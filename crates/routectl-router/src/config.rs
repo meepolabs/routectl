@@ -130,7 +130,8 @@ pub struct AliasEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
-    /// Max attempts per provider in the chain.
+    /// Default retry-attempts cap per provider in the chain. Used when
+    /// no per-error-class override below is set.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     /// Initial backoff in ms.
@@ -139,10 +140,39 @@ pub struct RetryPolicy {
     /// Backoff multiplier per attempt.
     #[serde(default = "default_backoff_multiplier")]
     pub backoff_multiplier: f64,
+    /// Random additional ms added to each backoff sleep (0..jitter_ms).
+    /// Prevents thundering-herd retries when many clients fail at once.
+    #[serde(default)]
+    pub jitter_ms: u64,
     /// Status codes that trigger fallback to the next provider in the chain
     /// (in addition to network errors).
     #[serde(default = "default_fallback_status")]
     pub fallback_on_status: Vec<u16>,
+
+    /// Per-error-class retry caps. When set, override `max_attempts` for
+    /// that specific class. Useful because rate-limits often clear in
+    /// a single retry while flaky 5xx may need more attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on_429: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on_5xx: Option<u32>,
+    /// Network errors (status 0): DNS, TCP connect, TLS handshake,
+    /// request body, request timeout. Default is `max_attempts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_on_network: Option<u32>,
+
+    /// End-to-end per-attempt timeout. `None` means rely on the
+    /// reqwest client's default (no explicit cap). When set, the
+    /// router wraps each upstream call in `tokio::time::timeout`
+    /// and treats expiry as a network error (status 0, retryable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_ms: Option<u64>,
+    /// First-byte timeout for streaming responses. If the upstream
+    /// hasn't emitted any bytes in this window, the stream is
+    /// abandoned and (if no chunk has been delivered yet) the next
+    /// provider in the chain is tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_byte_timeout_ms: Option<u64>,
 }
 
 impl Default for RetryPolicy {
@@ -151,7 +181,28 @@ impl Default for RetryPolicy {
             max_attempts: default_max_attempts(),
             initial_backoff_ms: default_backoff_ms(),
             backoff_multiplier: default_backoff_multiplier(),
+            jitter_ms: 0,
             fallback_on_status: default_fallback_status(),
+            retry_on_429: None,
+            retry_on_5xx: None,
+            retry_on_network: None,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Resolve the retry cap for a given upstream HTTP status code.
+    /// Returns 0 for non-retryable errors.
+    pub fn retries_for_status(&self, status: u16) -> u32 {
+        match status {
+            0 => self.retry_on_network.unwrap_or(self.max_attempts),
+            429 => self.retry_on_429.unwrap_or(self.max_attempts),
+            s if (500..600).contains(&s) && self.fallback_on_status.contains(&s) => {
+                self.retry_on_5xx.unwrap_or(self.max_attempts)
+            }
+            _ => 0,
         }
     }
 }
