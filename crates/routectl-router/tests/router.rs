@@ -843,6 +843,58 @@ async fn retries_count_toward_circuit_breaker_threshold() {
     assert_eq!(p2.calls(), 1);
 }
 
+/// T fix: client-side errors (400, 401, 404, ...) must NOT charge the
+/// circuit breaker. They say nothing about provider health -- they are
+/// the caller's mistake (malformed request, wrong auth, unknown model).
+/// Repeatedly sending one should propagate the error each time, never
+/// quarantine an otherwise-healthy provider.
+#[tokio::test]
+async fn client_errors_do_not_charge_the_circuit_breaker() {
+    // 5 consecutive 400s, but the breaker is configured to trip after 2.
+    let p1 = MockProvider::new(
+        "p1",
+        vec![
+            Behavior::Status(400),
+            Behavior::Status(400),
+            Behavior::Status(400),
+            Behavior::Status(400),
+            Behavior::Status(400),
+        ],
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fast".into(), alias(&["p1:m"]));
+    let mut runtime = BTreeMap::new();
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+        rt.circuit_failures = Some(2);
+        rt.circuit_cooldown_ms = Some(60_000);
+        rt
+    });
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+
+    // Five sequential 400s. If client errors charged the breaker, the
+    // third call would be gate-blocked and surface a status-0
+    // CircuitOpen error instead of the upstream's 400. Assert that
+    // every call reaches the provider AND that the upstream 400 is the
+    // error every caller sees.
+    for i in 0..5 {
+        let err = r
+            .complete(req("fast"))
+            .await
+            .expect_err(&format!("call {i} should propagate 400"));
+        assert!(
+            matches!(err, Error::Upstream { status: 400, .. }),
+            "call {i}: expected upstream 400, got {err:?}"
+        );
+    }
+    assert_eq!(
+        p1.calls(),
+        5,
+        "every client-error attempt must reach the provider; breaker must NOT quarantine on 400s"
+    );
+}
+
 /// H3 fix: a stream that emits one chunk and then errors should NOT
 /// mark the provider healthy. The breaker counter should reflect the
 /// failure recorded on the in-stream error.
