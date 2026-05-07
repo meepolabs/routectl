@@ -2,47 +2,46 @@
 
 A tiny local LLM router. Single Rust binary. Localhost-only by default. Drop-in OpenAI-compatible API with a unified reasoning surface (OpenRouter-shape) so any client that speaks OpenAI or OpenRouter speaks routectl.
 
-Status: **v0.1.0-dev**. Two providers shipped (`openai-compat`, `anthropic-api`). Cookie-auth providers (`claude-cookie`, `chatgpt-cookie`) are scaffolded and feature-gated; the `wry` login flow lands in v0.2.
+Status: **v0.2.0**. Two providers shipped (`openai-compat`, `anthropic-api`, the latter with both api-key and OAuth-bearer auth). Tier-1 retry policy + tier-2 per-provider rate limit and circuit breaker. Cookie-auth providers (`claude-cookie`, `chatgpt-cookie`) are scaffolded and feature-gated; their `wry` login flow is post-v0.3.
 
 ## Why
 
-LiteLLM is huge and ships a server's worth of features (multi-tenant auth, dashboards, accounting, RBAC). For local dev you want one binary that:
+You're using Claude Code, opencode, Codex, Cursor, or any other OpenAI-compatible client and you want it to round-robin or fall back across multiple backends -- some hosted (DeepSeek, OpenRouter, Groq, NIM, OpenAI), some local (llama.cpp, vLLM). You want a single small binary, on `127.0.0.1`, that does just that:
 
 - Routes requests across providers with fallback chains
-- Stores secrets in your OS keychain
+- Loads secrets from env vars or chmod-600 files (no auto-discovery, no keychain)
 - Speaks OpenAI on the wire so every client just works
 - Handles reasoning tokens cleanly across OpenAI o-series, Anthropic extended thinking, DeepSeek R1, Qwen3 thinking, vLLM-served reasoners, and raw `<think>...</think>` emitters
 
 routectl is that binary. Nothing more.
 
-## Scope (v0.1)
+## Scope (v0.2)
 
 **In:**
 
 - OpenAI-compatible HTTP server on `127.0.0.1:<port>` (refuses non-loopback bind without explicit `--unsafe-public`)
 - Two provider classes built and tested:
-  - `openai-compat` (covers DeepSeek, OpenRouter, OpenAI, OpenCode Go, NVIDIA NIM, llama.cpp, Together, Groq, anything OpenAI-shaped) with 5 reasoning dialects: `openai`, `deepseek`, `vllm`, `raw-think-tag`, `openrouter`, `passthrough`
-  - `anthropic-api` (api.anthropic.com Messages API; `thinking` blocks with `signature` preserved across multi-turn tool use)
+  - `openai-compat` (covers DeepSeek, OpenRouter, OpenAI, OpenCode Go, NVIDIA NIM, llama.cpp, Together, Groq, anything OpenAI-shaped) with 6 reasoning dialects: `openai`, `deepseek`, `vllm`, `raw-think-tag`, `openrouter`, `passthrough`
+  - `anthropic-api` (api.anthropic.com Messages API; `thinking` blocks with `signature` preserved across multi-turn tool use; either `x-api-key` or `Authorization: Bearer` auth)
 - Reasoning normalization to OpenRouter-shape `reasoning_details[]` array with provider-tagged `format`
 - Streaming SSE both directions, including stateful `<think>` tag handling for tags split across chunk boundaries
 - Fallback chain on 408/429/5xx/timeout (no fallback once first chunk has streamed)
-- Per-provider retry with exponential backoff
+- Tier-1 retry: per-error-class caps (`retry_on_429` / `retry_on_5xx` / `retry_on_network`), per-attempt `request_timeout_ms`, `stream_first_byte_timeout_ms`, jittered backoff
+- Tier-2 routing gates: per-provider `rpm_limit` (token bucket), passive circuit breaker (`circuit_failures` + cooldown, single-probe half-open under concurrent load), per-request `x-routectl-disable-fallbacks` header
 - TOML config in `~/.config/routectl/config.toml`
-- OS keychain via the `keyring` crate (mac/linux/win)
+- Secret resolution from `env://`, `file://` (chmod-600 / 400, TOCTOU-safe), or inline `literal:` URIs
 
-**Scaffolded but feature-gated (v0.2 lands the impl):**
+**Scaffolded but feature-gated:**
 
 - `claude-cookie` (claude.ai consumer session)
 - `chatgpt-cookie` (chatgpt.com consumer session)
-- `wry` webview popup for `routectl login`
 
-**Out of scope (use LiteLLM if you want any of these):**
+**Out of scope** -- if you need any of the below, reach for [LiteLLM](https://github.com/BerriAI/litellm) or a dedicated proxy:
 
 - Multi-user auth, TLS, persistent token store
 - Web UI / dashboard
 - Caching layer
 - Cost-aware routing (that's [LMSYS RouteLLM](https://github.com/lm-sys/RouteLLM)'s lane)
-- Rate limiting
 
 ## Schema
 
@@ -65,7 +64,7 @@ cargo build --release
 ./target/release/routectl --help
 ```
 
-The release binary is ~5.6MB stripped, single-file, no system dependencies beyond `libsecret`/`gnome-keyring` on Linux for the OS keychain.
+The release binary is under 6MB stripped, single-file, with no system-library dependencies. Just place it on your PATH.
 
 ## Quickstart
 
@@ -146,6 +145,26 @@ Secret references (the `*_ref` fields). Routectl never auto-discovers credential
 
 Routectl does not bundle an OS-keychain integration. Most managed-secret tools can drop a file or set an env var as part of their workflow, which is the integration boundary.
 
+## Anthropic auth: api-key vs OAuth bearer
+
+The `anthropic-api` provider supports two wire formats, both pointed at `https://api.anthropic.com/v1/messages`:
+
+- `auth_kind = "api-key"` (default) -- standard `x-api-key: <key>` header. Use with API keys provisioned through the Anthropic Console (`sk-ant-api03-...`). This is the path most third-party tools should use.
+- `auth_kind = "oauth-bearer"` -- sends `Authorization: Bearer <token>` plus the `anthropic-beta: oauth-2025-04-20` gate. Use when you have an Anthropic-issued OAuth access token to present and the client you're routing knows it's responsible for that token.
+
+Wire either path the same way: hand `api_key_ref` a `file://` or `env://` URI pointing at the credential.
+
+```toml
+[providers.anthropic-oauth]
+type = "anthropic-api"
+api_key_ref = "file:///home/me/.secrets/anthropic-oauth-token"
+auth_kind = "oauth-bearer"
+```
+
+routectl reads the credential fresh on each request, so rotating it on disk is a no-restart operation. Refresh-token round-trip is on the v0.2.1 list.
+
+> Anthropic restricts how OAuth tokens issued through Claude subscription products may be used outside Anthropic's own apps. Routectl just speaks the wire protocol -- you are responsible for ensuring whatever token you supply is permitted to be used the way you're using it. See [Anthropic's terms](https://www.anthropic.com/legal) and [Claude Code's compliance docs](https://code.claude.com/docs/en/legal-and-compliance) for current policy.
+
 ## Model groups (recommended pattern)
 
 Define one alias per cost/capability tier so callers can ask for `heavy`
@@ -155,8 +174,7 @@ group mechanism -- there's no separate group syntax.
 ```toml
 [aliases.heavy]
 chain = [
-  "claude-pro:claude-opus-4-7",                      # subscription
-  "anthropic:claude-opus-4-7",                       # API key
+  "anthropic:claude-opus-4-7",
   "openai:gpt-5",
   "openrouter:anthropic/claude-opus-4-7",            # last-ditch
 ]
@@ -228,13 +246,13 @@ Anthropic extended thinking is handled by the `anthropic-api` provider directly:
 ```
 crates/
   routectl-core/         Provider trait + OpenRouter-shape schema (request/response/chunk types)
-  routectl-providers/    openai_compat (5 dialects), anthropic_api, claude_cookie + chatgpt_cookie (stubs)
-  routectl-router/       alias resolution + fallback chain + retry policy + provider factory
-  routectl-auth/         SecretStore trait + KeyringStore (OS keychain) + MemoryStore (test mock)
+  routectl-providers/    openai_compat (6 dialects), anthropic_api (api-key + oauth-bearer), claude_cookie + chatgpt_cookie (stubs)
+  routectl-router/       alias resolution + fallback chain + tier-1 retry + tier-2 RPM/breaker + provider factory
+  routectl-auth/         SecretStore trait + MemoryStore resolving env:// / file:// (TOCTOU-safe) / literal:
   routectl-cli/          axum HTTP server + clap subcommands (serve, test, config, login)
 ```
 
-128 tests pass across the workspace. `cargo test --workspace` -- 0 failures, 0 warnings.
+165 tests pass across the workspace. `cargo test --workspace` -- 0 failures, 0 warnings.
 
 ## Tested models
 
@@ -249,9 +267,11 @@ Tests skip cleanly when their key is absent. See [`docs/TESTED_MODELS.md`](docs/
 
 ## Responsible-use note
 
-The `claude-cookie` and `chatgpt-cookie` providers (v0.2) reuse your existing browser session against `claude.ai` and `chatgpt.com`. **You are responsible for compliance with the upstream provider's Terms of Service.** routectl makes no representations about the legality or sanctioned-ness of consumer-session use; treat it as you would any reverse-engineered consumer API client.
+The `claude-cookie` and `chatgpt-cookie` providers (post-v0.3) reuse your existing browser session against `claude.ai` and `chatgpt.com`. **You are responsible for compliance with the upstream provider's Terms of Service.** routectl makes no representations about the legality or sanctioned-ness of consumer-session use; treat it as you would any reverse-engineered consumer API client.
 
 These providers are feature-gated and **not enabled in default builds**. You opt in when building from source.
+
+The same general principle applies to any auth path routectl exposes: the binary speaks several wire formats; it does not vouch for whether a particular credential is permitted to be used a particular way. Read the upstream provider's terms before pointing routectl at production traffic.
 
 ## License
 
