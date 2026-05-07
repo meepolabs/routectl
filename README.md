@@ -140,7 +140,7 @@ chain = ["anthropic:claude-opus-4-7", "deepseek:deepseek-reasoner"]
 Secret references (the `*_ref` fields). Routectl never auto-discovers credentials from other tools; you pick the source per provider:
 
 - `env://VAR_NAME` -- process env var. Silent on every platform. Trade-off: the value is visible to anything that can read this process's env (e.g. `/proc/<pid>/environ`). Fine for local dev with shell-managed keys.
-- `file:///abs/path/to/key` -- file contents (trimmed of trailing whitespace). Refused if group or other have any permissions; `chmod 600` or `400` is the recommended pattern. Compatible with sops, age, doppler-cli, vault-agent, or any tool that drops a token into a file.
+- `file:///abs/path/to/key` -- file contents (trimmed of trailing whitespace). On Unix, refused if group or other have any permissions (`chmod 600` or `400` recommended). Windows skips this check -- the permission-bit enforcement is Unix-only, since NTFS ACLs are not portably enforceable from Rust; secure the file via filesystem ACLs there. Compatible with sops, age, doppler-cli, vault-agent, or any tool that drops a token into a file.
 - `literal:hunter2` -- inline plaintext. Use for placeholders like `literal:not-needed` (llama.cpp where no auth is required) and tests. Avoid for real secrets in version-controlled config.
 
 Routectl does not bundle an OS-keychain integration. Most managed-secret tools can drop a file or set an env var as part of their workflow, which is the integration boundary.

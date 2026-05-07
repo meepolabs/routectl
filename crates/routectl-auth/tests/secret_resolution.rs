@@ -202,6 +202,27 @@ async fn file_get_group_readable_is_refused() {
 }
 
 #[tokio::test]
+async fn file_get_relative_path_is_refused() {
+    // Defense in depth: parse() rejects relative `file://` URIs, but
+    // the SecretRef::File variant is publicly constructible. Calling
+    // `read_secret_file` with a relative path must still refuse it
+    // rather than resolving against process CWD.
+    let store = MemoryStore::new();
+    let r = SecretRef::File("relative/path/to/key".into());
+    let err = store.get(&r).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("absolute"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn file_get_dot_relative_path_is_refused() {
+    let store = MemoryStore::new();
+    let r = SecretRef::File("./key".into());
+    let err = store.get(&r).await.unwrap_err();
+    assert!(err.to_string().contains("absolute"));
+}
+
+#[tokio::test]
 async fn file_get_directory_path_is_refused() {
     // A path pointing at a directory must be refused as "not a
     // regular file" (catches symlink-to-directory swaps).

@@ -10,9 +10,13 @@ port = 8787
 # Reference secrets via one of:
 #   env://VAR_NAME                  process env var; silent on every platform.
 #                                   Visible to anything reading process env.
-#   file:///abs/path/to/key         file contents; trimmed. Refused if
-#                                   group or other have any permissions
-#                                   (chmod 600 or 400 recommended).
+#   file:///abs/path/to/key         file contents; trimmed. On Unix,
+#                                   refused if group or other have any
+#                                   permissions (chmod 600 or 400
+#                                   recommended). Windows skips the
+#                                   permission-bit check (NTFS ACLs are
+#                                   not portably enforced); secure the
+#                                   file via filesystem ACLs there.
 #                                   Compatible with sops, age,
 #                                   doppler-cli, vault-agent, etc.
 #   literal:hunter2                 inline plaintext; only for placeholders
