@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Auth surface for routectl: keyring + cookie capture (wry popup)."
+description = "Auth surface for routectl: secret references (env, file, literal)."
 
 [dependencies]
 routectl-core.workspace = true
@@ -14,9 +14,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["sync", "rt"] }
-keyring.workspace = true
+tokio = { workspace = true, features = ["fs", "rt"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid.workspace = true
+tempfile = "3"

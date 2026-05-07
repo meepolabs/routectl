@@ -62,8 +62,10 @@ fn default_port() -> u16 {
 pub enum ProviderEntry {
     OpenaiCompat {
         base_url: String,
-        /// Reference to the API key in the OS keychain, e.g. `keychain://routectl/deepseek`.
-        /// Or, for dev convenience only, a literal `env://OPENAI_API_KEY`.
+        /// Reference to the API key. One of:
+        ///   - `env://VAR_NAME`             (process env var)
+        ///   - `file:///abs/path/to/key`    (mode-600 file)
+        ///   - `literal:plaintext`          (inline; placeholders only)
         api_key_ref: String,
         #[serde(default)]
         extra_headers: BTreeMap<String, String>,

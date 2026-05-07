@@ -7,10 +7,17 @@ port = 8787
 
 # ---- Providers ----
 # Each provider gets a user-facing name (the table key). Add as many as you want.
-# Reference secrets via:
-#   keychain://<service>/<account>   OS keychain (preferred)
-#   env://VAR_NAME                    process env var (dev only)
-#   literal:hunter2                   inline plaintext (discouraged)
+# Reference secrets via one of:
+#   env://VAR_NAME                  process env var; silent on every platform.
+#                                   Visible to anything reading process env.
+#   file:///abs/path/to/key         file contents; trimmed; refused unless
+#                                   chmod 600 or 400. Compatible with sops,
+#                                   age, doppler-cli, vault-agent, etc.
+#   literal:hunter2                 inline plaintext; only for placeholders
+#                                   like `literal:not-needed`. Avoid for
+#                                   real secrets.
+#
+# Routectl never auto-discovers credentials from other tools.
 #
 # Per-provider runtime gates (all optional, default off):
 #   rpm_limit              max requests per minute; over-limit falls through
@@ -20,13 +27,13 @@ port = 8787
 [providers.deepseek]
 type = "openai-compat"
 base_url = "https://api.deepseek.com/v1"
-api_key_ref = "keychain://routectl/deepseek"
+api_key_ref = "env://DEEPSEEK_API_KEY"
 reasoning_dialect = "deepseek"
 
 [providers.openrouter]
 type = "openai-compat"
 base_url = "https://openrouter.ai/api/v1"
-api_key_ref = "keychain://routectl/openrouter"
+api_key_ref = "env://OPENROUTER_API_KEY"
 reasoning_dialect = "openrouter"
 extra_headers = { "HTTP-Referer" = "https://github.com/meepolabs/routectl", "X-Title" = "routectl" }
 # Trip the breaker if openrouter hiccups three times in a row, cool for 60s.
@@ -36,19 +43,21 @@ circuit_cooldown_ms = 60000
 [providers.opencode-go]
 type = "openai-compat"
 base_url = "https://opencode.ai/zen/go/v1"  # Zen Go subscription tier
-api_key_ref = "keychain://routectl/opencode-go"
+api_key_ref = "env://OPENCODE_GO_API_KEY"
 reasoning_dialect = "deepseek"
 
 [providers.nim]
 type = "openai-compat"
 base_url = "https://integrate.api.nvidia.com/v1"
-api_key_ref = "keychain://routectl/nim"
+api_key_ref = "env://NIM_API_KEY"
 reasoning_dialect = "openai"
 
 [providers.openai]
+# file:// example: read the key from a chmod-600 file managed by your secret
+# tool of choice (sops, age, doppler --no-cache > file, etc.).
 type = "openai-compat"
 base_url = "https://api.openai.com/v1"
-api_key_ref = "keychain://routectl/openai"
+api_key_ref = "file:///home/me/.secrets/openai-key"
 reasoning_dialect = "openai"
 
 [providers.llama-local]
@@ -59,16 +68,16 @@ reasoning_dialect = "raw-think-tag"
 
 [providers.anthropic]
 type = "anthropic-api"
-api_key_ref = "keychain://routectl/anthropic"
+api_key_ref = "env://ANTHROPIC_API_KEY"
 
 [providers.claude-pro]
 type = "claude-cookie"
-session_ref = "keychain://routectl/claude-cookie"
+session_ref = "file:///home/me/.secrets/claude-session"
 # organization_id = "abc-123"  # optional, if you have multiple Claude orgs
 
 [providers.chatgpt-plus]
 type = "chatgpt-cookie"
-session_ref = "keychain://routectl/chatgpt-cookie"
+session_ref = "file:///home/me/.secrets/chatgpt-session"
 
 # ---- Aliases (model groups) ----
 # Logical tiers that resolve to a fallback chain. Each tier is just a

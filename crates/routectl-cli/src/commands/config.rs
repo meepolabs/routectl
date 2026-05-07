@@ -2,15 +2,15 @@
 
 use std::collections::BTreeMap;
 
-use routectl_auth::{KeyringStore, SecretRef, SecretStore};
+use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{Config, ProviderEntry};
 
 /// Validate the loaded config: parse syntax (already done by main.rs), resolve
-/// every secret reference via the keychain, and report any aliases that
+/// every secret reference (env / file / literal), and report any aliases that
 /// reference unknown providers.
 pub async fn check(config: &Config) -> Result<()> {
-    let secrets = KeyringStore::new();
+    let secrets = MemoryStore::new();
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
