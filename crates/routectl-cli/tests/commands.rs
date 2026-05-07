@@ -14,22 +14,13 @@ fn config_with(server_url: &str) -> Config {
     let mut providers = BTreeMap::new();
     providers.insert(
         "mock".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: format!("{server_url}/v1"),
-            api_key_ref: "literal:test-key".into(),
-            extra_headers: BTreeMap::new(),
-            default_extras: None,
-            reasoning_dialect: ReasoningDialect::Openai,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat(format!("{server_url}/v1"), "literal:test-key")
+            .with_reasoning_dialect(ReasoningDialect::Openai),
     );
     let mut aliases = BTreeMap::new();
     aliases.insert(
         "fast".into(),
-        AliasEntry {
-            chain: vec!["mock:gpt-4o-mini".into()],
-            retry: None,
-        },
+        AliasEntry::new(vec!["mock:gpt-4o-mini".to_string()]),
     );
     Config {
         server: ServerConfig {
@@ -66,21 +57,12 @@ async fn config_check_passes_for_valid_config() {
     };
     config.providers.insert(
         "mock".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "http://127.0.0.1:9".into(),
-            api_key_ref: "literal:abc".into(),
-            extra_headers: BTreeMap::new(),
-            default_extras: None,
-            reasoning_dialect: ReasoningDialect::Openai,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc")
+            .with_reasoning_dialect(ReasoningDialect::Openai),
     );
     config.aliases.insert(
         "fast".into(),
-        AliasEntry {
-            chain: vec!["mock:gpt-4o".into()],
-            retry: None,
-        },
+        AliasEntry::new(vec!["mock:gpt-4o".to_string()]),
     );
 
     commands::config::check(&config)
@@ -97,13 +79,9 @@ async fn config_check_fails_for_alias_pointing_at_unknown_provider() {
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
     };
-    config.aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["ghost:m".into()],
-            retry: None,
-        },
-    );
+    config
+        .aliases
+        .insert("fast".into(), AliasEntry::new(vec!["ghost:m".to_string()]));
 
     match commands::config::check(&config).await {
         Err(routectl_core::Error::Config(msg)) => {
@@ -125,14 +103,8 @@ fn config_show_redacts_literal_secrets() {
     };
     config.providers.insert(
         "secret".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://api.example.com/v1".into(),
-            api_key_ref: "literal:sk-very-secret".into(),
-            extra_headers: BTreeMap::new(),
-            default_extras: None,
-            reasoning_dialect: ReasoningDialect::Openai,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat("https://api.example.com/v1", "literal:sk-very-secret")
+            .with_reasoning_dialect(ReasoningDialect::Openai),
     );
 
     // Capture stdout via a wrapping function. Easiest: write our own
@@ -167,14 +139,11 @@ fn config_show_keeps_env_uris_intact() {
     };
     config.providers.insert(
         "kc".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: "https://api.example.com/v1".into(),
-            api_key_ref: "env://ROUTECTL_TEST_ANTHROPIC".into(),
-            extra_headers: BTreeMap::new(),
-            default_extras: None,
-            reasoning_dialect: ReasoningDialect::Openai,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat(
+            "https://api.example.com/v1",
+            "env://ROUTECTL_TEST_ANTHROPIC",
+        )
+        .with_reasoning_dialect(ReasoningDialect::Openai),
     );
 
     commands::config::show(&config).expect("show ok");

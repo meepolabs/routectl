@@ -45,23 +45,14 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
     let mut providers = BTreeMap::new();
     providers.insert(
         provider_name.to_string(),
-        ProviderEntry::OpenaiCompat {
-            base_url: upstream_base.to_string(),
-            api_key_ref: "literal://test-key".to_string(),
-            extra_headers: BTreeMap::new(),
-            default_extras: None,
-            reasoning_dialect: routectl_router::ReasoningDialect::Openai,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat(upstream_base, "literal://test-key")
+            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
     );
 
     let mut aliases = BTreeMap::new();
     aliases.insert(
         alias.to_string(),
-        AliasEntry {
-            chain: vec![format!("{provider_name}:gpt-4o")],
-            retry: None,
-        },
+        AliasEntry::new(vec![format!("{provider_name}:gpt-4o")]),
     );
 
     Arc::new(Config {
@@ -73,45 +64,33 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
     })
 }
 
-fn two_provider_config(
-    first_base: &str,
-    second_base: &str,
-) -> Arc<Config> {
+fn two_provider_config(first_base: &str, second_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "first".to_string(),
-        ProviderEntry::OpenaiCompat {
-            base_url: first_base.to_string(),
-            api_key_ref: "literal://test-key".to_string(),
-            extra_headers: BTreeMap::new(),
-            default_extras: None,
-            reasoning_dialect: routectl_router::ReasoningDialect::Openai,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat(first_base, "literal://test-key")
+            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
     );
     providers.insert(
         "second".to_string(),
-        ProviderEntry::OpenaiCompat {
-            base_url: second_base.to_string(),
-            api_key_ref: "literal://test-key".to_string(),
-            extra_headers: BTreeMap::new(),
-            default_extras: None,
-            reasoning_dialect: routectl_router::ReasoningDialect::Openai,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat(second_base, "literal://test-key")
+            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
     );
 
     let mut aliases = BTreeMap::new();
+    let rp = {
+        let mut rp = RetryPolicy::default();
+        rp.max_attempts = 1;
+        rp.fallback_on_status = vec![503, 429, 500, 502, 504, 408];
+        rp
+    };
     aliases.insert(
         "multi".to_string(),
-        AliasEntry {
-            chain: vec!["first:gpt-4o".to_string(), "second:gpt-4o".to_string()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                fallback_on_status: vec![503, 429, 500, 502, 504, 408],
-                ..RetryPolicy::default()
-            }),
-        },
+        AliasEntry::new(vec![
+            "first:gpt-4o".to_string(),
+            "second:gpt-4o".to_string(),
+        ])
+        .with_retry(rp),
     );
 
     Arc::new(Config {
@@ -265,7 +244,10 @@ async fn chat_completions_streaming_returns_sse_events() {
     let text = resp.text().await.unwrap();
     // Must contain at least one data: line with JSON and a final [DONE].
     assert!(text.contains("data: "), "no SSE data lines in:\n{text}");
-    assert!(text.contains("data: [DONE]"), "no [DONE] terminator in:\n{text}");
+    assert!(
+        text.contains("data: [DONE]"),
+        "no [DONE] terminator in:\n{text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +259,10 @@ fn bind_safety_rejects_non_loopback_without_flag() {
     use routectl_cli::server::check_bind_safety;
 
     let result = check_bind_safety("0.0.0.0", false);
-    assert!(result.is_err(), "expected error for 0.0.0.0 without unsafe_public");
+    assert!(
+        result.is_err(),
+        "expected error for 0.0.0.0 without unsafe_public"
+    );
 
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -345,8 +330,7 @@ async fn fallback_to_second_provider_on_503() {
     assert_eq!(body["choices"][0]["message"]["content"], "fallback answer");
     // routectl_provider extension should identify which provider answered.
     assert_eq!(
-        body["routectl_provider"],
-        "second",
+        body["routectl_provider"], "second",
         "expected second provider but got: {body}"
     );
 }

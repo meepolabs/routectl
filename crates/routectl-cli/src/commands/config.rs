@@ -15,7 +15,7 @@ pub async fn check(config: &Config) -> Result<()> {
     let mut warnings: Vec<String> = Vec::new();
 
     for (name, entry) in &config.providers {
-        for uri in secret_uris(entry) {
+        for uri in entry.secret_uris() {
             let parsed = match SecretRef::parse(uri) {
                 Ok(r) => r,
                 Err(e) => {
@@ -73,40 +73,14 @@ pub fn show(config: &Config) -> Result<()> {
     for (_, entry) in redacted.providers.iter_mut() {
         redact_entry(entry);
     }
-    let s = toml::to_string_pretty(&redacted)
-        .map_err(|e| Error::Config(format!("serialize: {e}")))?;
+    let s =
+        toml::to_string_pretty(&redacted).map_err(|e| Error::Config(format!("serialize: {e}")))?;
     println!("{s}");
     Ok(())
 }
 
 fn redact_entry(entry: &mut ProviderEntry) {
-    match entry {
-        ProviderEntry::OpenaiCompat { api_key_ref, .. } => *api_key_ref = redact(api_key_ref),
-        ProviderEntry::AnthropicApi { api_key_ref, .. } => *api_key_ref = redact(api_key_ref),
-        ProviderEntry::ClaudeCookie { session_ref, .. } => *session_ref = redact(session_ref),
-        ProviderEntry::ChatgptCookie { session_ref, .. } => *session_ref = redact(session_ref),
-    }
-}
-
-fn redact(uri: &str) -> String {
-    if let Some(rest) = uri.strip_prefix("literal:") {
-        if rest.is_empty() {
-            "literal:".into()
-        } else {
-            "literal:[REDACTED]".into()
-        }
-    } else {
-        uri.to_string()
-    }
-}
-
-fn secret_uris(entry: &ProviderEntry) -> Vec<&str> {
-    match entry {
-        ProviderEntry::OpenaiCompat { api_key_ref, .. } => vec![api_key_ref.as_str()],
-        ProviderEntry::AnthropicApi { api_key_ref, .. } => vec![api_key_ref.as_str()],
-        ProviderEntry::ClaudeCookie { session_ref, .. } => vec![session_ref.as_str()],
-        ProviderEntry::ChatgptCookie { session_ref, .. } => vec![session_ref.as_str()],
-    }
+    entry.redact_secrets();
 }
 
 /// Print the example config to stdout.
