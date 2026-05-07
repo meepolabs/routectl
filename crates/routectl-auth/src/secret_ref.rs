@@ -35,7 +35,13 @@ impl SecretRef {
             if rest.is_empty() {
                 return Err(Error::Auth("file:// URI missing path".into()));
             }
-            return Ok(Self::File(PathBuf::from(rest)));
+            let path = PathBuf::from(rest);
+            if !path.is_absolute() {
+                return Err(Error::Auth(format!(
+                    "file:// URI must be an absolute path (got `{rest}`); use `file:///abs/path/to/key`"
+                )));
+            }
+            return Ok(Self::File(path));
         }
         if let Some(lit) = uri.strip_prefix("literal:") {
             return Ok(Self::Literal(lit.to_string()));
