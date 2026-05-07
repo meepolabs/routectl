@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use routectl_auth::KeyringStore;
+use routectl_auth::MemoryStore;
 use routectl_core::{
     schema::MessageContent, ChatRequest, Message, Result, Role,
 };
@@ -11,7 +11,7 @@ use routectl_router::{build_provider, Config, Router};
 
 pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     let config = Arc::new(config);
-    let secrets = KeyringStore::new();
+    let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
     for (name, entry) in &config.providers {

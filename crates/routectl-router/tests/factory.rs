@@ -1,26 +1,17 @@
-//! Provider factory tests with the in-memory SecretStore.
+//! Provider factory tests with the default in-process SecretStore.
 
 use std::collections::BTreeMap;
 
-use routectl_auth::{MemoryStore, SecretRef, SecretStore};
+use routectl_auth::MemoryStore;
 use routectl_core::Error;
 use routectl_router::{build_provider, ProviderEntry, ReasoningDialect};
 
-fn store_with_key(uri: &str, value: &str) -> MemoryStore {
-    let store = MemoryStore::default();
-    let secret_ref = SecretRef::parse(uri).expect("parse");
-    futures::executor::block_on(async {
-        store.set(&secret_ref, value).await.expect("set");
-    });
-    store
-}
-
 #[tokio::test]
 async fn build_openai_compat_resolves_secret() {
-    let store = store_with_key("keychain://routectl/test", "sk-abc");
+    let store = MemoryStore::default();
     let entry = ProviderEntry::OpenaiCompat {
         base_url: "https://example.com/v1".into(),
-        api_key_ref: "keychain://routectl/test".into(),
+        api_key_ref: "literal:sk-abc".into(),
         extra_headers: BTreeMap::new(),
         default_extras: None,
         reasoning_dialect: ReasoningDialect::Openai,
@@ -32,9 +23,9 @@ async fn build_openai_compat_resolves_secret() {
 
 #[tokio::test]
 async fn build_anthropic_api_resolves_secret() {
-    let store = store_with_key("keychain://routectl/anthropic", "sk-ant-abc");
+    let store = MemoryStore::default();
     let entry = ProviderEntry::AnthropicApi {
-        api_key_ref: "keychain://routectl/anthropic".into(),
+        api_key_ref: "literal:sk-ant-abc".into(),
         base_url: "https://api.anthropic.com".into(),
         anthropic_version: "2023-06-01".into(),
         runtime: Default::default(),
@@ -47,7 +38,7 @@ async fn build_anthropic_api_resolves_secret() {
 async fn build_claude_cookie_returns_not_enabled() {
     let store = MemoryStore::default();
     let entry = ProviderEntry::ClaudeCookie {
-        session_ref: "keychain://routectl/claude".into(),
+        session_ref: "literal:fake-cookie".into(),
         organization_id: None,
         runtime: Default::default(),
     };
@@ -65,7 +56,7 @@ async fn build_claude_cookie_returns_not_enabled() {
 async fn build_chatgpt_cookie_returns_not_enabled() {
     let store = MemoryStore::default();
     let entry = ProviderEntry::ChatgptCookie {
-        session_ref: "keychain://routectl/chatgpt".into(),
+        session_ref: "literal:fake-cookie".into(),
         runtime: Default::default(),
     };
     match build_provider("chatgpt-plus", &entry, &store).await {
@@ -84,7 +75,7 @@ fn anthropic_custom_base_url_and_version_round_trip_through_toml() {
     let toml_src = r#"
 [providers.anthropic]
 type = "anthropic-api"
-api_key_ref = "keychain://routectl/anthropic"
+api_key_ref = "env://ANTHROPIC_API_KEY"
 base_url = "https://api2.anthropic.com"
 anthropic_version = "2024-05-01"
 "#;
@@ -99,7 +90,7 @@ anthropic_version = "2024-05-01"
         } => {
             assert_eq!(base_url, "https://api2.anthropic.com");
             assert_eq!(anthropic_version, "2024-05-01");
-            assert_eq!(api_key_ref, "keychain://routectl/anthropic");
+            assert_eq!(api_key_ref, "env://ANTHROPIC_API_KEY");
         }
         other => panic!("expected AnthropicApi, got {other:?}"),
     }
@@ -133,16 +124,19 @@ reasoning_dialect = "deepseek"
 }
 
 #[tokio::test]
-async fn build_with_unknown_secret_errors() {
+async fn build_with_missing_env_var_errors() {
+    std::env::remove_var("ROUTECTL_TEST_MISSING_KEY");
     let store = MemoryStore::default();
     let entry = ProviderEntry::AnthropicApi {
-        api_key_ref: "keychain://routectl/missing".into(),
+        api_key_ref: "env://ROUTECTL_TEST_MISSING_KEY".into(),
         base_url: "https://api.anthropic.com".into(),
         anthropic_version: "2023-06-01".into(),
         runtime: Default::default(),
     };
     match build_provider("anthropic", &entry, &store).await {
-        Err(Error::Auth(_)) => {}
+        Err(Error::Auth(msg)) => {
+            assert!(msg.contains("not set"), "got: {msg}");
+        }
         Ok(_) => panic!("expected Err"),
         Err(other) => panic!("expected Error::Auth, got: {other:?}"),
     }
