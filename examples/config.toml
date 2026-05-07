@@ -57,7 +57,7 @@ reasoning_dialect = "openai"
 # tool of choice (sops, age, doppler --no-cache > file, etc.).
 type = "openai-compat"
 base_url = "https://api.openai.com/v1"
-api_key_ref = "file:///home/me/.secrets/openai-key"
+api_key_ref = "file:///abs/path/to/openai-key"
 reasoning_dialect = "openai"
 
 [providers.llama-local]
@@ -83,17 +83,17 @@ api_key_ref = "env://ANTHROPIC_API_KEY"
 # before pointing routectl at one.
 [providers.anthropic-oauth]
 type = "anthropic-api"
-api_key_ref = "file:///home/me/.secrets/anthropic-oauth-token"
+api_key_ref = "file:///abs/path/to/anthropic-oauth-token"
 auth_kind = "oauth-bearer"
 
 [providers.claude-pro]
 type = "claude-cookie"
-session_ref = "file:///home/me/.secrets/claude-session"
+session_ref = "file:///abs/path/to/claude-session"
 # organization_id = "abc-123"  # optional, if you have multiple Claude orgs
 
 [providers.chatgpt-plus]
 type = "chatgpt-cookie"
-session_ref = "file:///home/me/.secrets/chatgpt-session"
+session_ref = "file:///abs/path/to/chatgpt-session"
 
 # ---- Aliases (model groups) ----
 # Logical tiers that resolve to a fallback chain. Each tier is just a
