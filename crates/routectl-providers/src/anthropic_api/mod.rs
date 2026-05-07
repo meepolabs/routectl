@@ -25,12 +25,25 @@ pub mod types;
 
 use sse::SseState;
 
+/// How the provider authenticates to the Anthropic Messages API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthKind {
+    /// Standard `x-api-key: <key>` header. Default for `sk-ant-api03-...` keys.
+    #[default]
+    ApiKey,
+    /// OAuth bearer for subscription tokens (e.g. Claude Code's
+    /// `sk-ant-oat01-...` access token). Sends `Authorization: Bearer <key>`
+    /// plus the `anthropic-beta: oauth-2025-04-20` gate.
+    OauthBearer,
+}
+
 #[derive(Debug, Clone)]
 pub struct AnthropicApiConfig {
     pub id: String,
     pub api_key: String,
     pub base_url: String,
     pub anthropic_version: String,
+    pub auth_kind: AuthKind,
 }
 
 impl AnthropicApiConfig {
@@ -40,6 +53,7 @@ impl AnthropicApiConfig {
             api_key: api_key.into(),
             base_url: "https://api.anthropic.com".into(),
             anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::ApiKey,
         }
     }
 }
@@ -59,6 +73,16 @@ impl AnthropicApiProvider {
 
     fn messages_url(&self) -> String {
         format!("{}/v1/messages", self.cfg.base_url.trim_end_matches('/'))
+    }
+
+    fn apply_auth_headers(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
+        match self.cfg.auth_kind {
+            AuthKind::ApiKey => rb.header("x-api-key", &self.cfg.api_key),
+            AuthKind::OauthBearer => rb
+                .header("authorization", format!("Bearer {}", self.cfg.api_key))
+                .header("anthropic-beta", "oauth-2025-04-20"),
+        }
     }
 }
 
@@ -89,10 +113,7 @@ impl Provider for AnthropicApiProvider {
         }
 
         let resp = self
-            .client
-            .post(&self.messages_url())
-            .header("x-api-key", &self.cfg.api_key)
-            .header("anthropic-version", &self.cfg.anthropic_version)
+            .apply_auth_headers(self.client.post(&self.messages_url()))
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -126,10 +147,7 @@ impl Provider for AnthropicApiProvider {
         }
 
         let resp = self
-            .client
-            .post(&self.messages_url())
-            .header("x-api-key", &self.cfg.api_key)
-            .header("anthropic-version", &self.cfg.anthropic_version)
+            .apply_auth_headers(self.client.post(&self.messages_url()))
             .header("content-type", "application/json")
             .json(&body)
             .send()

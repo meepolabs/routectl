@@ -13,7 +13,7 @@ mod tests {
         ChatRequest, Message, MessageContent, ReasoningConfig, ReasoningDetail,
         ReasoningDetailKind, Role,
     };
-    use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
+    use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
     use routectl_core::Provider;
     use serde_json::{json, Value};
     use wiremock::matchers::{method, path};
@@ -29,6 +29,7 @@ mod tests {
             api_key: "test-key".into(),
             base_url: base_url.to_string(),
             anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::ApiKey,
         };
         AnthropicApiProvider::new(cfg)
     }
