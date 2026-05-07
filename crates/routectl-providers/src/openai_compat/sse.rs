@@ -62,51 +62,7 @@ fn coalesce_chunk_reasoning_keys(val: &mut Value) {
 }
 
 fn apply_chunk_dialect(id: &str, val: &mut Value, dialect: ReasoningDialect) -> Result<()> {
-    match dialect {
-        ReasoningDialect::DeepSeek | ReasoningDialect::Vllm => {
-            lift_delta_reasoning_content(id, val, dialect.format_tag())?;
-        }
-        ReasoningDialect::OpenAi
-        | ReasoningDialect::OpenRouter
-        | ReasoningDialect::Passthrough
-        | ReasoningDialect::RawThinkTag => {}
-    }
-    Ok(())
-}
-
-/// Wrap `delta.reasoning` (a plain string, already coalesced from
-/// `reasoning_content` upstream) into a typed `reasoning_details` entry
-/// with the dialect's format tag. Leaves `delta.reasoning` intact for
-/// legacy-compat clients.
-fn lift_delta_reasoning_content(id: &str, val: &mut Value, format_tag: &str) -> Result<()> {
-    let choices = val
-        .get_mut("choices")
-        .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| Error::Streaming(format!("provider `{id}`: chunk missing choices")))?;
-
-    for choice in choices.iter_mut() {
-        let delta = match choice.get_mut("delta").and_then(|v| v.as_object_mut()) {
-            Some(d) => d,
-            None => continue,
-        };
-
-        let rc = match delta.get("reasoning") {
-            Some(Value::String(s)) if !s.is_empty() => s.clone(),
-            _ => continue,
-        };
-
-        let detail = build_reasoning_detail(&rc, format_tag, 0);
-        let detail_val = serde_json::to_value(detail)
-            .map_err(|e| Error::Streaming(format!("provider `{id}`: detail serialize: {e}")))?;
-
-        delta
-            .entry("reasoning_details")
-            .or_insert_with(|| Value::Array(vec![]))
-            .as_array_mut()
-            .expect("just inserted array")
-            .push(detail_val);
-    }
-    Ok(())
+    dialect.as_dyn().apply_chunk(id, val)
 }
 
 // ---------------------------------------------------------------------------
