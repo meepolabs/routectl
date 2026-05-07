@@ -1,13 +1,9 @@
 //! Live OAuth-bearer integration test against api.anthropic.com /v1/messages.
 //!
-//! Skipped unless `ROUTECTL_TEST_CLAUDE_OAUTH_TOKEN_FILE` is set to a path
-//! containing the raw OAuth bearer access token (one line, trailing
-//! whitespace OK). Extract from Claude Code's credentials store with:
-//!
-//!   jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json \
-//!     > /tmp/claude_oauth.txt
-//!   chmod 600 /tmp/claude_oauth.txt
-//!   export ROUTECTL_TEST_CLAUDE_OAUTH_TOKEN_FILE=/tmp/claude_oauth.txt
+//! Skipped unless `ROUTECTL_TEST_CLAUDE_OAUTH_TOKEN_FILE` is set to a
+//! path containing a raw Anthropic OAuth bearer access token (one
+//! line; trailing whitespace OK). The developer running the test is
+//! responsible for sourcing a token they're permitted to use this way.
 //!
 //! Run with:
 //!
@@ -78,12 +74,11 @@ fn build_oauth_provider(token: String) -> AnthropicApiProvider {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn anthropic_oauth_complete_with_claude_code_token() {
+async fn anthropic_oauth_complete_with_bearer_token() {
     let Some(token) = read_token_file() else {
         eprintln!(
             "skip: {ENV_TOKEN_FILE} not set or file empty. \
-             Set to a file containing the raw OAuth access token, e.g. \
-             `jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json > /tmp/claude_oauth.txt`."
+             Set to a file containing a raw Anthropic OAuth bearer access token."
         );
         return;
     };
@@ -110,7 +105,7 @@ async fn anthropic_oauth_complete_with_claude_code_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn anthropic_oauth_stream_with_claude_code_token() {
+async fn anthropic_oauth_stream_with_bearer_token() {
     use futures::StreamExt;
 
     let Some(token) = read_token_file() else {

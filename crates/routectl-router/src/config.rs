@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use routectl_providers::anthropic_api::AuthKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,12 @@ pub enum ProviderEntry {
         base_url: String,
         #[serde(default = "default_anthropic_version")]
         anthropic_version: String,
+        /// How the Messages API authenticates this provider. Default
+        /// is `api-key` (the standard `x-api-key` header). Use
+        /// `oauth-bearer` when `api_key_ref` resolves to a Claude Code
+        /// subscription access token (`sk-ant-oat01-...`).
+        #[serde(default)]
+        auth_kind: AuthKind,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -132,8 +139,17 @@ impl ProviderEntry {
             api_key_ref: api_key_ref.into(),
             base_url: default_anthropic_base(),
             anthropic_version: default_anthropic_version(),
+            auth_kind: AuthKind::ApiKey,
             runtime: ProviderRuntimePolicy::default(),
         }
+    }
+
+    pub fn with_auth_kind(mut self, kind: AuthKind) -> Self {
+        match &mut self {
+            Self::AnthropicApi { auth_kind, .. } => *auth_kind = kind,
+            _ => panic!("ProviderEntry::with_auth_kind only applies to anthropic-api"),
+        }
+        self
     }
 
     pub fn claude_cookie(session_ref: impl Into<String>) -> Self {
