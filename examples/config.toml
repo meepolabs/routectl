@@ -10,9 +10,11 @@ port = 8787
 # Reference secrets via one of:
 #   env://VAR_NAME                  process env var; silent on every platform.
 #                                   Visible to anything reading process env.
-#   file:///abs/path/to/key         file contents; trimmed; refused unless
-#                                   chmod 600 or 400. Compatible with sops,
-#                                   age, doppler-cli, vault-agent, etc.
+#   file:///abs/path/to/key         file contents; trimmed. Refused if
+#                                   group or other have any permissions
+#                                   (chmod 600 or 400 recommended).
+#                                   Compatible with sops, age,
+#                                   doppler-cli, vault-agent, etc.
 #   literal:hunter2                 inline plaintext; only for placeholders
 #                                   like `literal:not-needed`. Avoid for
 #                                   real secrets.
