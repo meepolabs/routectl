@@ -12,6 +12,7 @@ routectl-core.workspace = true
 routectl-providers = { workspace = true, features = ["openai-compat", "anthropic-api"] }
 routectl-auth.workspace = true
 async-trait.workspace = true
+async-stream = "0.3"
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -22,4 +23,3 @@ tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
-async-stream = "0.3"

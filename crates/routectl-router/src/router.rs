@@ -70,45 +70,79 @@ impl Router {
     ) -> Result<ChatResponse> {
         let chain = self.resolve_chain(&req.model)?;
         let policy = self.policy_for(&req.model);
+        let hard_cap = policy.hard_retry_cap();
         let mut last_err: Option<Error> = None;
 
-        for (i, target) in chain.iter().enumerate() {
+        'chain: for target in chain.iter() {
             let (provider_name, model) = parse_target(target);
             let Some(provider) = self.providers.get(provider_name).cloned() else {
                 last_err = Some(Error::UnknownProvider(provider_name.to_string()));
-                continue;
-            };
-
-            // Pre-dispatch gate: rate limit + circuit breaker.
-            if let Some(gate_err) = self.gate_check(provider_name) {
-                tracing::warn!(provider = provider_name, ?gate_err, "gate blocked");
-                last_err = Some(gate_err);
-                if opts.disable_fallbacks && i == 0 {
-                    break;
+                if opts.disable_fallbacks {
+                    break 'chain;
                 }
                 continue;
-            }
+            };
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
 
-            match attempt_with_retries(provider.as_ref(), attempt_req, &policy).await {
-                Ok(mut resp) => {
-                    self.record_success(provider_name);
-                    resp.routectl_provider = Some(provider_name.to_string());
-                    return Ok(resp);
-                }
-                Err(e) => {
-                    self.record_failure(provider_name);
+            let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
+            let mut attempts_made: u32 = 0;
+
+            loop {
+                // Per-attempt gate: rate limit + circuit breaker.
+                // Charges one RPM token and (when half-open) claims the
+                // probe slot. If the gate refuses, treat as a fallback
+                // event for THIS provider and move to the next chain
+                // entry -- retrying the same provider would just hit
+                // the gate again.
+                if let Some(gate_err) = self.gate_check(provider_name) {
+                    tracing::warn!(provider = provider_name, ?gate_err, "gate blocked");
+                    last_err = Some(gate_err);
                     if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue 'chain;
+                }
+
+                if attempts_made > 0 {
+                    let jittered = add_jitter(backoff, policy.jitter_ms);
+                    tokio::time::sleep(jittered).await;
+                    backoff = mul_duration(backoff, policy.backoff_multiplier);
+                }
+
+                let result = run_with_timeout(provider.as_ref(), &attempt_req, &policy).await;
+                attempts_made += 1;
+
+                match result {
+                    Ok(mut resp) => {
+                        self.record_success(provider_name);
+                        resp.routectl_provider = Some(provider_name.to_string());
+                        return Ok(resp);
+                    }
+                    Err(e) => {
+                        self.record_failure(provider_name);
+                        if opts.disable_fallbacks {
+                            return Err(e);
+                        }
+                        let can_retry_here = attempts_made < hard_cap
+                            && should_retry_same_provider(&e, &policy, attempts_made);
+                        if can_retry_here {
+                            tracing::debug!(attempt = attempts_made, error = ?e, "retrying same provider");
+                            // last_err is overwritten on the next failure
+                            // or in the fallback branch; no need to store
+                            // intermediate retry errors.
+                            let _ = e;
+                            continue;
+                        }
+                        // Done with this provider. Decide fallback vs propagate.
+                        if should_fallback(&e, &policy) {
+                            tracing::warn!(provider = provider_name, error = ?e, "fallback to next");
+                            last_err = Some(e);
+                            continue 'chain;
+                        }
                         return Err(e);
                     }
-                    if should_fallback(&e, &policy) {
-                        tracing::warn!(provider = provider_name, error = ?e, "fallback to next");
-                        last_err = Some(e);
-                        continue;
-                    }
-                    return Err(e);
                 }
             }
         }
@@ -136,19 +170,25 @@ impl Router {
         let policy = self.policy_for(&req.model);
         let mut last_err: Option<Error> = None;
 
-        for (i, target) in chain.iter().enumerate() {
+        'chain: for target in chain.iter() {
             let (provider_name, model) = parse_target(target);
             let Some(provider) = self.providers.get(provider_name).cloned() else {
                 last_err = Some(Error::UnknownProvider(provider_name.to_string()));
+                if opts.disable_fallbacks {
+                    break 'chain;
+                }
                 continue;
             };
 
+            // Per-attempt gate: streams don't retry against the same
+            // provider, so this is also the "single attempt" gate.
             if let Some(gate_err) = self.gate_check(provider_name) {
+                tracing::warn!(provider = provider_name, ?gate_err, "stream gate blocked");
                 last_err = Some(gate_err);
-                if opts.disable_fallbacks && i == 0 {
-                    break;
+                if opts.disable_fallbacks {
+                    break 'chain;
                 }
-                continue;
+                continue 'chain;
             }
 
             let mut attempt_req = req.clone();
@@ -156,8 +196,14 @@ impl Router {
 
             match try_stream_with_first_chunk(provider, attempt_req, &policy).await {
                 Ok(stream) => {
-                    self.record_success(provider_name);
-                    return Ok(stream);
+                    // DON'T record_success here. A first chunk arriving
+                    // is not the same as a healthy upstream -- a provider
+                    // that emits one token then dies should still count
+                    // toward the breaker. Wrap the stream so success
+                    // records on clean EOS and the first error inside
+                    // the stream records a failure.
+                    let state = self.state.get(provider_name).cloned();
+                    return Ok(wrap_with_breaker_accounting(stream, state));
                 }
                 Err(e) => {
                     self.record_failure(provider_name);
@@ -167,7 +213,7 @@ impl Router {
                     if should_fallback(&e, &policy) {
                         tracing::warn!(provider = provider_name, error = ?e, "stream fallback to next");
                         last_err = Some(e);
-                        continue;
+                        continue 'chain;
                     }
                     return Err(e);
                 }
@@ -229,60 +275,60 @@ impl Router {
     }
 }
 
-async fn attempt_with_retries(
+/// Execute one upstream `complete()` call with the policy's per-request
+/// timeout (if configured). Timeout expiry surfaces as a status-0
+/// upstream error, treated as a network class for retry/fallback.
+async fn run_with_timeout(
     provider: &dyn Provider,
-    req: ChatRequest,
+    req: &ChatRequest,
     policy: &RetryPolicy,
 ) -> Result<ChatResponse> {
-    let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
-    let mut last_err: Option<Error> = None;
-    let mut attempts_made: u32 = 0;
-
-    // Hard ceiling so a misconfigured policy can't loop forever.
-    let hard_cap = policy
-        .max_attempts
-        .max(policy.retry_on_429.unwrap_or(0))
-        .max(policy.retry_on_5xx.unwrap_or(0))
-        .max(policy.retry_on_network.unwrap_or(0))
-        .max(1);
-
-    while attempts_made < hard_cap {
-        if attempts_made > 0 {
-            let jittered = add_jitter(backoff, policy.jitter_ms);
-            tokio::time::sleep(jittered).await;
-            backoff = mul_duration(backoff, policy.backoff_multiplier);
-        }
-
-        let result = match policy.request_timeout_ms {
-            Some(ms) => match tokio::time::timeout(
-                Duration::from_millis(ms),
-                provider.complete(req.clone()),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => Err(Error::upstream(
-                    provider.id(),
-                    0,
-                    format!("request timed out after {ms}ms"),
-                )),
-            },
-            None => provider.complete(req.clone()).await,
-        };
-
-        attempts_made += 1;
-        match result {
-            Ok(resp) => return Ok(resp),
-            Err(e) if should_retry_same_provider(&e, policy, attempts_made) => {
-                tracing::debug!(attempt = attempts_made, error = ?e, "retrying same provider");
-                last_err = Some(e);
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
+    match policy.request_timeout_ms {
+        Some(ms) => match tokio::time::timeout(
+            Duration::from_millis(ms),
+            provider.complete(req.clone()),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(Error::upstream(
+                provider.id(),
+                0,
+                format!("request timed out after {ms}ms"),
+            )),
+        },
+        None => provider.complete(req.clone()).await,
     }
+}
 
-    Err(last_err.unwrap_or_else(|| Error::Streaming("no attempts ran".into())))
+/// Wrap an upstream stream so the breaker records success on clean
+/// completion (None / EOS) and records ONE failure on the first error
+/// that bubbles out of the stream. Subsequent errors do not double-count.
+fn wrap_with_breaker_accounting(
+    inner: BoxStream<'static, Result<ChatChunk>>,
+    state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
+) -> BoxStream<'static, Result<ChatChunk>> {
+    use futures::stream::StreamExt as _;
+    let s = async_stream::stream! {
+        let mut errored = false;
+        let mut inner = inner;
+        while let Some(item) = inner.next().await {
+            let is_err = item.is_err();
+            if is_err && !errored {
+                errored = true;
+                if let Some(st) = &state {
+                    st.lock().expect("poisoned").record_failure(Instant::now());
+                }
+            }
+            yield item;
+        }
+        if !errored {
+            if let Some(st) = &state {
+                st.lock().expect("poisoned").record_success();
+            }
+        }
+    };
+    Box::pin(s)
 }
 
 /// Open the upstream stream and pull the first chunk. If that initial step
