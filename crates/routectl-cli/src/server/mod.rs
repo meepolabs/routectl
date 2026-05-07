@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router as AxumRouter;
-use routectl_auth::KeyringStore;
+use routectl_auth::MemoryStore;
 use routectl_core::{Error, Result};
 use routectl_router::{Config, Router};
 use tokio::net::TcpListener;
@@ -80,7 +80,7 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
 }
 
 async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
-    let secrets = KeyringStore::new();
+    let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
     for (name, entry) in &config.providers {

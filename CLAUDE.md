@@ -20,8 +20,9 @@ making changes; refer back when a model fails the live matrix.
     **Edit here when a new wire format appears**.
 - `crates/routectl-router/` -- alias resolution, fallback chain, retry
   policy, provider factory.
-- `crates/routectl-auth/` -- `SecretStore` trait, OS keychain backend,
-  in-memory test store, secret-ref URI parser.
+- `crates/routectl-auth/` -- `SecretStore` trait + default impl that
+  resolves `env://`, `file://`, and `literal:` secret references.
+  No OS-keychain integration.
 - `crates/routectl-cli/` -- axum HTTP server, clap subcommands
   (serve/test/config/login), live matrix integration tests.
 

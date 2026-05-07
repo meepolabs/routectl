@@ -157,7 +157,7 @@ fn config_show_redacts_literal_secrets() {
 }
 
 #[test]
-fn config_show_keeps_keychain_uris_intact() {
+fn config_show_keeps_env_uris_intact() {
     let mut config = Config {
         server: ServerConfig::default(),
         providers: BTreeMap::new(),
@@ -169,7 +169,7 @@ fn config_show_keeps_keychain_uris_intact() {
         "kc".into(),
         ProviderEntry::OpenaiCompat {
             base_url: "https://api.example.com/v1".into(),
-            api_key_ref: "keychain://routectl/anthropic".into(),
+            api_key_ref: "env://ROUTECTL_TEST_ANTHROPIC".into(),
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: ReasoningDialect::Openai,
