@@ -18,24 +18,56 @@ Goal: a binary you can `cargo install`, point clients at, and have it route real
 8. **`routectl-cli::config`** -- DONE (check/show/example, 8 tests)
 9. **Distribution** -- DEFERRED (no `cargo dist` / Homebrew tap yet; manual `cargo build --release` for now)
 
-## v0.2 (cookie-auth)
+## v0.1.1 (DONE) -- modularization refactor
 
-Out of the default build, opt-in via cargo features.
+ModelProfile registry for per-model quirks; Dialect trait so each
+reasoning dialect lives in one file; CLAUDE.md runbook for autonomous
+agents. See `7a86f02..bc4618b` in git log.
 
-1. **`routectl-cli::login`** with `wry` webview
-   - Tiny embedded browser, navigate to upstream login URL, capture cookies on success
-   - Persist to OS keychain
-2. **`routectl-providers::claude_cookie`**
-   - Port logic from OpenClaw/Hermes Agent
-   - Map claude.ai internal envelope to normalized response
-3. **`routectl-providers::chatgpt_cookie`**
-   - Port from `revChatGPT`-style references
-   - cf-clearance handling
-4. **Session refresh** when cookies expire
+## v0.2.0 (DONE) -- routing policy + model groups
 
-Responsible-use disclosure on every login flow. ToS-on-user.
+Phase A from the LiteLLM/OpenRouter feature audit.
 
-## Post-v0.2 (deferred / never)
+- **Tier 1**: per-attempt request_timeout_ms, stream_first_byte_timeout_ms,
+  jitter_ms on backoff, per-error-class retry caps (retry_on_429 /
+  retry_on_5xx / retry_on_network).
+- **Tier 2**: per-provider rpm_limit (token bucket), passive circuit
+  breaker (circuit_failures + circuit_cooldown_ms), per-request
+  `x-routectl-disable-fallbacks` header.
+- **Model groups**: opinionated `[aliases.heavy/med/cheap/local/reasoning]`
+  in `examples/config.toml`. Aliases are the group mechanism -- no
+  separate group syntax.
+
+## v0.2.1 (planned) -- Anthropic-shape endpoint + local-creds auth
+
+Phase B. Aimed squarely at making Claude Code work pointed at routectl.
+
+1. **`POST /v1/messages` endpoint** -- Anthropic-shape input/output
+   with full tool-call round-trip + thinking blocks + signature
+   preservation + streaming SSE (typed events).
+2. **`claude_local` provider** -- reads `~/.claude/.credentials.json`
+   directly (OAuth access + refresh tokens), refreshes on expiry. No
+   webview cookie capture needed.
+3. **`chatgpt_local` provider** -- reads
+   `~/.local/share/opencode/auth.json`. Same refresh flow.
+4. **Schema-version detection** for the local credential files; fall
+   back cleanly when Claude Code's shape changes.
+
+The webview-based v0.2 cookie-auth proposal is superseded; both
+target apps already store usable OAuth tokens locally.
+
+## v0.3.0 (planned) -- Bedrock + load-balancing routing
+
+Phase C.
+
+1. **`bedrock` provider** with AWS Sigv4 signing, region/profile
+   config, and Bedrock Anthropic-shape model name mapping.
+2. **Latency-based routing** across multiple healthy providers in a
+   chain (sliding-window p95 tracking, weighted random).
+3. **Spend tracking** -- per-provider request count + token usage
+   metric, exposed via `/v1/metrics` for Prometheus scrape.
+
+## Post-v0.3 (deferred / never)
 
 - Caching layer (use a proxy if you want this)
 - Web UI / config editor (CLI-only by design)
