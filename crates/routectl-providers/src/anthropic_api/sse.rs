@@ -52,11 +52,7 @@ pub struct SseState {
 impl SseState {
     /// Parse one raw SSE data line (the JSON string after "data: ").
     /// Returns Ok(None) for housekeeping events, Ok(Some(chunk)) for content.
-    pub fn parse_event(
-        &mut self,
-        provider_id: &str,
-        data: &str,
-    ) -> Result<Option<ChatChunk>> {
+    pub fn parse_event(&mut self, provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
         let event: SseEvent = serde_json::from_str(data)
             .map_err(|e| Error::Streaming(format!("bad sse json: {e}")))?;
 
@@ -67,7 +63,10 @@ impl SseState {
                 Ok(None)
             }
 
-            SseEvent::ContentBlockStart { index: _, content_block } => {
+            SseEvent::ContentBlockStart {
+                index: _,
+                content_block,
+            } => {
                 use super::types::SseContentBlockStart;
                 match content_block {
                     SseContentBlockStart::Text { .. } => {
@@ -97,9 +96,7 @@ impl SseState {
             SseEvent::ContentBlockDelta { index: _, delta } => {
                 use super::types::SseDelta;
                 match delta {
-                    SseDelta::TextDelta { text } => {
-                        Ok(Some(self.make_text_chunk(text)))
-                    }
+                    SseDelta::TextDelta { text } => Ok(Some(self.make_text_chunk(text))),
                     SseDelta::ThinkingDelta { thinking } => {
                         // Accumulate for later signature association.
                         if let Some(OpenBlockKind::Thinking { accumulated, .. }) =
@@ -162,11 +159,7 @@ impl SseState {
         }
     }
 
-    fn make_thinking_delta_chunk(
-        &self,
-        _provider_id: &str,
-        thinking: String,
-    ) -> Result<ChatChunk> {
+    fn make_thinking_delta_chunk(&self, _provider_id: &str, thinking: String) -> Result<ChatChunk> {
         let detail_index = match &self.open_block {
             Some(OpenBlockKind::Thinking { detail_index, .. }) => *detail_index,
             _ => 0,
@@ -228,9 +221,11 @@ impl SseState {
 
     fn make_tool_delta_chunk(&self, partial_json: String) -> ChatChunk {
         let (tool_id, tool_name, call_index) = match &self.open_block {
-            Some(OpenBlockKind::ToolUse { id, name, call_index }) => {
-                (id.clone(), name.clone(), *call_index)
-            }
+            Some(OpenBlockKind::ToolUse {
+                id,
+                name,
+                call_index,
+            }) => (id.clone(), name.clone(), *call_index),
             _ => (String::new(), String::new(), 0),
         };
 
@@ -263,13 +258,10 @@ impl SseState {
 pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
     // Delegate to a throw-away state so we don't lose the id/model.
     // This is intentionally limited; the stateful path in stream() is preferred.
-    let v: Value = serde_json::from_str(data)
-        .map_err(|e| Error::Streaming(format!("bad sse json: {e}")))?;
+    let v: Value =
+        serde_json::from_str(data).map_err(|e| Error::Streaming(format!("bad sse json: {e}")))?;
 
-    let event_type = v
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     if event_type == "content_block_delta" {
         let delta_type = v
@@ -299,9 +291,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
 
     // For message_delta carrying stop_reason:
     if event_type == "message_delta" {
-        let stop_reason = v
-            .pointer("/delta/stop_reason")
-            .and_then(|r| r.as_str());
+        let stop_reason = v.pointer("/delta/stop_reason").and_then(|r| r.as_str());
         let finish_reason = map_stop_reason(stop_reason);
         if finish_reason.is_some() {
             return Ok(Some(ChatChunk {

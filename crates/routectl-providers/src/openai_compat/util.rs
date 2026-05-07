@@ -9,11 +9,7 @@ use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 /// Construct a `reasoning.text`-kind `ReasoningDetail` from a plain string.
 /// Generates a fresh UUID per call so detail blocks are individually
 /// addressable downstream.
-pub(crate) fn build_reasoning_detail(
-    text: &str,
-    format_tag: &str,
-    index: u32,
-) -> ReasoningDetail {
+pub(crate) fn build_reasoning_detail(text: &str, format_tag: &str, index: u32) -> ReasoningDetail {
     ReasoningDetail {
         kind: ReasoningDetailKind::Text,
         id: Some(Uuid::new_v4().to_string()),

@@ -53,7 +53,11 @@ fn header_truthy(headers: &HeaderMap, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn complete_response(state: Arc<AppState>, req: ChatRequest, opts: RouterOptions) -> Response {
+async fn complete_response(
+    state: Arc<AppState>,
+    req: ChatRequest,
+    opts: RouterOptions,
+) -> Response {
     match state.router.complete_with_options(req, opts).await {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => map_error(e),

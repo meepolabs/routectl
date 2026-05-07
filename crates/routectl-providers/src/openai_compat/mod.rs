@@ -69,7 +69,10 @@ impl OpenAiCompatProvider {
     }
 
     fn completions_url(&self) -> String {
-        format!("{}/chat/completions", self.cfg.base_url.trim_end_matches('/'))
+        format!(
+            "{}/chat/completions",
+            self.cfg.base_url.trim_end_matches('/')
+        )
     }
 
     fn build_headers(&self) -> Result<HeaderMap> {
@@ -142,7 +145,11 @@ impl Provider for OpenAiCompatProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(Error::upstream(&self.cfg.id, status, sanitize_upstream_body(&body_text)));
+            return Err(Error::upstream(
+                &self.cfg.id,
+                status,
+                sanitize_upstream_body(&body_text),
+            ));
         }
 
         let raw: Value = resp
@@ -175,7 +182,11 @@ impl Provider for OpenAiCompatProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(Error::upstream(&self.cfg.id, status, sanitize_upstream_body(&body_text)));
+            return Err(Error::upstream(
+                &self.cfg.id,
+                status,
+                sanitize_upstream_body(&body_text),
+            ));
         }
 
         let provider_id = self.cfg.id.clone();
@@ -238,8 +249,8 @@ impl Provider for OpenAiCompatProvider {
 fn sanitize_upstream_body(body: &str) -> String {
     const MAX_LEN: usize = 512;
     let trimmed = body.trim();
-    let looks_like_html = trimmed.starts_with('<')
-        || trimmed.to_ascii_lowercase().contains("<!doctype");
+    let looks_like_html =
+        trimmed.starts_with('<') || trimmed.to_ascii_lowercase().contains("<!doctype");
     if looks_like_html {
         return format!("<html error page, {} bytes>", body.len());
     }

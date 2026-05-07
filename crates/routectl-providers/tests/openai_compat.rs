@@ -9,10 +9,10 @@
 #![cfg(feature = "openai-compat")]
 
 use futures::StreamExt;
-use routectl_core::{
-    Message, MessageContent, Provider, ReasoningDetailKind, Role,
+use routectl_core::{Message, MessageContent, Provider, ReasoningDetailKind, Role};
+use routectl_providers::openai_compat::{
+    OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
 };
-use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -274,7 +274,10 @@ async fn stream_deepseek_lifts_reasoning_content_in_chunks() {
         .await;
 
     let provider = make_provider(&server.uri(), ReasoningDialect::DeepSeek);
-    let mut stream = provider.stream(user_request("deepseek-reasoner")).await.unwrap();
+    let mut stream = provider
+        .stream(user_request("deepseek-reasoner"))
+        .await
+        .unwrap();
 
     let mut reasoning_chunks: Vec<String> = Vec::new();
     let mut content_chunks: Vec<String> = Vec::new();
@@ -421,8 +424,14 @@ fn dialect_format_tags_are_correct() {
     assert_eq!(ReasoningDialect::OpenAi.format_tag(), "openai-responses-v1");
     assert_eq!(ReasoningDialect::DeepSeek.format_tag(), "deepseek-v1");
     assert_eq!(ReasoningDialect::Vllm.format_tag(), "vllm-reasoning-v1");
-    assert_eq!(ReasoningDialect::RawThinkTag.format_tag(), "raw-think-tag-v1");
-    assert_eq!(ReasoningDialect::OpenRouter.format_tag(), "openrouter-passthrough-v1");
+    assert_eq!(
+        ReasoningDialect::RawThinkTag.format_tag(),
+        "raw-think-tag-v1"
+    );
+    assert_eq!(
+        ReasoningDialect::OpenRouter.format_tag(),
+        "openrouter-passthrough-v1"
+    );
     assert_eq!(ReasoningDialect::Passthrough.format_tag(), "passthrough-v1");
 }
 

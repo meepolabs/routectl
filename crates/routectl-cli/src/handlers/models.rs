@@ -25,7 +25,8 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<Value> {
         .collect();
 
     // Also expose direct provider:model targets that appear in chains.
-    let mut seen_direct: std::collections::BTreeSet<String> = config.aliases.keys().cloned().collect();
+    let mut seen_direct: std::collections::BTreeSet<String> =
+        config.aliases.keys().cloned().collect();
     for alias_entry in config.aliases.values() {
         for target in &alias_entry.chain {
             if target.contains(':') && !seen_direct.contains(target) {
