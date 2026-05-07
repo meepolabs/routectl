@@ -121,16 +121,45 @@ async fn attempt_with_retries(
 ) -> Result<ChatResponse> {
     let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
     let mut last_err: Option<Error> = None;
+    let mut attempts_made: u32 = 0;
 
-    for attempt in 0..policy.max_attempts.max(1) {
-        if attempt > 0 {
-            tokio::time::sleep(backoff).await;
+    // Hard ceiling so a misconfigured policy can't loop forever.
+    let hard_cap = policy
+        .max_attempts
+        .max(policy.retry_on_429.unwrap_or(0))
+        .max(policy.retry_on_5xx.unwrap_or(0))
+        .max(policy.retry_on_network.unwrap_or(0))
+        .max(1);
+
+    while attempts_made < hard_cap {
+        if attempts_made > 0 {
+            let jittered = add_jitter(backoff, policy.jitter_ms);
+            tokio::time::sleep(jittered).await;
             backoff = mul_duration(backoff, policy.backoff_multiplier);
         }
-        match provider.complete(req.clone()).await {
+
+        let result = match policy.request_timeout_ms {
+            Some(ms) => match tokio::time::timeout(
+                Duration::from_millis(ms),
+                provider.complete(req.clone()),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => Err(Error::upstream(
+                    provider.id(),
+                    0,
+                    format!("request timed out after {ms}ms"),
+                )),
+            },
+            None => provider.complete(req.clone()).await,
+        };
+
+        attempts_made += 1;
+        match result {
             Ok(resp) => return Ok(resp),
-            Err(e) if should_retry_same_provider(&e, policy) => {
-                tracing::debug!(attempt, error = ?e, "retrying same provider");
+            Err(e) if should_retry_same_provider(&e, policy, attempts_made) => {
+                tracing::debug!(attempt = attempts_made, error = ?e, "retrying same provider");
                 last_err = Some(e);
                 continue;
             }
@@ -145,19 +174,38 @@ async fn attempt_with_retries(
 /// fails with a fallbackable error, return it so the caller can try the next
 /// provider. If the first chunk arrives, return a `BoxStream` that yields it
 /// followed by the rest of the upstream stream -- mid-stream errors propagate.
+///
+/// `policy.stream_first_byte_timeout_ms` (when set) caps the wait for the
+/// stream-open + first-chunk arrival; expiry surfaces as a status-0
+/// upstream error which is fallbackable per `should_fallback`.
 async fn try_stream_with_first_chunk(
     provider: Arc<dyn Provider>,
     req: ChatRequest,
-    _policy: &RetryPolicy,
+    policy: &RetryPolicy,
 ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-    let mut upstream = provider.stream(req).await?;
-    match upstream.next().await {
-        Some(Ok(first)) => {
-            let merged = futures::stream::once(async move { Ok(first) }).chain(upstream);
-            Ok(merged.boxed())
+    let provider_id = provider.id().to_string();
+    let open_and_first = async {
+        let mut upstream = provider.stream(req).await?;
+        match upstream.next().await {
+            Some(Ok(first)) => {
+                let merged = futures::stream::once(async move { Ok(first) }).chain(upstream);
+                Ok(merged.boxed())
+            }
+            Some(Err(e)) => Err(e),
+            None => Ok(futures::stream::empty().boxed()),
         }
-        Some(Err(e)) => Err(e),
-        None => Ok(futures::stream::empty().boxed()),
+    };
+
+    match policy.stream_first_byte_timeout_ms {
+        Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), open_and_first).await {
+            Ok(r) => r,
+            Err(_) => Err(Error::upstream(
+                &provider_id,
+                0,
+                format!("stream first-byte timeout after {ms}ms"),
+            )),
+        },
+        None => open_and_first.await,
     }
 }
 
@@ -178,15 +226,27 @@ fn should_fallback(err: &Error, policy: &RetryPolicy) -> bool {
     }
 }
 
-fn should_retry_same_provider(err: &Error, policy: &RetryPolicy) -> bool {
-    match err {
-        Error::Upstream { status: 0, .. } => true,
-        Error::Upstream { status, .. } => {
-            *status == 429 || (500..600).contains(status) && policy.fallback_on_status.contains(status)
-        }
-        Error::Streaming(_) => true,
-        _ => false,
+fn should_retry_same_provider(err: &Error, policy: &RetryPolicy, attempts_made: u32) -> bool {
+    let cap = match err {
+        Error::Upstream { status, .. } => policy.retries_for_status(*status),
+        Error::Streaming(_) => policy.retry_on_5xx.unwrap_or(policy.max_attempts),
+        _ => 0,
+    };
+    attempts_made < cap
+}
+
+fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {
+    if jitter_ms == 0 {
+        return base;
     }
+    // Non-cryptographic jitter from the wall clock's sub-millisecond
+    // bits. Suitable for retry-spreading; not for anything else.
+    use std::time::SystemTime;
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    base + Duration::from_millis(nanos % jitter_ms)
 }
 
 fn mul_duration(d: Duration, factor: f64) -> Duration {
