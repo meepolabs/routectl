@@ -21,12 +21,12 @@ pub fn normalize(
     dialect: ReasoningDialect,
     default_extras: Option<&Value>,
 ) -> Result<Value> {
-    let mut body = serde_json::to_value(req)
-        .map_err(|e| Error::normalize_request(id, e.to_string()))?;
+    let mut body =
+        serde_json::to_value(req).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
-    let obj = body.as_object_mut().ok_or_else(|| {
-        Error::normalize_request(id, "serialized request is not an object")
-    })?;
+    let obj = body
+        .as_object_mut()
+        .ok_or_else(|| Error::normalize_request(id, "serialized request is not an object"))?;
 
     // Remove routectl-internal fields that upstream never wants.
     // Dialects that need `chat_template_kwargs` re-inject it themselves.
@@ -182,7 +182,13 @@ mod tests {
             r
         };
         let defaults = json!({"key": "from_defaults"});
-        let body = normalize("test", &req_mut, ReasoningDialect::Passthrough, Some(&defaults)).unwrap();
+        let body = normalize(
+            "test",
+            &req_mut,
+            ReasoningDialect::Passthrough,
+            Some(&defaults),
+        )
+        .unwrap();
         assert_eq!(body["key"], "from_request");
     }
 }

@@ -37,7 +37,10 @@ pub fn walk_content_blocks(
 
     for block in blocks {
         match block {
-            ContentBlock::Thinking { thinking, signature } => {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 reasoning_details.push(ReasoningDetail {
                     kind: ReasoningDetailKind::Text,
                     id: Some(Uuid::new_v4().to_string()),
@@ -60,7 +63,11 @@ pub fn walk_content_blocks(
             ContentBlock::Text { text } => {
                 text_parts.push(text.clone());
             }
-            ContentBlock::ToolUse { id: tool_id, name, input } => {
+            ContentBlock::ToolUse {
+                id: tool_id,
+                name,
+                input,
+            } => {
                 // Convert to OpenAI tool_call shape.
                 let arguments = serde_json::to_string(input)
                     .map_err(|e| Error::normalize_response(id, e.to_string()))?;
@@ -77,14 +84,18 @@ pub fn walk_content_blocks(
     }
 
     let text = text_parts.join("");
-    let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
+    let tool_calls_opt = if tool_calls.is_empty() {
+        None
+    } else {
+        Some(tool_calls)
+    };
 
     Ok((text, reasoning_details, tool_calls_opt))
 }
 
 pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
-    let resp: AnthropicResponse = serde_json::from_value(raw)
-        .map_err(|e| Error::normalize_response(id, e.to_string()))?;
+    let resp: AnthropicResponse =
+        serde_json::from_value(raw).map_err(|e| Error::normalize_response(id, e.to_string()))?;
 
     let (text, reasoning_details, tool_calls) = walk_content_blocks(id, &resp.content)?;
 
@@ -111,7 +122,11 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
         id: resp.id,
         model: resp.model,
         created: Utc::now().timestamp(),
-        choices: vec![Choice { index: 0, message, finish_reason }],
+        choices: vec![Choice {
+            index: 0,
+            message,
+            finish_reason,
+        }],
         usage,
         routectl_provider: None,
     })
