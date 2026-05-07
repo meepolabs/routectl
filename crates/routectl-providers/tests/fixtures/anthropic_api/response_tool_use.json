@@ -1,0 +1,19 @@
+{
+  "id": "msg_02tool",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-5-20251101",
+  "stop_reason": "tool_use",
+  "usage": {
+    "input_tokens": 50,
+    "output_tokens": 30
+  },
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_01",
+      "name": "get_weather",
+      "input": {"location": "London"}
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "chatcmpl-oai-001",
+  "model": "gpt-4o",
+  "created": 1700000000,
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello there!"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 3,
+    "total_tokens": 13
+  }
+}

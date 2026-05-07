@@ -1,0 +1,20 @@
+{
+  "id": "chatcmpl-think-001",
+  "model": "qwq-32b",
+  "created": 1700000000,
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "<think>Let me reason about this.\nStep 1: read the question.\nStep 2: formulate an answer.</think>The capital of France is Paris."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 40,
+    "total_tokens": 52
+  }
+}

@@ -1,0 +1,41 @@
+[package]
+name = "routectl-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider implementations for routectl: openai-compat, anthropic-api, claude-cookie, chatgpt-cookie."
+
+[features]
+default = ["openai-compat", "anthropic-api"]
+# Cookie-auth providers are gated. Disabled by default in the binary
+# until the impl + ToS-on-user surface is complete.
+"openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
+"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio"]
+"claude-cookie" = []
+"chatgpt-cookie" = []
+
+[dependencies]
+routectl-core.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Used by anthropic-api and openai-compat providers.
+reqwest = { workspace = true, optional = true }
+eventsource-stream = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+async-stream = { version = "0.3", optional = true }
+tokio = { workspace = true, optional = true }
+regex = { version = "1", optional = true }
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+pretty_assertions = "1"

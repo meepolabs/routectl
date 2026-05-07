@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-ds-001",
+  "model": "deepseek-reasoner",
+  "created": 1700000000,
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The answer is 42.",
+        "reasoning": "Let me think carefully about this problem. Step 1: identify the question. Step 2: recall that 42 is the answer to everything."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 15,
+    "completion_tokens": 50,
+    "total_tokens": 65
+  }
+}

@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-ds-sse-001","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Step 1"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ds-sse-001","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"reasoning_content":" and step 2"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ds-sse-001","model":"deepseek-reasoner","choices":[{"index":0,"delta":{"content":"The answer."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ds-sse-001","model":"deepseek-reasoner","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
