@@ -34,6 +34,20 @@ fn parse_file_empty_path_is_error() {
 }
 
 #[test]
+fn parse_file_relative_path_is_error() {
+    let err = SecretRef::parse("file://relative/key").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("absolute"), "got: {msg}");
+    assert!(msg.contains("file:///abs/path"), "got: {msg}");
+}
+
+#[test]
+fn parse_file_dot_relative_path_is_error() {
+    let err = SecretRef::parse("file://./key").unwrap_err();
+    assert!(err.to_string().contains("absolute"));
+}
+
+#[test]
 fn parse_literal_valid() {
     let r = SecretRef::parse("literal:hello-world").unwrap();
     assert_eq!(r, SecretRef::Literal("hello-world".into()));
@@ -147,7 +161,11 @@ async fn file_get_missing_is_error() {
     let store = MemoryStore::new();
     let r = SecretRef::File("/nonexistent/path/to/key".into());
     let err = store.get(&r).await.unwrap_err();
-    assert!(err.to_string().contains("failed to read secret file"));
+    let msg = err.to_string();
+    assert!(
+        msg.contains("failed to open secret file"),
+        "got: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -168,6 +186,18 @@ async fn file_get_group_readable_is_refused() {
     let r = SecretRef::File(file.path().to_path_buf());
     let err = store.get(&r).await.unwrap_err();
     assert!(err.to_string().contains("permissions"));
+}
+
+#[tokio::test]
+async fn file_get_directory_path_is_refused() {
+    // A path pointing at a directory must be refused as "not a
+    // regular file" (catches symlink-to-directory swaps).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = MemoryStore::new();
+    let r = SecretRef::File(dir.path().to_path_buf());
+    let err = store.get(&r).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("not a regular file"), "got: {msg}");
 }
 
 // --- MemoryStore: set/delete are read-only ---
