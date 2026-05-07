@@ -20,6 +20,7 @@ fn config_with(server_url: &str) -> Config {
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: ReasoningDialect::Openai,
+            runtime: Default::default(),
         },
     );
     let mut aliases = BTreeMap::new();
@@ -71,6 +72,7 @@ async fn config_check_passes_for_valid_config() {
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: ReasoningDialect::Openai,
+            runtime: Default::default(),
         },
     );
     config.aliases.insert(
@@ -129,6 +131,7 @@ fn config_show_redacts_literal_secrets() {
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: ReasoningDialect::Openai,
+            runtime: Default::default(),
         },
     );
 
@@ -170,6 +173,7 @@ fn config_show_keeps_keychain_uris_intact() {
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: ReasoningDialect::Openai,
+            runtime: Default::default(),
         },
     );
 

@@ -41,6 +41,7 @@ fn deepseek_alias_config(upstream_base: &str) -> Arc<Config> {
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: ReasoningDialect::Deepseek,
+            runtime: Default::default(),
         },
     );
     let mut aliases = BTreeMap::new();

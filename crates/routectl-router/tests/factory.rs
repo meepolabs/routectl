@@ -24,6 +24,7 @@ async fn build_openai_compat_resolves_secret() {
         extra_headers: BTreeMap::new(),
         default_extras: None,
         reasoning_dialect: ReasoningDialect::Openai,
+        runtime: Default::default(),
     };
     let provider = build_provider("test", &entry, &store).await.expect("build");
     assert_eq!(provider.id(), "openai-compat:test");
@@ -36,6 +37,7 @@ async fn build_anthropic_api_resolves_secret() {
         api_key_ref: "keychain://routectl/anthropic".into(),
         base_url: "https://api.anthropic.com".into(),
         anthropic_version: "2023-06-01".into(),
+        runtime: Default::default(),
     };
     let provider = build_provider("anthropic", &entry, &store).await.expect("build");
     assert_eq!(provider.id(), "anthropic-api:anthropic");
@@ -47,6 +49,7 @@ async fn build_claude_cookie_returns_not_enabled() {
     let entry = ProviderEntry::ClaudeCookie {
         session_ref: "keychain://routectl/claude".into(),
         organization_id: None,
+        runtime: Default::default(),
     };
     match build_provider("claude-pro", &entry, &store).await {
         Err(Error::Auth(msg)) => {
@@ -63,6 +66,7 @@ async fn build_chatgpt_cookie_returns_not_enabled() {
     let store = MemoryStore::default();
     let entry = ProviderEntry::ChatgptCookie {
         session_ref: "keychain://routectl/chatgpt".into(),
+        runtime: Default::default(),
     };
     match build_provider("chatgpt-plus", &entry, &store).await {
         Err(Error::Auth(_)) => {}
@@ -91,6 +95,7 @@ anthropic_version = "2024-05-01"
             base_url,
             anthropic_version,
             api_key_ref,
+            ..
         } => {
             assert_eq!(base_url, "https://api2.anthropic.com");
             assert_eq!(anthropic_version, "2024-05-01");
@@ -134,6 +139,7 @@ async fn build_with_unknown_secret_errors() {
         api_key_ref: "keychain://routectl/missing".into(),
         base_url: "https://api.anthropic.com".into(),
         anthropic_version: "2023-06-01".into(),
+        runtime: Default::default(),
     };
     match build_provider("anthropic", &entry, &store).await {
         Err(Error::Auth(_)) => {}
