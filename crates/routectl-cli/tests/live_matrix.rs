@@ -336,6 +336,7 @@ async fn build_test_router(
             extra_headers,
             default_extras: None,
             reasoning_dialect: dialect,
+            runtime: Default::default(),
         },
     );
 

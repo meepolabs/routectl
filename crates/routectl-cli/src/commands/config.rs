@@ -84,7 +84,7 @@ fn redact_entry(entry: &mut ProviderEntry) {
         ProviderEntry::OpenaiCompat { api_key_ref, .. } => *api_key_ref = redact(api_key_ref),
         ProviderEntry::AnthropicApi { api_key_ref, .. } => *api_key_ref = redact(api_key_ref),
         ProviderEntry::ClaudeCookie { session_ref, .. } => *session_ref = redact(session_ref),
-        ProviderEntry::ChatgptCookie { session_ref } => *session_ref = redact(session_ref),
+        ProviderEntry::ChatgptCookie { session_ref, .. } => *session_ref = redact(session_ref),
     }
 }
 
@@ -105,7 +105,7 @@ fn secret_uris(entry: &ProviderEntry) -> Vec<&str> {
         ProviderEntry::OpenaiCompat { api_key_ref, .. } => vec![api_key_ref.as_str()],
         ProviderEntry::AnthropicApi { api_key_ref, .. } => vec![api_key_ref.as_str()],
         ProviderEntry::ClaudeCookie { session_ref, .. } => vec![session_ref.as_str()],
-        ProviderEntry::ChatgptCookie { session_ref } => vec![session_ref.as_str()],
+        ProviderEntry::ChatgptCookie { session_ref, .. } => vec![session_ref.as_str()],
     }
 }
 

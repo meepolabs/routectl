@@ -1,98 +1,213 @@
 //! Fallback-chain router. Given an incoming request, walks the configured
 //! alias chain attempting each provider until one succeeds or all are
 //! exhausted. Retries within a single provider per `RetryPolicy.max_attempts`
-//! with exponential backoff.
+//! with exponential backoff. Per-provider runtime gates (RPM bucket,
+//! circuit breaker) skip unhealthy providers in the chain.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
 
 use crate::config::{Config, RetryPolicy};
+use crate::runtime_state::{GateDecision, ProviderState};
 
 pub struct Router {
     pub config: Arc<Config>,
-    pub providers: std::collections::BTreeMap<String, Arc<dyn Provider>>,
+    pub providers: BTreeMap<String, Arc<dyn Provider>>,
+    /// Per-provider runtime gates. Built lazily from
+    /// `config.providers[name].runtime()` on the first dispatch and
+    /// kept under a mutex for the lifetime of the router.
+    state: BTreeMap<String, Arc<Mutex<ProviderState>>>,
+}
+
+/// Per-request switches that the HTTP handler can flip via header
+/// without polluting the wire schema. Defaults preserve current behavior.
+#[derive(Debug, Clone, Default)]
+pub struct RouterOptions {
+    /// When true, do NOT walk past the first provider in the chain.
+    /// The first failure (after retries) propagates verbatim.
+    /// Wired to header `x-routectl-disable-fallbacks: 1`.
+    pub disable_fallbacks: bool,
 }
 
 impl Router {
     pub fn new(config: Arc<Config>) -> Self {
+        let mut state = BTreeMap::new();
+        for (name, entry) in &config.providers {
+            state.insert(
+                name.clone(),
+                Arc::new(Mutex::new(ProviderState::new(entry.runtime()))),
+            );
+        }
         Self {
             config,
             providers: Default::default(),
+            state,
         }
     }
 
     pub fn register(&mut self, name: impl Into<String>, provider: Arc<dyn Provider>) {
-        self.providers.insert(name.into(), provider);
+        let name = name.into();
+        // Ensure a gate exists even for providers registered without a
+        // matching config entry (test harnesses rely on this).
+        self.state
+            .entry(name.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&Default::default()))));
+        self.providers.insert(name, provider);
     }
 
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        self.complete_with_options(req, RouterOptions::default()).await
+    }
+
+    pub async fn complete_with_options(
+        &self,
+        req: ChatRequest,
+        opts: RouterOptions,
+    ) -> Result<ChatResponse> {
         let chain = self.resolve_chain(&req.model)?;
         let policy = self.policy_for(&req.model);
         let mut last_err: Option<Error> = None;
 
-        for target in chain {
-            let (provider_name, model) = parse_target(&target);
+        for (i, target) in chain.iter().enumerate() {
+            let (provider_name, model) = parse_target(target);
             let Some(provider) = self.providers.get(provider_name).cloned() else {
                 last_err = Some(Error::UnknownProvider(provider_name.to_string()));
                 continue;
             };
+
+            // Pre-dispatch gate: rate limit + circuit breaker.
+            if let Some(gate_err) = self.gate_check(provider_name) {
+                tracing::warn!(provider = provider_name, ?gate_err, "gate blocked");
+                last_err = Some(gate_err);
+                if opts.disable_fallbacks && i == 0 {
+                    break;
+                }
+                continue;
+            }
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
 
             match attempt_with_retries(provider.as_ref(), attempt_req, &policy).await {
                 Ok(mut resp) => {
+                    self.record_success(provider_name);
                     resp.routectl_provider = Some(provider_name.to_string());
                     return Ok(resp);
                 }
-                Err(e) if should_fallback(&e, &policy) => {
-                    tracing::warn!(provider = provider_name, error = ?e, "fallback to next");
-                    last_err = Some(e);
-                    continue;
+                Err(e) => {
+                    self.record_failure(provider_name);
+                    if opts.disable_fallbacks {
+                        return Err(e);
+                    }
+                    if should_fallback(&e, &policy) {
+                        tracing::warn!(provider = provider_name, error = ?e, "fallback to next");
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
                 }
-                Err(e) => return Err(e),
             }
         }
 
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
     }
 
-    /// Streaming counterpart to `complete`. Fallback only happens on errors
-    /// that surface BEFORE the first chunk reaches us; once the upstream has
-    /// emitted any chunk, mid-stream errors propagate to the caller.
     pub async fn stream(
         &self,
         req: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        self.stream_with_options(req, RouterOptions::default()).await
+    }
+
+    /// Streaming counterpart. Fallback only happens BEFORE the first
+    /// chunk reaches us; once the upstream has emitted a chunk,
+    /// mid-stream errors propagate. Gate checks (rate limit / breaker)
+    /// run before the upstream is touched.
+    pub async fn stream_with_options(
+        &self,
+        req: ChatRequest,
+        opts: RouterOptions,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let chain = self.resolve_chain(&req.model)?;
         let policy = self.policy_for(&req.model);
         let mut last_err: Option<Error> = None;
 
-        for target in chain {
-            let (provider_name, model) = parse_target(&target);
+        for (i, target) in chain.iter().enumerate() {
+            let (provider_name, model) = parse_target(target);
             let Some(provider) = self.providers.get(provider_name).cloned() else {
                 last_err = Some(Error::UnknownProvider(provider_name.to_string()));
                 continue;
             };
 
+            if let Some(gate_err) = self.gate_check(provider_name) {
+                last_err = Some(gate_err);
+                if opts.disable_fallbacks && i == 0 {
+                    break;
+                }
+                continue;
+            }
+
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
 
             match try_stream_with_first_chunk(provider, attempt_req, &policy).await {
-                Ok(stream) => return Ok(stream),
-                Err(e) if should_fallback(&e, &policy) => {
-                    tracing::warn!(provider = provider_name, error = ?e, "stream fallback to next");
-                    last_err = Some(e);
-                    continue;
+                Ok(stream) => {
+                    self.record_success(provider_name);
+                    return Ok(stream);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.record_failure(provider_name);
+                    if opts.disable_fallbacks {
+                        return Err(e);
+                    }
+                    if should_fallback(&e, &policy) {
+                        tracing::warn!(provider = provider_name, error = ?e, "stream fallback to next");
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
             }
         }
 
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
+    }
+
+    /// Run RPM bucket + circuit breaker. Returns `Some(err)` if the
+    /// gate refuses this dispatch (pretreated as a fallbackable
+    /// status-0 upstream error).
+    fn gate_check(&self, provider_name: &str) -> Option<Error> {
+        let state = self.state.get(provider_name)?.clone();
+        let mut s = state.lock().expect("poisoned");
+        match s.try_dispatch(Instant::now()) {
+            GateDecision::Allow => None,
+            GateDecision::RateLimited => Some(Error::upstream(
+                provider_name,
+                0,
+                "local rpm_limit exceeded",
+            )),
+            GateDecision::CircuitOpen => Some(Error::upstream(
+                provider_name,
+                0,
+                "circuit breaker open",
+            )),
+        }
+    }
+
+    fn record_success(&self, provider_name: &str) {
+        if let Some(state) = self.state.get(provider_name) {
+            state.lock().expect("poisoned").record_success();
+        }
+    }
+
+    fn record_failure(&self, provider_name: &str) {
+        if let Some(state) = self.state.get(provider_name) {
+            state.lock().expect("poisoned").record_failure(Instant::now());
+        }
     }
 
     fn resolve_chain(&self, model: &str) -> Result<Vec<String>> {

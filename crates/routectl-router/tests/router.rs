@@ -12,7 +12,7 @@ use routectl_core::{
     Result, Role, Usage,
 };
 use routectl_router::{
-    AliasEntry, Config, RetryPolicy, Router,
+    AliasEntry, Config, ProviderEntry, ProviderRuntimePolicy, RetryPolicy, Router, RouterOptions,
 };
 
 /// Mock provider whose behavior is parameterized per-call.
@@ -549,4 +549,194 @@ async fn per_attempt_jitter_does_not_break_retries() {
     let resp = r.complete(req("fast")).await.expect("ok");
     assert_eq!(resp.routectl_provider.as_deref(), Some("p"));
     assert_eq!(p.calls(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2: per-provider RPM, circuit breaker, disable-fallbacks
+// ---------------------------------------------------------------------------
+
+fn build_router_with_runtime(
+    aliases: BTreeMap<String, AliasEntry>,
+    provider_runtime: BTreeMap<String, ProviderRuntimePolicy>,
+) -> Router {
+    let mut providers = BTreeMap::new();
+    for (name, runtime) in provider_runtime {
+        // The factory path is bypassed in tests; we stuff a dummy
+        // OpenaiCompat entry here so Router::new picks up the runtime.
+        providers.insert(
+            name,
+            ProviderEntry::OpenaiCompat {
+                base_url: "http://example.invalid".into(),
+                api_key_ref: "literal:x".into(),
+                extra_headers: BTreeMap::new(),
+                default_extras: None,
+                reasoning_dialect: routectl_router::ReasoningDialect::Openai,
+                runtime,
+            },
+        );
+    }
+    let cfg = Config {
+        server: Default::default(),
+        providers,
+        aliases,
+        retry: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 1,
+            backoff_multiplier: 1.0,
+            ..Default::default()
+        },
+        legacy_compat: Default::default(),
+    };
+    Router::new(Arc::new(cfg))
+}
+
+#[tokio::test]
+async fn rpm_limit_falls_through_to_next_provider() {
+    let p1 = MockProvider::new("p1", vec![Behavior::Ok, Behavior::Ok, Behavior::Ok]);
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: None,
+        },
+    );
+    let mut runtime = BTreeMap::new();
+    runtime.insert(
+        "p1".into(),
+        ProviderRuntimePolicy {
+            rpm_limit: Some(2),
+            ..Default::default()
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    // First two go to p1.
+    assert_eq!(
+        r.complete(req("fast")).await.unwrap().routectl_provider.as_deref(),
+        Some("p1")
+    );
+    assert_eq!(
+        r.complete(req("fast")).await.unwrap().routectl_provider.as_deref(),
+        Some("p1")
+    );
+    // Third hits the bucket limit; falls through to p2.
+    assert_eq!(
+        r.complete(req("fast")).await.unwrap().routectl_provider.as_deref(),
+        Some("p2")
+    );
+    assert_eq!(p1.calls(), 2);
+    assert_eq!(p2.calls(), 1);
+}
+
+#[tokio::test]
+async fn circuit_breaker_skips_provider_after_consecutive_failures() {
+    let p1 = MockProvider::new(
+        "p1",
+        vec![Behavior::Status(503), Behavior::Status(503), Behavior::Ok],
+    );
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok, Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: Some(RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                backoff_multiplier: 1.0,
+                fallback_on_status: vec![503],
+                ..Default::default()
+            }),
+        },
+    );
+    let mut runtime = BTreeMap::new();
+    runtime.insert(
+        "p1".into(),
+        ProviderRuntimePolicy {
+            circuit_failures: Some(2),
+            circuit_cooldown_ms: Some(30_000),
+            ..Default::default()
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    // First two requests trip the breaker on p1, both end up on p2.
+    let r1 = r.complete(req("fast")).await.unwrap();
+    let r2 = r.complete(req("fast")).await.unwrap();
+    assert_eq!(r1.routectl_provider.as_deref(), Some("p2"));
+    assert_eq!(r2.routectl_provider.as_deref(), Some("p2"));
+    // Third request: breaker is open, p1 is skipped silently and p2
+    // serves it without p1 being called again.
+    let r3 = r.complete(req("fast")).await.unwrap();
+    assert_eq!(r3.routectl_provider.as_deref(), Some("p2"));
+    assert_eq!(p1.calls(), 2);
+    assert_eq!(p2.calls(), 3);
+}
+
+#[tokio::test]
+async fn disable_fallbacks_propagates_first_error() {
+    let p1 = MockProvider::new("p1", vec![Behavior::Status(503)]);
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: Some(RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                backoff_multiplier: 1.0,
+                fallback_on_status: vec![503],
+                ..Default::default()
+            }),
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, BTreeMap::new());
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    // Without options: falls back to p2.
+    let ok = r.complete(req("fast")).await.unwrap();
+    assert_eq!(ok.routectl_provider.as_deref(), Some("p2"));
+
+    // With disable_fallbacks: error from p1 propagates verbatim.
+    let p1b = MockProvider::new("p1", vec![Behavior::Status(503)]);
+    let p2b = MockProvider::new("p2", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: Some(RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                backoff_multiplier: 1.0,
+                fallback_on_status: vec![503],
+                ..Default::default()
+            }),
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, BTreeMap::new());
+    r.register("p1", p1b);
+    r.register("p2", p2b.clone());
+    let err = r
+        .complete_with_options(
+            req("fast"),
+            RouterOptions {
+                disable_fallbacks: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    match err {
+        Error::Upstream { status: 503, .. } => {}
+        other => panic!("expected 503 from p1, got: {other:?}"),
+    }
+    assert_eq!(p2b.calls(), 0, "p2 should not have been touched");
 }
