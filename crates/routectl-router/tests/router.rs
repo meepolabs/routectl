@@ -733,13 +733,10 @@ async fn disable_fallbacks_propagates_first_error() {
     let mut r = build_router_with_runtime(aliases, BTreeMap::new());
     r.register("p1", p1b);
     r.register("p2", p2b.clone());
+    let mut opts = RouterOptions::new();
+    opts.disable_fallbacks = true;
     let err = r
-        .complete_with_options(
-            req("fast"),
-            RouterOptions {
-                disable_fallbacks: true,
-            },
-        )
+        .complete_with_options(req("fast"), opts)
         .await
         .unwrap_err();
     match err {
