@@ -1,0 +1,97 @@
+# Example routectl config. Copy to ~/.config/routectl/config.toml and edit.
+# Validate with: routectl config check
+
+[server]
+host = "127.0.0.1"
+port = 8787
+
+# ---- Providers ----
+# Each provider gets a user-facing name (the table key). Add as many as you want.
+# Reference secrets via:
+#   keychain://<service>/<account>   OS keychain (preferred)
+#   env://VAR_NAME                    process env var (dev only)
+#   literal:hunter2                   inline plaintext (discouraged)
+
+[providers.deepseek]
+type = "openai-compat"
+base_url = "https://api.deepseek.com/v1"
+api_key_ref = "keychain://routectl/deepseek"
+reasoning_dialect = "deepseek"
+
+[providers.openrouter]
+type = "openai-compat"
+base_url = "https://openrouter.ai/api/v1"
+api_key_ref = "keychain://routectl/openrouter"
+reasoning_dialect = "openrouter"
+extra_headers = { "HTTP-Referer" = "https://github.com/meepolabs/routectl", "X-Title" = "routectl" }
+
+[providers.opencode-go]
+type = "openai-compat"
+base_url = "https://opencode.ai/zen/v1"
+api_key_ref = "keychain://routectl/opencode-go"
+reasoning_dialect = "passthrough"
+
+[providers.openai]
+type = "openai-compat"
+base_url = "https://api.openai.com/v1"
+api_key_ref = "keychain://routectl/openai"
+reasoning_dialect = "openai"
+
+[providers.llama-local]
+type = "openai-compat"
+base_url = "http://127.0.0.1:8080/v1"  # llama.cpp server
+api_key_ref = "literal:not-needed"
+reasoning_dialect = "raw-think-tag"
+
+[providers.anthropic]
+type = "anthropic-api"
+api_key_ref = "keychain://routectl/anthropic"
+
+[providers.claude-pro]
+type = "claude-cookie"
+session_ref = "keychain://routectl/claude-cookie"
+# organization_id = "abc-123"  # optional, if you have multiple Claude orgs
+
+[providers.chatgpt-plus]
+type = "chatgpt-cookie"
+session_ref = "keychain://routectl/chatgpt-cookie"
+
+# ---- Aliases ----
+# Logical names that resolve to a fallback chain of `provider:model` targets.
+# First entry preferred; fall through on 5xx/429/timeout per `[retry]`.
+
+[aliases.fast]
+chain = [
+  "opencode-go:qwen3.6-plus",
+  "deepseek:deepseek-chat",
+  "openrouter:qwen/qwen3.6-plus",
+]
+
+[aliases.heavy]
+chain = [
+  "claude-pro:claude-opus-4-7",          # uses your Pro subscription
+  "anthropic:claude-opus-4-7",           # falls back to API key
+  "openrouter:anthropic/claude-opus-4-7",
+]
+
+[aliases.reasoning]
+chain = [
+  "deepseek:deepseek-reasoner",
+  "openrouter:deepseek/deepseek-r1",
+  "openrouter:openai/o3-mini",
+]
+
+[aliases.local]
+chain = ["llama-local:qwen3.6"]
+
+# ---- Retry ----
+
+[retry]
+max_attempts = 2
+initial_backoff_ms = 250
+backoff_multiplier = 2.0
+fallback_on_status = [408, 429, 500, 502, 503, 504]
+
+# ---- Schema ----
+# legacy_compat = "openrouter"   # default, full reasoning_details surface
+# legacy_compat = "openai"       # strip extensions for clients that gag on extras

@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/routectl-core",
+    "crates/routectl-providers",
+    "crates/routectl-router",
+    "crates/routectl-auth",
+    "crates/routectl-cli",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/meepolabs/routectl"
+homepage = "https://github.com/meepolabs/routectl"
+authors = ["Meepo Labs"]
+
+[workspace.dependencies]
+# Local crates
+routectl-core = { path = "crates/routectl-core" }
+routectl-providers = { path = "crates/routectl-providers" }
+routectl-router = { path = "crates/routectl-router" }
+routectl-auth = { path = "crates/routectl-auth" }
+
+# Async + runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Errors + logging
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+http = "1"
+mime = "0.3"
+bytes = "1"
+url = "2"
+
+# Streaming
+eventsource-stream = "0.2"
+tokio-stream = "0.1"
+
+# Auth
+keyring = "3"
+
+# Time / ids (used in response shaping)
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Test deps (used in dev-dependencies of individual crates)
+wiremock = "0.6"
+insta = { version = "1", features = ["yaml"] }
+tokio-test = "0.4"
+
+# Webview for v0.2 cookie capture (declared, not used in v0.1)
+# wry = "0.45"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
