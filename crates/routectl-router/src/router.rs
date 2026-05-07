@@ -490,7 +490,7 @@ fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as u64)
         .unwrap_or(0);
-    base + Duration::from_millis(nanos % jitter_ms)
+    base.saturating_add(Duration::from_millis(nanos % jitter_ms))
 }
 
 fn mul_duration(d: Duration, factor: f64) -> Duration {
