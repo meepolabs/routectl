@@ -14,7 +14,11 @@ use routectl_cli::{commands, server};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "routectl", version, about = "Local LLM router with fallback chains")]
+#[command(
+    name = "routectl",
+    version,
+    about = "Local LLM router with fallback chains"
+)]
 struct Cli {
     /// Path to config file. Defaults to `$XDG_CONFIG_HOME/routectl/config.toml`
     /// or `~/.config/routectl/config.toml`.
@@ -142,8 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("ROUTECTL_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("ROUTECTL_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -167,13 +170,11 @@ fn load_config(
         base.join("routectl").join("config.toml")
     };
 
-    let text = std::fs::read_to_string(&path).map_err(|e| {
-        format!("cannot read config `{}`: {e}", path.display())
-    })?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
 
-    let cfg: routectl_router::Config = toml::from_str(&text).map_err(|e| {
-        format!("config parse error in `{}`: {e}", path.display())
-    })?;
+    let cfg: routectl_router::Config = toml::from_str(&text)
+        .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
 
     Ok(cfg)
 }

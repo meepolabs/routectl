@@ -2,7 +2,9 @@
 
 use serde_json::{json, Value};
 
-use routectl_core::{ChatRequest, Error, Message, MessageContent, ReasoningDetailKind, Result, Role};
+use routectl_core::{
+    ChatRequest, Error, Message, MessageContent, ReasoningDetailKind, Result, Role,
+};
 
 use super::types::{
     AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicRole, AnthropicTool,
@@ -34,7 +36,9 @@ fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
     }
 
     if let Some(budget) = r.max_tokens {
-        return Some(ThinkingConfig::Enabled { budget_tokens: budget });
+        return Some(ThinkingConfig::Enabled {
+            budget_tokens: budget,
+        });
     }
 
     if let Some(effort) = r.effort.as_deref() {
@@ -48,13 +52,17 @@ fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
         // `profile_for(&req.model).supports_adaptive_thinking` here.
         // For now both code paths produced the same budget_tokens shape.
         let _adaptive = profile_for(&req.model).supports_adaptive_thinking;
-        return Some(ThinkingConfig::Enabled { budget_tokens: budget });
+        return Some(ThinkingConfig::Enabled {
+            budget_tokens: budget,
+        });
     }
 
     if r.enabled == Some(true) {
         let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let budget = (max / 2).max(1);
-        return Some(ThinkingConfig::Enabled { budget_tokens: budget });
+        return Some(ThinkingConfig::Enabled {
+            budget_tokens: budget,
+        });
     }
 
     None
@@ -84,7 +92,11 @@ fn translate_tool(id: &str, tool: &Value) -> Result<AnthropicTool> {
         .cloned()
         .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
 
-    Ok(AnthropicTool { name, description, input_schema })
+    Ok(AnthropicTool {
+        name,
+        description,
+        input_schema,
+    })
 }
 
 /// Reconstruct an Anthropic content array for an assistant message that
@@ -130,7 +142,10 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
                         )
                     })?
                     .to_string();
-                blocks.push(ContentBlock::Thinking { thinking, signature });
+                blocks.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                });
             }
             ReasoningDetailKind::Encrypted => {
                 if detail.format.as_deref() != Some(ANTHROPIC_FORMAT) {
@@ -214,15 +229,20 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
                             parts
                                 .iter()
                                 .filter_map(|p| {
-                                    p.get("text")
-                                        .and_then(|v| v.as_str())
-                                        .map(|t| ContentBlock::Text { text: t.to_string() })
+                                    p.get("text").and_then(|v| v.as_str()).map(|t| {
+                                        ContentBlock::Text {
+                                            text: t.to_string(),
+                                        }
+                                    })
                                 })
                                 .collect(),
                         )
                     }
                 };
-                anthropic_messages.push(AnthropicMessage { role: AnthropicRole::User, content });
+                anthropic_messages.push(AnthropicMessage {
+                    role: AnthropicRole::User,
+                    content,
+                });
             }
             Role::Assistant => {
                 let content = build_assistant_content(id, msg)?;
@@ -241,7 +261,11 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
     let tools = req
         .tools
         .as_ref()
-        .map(|ts| ts.iter().map(|t| translate_tool(id, t)).collect::<Result<Vec<_>>>())
+        .map(|ts| {
+            ts.iter()
+                .map(|t| translate_tool(id, t))
+                .collect::<Result<Vec<_>>>()
+        })
         .transpose()?;
 
     // When thinking is enabled, temperature must be 1.0 (Anthropic requirement).
@@ -264,14 +288,12 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
         tool_choice: req.tool_choice.clone(),
     };
 
-    let mut body = serde_json::to_value(&ar)
-        .map_err(|e| Error::normalize_request(id, e.to_string()))?;
+    let mut body =
+        serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
     // Merge provider_extras last (caller wins).
     if let Some(extras) = req.provider_extras.as_ref() {
-        if let (Some(obj), Some(extra_obj)) =
-            (body.as_object_mut(), extras.as_object())
-        {
+        if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) {
             for (k, v) in extra_obj {
                 obj.insert(k.clone(), v.clone());
             }

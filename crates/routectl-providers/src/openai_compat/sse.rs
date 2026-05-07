@@ -147,8 +147,7 @@ impl ThinkTagAccumulator {
                 .and_then(|v| v.as_array().cloned())
                 .map(|arr| arr.into_iter().collect::<Vec<_>>());
 
-            let (outside_content, inside_reasoning) =
-                self.split_think_tags(&delta_content);
+            let (outside_content, inside_reasoning) = self.split_think_tags(&delta_content);
 
             let mut delta = ChunkDelta {
                 role,
@@ -256,15 +255,23 @@ mod tests {
 
     #[test]
     fn done_returns_none() {
-        assert!(parse_chunk("t", "[DONE]", ReasoningDialect::OpenAi).unwrap().is_none());
-        assert!(parse_chunk("t", "  [DONE]  ", ReasoningDialect::OpenAi).unwrap().is_none());
-        assert!(parse_chunk("t", "", ReasoningDialect::OpenAi).unwrap().is_none());
+        assert!(parse_chunk("t", "[DONE]", ReasoningDialect::OpenAi)
+            .unwrap()
+            .is_none());
+        assert!(parse_chunk("t", "  [DONE]  ", ReasoningDialect::OpenAi)
+            .unwrap()
+            .is_none());
+        assert!(parse_chunk("t", "", ReasoningDialect::OpenAi)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn openai_basic_delta() {
         let raw = delta_chunk(Some("hello"), None);
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi).unwrap().unwrap();
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
         assert!(chunk.choices[0].delta.reasoning_details.is_empty());
     }
@@ -272,7 +279,9 @@ mod tests {
     #[test]
     fn deepseek_lifts_reasoning_content_in_delta() {
         let raw = delta_chunk(Some("answer"), Some("chain of thought"));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek).unwrap().unwrap();
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek)
+            .unwrap()
+            .unwrap();
         let details = &chunk.choices[0].delta.reasoning_details;
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].format.as_deref(), Some("deepseek-v1"));
@@ -284,7 +293,9 @@ mod tests {
     #[test]
     fn vllm_lifts_reasoning_content_in_delta() {
         let raw = delta_chunk(None, Some("vllm trace"));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::Vllm).unwrap().unwrap();
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::Vllm)
+            .unwrap()
+            .unwrap();
         let details = &chunk.choices[0].delta.reasoning_details;
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].format.as_deref(), Some("vllm-reasoning-v1"));
@@ -332,7 +343,10 @@ mod tests {
         let mut acc = ThinkTagAccumulator::new();
         let raw = delta_chunk(Some("no tags here"), None);
         let chunk = acc.process("t", &raw).unwrap().unwrap();
-        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("no tags here"));
+        assert_eq!(
+            chunk.choices[0].delta.content.as_deref(),
+            Some("no tags here")
+        );
         assert!(chunk.choices[0].delta.reasoning.is_none());
     }
 
@@ -341,17 +355,29 @@ mod tests {
         let mut acc = ThinkTagAccumulator::new();
 
         // Chunk 1: before tag
-        let c1 = acc.process("t", &delta_chunk(Some("before<think>"), None)).unwrap().unwrap();
+        let c1 = acc
+            .process("t", &delta_chunk(Some("before<think>"), None))
+            .unwrap()
+            .unwrap();
         assert_eq!(c1.choices[0].delta.content.as_deref(), Some("before"));
         assert!(c1.choices[0].delta.reasoning.is_none());
 
         // Chunk 2: inside tag, no close
-        let c2 = acc.process("t", &delta_chunk(Some("thinking..."), None)).unwrap().unwrap();
+        let c2 = acc
+            .process("t", &delta_chunk(Some("thinking..."), None))
+            .unwrap()
+            .unwrap();
         assert!(c2.choices[0].delta.content.is_none());
-        assert_eq!(c2.choices[0].delta.reasoning.as_deref(), Some("thinking..."));
+        assert_eq!(
+            c2.choices[0].delta.reasoning.as_deref(),
+            Some("thinking...")
+        );
 
         // Chunk 3: close tag + after
-        let c3 = acc.process("t", &delta_chunk(Some("</think>after"), None)).unwrap().unwrap();
+        let c3 = acc
+            .process("t", &delta_chunk(Some("</think>after"), None))
+            .unwrap()
+            .unwrap();
         // Empty reasoning (closing tag with no content before it)
         assert!(c3.choices[0].delta.reasoning.is_none());
         assert_eq!(c3.choices[0].delta.content.as_deref(), Some("after"));

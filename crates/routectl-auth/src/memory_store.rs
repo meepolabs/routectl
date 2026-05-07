@@ -31,8 +31,9 @@ impl Default for MemoryStore {
 impl SecretStore for MemoryStore {
     async fn get(&self, secret_ref: &SecretRef) -> Result<String> {
         match secret_ref {
-            SecretRef::Env(var) => std::env::var(var)
-                .map_err(|_| Error::Auth(format!("env var {var} not set"))),
+            SecretRef::Env(var) => {
+                std::env::var(var).map_err(|_| Error::Auth(format!("env var {var} not set")))
+            }
             SecretRef::Literal(s) => Ok(s.clone()),
             SecretRef::File(path) => read_secret_file(path).await,
         }
@@ -43,15 +44,13 @@ impl SecretStore for MemoryStore {
         // env vars, files, and inline literals through their own
         // tooling -- routectl just resolves them at request time.
         Err(Error::Auth(
-            "secrets are read-only via routectl; manage env vars / files outside the binary"
-                .into(),
+            "secrets are read-only via routectl; manage env vars / files outside the binary".into(),
         ))
     }
 
     async fn delete(&self, _secret_ref: &SecretRef) -> Result<()> {
         Err(Error::Auth(
-            "secrets are read-only via routectl; manage env vars / files outside the binary"
-                .into(),
+            "secrets are read-only via routectl; manage env vars / files outside the binary".into(),
         ))
     }
 }

@@ -4,9 +4,7 @@
 use std::sync::Arc;
 
 use routectl_auth::MemoryStore;
-use routectl_core::{
-    schema::MessageContent, ChatRequest, Message, Result, Role,
-};
+use routectl_core::{schema::MessageContent, ChatRequest, Message, Result, Role};
 use routectl_router::{build_provider, Config, Router};
 
 pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
@@ -77,7 +75,10 @@ fn print_response(resp: &routectl_core::ChatResponse) {
             } else if let Some(summary) = detail.payload.get("summary").and_then(|v| v.as_str()) {
                 println!("[summary] {summary}");
             } else {
-                println!("[{}] (encrypted/redacted)", detail.format.as_deref().unwrap_or("unknown"));
+                println!(
+                    "[{}] (encrypted/redacted)",
+                    detail.format.as_deref().unwrap_or("unknown")
+                );
             }
         }
         println!("--- response ---");

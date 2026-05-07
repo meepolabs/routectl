@@ -21,10 +21,7 @@ fn parse_env_empty_var_is_error() {
 #[test]
 fn parse_file_valid_absolute_path() {
     let r = SecretRef::parse("file:///etc/secrets/openrouter").unwrap();
-    assert_eq!(
-        r,
-        SecretRef::File("/etc/secrets/openrouter".into())
-    );
+    assert_eq!(r, SecretRef::File("/etc/secrets/openrouter".into()));
 }
 
 #[test]
@@ -64,8 +61,14 @@ fn parse_unknown_scheme_is_error() {
     let err = SecretRef::parse("http://example.com").unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("unrecognized secret URI scheme"));
-    assert!(msg.contains("env://"), "error should hint at env:// : {msg}");
-    assert!(msg.contains("file://"), "error should hint at file:// : {msg}");
+    assert!(
+        msg.contains("env://"),
+        "error should hint at env:// : {msg}"
+    );
+    assert!(
+        msg.contains("file://"),
+        "error should hint at file:// : {msg}"
+    );
 }
 
 // --- Display for SecretRef ---
@@ -85,10 +88,7 @@ fn display_file() {
 
 #[test]
 fn display_literal() {
-    assert_eq!(
-        SecretRef::Literal("val".into()).to_string(),
-        "literal:val"
-    );
+    assert_eq!(SecretRef::Literal("val".into()).to_string(), "literal:val");
 }
 
 // --- MemoryStore: env path ---
@@ -162,10 +162,7 @@ async fn file_get_missing_is_error() {
     let r = SecretRef::File("/nonexistent/path/to/key".into());
     let err = store.get(&r).await.unwrap_err();
     let msg = err.to_string();
-    assert!(
-        msg.contains("failed to open secret file"),
-        "got: {msg}"
-    );
+    assert!(msg.contains("failed to open secret file"), "got: {msg}");
 }
 
 #[tokio::test]

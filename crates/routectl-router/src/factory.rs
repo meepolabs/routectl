@@ -7,7 +7,9 @@ use std::sync::Arc;
 use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{Error, Provider, Result};
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
-use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect as ProviderDialect};
+use routectl_providers::openai_compat::{
+    OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect as ProviderDialect,
+};
 
 use crate::config::{ProviderEntry, ReasoningDialect};
 
