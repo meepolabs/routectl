@@ -32,9 +32,8 @@ pub async fn chat_completions(
         }
     };
 
-    let opts = RouterOptions {
-        disable_fallbacks: header_truthy(&headers, DISABLE_FALLBACKS_HEADER),
-    };
+    let mut opts = RouterOptions::new();
+    opts.disable_fallbacks = header_truthy(&headers, DISABLE_FALLBACKS_HEADER);
 
     let streaming = req.stream == Some(true);
     if streaming {

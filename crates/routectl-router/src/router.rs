@@ -25,12 +25,32 @@ pub struct Router {
 
 /// Per-request switches that the HTTP handler can flip via header
 /// without polluting the wire schema. Defaults preserve current behavior.
+///
+/// Marked `#[non_exhaustive]` so adding new options later is a
+/// non-breaking change for downstream Rust callers. Construct via
+/// [`RouterOptions::new`] (alias for `default()`) and mutate fields:
+///
+/// ```ignore
+/// let mut opts = RouterOptions::new();
+/// opts.disable_fallbacks = true;
+/// router.complete_with_options(req, opts).await
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct RouterOptions {
     /// When true, do NOT walk past the first provider in the chain.
     /// The first failure (after retries) propagates verbatim.
     /// Wired to header `x-routectl-disable-fallbacks: 1`.
     pub disable_fallbacks: bool,
+}
+
+impl RouterOptions {
+    /// Construct a `RouterOptions` with all-default values. Use this
+    /// instead of `RouterOptions { disable_fallbacks: ... }` literals
+    /// so future field additions don't break your code.
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl Router {
