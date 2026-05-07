@@ -38,23 +38,19 @@ Phase A from the LiteLLM/OpenRouter feature audit.
   in `examples/config.toml`. Aliases are the group mechanism -- no
   separate group syntax.
 
-## v0.2.1 (planned) -- Anthropic-shape endpoint + local-creds auth
+## v0.2.1 (planned) -- Anthropic-shape endpoint
 
 Phase B. Aimed squarely at making Claude Code work pointed at routectl.
 
 1. **`POST /v1/messages` endpoint** -- Anthropic-shape input/output
    with full tool-call round-trip + thinking blocks + signature
    preservation + streaming SSE (typed events).
-2. **`claude_local` provider** -- reads `~/.claude/.credentials.json`
-   directly (OAuth access + refresh tokens), refreshes on expiry. No
-   webview cookie capture needed.
-3. **`chatgpt_local` provider** -- reads
-   `~/.local/share/opencode/auth.json`. Same refresh flow.
-4. **Schema-version detection** for the local credential files; fall
-   back cleanly when Claude Code's shape changes.
 
-The webview-based v0.2 cookie-auth proposal is superseded; both
-target apps already store usable OAuth tokens locally.
+Default-build providers stay the same (api-key auth via OpenAI-compat
+or `anthropic-api`). Cookie / OAuth-token-based auth remains opt-in
+behind cargo features, with the user explicitly configuring a token
+file path -- no auto-discovery of any other tool's credential
+storage.
 
 ## v0.3.0 (planned) -- Bedrock + load-balancing routing
 
