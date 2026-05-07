@@ -75,7 +75,11 @@ impl Provider for MockProvider {
         match self.next_behavior() {
             Behavior::Ok => Ok(ok_response(&self.id, &req.model)),
             Behavior::OkSlow => {
-                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                // Slow enough that a concurrent caller is virtually
+                // certain to arrive before this future resolves, even
+                // on a heavily loaded CI runner. Used by the
+                // half-open-single-probe race test.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 Ok(ok_response(&self.id, &req.model))
             }
             Behavior::Status(s) => Err(Error::upstream(&self.id, s, "mock")),
@@ -911,6 +915,10 @@ async fn stream_mid_failure_charges_the_breaker() {
 /// H2 fix: under concurrent dispatches after cooldown, only ONE caller
 /// should hit the upstream as the half-open probe; the other should
 /// see a CircuitOpen gate and fall through.
+// `start_paused` requires the `current_thread` runtime, but this test
+// is fundamentally about real parallelism between two spawned tasks
+// racing on the half-open slot, so we keep the multi-thread runtime
+// and use generous wall-clock margins (CI-safe) instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn half_open_probe_is_single_under_concurrent_load() {
     use std::sync::Arc as StdArc;
@@ -947,7 +955,9 @@ async fn half_open_probe_is_single_under_concurrent_load() {
 
         rt.circuit_failures = Some(2);
 
-        rt.circuit_cooldown_ms = Some(50);
+        // 250ms cooldown -- generous so the wait below is safely
+        // past it even on a contended runner.
+        rt.circuit_cooldown_ms = Some(250);
         rt
     });
     let mut r = build_router_with_runtime(aliases, runtime);
@@ -962,8 +972,8 @@ async fn half_open_probe_is_single_under_concurrent_load() {
     let p1_after_trip = p1.calls();
     assert_eq!(p1_after_trip, 2);
 
-    // Wait for cooldown.
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    // Wait for cooldown (250ms cooldown, sleep 350ms).
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
 
     // Fire two concurrent requests. Exactly one should reach p1 as
     // the half-open probe; the other should see CircuitOpen and fall
@@ -997,6 +1007,9 @@ async fn half_open_probe_is_single_under_concurrent_load() {
     assert_eq!(p1.calls(), p1_after_trip + 1);
 }
 
+// Paused-time would be ideal here but the breaker tracks cooldowns
+// against `std::time::Instant`, which is not affected by Tokio's
+// paused-time clock. Use generous wall-clock margins instead.
 #[tokio::test]
 async fn dropped_stream_releases_half_open_probe_and_reopens_breaker() {
     let p1 = MockProvider::new(
@@ -1024,7 +1037,9 @@ async fn dropped_stream_releases_half_open_probe_and_reopens_breaker() {
 
         rt.circuit_failures = Some(1);
 
-        rt.circuit_cooldown_ms = Some(50);
+        // 200ms cooldown -- the sleeps below use 350ms margin so the
+        // assertion fires even on a contended runner.
+        rt.circuit_cooldown_ms = Some(200);
         rt
     });
     let mut r = build_router_with_runtime(aliases, runtime);
@@ -1035,13 +1050,13 @@ async fn dropped_stream_releases_half_open_probe_and_reopens_breaker() {
     assert_eq!(first.routectl_provider.as_deref(), Some("p2"));
     assert_eq!(p1.calls(), 1);
 
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
 
     let stream = r.stream(req("fast")).await.unwrap();
     drop(stream);
     assert_eq!(p1.calls(), 2, "half-open probe should reach p1 once");
 
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
 
     let recovered = r.complete(req("fast")).await.unwrap();
     assert_eq!(recovered.routectl_provider.as_deref(), Some("p1"));
