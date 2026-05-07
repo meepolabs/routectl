@@ -7,10 +7,11 @@
 pub mod config;
 pub mod factory;
 pub mod router;
+pub mod runtime_state;
 
 pub use config::{
-    AliasEntry, Config, LegacyCompat, ProviderEntry, ProviderKind, ReasoningDialect, RetryPolicy,
-    ServerConfig,
+    AliasEntry, Config, LegacyCompat, ProviderEntry, ProviderKind, ProviderRuntimePolicy,
+    ReasoningDialect, RetryPolicy, ServerConfig,
 };
 pub use factory::build_provider;
-pub use router::Router;
+pub use router::{Router, RouterOptions};

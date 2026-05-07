@@ -23,6 +23,7 @@ pub async fn build_provider(
             extra_headers,
             default_extras,
             reasoning_dialect,
+            runtime: _,
         } => {
             let api_key = resolve(secrets, api_key_ref).await?;
             let cfg = OpenAiCompatConfig {
@@ -42,6 +43,7 @@ pub async fn build_provider(
             api_key_ref,
             base_url,
             anthropic_version,
+            runtime: _,
         } => {
             let api_key = resolve(secrets, api_key_ref).await?;
             let cfg = AnthropicApiConfig {

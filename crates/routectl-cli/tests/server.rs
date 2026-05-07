@@ -51,6 +51,7 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: routectl_router::ReasoningDialect::Openai,
+            runtime: Default::default(),
         },
     );
 
@@ -85,6 +86,7 @@ fn two_provider_config(
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: routectl_router::ReasoningDialect::Openai,
+            runtime: Default::default(),
         },
     );
     providers.insert(
@@ -95,6 +97,7 @@ fn two_provider_config(
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: routectl_router::ReasoningDialect::Openai,
+            runtime: Default::default(),
         },
     );
 

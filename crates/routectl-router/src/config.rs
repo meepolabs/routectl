@@ -71,6 +71,8 @@ pub enum ProviderEntry {
         default_extras: Option<serde_json::Value>,
         #[serde(default)]
         reasoning_dialect: ReasoningDialect,
+        #[serde(default, flatten)]
+        runtime: ProviderRuntimePolicy,
     },
     AnthropicApi {
         api_key_ref: String,
@@ -78,15 +80,56 @@ pub enum ProviderEntry {
         base_url: String,
         #[serde(default = "default_anthropic_version")]
         anthropic_version: String,
+        #[serde(default, flatten)]
+        runtime: ProviderRuntimePolicy,
     },
     ClaudeCookie {
         session_ref: String,
         #[serde(default)]
         organization_id: Option<String>,
+        #[serde(default, flatten)]
+        runtime: ProviderRuntimePolicy,
     },
     ChatgptCookie {
         session_ref: String,
+        #[serde(default, flatten)]
+        runtime: ProviderRuntimePolicy,
     },
+}
+
+impl ProviderEntry {
+    /// Get the runtime policy attached to this entry. Centralizes the
+    /// match so the router doesn't repeat it.
+    pub fn runtime(&self) -> &ProviderRuntimePolicy {
+        match self {
+            Self::OpenaiCompat { runtime, .. }
+            | Self::AnthropicApi { runtime, .. }
+            | Self::ClaudeCookie { runtime, .. }
+            | Self::ChatgptCookie { runtime, .. } => runtime,
+        }
+    }
+}
+
+/// Per-provider runtime knobs that gate dispatch: rate limits and a
+/// passive circuit breaker. All fields default to "off" so omitting
+/// the block leaves provider behavior unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderRuntimePolicy {
+    /// Maximum requests per minute. When exceeded, the router treats
+    /// this provider as a fallbackable failure and tries the next entry
+    /// in the chain. None = unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm_limit: Option<u32>,
+    /// Trip the circuit breaker after this many consecutive failed
+    /// attempts within the failure window. Once tripped, the router
+    /// skips this provider for `circuit_cooldown_ms`.
+    /// None = breaker disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_failures: Option<u32>,
+    /// How long to keep the circuit open (skip provider) once tripped.
+    /// Defaults to 30s when `circuit_failures` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_cooldown_ms: Option<u64>,
 }
 
 fn default_anthropic_base() -> String {
