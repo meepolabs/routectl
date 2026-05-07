@@ -25,6 +25,10 @@ struct MockProvider {
 #[derive(Clone)]
 enum Behavior {
     Ok,
+    /// Sleep briefly before returning Ok. Used by concurrency tests to
+    /// keep the half-open probe in flight long enough for a sibling
+    /// dispatch to race the gate.
+    OkSlow,
     Status(u16),
     Streaming(String),
     StreamFirstChunkErrors(u16),
@@ -70,6 +74,10 @@ impl Provider for MockProvider {
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         match self.next_behavior() {
             Behavior::Ok => Ok(ok_response(&self.id, &req.model)),
+            Behavior::OkSlow => {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                Ok(ok_response(&self.id, &req.model))
+            }
             Behavior::Status(s) => Err(Error::upstream(&self.id, s, "mock")),
             Behavior::Streaming(msg) => Err(Error::Streaming(msg)),
             _ => Err(Error::upstream(&self.id, 500, "unexpected")),
@@ -81,7 +89,7 @@ impl Provider for MockProvider {
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let id = self.id.clone();
         match self.next_behavior() {
-            Behavior::Ok | Behavior::Streaming(_) => {
+            Behavior::Ok | Behavior::OkSlow | Behavior::Streaming(_) => {
                 let chunks = vec![ok_chunk(&id, &req.model, "Hello"), ok_chunk(&id, &req.model, " world")];
                 Ok(futures::stream::iter(chunks.into_iter().map(Ok)).boxed())
             }
@@ -739,4 +747,254 @@ async fn disable_fallbacks_propagates_first_error() {
         other => panic!("expected 503 from p1, got: {other:?}"),
     }
     assert_eq!(p2b.calls(), 0, "p2 should not have been touched");
+}
+
+// ---------------------------------------------------------------------------
+// Tier-2 hardening: gates apply per-attempt, not per-routed-request
+// ---------------------------------------------------------------------------
+
+/// H1 fix: each retry against the same provider should consume one RPM
+/// token. With `rpm_limit = 2` and `retry_on_5xx = 3`, a provider that
+/// 503s every time exhausts its bucket on the second attempt and the
+/// router falls through to the next chain entry instead of completing
+/// all 3 retries against an over-budget provider.
+#[tokio::test]
+async fn retries_consume_rpm_tokens_and_fall_through_when_bucket_empty() {
+    let p1 = MockProvider::new(
+        "p1",
+        vec![Behavior::Status(503), Behavior::Status(503), Behavior::Status(503)],
+    );
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: Some(RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                backoff_multiplier: 1.0,
+                fallback_on_status: vec![503],
+                retry_on_5xx: Some(5),
+                ..Default::default()
+            }),
+        },
+    );
+    let mut runtime = BTreeMap::new();
+    runtime.insert(
+        "p1".into(),
+        ProviderRuntimePolicy {
+            rpm_limit: Some(2),
+            ..Default::default()
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    let resp = r.complete(req("fast")).await.unwrap();
+    assert_eq!(resp.routectl_provider.as_deref(), Some("p2"));
+    // p1 saw exactly 2 calls before the RPM bucket emptied; the router
+    // then fell through to p2.
+    assert_eq!(p1.calls(), 2, "RPM gate must apply per-attempt, not per-request");
+    assert_eq!(p2.calls(), 1);
+}
+
+/// H1 fix: each failed attempt should increment the breaker, not the
+/// whole routed request. With `circuit_failures = 2`, a provider that
+/// 503s repeatedly should trip after the second attempt and the third
+/// attempt should hit a CircuitOpen gate (router falls through).
+#[tokio::test]
+async fn retries_count_toward_circuit_breaker_threshold() {
+    let p1 = MockProvider::new(
+        "p1",
+        vec![Behavior::Status(503), Behavior::Status(503), Behavior::Status(503)],
+    );
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: Some(RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                backoff_multiplier: 1.0,
+                fallback_on_status: vec![503],
+                retry_on_5xx: Some(5),
+                ..Default::default()
+            }),
+        },
+    );
+    let mut runtime = BTreeMap::new();
+    runtime.insert(
+        "p1".into(),
+        ProviderRuntimePolicy {
+            circuit_failures: Some(2),
+            circuit_cooldown_ms: Some(60_000),
+            ..Default::default()
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    let resp = r.complete(req("fast")).await.unwrap();
+    assert_eq!(resp.routectl_provider.as_deref(), Some("p2"));
+    // p1 saw exactly 2 calls; the third would have been gate-blocked
+    // because each retry increments the breaker counter.
+    assert_eq!(p1.calls(), 2, "breaker must count each retry as a failure");
+    assert_eq!(p2.calls(), 1);
+}
+
+/// H3 fix: a stream that emits one chunk and then errors should NOT
+/// mark the provider healthy. The breaker counter should reflect the
+/// failure recorded on the in-stream error.
+#[tokio::test]
+async fn stream_mid_failure_charges_the_breaker() {
+    use futures::StreamExt;
+    // Provider whose stream emits one chunk then errors mid-stream on
+    // every call. Three calls in a row -> breaker should trip after 2
+    // failures (per circuit_failures = 2).
+    let p1 = MockProvider::new(
+        "p1",
+        vec![
+            Behavior::StreamMidErrors,
+            Behavior::StreamMidErrors,
+            Behavior::StreamMidErrors,
+        ],
+    );
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok, Behavior::Ok, Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: None,
+        },
+    );
+    let mut runtime = BTreeMap::new();
+    runtime.insert(
+        "p1".into(),
+        ProviderRuntimePolicy {
+            circuit_failures: Some(2),
+            circuit_cooldown_ms: Some(60_000),
+            ..Default::default()
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    // First request: starts streaming from p1, gets one chunk, errors.
+    // Drain the stream so the wrapper records the failure.
+    let mut s = r.stream(req("fast")).await.expect("stream open");
+    let mut count = 0;
+    while let Some(_) = s.next().await {
+        count += 1;
+    }
+    drop(s);
+    assert!(count >= 2, "expected at least one chunk + one error");
+
+    // Second request: same outcome, breaker hits threshold (2).
+    let mut s = r.stream(req("fast")).await.expect("stream open");
+    while let Some(_) = s.next().await {}
+    drop(s);
+
+    // Third request: p1's circuit is now open. The router should
+    // gate-block p1 and fall through to p2 without ever calling p1.
+    let calls_before = p1.calls();
+    let mut s = r.stream(req("fast")).await.expect("stream open");
+    let mut got_chunk = false;
+    while let Some(item) = s.next().await {
+        if item.is_ok() {
+            got_chunk = true;
+        }
+    }
+    assert!(got_chunk, "p2 should answer once p1's breaker is open");
+    assert_eq!(p1.calls(), calls_before, "p1 must be skipped while breaker is open");
+}
+
+/// H2 fix: under concurrent dispatches after cooldown, only ONE caller
+/// should hit the upstream as the half-open probe; the other should
+/// see a CircuitOpen gate and fall through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn half_open_probe_is_single_under_concurrent_load() {
+    use std::sync::Arc as StdArc;
+    // Trip p1's breaker by feeding 2 failures inline.
+    let p1 = MockProvider::new(
+        "p1",
+        vec![
+            Behavior::Status(503),
+            Behavior::Status(503),
+            // After the breaker trips: deliberately make the probe
+            // slow so concurrent callers race the half-open slot.
+            Behavior::OkSlow,
+            Behavior::OkSlow,
+        ],
+    );
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok, Behavior::Ok, Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: Some(RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                backoff_multiplier: 1.0,
+                fallback_on_status: vec![503],
+                ..Default::default()
+            }),
+        },
+    );
+    let mut runtime = BTreeMap::new();
+    runtime.insert(
+        "p1".into(),
+        ProviderRuntimePolicy {
+            circuit_failures: Some(2),
+            // Tiny cooldown so the test doesn't have to sleep for long.
+            circuit_cooldown_ms: Some(50),
+            ..Default::default()
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+    let r = StdArc::new(r);
+
+    // Trip the breaker.
+    r.complete(req("fast")).await.unwrap();
+    r.complete(req("fast")).await.unwrap();
+    // Two p1 calls already done; breaker now open.
+    let p1_after_trip = p1.calls();
+    assert_eq!(p1_after_trip, 2);
+
+    // Wait for cooldown.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+    // Fire two concurrent requests. Exactly one should reach p1 as
+    // the half-open probe; the other should see CircuitOpen and fall
+    // through to p2.
+    let r1 = r.clone();
+    let r2 = r.clone();
+    let (a, b) = tokio::join!(
+        tokio::spawn(async move { r1.complete(req("fast")).await }),
+        tokio::spawn(async move { r2.complete(req("fast")).await }),
+    );
+    let a = a.unwrap().unwrap();
+    let b = b.unwrap().unwrap();
+
+    let providers: Vec<_> = [a, b]
+        .iter()
+        .map(|r| r.routectl_provider.clone().unwrap_or_default())
+        .collect();
+    // Exactly one of the two requests went to p1 (the probe); the
+    // other was deflected to p2 by the half-open guard.
+    let p1_count = providers.iter().filter(|p| p.as_str() == "p1").count();
+    let p2_count = providers.iter().filter(|p| p.as_str() == "p2").count();
+    assert_eq!(p1_count, 1, "exactly one half-open probe expected: {providers:?}");
+    assert_eq!(p2_count, 1, "the other concurrent request must fall through: {providers:?}");
+    // p1 saw exactly 1 additional call (the probe) on top of the trip calls.
+    assert_eq!(p1.calls(), p1_after_trip + 1);
 }

@@ -250,6 +250,17 @@ impl RetryPolicy {
             _ => 0,
         }
     }
+
+    /// Maximum attempts a single provider can ever consume regardless
+    /// of error class. The router uses this as a hard ceiling so a
+    /// misconfigured policy can't loop forever.
+    pub fn hard_retry_cap(&self) -> u32 {
+        self.max_attempts
+            .max(self.retry_on_429.unwrap_or(0))
+            .max(self.retry_on_5xx.unwrap_or(0))
+            .max(self.retry_on_network.unwrap_or(0))
+            .max(1)
+    }
 }
 
 fn default_max_attempts() -> u32 {
