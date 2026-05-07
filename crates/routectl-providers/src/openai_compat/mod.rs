@@ -27,6 +27,7 @@ pub mod dialect;
 pub mod request;
 pub mod response;
 pub mod sse;
+pub(crate) mod util;
 
 pub use dialect::ReasoningDialect;
 

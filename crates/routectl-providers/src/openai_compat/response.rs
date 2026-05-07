@@ -12,13 +12,11 @@
 use regex::Regex;
 use serde_json::Value;
 use std::sync::OnceLock;
-use uuid::Uuid;
 
-use routectl_core::{
-    ChatResponse, Error, Message, ReasoningDetail, ReasoningDetailKind, Result,
-};
+use routectl_core::{ChatResponse, Error, Message, Result};
 
 use super::dialect::ReasoningDialect;
+use super::util::build_reasoning_detail;
 
 pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<ChatResponse> {
     let preprocessed = coalesce_reasoning_content_in_response(raw);
@@ -136,16 +134,6 @@ fn lift_think_tags(id: &str, msg: &mut Message) -> Result<()> {
     msg.content = routectl_core::MessageContent::Text(stripped.trim_start().to_string());
     let _ = id; // id reserved for future error paths
     Ok(())
-}
-
-fn build_reasoning_detail(text: &str, format_tag: &str, index: u32) -> ReasoningDetail {
-    ReasoningDetail {
-        kind: ReasoningDetailKind::Text,
-        id: Some(Uuid::new_v4().to_string()),
-        format: Some(format_tag.into()),
-        index: Some(index),
-        payload: serde_json::json!({"text": text}),
-    }
 }
 
 fn think_tag_regex() -> &'static Regex {

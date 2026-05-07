@@ -11,12 +11,12 @@
 //! the dialect is `RawThinkTag`.
 
 use serde_json::Value;
-use uuid::Uuid;
 
 use routectl_core::schema::{ChunkChoice, ChunkDelta};
-use routectl_core::{ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result};
+use routectl_core::{ChatChunk, Error, Result};
 
 use super::dialect::ReasoningDialect;
+use super::util::build_reasoning_detail;
 
 // ---------------------------------------------------------------------------
 // Stateless path
@@ -107,16 +107,6 @@ fn lift_delta_reasoning_content(id: &str, val: &mut Value, format_tag: &str) -> 
             .push(detail_val);
     }
     Ok(())
-}
-
-fn build_reasoning_detail(text: &str, format_tag: &str, index: u32) -> ReasoningDetail {
-    ReasoningDetail {
-        kind: ReasoningDetailKind::Text,
-        id: Some(Uuid::new_v4().to_string()),
-        format: Some(format_tag.into()),
-        index: Some(index),
-        payload: serde_json::json!({"text": text}),
-    }
 }
 
 // ---------------------------------------------------------------------------
