@@ -1,33 +1,19 @@
-//! Per-dialect request normalization.
+//! Top-level request normalization. Walks a routectl `ChatRequest` into
+//! the JSON body sent upstream:
 //!
-//! Converts a routectl `ChatRequest` into the JSON body sent upstream.
-//! Rules:
-//!   - Start from a direct serde serialization of `ChatRequest`.
-//!   - Strip fields unsupported by the dialect/model.
-//!   - Inject dialect-specific reasoning params.
-//!   - Strip `reasoning_content` / `reasoning_details` from message history
-//!     for dialects that 400 on them.
-//!   - Merge `default_extras` then `provider_extras` last (callers win).
-//!   - Remove `chat_template_kwargs` unless the dialect uses it.
+//!   1. Direct serde serialization of `ChatRequest`.
+//!   2. Drop routectl-internal fields the upstream never wants.
+//!   3. Hand off dialect-specific shaping to `Dialect::apply_request`.
+//!   4. Merge `default_extras` then `provider_extras` last (callers win).
+//!
+//! Per-dialect logic lives in `dialects/*.rs`; this module is a thin
+//! envelope around that dispatch.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use routectl_core::{ChatRequest, Error, Result};
 
 use super::dialect::ReasoningDialect;
-use crate::model_profile::profile_for;
-
-/// Fields that reasoning-only models reject. Applied when
-/// `ModelProfile.drops_sampling_params` is true (currently OpenAI
-/// o-series, GPT-5, and DeepSeek `reasoner` variants).
-const SAMPLING_DROP: &[&str] = &[
-    "temperature",
-    "top_p",
-    "presence_penalty",
-    "frequency_penalty",
-    "logprobs",
-    "top_logprobs",
-];
 
 pub fn normalize(
     id: &str,
@@ -43,11 +29,12 @@ pub fn normalize(
     })?;
 
     // Remove routectl-internal fields that upstream never wants.
+    // Dialects that need `chat_template_kwargs` re-inject it themselves.
     obj.remove("reasoning");
     obj.remove("provider_extras");
     obj.remove("chat_template_kwargs");
 
-    apply_dialect(id, obj, req, dialect)?;
+    dialect.as_dyn().apply_request(id, obj, req)?;
 
     // Merge default_extras first, then provider_extras (caller wins).
     if let Some(extras) = default_extras {
@@ -58,96 +45,6 @@ pub fn normalize(
     }
 
     Ok(body)
-}
-
-fn apply_dialect(
-    id: &str,
-    obj: &mut serde_json::Map<String, Value>,
-    req: &ChatRequest,
-    dialect: ReasoningDialect,
-) -> Result<()> {
-    match dialect {
-        ReasoningDialect::OpenAi => apply_openai(obj, req),
-        ReasoningDialect::DeepSeek => apply_deepseek(id, obj, req)?,
-        ReasoningDialect::Vllm => apply_vllm(id, obj, req)?,
-        ReasoningDialect::RawThinkTag => {}
-        ReasoningDialect::OpenRouter => {}
-        ReasoningDialect::Passthrough => {}
-    }
-    Ok(())
-}
-
-fn apply_openai(obj: &mut serde_json::Map<String, Value>, req: &ChatRequest) {
-    // Translate `reasoning.effort` -> top-level `reasoning_effort`.
-    if let Some(effort) = req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
-        obj.insert("reasoning_effort".into(), Value::String(effort.into()));
-    }
-
-    if profile_for(&req.model).drops_sampling_params {
-        drop_sampling_params(obj);
-    }
-}
-
-fn apply_deepseek(
-    id: &str,
-    obj: &mut serde_json::Map<String, Value>,
-    req: &ChatRequest,
-) -> Result<()> {
-    if profile_for(&req.model).drops_sampling_params {
-        drop_sampling_params(obj);
-    }
-
-    strip_history_reasoning(id, obj, req)?;
-    Ok(())
-}
-
-fn drop_sampling_params(obj: &mut serde_json::Map<String, Value>) {
-    for key in SAMPLING_DROP {
-        obj.remove(*key);
-    }
-}
-
-fn apply_vllm(
-    id: &str,
-    obj: &mut serde_json::Map<String, Value>,
-    req: &ChatRequest,
-) -> Result<()> {
-    // Forward `chat_template_kwargs` if present -- vLLM accepts them.
-    if let Some(ctk) = req.chat_template_kwargs.as_ref() {
-        obj.insert("chat_template_kwargs".into(), ctk.clone());
-    } else if let Some(r) = req.reasoning.as_ref() {
-        // Auto-inject `enable_thinking` from the unified reasoning config.
-        let enabled = r.enabled.unwrap_or(false);
-        obj.insert(
-            "chat_template_kwargs".into(),
-            json!({"enable_thinking": enabled}),
-        );
-    }
-
-    strip_history_reasoning(id, obj, req)?;
-    Ok(())
-}
-
-/// Remove `reasoning_content` and `reasoning_details` from every assistant
-/// message in the outgoing body. DeepSeek and vLLM 400 on those fields.
-fn strip_history_reasoning(
-    id: &str,
-    obj: &mut serde_json::Map<String, Value>,
-    _req: &ChatRequest,
-) -> Result<()> {
-    let messages = obj
-        .get_mut("messages")
-        .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| Error::normalize_request(id, "messages is not an array"))?;
-
-    for msg in messages.iter_mut() {
-        if let Some(m) = msg.as_object_mut() {
-            m.remove("reasoning_content");
-            m.remove("reasoning_details");
-            m.remove("reasoning");
-        }
-    }
-    Ok(())
 }
 
 /// Shallow-merge `extras` into `obj`. Extras keys win.

@@ -9,14 +9,11 @@
 //!   - RawThinkTag: regex-strip `<think>...</think>` blocks from content,
 //!     push them as `reasoning_details`.
 
-use regex::Regex;
 use serde_json::Value;
-use std::sync::OnceLock;
 
 use routectl_core::{ChatResponse, Error, Message, Result};
 
 use super::dialect::ReasoningDialect;
-use super::util::build_reasoning_detail;
 
 pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<ChatResponse> {
     let preprocessed = coalesce_reasoning_content_in_response(raw);
@@ -72,76 +69,7 @@ fn apply_dialect_to_message(
     msg: &mut Message,
     dialect: ReasoningDialect,
 ) -> Result<()> {
-    match dialect {
-        ReasoningDialect::DeepSeek | ReasoningDialect::Vllm => {
-            lift_reasoning_content_field(msg, dialect.format_tag());
-        }
-        ReasoningDialect::RawThinkTag => {
-            lift_think_tags(id, msg)?;
-        }
-        ReasoningDialect::OpenAi
-        | ReasoningDialect::OpenRouter
-        | ReasoningDialect::Passthrough => {}
-    }
-    Ok(())
-}
-
-/// Pull `reasoning_content` (a plain string field that DeepSeek and vLLM
-/// emit alongside `content`) into a typed `ReasoningDetail`.
-fn lift_reasoning_content_field(msg: &mut Message, format_tag: &str) {
-    // The field may survive as `msg.reasoning` (our schema maps it there via
-    // serde flatten or manual mapping). In practice the raw JSON has
-    // `reasoning_content` which serde_json deserializes into `reasoning`.
-    let text = match msg.reasoning.take() {
-        Some(t) if !t.is_empty() => t,
-        _ => return,
-    };
-
-    let detail = build_reasoning_detail(&text, format_tag, msg.reasoning_details.len() as u32);
-    msg.reasoning_details.push(detail);
-}
-
-/// Regex-extract `<think>...</think>` from the content string.
-/// The entire block (potentially multiple blocks) is lifted into
-/// `reasoning_details`. Remaining content replaces the original.
-fn lift_think_tags(id: &str, msg: &mut Message) -> Result<()> {
-    let content = match &msg.content {
-        routectl_core::MessageContent::Text(t) => t.clone(),
-        // Parts/Null: not expected from reasoning-model endpoints;
-        // leave untouched.
-        routectl_core::MessageContent::Parts(_) | routectl_core::MessageContent::Null => {
-            return Ok(())
-        }
-    };
-
-    let re = think_tag_regex();
-    let mut reasoning_text = String::new();
-    let stripped = re.replace_all(&content, |caps: &regex::Captures| {
-        reasoning_text.push_str(caps.get(1).map_or("", |m| m.as_str()));
-        ""
-    });
-
-    if reasoning_text.is_empty() {
-        return Ok(());
-    }
-
-    let detail = build_reasoning_detail(
-        &reasoning_text,
-        ReasoningDialect::RawThinkTag.format_tag(),
-        msg.reasoning_details.len() as u32,
-    );
-    msg.reasoning_details.push(detail);
-    msg.content = routectl_core::MessageContent::Text(stripped.trim_start().to_string());
-    let _ = id; // id reserved for future error paths
-    Ok(())
-}
-
-fn think_tag_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // DOTALL via `(?s)` so `.` matches newlines inside think blocks.
-        Regex::new(r"(?s)<think>(.*?)</think>").expect("static regex is valid")
-    })
+    dialect.as_dyn().apply_response(id, msg)
 }
 
 #[cfg(test)]
