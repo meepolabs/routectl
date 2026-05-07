@@ -10,7 +10,6 @@ use super::types::{
     AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicRole, AnthropicTool,
     ContentBlock, ThinkingConfig,
 };
-use crate::model_profile::profile_for;
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
@@ -50,8 +49,8 @@ fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
         // Future extension point: when the Anthropic API exposes a
         // distinct `adaptive` thinking type in JSON, branch on
         // `profile_for(&req.model).supports_adaptive_thinking` here.
-        // For now both code paths produced the same budget_tokens shape.
-        let _adaptive = profile_for(&req.model).supports_adaptive_thinking;
+        // Both code paths currently produce the same `budget_tokens`
+        // shape, so the branch is elided to avoid dead code.
         return Some(ThinkingConfig::Enabled {
             budget_tokens: budget,
         });
