@@ -15,19 +15,12 @@ use serde_json::{json, Value};
 use routectl_core::{ChatRequest, Error, Result};
 
 use super::dialect::ReasoningDialect;
+use crate::model_profile::profile_for;
 
-/// Fields that o-series / reasoning-only models do not accept.
-const OPENAI_REASONING_DROP: &[&str] = &[
-    "temperature",
-    "top_p",
-    "presence_penalty",
-    "frequency_penalty",
-    "logprobs",
-    "top_logprobs",
-];
-
-/// Same set for DeepSeek reasoner and vLLM thinking models.
-const DEEPSEEK_REASONING_DROP: &[&str] = &[
+/// Fields that reasoning-only models reject. Applied when
+/// `ModelProfile.drops_sampling_params` is true (currently OpenAI
+/// o-series, GPT-5, and DeepSeek `reasoner` variants).
+const SAMPLING_DROP: &[&str] = &[
     "temperature",
     "top_p",
     "presence_penalty",
@@ -90,11 +83,8 @@ fn apply_openai(obj: &mut serde_json::Map<String, Value>, req: &ChatRequest) {
         obj.insert("reasoning_effort".into(), Value::String(effort.into()));
     }
 
-    // o1/o3/o4/gpt-5 do not accept sampling params.
-    if is_openai_reasoning_model(&req.model) {
-        for key in OPENAI_REASONING_DROP {
-            obj.remove(*key);
-        }
+    if profile_for(&req.model).drops_sampling_params {
+        drop_sampling_params(obj);
     }
 }
 
@@ -103,15 +93,18 @@ fn apply_deepseek(
     obj: &mut serde_json::Map<String, Value>,
     req: &ChatRequest,
 ) -> Result<()> {
-    // Reasoning-specific model variants reject sampling params.
-    if req.model.contains("reasoner") {
-        for key in DEEPSEEK_REASONING_DROP {
-            obj.remove(*key);
-        }
+    if profile_for(&req.model).drops_sampling_params {
+        drop_sampling_params(obj);
     }
 
     strip_history_reasoning(id, obj, req)?;
     Ok(())
+}
+
+fn drop_sampling_params(obj: &mut serde_json::Map<String, Value>) {
+    for key in SAMPLING_DROP {
+        obj.remove(*key);
+    }
 }
 
 fn apply_vllm(
@@ -164,14 +157,6 @@ fn merge_extras(obj: &mut serde_json::Map<String, Value>, extras: &Value) {
             obj.insert(k.clone(), v.clone());
         }
     }
-}
-
-fn is_openai_reasoning_model(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-        || lower.starts_with("gpt-5")
 }
 
 #[cfg(test)]
