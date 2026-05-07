@@ -1,7 +1,5 @@
 //! Provider factory tests with the default in-process SecretStore.
 
-use std::collections::BTreeMap;
-
 use routectl_auth::MemoryStore;
 use routectl_core::Error;
 use routectl_router::{build_provider, ProviderEntry, ReasoningDialect};
@@ -9,14 +7,8 @@ use routectl_router::{build_provider, ProviderEntry, ReasoningDialect};
 #[tokio::test]
 async fn build_openai_compat_resolves_secret() {
     let store = MemoryStore::default();
-    let entry = ProviderEntry::OpenaiCompat {
-        base_url: "https://example.com/v1".into(),
-        api_key_ref: "literal:sk-abc".into(),
-        extra_headers: BTreeMap::new(),
-        default_extras: None,
-        reasoning_dialect: ReasoningDialect::Openai,
-        runtime: Default::default(),
-    };
+    let entry = ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-abc")
+        .with_reasoning_dialect(ReasoningDialect::Openai);
     let provider = build_provider("test", &entry, &store).await.expect("build");
     assert_eq!(provider.id(), "openai-compat:test");
 }
@@ -24,24 +16,17 @@ async fn build_openai_compat_resolves_secret() {
 #[tokio::test]
 async fn build_anthropic_api_resolves_secret() {
     let store = MemoryStore::default();
-    let entry = ProviderEntry::AnthropicApi {
-        api_key_ref: "literal:sk-ant-abc".into(),
-        base_url: "https://api.anthropic.com".into(),
-        anthropic_version: "2023-06-01".into(),
-        runtime: Default::default(),
-    };
-    let provider = build_provider("anthropic", &entry, &store).await.expect("build");
+    let entry = ProviderEntry::anthropic_api("literal:sk-ant-abc");
+    let provider = build_provider("anthropic", &entry, &store)
+        .await
+        .expect("build");
     assert_eq!(provider.id(), "anthropic-api:anthropic");
 }
 
 #[tokio::test]
 async fn build_claude_cookie_returns_not_enabled() {
     let store = MemoryStore::default();
-    let entry = ProviderEntry::ClaudeCookie {
-        session_ref: "literal:fake-cookie".into(),
-        organization_id: None,
-        runtime: Default::default(),
-    };
+    let entry = ProviderEntry::claude_cookie("literal:fake-cookie");
     match build_provider("claude-pro", &entry, &store).await {
         Err(Error::Auth(msg)) => {
             assert!(msg.contains("claude-cookie"), "got: {msg}");
@@ -55,10 +40,8 @@ async fn build_claude_cookie_returns_not_enabled() {
 #[tokio::test]
 async fn build_chatgpt_cookie_returns_not_enabled() {
     let store = MemoryStore::default();
-    let entry = ProviderEntry::ChatgptCookie {
-        session_ref: "literal:fake-cookie".into(),
-        runtime: Default::default(),
-    };
+    let entry = ProviderEntry::chatgpt_cookie("literal:fake-cookie");
+
     match build_provider("chatgpt-plus", &entry, &store).await {
         Err(Error::Auth(_)) => {}
         Ok(_) => panic!("expected Err"),
@@ -127,12 +110,7 @@ reasoning_dialect = "deepseek"
 async fn build_with_missing_env_var_errors() {
     std::env::remove_var("ROUTECTL_TEST_MISSING_KEY");
     let store = MemoryStore::default();
-    let entry = ProviderEntry::AnthropicApi {
-        api_key_ref: "env://ROUTECTL_TEST_MISSING_KEY".into(),
-        base_url: "https://api.anthropic.com".into(),
-        anthropic_version: "2023-06-01".into(),
-        runtime: Default::default(),
-    };
+    let entry = ProviderEntry::anthropic_api("env://ROUTECTL_TEST_MISSING_KEY");
     match build_provider("anthropic", &entry, &store).await {
         Err(Error::Auth(msg)) => {
             assert!(msg.contains("not set"), "got: {msg}");
