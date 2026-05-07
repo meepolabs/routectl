@@ -152,7 +152,20 @@ impl Router {
                         return Ok(resp);
                     }
                     Err(e) => {
-                        self.record_failure(provider_name);
+                        // Only charge the circuit breaker for
+                        // health-indicative failures. A 400 (bad
+                        // request shape), 401 (auth), 404 (model not
+                        // found), etc. is the caller's mistake -- it
+                        // says nothing about whether the provider is
+                        // healthy, so quarantining the provider on
+                        // repeated client errors would be wrong. We
+                        // piggyback on `should_fallback` because it
+                        // already encodes "is this error provider-side
+                        // and worth working around?" (network/status=0,
+                        // configured 5xx, 429, streaming).
+                        if should_fallback(&e, &policy) {
+                            self.record_failure(provider_name);
+                        }
                         if opts.disable_fallbacks {
                             return Err(e);
                         }
@@ -242,7 +255,16 @@ impl Router {
                     ));
                 }
                 Err(e) => {
-                    self.record_failure(provider_name);
+                    // See parallel comment in `complete_with_options`:
+                    // only charge the breaker for health-indicative
+                    // failures. Stream-path errors *before* the first
+                    // chunk arrives go through here; mid-stream errors
+                    // are handled by `BreakerAccounting` in the wrapped
+                    // stream and apply the same gating implicitly
+                    // (`Error::Streaming(_)` is fall-back-able).
+                    if should_fallback(&e, &policy) {
+                        self.record_failure(provider_name);
+                    }
                     if opts.disable_fallbacks {
                         return Err(e);
                     }
