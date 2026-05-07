@@ -17,7 +17,12 @@ use crate::runtime_state::{GateDecision, ProviderState};
 
 pub struct Router {
     pub config: Arc<Config>,
-    pub providers: BTreeMap<String, Arc<dyn Provider>>,
+    /// Provider implementations keyed by user-facing name. Private so
+    /// every insertion goes through [`Router::register`], which keeps
+    /// the parallel `state` map (RPM bucket, circuit breaker) in sync.
+    /// A direct insert here would silently disable runtime gating for
+    /// that provider -- see `gate_check`.
+    providers: BTreeMap<String, Arc<dyn Provider>>,
     /// Per-provider runtime gates. Eagerly populated from
     /// `config.providers[name].runtime()` in `Router::new` for every
     /// configured provider, plus an on-demand zero-policy entry
@@ -473,7 +478,11 @@ fn should_fallback(err: &Error, policy: &RetryPolicy) -> bool {
 fn should_retry_same_provider(err: &Error, policy: &RetryPolicy, attempts_made: u32) -> bool {
     let cap = match err {
         Error::Upstream { status, .. } => policy.retries_for_status(*status),
-        Error::Streaming(_) => policy.retry_on_5xx.unwrap_or(policy.max_attempts),
+        // Streaming errors are transport-level (broken connection
+        // mid-stream, partial frame, decode failure on the wire) --
+        // semantically network-class, not 5xx-class. Bucket them under
+        // `retry_on_network` so configuration matches the error class.
+        Error::Streaming(_) => policy.retry_on_network.unwrap_or(policy.max_attempts),
         _ => 0,
     };
     attempts_made < cap
