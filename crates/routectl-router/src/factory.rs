@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{Error, Provider, Result};
-use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
+use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
 use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect as ProviderDialect};
 
 use crate::config::{ProviderEntry, ReasoningDialect};
@@ -51,6 +51,7 @@ pub async fn build_provider(
                 api_key,
                 base_url: base_url.clone(),
                 anthropic_version: anthropic_version.clone(),
+                auth_kind: AuthKind::ApiKey,
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }
