@@ -995,3 +995,96 @@ async fn half_open_probe_is_single_under_concurrent_load() {
     // p1 saw exactly 1 additional call (the probe) on top of the trip calls.
     assert_eq!(p1.calls(), p1_after_trip + 1);
 }
+
+#[tokio::test]
+async fn dropped_stream_releases_half_open_probe_and_reopens_breaker() {
+    let p1 = MockProvider::new(
+        "p1",
+        vec![Behavior::Status(503), Behavior::Ok, Behavior::Ok],
+    );
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok, Behavior::Ok, Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: Some(RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                backoff_multiplier: 1.0,
+                fallback_on_status: vec![503],
+                ..Default::default()
+            }),
+        },
+    );
+    let mut runtime = BTreeMap::new();
+    runtime.insert(
+        "p1".into(),
+        ProviderRuntimePolicy {
+            circuit_failures: Some(1),
+            circuit_cooldown_ms: Some(50),
+            ..Default::default()
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    let first = r.complete(req("fast")).await.unwrap();
+    assert_eq!(first.routectl_provider.as_deref(), Some("p2"));
+    assert_eq!(p1.calls(), 1);
+
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+    let stream = r.stream(req("fast")).await.unwrap();
+    drop(stream);
+    assert_eq!(p1.calls(), 2, "half-open probe should reach p1 once");
+
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+    let recovered = r.complete(req("fast")).await.unwrap();
+    assert_eq!(recovered.routectl_provider.as_deref(), Some("p1"));
+    assert_eq!(p1.calls(), 3, "dropped stream must not leak the half-open slot");
+}
+
+#[tokio::test]
+async fn dropped_steady_state_stream_does_not_trip_breaker() {
+    let p1 = MockProvider::new("p1", vec![Behavior::Ok, Behavior::Ok]);
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry {
+            chain: vec!["p1:m".into(), "p2:m".into()],
+            retry: Some(RetryPolicy {
+                max_attempts: 1,
+                initial_backoff_ms: 1,
+                backoff_multiplier: 1.0,
+                fallback_on_status: vec![503],
+                ..Default::default()
+            }),
+        },
+    );
+    let mut runtime = BTreeMap::new();
+    runtime.insert(
+        "p1".into(),
+        ProviderRuntimePolicy {
+            circuit_failures: Some(1),
+            circuit_cooldown_ms: Some(50),
+            ..Default::default()
+        },
+    );
+    let mut r = build_router_with_runtime(aliases, runtime);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    let mut stream = r.stream(req("fast")).await.unwrap();
+    let first = stream.next().await.transpose().unwrap();
+    assert!(first.is_some(), "expected first chunk before cancel");
+    drop(stream);
+
+    let recovered = r.complete(req("fast")).await.unwrap();
+    assert_eq!(recovered.routectl_provider.as_deref(), Some("p1"));
+    assert_eq!(p1.calls(), 2, "client cancel after first chunk must not open the breaker");
+    assert_eq!(p2.calls(), 0);
+}

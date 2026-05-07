@@ -223,7 +223,16 @@ impl Router {
                     // records on clean EOS and the first error inside
                     // the stream records a failure.
                     let state = self.state.get(provider_name).cloned();
-                    return Ok(wrap_with_breaker_accounting(stream, state));
+                    let cancel_is_failure = state.as_ref().is_some_and(|st| {
+                        st.lock()
+                            .expect("poisoned")
+                            .half_open_probe_in_flight()
+                    });
+                    return Ok(wrap_with_breaker_accounting(
+                        stream,
+                        state,
+                        cancel_is_failure,
+                    ));
                 }
                 Err(e) => {
                     self.record_failure(provider_name);
@@ -324,29 +333,84 @@ async fn run_with_timeout(
 /// Wrap an upstream stream so the breaker records success on clean
 /// completion (None / EOS) and records ONE failure on the first error
 /// that bubbles out of the stream. Subsequent errors do not double-count.
+///
+/// Consumer cancellation after the first upstream chunk is treated as a
+/// success for steady-state traffic, but still counts as a failure for a
+/// half-open probe because the breaker has not observed a full recovery yet.
 fn wrap_with_breaker_accounting(
     inner: BoxStream<'static, Result<ChatChunk>>,
     state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
+    cancel_is_failure: bool,
 ) -> BoxStream<'static, Result<ChatChunk>> {
     use futures::stream::StreamExt as _;
+    struct BreakerAccounting {
+        state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
+        cancel_is_failure: bool,
+        settled: bool,
+    }
+
+    impl BreakerAccounting {
+        fn new(
+            state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
+            cancel_is_failure: bool,
+        ) -> Self {
+            Self {
+                state,
+                cancel_is_failure,
+                settled: false,
+            }
+        }
+
+        fn with_state(&self, f: impl FnOnce(&mut crate::runtime_state::ProviderState)) {
+            let Some(st) = &self.state else {
+                return;
+            };
+            let mut guard = match st.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            f(&mut guard);
+        }
+
+        fn record_success(&mut self) {
+            if self.settled {
+                return;
+            }
+            self.settled = true;
+            self.with_state(|state| state.record_success());
+        }
+
+        fn record_failure(&mut self) {
+            if self.settled {
+                return;
+            }
+            self.settled = true;
+            self.with_state(|state| state.record_failure(Instant::now()));
+        }
+    }
+
+    impl Drop for BreakerAccounting {
+        fn drop(&mut self) {
+            if !self.settled {
+                if self.cancel_is_failure {
+                    self.record_failure();
+                } else {
+                    self.record_success();
+                }
+            }
+        }
+    }
+
+    let mut accounting = BreakerAccounting::new(state, cancel_is_failure);
     let s = async_stream::stream! {
-        let mut errored = false;
         let mut inner = inner;
         while let Some(item) = inner.next().await {
-            let is_err = item.is_err();
-            if is_err && !errored {
-                errored = true;
-                if let Some(st) = &state {
-                    st.lock().expect("poisoned").record_failure(Instant::now());
-                }
+            if item.is_err() {
+                accounting.record_failure();
             }
             yield item;
         }
-        if !errored {
-            if let Some(st) = &state {
-                st.lock().expect("poisoned").record_success();
-            }
-        }
+        accounting.record_success();
     };
     Box::pin(s)
 }
