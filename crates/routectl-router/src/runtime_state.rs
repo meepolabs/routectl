@@ -142,6 +142,10 @@ impl ProviderState {
         }
     }
 
+    pub fn half_open_probe_in_flight(&self) -> bool {
+        self.half_open_in_flight
+    }
+
     fn refill_tokens(&mut self, now: Instant, capacity: f64) {
         let elapsed_ms = now.duration_since(self.rpm_last_refill).as_millis() as f64;
         if elapsed_ms <= 0.0 {
