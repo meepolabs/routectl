@@ -8,6 +8,7 @@ use super::types::{
     AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicRole, AnthropicTool,
     ContentBlock, ThinkingConfig,
 };
+use crate::model_profile::profile_for;
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
@@ -22,14 +23,6 @@ fn effort_ratio(effort: &str) -> f64 {
         "minimal" => 0.10,
         _ => 0.50,
     }
-}
-
-/// Returns true when model supports the `adaptive` thinking type (Opus 4.7+).
-fn supports_adaptive_thinking(model: &str) -> bool {
-    // Match "opus-4-7", "opus-4-8", etc. as well as any future version
-    model.contains("opus-4-7")
-        || model.contains("opus-4-8")
-        || model.contains("opus-4-9")
 }
 
 fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
@@ -49,14 +42,12 @@ fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
             return Some(ThinkingConfig::Disabled);
         }
         let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-        // Adaptive thinking available on Opus 4.7+
-        if supports_adaptive_thinking(&req.model) {
-            // Still use budget_tokens; "adaptive" is a future extension point.
-            // The API does not yet expose a separate adaptive type in JSON.
-            let budget = ((max as f64) * effort_ratio(effort)).max(1.0) as u32;
-            return Some(ThinkingConfig::Enabled { budget_tokens: budget });
-        }
         let budget = ((max as f64) * effort_ratio(effort)).max(1.0) as u32;
+        // Future extension point: when the Anthropic API exposes a
+        // distinct `adaptive` thinking type in JSON, branch on
+        // `profile_for(&req.model).supports_adaptive_thinking` here.
+        // For now both code paths produced the same budget_tokens shape.
+        let _adaptive = profile_for(&req.model).supports_adaptive_thinking;
         return Some(ThinkingConfig::Enabled { budget_tokens: budget });
     }
 
