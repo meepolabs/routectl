@@ -24,6 +24,7 @@
 //!   variable captured by the stream future.
 
 pub mod dialect;
+pub mod dialects;
 pub mod request;
 pub mod response;
 pub mod sse;
