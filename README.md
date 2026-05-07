@@ -157,7 +157,7 @@ Wire either path the same way: hand `api_key_ref` a `file://` or `env://` URI po
 ```toml
 [providers.anthropic-oauth]
 type = "anthropic-api"
-api_key_ref = "file:///home/me/.secrets/anthropic-oauth-token"
+api_key_ref = "file:///abs/path/to/anthropic-oauth-token"
 auth_kind = "oauth-bearer"
 ```
 

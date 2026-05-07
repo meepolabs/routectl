@@ -45,7 +45,7 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
     let mut providers = BTreeMap::new();
     providers.insert(
         provider_name.to_string(),
-        ProviderEntry::openai_compat(upstream_base, "literal://test-key")
+        ProviderEntry::openai_compat(upstream_base, "literal:test-key")
             .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
     );
 
@@ -68,12 +68,12 @@ fn two_provider_config(first_base: &str, second_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "first".to_string(),
-        ProviderEntry::openai_compat(first_base, "literal://test-key")
+        ProviderEntry::openai_compat(first_base, "literal:test-key")
             .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
     );
     providers.insert(
         "second".to_string(),
-        ProviderEntry::openai_compat(second_base, "literal://test-key")
+        ProviderEntry::openai_compat(second_base, "literal:test-key")
             .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
     );
 

@@ -5,10 +5,11 @@
 //! circuit breaker) skip unhealthy providers in the chain.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::stream::{BoxStream, StreamExt};
+use parking_lot::Mutex;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
 
 use crate::config::{Config, RetryPolicy};
@@ -17,9 +18,12 @@ use crate::runtime_state::{GateDecision, ProviderState};
 pub struct Router {
     pub config: Arc<Config>,
     pub providers: BTreeMap<String, Arc<dyn Provider>>,
-    /// Per-provider runtime gates. Built lazily from
-    /// `config.providers[name].runtime()` on the first dispatch and
-    /// kept under a mutex for the lifetime of the router.
+    /// Per-provider runtime gates. Eagerly populated from
+    /// `config.providers[name].runtime()` in `Router::new` for every
+    /// configured provider, plus an on-demand zero-policy entry
+    /// inserted on first dispatch for any provider registered after
+    /// construction. Kept under a parking_lot Mutex (no poisoning) for
+    /// the lifetime of the router.
     state: BTreeMap<String, Arc<Mutex<ProviderState>>>,
 }
 
@@ -132,7 +136,8 @@ impl Router {
                     backoff = mul_duration(backoff, policy.backoff_multiplier);
                 }
 
-                let result = run_with_timeout(provider.as_ref(), &attempt_req, &policy).await;
+                let result =
+                    run_with_timeout(provider_name, provider.as_ref(), &attempt_req, &policy).await;
                 attempts_made += 1;
 
                 match result {
@@ -213,7 +218,7 @@ impl Router {
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
 
-            match try_stream_with_first_chunk(provider, attempt_req, &policy).await {
+            match try_stream_with_first_chunk(provider_name, provider, attempt_req, &policy).await {
                 Ok(stream) => {
                     // DON'T record_success here. A first chunk arriving
                     // is not the same as a healthy upstream -- a provider
@@ -224,7 +229,7 @@ impl Router {
                     let state = self.state.get(provider_name).cloned();
                     let cancel_is_failure = state
                         .as_ref()
-                        .is_some_and(|st| st.lock().expect("poisoned").half_open_probe_in_flight());
+                        .is_some_and(|st| st.lock().half_open_probe_in_flight());
                     return Ok(wrap_with_breaker_accounting(
                         stream,
                         state,
@@ -254,7 +259,7 @@ impl Router {
     /// status-0 upstream error).
     fn gate_check(&self, provider_name: &str) -> Option<Error> {
         let state = self.state.get(provider_name)?.clone();
-        let mut s = state.lock().expect("poisoned");
+        let mut s = state.lock();
         match s.try_dispatch(Instant::now()) {
             GateDecision::Allow => None,
             GateDecision::RateLimited => Some(Error::upstream(
@@ -270,16 +275,13 @@ impl Router {
 
     fn record_success(&self, provider_name: &str) {
         if let Some(state) = self.state.get(provider_name) {
-            state.lock().expect("poisoned").record_success();
+            state.lock().record_success();
         }
     }
 
     fn record_failure(&self, provider_name: &str) {
         if let Some(state) = self.state.get(provider_name) {
-            state
-                .lock()
-                .expect("poisoned")
-                .record_failure(Instant::now());
+            state.lock().record_failure(Instant::now());
         }
     }
 
@@ -304,8 +306,12 @@ impl Router {
 
 /// Execute one upstream `complete()` call with the policy's per-request
 /// timeout (if configured). Timeout expiry surfaces as a status-0
-/// upstream error, treated as a network class for retry/fallback.
+/// upstream error, treated as a network class for retry/fallback. The
+/// error reports `provider_name` (the config-key the chain walks) so
+/// it lines up with `routectl_provider` in responses and with
+/// gate-error sources -- never the kind-prefixed `provider.id()`.
 async fn run_with_timeout(
+    provider_name: &str,
     provider: &dyn Provider,
     req: &ChatRequest,
     policy: &RetryPolicy,
@@ -317,7 +323,7 @@ async fn run_with_timeout(
             {
                 Ok(r) => r,
                 Err(_) => Err(Error::upstream(
-                    provider.id(),
+                    provider_name,
                     0,
                     format!("request timed out after {ms}ms"),
                 )),
@@ -362,11 +368,7 @@ fn wrap_with_breaker_accounting(
             let Some(st) = &self.state else {
                 return;
             };
-            let mut guard = match st.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            f(&mut guard);
+            f(&mut st.lock());
         }
 
         fn record_success(&mut self) {
@@ -421,11 +423,11 @@ fn wrap_with_breaker_accounting(
 /// stream-open + first-chunk arrival; expiry surfaces as a status-0
 /// upstream error which is fallbackable per `should_fallback`.
 async fn try_stream_with_first_chunk(
+    provider_name: &str,
     provider: Arc<dyn Provider>,
     req: ChatRequest,
     policy: &RetryPolicy,
 ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-    let provider_id = provider.id().to_string();
     let open_and_first = async {
         let mut upstream = provider.stream(req).await?;
         match upstream.next().await {
@@ -442,7 +444,7 @@ async fn try_stream_with_first_chunk(
         Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), open_and_first).await {
             Ok(r) => r,
             Err(_) => Err(Error::upstream(
-                &provider_id,
+                provider_name,
                 0,
                 format!("stream first-byte timeout after {ms}ms"),
             )),
