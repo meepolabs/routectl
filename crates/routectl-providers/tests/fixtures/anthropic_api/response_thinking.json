@@ -1,0 +1,22 @@
+{
+  "id": "msg_01abc",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-5-20251101",
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 80
+  },
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "Let me think about this carefully...",
+      "signature": "sig_abc123"
+    },
+    {
+      "type": "text",
+      "text": "The answer is 42."
+    }
+  ]
+}

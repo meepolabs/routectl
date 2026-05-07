@@ -1,0 +1,25 @@
+[package]
+name = "routectl-router"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fallback chains, retries, and alias resolution for routectl."
+
+[dependencies]
+routectl-core.workspace = true
+routectl-providers = { workspace = true, features = ["openai-compat", "anthropic-api"] }
+routectl-auth.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+async-stream = "0.3"
