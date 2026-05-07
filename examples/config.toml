@@ -11,6 +11,11 @@ port = 8787
 #   keychain://<service>/<account>   OS keychain (preferred)
 #   env://VAR_NAME                    process env var (dev only)
 #   literal:hunter2                   inline plaintext (discouraged)
+#
+# Per-provider runtime gates (all optional, default off):
+#   rpm_limit              max requests per minute; over-limit falls through
+#   circuit_failures       trip breaker after N consecutive failures
+#   circuit_cooldown_ms    keep breaker open this long (default 30000)
 
 [providers.deepseek]
 type = "openai-compat"
@@ -24,12 +29,21 @@ base_url = "https://openrouter.ai/api/v1"
 api_key_ref = "keychain://routectl/openrouter"
 reasoning_dialect = "openrouter"
 extra_headers = { "HTTP-Referer" = "https://github.com/meepolabs/routectl", "X-Title" = "routectl" }
+# Trip the breaker if openrouter hiccups three times in a row, cool for 60s.
+circuit_failures = 3
+circuit_cooldown_ms = 60000
 
 [providers.opencode-go]
 type = "openai-compat"
-base_url = "https://opencode.ai/zen/v1"
+base_url = "https://opencode.ai/zen/go/v1"  # Zen Go subscription tier
 api_key_ref = "keychain://routectl/opencode-go"
-reasoning_dialect = "passthrough"
+reasoning_dialect = "deepseek"
+
+[providers.nim]
+type = "openai-compat"
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key_ref = "keychain://routectl/nim"
+reasoning_dialect = "openai"
 
 [providers.openai]
 type = "openai-compat"
@@ -56,42 +70,88 @@ session_ref = "keychain://routectl/claude-cookie"
 type = "chatgpt-cookie"
 session_ref = "keychain://routectl/chatgpt-cookie"
 
-# ---- Aliases ----
-# Logical names that resolve to a fallback chain of `provider:model` targets.
-# First entry preferred; fall through on 5xx/429/timeout per `[retry]`.
-
-[aliases.fast]
-chain = [
-  "opencode-go:qwen3.6-plus",
-  "deepseek:deepseek-chat",
-  "openrouter:qwen/qwen3.6-plus",
-]
+# ---- Aliases (model groups) ----
+# Logical tiers that resolve to a fallback chain. Each tier is just a
+# named alias; nothing special syntactically. Pick your defaults below
+# and remove the providers you don't have keys for.
+#
+# Recommended pattern: one alias per cost/capability tier so callers
+# pick "heavy" or "cheap" without knowing which model is current.
 
 [aliases.heavy]
+# Top-shelf reasoning. Prefer Pro subscription, fall back to API, then OR.
 chain = [
-  "claude-pro:claude-opus-4-7",          # uses your Pro subscription
-  "anthropic:claude-opus-4-7",           # falls back to API key
+  "claude-pro:claude-opus-4-7",
+  "anthropic:claude-opus-4-7",
+  "openai:gpt-5",
   "openrouter:anthropic/claude-opus-4-7",
 ]
 
+[aliases.med]
+# Balanced quality/latency for everyday work.
+chain = [
+  "opencode-go:deepseek-v4-pro",
+  "openrouter:nvidia/llama-3.3-nemotron-super-49b-v1.5",
+  "nim:meta/llama-3.3-70b-instruct",
+  "openrouter:meta-llama/llama-3.3-70b-instruct",
+]
+
+[aliases.cheap]
+# Cheapest acceptable; good for bulk classification, summarization, etc.
+chain = [
+  "opencode-go:deepseek-v4-flash",
+  "openrouter:deepseek/deepseek-v4-flash",
+  "llama-local:qwen3.6",
+]
+
+[aliases.local]
+# Privacy-only path; no remote calls.
+chain = ["llama-local:qwen3.6"]
+
 [aliases.reasoning]
+# Explicitly pick a reasoning model with chain-of-thought surfaced in
+# `reasoning_details[]`.
 chain = [
   "deepseek:deepseek-reasoner",
   "openrouter:deepseek/deepseek-r1",
   "openrouter:openai/o3-mini",
 ]
 
-[aliases.local]
-chain = ["llama-local:qwen3.6"]
+# Per-alias retry override -- example: cheap tier should retry
+# rate-limits aggressively (free models 429 a lot) but give up on 5xx
+# faster so we move on to the next provider.
+[aliases.cheap.retry]
+max_attempts = 2
+initial_backoff_ms = 200
+backoff_multiplier = 2.0
+jitter_ms = 100              # spread retries; avoid herding
+fallback_on_status = [408, 429, 500, 502, 503, 504]
+retry_on_429 = 4             # try harder on rate limits
+retry_on_5xx = 1             # fall through faster on flaky upstream
+request_timeout_ms = 30000   # cap per-attempt time
+stream_first_byte_timeout_ms = 10000
 
-# ---- Retry ----
+# ---- Default retry policy (used by aliases without their own block) ----
 
 [retry]
 max_attempts = 2
 initial_backoff_ms = 250
 backoff_multiplier = 2.0
+jitter_ms = 50
 fallback_on_status = [408, 429, 500, 502, 503, 504]
+# Per-error-class overrides (all optional). When unset, max_attempts applies.
+# retry_on_429 = 3
+# retry_on_5xx = 2
+# retry_on_network = 2
+# Per-attempt timeouts (optional).
+# request_timeout_ms = 60000
+# stream_first_byte_timeout_ms = 15000
 
 # ---- Schema ----
 # legacy_compat = "openrouter"   # default, full reasoning_details surface
 # legacy_compat = "openai"       # strip extensions for clients that gag on extras
+
+# ---- Per-request switches ----
+# Send `x-routectl-disable-fallbacks: 1` on the HTTP request to skip
+# the chain walk -- useful when comparing model outputs side-by-side
+# and you need to know which exact provider answered.

@@ -144,6 +144,70 @@ Secret references (the `*_ref` fields):
 - `env://VAR_NAME` -- process env var (dev only)
 - `literal:hunter2` -- inline plaintext (discouraged, but useful in tests)
 
+## Model groups (recommended pattern)
+
+Define one alias per cost/capability tier so callers can ask for `heavy`
+or `cheap` without knowing which model is current. Aliases ARE the
+group mechanism -- there's no separate group syntax.
+
+```toml
+[aliases.heavy]
+chain = [
+  "claude-pro:claude-opus-4-7",                      # subscription
+  "anthropic:claude-opus-4-7",                       # API key
+  "openai:gpt-5",
+  "openrouter:anthropic/claude-opus-4-7",            # last-ditch
+]
+
+[aliases.med]
+chain = [
+  "opencode-go:deepseek-v4-pro",
+  "nim:meta/llama-3.3-70b-instruct",
+  "openrouter:meta-llama/llama-3.3-70b-instruct",
+]
+
+[aliases.cheap]
+chain = [
+  "opencode-go:deepseek-v4-flash",
+  "openrouter:deepseek/deepseek-v4-flash",
+  "llama-local:qwen3.6",
+]
+```
+
+When a tier's primary fails (rate limit, 5xx, network error), the
+router falls through to the next entry. See `examples/config.toml`
+for the full set with retry overrides per tier.
+
+## Routing policy knobs
+
+Per-alias `[aliases.<name>.retry]` block (and a global `[retry]` for
+defaults):
+
+| Field | Default | Effect |
+|---|---|---|
+| `max_attempts` | 2 | Retry cap per provider in chain |
+| `initial_backoff_ms` | 250 | Exponential backoff start |
+| `backoff_multiplier` | 2.0 | Per-attempt growth |
+| `jitter_ms` | 0 | Random extra ms on each sleep -- avoids thundering-herd retries |
+| `fallback_on_status` | `[408,429,500,502,503,504]` | Status codes that trigger fallback |
+| `retry_on_429` | (`max_attempts`) | Override retry cap for 429 specifically |
+| `retry_on_5xx` | (`max_attempts`) | Override for 5xx |
+| `retry_on_network` | (`max_attempts`) | Override for status 0 (DNS, connect, TLS, timeout) |
+| `request_timeout_ms` | none | Cap each attempt; expiry treated as network error |
+| `stream_first_byte_timeout_ms` | none | Abandon stream if no chunk arrives in this window |
+
+Per-provider runtime gates (set inline on the provider definition):
+
+| Field | Effect |
+|---|---|
+| `rpm_limit` | Token-bucket cap; over-limit falls through to next chain entry |
+| `circuit_failures` | Trip breaker after N consecutive failures |
+| `circuit_cooldown_ms` | Keep breaker open this long once tripped (default 30000) |
+
+Per-request:
+
+- Header `x-routectl-disable-fallbacks: 1` -- only the first chain entry is tried, the first failure propagates verbatim.
+
 ## Reasoning dialects (per-provider)
 
 | Dialect | Wire signal | Format tag |
