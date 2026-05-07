@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{BoxStream, StreamExt};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
@@ -26,7 +27,8 @@ pub mod types;
 use sse::SseState;
 
 /// How the provider authenticates to the Anthropic Messages API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AuthKind {
     /// Standard `x-api-key: <key>` header. Default for `sk-ant-api03-...` keys.
     #[default]
