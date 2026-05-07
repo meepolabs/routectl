@@ -75,6 +75,19 @@ async fn read_secret_file(path: &Path) -> Result<String> {
     tokio::task::spawn_blocking(move || -> Result<String> {
         use std::io::Read;
 
+        // Defense in depth: `SecretRef::parse()` rejects relative
+        // `file://` URIs, but `SecretRef::File` is publicly
+        // constructible -- programmatic callers (tests, downstream
+        // crates) could pass a relative path that would otherwise be
+        // resolved against the process CWD. Refuse here so the
+        // "absolute path" invariant holds at every entry point.
+        if !path_owned.is_absolute() {
+            return Err(Error::Auth(format!(
+                "secret file `{}` must be an absolute path; relative paths are refused (CWD-relative resolution is unsafe)",
+                path_owned.display()
+            )));
+        }
+
         let mut file = std::fs::File::open(&path_owned).map_err(|e| {
             Error::Auth(format!(
                 "failed to open secret file `{}`: {e}",
