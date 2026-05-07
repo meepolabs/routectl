@@ -56,9 +56,6 @@ url = "2"
 eventsource-stream = "0.2"
 tokio-stream = "0.1"
 
-# Auth
-keyring = "3"
-
 # Time / ids (used in response shaping)
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 uuid = { version = "1", features = ["v4"] }

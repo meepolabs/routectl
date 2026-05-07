@@ -124,12 +124,12 @@ port = 8787
 [providers.deepseek]
 type = "openai-compat"
 base_url = "https://api.deepseek.com/v1"
-api_key_ref = "keychain://routectl/deepseek"
+api_key_ref = "env://DEEPSEEK_API_KEY"
 reasoning_dialect = "deepseek"
 
 [providers.anthropic]
 type = "anthropic-api"
-api_key_ref = "keychain://routectl/anthropic"
+api_key_ref = "env://ANTHROPIC_API_KEY"
 
 [aliases.fast]
 chain = ["deepseek:deepseek-chat"]
@@ -138,11 +138,13 @@ chain = ["deepseek:deepseek-chat"]
 chain = ["anthropic:claude-opus-4-7", "deepseek:deepseek-reasoner"]
 ```
 
-Secret references (the `*_ref` fields):
+Secret references (the `*_ref` fields). Routectl never auto-discovers credentials from other tools; you pick the source per provider:
 
-- `keychain://<service>/<account>` -- OS keychain (libsecret on Linux, Keychain on macOS, Credential Manager on Windows). On macOS first read of each entry triggers an "Allow / Always Allow / Deny" prompt; click Always Allow once per entry to silence subsequent runs (gated on the binary path).
-- `env://VAR_NAME` -- process env var. Silent on every platform; convenient when you already have keys in the shell or a `.env` file. The trade-off vs keychain is that the value is visible to anything that can read your process env (e.g. `/proc/<pid>/environ`).
-- `literal:hunter2` -- inline plaintext. Useful in tests and for shared-config local-only providers (e.g. llama.cpp where the key is `not-needed`); avoid for real secrets.
+- `env://VAR_NAME` -- process env var. Silent on every platform. Trade-off: the value is visible to anything that can read this process's env (e.g. `/proc/<pid>/environ`). Fine for local dev with shell-managed keys.
+- `file:///abs/path/to/key` -- file contents (trimmed of trailing whitespace). Refused unless `chmod 600` or `400`. Compatible with sops, age, doppler-cli, vault-agent, or any tool that drops a token into a file. Good if you keep secrets in `~/.secrets/*` mode 600.
+- `literal:hunter2` -- inline plaintext. Use for placeholders like `literal:not-needed` (llama.cpp where no auth is required) and tests. Avoid for real secrets in version-controlled config.
+
+Routectl does not bundle an OS-keychain integration. Most managed-secret tools can drop a file or set an env var as part of their workflow, which is the integration boundary.
 
 ## Model groups (recommended pattern)
 
