@@ -71,6 +71,62 @@ async fn build_chatgpt_cookie_returns_not_enabled() {
     }
 }
 
+/// Defensive test: a custom `base_url` and `anthropic_version` in the
+/// TOML config must round-trip cleanly into the Anthropic provider.
+/// Locks in that future refactors don't silently re-hardcode the
+/// production endpoint or API version.
+#[test]
+fn anthropic_custom_base_url_and_version_round_trip_through_toml() {
+    let toml_src = r#"
+[providers.anthropic]
+type = "anthropic-api"
+api_key_ref = "keychain://routectl/anthropic"
+base_url = "https://api2.anthropic.com"
+anthropic_version = "2024-05-01"
+"#;
+    let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
+    let entry = cfg.providers.get("anthropic").expect("anthropic entry");
+    match entry {
+        ProviderEntry::AnthropicApi {
+            base_url,
+            anthropic_version,
+            api_key_ref,
+        } => {
+            assert_eq!(base_url, "https://api2.anthropic.com");
+            assert_eq!(anthropic_version, "2024-05-01");
+            assert_eq!(api_key_ref, "keychain://routectl/anthropic");
+        }
+        other => panic!("expected AnthropicApi, got {other:?}"),
+    }
+}
+
+/// Same test but for the OpenAI-compat shape: a custom `base_url`
+/// must survive TOML round-trip. Lots of providers (OpenCode-Go,
+/// NIM, llama.cpp) rely on this.
+#[test]
+fn openai_compat_custom_base_url_round_trips_through_toml() {
+    let toml_src = r#"
+[providers.opencode-go]
+type = "openai-compat"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key_ref = "env://OPENCODE_GO_API_KEY"
+reasoning_dialect = "deepseek"
+"#;
+    let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
+    let entry = cfg.providers.get("opencode-go").expect("opencode entry");
+    match entry {
+        ProviderEntry::OpenaiCompat {
+            base_url,
+            reasoning_dialect,
+            ..
+        } => {
+            assert_eq!(base_url, "https://opencode.ai/zen/go/v1");
+            assert!(matches!(reasoning_dialect, ReasoningDialect::Deepseek));
+        }
+        other => panic!("expected OpenaiCompat, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn build_with_unknown_secret_errors() {
     let store = MemoryStore::default();
