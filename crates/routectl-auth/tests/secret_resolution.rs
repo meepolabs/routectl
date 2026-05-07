@@ -1,4 +1,5 @@
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
@@ -129,13 +130,26 @@ async fn literal_empty_returns_empty_string() {
 }
 
 // --- MemoryStore: file path ---
+//
+// File-permission enforcement is Unix-only (POSIX mode bits via
+// PermissionsExt); the tests below that depend on it are gated with
+// `#[cfg(unix)]` so the suite still compiles + runs cleanly on
+// Windows.
 
+#[cfg(unix)]
 fn write_secret_file(contents: &str, mode: u32) -> NamedTempFile {
     let mut f = NamedTempFile::new().expect("tempfile");
     f.write_all(contents.as_bytes()).expect("write");
     let mut perms = f.as_file().metadata().expect("meta").permissions();
     perms.set_mode(mode);
     f.as_file().set_permissions(perms).expect("chmod");
+    f
+}
+
+#[cfg(not(unix))]
+fn write_secret_file(contents: &str, _mode: u32) -> NamedTempFile {
+    let mut f = NamedTempFile::new().expect("tempfile");
+    f.write_all(contents.as_bytes()).expect("write");
     f
 }
 
@@ -165,6 +179,7 @@ async fn file_get_missing_is_error() {
     assert!(msg.contains("failed to open secret file"), "got: {msg}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn file_get_world_readable_is_refused() {
     let file = write_secret_file("leaky-secret", 0o644);
@@ -176,6 +191,7 @@ async fn file_get_world_readable_is_refused() {
     assert!(msg.contains("chmod 600 or 400"), "got: {msg}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn file_get_group_readable_is_refused() {
     let file = write_secret_file("leaky-group-secret", 0o640);
