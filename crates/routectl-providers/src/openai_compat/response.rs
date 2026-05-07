@@ -64,11 +64,7 @@ pub(crate) fn merge_reasoning_keys(obj: &mut serde_json::Map<String, Value>) {
     }
 }
 
-fn apply_dialect_to_message(
-    id: &str,
-    msg: &mut Message,
-    dialect: ReasoningDialect,
-) -> Result<()> {
+fn apply_dialect_to_message(id: &str, msg: &mut Message, dialect: ReasoningDialect) -> Result<()> {
     dialect.as_dyn().apply_response(id, msg)
 }
 

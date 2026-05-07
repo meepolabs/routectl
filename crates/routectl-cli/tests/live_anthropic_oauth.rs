@@ -128,10 +128,9 @@ async fn anthropic_oauth_stream_with_claude_code_token() {
 
     let mut text = String::new();
     let mut chunks = 0u32;
-    while let Some(item) =
-        tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), stream.next())
-            .await
-            .expect("oauth stream chunk timed out")
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), stream.next())
+        .await
+        .expect("oauth stream chunk timed out")
     {
         let chunk = item.expect("oauth stream chunk error");
         chunks += 1;

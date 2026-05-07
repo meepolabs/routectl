@@ -9,12 +9,12 @@
 #[cfg(feature = "anthropic-api")]
 mod tests {
     use pretty_assertions::assert_eq;
+    use routectl_core::Provider;
     use routectl_core::{
         ChatRequest, Message, MessageContent, ReasoningConfig, ReasoningDetail,
         ReasoningDetailKind, Role,
     };
     use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
-    use routectl_core::Provider;
     use serde_json::{json, Value};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -183,7 +183,10 @@ mod tests {
         assert_eq!(tool["name"], "get_weather");
         assert_eq!(tool["description"], "Get the current weather");
         assert!(tool.get("input_schema").is_some());
-        assert_eq!(tool["input_schema"]["properties"]["location"]["type"], "string");
+        assert_eq!(
+            tool["input_schema"]["properties"]["location"]["type"],
+            "string"
+        );
         // No 'parameters' key in Anthropic shape
         assert!(tool.get("parameters").is_none());
         assert!(tool.get("function").is_none());
@@ -213,7 +216,11 @@ mod tests {
 
         let req = base_req(
             "claude-3-opus",
-            vec![user_msg("Think about X"), assistant_msg, user_msg("Continue")],
+            vec![
+                user_msg("Think about X"),
+                assistant_msg,
+                user_msg("Continue"),
+            ],
         );
         let body = provider.normalize_request(&req).unwrap();
         let msgs = body["messages"].as_array().unwrap();
@@ -332,9 +339,8 @@ mod tests {
         assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
 
         // arguments should be JSON string
-        let args: Value = serde_json::from_str(
-            tool_calls[0]["function"]["arguments"].as_str().unwrap()
-        ).unwrap();
+        let args: Value =
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(args["location"], "London");
 
         assert_eq!(resp.choices[0].finish_reason, Some("tool_calls".into()));
@@ -428,23 +434,39 @@ mod tests {
         }
 
         // Should have: thinking_delta chunk, signature chunk, text_delta chunk, finish_reason chunk
-        assert!(chunks.len() >= 4, "expected at least 4 chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 4,
+            "expected at least 4 chunks, got {}",
+            chunks.len()
+        );
 
         // First chunk: thinking_delta with reasoning and reasoning_details
         let thinking_chunk = &chunks[0];
         let delta = &thinking_chunk.choices[0].delta;
         assert!(delta.reasoning.is_some());
         assert!(!delta.reasoning_details.is_empty());
-        assert_eq!(delta.reasoning_details[0].payload["text"], "Let me think...");
+        assert_eq!(
+            delta.reasoning_details[0].payload["text"],
+            "Let me think..."
+        );
         // No signature yet in thinking_delta
-        assert!(delta.reasoning_details[0].payload.get("signature").is_none());
+        assert!(delta.reasoning_details[0]
+            .payload
+            .get("signature")
+            .is_none());
 
         // Second chunk: signature_delta with only signature in reasoning_details
         let sig_chunk = &chunks[1];
         let sig_delta = &sig_chunk.choices[0].delta;
-        assert!(sig_delta.reasoning.is_none(), "signature chunk should have no reasoning text");
+        assert!(
+            sig_delta.reasoning.is_none(),
+            "signature chunk should have no reasoning text"
+        );
         assert!(!sig_delta.reasoning_details.is_empty());
-        assert_eq!(sig_delta.reasoning_details[0].payload["signature"], "sig_xyz789");
+        assert_eq!(
+            sig_delta.reasoning_details[0].payload["signature"],
+            "sig_xyz789"
+        );
 
         // Third chunk: text_delta
         let text_chunk = &chunks[2];
@@ -495,7 +517,10 @@ mod tests {
 
         // Finish reason chunk
         let finish = chunks.last().unwrap();
-        assert_eq!(finish.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(
+            finish.choices[0].finish_reason.as_deref(),
+            Some("tool_calls")
+        );
     }
 
     #[test]
@@ -510,7 +535,9 @@ mod tests {
         assert!(result.is_none());
 
         // message_stop
-        let result = state.parse_event(pid, r#"{"type":"message_stop"}"#).unwrap();
+        let result = state
+            .parse_event(pid, r#"{"type":"message_stop"}"#)
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -534,9 +561,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(response_body),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
             .mount(&mock_server)
             .await;
 
@@ -559,12 +584,10 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(401).set_body_json(json!({
-                    "type": "error",
-                    "error": {"type": "authentication_error", "message": "invalid api key"}
-                })),
-            )
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "type": "error",
+                "error": {"type": "authentication_error", "message": "invalid api key"}
+            })))
             .mount(&mock_server)
             .await;
 
@@ -573,7 +596,10 @@ mod tests {
 
         let err = provider.complete(req).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("401") || msg.contains("invalid api key"), "unexpected: {msg}");
+        assert!(
+            msg.contains("401") || msg.contains("invalid api key"),
+            "unexpected: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -627,7 +653,15 @@ mod tests {
             }
         }
 
-        assert!(text_chunks.contains(&"Hi!".to_string()), "expected 'Hi!' in {:?}", text_chunks);
-        assert!(finish_reasons.contains(&"stop".to_string()), "expected 'stop' in {:?}", finish_reasons);
+        assert!(
+            text_chunks.contains(&"Hi!".to_string()),
+            "expected 'Hi!' in {:?}",
+            text_chunks
+        );
+        assert!(
+            finish_reasons.contains(&"stop".to_string()),
+            "expected 'stop' in {:?}",
+            finish_reasons
+        );
     }
 }

@@ -80,7 +80,8 @@ impl Router {
     }
 
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-        self.complete_with_options(req, RouterOptions::default()).await
+        self.complete_with_options(req, RouterOptions::default())
+            .await
     }
 
     pub async fn complete_with_options(
@@ -170,11 +171,9 @@ impl Router {
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
     }
 
-    pub async fn stream(
-        &self,
-        req: ChatRequest,
-    ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        self.stream_with_options(req, RouterOptions::default()).await
+    pub async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        self.stream_with_options(req, RouterOptions::default())
+            .await
     }
 
     /// Streaming counterpart. Fallback only happens BEFORE the first
@@ -223,11 +222,9 @@ impl Router {
                     // records on clean EOS and the first error inside
                     // the stream records a failure.
                     let state = self.state.get(provider_name).cloned();
-                    let cancel_is_failure = state.as_ref().is_some_and(|st| {
-                        st.lock()
-                            .expect("poisoned")
-                            .half_open_probe_in_flight()
-                    });
+                    let cancel_is_failure = state
+                        .as_ref()
+                        .is_some_and(|st| st.lock().expect("poisoned").half_open_probe_in_flight());
                     return Ok(wrap_with_breaker_accounting(
                         stream,
                         state,
@@ -265,11 +262,9 @@ impl Router {
                 0,
                 "local rpm_limit exceeded",
             )),
-            GateDecision::CircuitOpen => Some(Error::upstream(
-                provider_name,
-                0,
-                "circuit breaker open",
-            )),
+            GateDecision::CircuitOpen => {
+                Some(Error::upstream(provider_name, 0, "circuit breaker open"))
+            }
         }
     }
 
@@ -281,7 +276,10 @@ impl Router {
 
     fn record_failure(&self, provider_name: &str) {
         if let Some(state) = self.state.get(provider_name) {
-            state.lock().expect("poisoned").record_failure(Instant::now());
+            state
+                .lock()
+                .expect("poisoned")
+                .record_failure(Instant::now());
         }
     }
 
@@ -313,19 +311,18 @@ async fn run_with_timeout(
     policy: &RetryPolicy,
 ) -> Result<ChatResponse> {
     match policy.request_timeout_ms {
-        Some(ms) => match tokio::time::timeout(
-            Duration::from_millis(ms),
-            provider.complete(req.clone()),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => Err(Error::upstream(
-                provider.id(),
-                0,
-                format!("request timed out after {ms}ms"),
-            )),
-        },
+        Some(ms) => {
+            match tokio::time::timeout(Duration::from_millis(ms), provider.complete(req.clone()))
+                .await
+            {
+                Ok(r) => r,
+                Err(_) => Err(Error::upstream(
+                    provider.id(),
+                    0,
+                    format!("request timed out after {ms}ms"),
+                )),
+            }
+        }
         None => provider.complete(req.clone()).await,
     }
 }
