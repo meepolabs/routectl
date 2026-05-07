@@ -140,9 +140,9 @@ chain = ["anthropic:claude-opus-4-7", "deepseek:deepseek-reasoner"]
 
 Secret references (the `*_ref` fields):
 
-- `keychain://<service>/<account>` -- OS keychain (preferred)
-- `env://VAR_NAME` -- process env var (dev only)
-- `literal:hunter2` -- inline plaintext (discouraged, but useful in tests)
+- `keychain://<service>/<account>` -- OS keychain (libsecret on Linux, Keychain on macOS, Credential Manager on Windows). On macOS first read of each entry triggers an "Allow / Always Allow / Deny" prompt; click Always Allow once per entry to silence subsequent runs (gated on the binary path).
+- `env://VAR_NAME` -- process env var. Silent on every platform; convenient when you already have keys in the shell or a `.env` file. The trade-off vs keychain is that the value is visible to anything that can read your process env (e.g. `/proc/<pid>/environ`).
+- `literal:hunter2` -- inline plaintext. Useful in tests and for shared-config local-only providers (e.g. llama.cpp where the key is `not-needed`); avoid for real secrets.
 
 ## Model groups (recommended pattern)
 
