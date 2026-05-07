@@ -6,7 +6,6 @@
 //! Routectl never auto-discovers credentials from third-party tools;
 //! every secret source is explicit-by-config in the user's TOML.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -58,42 +57,75 @@ impl SecretStore for MemoryStore {
 }
 
 /// Read a secret from a file. Trims trailing whitespace (handles the
-/// common case where the file has a trailing newline). On Unix, refuses
-/// world- or group-readable files to avoid silently using a leaked
-/// secret -- mode 600 / 400 is the recommended pattern.
+/// common case where the file has a trailing newline).
+///
+/// TOCTOU-safe on Unix: opens the file ONCE, then `fstat`s the open
+/// file descriptor (not the path) before reading bytes. This means
+/// the permission check, the symlink/special-file check, and the read
+/// all observe the same inode -- a `mv` or symlink swap between the
+/// open and the stat cannot trick the check.
+///
+/// Refuses files that are not regular files (catches symlinks pointing
+/// at devices/fifos/etc.), and refuses any file with `0o077`-readable
+/// permissions (group or other has any bit set). `chmod 600` or `400`
+/// is the recommended pattern.
 async fn read_secret_file(path: &Path) -> Result<String> {
-    let bytes = tokio::fs::read(path).await.map_err(|e| {
-        Error::Auth(format!(
-            "failed to read secret file `{}`: {e}",
-            path.display()
-        ))
-    })?;
+    let path_owned = path.to_path_buf();
+    let display = path_owned.display().to_string();
 
-    #[cfg(unix)]
-    {
-        let meta = tokio::fs::metadata(path).await.map_err(|e| {
+    tokio::task::spawn_blocking(move || -> Result<String> {
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(&path_owned).map_err(|e| {
             Error::Auth(format!(
-                "failed to stat secret file `{}`: {e}",
-                path.display()
+                "failed to open secret file `{}`: {e}",
+                path_owned.display()
             ))
         })?;
-        let mode = meta.permissions().mode();
-        // Bits 0o077 cover group + other read/write/execute. If any
-        // are set the file is too permissive for a secret.
-        if mode & 0o077 != 0 {
+
+        let meta = file.metadata().map_err(|e| {
+            Error::Auth(format!(
+                "failed to stat secret file `{}`: {e}",
+                path_owned.display()
+            ))
+        })?;
+
+        if !meta.is_file() {
             return Err(Error::Auth(format!(
-                "secret file `{}` has permissions {:o}; use chmod 600 or 400 to restrict reads to the owner",
-                path.display(),
-                mode & 0o7777
+                "secret file `{}` is not a regular file (refusing symlink to special file or directory)",
+                path_owned.display()
             )));
         }
-    }
 
-    let s = String::from_utf8(bytes).map_err(|e| {
-        Error::Auth(format!(
-            "secret file `{}` is not valid UTF-8: {e}",
-            path.display()
-        ))
-    })?;
-    Ok(s.trim_end().to_string())
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                return Err(Error::Auth(format!(
+                    "secret file `{}` has permissions {:o}; use chmod 600 or 400 to restrict reads to the owner",
+                    path_owned.display(),
+                    mode & 0o7777
+                )));
+            }
+        }
+
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).map_err(|e| {
+            Error::Auth(format!(
+                "failed to read secret file `{}`: {e}",
+                path_owned.display()
+            ))
+        })?;
+
+        let s = String::from_utf8(buf).map_err(|e| {
+            Error::Auth(format!(
+                "secret file `{}` is not valid UTF-8: {e}",
+                path_owned.display()
+            ))
+        })?;
+        Ok(s.trim_end().to_string())
+    })
+    .await
+    .map_err(|e| Error::Auth(format!("secret file read for `{display}` panicked: {e}")))?
 }
