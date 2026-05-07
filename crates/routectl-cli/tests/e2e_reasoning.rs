@@ -35,22 +35,13 @@ fn deepseek_alias_config(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "deepseek".into(),
-        ProviderEntry::OpenaiCompat {
-            base_url: format!("{upstream_base}/v1"),
-            api_key_ref: "literal:test".into(),
-            extra_headers: BTreeMap::new(),
-            default_extras: None,
-            reasoning_dialect: ReasoningDialect::Deepseek,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat(format!("{upstream_base}/v1"), "literal:test")
+            .with_reasoning_dialect(ReasoningDialect::Deepseek),
     );
     let mut aliases = BTreeMap::new();
     aliases.insert(
         "reasoning".into(),
-        AliasEntry {
-            chain: vec!["deepseek:deepseek-reasoner".into()],
-            retry: None,
-        },
+        AliasEntry::new(vec!["deepseek:deepseek-reasoner".to_string()]),
     );
     Arc::new(Config {
         server: ServerConfig::default(),
@@ -106,7 +97,10 @@ async fn deepseek_reasoning_content_lifts_to_reasoning_details_via_server() {
         .await
         .unwrap();
 
-    assert_eq!(resp["choices"][0]["message"]["content"], "Final answer: 42.");
+    assert_eq!(
+        resp["choices"][0]["message"]["content"],
+        "Final answer: 42."
+    );
     assert_eq!(resp["routectl_provider"], "deepseek");
 
     let details = resp["choices"][0]["message"]["reasoning_details"]

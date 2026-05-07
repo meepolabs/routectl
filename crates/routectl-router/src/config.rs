@@ -59,7 +59,9 @@ fn default_port() -> u16 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum ProviderEntry {
+    #[non_exhaustive]
     OpenaiCompat {
         base_url: String,
         /// Reference to the API key. One of:
@@ -76,6 +78,7 @@ pub enum ProviderEntry {
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
+    #[non_exhaustive]
     AnthropicApi {
         api_key_ref: String,
         #[serde(default = "default_anthropic_base")]
@@ -85,6 +88,7 @@ pub enum ProviderEntry {
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
+    #[non_exhaustive]
     ClaudeCookie {
         session_ref: String,
         #[serde(default)]
@@ -92,6 +96,7 @@ pub enum ProviderEntry {
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
+    #[non_exhaustive]
     ChatgptCookie {
         session_ref: String,
         #[serde(default, flatten)]
@@ -110,12 +115,155 @@ impl ProviderEntry {
             | Self::ChatgptCookie { runtime, .. } => runtime,
         }
     }
+
+    pub fn openai_compat(base_url: impl Into<String>, api_key_ref: impl Into<String>) -> Self {
+        Self::OpenaiCompat {
+            base_url: base_url.into(),
+            api_key_ref: api_key_ref.into(),
+            extra_headers: BTreeMap::new(),
+            default_extras: None,
+            reasoning_dialect: ReasoningDialect::default(),
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
+    pub fn anthropic_api(api_key_ref: impl Into<String>) -> Self {
+        Self::AnthropicApi {
+            api_key_ref: api_key_ref.into(),
+            base_url: default_anthropic_base(),
+            anthropic_version: default_anthropic_version(),
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
+    pub fn claude_cookie(session_ref: impl Into<String>) -> Self {
+        Self::ClaudeCookie {
+            session_ref: session_ref.into(),
+            organization_id: None,
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
+    pub fn chatgpt_cookie(session_ref: impl Into<String>) -> Self {
+        Self::ChatgptCookie {
+            session_ref: session_ref.into(),
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
+    pub fn with_runtime(mut self, rt: ProviderRuntimePolicy) -> Self {
+        match &mut self {
+            Self::OpenaiCompat { runtime, .. }
+            | Self::AnthropicApi { runtime, .. }
+            | Self::ClaudeCookie { runtime, .. }
+            | Self::ChatgptCookie { runtime, .. } => *runtime = rt,
+        }
+        self
+    }
+
+    pub fn with_extra_headers(mut self, headers: BTreeMap<String, String>) -> Self {
+        match &mut self {
+            Self::OpenaiCompat { extra_headers, .. } => *extra_headers = headers,
+            _ => panic!("ProviderEntry::with_extra_headers only applies to openai-compat"),
+        }
+        self
+    }
+
+    pub fn with_default_extras(mut self, extras: Option<serde_json::Value>) -> Self {
+        match &mut self {
+            Self::OpenaiCompat { default_extras, .. } => *default_extras = extras,
+            _ => panic!("ProviderEntry::with_default_extras only applies to openai-compat"),
+        }
+        self
+    }
+
+    pub fn with_reasoning_dialect(mut self, dialect: ReasoningDialect) -> Self {
+        match &mut self {
+            Self::OpenaiCompat {
+                reasoning_dialect, ..
+            } => *reasoning_dialect = dialect,
+            _ => {
+                panic!("ProviderEntry::with_reasoning_dialect only applies to openai-compat")
+            }
+        }
+        self
+    }
+
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        let u = url.into();
+        match &mut self {
+            Self::OpenaiCompat { base_url, .. } | Self::AnthropicApi { base_url, .. } => {
+                *base_url = u
+            }
+            _ => panic!("ProviderEntry::with_base_url only applies to api-backed providers"),
+        }
+        self
+    }
+
+    pub fn with_anthropic_version(mut self, version: impl Into<String>) -> Self {
+        match &mut self {
+            Self::AnthropicApi {
+                anthropic_version, ..
+            } => *anthropic_version = version.into(),
+            _ => {
+                panic!("ProviderEntry::with_anthropic_version only applies to anthropic-api")
+            }
+        }
+        self
+    }
+
+    pub fn with_organization_id(mut self, org_id: impl Into<String>) -> Self {
+        match &mut self {
+            Self::ClaudeCookie {
+                organization_id, ..
+            } => *organization_id = Some(org_id.into()),
+            _ => {
+                panic!("ProviderEntry::with_organization_id only applies to claude-cookie")
+            }
+        }
+        self
+    }
+
+    pub fn redact_secrets(&mut self) {
+        match self {
+            Self::OpenaiCompat { api_key_ref, .. } | Self::AnthropicApi { api_key_ref, .. } => {
+                *api_key_ref = redact_literal_secret(api_key_ref);
+            }
+            Self::ClaudeCookie { session_ref, .. } | Self::ChatgptCookie { session_ref, .. } => {
+                *session_ref = redact_literal_secret(session_ref);
+            }
+        }
+    }
+
+    pub fn secret_uris(&self) -> Vec<&str> {
+        match self {
+            Self::OpenaiCompat { api_key_ref, .. } | Self::AnthropicApi { api_key_ref, .. } => {
+                vec![api_key_ref.as_str()]
+            }
+            Self::ClaudeCookie { session_ref, .. } | Self::ChatgptCookie { session_ref, .. } => {
+                vec![session_ref.as_str()]
+            }
+        }
+    }
+}
+
+fn redact_literal_secret(uri: &str) -> String {
+    if let Some(rest) = uri.strip_prefix("literal:") {
+        if rest.is_empty() {
+            "literal:".into()
+        } else {
+            "literal:[REDACTED]".into()
+        }
+    } else {
+        uri.to_string()
+    }
 }
 
 /// Per-provider runtime knobs that gate dispatch: rate limits and a
 /// passive circuit breaker. All fields default to "off" so omitting
 /// the block leaves provider behavior unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProviderRuntimePolicy {
     /// Maximum requests per minute. When exceeded, the router treats
     /// this provider as a fallbackable failure and tries the next entry
@@ -164,7 +312,8 @@ pub enum ReasoningDialect {
     Passthrough,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AliasEntry {
     /// Ordered list of `provider:model` targets. First entry is preferred.
     pub chain: Vec<String>,
@@ -173,7 +322,19 @@ pub struct AliasEntry {
     pub retry: Option<RetryPolicy>,
 }
 
+impl AliasEntry {
+    pub fn new(chain: Vec<String>) -> Self {
+        Self { chain, retry: None }
+    }
+
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = Some(retry);
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// Default retry-attempts cap per provider in the chain. Used when
     /// no per-error-class override below is set.
@@ -234,6 +395,26 @@ impl Default for RetryPolicy {
             request_timeout_ms: None,
             stream_first_byte_timeout_ms: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderEntry, ReasoningDialect};
+
+    #[test]
+    #[should_panic(expected = "with_anthropic_version")]
+    fn wrong_variant_setter_panics() {
+        let _ = ProviderEntry::openai_compat("https://example.com/v1", "literal:test")
+            .with_anthropic_version("2023-06-01");
+    }
+
+    #[test]
+    fn redact_secrets_redacts_literal_only() {
+        let mut entry = ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-test")
+            .with_reasoning_dialect(ReasoningDialect::Openai);
+        entry.redact_secrets();
+        assert_eq!(entry.secret_uris(), vec!["literal:[REDACTED]"]);
     }
 }
 

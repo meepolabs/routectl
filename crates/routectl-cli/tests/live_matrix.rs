@@ -330,24 +330,16 @@ async fn build_test_router(
     let mut providers = BTreeMap::new();
     providers.insert(
         provider_name.to_string(),
-        ProviderEntry::OpenaiCompat {
-            base_url: base_url.to_string(),
-            api_key_ref: secret_uri.clone(),
-            extra_headers,
-            default_extras: None,
-            reasoning_dialect: dialect,
-            runtime: Default::default(),
-        },
+        ProviderEntry::openai_compat(base_url, secret_uri.clone())
+            .with_extra_headers(extra_headers)
+            .with_reasoning_dialect(dialect),
     );
 
     let mut aliases = BTreeMap::new();
     for t in targets {
         aliases.insert(
             (*t).to_string(),
-            AliasEntry {
-                chain: vec![format!("{provider_name}:{t}")],
-                retry: None,
-            },
+            AliasEntry::new(vec![format!("{provider_name}:{t}")]),
         );
     }
 

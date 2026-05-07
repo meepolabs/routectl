@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::{
     schema::{ChunkChoice, ChunkDelta},
-    ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, Provider,
-    Result, Role, Usage,
+    ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, Provider, Result,
+    Role, Usage,
 };
 use routectl_router::{
     AliasEntry, Config, ProviderEntry, ProviderRuntimePolicy, RetryPolicy, Router, RouterOptions,
@@ -83,14 +83,14 @@ impl Provider for MockProvider {
             _ => Err(Error::upstream(&self.id, 500, "unexpected")),
         }
     }
-    async fn stream(
-        &self,
-        req: ChatRequest,
-    ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let id = self.id.clone();
         match self.next_behavior() {
             Behavior::Ok | Behavior::OkSlow | Behavior::Streaming(_) => {
-                let chunks = vec![ok_chunk(&id, &req.model, "Hello"), ok_chunk(&id, &req.model, " world")];
+                let chunks = vec![
+                    ok_chunk(&id, &req.model, "Hello"),
+                    ok_chunk(&id, &req.model, " world"),
+                ];
                 Ok(futures::stream::iter(chunks.into_iter().map(Ok)).boxed())
             }
             Behavior::Status(s) => Err(Error::upstream(&id, s, "open-stream-error")),
@@ -151,12 +151,13 @@ fn build_router(aliases: BTreeMap<String, AliasEntry>) -> Router {
         server: Default::default(),
         providers: BTreeMap::new(),
         aliases,
-        retry: RetryPolicy {
-            max_attempts: 1,
-            initial_backoff_ms: 1,
-            backoff_multiplier: 1.0,
-            fallback_on_status: vec![429, 500, 502, 503, 504],
-            ..Default::default()
+        retry: {
+            let mut r = RetryPolicy::default();
+            r.max_attempts = 1;
+            r.initial_backoff_ms = 1;
+            r.backoff_multiplier = 1.0;
+            r.fallback_on_status = vec![429, 500, 502, 503, 504];
+            r
         },
         legacy_compat: Default::default(),
     };
@@ -198,10 +199,7 @@ fn req(model: &str) -> ChatRequest {
 }
 
 fn alias(chain: &[&str]) -> AliasEntry {
-    AliasEntry {
-        chain: chain.iter().map(|s| s.to_string()).collect(),
-        retry: None,
-    }
+    AliasEntry::new(chain.iter().map(|s| s.to_string()).collect())
 }
 
 #[tokio::test]
@@ -258,7 +256,10 @@ async fn complete_does_not_fall_back_on_4xx_other_than_429() {
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
 
-    let err = r.complete(req("fast")).await.expect_err("400 should propagate");
+    let err = r
+        .complete(req("fast"))
+        .await
+        .expect_err("400 should propagate");
     assert!(matches!(err, Error::Upstream { status: 400, .. }));
     assert_eq!(p2.calls(), 0);
 }
@@ -297,23 +298,22 @@ async fn complete_direct_provider_target_works() {
 async fn complete_retries_within_provider_then_falls_back() {
     let p1 = MockProvider::new(
         "p1",
-        vec![Behavior::Status(503), Behavior::Status(503), Behavior::Status(503)],
+        vec![
+            Behavior::Status(503),
+            Behavior::Status(503),
+            Behavior::Status(503),
+        ],
     );
     let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 3,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+        rp.max_attempts = 3;
+        rp.initial_backoff_ms = 1;
+        rp.backoff_multiplier = 1.0;
+        rp.fallback_on_status = vec![503];
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut r = build_router(aliases);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -417,20 +417,15 @@ async fn retry_on_429_overrides_max_attempts() {
         ],
     );
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![408, 429, 500, 502, 503, 504],
-                retry_on_429: Some(4),
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+        rp.max_attempts = 1;
+        rp.initial_backoff_ms = 1;
+        rp.backoff_multiplier = 1.0;
+        rp.fallback_on_status = vec![408, 429, 500, 502, 503, 504];
+        rp.retry_on_429 = Some(4);
+        AliasEntry::new(vec!["p:m".into()]).with_retry(rp)
+    });
     let mut r = build_router(aliases);
     r.register("p", p.clone());
     let resp = r.complete(req("fast")).await.expect("ok after retries");
@@ -442,27 +437,19 @@ async fn retry_on_429_overrides_max_attempts() {
 async fn retry_on_5xx_independent_of_429() {
     // 5xx retries get 1 attempt; 429 retries get 5. A 5xx run that
     // exhausts its budget falls through.
-    let p1 = MockProvider::new(
-        "p1",
-        vec![Behavior::Status(503), Behavior::Status(503)],
-    );
+    let p1 = MockProvider::new("p1", vec![Behavior::Status(503), Behavior::Status(503)]);
     let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 5,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                retry_on_5xx: Some(1),
-                retry_on_429: Some(5),
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+        rp.max_attempts = 5;
+        rp.initial_backoff_ms = 1;
+        rp.backoff_multiplier = 1.0;
+        rp.fallback_on_status = vec![503];
+        rp.retry_on_5xx = Some(1);
+        rp.retry_on_429 = Some(5);
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut r = build_router(aliases);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -482,14 +469,18 @@ async fn request_timeout_translates_to_network_error_and_retries() {
     }
     #[async_trait]
     impl Provider for SlowProvider {
-        fn id(&self) -> &str { &self.id }
+        fn id(&self) -> &str {
+            &self.id
+        }
         fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
             Ok(serde_json::json!({}))
         }
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> { Ok(None) }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
         async fn complete(&self, _req: ChatRequest) -> Result<ChatResponse> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             // First two calls hang past the timeout; third returns fast.
@@ -507,21 +498,16 @@ async fn request_timeout_translates_to_network_error_and_retries() {
         calls: AtomicUsize::new(0),
     });
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["slow:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![],
-                retry_on_network: Some(3),
-                request_timeout_ms: Some(20),
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+        rp.max_attempts = 1;
+        rp.initial_backoff_ms = 1;
+        rp.backoff_multiplier = 1.0;
+        rp.fallback_on_status = vec![];
+        rp.retry_on_network = Some(3);
+        rp.request_timeout_ms = Some(20);
+        AliasEntry::new(vec!["slow:m".into()]).with_retry(rp)
+    });
     let mut r = build_router(aliases);
     r.register("slow", p.clone());
     let resp = r.complete(req("fast")).await.expect("eventually ok");
@@ -533,25 +519,17 @@ async fn request_timeout_translates_to_network_error_and_retries() {
 #[tokio::test]
 async fn per_attempt_jitter_does_not_break_retries() {
     // Smoke test: jitter_ms > 0 doesn't crash the retry loop.
-    let p = MockProvider::new(
-        "p",
-        vec![Behavior::Status(503), Behavior::Ok],
-    );
+    let p = MockProvider::new("p", vec![Behavior::Status(503), Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 2,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                jitter_ms: 5,
-                fallback_on_status: vec![503],
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+        rp.max_attempts = 2;
+        rp.initial_backoff_ms = 1;
+        rp.backoff_multiplier = 1.0;
+        rp.jitter_ms = 5;
+        rp.fallback_on_status = vec![503];
+        AliasEntry::new(vec!["p:m".into()]).with_retry(rp)
+    });
     let mut r = build_router(aliases);
     r.register("p", p.clone());
     let resp = r.complete(req("fast")).await.expect("ok");
@@ -573,25 +551,21 @@ fn build_router_with_runtime(
         // OpenaiCompat entry here so Router::new picks up the runtime.
         providers.insert(
             name,
-            ProviderEntry::OpenaiCompat {
-                base_url: "http://example.invalid".into(),
-                api_key_ref: "literal:x".into(),
-                extra_headers: BTreeMap::new(),
-                default_extras: None,
-                reasoning_dialect: routectl_router::ReasoningDialect::Openai,
-                runtime,
-            },
+            ProviderEntry::openai_compat("http://example.invalid", "literal:x")
+                .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai)
+                .with_runtime(runtime),
         );
     }
     let cfg = Config {
         server: Default::default(),
         providers,
         aliases,
-        retry: RetryPolicy {
-            max_attempts: 1,
-            initial_backoff_ms: 1,
-            backoff_multiplier: 1.0,
-            ..Default::default()
+        retry: {
+            let mut r = RetryPolicy::default();
+            r.max_attempts = 1;
+            r.initial_backoff_ms = 1;
+            r.backoff_multiplier = 1.0;
+            r
         },
         legacy_compat: Default::default(),
     };
@@ -605,35 +579,43 @@ async fn rpm_limit_falls_through_to_next_provider() {
     let mut aliases = BTreeMap::new();
     aliases.insert(
         "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: None,
-        },
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]),
     );
     let mut runtime = BTreeMap::new();
-    runtime.insert(
-        "p1".into(),
-        ProviderRuntimePolicy {
-            rpm_limit: Some(2),
-            ..Default::default()
-        },
-    );
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+
+        rt.rpm_limit = Some(2);
+        rt
+    });
     let mut r = build_router_with_runtime(aliases, runtime);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
 
     // First two go to p1.
     assert_eq!(
-        r.complete(req("fast")).await.unwrap().routectl_provider.as_deref(),
+        r.complete(req("fast"))
+            .await
+            .unwrap()
+            .routectl_provider
+            .as_deref(),
         Some("p1")
     );
     assert_eq!(
-        r.complete(req("fast")).await.unwrap().routectl_provider.as_deref(),
+        r.complete(req("fast"))
+            .await
+            .unwrap()
+            .routectl_provider
+            .as_deref(),
         Some("p1")
     );
     // Third hits the bucket limit; falls through to p2.
     assert_eq!(
-        r.complete(req("fast")).await.unwrap().routectl_provider.as_deref(),
+        r.complete(req("fast"))
+            .await
+            .unwrap()
+            .routectl_provider
+            .as_deref(),
         Some("p2")
     );
     assert_eq!(p1.calls(), 2);
@@ -648,28 +630,28 @@ async fn circuit_breaker_skips_provider_after_consecutive_failures() {
     );
     let p2 = MockProvider::new("p2", vec![Behavior::Ok, Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+
+        rp.max_attempts = 1;
+
+        rp.initial_backoff_ms = 1;
+
+        rp.backoff_multiplier = 1.0;
+
+        rp.fallback_on_status = vec![503];
+
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut runtime = BTreeMap::new();
-    runtime.insert(
-        "p1".into(),
-        ProviderRuntimePolicy {
-            circuit_failures: Some(2),
-            circuit_cooldown_ms: Some(30_000),
-            ..Default::default()
-        },
-    );
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+
+        rt.circuit_failures = Some(2);
+
+        rt.circuit_cooldown_ms = Some(30_000);
+        rt
+    });
     let mut r = build_router_with_runtime(aliases, runtime);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -692,19 +674,19 @@ async fn disable_fallbacks_propagates_first_error() {
     let p1 = MockProvider::new("p1", vec![Behavior::Status(503)]);
     let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+
+        rp.max_attempts = 1;
+
+        rp.initial_backoff_ms = 1;
+
+        rp.backoff_multiplier = 1.0;
+
+        rp.fallback_on_status = vec![503];
+
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut r = build_router_with_runtime(aliases, BTreeMap::new());
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -717,19 +699,19 @@ async fn disable_fallbacks_propagates_first_error() {
     let p1b = MockProvider::new("p1", vec![Behavior::Status(503)]);
     let p2b = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+
+        rp.max_attempts = 1;
+
+        rp.initial_backoff_ms = 1;
+
+        rp.backoff_multiplier = 1.0;
+
+        rp.fallback_on_status = vec![503];
+
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut r = build_router_with_runtime(aliases, BTreeMap::new());
     r.register("p1", p1b);
     r.register("p2", p2b.clone());
@@ -759,32 +741,36 @@ async fn disable_fallbacks_propagates_first_error() {
 async fn retries_consume_rpm_tokens_and_fall_through_when_bucket_empty() {
     let p1 = MockProvider::new(
         "p1",
-        vec![Behavior::Status(503), Behavior::Status(503), Behavior::Status(503)],
+        vec![
+            Behavior::Status(503),
+            Behavior::Status(503),
+            Behavior::Status(503),
+        ],
     );
     let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                retry_on_5xx: Some(5),
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+
+        rp.max_attempts = 1;
+
+        rp.initial_backoff_ms = 1;
+
+        rp.backoff_multiplier = 1.0;
+
+        rp.fallback_on_status = vec![503];
+
+        rp.retry_on_5xx = Some(5);
+
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut runtime = BTreeMap::new();
-    runtime.insert(
-        "p1".into(),
-        ProviderRuntimePolicy {
-            rpm_limit: Some(2),
-            ..Default::default()
-        },
-    );
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+
+        rt.rpm_limit = Some(2);
+        rt
+    });
     let mut r = build_router_with_runtime(aliases, runtime);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -793,7 +779,11 @@ async fn retries_consume_rpm_tokens_and_fall_through_when_bucket_empty() {
     assert_eq!(resp.routectl_provider.as_deref(), Some("p2"));
     // p1 saw exactly 2 calls before the RPM bucket emptied; the router
     // then fell through to p2.
-    assert_eq!(p1.calls(), 2, "RPM gate must apply per-attempt, not per-request");
+    assert_eq!(
+        p1.calls(),
+        2,
+        "RPM gate must apply per-attempt, not per-request"
+    );
     assert_eq!(p2.calls(), 1);
 }
 
@@ -805,33 +795,38 @@ async fn retries_consume_rpm_tokens_and_fall_through_when_bucket_empty() {
 async fn retries_count_toward_circuit_breaker_threshold() {
     let p1 = MockProvider::new(
         "p1",
-        vec![Behavior::Status(503), Behavior::Status(503), Behavior::Status(503)],
+        vec![
+            Behavior::Status(503),
+            Behavior::Status(503),
+            Behavior::Status(503),
+        ],
     );
     let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                retry_on_5xx: Some(5),
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+
+        rp.max_attempts = 1;
+
+        rp.initial_backoff_ms = 1;
+
+        rp.backoff_multiplier = 1.0;
+
+        rp.fallback_on_status = vec![503];
+
+        rp.retry_on_5xx = Some(5);
+
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut runtime = BTreeMap::new();
-    runtime.insert(
-        "p1".into(),
-        ProviderRuntimePolicy {
-            circuit_failures: Some(2),
-            circuit_cooldown_ms: Some(60_000),
-            ..Default::default()
-        },
-    );
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+
+        rt.circuit_failures = Some(2);
+
+        rt.circuit_cooldown_ms = Some(60_000);
+        rt
+    });
     let mut r = build_router_with_runtime(aliases, runtime);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -865,20 +860,17 @@ async fn stream_mid_failure_charges_the_breaker() {
     let mut aliases = BTreeMap::new();
     aliases.insert(
         "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: None,
-        },
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]),
     );
     let mut runtime = BTreeMap::new();
-    runtime.insert(
-        "p1".into(),
-        ProviderRuntimePolicy {
-            circuit_failures: Some(2),
-            circuit_cooldown_ms: Some(60_000),
-            ..Default::default()
-        },
-    );
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+
+        rt.circuit_failures = Some(2);
+
+        rt.circuit_cooldown_ms = Some(60_000);
+        rt
+    });
     let mut r = build_router_with_runtime(aliases, runtime);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -909,7 +901,11 @@ async fn stream_mid_failure_charges_the_breaker() {
         }
     }
     assert!(got_chunk, "p2 should answer once p1's breaker is open");
-    assert_eq!(p1.calls(), calls_before, "p1 must be skipped while breaker is open");
+    assert_eq!(
+        p1.calls(),
+        calls_before,
+        "p1 must be skipped while breaker is open"
+    );
 }
 
 /// H2 fix: under concurrent dispatches after cooldown, only ONE caller
@@ -932,29 +928,28 @@ async fn half_open_probe_is_single_under_concurrent_load() {
     );
     let p2 = MockProvider::new("p2", vec![Behavior::Ok, Behavior::Ok, Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+
+        rp.max_attempts = 1;
+
+        rp.initial_backoff_ms = 1;
+
+        rp.backoff_multiplier = 1.0;
+
+        rp.fallback_on_status = vec![503];
+
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut runtime = BTreeMap::new();
-    runtime.insert(
-        "p1".into(),
-        ProviderRuntimePolicy {
-            circuit_failures: Some(2),
-            // Tiny cooldown so the test doesn't have to sleep for long.
-            circuit_cooldown_ms: Some(50),
-            ..Default::default()
-        },
-    );
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+
+        rt.circuit_failures = Some(2);
+
+        rt.circuit_cooldown_ms = Some(50);
+        rt
+    });
     let mut r = build_router_with_runtime(aliases, runtime);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -990,8 +985,14 @@ async fn half_open_probe_is_single_under_concurrent_load() {
     // other was deflected to p2 by the half-open guard.
     let p1_count = providers.iter().filter(|p| p.as_str() == "p1").count();
     let p2_count = providers.iter().filter(|p| p.as_str() == "p2").count();
-    assert_eq!(p1_count, 1, "exactly one half-open probe expected: {providers:?}");
-    assert_eq!(p2_count, 1, "the other concurrent request must fall through: {providers:?}");
+    assert_eq!(
+        p1_count, 1,
+        "exactly one half-open probe expected: {providers:?}"
+    );
+    assert_eq!(
+        p2_count, 1,
+        "the other concurrent request must fall through: {providers:?}"
+    );
     // p1 saw exactly 1 additional call (the probe) on top of the trip calls.
     assert_eq!(p1.calls(), p1_after_trip + 1);
 }
@@ -1004,28 +1005,28 @@ async fn dropped_stream_releases_half_open_probe_and_reopens_breaker() {
     );
     let p2 = MockProvider::new("p2", vec![Behavior::Ok, Behavior::Ok, Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+
+        rp.max_attempts = 1;
+
+        rp.initial_backoff_ms = 1;
+
+        rp.backoff_multiplier = 1.0;
+
+        rp.fallback_on_status = vec![503];
+
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut runtime = BTreeMap::new();
-    runtime.insert(
-        "p1".into(),
-        ProviderRuntimePolicy {
-            circuit_failures: Some(1),
-            circuit_cooldown_ms: Some(50),
-            ..Default::default()
-        },
-    );
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+
+        rt.circuit_failures = Some(1);
+
+        rt.circuit_cooldown_ms = Some(50);
+        rt
+    });
     let mut r = build_router_with_runtime(aliases, runtime);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -1044,7 +1045,11 @@ async fn dropped_stream_releases_half_open_probe_and_reopens_breaker() {
 
     let recovered = r.complete(req("fast")).await.unwrap();
     assert_eq!(recovered.routectl_provider.as_deref(), Some("p1"));
-    assert_eq!(p1.calls(), 3, "dropped stream must not leak the half-open slot");
+    assert_eq!(
+        p1.calls(),
+        3,
+        "dropped stream must not leak the half-open slot"
+    );
 }
 
 #[tokio::test]
@@ -1052,28 +1057,28 @@ async fn dropped_steady_state_stream_does_not_trip_breaker() {
     let p1 = MockProvider::new("p1", vec![Behavior::Ok, Behavior::Ok]);
     let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry {
-            chain: vec!["p1:m".into(), "p2:m".into()],
-            retry: Some(RetryPolicy {
-                max_attempts: 1,
-                initial_backoff_ms: 1,
-                backoff_multiplier: 1.0,
-                fallback_on_status: vec![503],
-                ..Default::default()
-            }),
-        },
-    );
+    aliases.insert("fast".into(), {
+        let mut rp = RetryPolicy::default();
+
+        rp.max_attempts = 1;
+
+        rp.initial_backoff_ms = 1;
+
+        rp.backoff_multiplier = 1.0;
+
+        rp.fallback_on_status = vec![503];
+
+        AliasEntry::new(vec!["p1:m".into(), "p2:m".into()]).with_retry(rp)
+    });
     let mut runtime = BTreeMap::new();
-    runtime.insert(
-        "p1".into(),
-        ProviderRuntimePolicy {
-            circuit_failures: Some(1),
-            circuit_cooldown_ms: Some(50),
-            ..Default::default()
-        },
-    );
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+
+        rt.circuit_failures = Some(1);
+
+        rt.circuit_cooldown_ms = Some(50);
+        rt
+    });
     let mut r = build_router_with_runtime(aliases, runtime);
     r.register("p1", p1.clone());
     r.register("p2", p2.clone());
@@ -1085,6 +1090,10 @@ async fn dropped_steady_state_stream_does_not_trip_breaker() {
 
     let recovered = r.complete(req("fast")).await.unwrap();
     assert_eq!(recovered.routectl_provider.as_deref(), Some("p1"));
-    assert_eq!(p1.calls(), 2, "client cancel after first chunk must not open the breaker");
+    assert_eq!(
+        p1.calls(),
+        2,
+        "client cancel after first chunk must not open the breaker"
+    );
     assert_eq!(p2.calls(), 0);
 }
