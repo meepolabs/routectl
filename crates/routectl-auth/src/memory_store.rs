@@ -126,5 +126,8 @@ async fn read_secret_file(path: &Path) -> Result<String> {
         Ok(s.trim_end().to_string())
     })
     .await
-    .map_err(|e| Error::Auth(format!("secret file read for `{display}` panicked: {e}")))?
+    .map_err(|e| {
+        let kind = if e.is_panic() { "panicked" } else { "was cancelled" };
+        Error::Auth(format!("secret file read for `{display}` {kind}: {e}"))
+    })?
 }
