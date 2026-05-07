@@ -69,13 +69,67 @@ anthropic_version = "2024-05-01"
             base_url,
             anthropic_version,
             api_key_ref,
+            auth_kind,
             ..
         } => {
             assert_eq!(base_url, "https://api2.anthropic.com");
             assert_eq!(anthropic_version, "2024-05-01");
             assert_eq!(api_key_ref, "env://ANTHROPIC_API_KEY");
+            // No `auth_kind` line in the TOML -> default api-key.
+            assert_eq!(
+                *auth_kind,
+                routectl_providers::anthropic_api::AuthKind::ApiKey
+            );
         }
         other => panic!("expected AnthropicApi, got {other:?}"),
+    }
+}
+
+/// `auth_kind = "oauth-bearer"` round-trips into `AuthKind::OauthBearer`,
+/// and the absence of the field defaults to `AuthKind::ApiKey`. Locks
+/// in the kebab-case TOML surface.
+#[test]
+fn anthropic_auth_kind_round_trips_through_toml() {
+    use routectl_providers::anthropic_api::AuthKind;
+
+    let toml_src = r#"
+[providers.claude-code]
+type = "anthropic-api"
+api_key_ref = "file://<local-path>"
+auth_kind = "oauth-bearer"
+
+[providers.anthropic-default]
+type = "anthropic-api"
+api_key_ref = "env://ANTHROPIC_API_KEY"
+"#;
+    let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
+
+    match cfg.providers.get("claude-code").expect("claude-code entry") {
+        ProviderEntry::AnthropicApi { auth_kind, .. } => {
+            assert_eq!(*auth_kind, AuthKind::OauthBearer);
+        }
+        other => panic!("expected AnthropicApi, got {other:?}"),
+    }
+
+    match cfg
+        .providers
+        .get("anthropic-default")
+        .expect("anthropic-default entry")
+    {
+        ProviderEntry::AnthropicApi { auth_kind, .. } => {
+            assert_eq!(*auth_kind, AuthKind::ApiKey);
+        }
+        other => panic!("expected AnthropicApi, got {other:?}"),
+    }
+
+    // Round-trip the other way: serialize and re-parse must preserve the value.
+    let reserialized = toml::to_string(&cfg).expect("re-serialize");
+    let cfg2: routectl_router::Config = toml::from_str(&reserialized).expect("re-parse");
+    match cfg2.providers.get("claude-code").unwrap() {
+        ProviderEntry::AnthropicApi { auth_kind, .. } => {
+            assert_eq!(*auth_kind, AuthKind::OauthBearer);
+        }
+        _ => unreachable!(),
     }
 }
 
