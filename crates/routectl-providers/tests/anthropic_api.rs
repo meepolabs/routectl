@@ -11,8 +11,9 @@ mod tests {
     use pretty_assertions::assert_eq;
     use routectl_core::Provider;
     use routectl_core::{
-        ChatRequest, Message, MessageContent, ReasoningConfig, ReasoningDetail,
-        ReasoningDetailKind, Role, ToolDef,
+        cache_control::CacheControl, content_part::ContentPart, system_content::SystemContent,
+        tool_def::CustomTool, ChatRequest, KnownContentPart, Message, MessageContent,
+        ReasoningConfig, ReasoningDetail, ReasoningDetailKind, Role, SystemBlock, ToolDef,
     };
     use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
     use serde_json::{json, Value};
@@ -175,6 +176,209 @@ mod tests {
         // No 'parameters' key in Anthropic shape
         assert!(tool.get("parameters").is_none());
         assert!(tool.get("function").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.4.0 cache_control round-trip tests (Commit 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_control_on_user_text_block_round_trips_to_wire() {
+        let provider = make_provider("https://api.anthropic.com");
+        let mut req = base_req(
+            "claude-opus-4-7",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                    text: "look at this".into(),
+                    cache_control: Some(CacheControl::ephemeral_5m()),
+                })]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+        );
+        // also set top-level for autocache
+        req.cache_control = Some(CacheControl::ephemeral_5m());
+
+        let body = provider.normalize_request(&req).unwrap();
+
+        // Wire body must carry cache_control on the user text block.
+        let blocks = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "look at this");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(blocks[0]["cache_control"]["ttl"], "5m");
+        // top-level cache_control survives.
+        assert_eq!(body["cache_control"]["ttl"], "5m");
+    }
+
+    #[test]
+    fn system_blocks_with_cache_control_emit_array_form() {
+        let provider = make_provider("https://api.anthropic.com");
+        let mut req = base_req(
+            "claude-opus-4-7",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+        );
+        req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "system prompt with cache".into(),
+            cache_control: Some(CacheControl::ephemeral_1h()),
+            citations: None,
+        }]));
+
+        let body = provider.normalize_request(&req).unwrap();
+        let arr = body["system"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn anthropic_beta_array_round_trips_into_body() {
+        let provider = make_provider("https://api.anthropic.com");
+        let mut req = base_req(
+            "claude-opus-4-7",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+        );
+        req.anthropic_beta = vec!["context-1m-2025-08-07".into(), "future-flag".into()];
+        let body = provider.normalize_request(&req).unwrap();
+        assert_eq!(
+            body["anthropic_beta"],
+            json!(["context-1m-2025-08-07", "future-flag"])
+        );
+    }
+
+    #[test]
+    fn typed_custom_tool_with_cache_control_serializes_correctly() {
+        let provider = make_provider("https://api.anthropic.com");
+        let mut req = base_req(
+            "claude-opus-4-7",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+        );
+        req.tools = Some(vec![ToolDef::Custom(CustomTool {
+            name: "lookup".into(),
+            description: Some("look up docs".into()),
+            input_schema: json!({"type": "object", "properties": {}}),
+            cache_control: Some(CacheControl::ephemeral_1h()),
+            defer_loading: Some(true),
+            strict: Some(true),
+            type_tag: None,
+        })]);
+        let body = provider.normalize_request(&req).unwrap();
+        let tool = &body["tools"][0];
+        assert_eq!(tool["name"], "lookup");
+        assert_eq!(tool["description"], "look up docs");
+        assert_eq!(tool["cache_control"]["ttl"], "1h");
+        assert_eq!(tool["defer_loading"], true);
+        assert_eq!(tool["strict"], true);
+    }
+
+    #[test]
+    fn anthropic_builtin_tool_passes_through_verbatim() {
+        let provider = make_provider("https://api.anthropic.com");
+        let mut req = base_req(
+            "claude-opus-4-7",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+        );
+        req.tools = Some(vec![ToolDef::Other(json!({
+            "type": "bash_20250124",
+            "name": "bash",
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }))]);
+        let body = provider.normalize_request(&req).unwrap();
+        let tool = &body["tools"][0];
+        // Builtin shape preserved exactly.
+        assert_eq!(tool["type"], "bash_20250124");
+        assert_eq!(tool["name"], "bash");
+        assert_eq!(tool["cache_control"]["ttl"], "5m");
+    }
+
+    #[test]
+    fn unknown_content_block_type_passes_through_verbatim() {
+        let provider = make_provider("https://api.anthropic.com");
+        let extras: serde_json::Map<String, Value> = [
+            ("id".to_string(), json!("srvtu_01")),
+            ("name".to_string(), json!("web_search")),
+            ("input".to_string(), json!({"query": "rust"})),
+        ]
+        .into_iter()
+        .collect();
+        let req = base_req(
+            "claude-opus-4-7",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Parts(vec![ContentPart::Other {
+                    type_tag: "server_tool_use".into(),
+                    cache_control: Some(CacheControl::ephemeral_1h()),
+                    extras,
+                }]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+        );
+        let body = provider.normalize_request(&req).unwrap();
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["type"], "server_tool_use");
+        assert_eq!(block["id"], "srvtu_01");
+        assert_eq!(block["name"], "web_search");
+        assert_eq!(block["input"]["query"], "rust");
+        assert_eq!(block["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn req_system_field_takes_precedence_over_role_system_messages() {
+        let provider = make_provider("https://api.anthropic.com");
+        // Both: req.system set AND a Role::System message in the array.
+        // req.system wins; the role-system message gets dropped.
+        let mut req = base_req(
+            "claude-opus-4-7",
+            vec![system_msg("legacy lifted system"), user_msg("hi")],
+        );
+        req.system = Some(SystemContent::Text("structured top-level system".into()));
+        let body = provider.normalize_request(&req).unwrap();
+        assert_eq!(body["system"], "structured top-level system");
+        // messages array contains only the user.
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
     }
 
     #[test]
