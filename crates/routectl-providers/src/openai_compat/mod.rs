@@ -55,6 +55,8 @@ pub struct OpenAiCompatConfig {
     pub default_extras: Option<Value>,
     /// Which reasoning wire-format quirks apply.
     pub reasoning_dialect: ReasoningDialect,
+    /// Override the User-Agent on outbound requests. `None` keeps reqwest's default.
+    pub user_agent: Option<String>,
 }
 
 pub struct OpenAiCompatProvider {
@@ -64,7 +66,7 @@ pub struct OpenAiCompatProvider {
 
 impl OpenAiCompatProvider {
     pub fn new(cfg: OpenAiCompatConfig) -> Self {
-        let client = reqwest::Client::new();
+        let client = crate::http_client::build(cfg.user_agent.as_deref());
         Self { cfg, client }
     }
 

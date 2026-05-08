@@ -13,5 +13,7 @@ pub use config::{
     AliasEntry, Config, LegacyCompat, ProviderEntry, ProviderKind, ProviderRuntimePolicy,
     ReasoningDialect, RetryPolicy, ServerConfig,
 };
+#[cfg(feature = "bedrock")]
+pub use config::{BedrockApiShapeConfig, BedrockCredsConfig};
 pub use factory::build_provider;
 pub use router::{Router, RouterOptions};
