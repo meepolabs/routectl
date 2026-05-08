@@ -1,9 +1,7 @@
 //! `POST /v1/chat/completions` handler. Thin wrapper around the
-//! generic `ingress_handle` driver with `OpenAiIngress`.
-//!
-//! All ingress-specific logic (request parsing, response/chunk
-//! rendering, end-of-stream marker) lives in the adapter; this file
-//! is just the route binding.
+//! generic `ingress_handle` driver with `OpenAiIngress`. The ingress's
+//! alias map comes from `AppState::openai_aliases` (loaded from
+//! `[ingress.openai].aliases` in TOML).
 
 use std::sync::Arc;
 
@@ -21,5 +19,6 @@ pub async fn chat_completions(
     headers: HeaderMap,
     body: Result<axum::Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    ingress_handle(state, headers, body, OpenAiIngress).await
+    let ingress = OpenAiIngress::new(state.openai_aliases.clone());
+    ingress_handle(state, headers, body, ingress).await
 }

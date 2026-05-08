@@ -61,6 +61,7 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
         aliases,
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
+        ingress: Default::default(),
     })
 }
 
@@ -99,6 +100,7 @@ fn two_provider_config(first_base: &str, second_base: &str) -> Arc<Config> {
         aliases,
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
+        ingress: Default::default(),
     })
 }
 

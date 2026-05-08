@@ -333,6 +333,7 @@ async fn build_test_router(
         aliases,
         retry: Default::default(),
         legacy_compat: Default::default(),
+        ingress: Default::default(),
     });
 
     let mut router = Router::new(cfg.clone());
