@@ -101,6 +101,71 @@ mod tests {
     }
 
     #[test]
+    fn legacy_system_lift_skips_non_text_content() {
+        // A Role::System message with Parts content (image/document/etc.)
+        // or Null must NOT produce `system: ""` upstream. The legacy lift
+        // returns None when no meaningful text is found, so the top-level
+        // `system` field is absent rather than an empty string.
+        let provider = make_provider("https://api.anthropic.com");
+        let req = base_req(
+            "claude-3-opus",
+            vec![
+                Message {
+                    role: Role::System,
+                    content: MessageContent::Parts(vec![ContentPart::Known(
+                        KnownContentPart::Image {
+                            source: serde_json::json!({"type": "url", "url": "https://example/x.png"}),
+                            cache_control: None,
+                        },
+                    )]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                user_msg("Hello!"),
+            ],
+        );
+        let body = provider.normalize_request(&req).unwrap();
+        assert!(
+            body.get("system").is_none(),
+            "expected absent `system`, got {:?}",
+            body.get("system")
+        );
+    }
+
+    #[test]
+    fn legacy_system_lift_extracts_text_from_parts() {
+        // A Role::System message with Parts containing a text block
+        // should still lift -- we extract the text content rather than
+        // dropping the whole message.
+        let provider = make_provider("https://api.anthropic.com");
+        let req = base_req(
+            "claude-3-opus",
+            vec![
+                Message {
+                    role: Role::System,
+                    content: MessageContent::Parts(vec![ContentPart::Known(
+                        KnownContentPart::Text {
+                            text: "primary system".into(),
+                            cache_control: None,
+                        },
+                    )]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                user_msg("Hello!"),
+            ],
+        );
+        let body = provider.normalize_request(&req).unwrap();
+        assert_eq!(body["system"], "primary system");
+    }
+
+    #[test]
     fn reasoning_max_tokens_maps_to_budget_tokens() {
         let provider = make_provider("https://api.anthropic.com");
         let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
