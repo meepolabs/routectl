@@ -84,6 +84,14 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // not via a body field, so strip any leftover.
     obj.remove("stream");
 
+    // Bedrock's InvokeModel takes the model identifier in the URL path
+    // (`/model/{model_id}/invoke`), not the body. The Anthropic API
+    // path requires it in the body, which `anthropic_api::request::
+    // normalize` honors -- but Bedrock's strict-schema validator
+    // rejects a body-side `model` with "Extra inputs are not
+    // permitted". Strip it here on the Bedrock-Invoke seam.
+    obj.remove("model");
+
     Ok(body)
 }
 
@@ -144,6 +152,10 @@ mod tests {
         assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]),);
         assert_eq!(body["top_p"], json!(0.9));
         assert!(body.get("stream").is_none(), "stream should be stripped");
+        assert!(
+            body.get("model").is_none(),
+            "model must be stripped: Bedrock takes it in the URL, not the body"
+        );
     }
 
     #[test]
