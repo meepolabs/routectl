@@ -134,6 +134,7 @@ impl Provider for AnthropicApiProvider {
         sse::parse_stateless(&self.cfg.id, raw)
     }
 
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let mut body = self.normalize_request(&req)?;
         // Ensure stream is absent / false for the non-streaming path.
@@ -161,6 +162,15 @@ impl Provider for AnthropicApiProvider {
                 .and_then(|v| v.as_str())
                 .unwrap_or("upstream error")
                 .to_string();
+            if status == 401 || status == 403 {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    auth_kind = ?self.cfg.auth_kind,
+                    message = %msg,
+                    "anthropic upstream auth failed",
+                );
+            }
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
@@ -169,6 +179,7 @@ impl Provider for AnthropicApiProvider {
         Ok(chat_resp)
     }
 
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
@@ -194,6 +205,15 @@ impl Provider for AnthropicApiProvider {
                 .and_then(|v| v.as_str())
                 .unwrap_or("upstream error")
                 .to_string();
+            if status == 401 || status == 403 {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    auth_kind = ?self.cfg.auth_kind,
+                    message = %msg,
+                    "anthropic upstream auth failed",
+                );
+            }
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 

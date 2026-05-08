@@ -22,3 +22,11 @@ pub use schema::{
 };
 pub use system_content::{SystemBlock, SystemContent};
 pub use tool_def::{CustomTool, ToolDef};
+
+/// Cross-crate cap on `body_excerpt` fields in upstream-error tracing
+/// logs. Sized to fit a typical AWS IAM error body (User ARN + action +
+/// resource ARN runs ~300 chars) plus headroom, while keeping log lines
+/// scannable. Used by both the bedrock and openai-compat providers so
+/// operators see consistent excerpt lengths across `body_excerpt=...`
+/// fields when grepping logs.
+pub const MAX_LOG_BODY_EXCERPT: usize = 512;

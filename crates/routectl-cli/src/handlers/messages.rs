@@ -17,6 +17,7 @@ use crate::handlers::ingress_handle::ingress_handle;
 use crate::ingress::anthropic::AnthropicIngress;
 use crate::server::AppState;
 
+#[tracing::instrument(skip_all, fields(ingress = "anthropic"))]
 pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

@@ -154,6 +154,76 @@ cargo check --workspace --no-default-features \
 The live matrix is slow (~30s) and costs cents per run. Use it as a
 final gate, not a tight inner loop.
 
+## Logging recipes
+
+routectl uses `tracing` with the env filter `ROUTECTL_LOG` (NOT the
+default `RUST_LOG`, since we don't want stray `RUST_LOG=debug` exports
+turning routectl into a firehose).
+
+Default level is `info`. Every log line carries the module path
+(`routectl_router::router`, `routectl_providers::bedrock`, etc.) and,
+inside an HTTP request, the `request_id` field for correlation across
+fallback hops.
+
+```bash
+# Full debug across all routectl crates.
+ROUTECTL_LOG=routectl=debug,routectl_providers=debug,routectl_router=debug \
+  ./routectl serve
+
+# Bedrock-only deep dive (SigV4 inputs + eventstream frames).
+ROUTECTL_LOG=routectl=info,routectl_providers::bedrock=trace ./routectl serve
+
+# Auth tracing only (secret resolution + credential failures + listener
+# rejections + upstream 401/403).
+ROUTECTL_LOG=routectl_auth=warn,routectl_providers::bedrock::auth=warn,\
+routectl_providers::bedrock::signing=warn,\
+routectl_cli::server::auth=warn ./routectl serve
+
+# Quiet -- only warnings and errors.
+ROUTECTL_LOG=warn ./routectl serve
+```
+
+### Request correlation
+
+Every request gets a `request_id`. Either supply your own via the
+`x-request-id` header (echoed back on the response so your client logs
+match) or routectl mints a `Uuid::now_v7()` (sortable by time). All
+log lines emitted while processing the request inherit `request_id` as
+a span field, so:
+
+```bash
+ROUTECTL_LOG=info ./routectl serve 2>&1 | grep request_id=probe-1
+```
+
+shows every event for one specific request: ingress parse, alias
+resolution, fallback hops, retry attempts, upstream calls, response
+shape, errors.
+
+### Auth-failure log shapes (no secret values, ever)
+
+| Surface | Log line |
+|---|---|
+| Listener auth (wrong `x-api-key` / `Bearer`) | `WARN routectl_cli::server::auth has_x_api_key=<bool> has_bearer=<bool> route=<path> "listener auth rejected"` |
+| Bad secret ref (`env://NONEXISTENT`) | `WARN routectl_auth::memory_store scheme=env:// var=<NAME> reason="not set" "secret resolution failed"` |
+| Bad secret ref (file perm too open) | `WARN routectl_auth::memory_store scheme=file:// path=<P> mode=<oct> reason="group/other readable; chmod 600 or 400" "secret resolution failed"` |
+| Bedrock SigV4 / cred chain failed | `WARN routectl_providers::bedrock::auth variant=Profile\|DefaultChain region=<r> error=... "bedrock credential resolution failed"` |
+| Bedrock SigV4 sign failure | `ERROR routectl_providers::bedrock::signing failure_kind=<kind> ... "bedrock auth failed"` -- where `<kind>` is one of `bearer_header_invalid`, `creds_unavailable`, `body_unbuffered`, `signing_params_build`, `non_ascii_header`, `signable_request_build`, `sigv4_sign`, `signed_header_name_invalid`, `signed_header_value_invalid`, `unexpected_query_params` |
+| Bedrock 403 (IAM denied) | `WARN routectl_providers::bedrock provider=<id> status=403 action=<bedrock-runtime:InvokeModel...> principal_present=<bool> "bedrock IAM access denied"` -- `action` extracted from the AWS error body so you immediately see WHICH IAM action your role lacks |
+| Bedrock in-stream auth event | `WARN routectl_providers::bedrock::eventstream provider=<id> event_type=accessDeniedException\|unauthorizedException\|authentication_error\|permission_error message=... "bedrock in-stream auth/permission exception"` |
+| Anthropic upstream 401/403 | `WARN routectl_providers::anthropic_api provider=<id> status=<401\|403> auth_kind=<ApiKey\|OauthBearer> message=... "anthropic upstream auth failed"` |
+| OpenAI-compat upstream 401/403 | `WARN routectl_providers::openai_compat provider=<id> status=<401\|403> body_excerpt=... "openai-compat upstream auth failed"` |
+
+### What's never logged
+
+- Resolved secret values (env contents, file contents, OAuth tokens,
+  bearer keys, AWS access/secret keys).
+- The supplied `x-api-key` / `Authorization: Bearer` value on a
+  rejected listener auth (we log only header presence).
+- Full upstream request/response bodies. Bodies are only excerpted to
+  256 chars on 4xx/5xx upstream paths, intentionally. Wire-level
+  body dump is a future opt-in (`ROUTECTL_DEBUG_BODIES=1`) with
+  header-redaction tests; it does not exist yet.
+
 ## When a model breaks the live matrix
 
 1. **Add the failing target to the matrix** in
