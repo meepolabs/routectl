@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 routectl-core.workspace = true
 routectl-providers = { workspace = true, default-features = false, features = ["openai-compat", "anthropic-api"] }
+# Optional: enable native Bedrock provider in routectl-cli builds. The
+# routectl-providers/bedrock feature pulls in aws-config + aws-sigv4 +
+# eventstream parsing. Off by default so the lean cli build stays small.
 routectl-router.workspace = true
 routectl-auth.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
@@ -39,10 +42,13 @@ dirs = "5"
 [features]
 # Enable live integration tests that hit real providers using API keys
 # from the environment (OPENROUTER_API_KEY, OPENCODE_GO_API_KEY, NIM_API_KEY,
-# ANTHROPIC_API_KEY). Tests skip cleanly when their key is absent.
-#   cargo test -p routectl-cli --features live-integration --release \
+# ANTHROPIC_API_KEY, AWS_BEARER_TOKEN_BEDROCK). Tests skip cleanly when
+# their key is absent.
+#   cargo test -p routectl-cli --features live-integration,bedrock --release \
 #     --test live_matrix -- --nocapture --test-threads=1
 live-integration = []
+# Enable native Bedrock provider in routectl-cli builds + Bedrock matrix tests.
+bedrock = ["routectl-providers/bedrock"]
 
 [dev-dependencies]
 wiremock.workspace = true
