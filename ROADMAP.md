@@ -3,8 +3,7 @@
 ## v0.1.0 (DONE -- 2026-05-06)
 
 Goal: a binary you can `cargo install`, point clients at, and have it
-route real LLM calls with fallback + reasoning normalization. Cookie
-auth providers scaffolded but feature-gated.
+route real LLM calls with fallback + reasoning normalization.
 
 128 tests pass across the workspace. Release binary 5.6MB stripped.
 
@@ -26,7 +25,8 @@ the modularization refactor with the routing-policy work surfaced
 during the v0.1 feature audit.
 
 165 tests pass. Live integration matrix: 5/5 tests, 43/47 model rows
-across OpenRouter / OpenCode-Go / NIM. Release binary still <6MB.
+across OpenRouter / NIM and additional OpenAI-compatible hosts.
+Release binary still <6MB.
 
 ### Highlights
 
@@ -97,9 +97,8 @@ Deferred from this milestone into v0.4.0:
 ## v0.4.0 (in flight on `feat/v0.4-ingress-canonical`) -- API spec independence
 
 Two ingress dialects (OpenAI Chat Completions + Anthropic Messages),
-one canonical internal request shape, N egress providers. Lets any
-harness (Claude Code, opencode, Codex, raw curl) pick either wire
-format and route through any backend.
+one canonical internal request shape, N egress providers. Any client
+that speaks either wire format can route through any backend.
 
 Landed in this milestone:
 

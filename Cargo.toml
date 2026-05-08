@@ -65,9 +65,6 @@ wiremock = "0.6"
 insta = { version = "1", features = ["yaml"] }
 tokio-test = "0.4"
 
-# Webview for v0.2 cookie capture (declared, not used in v0.1)
-# wry = "0.45"
-
 [profile.release]
 strip = true
 lto = "thin"
