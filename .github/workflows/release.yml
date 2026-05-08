@@ -30,10 +30,30 @@ name: release
 # attestation via actions/attest-build-provenance. Permissions are
 # scoped per job so id-token / attestations / contents writes are only
 # granted where needed.
+#
+# Dry-run: `workflow_dispatch` runs the FULL pipeline (validate +
+# build + sign + attest + deb + assertions) using a synthetic version
+# string supplied at trigger time, but SKIPS the GitHub Releases
+# upload step. Use this to exercise pipeline changes without burning
+# a real tag. Trigger via the Actions tab UI or:
+#   gh workflow run release.yml --ref develop -f version=0.0.0-dev
+# Note: cosign signatures from a workflow_dispatch run are bound to
+# the branch ref (`@refs/heads/develop`), so they do NOT pass the
+# published verification regexp (which pins to `@refs/tags/v[0-9]`).
+# The bundles are still produced; they're just not verifiable as
+# real-release signatures. That's intentional -- only tag-push runs
+# produce real releases.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Bare semver for artifact naming (e.g. 0.0.0-dev). NEVER publishes -- push a v* tag for a real release.'
+        required: true
+        default: '0.0.0-dev'
+        type: string
 
 # Default permissions are minimal. Per-job blocks add what each job
 # needs (id-token + attestations for build/deb, contents:write for
@@ -45,6 +65,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   BIN_NAME: routectl
+  # Tag-style version string (e.g. "v0.5.0") consumed by every step
+  # that derives artifact filenames or release-notes lookups. On tag
+  # push, this is the tag name verbatim. On workflow_dispatch (dry-run),
+  # this is `v<inputs.version>`. Steps strip the leading `v` in shell:
+  #   bash:  version="${ROUTECTL_TAG#v}"
+  #   pwsh:  $version = $env:ROUTECTL_TAG -replace '^v',''
+  ROUTECTL_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
 jobs:
   validate:
@@ -154,7 +181,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${ROUTECTL_TAG#v}"
           dir="${BIN_NAME}-${version}-${{ matrix.target }}"
           mkdir -p "stage/${dir}"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "stage/${dir}/"
@@ -168,7 +195,7 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          $version = $env:ROUTECTL_TAG -replace '^v',''
           $dir = "$env:BIN_NAME-$version-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "stage/$dir" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$env:BIN_NAME.exe" "stage/$dir/"
@@ -238,7 +265,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${ROUTECTL_TAG#v}"
           dir="${BIN_NAME}-${version}-${{ matrix.target }}"
 
           # Verify the downloaded .tar.xz matches the .sha256 the build
@@ -423,7 +450,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${ROUTECTL_TAG#v}"
           awk -v v="$version" '
             /^## \[/ {
               if (capture) exit
@@ -433,14 +460,14 @@ jobs:
           ' CHANGELOG.md > release_notes.md
 
           # Stable releases (v1.2.3) MUST have a matching CHANGELOG
-          # section. Pre-releases (v1.2.3-rc.0, -alpha.1, etc.) get
-          # a stub fallback so we can dry-run the pipeline without
-          # editing CHANGELOG. This catches the silent-failure mode
-          # where a typo in the heading drops us to the stub on a
-          # real release.
+          # section. Pre-releases (v1.2.3-rc.0, -alpha.1, etc.) AND
+          # workflow_dispatch dry-runs get a stub fallback so we can
+          # exercise the pipeline without editing CHANGELOG. This
+          # catches the silent-failure mode where a typo in the
+          # heading drops us to the stub on a real release.
           if [ ! -s release_notes.md ]; then
-            if [[ "$version" == *-* ]]; then
-              echo "Pre-release ${GITHUB_REF_NAME}." > release_notes.md
+            if [[ "$version" == *-* ]] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "Pre-release ${ROUTECTL_TAG}." > release_notes.md
             else
               echo "FAIL: no CHANGELOG section for [$version]" >&2
               echo "  expected a heading like '## [$version] - YYYY-MM-DD'" >&2
@@ -449,9 +476,24 @@ jobs:
             fi
           fi
 
-      - uses: softprops/action-gh-release@v2
+      # Real release upload -- only on tag push. workflow_dispatch
+      # runs everything else (validate, build, sign, attest, deb,
+      # assert-targets, SHA256SUMS sign) but stops short of creating
+      # a GitHub Release. This makes workflow_dispatch a true dry-run
+      # of the pipeline.
+      - name: publish to GitHub Releases
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           body_path: release_notes.md
           fail_on_unmatched_files: true
           generate_release_notes: false
+
+      - name: dry-run summary (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          echo "::notice title=Dry-run complete::Pipeline ran end-to-end for ${ROUTECTL_TAG}; GitHub Releases publish was SKIPPED. Push a v* tag to publish for real."
+          echo "Artifacts produced (uploaded as workflow run artifacts only):"
+          ls -1 dist/
