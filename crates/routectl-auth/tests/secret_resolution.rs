@@ -171,6 +171,31 @@ async fn file_get_handles_no_trailing_newline() {
 }
 
 #[tokio::test]
+async fn file_get_oversized_is_refused() {
+    // 1 MiB + 1 byte. Real secrets are bytes-to-kilobytes; a misconfigured
+    // path (e.g. /var/log/syslog) must not drive the loader toward OOM.
+    let oversized = "a".repeat((1 << 20) + 1);
+    let file = write_secret_file(&oversized, 0o600);
+    let store = MemoryStore::new();
+    let r = SecretRef::File(file.path().to_path_buf());
+    let err = store.get(&r).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("refusing to load"), "got: {msg}");
+    assert!(msg.contains("cap is"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn file_get_at_cap_size_succeeds() {
+    // Exactly 1 MiB must succeed. Boundary check on the cap.
+    let at_cap = "b".repeat(1 << 20);
+    let file = write_secret_file(&at_cap, 0o600);
+    let store = MemoryStore::new();
+    let r = SecretRef::File(file.path().to_path_buf());
+    let got = store.get(&r).await.unwrap();
+    assert_eq!(got.len(), 1 << 20);
+}
+
+#[tokio::test]
 async fn file_get_missing_is_error() {
     let store = MemoryStore::new();
     let r = SecretRef::File("/nonexistent/path/to/key".into());

@@ -134,9 +134,10 @@ where
 }
 
 /// Decode Bedrock Converse-stream frames into routectl `ChatChunk`s.
-/// Translation of the AWS-shaped events lives in `converse.rs` (M2.7);
-/// for now this stub mirrors the Invoke shape so the trait surface
-/// holds. Returns an empty stream when not yet implemented.
+/// Translation of the AWS-shaped events lives in `converse.rs` (planned
+/// for v0.4.0); for now this stub mirrors the Invoke shape so the trait
+/// surface holds. Yields a single not-implemented `Err` on first poll
+/// so callers see an explicit error rather than a silently-empty stream.
 pub fn converse_stream<S>(
     _provider_id: String,
     _byte_stream: S,

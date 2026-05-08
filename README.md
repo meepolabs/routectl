@@ -2,7 +2,7 @@
 
 A tiny local LLM router. Single Rust binary. Localhost-only by default. Drop-in OpenAI-compatible API with a unified reasoning surface (OpenRouter-shape) so any client that speaks OpenAI or OpenRouter speaks routectl.
 
-Status: **v0.2.0**. Two providers shipped (`openai-compat`, `anthropic-api`, the latter with both api-key and OAuth-bearer auth). Tier-1 retry policy + tier-2 per-provider rate limit and circuit breaker. Cookie-auth providers (`claude-cookie`, `chatgpt-cookie`) are scaffolded and feature-gated; their `wry` login flow is post-v0.3.
+Status: **v0.3.0** (in flight on `feat/v0.3-bedrock`). Three default-on provider classes: `openai-compat`, `anthropic-api` (api-key + OAuth-bearer auth), and native `bedrock` (SigV4 + eventstream streaming, full AWS credential chain). Tier-1 retry policy + tier-2 per-provider rate limit and circuit breaker. Cookie-auth providers (`claude-cookie`, `chatgpt-cookie`) are scaffolded and feature-gated.
 
 ## Why
 
@@ -15,21 +15,22 @@ You're using Claude Code, opencode, Codex, Cursor, or any other OpenAI-compatibl
 
 routectl is that binary. Nothing more.
 
-## Scope (v0.2)
+## Scope (v0.3)
 
 **In:**
 
 - OpenAI-compatible HTTP server on `127.0.0.1:<port>` (refuses non-loopback bind without explicit `--unsafe-public`)
-- Two provider classes built and tested:
+- Three default-on provider classes:
   - `openai-compat` (covers DeepSeek, OpenRouter, OpenAI, OpenCode Go, NVIDIA NIM, llama.cpp, Together, Groq, anything OpenAI-shaped) with 6 reasoning dialects: `openai`, `deepseek`, `vllm`, `raw-think-tag`, `openrouter`, `passthrough`
-  - `anthropic-api` (api.anthropic.com Messages API; `thinking` blocks with `signature` preserved across multi-turn tool use; either `x-api-key` or `Authorization: Bearer` auth)
+  - `anthropic-api` (api.anthropic.com Messages API; `thinking` blocks with `signature` preserved across multi-turn tool use; `x-api-key` or `Authorization: Bearer` auth; per-provider `extra_headers` and `user_agent` overrides)
+  - `bedrock` (native AWS Bedrock; SigV4 signing or short-term bearer keys; full AWS credential chain via `aws-config`; `InvokeModel` shape today, `Converse` adapter planned for v0.4.0; eventstream binary frame decoder for streaming)
 - Reasoning normalization to OpenRouter-shape `reasoning_details[]` array with provider-tagged `format`
 - Streaming SSE both directions, including stateful `<think>` tag handling for tags split across chunk boundaries
 - Fallback chain on 408/429/5xx/timeout (no fallback once first chunk has streamed)
 - Tier-1 retry: per-error-class caps (`retry_on_429` / `retry_on_5xx` / `retry_on_network`), per-attempt `request_timeout_ms`, `stream_first_byte_timeout_ms`, jittered backoff
 - Tier-2 routing gates: per-provider `rpm_limit` (token bucket), passive circuit breaker (`circuit_failures` + cooldown, single-probe half-open under concurrent load), per-request `x-routectl-disable-fallbacks` header
 - TOML config in `~/.config/routectl/config.toml`
-- Secret resolution from `env://`, `file://` (chmod-600 / 400, TOCTOU-safe), or inline `literal:` URIs
+- Secret resolution from `env://`, `file://` (chmod-600 / 400, TOCTOU-safe, 1 MiB cap), or inline `literal:` URIs
 
 **Scaffolded but feature-gated:**
 
@@ -64,7 +65,7 @@ cargo build --release
 ./target/release/routectl --help
 ```
 
-The release binary is under 6MB stripped, single-file, with no system-library dependencies. Just place it on your PATH.
+The release binary is roughly 6.5 MB stripped with default features (which include the `bedrock` provider and its `aws-config` dependency tree), or about 5.6 MB if you build with `--no-default-features --features openai-compat,anthropic-api`. Single-file, no system-library dependencies. Place it on your PATH.
 
 ## Quickstart
 
@@ -149,21 +150,85 @@ Routectl does not bundle an OS-keychain integration. Most managed-secret tools c
 
 The `anthropic-api` provider supports two wire formats, both pointed at `https://api.anthropic.com/v1/messages`:
 
-- `auth_kind = "api-key"` (default) -- standard `x-api-key: <key>` header. Use with API keys provisioned through the Anthropic Console (`sk-ant-api03-...`). This is the path most third-party tools should use.
-- `auth_kind = "oauth-bearer"` -- sends `Authorization: Bearer <token>` plus the `anthropic-beta: oauth-2025-04-20` gate. Use when you have an Anthropic-issued OAuth access token to present and the client you're routing knows it's responsible for that token.
+- `auth_kind = "api-key"` (default) -- standard `x-api-key: <key>` header. Use with API keys provisioned through the Anthropic Console (`sk-ant-api03-...`).
+- `auth_kind = "oauth-bearer"` -- sends `Authorization: Bearer <token>`. Use when you have an Anthropic OAuth access token to present.
 
-Wire either path the same way: hand `api_key_ref` a `file://` or `env://` URI pointing at the credential.
+Beta gates are not coupled to the auth kind. To enable `anthropic-beta` flags (1M context, prompt caching, extended thinking, OAuth gates, etc.) declare them yourself via `extra_headers`:
 
 ```toml
 [providers.anthropic-oauth]
 type = "anthropic-api"
 api_key_ref = "file:///abs/path/to/anthropic-oauth-token"
 auth_kind = "oauth-bearer"
+extra_headers = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
+
+[providers.anthropic-api]
+type = "anthropic-api"
+api_key_ref = "env://ANTHROPIC_API_KEY"
+extra_headers = { "anthropic-beta" = "context-1m-2025-08-07,prompt-caching-2024-07-31" }
 ```
 
-routectl reads the credential fresh on each request, so rotating it on disk is a no-restart operation. Refresh-token round-trip is on the v0.2.1 list.
+`extra_headers` cannot override auth-bearing headers (`authorization`, `x-api-key`, `host`); collisions are dropped with a `tracing::warn!`.
 
-> Anthropic restricts how OAuth tokens issued through Claude subscription products may be used outside Anthropic's own apps. Routectl just speaks the wire protocol -- you are responsible for ensuring whatever token you supply is permitted to be used the way you're using it. See [Anthropic's terms](https://www.anthropic.com/legal) and [Claude Code's compliance docs](https://code.claude.com/docs/en/legal-and-compliance) for current policy.
+The credential is resolved once at startup and held in process memory. To rotate a token on disk, restart routectl. Live OAuth refresh (re-read on rotation, plus full refresh-token round-trip against the OAuth provider) is on the v0.4.0 roadmap.
+
+> OAuth access tokens may carry usage restrictions imposed by their issuer. routectl just speaks the wire protocol; check the upstream provider's terms before pointing it at production traffic.
+
+## Bedrock provider
+
+`type = "bedrock"` talks to `bedrock-runtime.<region>.amazonaws.com` directly, no gateway in the middle. Two request shapes, selected per-provider via `api_shape`:
+
+- `invoke` (default) -- per-vendor body shape; today this is the Anthropic Messages JSON shape with `anthropic_version = "bedrock-2023-05-31"`. Reuses the `anthropic-api` request/response normalization, so multi-turn tool use, thinking signatures, and cache breakpoints round-trip unchanged.
+- `converse` -- AWS's vendor-neutral envelope. The transport, auth, and streaming framing are wired; body translation lands in v0.4.0.
+
+Credentials resolve through one of four mutually exclusive `creds.kind` shapes:
+
+```toml
+# Short-term Bedrock API key from the AWS console. Skips SigV4 entirely
+# and sends Authorization: Bearer <key>. Useful for quick demos; expires
+# in hours.
+[providers.bedrock-bearer]
+type = "bedrock"
+region = "us-east-1"
+model_id = "us.anthropic.claude-opus-4-7"
+creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
+
+# Raw access key + secret key (+ optional session token). Each value
+# resolves through a routectl SecretRef URI.
+[providers.bedrock-static.creds]
+kind = "static"
+access_key_ref = "env://AWS_ACCESS_KEY_ID"
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+session_token_ref = "env://AWS_SESSION_TOKEN"  # optional
+[providers.bedrock-static]
+type = "bedrock"
+region = "us-east-1"
+model_id = "us.anthropic.claude-opus-4-7"
+
+# Named profile from ~/.aws/credentials / ~/.aws/config. SSO sessions
+# auto-refresh via aws-config.
+[providers.bedrock-profile]
+type = "bedrock"
+region = "us-east-1"
+model_id = "us.anthropic.claude-opus-4-7"
+creds = { kind = "profile", name = "my-bedrock-profile" }
+
+# Standard AWS chain: env -> profile -> SSO -> web identity / IRSA ->
+# EC2/ECS metadata. Picks whichever first resolves.
+[providers.bedrock-default]
+type = "bedrock"
+region = "us-east-1"
+model_id = "us.anthropic.claude-opus-4-7"
+creds = { kind = "default-chain" }
+```
+
+A few Bedrock-specific knobs that come up in practice:
+
+- `user_agent` -- per-provider UA override. Required when an IAM policy gates access via the `aws:UserAgent` condition key.
+- `anthropic_beta` -- list of beta flags merged into the request body's top-level `anthropic_beta` array (Invoke) or `additionalModelRequestFields.anthropic_beta` (Converse). Independent of `extra_headers`.
+- `additional_model_request_fields` -- free-form JSON merged into the request body, for vendor-specific knobs that don't yet have a dedicated config field.
+
+The `bedrock` feature is on by default; library consumers who want to skip the AWS dependency tree can build with `--no-default-features --features openai-compat,anthropic-api`. AWS credential refresh (SSO token rotation, role-credential refresh, IMDS rotation) is handled by `aws-config` itself; routectl calls `provide_credentials()` per signing request and the SDK does the right thing.
 
 ## Model groups (recommended pattern)
 
@@ -246,17 +311,19 @@ Anthropic extended thinking is handled by the `anthropic-api` provider directly:
 ```
 crates/
   routectl-core/         Provider trait + OpenRouter-shape schema (request/response/chunk types)
-  routectl-providers/    openai_compat (6 dialects), anthropic_api (api-key + oauth-bearer), claude_cookie + chatgpt_cookie (stubs)
+  routectl-providers/    openai_compat (6 dialects), anthropic_api (api-key + oauth-bearer),
+                         bedrock (SigV4 + InvokeModel + eventstream; Converse stubbed for v0.4.0),
+                         claude_cookie + chatgpt_cookie (feature-gated stubs)
   routectl-router/       alias resolution + fallback chain + tier-1 retry + tier-2 RPM/breaker + provider factory
   routectl-auth/         SecretStore trait + MemoryStore resolving env:// / file:// (TOCTOU-safe) / literal:
   routectl-cli/          axum HTTP server + clap subcommands (serve, test, config, login)
 ```
 
-165 tests pass across the workspace. `cargo test --workspace` -- 0 failures, 0 warnings.
+Run `cargo test --workspace --features bedrock` for the full suite. The live integration matrix is opt-in via the `live-integration` feature and skips per-provider when its env key is absent.
 
 ## Tested models
 
-A live integration matrix in `crates/routectl-cli/tests/live_matrix.rs` exercises representative models across OpenRouter, OpenCode-Go, and NIM end-to-end through the router. Run with:
+A live integration matrix in `crates/routectl-cli/tests/live_matrix.rs` exercises representative models across OpenRouter, OpenCode-Go, and NIM end-to-end through the router. (Bedrock entries land in v0.4.0 alongside the doctor command.) Run with:
 
 ```bash
 cargo test -p routectl-cli --features live-integration --release \
