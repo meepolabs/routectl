@@ -67,8 +67,17 @@ pub struct AnthropicStreamState {
     /// Stream identifiers cached from first chunk.
     msg_id: Option<String>,
     msg_model: Option<String>,
-    /// Tool-use block tracking: tool call index -> (block_index, id, name).
-    tool_blocks: Vec<(usize, String, String)>,
+    /// Buffered tool-use deltas keyed by tool call index. We flush them
+    /// sequentially at the end of the stream so OpenAI-style interleaved
+    /// tool call chunks still produce valid Anthropic block ordering.
+    tool_blocks: Vec<ToolBlockState>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ToolBlockState {
+    id: String,
+    name: String,
+    partial_json: String,
 }
 
 impl IngressStreamState for AnthropicStreamState {
@@ -429,13 +438,14 @@ fn render_chunk_internal(
         emit_delta_events(&choice.delta, state, &mut events)?;
 
         if let Some(fr) = choice.finish_reason.as_deref() {
+            flush_tool_blocks(state, &mut events);
             close_open_block(state, &mut events);
-            emit_message_delta(state, fr, chunk.usage.as_ref(), &mut events);
+            emit_message_delta(Some(fr), chunk.usage.as_ref(), &mut events);
             emit_message_stop(state, &mut events);
         }
     } else if chunk.usage.is_some() {
         // Usage-only chunk (Anthropic emits these in message_delta).
-        emit_message_delta(state, "end_turn", chunk.usage.as_ref(), &mut events);
+        emit_message_delta(None, chunk.usage.as_ref(), &mut events);
     }
 
     Ok(events)
@@ -555,7 +565,7 @@ const MAX_TOOL_CALL_INDEX: usize = 64;
 fn apply_tool_call_delta(
     tc: &Value,
     state: &mut AnthropicStreamState,
-    events: &mut Vec<SseEvent>,
+    _events: &mut Vec<SseEvent>,
 ) -> Result<()> {
     // OpenAI shape: {index, id?, type, function: {name?, arguments?}}.
     let call_index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -566,62 +576,65 @@ fn apply_tool_call_delta(
     }
 
     // Allocate a new tool_use block on first sight of this call_index.
-    let block_index = match state.tool_blocks.get(call_index).cloned() {
-        Some((idx, _, _)) => idx,
-        None => {
-            close_open_block(state, events);
-            let id = tc
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let name = tc
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let idx = state.next_index;
-            state.next_index += 1;
-            // Track for future deltas under the same call_index.
-            while state.tool_blocks.len() <= call_index {
-                state.tool_blocks.push((0, String::new(), String::new()));
-            }
-            state.tool_blocks[call_index] = (idx, id.clone(), name.clone());
-            state.open = Some((idx, OpenBlockKind::ToolUse));
-            events.push(SseEvent::named(
-                "content_block_start",
-                serde_json::to_string(&json!({
-                    "type": "content_block_start",
-                    "index": idx,
-                    "content_block": {
-                        "type": "tool_use",
-                        "id": id,
-                        "name": name,
-                        "input": {},
-                    },
-                }))
-                .unwrap_or_default(),
-            ));
-            idx
-        }
-    };
+    while state.tool_blocks.len() <= call_index {
+        state.tool_blocks.push(ToolBlockState::default());
+    }
+    let block = &mut state.tool_blocks[call_index];
+    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+        block.id = id.to_string();
+    }
+    if let Some(name) = tc
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(|v| v.as_str())
+    {
+        block.name = name.to_string();
+    }
 
-    // Append partial JSON arguments via input_json_delta.
     if let Some(args) = tc
         .get("function")
         .and_then(|f| f.get("arguments"))
         .and_then(|v| v.as_str())
     {
         if !args.is_empty() {
-            push_block_delta(
-                events,
-                block_index,
-                json!({"type": "input_json_delta", "partial_json": args}),
-            );
+            block.partial_json.push_str(args);
         }
     }
     Ok(())
+}
+
+fn flush_tool_blocks(state: &mut AnthropicStreamState, events: &mut Vec<SseEvent>) {
+    let buffered = std::mem::take(&mut state.tool_blocks);
+    for block in buffered
+        .into_iter()
+        .filter(|b| !b.id.is_empty() || !b.name.is_empty())
+    {
+        close_open_block(state, events);
+        let idx = state.next_index;
+        state.next_index += 1;
+        state.open = Some((idx, OpenBlockKind::ToolUse));
+        events.push(SseEvent::named(
+            "content_block_start",
+            serde_json::to_string(&json!({
+                "type": "content_block_start",
+                "index": idx,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": {},
+                },
+            }))
+            .unwrap_or_default(),
+        ));
+        if !block.partial_json.is_empty() {
+            push_block_delta(
+                events,
+                idx,
+                json!({"type": "input_json_delta", "partial_json": block.partial_json}),
+            );
+        }
+    }
 }
 
 /// Open a content block of `kind` if one isn't already open. Returns
@@ -685,15 +698,16 @@ fn push_block_delta(events: &mut Vec<SseEvent>, idx: usize, delta: Value) {
 }
 
 fn emit_message_delta(
-    _state: &AnthropicStreamState,
-    finish_reason: &str,
+    finish_reason: Option<&str>,
     usage: Option<&routectl_core::UsageDelta>,
     events: &mut Vec<SseEvent>,
 ) {
     let mut delta = Map::new();
     delta.insert(
         "stop_reason".into(),
-        Value::String(openai_finish_to_anthropic_stop(finish_reason).into()),
+        finish_reason
+            .map(|fr| Value::String(openai_finish_to_anthropic_stop(fr).into()))
+            .unwrap_or(Value::Null),
     );
     delta.insert("stop_sequence".into(), Value::Null);
 
@@ -775,6 +789,7 @@ impl IngressAdapter for AnthropicIngress {
         let s = anthropic_state_mut(state);
         let mut events = Vec::new();
         if !s.finished {
+            flush_tool_blocks(s, &mut events);
             close_open_block(s, &mut events);
             emit_message_stop(s, &mut events);
         }
@@ -1096,24 +1111,97 @@ mod tests {
         let mut s = fresh_state();
         let events = render_chunk_internal(chunk, &mut s).unwrap();
         let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
-        // Anthropic protocol requires sequential blocks (no
-        // interleaving): block 0 must be stopped before block 1
-        // opens. The translation buffers per chunk, but the wire
-        // ordering is the protocol contract.
+        assert_eq!(names, vec!["message_start"]);
+        assert_eq!(s.tool_blocks.len(), 2);
+        assert_eq!(s.tool_blocks[0].id, "toolu_01");
+        assert_eq!(s.tool_blocks[1].id, "toolu_02");
+    }
+
+    #[test]
+    fn stream_interleaved_tool_call_chunks_flush_in_valid_order_at_finish() {
+        use routectl_core::{ChunkChoice, ChunkDelta};
+        let mut s = fresh_state();
+        let first = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    tool_calls: Some(vec![
+                        json!({
+                            "index": 0,
+                            "id": "toolu_01",
+                            "type": "function",
+                            "function": {"name": "calc", "arguments": "{\"a\":"}
+                        }),
+                        json!({
+                            "index": 1,
+                            "id": "toolu_02",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{\"q\":"}
+                        }),
+                    ]),
+                    ..Default::default()
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let second = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    tool_calls: Some(vec![
+                        json!({
+                            "index": 1,
+                            "function": {"arguments": "\"rust\"}"}
+                        }),
+                        json!({
+                            "index": 0,
+                            "function": {"arguments": "1}"}
+                        }),
+                    ]),
+                    ..Default::default()
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: None,
+        };
+
+        let _ = render_chunk_internal(first, &mut s).unwrap();
+        let events = render_chunk_internal(second, &mut s).unwrap();
+        let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
         assert_eq!(
             names,
             vec![
-                "message_start",
                 "content_block_start",
                 "content_block_delta",
                 "content_block_stop",
                 "content_block_start",
-                "content_block_delta"
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
             ]
         );
-        // Two distinct block indices were allocated.
-        assert_eq!(s.tool_blocks.len(), 2);
-        assert_ne!(s.tool_blocks[0].0, s.tool_blocks[1].0);
+    }
+
+    #[test]
+    fn usage_only_chunk_emits_null_stop_reason() {
+        use routectl_core::UsageDelta;
+        let mut s = fresh_state();
+        let _ = render_chunk_internal(text_chunk("hello", None), &mut s).unwrap();
+        let usage_only = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![],
+            usage: Some(UsageDelta::default()),
+        };
+        let events = render_chunk_internal(usage_only, &mut s).unwrap();
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert!(payload["delta"]["stop_reason"].is_null());
     }
 
     #[test]

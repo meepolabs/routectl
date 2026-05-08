@@ -428,6 +428,37 @@ mod tests {
     }
 
     #[test]
+    fn tool_role_parts_are_translated_to_anthropic_blocks() {
+        let provider = make_provider("https://api.anthropic.com");
+        let req = base_req(
+            "claude-opus-4-7",
+            vec![Message {
+                role: Role::Tool,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ImageUrl {
+                        image_url: json!({"url": "https://example.com/img.png"}),
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some("toolu_01".into()),
+                tool_calls: None,
+            }],
+        );
+        let body = provider.normalize_request(&req).unwrap();
+        let block = &body["messages"][0]["content"][0];
+        assert_eq!(block["type"], "tool_result");
+        assert_eq!(block["content"][0]["type"], "image");
+        assert_eq!(block["content"][0]["source"]["type"], "url");
+        assert_eq!(
+            block["content"][0]["source"]["url"],
+            "https://example.com/img.png"
+        );
+    }
+
+    #[test]
     fn max_tokens_defaults_to_4096_when_not_set() {
         let provider = make_provider("https://api.anthropic.com");
         let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
