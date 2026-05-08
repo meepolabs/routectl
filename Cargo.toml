@@ -16,6 +16,11 @@ license = "MIT"
 repository = "https://github.com/meepolabs/routectl"
 homepage = "https://github.com/meepolabs/routectl"
 authors = ["Meepo Labs"]
+# Internal crates of the routectl binary, not intended for crates.io
+# publication (path-only `routectl-core.workspace = true` deps would
+# need explicit version specifiers to be publishable). When publishing
+# becomes a goal, flip this and add versions to the path deps.
+publish = false
 
 [workspace.dependencies]
 # Local crates

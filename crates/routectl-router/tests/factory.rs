@@ -6,7 +6,7 @@ use routectl_router::{build_provider, ProviderEntry, ReasoningDialect};
 
 #[tokio::test]
 async fn build_openai_compat_resolves_secret() {
-    let store = MemoryStore::default();
+    let store = MemoryStore;
     let entry = ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-abc")
         .with_reasoning_dialect(ReasoningDialect::Openai);
     let provider = build_provider("test", &entry, &store).await.expect("build");
@@ -15,7 +15,7 @@ async fn build_openai_compat_resolves_secret() {
 
 #[tokio::test]
 async fn build_anthropic_api_resolves_secret() {
-    let store = MemoryStore::default();
+    let store = MemoryStore;
     let entry = ProviderEntry::anthropic_api("literal:sk-ant-abc");
     let provider = build_provider("anthropic", &entry, &store)
         .await
@@ -25,7 +25,7 @@ async fn build_anthropic_api_resolves_secret() {
 
 #[tokio::test]
 async fn build_claude_cookie_returns_not_enabled() {
-    let store = MemoryStore::default();
+    let store = MemoryStore;
     let entry = ProviderEntry::claude_cookie("literal:fake-cookie");
     match build_provider("claude-pro", &entry, &store).await {
         Err(Error::Auth(msg)) => {
@@ -39,7 +39,7 @@ async fn build_claude_cookie_returns_not_enabled() {
 
 #[tokio::test]
 async fn build_chatgpt_cookie_returns_not_enabled() {
-    let store = MemoryStore::default();
+    let store = MemoryStore;
     let entry = ProviderEntry::chatgpt_cookie("literal:fake-cookie");
 
     match build_provider("chatgpt-plus", &entry, &store).await {
@@ -163,7 +163,7 @@ reasoning_dialect = "deepseek"
 #[tokio::test]
 async fn build_with_missing_env_var_errors() {
     std::env::remove_var("ROUTECTL_TEST_MISSING_KEY");
-    let store = MemoryStore::default();
+    let store = MemoryStore;
     let entry = ProviderEntry::anthropic_api("env://ROUTECTL_TEST_MISSING_KEY");
     match build_provider("anthropic", &entry, &store).await {
         Err(Error::Auth(msg)) => {

@@ -82,10 +82,7 @@ fn sigv4_sign(
     // SignableRequest synchronously, so the borrow is released before we
     // touch `req.headers_mut()` below. Avoids a per-request copy.
     let body_bytes = req.body().and_then(|b| b.as_bytes()).ok_or_else(|| {
-        tracing::error!(
-            failure_kind = "body_unbuffered",
-            "bedrock auth failed",
-        );
+        tracing::error!(failure_kind = "body_unbuffered", "bedrock auth failed",);
         Error::Auth(
             "bedrock: cannot SigV4-sign a streaming or unbuffered body; \
                  body() must resolve to in-memory bytes"
@@ -141,16 +138,15 @@ fn sigv4_sign(
     let method = req.method().as_str();
     let url = req.url().as_str();
 
-    let signable = SignableRequest::new(method, url, header_pairs.into_iter(), body).map_err(
-        |e| {
+    let signable =
+        SignableRequest::new(method, url, header_pairs.into_iter(), body).map_err(|e| {
             tracing::error!(
                 failure_kind = "signable_request_build",
                 error = %e,
                 "bedrock auth failed",
             );
             Error::Auth(format!("bedrock: signable request build failed: {e}"))
-        },
-    )?;
+        })?;
 
     let (instructions, _signature) = sign(signable, &signing_params)
         .map_err(|e| {

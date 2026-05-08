@@ -30,7 +30,6 @@ enum Behavior {
     /// dispatch to race the gate.
     OkSlow,
     Status(u16),
-    Streaming(String),
     StreamFirstChunkErrors(u16),
     StreamMidErrors,
 }
@@ -83,14 +82,13 @@ impl Provider for MockProvider {
                 Ok(ok_response(&self.id, &req.model))
             }
             Behavior::Status(s) => Err(Error::upstream(&self.id, s, "mock")),
-            Behavior::Streaming(msg) => Err(Error::Streaming(msg)),
             _ => Err(Error::upstream(&self.id, 500, "unexpected")),
         }
     }
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let id = self.id.clone();
         match self.next_behavior() {
-            Behavior::Ok | Behavior::OkSlow | Behavior::Streaming(_) => {
+            Behavior::Ok | Behavior::OkSlow => {
                 let chunks = vec![
                     ok_chunk(&id, &req.model, "Hello"),
                     ok_chunk(&id, &req.model, " world"),
@@ -920,7 +918,7 @@ async fn stream_mid_failure_charges_the_breaker() {
     // Drain the stream so the wrapper records the failure.
     let mut s = r.stream(req("fast")).await.expect("stream open");
     let mut count = 0;
-    while let Some(_) = s.next().await {
+    while s.next().await.is_some() {
         count += 1;
     }
     drop(s);
@@ -928,7 +926,7 @@ async fn stream_mid_failure_charges_the_breaker() {
 
     // Second request: same outcome, breaker hits threshold (2).
     let mut s = r.stream(req("fast")).await.expect("stream open");
-    while let Some(_) = s.next().await {}
+    while s.next().await.is_some() {}
     drop(s);
 
     // Third request: p1's circuit is now open. The router should
