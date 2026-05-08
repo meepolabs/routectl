@@ -17,9 +17,7 @@
 use std::time::SystemTime;
 
 use aws_credential_types::provider::ProvideCredentials;
-use aws_sigv4::http_request::{
-    sign, SignableBody, SignableRequest, SigningSettings,
-};
+use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION};
 
@@ -70,16 +68,13 @@ fn sigv4_sign(
     // `&[u8]` borrowed from the request itself; sign() consumes the
     // SignableRequest synchronously, so the borrow is released before we
     // touch `req.headers_mut()` below. Avoids a per-request copy.
-    let body_bytes = req
-        .body()
-        .and_then(|b| b.as_bytes())
-        .ok_or_else(|| {
-            Error::Auth(
-                "bedrock: cannot SigV4-sign a streaming or unbuffered body; \
+    let body_bytes = req.body().and_then(|b| b.as_bytes()).ok_or_else(|| {
+        Error::Auth(
+            "bedrock: cannot SigV4-sign a streaming or unbuffered body; \
                  body() must resolve to in-memory bytes"
-                    .into(),
-            )
-        })?;
+                .into(),
+        )
+    })?;
     let body = SignableBody::Bytes(body_bytes);
 
     let identity = credentials.clone().into();
@@ -104,14 +99,12 @@ fn sigv4_sign(
         .headers()
         .iter()
         .map(|(k, v)| {
-            v.to_str()
-                .map(|val| (k.as_str(), val))
-                .map_err(|e| {
-                    Error::Auth(format!(
-                        "bedrock: header `{}` has non-ASCII value, cannot SigV4-sign: {e}",
-                        k.as_str()
-                    ))
-                })
+            v.to_str().map(|val| (k.as_str(), val)).map_err(|e| {
+                Error::Auth(format!(
+                    "bedrock: header `{}` has non-ASCII value, cannot SigV4-sign: {e}",
+                    k.as_str()
+                ))
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -150,8 +143,8 @@ fn sigv4_sign(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bedrock::BedrockCreds;
     use crate::bedrock::auth::resolve;
+    use crate::bedrock::BedrockCreds;
 
     #[tokio::test]
     async fn bearer_path_attaches_authorization_header() {

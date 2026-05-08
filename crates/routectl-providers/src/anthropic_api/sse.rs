@@ -133,6 +133,7 @@ impl SseState {
                         delta: ChunkDelta::default(),
                         finish_reason,
                     }],
+                    usage: None,
                 }))
             }
 
@@ -156,6 +157,7 @@ impl SseState {
                 },
                 finish_reason: None,
             }],
+            usage: None,
         }
     }
 
@@ -186,6 +188,7 @@ impl SseState {
                 },
                 finish_reason: None,
             }],
+            usage: None,
         })
     }
 
@@ -216,6 +219,7 @@ impl SseState {
                 },
                 finish_reason: None,
             }],
+            usage: None,
         }
     }
 
@@ -247,6 +251,7 @@ impl SseState {
                 },
                 finish_reason: None,
             }],
+            usage: None,
         }
     }
 }
@@ -285,6 +290,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
                     },
                     finish_reason: None,
                 }],
+                usage: None,
             }));
         }
     }
@@ -302,6 +308,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
                     delta: ChunkDelta::default(),
                     finish_reason,
                 }],
+                usage: None,
             }));
         }
     }

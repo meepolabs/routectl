@@ -47,31 +47,14 @@ fn make_request(stream: bool) -> ChatRequest {
         }],
         max_tokens: Some(40),
         stream: Some(stream),
-        temperature: None,
-        top_p: None,
-        stop: None,
-        n: None,
-        seed: None,
-        logprobs: None,
-        top_logprobs: None,
-        logit_bias: None,
-        presence_penalty: None,
-        frequency_penalty: None,
-        user: None,
-        tools: None,
-        tool_choice: None,
-        response_format: None,
-        reasoning: None,
-        chat_template_kwargs: None,
-        provider_extras: None,
+        ..Default::default()
     }
 }
 
 fn build_oauth_provider(token: String) -> AnthropicApiProvider {
     let mut cfg = AnthropicApiConfig::new("anthropic-oauth-test", token);
     cfg.auth_kind = AuthKind::OauthBearer;
-    cfg.extra_headers =
-        vec![("anthropic-beta".into(), "oauth-2025-04-20".into())];
+    cfg.extra_headers = vec![("anthropic-beta".into(), "oauth-2025-04-20".into())];
     AnthropicApiProvider::new(cfg)
 }
 

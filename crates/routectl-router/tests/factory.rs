@@ -190,13 +190,20 @@ user_agent = "claude-code/1.2.3"
     let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
     let entry = cfg.providers.get("anthropic").expect("anthropic entry");
     match entry {
-        ProviderEntry::AnthropicApi { extra_headers, user_agent, .. } => {
+        ProviderEntry::AnthropicApi {
+            extra_headers,
+            user_agent,
+            ..
+        } => {
             assert_eq!(user_agent.as_deref(), Some("claude-code/1.2.3"));
             assert_eq!(
                 extra_headers.get("anthropic-beta").map(String::as_str),
                 Some("context-1m-2025-08-07,prompt-caching-2024-07-31"),
             );
-            assert_eq!(extra_headers.get("x-custom-trace").map(String::as_str), Some("abc123"));
+            assert_eq!(
+                extra_headers.get("x-custom-trace").map(String::as_str),
+                Some("abc123")
+            );
         }
         other => panic!("expected AnthropicApi, got {other:?}"),
     }
@@ -204,9 +211,7 @@ user_agent = "claude-code/1.2.3"
 
 #[cfg(feature = "bedrock")]
 mod bedrock_tests {
-    use routectl_router::{
-        BedrockApiShapeConfig, BedrockCredsConfig, Config, ProviderEntry,
-    };
+    use routectl_router::{BedrockApiShapeConfig, BedrockCredsConfig, Config, ProviderEntry};
 
     #[test]
     fn bedrock_invoke_with_bearer_key_round_trips() {
@@ -247,7 +252,10 @@ creds = { kind = "bearer-key", key_ref = "file:///home/me/.config/routectl/bedro
                         "prompt-caching-2024-07-31".to_string(),
                     ]
                 );
-                assert_eq!(extra_headers.get("x-trace-id").map(String::as_str), Some("abc"));
+                assert_eq!(
+                    extra_headers.get("x-trace-id").map(String::as_str),
+                    Some("abc")
+                );
                 match creds {
                     BedrockCredsConfig::BearerKey { key_ref } => {
                         assert_eq!(key_ref, "file:///home/me/.config/routectl/bedrock.key");
@@ -277,7 +285,9 @@ session_token_ref = "env://AWS_SESSION_TOKEN"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         match cfg.providers.get("bedrock_static").unwrap() {
-            ProviderEntry::Bedrock { creds, api_shape, .. } => {
+            ProviderEntry::Bedrock {
+                creds, api_shape, ..
+            } => {
                 // Default api_shape when omitted -> Invoke.
                 assert_eq!(*api_shape, BedrockApiShapeConfig::Invoke);
                 match creds {
@@ -312,7 +322,9 @@ creds = { kind = "profile", name = "bedrock-prod" }
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         match cfg.providers.get("bedrock_profile").unwrap() {
-            ProviderEntry::Bedrock { creds, api_shape, .. } => {
+            ProviderEntry::Bedrock {
+                creds, api_shape, ..
+            } => {
                 assert_eq!(*api_shape, BedrockApiShapeConfig::Converse);
                 match creds {
                     BedrockCredsConfig::Profile { name } => {
