@@ -107,6 +107,7 @@ fn build_axum_router(state: Arc<AppState>) -> AxumRouter {
             "/v1/chat/completions",
             post(handlers::chat_completions::chat_completions),
         )
+        .route("/v1/messages", post(handlers::messages::messages))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
