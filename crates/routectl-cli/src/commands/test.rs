@@ -32,25 +32,9 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
             tool_call_id: None,
             tool_calls: None,
         }],
-        temperature: None,
-        top_p: None,
         max_tokens: Some(512),
-        stop: None,
         stream: Some(false),
-        n: None,
-        seed: None,
-        logprobs: None,
-        top_logprobs: None,
-        logit_bias: None,
-        presence_penalty: None,
-        frequency_penalty: None,
-        user: None,
-        tools: None,
-        tool_choice: None,
-        response_format: None,
-        reasoning: None,
-        chat_template_kwargs: None,
-        provider_extras: None,
+        ..Default::default()
     };
 
     let resp = router.complete(req).await?;
@@ -91,7 +75,13 @@ fn print_response(resp: &routectl_core::ChatResponse) {
         MessageContent::Null => println!("(no content)"),
         MessageContent::Parts(p) => {
             for part in p {
-                println!("{part}");
+                // Display the JSON wire form. Typed ContentPart variants
+                // (text, image, tool_use, ...) serialize to the original
+                // Anthropic-shape body verbatim.
+                match serde_json::to_string(part) {
+                    Ok(s) => println!("{s}"),
+                    Err(_) => println!("{part:?}"),
+                }
             }
         }
     }

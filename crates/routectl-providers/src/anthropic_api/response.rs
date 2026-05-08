@@ -99,11 +99,17 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
 
     let (text, reasoning_details, tool_calls) = walk_content_blocks(id, &resp.content)?;
 
+    // Commit 2 will populate cache_creation_input_tokens /
+    // cache_read_input_tokens / cache_creation breakdown from the
+    // upstream `usage` object. For Commit 1 we keep today's behavior.
     let usage = resp.usage.as_ref().map(|u| Usage {
         prompt_tokens: u.input_tokens,
         completion_tokens: u.output_tokens,
         total_tokens: u.input_tokens + u.output_tokens,
         reasoning_tokens: u.reasoning_tokens,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation: None,
     });
 
     let finish_reason = map_stop_reason(resp.stop_reason.as_deref());

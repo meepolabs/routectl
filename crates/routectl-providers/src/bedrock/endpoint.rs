@@ -16,14 +16,22 @@ pub fn bedrock_runtime_url(region: &str) -> String {
 /// Build the InvokeModel URL for `model_id` in `region`. `streaming`
 /// switches between `/invoke` and `/invoke-with-response-stream`.
 pub fn invoke_url(region: &str, model_id: &str, streaming: bool) -> String {
-    let suffix = if streaming { "invoke-with-response-stream" } else { "invoke" };
+    let suffix = if streaming {
+        "invoke-with-response-stream"
+    } else {
+        "invoke"
+    };
     let encoded = urlencoded(model_id);
     format!("{}/model/{encoded}/{suffix}", bedrock_runtime_url(region))
 }
 
 /// Build the Converse URL for `model_id` in `region`.
 pub fn converse_url(region: &str, model_id: &str, streaming: bool) -> String {
-    let suffix = if streaming { "converse-stream" } else { "converse" };
+    let suffix = if streaming {
+        "converse-stream"
+    } else {
+        "converse"
+    };
     let encoded = urlencoded(model_id);
     format!("{}/model/{encoded}/{suffix}", bedrock_runtime_url(region))
 }

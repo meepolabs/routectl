@@ -5,14 +5,34 @@
 //! Key design choice (DEC-001): routectl's outward schema mirrors OpenRouter so
 //! any client that speaks OpenRouter speaks routectl. Reasoning is first-class:
 //! `reasoning` config in request, `reasoning_details` array in response.
+//!
+//! v0.4.0 extension (DEC-002): the canonical now carries Anthropic-shape
+//! features (cache_control on every block, top-level system, anthropic_beta,
+//! cache usage stats) so an Anthropic-in / Anthropic-out and Anthropic-in /
+//! Bedrock-Invoke-out request round-trips losslessly. Typed `ContentPart`,
+//! `SystemContent`, and `ToolDef` replace the earlier `Vec<Value>`
+//! passthroughs. See `crate::content_part`, `crate::system_content`,
+//! `crate::tool_def`, `crate::cache_control`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::cache_control::CacheControl;
+use crate::content_part::ContentPart;
+use crate::system_content::SystemContent;
+use crate::tool_def::ToolDef;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
+
+    /// Top-level system prompt. Anthropic accepts a flat string or an
+    /// array of typed text blocks with per-block `cache_control`. The
+    /// OpenAI ingress lifts `Role::System` messages into this field at
+    /// parse time; egresses read it directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemContent>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -40,12 +60,31 @@ pub struct ChatRequest {
     pub frequency_penalty: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+
+    /// Tool definitions. Typed `ToolDef::Custom` for canonical custom
+    /// tools (with `cache_control`, `defer_loading`, `strict`); typed
+    /// `ToolDef::Other(Value)` for OpenAI-shape function tools,
+    /// Anthropic builtins, and any future shape (passthrough).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<Value>>,
+    pub tools: Option<Vec<ToolDef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<Value>,
+
+    /// Top-level cache breakpoint (auto-cache mode). Counts toward the
+    /// 4-breakpoint cap. Anthropic-only; egresses without prompt caching
+    /// drop with a `tracing::warn!`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+
+    /// Body-level Anthropic beta flags (e.g. `context-1m-2025-08-07`).
+    /// Egresses to Anthropic-shape upstreams (Anthropic API,
+    /// Bedrock-Invoke) merge this into the body's `anthropic_beta` array.
+    /// Distinct from the `anthropic-beta` HTTP header which is configured
+    /// per provider via `extra_headers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anthropic_beta: Vec<String>,
 
     /// Unified reasoning controls. Translated per-provider in `Provider::normalize_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,8 +141,11 @@ pub struct Message {
 #[serde(untagged)]
 pub enum MessageContent {
     Text(String),
-    /// OpenAI-style content parts: [{type: "text", text: "..."}, {type: "image_url", ...}]
-    Parts(Vec<Value>),
+    /// Typed content parts. Round-trips Anthropic and OpenAI-shape blocks
+    /// losslessly via `ContentPart` (see `crate::content_part`). Unknown
+    /// block types fall to `ContentPart::Other` which preserves the
+    /// original `type` discriminant and arbitrary fields.
+    Parts(Vec<ContentPart>),
     /// Some upstreams (Clarifai-hosted models on OpenRouter, vLLM trailers)
     /// return `"content": null` when the entire output is reasoning. We
     /// accept it on the wire and serialize back as null.
@@ -167,6 +209,9 @@ pub struct Choice {
     pub finish_reason: Option<String>,
 }
 
+/// Usage tallies. v0.4.0 extension: cache stats from Anthropic /
+/// Bedrock-Invoke responses surface here (`cache_creation_input_tokens`,
+/// `cache_read_input_tokens`, and the per-TTL breakdown).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u32,
@@ -174,6 +219,25 @@ pub struct Usage {
     pub total_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
+    /// Tokens written to the prompt cache on this request (cache miss
+    /// path). Anthropic / Bedrock-Invoke only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    /// Tokens read from the prompt cache on this request (cache hit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
+    /// Per-TTL breakdown of cache creations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<CacheCreation>,
+}
+
+/// Per-TTL breakdown of cache writes for one request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CacheCreation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral_5m_input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral_1h_input_tokens: Option<u32>,
 }
 
 /// Streaming SSE chunk (delta).
@@ -182,7 +246,7 @@ pub struct Usage {
 /// emit cost/usage trailer chunks where these fields are absent. Empty
 /// strings serialize back out, which is fine for OpenAI-style SSE clients
 /// that only look at `choices[].delta`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatChunk {
     #[serde(default)]
     pub id: String,
@@ -190,6 +254,11 @@ pub struct ChatChunk {
     pub model: String,
     #[serde(default)]
     pub choices: Vec<ChunkChoice>,
+    /// Streaming usage update. Anthropic emits cache stats in
+    /// `message_delta` events; routectl surfaces them here so OpenAI-SSE
+    /// clients see the same totals at end-of-stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageDelta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +283,26 @@ pub struct ChunkDelta {
     pub reasoning_details: Vec<ReasoningDetail>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<Value>>,
+}
+
+/// Streaming usage delta. Mirrors `Usage` but every field is optional
+/// because chunks may carry partial info.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<CacheCreation>,
 }
 
 /// Top-level reasoning content on an assistant message. Mirrors OpenRouter's
