@@ -88,7 +88,7 @@ async fn read_secret_file(path: &Path) -> Result<String> {
             )));
         }
 
-        let mut file = std::fs::File::open(&path_owned).map_err(|e| {
+        let file = std::fs::File::open(&path_owned).map_err(|e| {
             Error::Auth(format!(
                 "failed to open secret file `{}`: {e}",
                 path_owned.display()
@@ -122,8 +122,23 @@ async fn read_secret_file(path: &Path) -> Result<String> {
             }
         }
 
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf).map_err(|e| {
+        // Cap the read at 1 MiB. Real secrets are bytes-to-kilobytes; a
+        // misconfigured `file://` URI pointing at /var/log/syslog (or worse,
+        // /dev/zero through a symlink that got past the regular-file check
+        // via TOCTOU) would otherwise drive the process toward OOM.
+        const MAX_SECRET_FILE_BYTES: u64 = 1 << 20;
+        let len = meta.len();
+        if len > MAX_SECRET_FILE_BYTES {
+            return Err(Error::Auth(format!(
+                "secret file `{}` is {} bytes; refusing to load (cap is {} bytes)",
+                path_owned.display(),
+                len,
+                MAX_SECRET_FILE_BYTES
+            )));
+        }
+
+        let mut buf = Vec::with_capacity(len as usize);
+        file.take(MAX_SECRET_FILE_BYTES).read_to_end(&mut buf).map_err(|e| {
             Error::Auth(format!(
                 "failed to read secret file `{}`: {e}",
                 path_owned.display()

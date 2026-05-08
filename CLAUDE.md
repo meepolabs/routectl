@@ -9,15 +9,26 @@ making changes; refer back when a model fails the live matrix.
 - `crates/routectl-core/` -- `Provider` trait + OpenRouter-shape schema
   (`ChatRequest`, `ChatResponse`, `ChatChunk`, `Message`,
   `ReasoningDetail`). Wire shapes only; no provider code.
-- `crates/routectl-providers/` -- concrete provider impls. Two are
+- `crates/routectl-providers/` -- concrete provider impls. Three are
   feature-on by default: `openai_compat` (covers OpenAI, OpenRouter,
-  DeepSeek, vLLM, NIM, llama.cpp, OpenCode-Go, ...) and `anthropic_api`.
-  Cookie-auth providers stub for v0.2.
+  DeepSeek, vLLM, NIM, llama.cpp, OpenCode-Go, ...), `anthropic_api`
+  (api-key + OAuth-bearer auth), and `bedrock` (gated behind the
+  default-on `bedrock` Cargo feature). Cookie-auth providers
+  (`claude_cookie`, `chatgpt_cookie`) are scaffolded but feature-gated
+  off.
   - `model_profile.rs` -- per-model quirks table. **Edit here when a
     model needs new behavior** (drops sampling params, requires
     reasoning effort, etc.).
   - `openai_compat/dialects/*.rs` -- one file per reasoning dialect.
     **Edit here when a new wire format appears**.
+  - `bedrock/` -- AWS Bedrock provider. `auth.rs` resolves credentials
+    through `aws-config`'s chain (or short-term bearer keys);
+    `signing.rs` wraps `aws-sigv4`; `invoke.rs` reuses
+    `anthropic_api::request/response` for the Anthropic Messages
+    body shape; `eventstream.rs` decodes the AWS binary frame format
+    for streaming. **Converse body translation is stubbed** -- it's
+    on the v0.4.0 list; calling it today returns a clear
+    not-implemented error.
 - `crates/routectl-router/` -- alias resolution, fallback chain, retry
   policy, provider factory.
 - `crates/routectl-auth/` -- `SecretStore` trait + default impl that
@@ -31,8 +42,8 @@ making changes; refer back when a model fails the live matrix.
 Every change must keep two things green:
 
 ```bash
-# Unit + integration tests, ~140 of them.
-cargo test --workspace --release
+# Unit + integration tests across the whole workspace.
+cargo test --workspace --features bedrock --release
 
 # Live matrix against real providers. Requires OPENROUTER_API_KEY,
 # OPENCODE_GO_API_KEY, NIM_API_KEY in env (skips per-provider when
@@ -40,6 +51,11 @@ cargo test --workspace --release
 # the baseline in docs/TESTED_MODELS.md.
 cargo test -p routectl-cli --features live-integration --release \
   --test live_matrix -- --nocapture --test-threads=1
+
+# Lean build for downstream library consumers who don't want the
+# AWS dependency tree:
+cargo check --workspace --no-default-features \
+  --features openai-compat,anthropic-api
 ```
 
 The live matrix is slow (~30s) and costs cents per run. Use it as a
