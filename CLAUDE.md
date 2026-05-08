@@ -35,7 +35,100 @@ making changes; refer back when a model fails the live matrix.
   resolves `env://`, `file://`, and `literal:` secret references.
   No OS-keychain integration.
 - `crates/routectl-cli/` -- axum HTTP server, clap subcommands
-  (serve/test/config/login), live matrix integration tests.
+  (serve/test/config/login), live matrix integration tests. Two
+  ingress dialects in `src/ingress/`:
+  - `openai.rs` -- `POST /v1/chat/completions`, canonical wire shape
+    pass-through (the existing route, refactored behind the
+    `IngressAdapter` trait in v0.4.0).
+  - `anthropic.rs` -- `POST /v1/messages` (v0.4.0). Translates
+    Anthropic Messages bodies to canonical, runs cache_control
+    validation up front, renders Anthropic SSE events
+    (`message_start`, `content_block_*`, `message_delta`,
+    `message_stop`) through a stateful block-index machine.
+  - `mod.rs` -- `IngressAdapter` trait, `SseEvent`,
+    `resolve_alias` (header > config map > literal model passthrough).
+
+## Ingress runbook (v0.4.0)
+
+routectl is a translation pipe with two ingress dialects feeding one
+canonical `ChatRequest` and N egress providers. The hub-and-spoke
+contract:
+
+- New ingress dialect: add a file under `src/ingress/`, implement
+  `IngressAdapter`, add a one-line route in `src/server/mod.rs`. Zero
+  changes to providers or canonical types.
+- New egress provider: implement `Provider` in `routectl-providers`.
+  Zero changes to ingress adapters.
+- New canonical-shape feature (e.g. an Anthropic-introduced field
+  that needs to round-trip): extend `routectl-core` schema first,
+  then teach the relevant ingress and egress to read/write it.
+  Forward-compat catchalls (`ContentPart::Other`, `ToolDef::Other`,
+  `ContentBlock::Other` on the wire) make most new Anthropic block
+  types ship without code edits on the all-Anthropic path.
+
+### When the Anthropic ingress breaks (Claude Code, opencode, etc.)
+
+1. **Reproduce against routectl directly** with a captured request
+   body:
+
+   ```bash
+   curl -sN http://127.0.0.1:8787/v1/messages \
+     -H "x-api-key: $ROUTECTL_TOKEN" \
+     -H "content-type: application/json" \
+     -d @failing-body.json | tee out.log
+   ```
+
+2. **Inspect what the egress sent upstream** with
+   `RUST_LOG=routectl_providers=debug` or by running the
+   `anthropic_ingress` integration test against a wiremock that
+   captures the body. The failing dimension is usually one of:
+   - cache_control dropped on a position routectl doesn't yet handle
+     (system block / tool def / message block).
+   - Unknown content block type that ContentBlock::Other should pass
+     through but doesn't (custom Deserialize edge case).
+   - thinking signature missing on a multi-turn assistant message
+     (callers must echo `reasoning_details` with the
+     `anthropic-claude-v1` format tag verbatim).
+
+3. **Pick the right fix site**:
+   - Body translation issue (Anthropic Messages -> canonical):
+     `routectl-cli/src/ingress/anthropic.rs::translate_request`.
+   - Content-block translation (canonical -> Anthropic wire):
+     `routectl-providers/src/anthropic_api/request.rs::translate_content_part`.
+   - Missing wire field on the response side: extend
+     `routectl-providers/src/anthropic_api/types.rs::AnthropicResponse`
+     and `walk_content_blocks`.
+   - SSE event ordering (e.g. Anthropic emits a new event type):
+     `routectl-cli/src/ingress/anthropic.rs::render_chunk_internal`
+     state machine; mirror the wire decoder in
+     `routectl-providers/src/anthropic_api/sse.rs::SseState`.
+
+4. **Add an integration test** in
+   `crates/routectl-cli/tests/anthropic_ingress.rs` that drives the
+   server with the failing body and asserts on the upstream-side
+   wiremock body. Re-run the live matrix.
+
+### Configuring listener auth + ingress aliases
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 8787
+strict_translation = false   # set true for production CI
+
+[server.auth]
+tokens = ["env://ROUTECTL_LISTENER_TOKEN", "literal:sk-routectl-dev"]
+
+# Map Claude Code's model IDs to routectl aliases. CC can't override
+# the `model` field in its API call, so the mapping happens server-side.
+[ingress.anthropic.aliases]
+"claude-opus-4-7-20251022"      = "heavy"
+"claude-sonnet-4-6-20251022"    = "default"
+"claude-haiku-4-5-20251022"     = "fast"
+
+# Alternative: harness sets `x-routectl-alias: heavy` and the model
+# field is ignored. Header always wins over the aliases map.
+```
 
 ## Verification gate
 
