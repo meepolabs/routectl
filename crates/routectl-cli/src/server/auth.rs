@@ -10,7 +10,6 @@
 //! Local-loopback default: when `tokens` is empty (or
 //! `[server.auth]` is absent), the middleware is bypassed entirely.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -21,15 +20,22 @@ use axum::response::{IntoResponse, Json, Response};
 use serde_json::json;
 
 /// Set of valid tokens. `None` (or empty) means "no auth required".
+///
+/// Token comparison is intentionally a per-token constant-time
+/// equality so an attacker reaching the listener cannot binary-search
+/// a valid token via response-time differences. This matters most
+/// when `--unsafe-public` is set (the listener is reachable beyond
+/// loopback); on pure loopback the risk is theoretical, but the cost
+/// of a constant-time loop is negligible.
 #[derive(Debug, Default, Clone)]
 pub struct TokenSet {
-    tokens: Arc<HashSet<String>>,
+    tokens: Arc<Vec<Vec<u8>>>,
 }
 
 impl TokenSet {
     pub fn new(tokens: Vec<String>) -> Self {
         Self {
-            tokens: Arc::new(tokens.into_iter().collect()),
+            tokens: Arc::new(tokens.into_iter().map(String::into_bytes).collect()),
         }
     }
 
@@ -44,17 +50,46 @@ impl TokenSet {
             return true;
         }
         if let Some(t) = extract_x_api_key(headers) {
-            if self.tokens.contains(t) {
+            if self.contains(t.as_bytes()) {
                 return true;
             }
         }
         if let Some(t) = extract_bearer(headers) {
-            if self.tokens.contains(t) {
+            if self.contains(t.as_bytes()) {
                 return true;
             }
         }
         false
     }
+
+    fn contains(&self, candidate: &[u8]) -> bool {
+        // Iterate every entry rather than short-circuiting -- the
+        // length check + constant_time_eq below is what makes
+        // comparison resistant to byte-by-byte timing inference.
+        // Keeping the loop unbounded over the token list would be
+        // overkill and is not a meaningful threat (the set is small
+        // and known at startup), so we accept O(N) over the set
+        // size.
+        let mut hit = false;
+        for token in self.tokens.iter() {
+            if token.len() == candidate.len() && constant_time_eq(token, candidate) {
+                hit = true;
+            }
+        }
+        hit
+    }
+}
+
+/// Byte-wise constant-time equality. Both inputs MUST be the same
+/// length (the caller checks). Avoids `==` on `&[u8]` and
+/// `String::==` which short-circuit on first mismatch.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    debug_assert_eq!(a.len(), b.len());
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn extract_x_api_key(headers: &axum::http::HeaderMap) -> Option<&str> {
