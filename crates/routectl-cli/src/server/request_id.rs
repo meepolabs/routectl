@@ -100,9 +100,7 @@ mod tests {
 
     #[test]
     fn accepts_uuid_v7_shape() {
-        assert!(is_safe_request_id(
-            "019e0908-c6d1-7b51-b140-af977721affc"
-        ));
+        assert!(is_safe_request_id("019e0908-c6d1-7b51-b140-af977721affc"));
     }
 
     #[test]
