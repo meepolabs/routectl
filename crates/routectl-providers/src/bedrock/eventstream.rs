@@ -66,23 +66,25 @@ where
 
         let mut byte_stream = Box::pin(byte_stream);
         loop {
-            // DoS guard: if the upstream advertises a frame larger
-            // than MAX_FRAME_BYTES we won't even try to buffer it.
-            // The advertised total_length lives in the first 4 bytes
-            // big-endian whenever the buffer is at least that large.
-            if buffer.len() >= 4 {
-                let advertised = u32::from_be_bytes([
-                    buffer[0], buffer[1], buffer[2], buffer[3],
-                ]) as usize;
-                if advertised > MAX_FRAME_BYTES {
-                    yield Err(Error::Streaming(format!(
-                        "bedrock eventstream frame advertised {advertised} bytes, exceeds cap {MAX_FRAME_BYTES}"
-                    )));
-                    return;
-                }
-            }
-            // Try to decode any complete frames already in buffer.
+            // Try to decode any complete frames already in buffer. The
+            // advertised-length DoS guard runs at the TOP of this inner
+            // loop so it fires before EVERY decode attempt, not just
+            // once per outer-loop tick. Otherwise a buffer holding
+            // [small valid frame][giant malicious frame] would consume
+            // the small one and decode the giant one without checking
+            // its advertised total_length.
             loop {
+                if buffer.len() >= 4 {
+                    let advertised = u32::from_be_bytes([
+                        buffer[0], buffer[1], buffer[2], buffer[3],
+                    ]) as usize;
+                    if advertised > MAX_FRAME_BYTES {
+                        yield Err(Error::Streaming(format!(
+                            "bedrock eventstream frame advertised {advertised} bytes, exceeds cap {MAX_FRAME_BYTES}"
+                        )));
+                        return;
+                    }
+                }
                 let mut cursor = std::io::Cursor::new(buffer.as_ref());
                 match decoder.decode_frame(&mut cursor) {
                     Ok(DecodedFrame::Complete(message)) => {
