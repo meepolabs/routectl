@@ -434,10 +434,37 @@ fn build_tool_message(msg: &Message) -> AnthropicMessage {
 fn validate_breakpoints(ar: &AnthropicRequest) -> Result<()> {
     let mut bps: Vec<Breakpoint<'_>> = Vec::new();
 
+    // Owned cache_control values pulled out of `AnthropicTool::Builtin`'s
+    // raw JSON. Lives here so the Breakpoint slice below can reference
+    // them without lifetime issues. Indexed by position in `ar.tools`.
+    let builtin_tool_ccs: Vec<Option<routectl_core::CacheControl>> = ar
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|t| match t {
+                    AnthropicTool::Builtin(v) => v
+                        .as_object()
+                        .and_then(|o| o.get("cache_control"))
+                        .and_then(|cc| {
+                            serde_json::from_value::<routectl_core::CacheControl>(cc.clone()).ok()
+                        }),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Tools come first in the cache prefix.
     if let Some(tools) = &ar.tools {
-        for t in tools {
+        for (i, t) in tools.iter().enumerate() {
             if let Some(cc) = anthropic_tool_cache_control(t) {
+                bps.push(Breakpoint {
+                    position: BreakpointPosition::Tools,
+                    control: cc,
+                });
+            } else if let Some(cc) = builtin_tool_ccs.get(i).and_then(|o| o.as_ref()) {
                 bps.push(Breakpoint {
                     position: BreakpointPosition::Tools,
                     control: cc,
