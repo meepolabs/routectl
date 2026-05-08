@@ -110,14 +110,49 @@ fn translate_system(s: &SystemContent) -> AnthropicSystem {
 /// Backwards-compat fallback: lift Role::System messages out of the
 /// messages array into a flat AnthropicSystem::Text. Used only when
 /// `req.system` is None. Returns None when no System messages are
-/// present.
+/// present, or when all System messages contain only non-text content
+/// (Parts without text blocks, Null) -- avoids emitting a meaningless
+/// `system: ""` upstream and the extra newlines from joining blanks.
 fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
     let texts: Vec<String> = messages
         .iter()
         .filter(|m| matches!(m.role, Role::System))
-        .map(|m| match &m.content {
-            MessageContent::Text(t) => t.clone(),
-            _ => String::new(),
+        .filter_map(|m| match &m.content {
+            MessageContent::Text(t) => {
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(t.clone())
+                }
+            }
+            MessageContent::Parts(parts) => {
+                // Pick out text content from typed parts. Image/Document/etc.
+                // in a System message are not meaningful for the flat-text
+                // lift and would have been dropped by the egress anyway.
+                let collected: Vec<String> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        routectl_core::ContentPart::Known(
+                            routectl_core::KnownContentPart::Text { text, .. },
+                        ) => {
+                            let trimmed = text.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(text.clone())
+                            }
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if collected.is_empty() {
+                    None
+                } else {
+                    Some(collected.join("\n"))
+                }
+            }
+            MessageContent::Null => None,
         })
         .collect();
     if texts.is_empty() {
