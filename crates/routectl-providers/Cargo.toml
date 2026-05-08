@@ -8,11 +8,34 @@ repository.workspace = true
 description = "Provider implementations for routectl: openai-compat, anthropic-api, claude-cookie, chatgpt-cookie."
 
 [features]
-default = ["openai-compat", "anthropic-api"]
+default = ["openai-compat", "anthropic-api", "bedrock"]
 # Cookie-auth providers are gated. Disabled by default in the binary
 # until the impl + ToS-on-user surface is complete.
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
 "anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio"]
+# Native AWS Bedrock provider (SigV4 signing + eventstream streaming).
+# Pulls in the AWS SDK credential / signing crates. ~1MB binary growth.
+# Disable with `--no-default-features --features openai-compat,anthropic-api`
+# to skip the AWS deps entirely.
+"bedrock" = [
+    "dep:reqwest",
+    "dep:eventsource-stream",
+    "dep:chrono",
+    "dep:uuid",
+    "dep:bytes",
+    "dep:async-stream",
+    "dep:tokio",
+    "dep:tokio-stream",
+    "dep:aws-config",
+    "dep:aws-credential-types",
+    "dep:aws-sigv4",
+    "dep:aws-smithy-eventstream",
+    "dep:aws-smithy-runtime-api",
+    "dep:aws-smithy-types",
+    "dep:aws-types",
+    "dep:http",
+    "dep:base64",
+]
 "claude-cookie" = []
 "chatgpt-cookie" = []
 
@@ -33,7 +56,20 @@ uuid = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 async-stream = { version = "0.3", optional = true }
 tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
 regex = { version = "1", optional = true }
+
+# AWS SDK / signing crates (used only by the `bedrock` feature). Pinned
+# to specific minor versions so cargo update churn is bounded.
+aws-config = { version = "1.5", optional = true, default-features = false, features = ["behavior-version-latest", "rustls", "credentials-process", "sso"] }
+aws-credential-types = { version = "1.2", optional = true }
+aws-sigv4 = { version = "1.2", optional = true, features = ["http1"] }
+aws-smithy-eventstream = { version = "0.60", optional = true }
+aws-smithy-runtime-api = { version = "1.7", optional = true, features = ["client"] }
+aws-smithy-types = { version = "1.2", optional = true }
+aws-types = { version = "1.3", optional = true }
+http = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
 wiremock.workspace = true

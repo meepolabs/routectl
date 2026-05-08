@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 routectl-core.workspace = true
-routectl-providers = { workspace = true, features = ["openai-compat", "anthropic-api"] }
+routectl-providers = { workspace = true, default-features = false, features = ["openai-compat", "anthropic-api"] }
 routectl-router.workspace = true
 routectl-auth.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }

@@ -76,6 +76,9 @@ pub enum ProviderEntry {
         default_extras: Option<serde_json::Value>,
         #[serde(default)]
         reasoning_dialect: ReasoningDialect,
+        /// Override the outbound User-Agent.
+        #[serde(default)]
+        user_agent: Option<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -92,6 +95,36 @@ pub enum ProviderEntry {
         /// subscription access token (`sk-ant-oat01-...`).
         #[serde(default)]
         auth_kind: AuthKind,
+        /// Extra HTTP headers applied to every Anthropic API request.
+        /// Common usage: `extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }`.
+        #[serde(default)]
+        extra_headers: BTreeMap<String, String>,
+        /// Override the outbound User-Agent. Useful for IAM-gated upstreams.
+        #[serde(default)]
+        user_agent: Option<String>,
+        #[serde(default, flatten)]
+        runtime: ProviderRuntimePolicy,
+    },
+    /// Native AWS Bedrock provider. Speaks SigV4 directly to
+    /// `bedrock-runtime.<region>.amazonaws.com`. Pick `api_shape` to
+    /// switch between vendor-specific InvokeModel (default) and
+    /// vendor-neutral Converse.
+    #[cfg(feature = "bedrock")]
+    #[non_exhaustive]
+    Bedrock {
+        region: String,
+        model_id: String,
+        #[serde(default)]
+        api_shape: BedrockApiShapeConfig,
+        creds: BedrockCredsConfig,
+        #[serde(default)]
+        user_agent: Option<String>,
+        #[serde(default)]
+        extra_headers: BTreeMap<String, String>,
+        #[serde(default)]
+        anthropic_beta: Vec<String>,
+        #[serde(default)]
+        additional_model_request_fields: Option<serde_json::Value>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -111,6 +144,64 @@ pub enum ProviderEntry {
     },
 }
 
+/// TOML-side mirror of `routectl_providers::bedrock::BedrockApiShape`.
+/// We don't re-export the providers-side enum directly because TOML
+/// configs need to parse cleanly even when the `bedrock` feature is
+/// off (so non-Bedrock builds stay lean), and serde derives don't
+/// like cfg-gated re-exports.
+#[cfg(feature = "bedrock")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BedrockApiShapeConfig {
+    #[default]
+    Invoke,
+    Converse,
+}
+
+/// TOML-side credentials descriptor for a Bedrock provider.
+///
+/// Each variant is tagged by `kind`. Secret-bearing fields hold raw
+/// secret-URI strings (`env://`, `file://`, `literal:`) which the
+/// factory parses + resolves at provider build time -- same pattern
+/// as `api_key_ref` on the other provider variants.
+///
+/// Examples:
+/// ```toml
+/// # Bedrock console short-term API key
+/// creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
+///
+/// # Static AWS access keys
+/// creds = { kind = "static",
+///           access_key_ref  = "env://AWS_ACCESS_KEY_ID",
+///           secret_key_ref  = "env://AWS_SECRET_ACCESS_KEY",
+///           session_token_ref = "env://AWS_SESSION_TOKEN" }
+///
+/// # Named profile in ~/.aws/credentials (incl. SSO)
+/// creds = { kind = "profile", name = "bedrock-prod" }
+///
+/// # Standard AWS provider chain (env -> profile -> SSO -> IRSA -> IMDS)
+/// creds = { kind = "default-chain" }
+/// ```
+#[cfg(feature = "bedrock")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum BedrockCredsConfig {
+    BearerKey {
+        key_ref: String,
+    },
+    Static {
+        access_key_ref: String,
+        secret_key_ref: String,
+        #[serde(default)]
+        session_token_ref: Option<String>,
+    },
+    Profile {
+        name: String,
+    },
+    DefaultChain,
+}
+
 impl ProviderEntry {
     /// Get the runtime policy attached to this entry. Centralizes the
     /// match so the router doesn't repeat it.
@@ -120,6 +211,8 @@ impl ProviderEntry {
             | Self::AnthropicApi { runtime, .. }
             | Self::ClaudeCookie { runtime, .. }
             | Self::ChatgptCookie { runtime, .. } => runtime,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { runtime, .. } => runtime,
         }
     }
 
@@ -130,6 +223,7 @@ impl ProviderEntry {
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: ReasoningDialect::default(),
+            user_agent: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -140,6 +234,8 @@ impl ProviderEntry {
             base_url: default_anthropic_base(),
             anthropic_version: default_anthropic_version(),
             auth_kind: AuthKind::ApiKey,
+            extra_headers: BTreeMap::new(),
+            user_agent: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -173,6 +269,8 @@ impl ProviderEntry {
             | Self::AnthropicApi { runtime, .. }
             | Self::ClaudeCookie { runtime, .. }
             | Self::ChatgptCookie { runtime, .. } => *runtime = rt,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { runtime, .. } => *runtime = rt,
         }
         self
     }
@@ -248,6 +346,8 @@ impl ProviderEntry {
             Self::ClaudeCookie { session_ref, .. } | Self::ChatgptCookie { session_ref, .. } => {
                 *session_ref = redact_literal_secret(session_ref);
             }
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { creds, .. } => creds.redact(),
         }
     }
 
@@ -259,6 +359,52 @@ impl ProviderEntry {
             Self::ClaudeCookie { session_ref, .. } | Self::ChatgptCookie { session_ref, .. } => {
                 vec![session_ref.as_str()]
             }
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { creds, .. } => creds.secret_uris(),
+        }
+    }
+}
+
+#[cfg(feature = "bedrock")]
+impl BedrockCredsConfig {
+    /// Replace literal-prefixed secret values with `literal:[REDACTED]`.
+    /// Other URI schemes are already non-secret pointers.
+    pub fn redact(&mut self) {
+        match self {
+            Self::BearerKey { key_ref } => {
+                *key_ref = redact_literal_secret(key_ref);
+            }
+            Self::Static {
+                access_key_ref,
+                secret_key_ref,
+                session_token_ref,
+            } => {
+                *access_key_ref = redact_literal_secret(access_key_ref);
+                *secret_key_ref = redact_literal_secret(secret_key_ref);
+                if let Some(t) = session_token_ref {
+                    *t = redact_literal_secret(t);
+                }
+            }
+            Self::Profile { .. } | Self::DefaultChain => {}
+        }
+    }
+
+    /// Enumerate every secret-URI string a config check should resolve.
+    pub fn secret_uris(&self) -> Vec<&str> {
+        match self {
+            Self::BearerKey { key_ref } => vec![key_ref.as_str()],
+            Self::Static {
+                access_key_ref,
+                secret_key_ref,
+                session_token_ref,
+            } => {
+                let mut v = vec![access_key_ref.as_str(), secret_key_ref.as_str()];
+                if let Some(t) = session_token_ref {
+                    v.push(t.as_str());
+                }
+                v
+            }
+            Self::Profile { .. } | Self::DefaultChain => Vec::new(),
         }
     }
 }
