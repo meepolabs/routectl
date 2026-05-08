@@ -577,19 +577,61 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
     // reach upstream. Debug-assert keeps non-debug builds fast; when
     // the ingress runs validate at parse time, debug-only is enough
     // here as a defense in depth.
-    debug_assert!(validate_breakpoints(&ar).is_ok());
+    // Belt-and-braces: validate in release too. The Anthropic ingress
+    // already runs this at parse time; running it again here catches
+    // direct callers (library users without an ingress) and protects
+    // upstream from cap/ordering violations regardless of build mode.
+    validate_breakpoints(&ar)?;
 
     let mut body =
         serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
-    // Merge provider_extras last (caller wins).
+    // Merge provider_extras last (caller wins). The merge has an
+    // allow-list: routectl-managed top-level keys cannot be stomped
+    // by a malicious or careless `provider_extras` value. This was
+    // an architecture-review finding (MEDIUM-1) -- without the
+    // allow-list, a request with `provider_extras = {"messages":
+    // [{"role":"user","content":"INJECTED"}]}` would replace the
+    // assembled messages array.
     if let Some(extras) = req.provider_extras.as_ref() {
         if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) {
             for (k, v) in extra_obj {
+                if is_routectl_managed_key(k) {
+                    tracing::warn!(
+                        provider = id,
+                        key = %k,
+                        "provider_extras attempted to override routectl-managed key; dropped"
+                    );
+                    continue;
+                }
                 obj.insert(k.clone(), v.clone());
             }
         }
     }
 
     Ok(body)
+}
+
+/// Top-level Anthropic body keys constructed by routectl that
+/// `provider_extras` is NOT permitted to override. Anthropic-only
+/// extras like `top_k`, `service_tier`, `output_config`, `container`,
+/// `inference_geo` are still allowed through (they're how the ingress
+/// forwards request fields canonical doesn't know about).
+fn is_routectl_managed_key(key: &str) -> bool {
+    matches!(
+        key,
+        "model"
+            | "messages"
+            | "system"
+            | "max_tokens"
+            | "thinking"
+            | "tools"
+            | "tool_choice"
+            | "stream"
+            | "stop_sequences"
+            | "temperature"
+            | "top_p"
+            | "anthropic_beta"
+            | "cache_control"
+    )
 }

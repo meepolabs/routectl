@@ -32,12 +32,20 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     let Json(raw_body) = match body {
         Ok(b) => b,
         Err(e) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                &e.to_string(),
-                "invalid_request_error",
-            );
+            // JsonRejection carries the right status code for each
+            // failure mode: 413 Payload Too Large for body-size cap
+            // hits, 400 Bad Request for parse errors, 415 for missing
+            // content-type, etc. Mirror that status into our error
+            // envelope rather than collapsing every rejection into 400.
+            let status = e.status();
+            let kind = if status == StatusCode::PAYLOAD_TOO_LARGE {
+                "payload_too_large"
+            } else if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+                "unsupported_media_type"
+            } else {
+                "bad_request"
+            };
+            return error_response(status, kind, &e.to_string(), "invalid_request_error");
         }
     };
 

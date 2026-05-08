@@ -89,6 +89,34 @@ impl SseState {
                             call_index: ci,
                         });
                     }
+                    SseContentBlockStart::RedactedThinking { data } => {
+                        // No per-token deltas follow a redacted_thinking
+                        // block. Emit it immediately as a synthesized
+                        // reasoning_details entry; the open_block stays
+                        // None so the next block_start opens cleanly.
+                        let di = self.next_detail_index;
+                        self.next_detail_index += 1;
+                        let detail = ReasoningDetail {
+                            kind: ReasoningDetailKind::Encrypted,
+                            id: Some(Uuid::new_v4().to_string()),
+                            format: Some(ANTHROPIC_FORMAT.to_string()),
+                            index: Some(di),
+                            payload: json!({"data": data}),
+                        };
+                        return Ok(Some(ChatChunk {
+                            id: self.id.clone(),
+                            model: self.model.clone(),
+                            choices: vec![ChunkChoice {
+                                index: 0,
+                                delta: ChunkDelta {
+                                    reasoning_details: vec![detail],
+                                    ..Default::default()
+                                },
+                                finish_reason: None,
+                            }],
+                            usage: None,
+                        }));
+                    }
                 }
                 Ok(None)
             }
