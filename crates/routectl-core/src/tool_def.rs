@@ -5,13 +5,19 @@
 //! - `ToolDef::Custom(CustomTool)` -- canonical Anthropic-shape custom
 //!   tool with first-class `cache_control`, `defer_loading`, and
 //!   `strict`. The OpenAI ingress translates `{type: "function",
-//!   function: {...}}` into this variant at parse time so all egresses
-//!   see a single representation for the hot-path case.
+//!   function: {...}}` into this variant at parse time (see
+//!   `lift_openai_function_tools` in `crates/routectl-cli/src/
+//!   ingress/openai.rs`, which uses `CustomTool::from_openai_function`)
+//!   so all egresses see a single representation for the hot-path
+//!   case. Library callers that bypass the ingress can rely on the
+//!   `anthropic-api` egress's belt-and-braces translation of the same
+//!   shape.
 //! - `ToolDef::Other(Value)` -- forward-compat catchall. Anthropic
 //!   built-in tools (`bash_*`, `code_execution_*`, `web_search_*`),
 //!   server-side tools, and future shapes pass through verbatim. The
 //!   Anthropic and Bedrock-Invoke egresses re-emit this Value as-is;
-//!   OpenAI-compat egress drops with a `tracing::warn!`.
+//!   OpenAI-compat egress drops with a `tracing::warn!` (or rejects
+//!   under `strict_translation`).
 //!
 //! Discrimination on the wire: the `type` field decides. Absent or
 //! `"custom"` -> `Custom`. Anything else -> `Other`. This avoids
@@ -53,6 +59,47 @@ pub struct CustomTool {
 
 fn empty_object_schema() -> Value {
     serde_json::json!({"type": "object", "properties": {}})
+}
+
+impl CustomTool {
+    /// If `v` is the OpenAI tool wire shape (`{type: "function", function:
+    /// {name, description?, parameters?, strict?}}`), translate it into a
+    /// canonical `CustomTool`. Returns `None` for any other shape so the
+    /// caller can fall through to `ToolDef::Other` for builtin / unknown
+    /// tool types.
+    ///
+    /// Used by the OpenAI ingress (`crates/routectl-cli/src/ingress/
+    /// openai.rs`) at parse time so all egresses see the canonical
+    /// representation. Direct callers that bypass an ingress can rely on
+    /// the `anthropic-api` egress's belt-and-braces translation of the
+    /// same shape.
+    pub fn from_openai_function(v: &Value) -> Option<CustomTool> {
+        let obj = v.as_object()?;
+        let is_function = obj.get("type").and_then(|t| t.as_str()) == Some("function");
+        if !is_function {
+            return None;
+        }
+        let func = obj.get("function")?.as_object()?;
+        let name = func.get("name")?.as_str()?.to_string();
+        let description = func
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let input_schema = func
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(empty_object_schema);
+        let strict = func.get("strict").and_then(|v| v.as_bool());
+        Some(CustomTool {
+            name,
+            description,
+            input_schema,
+            cache_control: None,
+            defer_loading: None,
+            strict,
+            type_tag: None,
+        })
+    }
 }
 
 impl ToolDef {

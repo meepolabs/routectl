@@ -21,16 +21,15 @@ pub fn normalize(
     req: &ChatRequest,
     dialect: ReasoningDialect,
     default_extras: Option<&Value>,
+    strict_translation: bool,
 ) -> Result<Value> {
-    // Warn-and-drop on canonical fields that OpenAI-compat upstreams
-    // do not understand. The lossy seams: cache_control (prompt
-    // caching is Anthropic-only), anthropic_beta (Anthropic-specific
-    // body flags), and the ToolDef::Other / ContentPart::Other
-    // catchalls that carry Anthropic builtin tools and forward-compat
-    // block types. SystemContent::Blocks is flattened to a string by
-    // the dialect when it serializes `system`; the per-block
-    // cache_control on those blocks is dropped here too.
-    warn_on_dropped_anthropic_fields(id, req);
+    // Lossy seams (Anthropic-canonical fields the OpenAI-compat wire
+    // can't carry): cache_control, anthropic_beta, ToolDef::Other /
+    // ContentPart::Other catchalls (Anthropic builtin tools and
+    // forward-compat block types), SystemContent::Blocks with
+    // per-block cache_control. Default mode warns and continues;
+    // strict_translation flips this to a hard 400.
+    check_dropped_anthropic_fields(id, req, strict_translation)?;
 
     let mut body =
         serde_json::to_value(req).map_err(|e| Error::normalize_request(id, e.to_string()))?;
@@ -75,12 +74,25 @@ fn merge_extras(obj: &mut serde_json::Map<String, Value>, extras: &Value) {
 /// the "lossy seam policy" -- the v0.4.0 plan calls out that an
 /// Anthropic-in / OpenAI-compat-out request should produce visible
 /// signal when fields are dropped, not silent degradation.
-fn warn_on_dropped_anthropic_fields(id: &str, req: &ChatRequest) {
+///
+/// In default mode each finding emits a `tracing::warn!` and the
+/// function returns `Ok(())`. In strict mode the findings are
+/// collected and returned as an `Error::Validation` (HTTP 400),
+/// rejecting the request before it hits upstream.
+fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> Result<()> {
+    let mut findings: Vec<String> = Vec::new();
+    let mut record = |msg: String| {
+        if strict {
+            findings.push(msg);
+        }
+    };
+
     if req.cache_control.is_some() {
         warn!(
             provider = id,
             "openai-compat egress: top-level cache_control dropped (prompt caching not supported)",
         );
+        record("top-level cache_control".into());
     }
     if !req.anthropic_beta.is_empty() {
         warn!(
@@ -88,6 +100,7 @@ fn warn_on_dropped_anthropic_fields(id: &str, req: &ChatRequest) {
             beta_flags = ?req.anthropic_beta,
             "openai-compat egress: anthropic_beta flags dropped (Anthropic-only)",
         );
+        record(format!("anthropic_beta {:?}", req.anthropic_beta));
     }
     if let Some(routectl_core::SystemContent::Blocks(blocks)) = &req.system {
         let any_cc = blocks.iter().any(|b| b.cache_control.is_some());
@@ -96,6 +109,7 @@ fn warn_on_dropped_anthropic_fields(id: &str, req: &ChatRequest) {
                 provider = id,
                 "openai-compat egress: per-block cache_control on system dropped",
             );
+            record("per-block cache_control on system".into());
         }
     }
     if let Some(tools) = &req.tools {
@@ -105,6 +119,7 @@ fn warn_on_dropped_anthropic_fields(id: &str, req: &ChatRequest) {
                     provider = id,
                     "openai-compat egress: Anthropic builtin / non-custom tool dropped",
                 );
+                record("Anthropic builtin / non-custom tool".into());
             } else if let ToolDef::Custom(c) = t {
                 if c.cache_control.is_some() {
                     warn!(
@@ -112,6 +127,7 @@ fn warn_on_dropped_anthropic_fields(id: &str, req: &ChatRequest) {
                         tool = %c.name,
                         "openai-compat egress: tool cache_control dropped (Anthropic-only)",
                     );
+                    record(format!("tool `{}` cache_control", c.name));
                 }
             }
         }
@@ -127,6 +143,7 @@ fn warn_on_dropped_anthropic_fields(id: &str, req: &ChatRequest) {
                             block_type = %type_tag,
                             "openai-compat egress: forward-compat content block dropped",
                         );
+                        record(format!("forward-compat block `{type_tag}` on message {i}"));
                     }
                     routectl_core::ContentPart::Known(k) => {
                         if k.cache_control().is_some() {
@@ -136,12 +153,26 @@ fn warn_on_dropped_anthropic_fields(id: &str, req: &ChatRequest) {
                                 block_type = k.type_tag(),
                                 "openai-compat egress: per-block cache_control dropped",
                             );
+                            record(format!(
+                                "per-block cache_control on message {i} ({})",
+                                k.type_tag()
+                            ));
                         }
                     }
                 }
             }
         }
     }
+
+    if strict && !findings.is_empty() {
+        return Err(Error::Validation(format!(
+            "strict_translation: {} canonical-only field(s) cannot be carried by openai-compat egress `{}`: {}",
+            findings.len(),
+            id,
+            findings.join("; ")
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -174,7 +205,7 @@ mod tests {
     #[test]
     fn openai_passthrough_normal_model() {
         let req = simple_req("gpt-4o");
-        let body = normalize("test", &req, ReasoningDialect::OpenAi, None).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::OpenAi, None, false).unwrap();
         // temperature preserved for non-reasoning models
         assert!(body.get("temperature").is_some());
         assert!(body.get("reasoning").is_none());
@@ -184,7 +215,7 @@ mod tests {
     #[test]
     fn openai_drops_sampling_for_o_series() {
         let req = simple_req("o3-mini");
-        let body = normalize("test", &req, ReasoningDialect::OpenAi, None).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::OpenAi, None, false).unwrap();
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
         assert!(body.get("presence_penalty").is_none());
@@ -197,14 +228,14 @@ mod tests {
             effort: Some("high".into()),
             ..Default::default()
         });
-        let body = normalize("test", &req, ReasoningDialect::OpenAi, None).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::OpenAi, None, false).unwrap();
         assert_eq!(body["reasoning_effort"], "high");
     }
 
     #[test]
     fn deepseek_drops_sampling_for_reasoner() {
         let req = simple_req("deepseek-reasoner");
-        let body = normalize("test", &req, ReasoningDialect::DeepSeek, None).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::DeepSeek, None, false).unwrap();
         assert!(body.get("temperature").is_none());
     }
 
@@ -220,7 +251,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
         });
-        let body = normalize("test", &req, ReasoningDialect::DeepSeek, None).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::DeepSeek, None, false).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         for m in msgs {
             assert!(m.get("reasoning_content").is_none());
@@ -236,7 +267,7 @@ mod tests {
             enabled: Some(true),
             ..Default::default()
         });
-        let body = normalize("test", &req, ReasoningDialect::Vllm, None).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::Vllm, None, false).unwrap();
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
     }
 
@@ -244,7 +275,7 @@ mod tests {
     fn provider_extras_merged_last() {
         let mut req = simple_req("gpt-4o");
         req.provider_extras = Some(json!({"custom_key": "custom_val"}));
-        let body = normalize("test", &req, ReasoningDialect::Passthrough, None).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::Passthrough, None, false).unwrap();
         assert_eq!(body["custom_key"], "custom_val");
         assert!(body.get("provider_extras").is_none());
     }
@@ -262,6 +293,7 @@ mod tests {
             &req_mut,
             ReasoningDialect::Passthrough,
             Some(&defaults),
+            false,
         )
         .unwrap();
         assert_eq!(body["key"], "from_request");

@@ -23,6 +23,38 @@ pub async fn build_provider(
     entry: &ProviderEntry,
     secrets: &dyn SecretStore,
 ) -> Result<Arc<dyn Provider>> {
+    build_provider_with_options(name, entry, secrets, BuildOptions::default()).await
+}
+
+/// Server-wide options that influence per-provider construction.
+/// Defaults are equivalent to the legacy `build_provider` behavior.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct BuildOptions {
+    /// When `true`, providers reject requests carrying canonical-only
+    /// fields they cannot represent on the wire (e.g. an OpenAI-compat
+    /// egress receiving an Anthropic `cache_control` block). Default
+    /// `false` -- warn-and-drop. Set from `[server] strict_translation`.
+    pub strict_translation: bool,
+}
+
+impl BuildOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_strict_translation(mut self, strict: bool) -> Self {
+        self.strict_translation = strict;
+        self
+    }
+}
+
+pub async fn build_provider_with_options(
+    name: &str,
+    entry: &ProviderEntry,
+    secrets: &dyn SecretStore,
+    opts: BuildOptions,
+) -> Result<Arc<dyn Provider>> {
     match entry {
         ProviderEntry::OpenaiCompat {
             base_url,
@@ -45,6 +77,7 @@ pub async fn build_provider(
                 default_extras: default_extras.clone(),
                 reasoning_dialect: map_dialect(*reasoning_dialect),
                 user_agent: user_agent.clone(),
+                strict_translation: opts.strict_translation,
             };
             Ok(Arc::new(OpenAiCompatProvider::new(cfg)))
         }
