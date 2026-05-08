@@ -9,17 +9,29 @@
 //! frames followed by `data: [DONE]`. No named events.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Result};
 use serde_json::Value;
 
-use super::{IngressAdapter, IngressStreamState, SseEvent};
+use super::{resolve_alias, IngressAdapter, IngressStreamState, SseEvent};
 
 const DONE_SENTINEL: &str = "[DONE]";
 
 #[derive(Debug, Default)]
-pub struct OpenAiIngress;
+pub struct OpenAiIngress {
+    /// Map from wire `model` field value to a configured alias. The
+    /// `x-routectl-alias` header overrides this. Empty by default
+    /// (loopback dev / direct testing).
+    pub aliases: BTreeMap<String, String>,
+}
+
+impl OpenAiIngress {
+    pub fn new(aliases: BTreeMap<String, String>) -> Self {
+        Self { aliases }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct OpenAiStreamState;
@@ -35,12 +47,14 @@ impl IngressAdapter for OpenAiIngress {
         "openai"
     }
 
-    fn parse_request(&self, _headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
-        serde_json::from_value::<ChatRequest>(body).map_err(|e| {
+    fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
+        let mut req: ChatRequest = serde_json::from_value(body).map_err(|e| {
             Error::Validation(format!(
                 "openai ingress: invalid /v1/chat/completions body: {e}"
             ))
-        })
+        })?;
+        req.model = resolve_alias(&self.aliases, headers, &req.model);
+        Ok(req)
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<Value> {
@@ -82,7 +96,7 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}],
             "stream": true
         });
-        let req = OpenAiIngress
+        let req = OpenAiIngress::default()
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.model, "gpt-4o");
@@ -96,7 +110,7 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning": {"effort": "high"}
         });
-        let req = OpenAiIngress
+        let req = OpenAiIngress::default()
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.reasoning.unwrap().effort.as_deref(), Some("high"));
@@ -108,7 +122,7 @@ mod tests {
     #[test]
     fn parse_request_rejects_malformed_body() {
         let body = json!({"this": "is not a chat request"});
-        let err = OpenAiIngress
+        let err = OpenAiIngress::default()
             .parse_request(&HeaderMap::new(), body)
             .unwrap_err();
         assert!(matches!(err, Error::Validation(_)));
@@ -129,8 +143,10 @@ mod tests {
             }],
             usage: None,
         };
-        let mut state = OpenAiIngress.new_stream_state();
-        let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
+        let mut state = OpenAiIngress::default().new_stream_state();
+        let events = OpenAiIngress::default()
+            .render_chunk(chunk, state.as_mut())
+            .unwrap();
         assert_eq!(events.len(), 1);
         assert!(events[0].event.is_none());
         assert!(events[0].data.contains("\"content\":\"hello\""));
@@ -138,8 +154,8 @@ mod tests {
 
     #[test]
     fn render_eos_emits_done_sentinel() {
-        let mut state = OpenAiIngress.new_stream_state();
-        let events = OpenAiIngress.render_eos(state.as_mut());
+        let mut state = OpenAiIngress::default().new_stream_state();
+        let events = OpenAiIngress::default().render_eos(state.as_mut());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "[DONE]");
         assert!(events[0].event.is_none());
@@ -155,7 +171,7 @@ mod tests {
             usage: None,
             routectl_provider: Some("test".into()),
         };
-        let v = OpenAiIngress.render_response(resp).unwrap();
+        let v = OpenAiIngress::default().render_response(resp).unwrap();
         assert_eq!(v["id"], "chatcmpl-1");
         assert_eq!(v["routectl_provider"], "test");
         // Suppress unused-import warnings.
