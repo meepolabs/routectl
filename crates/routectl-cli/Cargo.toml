@@ -50,3 +50,27 @@ wiremock.workspace = true
 reqwest = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+# cargo-deb metadata. Used by `.github/workflows/release.yml` to build
+# .deb packages on tag pushes. Run locally with: `cargo deb -p routectl-cli`.
+[package.metadata.deb]
+name = "routectl"
+maintainer = "Meepo Labs <noreply@meepolabs.com>"
+copyright = "2026, Meepo Labs"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+routectl is a translation pipe between OpenAI Chat Completions / \
+Anthropic Messages clients and N upstream model providers. It speaks \
+both ingress dialects on /v1/chat/completions and /v1/messages, fans \
+out to OpenAI-compatible APIs, the Anthropic Messages API, and AWS \
+Bedrock (InvokeModel + Converse), and supports alias chains, \
+fallbacks, retry policy, listener auth, and per-provider runtime \
+gates."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/routectl", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/routectl/README.md", "644"],
+    ["../../CHANGELOG.md", "usr/share/doc/routectl/CHANGELOG.md", "644"],
+    ["../../examples/config.toml", "usr/share/doc/routectl/examples/config.toml", "644"],
+]
