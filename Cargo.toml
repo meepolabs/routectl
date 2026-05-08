@@ -20,7 +20,7 @@ authors = ["Meepo Labs"]
 [workspace.dependencies]
 # Local crates
 routectl-core = { path = "crates/routectl-core" }
-routectl-providers = { path = "crates/routectl-providers" }
+routectl-providers = { path = "crates/routectl-providers", default-features = false }
 routectl-router = { path = "crates/routectl-router" }
 routectl-auth = { path = "crates/routectl-auth" }
 

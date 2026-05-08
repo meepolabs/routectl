@@ -173,3 +173,195 @@ async fn build_with_missing_env_var_errors() {
         Err(other) => panic!("expected Error::Auth, got: {other:?}"),
     }
 }
+
+/// TOML round-trip for Anthropic `extra_headers` and `user_agent`.
+#[test]
+fn anthropic_extra_headers_and_user_agent_round_trip_through_toml() {
+    let toml_src = r#"
+[providers.anthropic]
+type = "anthropic-api"
+api_key_ref = "env://ANTHROPIC_API_KEY"
+user_agent = "claude-code/1.2.3"
+
+[providers.anthropic.extra_headers]
+"anthropic-beta" = "context-1m-2025-08-07,prompt-caching-2024-07-31"
+"x-custom-trace" = "abc123"
+"#;
+    let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
+    let entry = cfg.providers.get("anthropic").expect("anthropic entry");
+    match entry {
+        ProviderEntry::AnthropicApi { extra_headers, user_agent, .. } => {
+            assert_eq!(user_agent.as_deref(), Some("claude-code/1.2.3"));
+            assert_eq!(
+                extra_headers.get("anthropic-beta").map(String::as_str),
+                Some("context-1m-2025-08-07,prompt-caching-2024-07-31"),
+            );
+            assert_eq!(extra_headers.get("x-custom-trace").map(String::as_str), Some("abc123"));
+        }
+        other => panic!("expected AnthropicApi, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "bedrock")]
+mod bedrock_tests {
+    use routectl_router::{
+        BedrockApiShapeConfig, BedrockCredsConfig, Config, ProviderEntry,
+    };
+
+    #[test]
+    fn bedrock_invoke_with_bearer_key_round_trips() {
+        let toml_src = r#"
+[providers.bedrock_anthropic]
+type = "bedrock"
+region = "us-west-2"
+model_id = "us.anthropic.claude-opus-4-7"
+api_shape = "invoke"
+user_agent = "claude-code/1.2.3"
+anthropic_beta = ["context-1m-2025-08-07", "prompt-caching-2024-07-31"]
+creds = { kind = "bearer-key", key_ref = "file:///home/me/.config/routectl/bedrock.key" }
+
+[providers.bedrock_anthropic.extra_headers]
+"x-trace-id" = "abc"
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        let entry = cfg.providers.get("bedrock_anthropic").expect("entry");
+        match entry {
+            ProviderEntry::Bedrock {
+                region,
+                model_id,
+                api_shape,
+                user_agent,
+                anthropic_beta,
+                extra_headers,
+                creds,
+                ..
+            } => {
+                assert_eq!(region, "us-west-2");
+                assert_eq!(model_id, "us.anthropic.claude-opus-4-7");
+                assert_eq!(*api_shape, BedrockApiShapeConfig::Invoke);
+                assert_eq!(user_agent.as_deref(), Some("claude-code/1.2.3"));
+                assert_eq!(
+                    anthropic_beta,
+                    &[
+                        "context-1m-2025-08-07".to_string(),
+                        "prompt-caching-2024-07-31".to_string(),
+                    ]
+                );
+                assert_eq!(extra_headers.get("x-trace-id").map(String::as_str), Some("abc"));
+                match creds {
+                    BedrockCredsConfig::BearerKey { key_ref } => {
+                        assert_eq!(key_ref, "file:///home/me/.config/routectl/bedrock.key");
+                    }
+                    other => panic!("expected BearerKey, got {other:?}"),
+                }
+            }
+            other => panic!("expected Bedrock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bedrock_static_creds_round_trip_with_optional_session_token() {
+        // TOML inline tables must be single-line, so we use a sub-table
+        // for `creds` here. Both syntaxes serialize to the same struct.
+        let toml_src = r#"
+[providers.bedrock_static]
+type = "bedrock"
+region = "us-west-2"
+model_id = "anthropic.claude-haiku-4-5"
+
+[providers.bedrock_static.creds]
+kind = "static"
+access_key_ref = "env://AWS_ACCESS_KEY_ID"
+secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
+session_token_ref = "env://AWS_SESSION_TOKEN"
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        match cfg.providers.get("bedrock_static").unwrap() {
+            ProviderEntry::Bedrock { creds, api_shape, .. } => {
+                // Default api_shape when omitted -> Invoke.
+                assert_eq!(*api_shape, BedrockApiShapeConfig::Invoke);
+                match creds {
+                    BedrockCredsConfig::Static {
+                        access_key_ref,
+                        secret_key_ref,
+                        session_token_ref,
+                    } => {
+                        assert_eq!(access_key_ref, "env://AWS_ACCESS_KEY_ID");
+                        assert_eq!(secret_key_ref, "env://AWS_SECRET_ACCESS_KEY");
+                        assert_eq!(
+                            session_token_ref.as_deref(),
+                            Some("env://AWS_SESSION_TOKEN"),
+                        );
+                    }
+                    other => panic!("expected Static, got {other:?}"),
+                }
+            }
+            other => panic!("expected Bedrock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bedrock_profile_creds_round_trip() {
+        let toml_src = r#"
+[providers.bedrock_profile]
+type = "bedrock"
+region = "us-west-2"
+model_id = "us.anthropic.claude-opus-4-7"
+api_shape = "converse"
+creds = { kind = "profile", name = "bedrock-prod" }
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        match cfg.providers.get("bedrock_profile").unwrap() {
+            ProviderEntry::Bedrock { creds, api_shape, .. } => {
+                assert_eq!(*api_shape, BedrockApiShapeConfig::Converse);
+                match creds {
+                    BedrockCredsConfig::Profile { name } => {
+                        assert_eq!(name, "bedrock-prod");
+                    }
+                    other => panic!("expected Profile, got {other:?}"),
+                }
+            }
+            other => panic!("expected Bedrock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bedrock_default_chain_round_trips() {
+        let toml_src = r#"
+[providers.bedrock_chain]
+type = "bedrock"
+region = "us-west-2"
+model_id = "us.anthropic.claude-opus-4-7"
+creds = { kind = "default-chain" }
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        match cfg.providers.get("bedrock_chain").unwrap() {
+            ProviderEntry::Bedrock { creds, .. } => {
+                assert!(matches!(creds, BedrockCredsConfig::DefaultChain));
+            }
+            other => panic!("expected Bedrock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bedrock_redact_secrets_clears_literals_only() {
+        let mut creds = BedrockCredsConfig::Static {
+            access_key_ref: "literal:AKIAACTUAL".into(),
+            secret_key_ref: "env://AWS_SECRET_ACCESS_KEY".into(),
+            session_token_ref: Some("literal:abc123".into()),
+        };
+        creds.redact();
+        match creds {
+            BedrockCredsConfig::Static {
+                access_key_ref,
+                secret_key_ref,
+                session_token_ref,
+            } => {
+                assert_eq!(access_key_ref, "literal:[REDACTED]");
+                assert_eq!(secret_key_ref, "env://AWS_SECRET_ACCESS_KEY");
+                assert_eq!(session_token_ref.as_deref(), Some("literal:[REDACTED]"));
+            }
+            _ => unreachable!(),
+        }
+    }
+}
