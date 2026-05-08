@@ -8,10 +8,13 @@ so the README and the test stay in sync.
 ## How to run the matrix
 
 ```bash
-# Set keys once (they're optional -- tests skip cleanly when missing).
+# Set keys for the providers you want to exercise. Tests skip cleanly
+# when a key is absent.
 export OPENROUTER_API_KEY=sk-or-v1-...
-export OPENCODE_GO_API_KEY=sk-...
 export NIM_API_KEY=nvapi-...
+export ANTHROPIC_API_KEY=sk-ant-api03-...
+export AWS_BEARER_TOKEN_BEDROCK=...
+export AWS_REGION=us-east-1
 
 cargo test -p routectl-cli --features live-integration --release \
   --test live_matrix -- --nocapture --test-threads=1
@@ -64,37 +67,15 @@ headers OpenRouter expects.
 | `arcee-ai/trinity-mini` | complete | PASS | Returns `content: null` |
 | `nousresearch/hermes-3-llama-3.1-405b:free` | complete | upstream-429 | Free tier rate-limit |
 
-## OpenCode-Go (`reasoning_dialect = "deepseek"`)
+Notable openai-compat-host behaviors routectl handles, surfaced
+during testing across multiple OpenAI-compatible upstreams:
 
-Hits `https://opencode.ai/zen/go/v1`. The Zen Go subscription tier --
-distinct from the pay-as-you-go Zen API at `/zen/v1`.
-
-All 14 models on the subscription have been verified end-to-end:
-
-| Model | Mode | Status |
-|---|---|---|
-| `minimax-m2.7` | complete | PASS |
-| `minimax-m2.5` | complete | PASS |
-| `kimi-k2.6` | complete + stream | PASS (~59 reasoning chunks streamed) |
-| `kimi-k2.5` | complete | PASS |
-| `glm-5.1` | complete + stream | PASS |
-| `glm-5` | complete | PASS |
-| `deepseek-v4-pro` | complete | PASS |
-| `deepseek-v4-flash` | complete + stream | PASS (~43 reasoning chunks streamed) |
-| `qwen3.6-plus` | complete + stream | PASS |
-| `qwen3.5-plus` | complete | PASS (occasional Alibaba 429 upstream) |
-| `mimo-v2-pro` | complete | PASS |
-| `mimo-v2-omni` | complete | PASS |
-| `mimo-v2.5-pro` | complete | PASS |
-| `mimo-v2.5` | complete | PASS |
-
-OpenCode-Go-specific behaviors routectl handles:
-
-- Emits a `data: {"choices":[],"cost":"0"}` cost-trailer chunk **after**
-  the `[DONE]` SSE terminator. Routectl correctly stops parsing at
+- **Trailing chunks after `[DONE]`**: some hosts emit a final
+  `data: {"choices":[],"cost":"0"}` (or similar bookkeeping chunk)
+  *after* the SSE `[DONE]` terminator. Routectl stops parsing at
   `[DONE]` so the trailer doesn't fail chunk deserialization.
-- DeepSeek-style `reasoning_content` field on responses; lifted into
-  `reasoning_details[format="deepseek-v1"]` by the deepseek dialect.
+- **DeepSeek-style `reasoning_content`**: the `deepseek` dialect lifts
+  this into `reasoning_details[format="deepseek-v1"]`.
 
 ## NIM -- NVIDIA Inference Microservices (`reasoning_dialect = "openai"`)
 
@@ -113,20 +94,47 @@ and architectures. Lots of NIM models are guarded behind feature
 endpoints that 410 ("end of life") -- the matrix avoids those by using
 freshly-validated names.
 
-## Anthropic API (untested live)
+## Anthropic API direct (`type = "anthropic-api"`)
 
-`reasoning_dialect = "anthropic-api"`, hits `https://api.anthropic.com`
-(with `x-api-key` and `anthropic-version: 2023-06-01` headers). Wire
-format -- thinking blocks, signature preservation, system-message lift,
-tools shape -- is covered by 20 unit tests. No live key has been wired
-into the matrix yet.
+Hits `https://api.anthropic.com` with `x-api-key` (or
+`Authorization: Bearer` for OAuth-bearer auth) and
+`anthropic-version: 2023-06-01`. Wire-format coverage -- thinking
+blocks, signature preservation, system-message lift, tools shape,
+cache_control round-trip -- has 20+ unit tests. Live verification
+runs when `ANTHROPIC_API_KEY` is set.
 
-## Cookie-auth providers (deferred to v0.2)
+## AWS Bedrock (`type = "bedrock"`, InvokeModel + Anthropic body)
 
-`claude-cookie` and `chatgpt-cookie` providers are scaffolded but
-feature-gated. The CLI returns a clean "not enabled in this build (v0.2
-feature)" error when configured. v0.2 will enable a `wry`-based webview
-login flow.
+Hits `bedrock-runtime.<region>.amazonaws.com` directly with SigV4
+signing or a short-term bearer key
+(`AWS_BEARER_TOKEN_BEDROCK`). Live matrix entries cover the
+cross-region inference profiles for current Anthropic models on
+Bedrock; per-account model-availability varies. Skipped unless
+`AWS_BEARER_TOKEN_BEDROCK` (or the standard AWS credential chain) is
+available.
+
+| Model | Mode | Notes |
+|---|---|---|
+| `us.anthropic.claude-3-5-haiku-20241022-v1:0` | complete + stream | |
+| `us.anthropic.claude-haiku-4-5-20251001-v1:0` | complete + stream | |
+| `us.anthropic.claude-sonnet-4-20250514-v1:0` | complete | |
+| `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | complete | Used as the cache_control verification target (1024-token cache minimum) |
+| `us.anthropic.claude-opus-4-20250514-v1:0` | complete | |
+
+Three additional ingress-through-Bedrock tests verify the v0.4
+hub-and-spoke seam end-to-end:
+
+- `openai_ingress_through_bedrock`: OpenAI Chat Completions wire body
+  -> canonical -> Bedrock InvokeModel -> response.
+- `anthropic_ingress_through_bedrock_cache_and_beta`: Anthropic
+  Messages body with `cache_control` on a system block and
+  `anthropic_beta` flags. Sends the same body twice; the second call
+  hits the cache. Verified live: cache_create=N on call 1,
+  cache_read=N on call 2.
+- `anthropic_ingress_streaming_through_bedrock`: streaming through
+  the Anthropic ingress, decoding Bedrock's binary eventstream
+  frames, asserts the rendered SSE event sequence
+  (`message_start` -> `content_block_*` -> `message_stop`).
 
 ## Adding a new model
 
