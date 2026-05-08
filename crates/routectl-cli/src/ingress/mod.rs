@@ -17,6 +17,7 @@ use axum::http::HeaderMap;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 use serde_json::Value;
 
+pub mod anthropic;
 pub mod openai;
 
 /// One server-sent event ready to write to the response stream.
