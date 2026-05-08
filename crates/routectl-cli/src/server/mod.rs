@@ -135,27 +135,46 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     Ok(router)
 }
 
+/// Maximum incoming JSON body size for `/v1/chat/completions` and
+/// `/v1/messages`. 4 MiB easily fits the largest legitimate
+/// Anthropic Messages request (long system prompt + tool defs +
+/// long history) while preventing trivial OOM-DoS via a multi-GB
+/// POST.
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+
 fn build_axum_router(state: Arc<AppState>, token_set: Arc<TokenSet>) -> AxumRouter {
+    use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
 
-    let mut router = AxumRouter::new()
-        .route("/health", get(handlers::health::health))
+    // Public routes: /health is intentionally outside the auth layer
+    // so external liveness probes work in --unsafe-public deployments.
+    let public = AxumRouter::new().route("/health", get(handlers::health::health));
+
+    // Authenticated routes: /v1/models lists configured aliases (low
+    // sensitivity but still gated when auth is on); /v1/chat/completions
+    // and /v1/messages carry the body of every request and forward
+    // upstream.
+    let mut authed = AxumRouter::new()
         .route("/v1/models", get(handlers::models::list_models))
         .route(
             "/v1/chat/completions",
             post(handlers::chat_completions::chat_completions),
         )
-        .route("/v1/messages", post(handlers::messages::messages));
+        .route("/v1/messages", post(handlers::messages::messages))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES));
 
     // Mount the auth middleware only when tokens are configured.
     // Loopback dev (empty token list) gets the historical zero-auth
     // behavior with no per-request overhead.
     if !token_set.is_empty() {
-        router = router.layer(axum::middleware::from_fn_with_state(
+        authed = authed.layer(axum::middleware::from_fn_with_state(
             token_set,
             auth::auth_layer,
         ));
     }
 
-    router.layer(TraceLayer::new_for_http()).with_state(state)
+    public
+        .merge(authed)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
 }

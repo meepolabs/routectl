@@ -10,8 +10,9 @@
 //! envelope around that dispatch.
 
 use serde_json::Value;
+use tracing::warn;
 
-use routectl_core::{ChatRequest, Error, Result};
+use routectl_core::{ChatRequest, Error, Result, ToolDef};
 
 use super::dialect::ReasoningDialect;
 
@@ -21,6 +22,16 @@ pub fn normalize(
     dialect: ReasoningDialect,
     default_extras: Option<&Value>,
 ) -> Result<Value> {
+    // Warn-and-drop on canonical fields that OpenAI-compat upstreams
+    // do not understand. The lossy seams: cache_control (prompt
+    // caching is Anthropic-only), anthropic_beta (Anthropic-specific
+    // body flags), and the ToolDef::Other / ContentPart::Other
+    // catchalls that carry Anthropic builtin tools and forward-compat
+    // block types. SystemContent::Blocks is flattened to a string by
+    // the dialect when it serializes `system`; the per-block
+    // cache_control on those blocks is dropped here too.
+    warn_on_dropped_anthropic_fields(id, req);
+
     let mut body =
         serde_json::to_value(req).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
@@ -33,6 +44,8 @@ pub fn normalize(
     obj.remove("reasoning");
     obj.remove("provider_extras");
     obj.remove("chat_template_kwargs");
+    obj.remove("cache_control");
+    obj.remove("anthropic_beta");
 
     dialect.as_dyn().apply_request(id, obj, req)?;
 
@@ -52,6 +65,81 @@ fn merge_extras(obj: &mut serde_json::Map<String, Value>, extras: &Value) {
     if let Some(extra_obj) = extras.as_object() {
         for (k, v) in extra_obj {
             obj.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// Emit `tracing::warn!` for each Anthropic-only canonical field that
+/// the openai-compat egress will drop. Quiet when none apply (the
+/// common case). This is the OpenAI-compat egress's contribution to
+/// the "lossy seam policy" -- the v0.4.0 plan calls out that an
+/// Anthropic-in / OpenAI-compat-out request should produce visible
+/// signal when fields are dropped, not silent degradation.
+fn warn_on_dropped_anthropic_fields(id: &str, req: &ChatRequest) {
+    if req.cache_control.is_some() {
+        warn!(
+            provider = id,
+            "openai-compat egress: top-level cache_control dropped (prompt caching not supported)",
+        );
+    }
+    if !req.anthropic_beta.is_empty() {
+        warn!(
+            provider = id,
+            beta_flags = ?req.anthropic_beta,
+            "openai-compat egress: anthropic_beta flags dropped (Anthropic-only)",
+        );
+    }
+    if let Some(routectl_core::SystemContent::Blocks(blocks)) = &req.system {
+        let any_cc = blocks.iter().any(|b| b.cache_control.is_some());
+        if any_cc {
+            warn!(
+                provider = id,
+                "openai-compat egress: per-block cache_control on system dropped",
+            );
+        }
+    }
+    if let Some(tools) = &req.tools {
+        for t in tools {
+            if matches!(t, ToolDef::Other(_)) {
+                warn!(
+                    provider = id,
+                    "openai-compat egress: Anthropic builtin / non-custom tool dropped",
+                );
+            } else if let ToolDef::Custom(c) = t {
+                if c.cache_control.is_some() {
+                    warn!(
+                        provider = id,
+                        tool = %c.name,
+                        "openai-compat egress: tool cache_control dropped (Anthropic-only)",
+                    );
+                }
+            }
+        }
+    }
+    for (i, m) in req.messages.iter().enumerate() {
+        if let routectl_core::MessageContent::Parts(parts) = &m.content {
+            for p in parts {
+                match p {
+                    routectl_core::ContentPart::Other { type_tag, .. } => {
+                        warn!(
+                            provider = id,
+                            message_index = i,
+                            block_type = %type_tag,
+                            "openai-compat egress: forward-compat content block dropped",
+                        );
+                    }
+                    routectl_core::ContentPart::Known(k) => {
+                        if k.cache_control().is_some() {
+                            warn!(
+                                provider = id,
+                                message_index = i,
+                                block_type = k.type_tag(),
+                                "openai-compat egress: per-block cache_control dropped",
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }
