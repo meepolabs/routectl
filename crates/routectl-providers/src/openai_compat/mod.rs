@@ -86,6 +86,19 @@ impl OpenAiCompatProvider {
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         for (k, v) in &self.cfg.extra_headers {
+            // Defense-in-depth, parity with anthropic_api / bedrock: refuse
+            // to let TOML-supplied `extra_headers` stomp on the auth header
+            // we just set. HeaderMap::insert replaces by name, so without
+            // this guard `extra_headers = { "authorization" = "..." }` would
+            // silently override the Bearer token.
+            if crate::http_client::is_reserved_extra_header(k) {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "ignoring reserved header from extra_headers (would bypass provider auth)"
+                );
+                continue;
+            }
             let name = HeaderName::from_bytes(k.as_bytes())
                 .map_err(|e| Error::Config(format!("invalid header name `{k}`: {e}")))?;
             let value = HeaderValue::from_str(v)
