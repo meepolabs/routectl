@@ -31,9 +31,15 @@ impl Default for MemoryStore {
 impl SecretStore for MemoryStore {
     async fn get(&self, secret_ref: &SecretRef) -> Result<String> {
         match secret_ref {
-            SecretRef::Env(var) => {
-                std::env::var(var).map_err(|_| Error::Auth(format!("env var {var} not set")))
-            }
+            SecretRef::Env(var) => std::env::var(var).map_err(|_| {
+                tracing::warn!(
+                    scheme = "env://",
+                    var = %var,
+                    reason = "not set",
+                    "secret resolution failed",
+                );
+                Error::Auth(format!("env var {var} not set"))
+            }),
             SecretRef::Literal(s) => Ok(s.clone()),
             SecretRef::File(path) => read_secret_file(path).await,
         }
@@ -82,6 +88,12 @@ async fn read_secret_file(path: &Path) -> Result<String> {
         // resolved against the process CWD. Refuse here so the
         // "absolute path" invariant holds at every entry point.
         if !path_owned.is_absolute() {
+            tracing::warn!(
+                scheme = "file://",
+                path = %path_owned.display(),
+                reason = "relative path",
+                "secret resolution failed",
+            );
             return Err(Error::Auth(format!(
                 "secret file `{}` must be an absolute path; relative paths are refused (CWD-relative resolution is unsafe)",
                 path_owned.display()
@@ -89,6 +101,13 @@ async fn read_secret_file(path: &Path) -> Result<String> {
         }
 
         let file = std::fs::File::open(&path_owned).map_err(|e| {
+            tracing::warn!(
+                scheme = "file://",
+                path = %path_owned.display(),
+                reason = "open failed",
+                error = %e,
+                "secret resolution failed",
+            );
             Error::Auth(format!(
                 "failed to open secret file `{}`: {e}",
                 path_owned.display()
@@ -96,6 +115,13 @@ async fn read_secret_file(path: &Path) -> Result<String> {
         })?;
 
         let meta = file.metadata().map_err(|e| {
+            tracing::warn!(
+                scheme = "file://",
+                path = %path_owned.display(),
+                reason = "stat failed",
+                error = %e,
+                "secret resolution failed",
+            );
             Error::Auth(format!(
                 "failed to stat secret file `{}`: {e}",
                 path_owned.display()
@@ -103,6 +129,12 @@ async fn read_secret_file(path: &Path) -> Result<String> {
         })?;
 
         if !meta.is_file() {
+            tracing::warn!(
+                scheme = "file://",
+                path = %path_owned.display(),
+                reason = "not a regular file",
+                "secret resolution failed",
+            );
             return Err(Error::Auth(format!(
                 "secret file `{}` is not a regular file (refusing symlink to special file or directory)",
                 path_owned.display()
@@ -114,6 +146,13 @@ async fn read_secret_file(path: &Path) -> Result<String> {
             use std::os::unix::fs::PermissionsExt;
             let mode = meta.permissions().mode();
             if mode & 0o077 != 0 {
+                tracing::warn!(
+                    scheme = "file://",
+                    path = %path_owned.display(),
+                    mode = format!("{:o}", mode & 0o7777),
+                    reason = "group/other readable; chmod 600 or 400",
+                    "secret resolution failed",
+                );
                 return Err(Error::Auth(format!(
                     "secret file `{}` has permissions {:o}; use chmod 600 or 400 to restrict reads to the owner",
                     path_owned.display(),
@@ -146,6 +185,12 @@ async fn read_secret_file(path: &Path) -> Result<String> {
         })?;
 
         let s = String::from_utf8(buf).map_err(|e| {
+            tracing::warn!(
+                scheme = "file://",
+                path = %path_owned.display(),
+                reason = "not utf8",
+                "secret resolution failed",
+            );
             Error::Auth(format!(
                 "secret file `{}` is not valid UTF-8: {e}",
                 path_owned.display()
