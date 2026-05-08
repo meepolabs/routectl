@@ -145,4 +145,44 @@ mod tests {
         assert_eq!(body["top_p"], json!(0.9));
         assert!(body.get("stream").is_none(), "stream should be stripped");
     }
+
+    #[test]
+    fn cache_control_on_user_text_round_trips_to_bedrock_invoke_body() {
+        // v0.4.0 mandate: Anthropic-in -> Bedrock-Invoke-out path
+        // preserves cache_control byte-for-byte. Bedrock-Invoke
+        // delegates body construction to anthropic_api::request::
+        // normalize, so this test pins the inheritance.
+        use routectl_core::{
+            cache_control::CacheControl, content_part::ContentPart, system_content::SystemContent,
+            KnownContentPart, SystemBlock,
+        };
+
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.cache_control = Some(CacheControl::ephemeral_5m());
+        req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "be helpful".into(),
+            cache_control: Some(CacheControl::ephemeral_1h()),
+            citations: None,
+        }]));
+        req.messages[0].content =
+            MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "look".into(),
+                cache_control: Some(CacheControl::ephemeral_5m()),
+            })]);
+
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Top-level cache_control on body.
+        assert_eq!(body["cache_control"]["ttl"], "5m");
+        // System block preserved with cache_control.
+        let sys = body["system"].as_array().unwrap();
+        assert_eq!(sys[0]["cache_control"]["ttl"], "1h");
+        // User text block preserved with cache_control.
+        let blk = &body["messages"][0]["content"][0];
+        assert_eq!(blk["cache_control"]["ttl"], "5m");
+        // Bedrock-required version still set.
+        assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
+    }
 }

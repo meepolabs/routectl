@@ -1,15 +1,41 @@
 //! Request normalization: routectl shape -> Anthropic wire format.
+//!
+//! v0.4.0: rewritten to consume the typed canonical (ContentPart,
+//! SystemContent, ToolDef) so cache_control round-trips end-to-end on
+//! the Anthropic-in / Anthropic-out and Anthropic-in / Bedrock-Invoke-out
+//! paths. Forward-compat: ContentPart::Other and ToolDef::Other pass
+//! through verbatim, so a new Anthropic block or builtin tool ships
+//! without code edits here.
+//!
+//! Translation rules:
+//! - `req.system` is read directly into the wire `system` field (Text or
+//!   Blocks). Backwards-compatible fallback: when `req.system` is None,
+//!   any Role::System messages in `req.messages` get lifted (today's
+//!   behavior) so direct callers without an ingress aren't broken.
+//! - User content is translated typed-block-by-typed-block. Unknown
+//!   blocks pass through via ContentPart::Other -> ContentBlock::Other.
+//! - Assistant content with reasoning_details (multi-turn tool-use)
+//!   continues to require a signature on each thinking block.
+//! - Tool message: the canonical Tool role becomes a user message with
+//!   a tool_result block, same as today.
+//! - Tools: ToolDef::Custom -> AnthropicTool::Custom (cache_control,
+//!   defer_loading, strict, optional type_tag); ToolDef::Other ->
+//!   AnthropicTool::Builtin (passthrough Value).
+//! - Top-level cache_control and anthropic_beta are set on the body.
+//! - cache_control::validate runs before serialization (debug_assert
+//!   only; keeps non-debug builds fast).
 
 use serde_json::{json, Value};
 
+use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
 use routectl_core::{
     ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetailKind, Result, Role, ToolDef,
+    ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
 };
 
 use super::types::{
-    AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicRole, AnthropicTool,
-    ContentBlock, ThinkingConfig,
+    AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicRole, AnthropicSystem,
+    AnthropicSystemBlock, AnthropicTool, ContentBlock, ThinkingConfig,
 };
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -30,33 +56,24 @@ fn effort_ratio(effort: &str) -> f64 {
 fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
-    // Explicit disable
     if r.enabled == Some(false) {
         return Some(ThinkingConfig::Disabled);
     }
-
     if let Some(budget) = r.max_tokens {
         return Some(ThinkingConfig::Enabled {
             budget_tokens: budget,
         });
     }
-
     if let Some(effort) = r.effort.as_deref() {
         if effort == "none" {
             return Some(ThinkingConfig::Disabled);
         }
         let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let budget = ((max as f64) * effort_ratio(effort)).max(1.0) as u32;
-        // Future extension point: when the Anthropic API exposes a
-        // distinct `adaptive` thinking type in JSON, branch on
-        // `profile_for(&req.model).supports_adaptive_thinking` here.
-        // Both code paths currently produce the same `budget_tokens`
-        // shape, so the branch is elided to avoid dead code.
         return Some(ThinkingConfig::Enabled {
             budget_tokens: budget,
         });
     }
-
     if r.enabled == Some(true) {
         let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let budget = (max / 2).max(1);
@@ -64,50 +81,219 @@ fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
             budget_tokens: budget,
         });
     }
-
     None
 }
 
-/// Translate a typed `CustomTool` into an Anthropic tool body. Mechanical
-/// (Commit 1): drops cache_control, defer_loading, and strict; Commit 2
-/// extends the wire `AnthropicTool` shape and threads them through.
-fn custom_tool_to_anthropic(c: &CustomTool) -> AnthropicTool {
-    AnthropicTool {
-        name: c.name.clone(),
-        description: c.description.clone(),
-        input_schema: c.input_schema.clone(),
+// ---------------------------------------------------------------------------
+// System
+// ---------------------------------------------------------------------------
+
+/// Convert canonical `SystemContent` to wire `AnthropicSystem`. Preserves
+/// per-block cache_control and citations.
+fn translate_system(s: &SystemContent) -> AnthropicSystem {
+    match s {
+        SystemContent::Text(t) => AnthropicSystem::Text(t.clone()),
+        SystemContent::Blocks(blocks) => AnthropicSystem::Blocks(
+            blocks
+                .iter()
+                .map(|b| AnthropicSystemBlock {
+                    kind: b.kind.clone(),
+                    text: b.text.clone(),
+                    cache_control: b.cache_control.clone(),
+                    citations: b.citations.clone(),
+                })
+                .collect(),
+        ),
     }
 }
 
-/// Translate an OpenAI-shape tool object into an Anthropic tool.
-/// OpenAI: `{type: "function", function: {name, description, parameters}}`
-/// Anthropic: `{name, description?, input_schema}`
-fn translate_tool(id: &str, tool: &Value) -> Result<AnthropicTool> {
-    let func = tool
-        .get("function")
-        .ok_or_else(|| Error::normalize_request(id, "tool missing 'function' key"))?;
+/// Backwards-compat fallback: lift Role::System messages out of the
+/// messages array into a flat AnthropicSystem::Text. Used only when
+/// `req.system` is None. Returns None when no System messages are
+/// present.
+fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
+    let texts: Vec<String> = messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::System))
+        .map(|m| match &m.content {
+            MessageContent::Text(t) => t.clone(),
+            _ => String::new(),
+        })
+        .collect();
+    if texts.is_empty() {
+        None
+    } else {
+        Some(AnthropicSystem::Text(texts.join("\n")))
+    }
+}
 
-    let name = func
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::normalize_request(id, "tool.function missing 'name'"))?
-        .to_string();
+// ---------------------------------------------------------------------------
+// Tools
+// ---------------------------------------------------------------------------
 
+fn translate_custom_tool(c: &CustomTool) -> AnthropicTool {
+    AnthropicTool::Custom {
+        name: c.name.clone(),
+        description: c.description.clone(),
+        input_schema: c.input_schema.clone(),
+        cache_control: c.cache_control.clone(),
+        defer_loading: c.defer_loading,
+        strict: c.strict,
+        type_tag: c.type_tag.clone(),
+    }
+}
+
+fn translate_tool(td: &ToolDef) -> AnthropicTool {
+    match td {
+        ToolDef::Custom(c) => translate_custom_tool(c),
+        ToolDef::Other(v) => {
+            // Backwards-compat: a legacy OpenAI-shape tool
+            // `{type: "function", function: {name, description, parameters}}`
+            // arriving via ToolDef::Other gets translated to
+            // AnthropicTool::Custom so callers that bypass the OpenAI
+            // ingress still get a working Anthropic body. Anything else
+            // (Anthropic builtins, server-side, future shapes) passes
+            // through verbatim as Builtin.
+            if let Some(custom) = openai_function_to_custom(v) {
+                custom
+            } else {
+                AnthropicTool::Builtin(v.clone())
+            }
+        }
+    }
+}
+
+fn openai_function_to_custom(v: &Value) -> Option<AnthropicTool> {
+    let obj = v.as_object()?;
+    let is_function = obj.get("type").and_then(|t| t.as_str()) == Some("function");
+    if !is_function {
+        return None;
+    }
+    let func = obj.get("function")?.as_object()?;
+    let name = func.get("name")?.as_str()?.to_string();
     let description = func
         .get("description")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-
     let input_schema = func
         .get("parameters")
         .cloned()
         .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
-
-    Ok(AnthropicTool {
+    let strict = func.get("strict").and_then(|v| v.as_bool());
+    Some(AnthropicTool::Custom {
         name,
         description,
         input_schema,
+        cache_control: None,
+        defer_loading: None,
+        strict,
+        type_tag: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Content blocks
+// ---------------------------------------------------------------------------
+
+/// Translate one canonical ContentPart into a wire ContentBlock.
+/// Forward-compat: ContentPart::Other passes through verbatim as
+/// ContentBlock::Other so the Anthropic-in / Anthropic-out path keeps
+/// working when Anthropic ships a new block type.
+fn translate_content_part(p: &ContentPart) -> ContentBlock {
+    match p {
+        ContentPart::Known(k) => translate_known_part(k),
+        ContentPart::Other {
+            type_tag,
+            cache_control,
+            extras,
+        } => ContentBlock::Other {
+            type_tag: type_tag.clone(),
+            cache_control: cache_control.clone(),
+            extras: extras.clone(),
+        },
+    }
+}
+
+fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
+    match k {
+        KnownContentPart::Text {
+            text,
+            cache_control,
+        } => ContentBlock::Text {
+            text: text.clone(),
+            cache_control: cache_control.clone(),
+        },
+        KnownContentPart::Image {
+            source,
+            cache_control,
+        } => ContentBlock::Image {
+            source: source.clone(),
+            cache_control: cache_control.clone(),
+        },
+        // OpenAI-shape ImageUrl translates to an Anthropic image block
+        // when the URL is HTTPS-direct. base64 data URIs are a separate
+        // shape and we don't synthesize them here -- callers should use
+        // KnownContentPart::Image for that.
+        KnownContentPart::ImageUrl {
+            image_url,
+            cache_control,
+        } => {
+            let url = image_url.get("url").cloned().unwrap_or(Value::Null);
+            ContentBlock::Image {
+                source: json!({"type": "url", "url": url}),
+                cache_control: cache_control.clone(),
+            }
+        }
+        KnownContentPart::Document {
+            source,
+            title,
+            citations,
+            cache_control,
+        } => ContentBlock::Document {
+            source: source.clone(),
+            title: title.clone(),
+            citations: citations.clone(),
+            cache_control: cache_control.clone(),
+        },
+        KnownContentPart::ToolUse {
+            id,
+            name,
+            input,
+            cache_control,
+        } => ContentBlock::ToolUse {
+            id: id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+            cache_control: cache_control.clone(),
+        },
+        KnownContentPart::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+            cache_control,
+        } => ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            content: content.clone(),
+            cache_control: cache_control.clone(),
+            is_error: *is_error,
+        },
+        KnownContentPart::Thinking {
+            thinking,
+            signature,
+        } => ContentBlock::Thinking {
+            thinking: thinking.clone(),
+            // Wire requires signature; absent on canonical means we fall
+            // back to empty. Multi-turn callers should always set this;
+            // build_assistant_content errors when reasoning_details lack
+            // a signature.
+            signature: signature.clone().unwrap_or_default(),
+            cache_control: None,
+        },
+        KnownContentPart::RedactedThinking { data } => ContentBlock::RedactedThinking {
+            data: data.clone(),
+            cache_control: None,
+        },
+    }
 }
 
 /// Reconstruct an Anthropic content array for an assistant message that
@@ -115,12 +301,9 @@ fn translate_tool(id: &str, tool: &Value) -> Result<AnthropicTool> {
 /// signatures must be passed back verbatim.
 fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> {
     if msg.reasoning_details.is_empty() {
-        // No reasoning -- plain text or empty string.
-        let text = match &msg.content {
-            MessageContent::Text(t) => t.clone(),
-            MessageContent::Parts(_) | MessageContent::Null => String::new(),
-        };
-        return Ok(AnthropicContent::Text(text));
+        // No multi-turn reasoning to thread back; fall through to the
+        // generic content translation (Text or Parts).
+        return Ok(translate_simple_content(&msg.content));
     }
 
     let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -132,7 +315,6 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
     for detail in &details {
         match detail.kind {
             ReasoningDetailKind::Text => {
-                // Verify format tag before trusting the payload.
                 if detail.format.as_deref() != Some(ANTHROPIC_FORMAT) {
                     continue;
                 }
@@ -156,6 +338,7 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
                 blocks.push(ContentBlock::Thinking {
                     thinking,
                     signature,
+                    cache_control: None,
                 });
             }
             ReasoningDetailKind::Encrypted => {
@@ -168,7 +351,10 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                blocks.push(ContentBlock::RedactedThinking { data });
+                blocks.push(ContentBlock::RedactedThinking {
+                    data,
+                    cache_control: None,
+                });
             }
             ReasoningDetailKind::Summary => {
                 // Not an Anthropic block; skip.
@@ -176,22 +362,46 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
         }
     }
 
-    // Append text block from message content.
-    let text = match &msg.content {
-        MessageContent::Text(t) => t.clone(),
-        MessageContent::Parts(_) | MessageContent::Null => String::new(),
-    };
-    if !text.is_empty() {
-        blocks.push(ContentBlock::Text { text });
+    // Append text or parts from message content. For a Text body, emit
+    // a single Text block; for typed Parts, translate each.
+    match &msg.content {
+        MessageContent::Text(t) if !t.is_empty() => blocks.push(ContentBlock::Text {
+            text: t.clone(),
+            cache_control: None,
+        }),
+        MessageContent::Text(_) | MessageContent::Null => {}
+        MessageContent::Parts(parts) => {
+            for p in parts {
+                blocks.push(translate_content_part(p));
+            }
+        }
     }
 
     Ok(AnthropicContent::Blocks(blocks))
 }
 
-/// Build the tool_result content for a tool-role message.
+/// Translate plain message content (no multi-turn reasoning context).
+/// Text -> AnthropicContent::Text (cheaper wire form). Parts ->
+/// AnthropicContent::Blocks via per-part translation.
+fn translate_simple_content(c: &MessageContent) -> AnthropicContent {
+    match c {
+        MessageContent::Text(t) => AnthropicContent::Text(t.clone()),
+        MessageContent::Null => AnthropicContent::Text(String::new()),
+        MessageContent::Parts(parts) => {
+            AnthropicContent::Blocks(parts.iter().map(translate_content_part).collect())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool-role messages
+// ---------------------------------------------------------------------------
+
 fn build_tool_message(msg: &Message) -> AnthropicMessage {
-    // Anthropic represents tool results as a user message with tool_result block.
     let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
+    // Anthropic tool_result.content accepts either a string or an array
+    // of content blocks. We honor whichever shape the canonical message
+    // carries.
     let content_val = match &msg.content {
         MessageContent::Text(t) => Value::String(t.clone()),
         MessageContent::Parts(parts) => Value::Array(
@@ -207,58 +417,120 @@ fn build_tool_message(msg: &Message) -> AnthropicMessage {
         content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
             tool_use_id,
             content: content_val,
+            cache_control: None,
+            is_error: None,
         }]),
     }
 }
+
+// ---------------------------------------------------------------------------
+// cache_control validation
+// ---------------------------------------------------------------------------
+
+/// Walk all positions of an AnthropicRequest and call
+/// `cache_control::validate` against the collected breakpoint sequence.
+/// Catches 1h-after-5m ordering violations and 5+ breakpoint counts
+/// before they reach upstream.
+fn validate_breakpoints(ar: &AnthropicRequest) -> Result<()> {
+    let mut bps: Vec<Breakpoint<'_>> = Vec::new();
+
+    // Tools come first in the cache prefix.
+    if let Some(tools) = &ar.tools {
+        for t in tools {
+            if let Some(cc) = anthropic_tool_cache_control(t) {
+                bps.push(Breakpoint {
+                    position: BreakpointPosition::Tools,
+                    control: cc,
+                });
+            }
+        }
+    }
+
+    // Then system blocks.
+    if let Some(AnthropicSystem::Blocks(blocks)) = &ar.system {
+        for b in blocks {
+            if let Some(cc) = b.cache_control.as_ref() {
+                bps.push(Breakpoint {
+                    position: BreakpointPosition::System,
+                    control: cc,
+                });
+            }
+        }
+    }
+
+    // Then messages.
+    for m in &ar.messages {
+        if let AnthropicContent::Blocks(blocks) = &m.content {
+            for b in blocks {
+                if let Some(cc) = content_block_cache_control(b) {
+                    bps.push(Breakpoint {
+                        position: BreakpointPosition::Messages,
+                        control: cc,
+                    });
+                }
+            }
+        }
+    }
+
+    // Top-level auto-cache marker.
+    if let Some(cc) = ar.cache_control.as_ref() {
+        bps.push(Breakpoint {
+            position: BreakpointPosition::TopLevel,
+            control: cc,
+        });
+    }
+
+    cache_control::validate(&bps)
+}
+
+fn content_block_cache_control(b: &ContentBlock) -> Option<&routectl_core::CacheControl> {
+    match b {
+        ContentBlock::Text { cache_control, .. }
+        | ContentBlock::Image { cache_control, .. }
+        | ContentBlock::Document { cache_control, .. }
+        | ContentBlock::Thinking { cache_control, .. }
+        | ContentBlock::RedactedThinking { cache_control, .. }
+        | ContentBlock::ToolUse { cache_control, .. }
+        | ContentBlock::ToolResult { cache_control, .. }
+        | ContentBlock::Other { cache_control, .. } => cache_control.as_ref(),
+    }
+}
+
+fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::CacheControl> {
+    match t {
+        AnthropicTool::Custom { cache_control, .. } => cache_control.as_ref(),
+        AnthropicTool::Builtin(_) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Top-level normalize
+// ---------------------------------------------------------------------------
 
 pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let thinking = build_thinking(req);
 
-    // Lift system messages out of the messages array.
-    let mut system: Option<String> = None;
-    let mut anthropic_messages: Vec<AnthropicMessage> = Vec::new();
+    // System: prefer req.system (canonical); fall back to lifting any
+    // Role::System messages for direct callers that bypass an ingress.
+    let system = req
+        .system
+        .as_ref()
+        .map(translate_system)
+        .or_else(|| lift_legacy_system(&req.messages));
 
+    // Translate non-System messages.
+    let mut anthropic_messages: Vec<AnthropicMessage> = Vec::new();
     for msg in &req.messages {
         match msg.role {
             Role::System => {
-                let text = match &msg.content {
-                    MessageContent::Text(t) => t.clone(),
-                    MessageContent::Parts(_) | MessageContent::Null => String::new(),
-                };
-                // Multiple system messages are concatenated.
-                match system.as_mut() {
-                    Some(s) => {
-                        s.push('\n');
-                        s.push_str(&text);
-                    }
-                    None => system = Some(text),
-                }
+                // Already handled via req.system / lift_legacy_system.
+                // Drop here (do not duplicate in the messages array).
             }
             Role::User => {
-                let content = match &msg.content {
-                    MessageContent::Text(t) => AnthropicContent::Text(t.clone()),
-                    MessageContent::Null => AnthropicContent::Text(String::new()),
-                    MessageContent::Parts(parts) => {
-                        // Mechanical patch (Commit 1): preserve today's
-                        // text-only behavior. Commit 2 rewrites this to
-                        // emit every typed block with cache_control intact.
-                        AnthropicContent::Blocks(
-                            parts
-                                .iter()
-                                .filter_map(|p| match p {
-                                    ContentPart::Known(KnownContentPart::Text { text, .. }) => {
-                                        Some(ContentBlock::Text { text: text.clone() })
-                                    }
-                                    _ => None,
-                                })
-                                .collect(),
-                        )
-                    }
-                };
                 anthropic_messages.push(AnthropicMessage {
                     role: AnthropicRole::User,
-                    content,
+                    content: translate_simple_content(&msg.content),
                 });
             }
             Role::Assistant => {
@@ -274,25 +546,12 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
         }
     }
 
-    // Translate tools. Mechanical patch (Commit 1): Custom variants emit
-    // a minimal AnthropicTool; Other(Value) goes through the legacy
-    // translate_tool that decodes OpenAI-shape `{type:"function", ...}`.
-    // Commit 2 wires cache_control / defer_loading / strict and the
-    // builtin passthrough.
     let tools = req
         .tools
         .as_ref()
-        .map(|ts| {
-            ts.iter()
-                .map(|t| match t {
-                    ToolDef::Custom(c) => Ok(custom_tool_to_anthropic(c)),
-                    ToolDef::Other(v) => translate_tool(id, v),
-                })
-                .collect::<Result<Vec<_>>>()
-        })
-        .transpose()?;
+        .map(|ts| ts.iter().map(translate_tool).collect::<Vec<_>>());
 
-    // When thinking is enabled, temperature must be 1.0 (Anthropic requirement).
+    // Anthropic requires temperature = 1.0 when thinking is enabled.
     let temperature = match &thinking {
         Some(ThinkingConfig::Enabled { .. }) => Some(1.0f64),
         _ => req.temperature,
@@ -310,7 +569,15 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
         stream: None, // caller sets this
         tools,
         tool_choice: req.tool_choice.clone(),
+        cache_control: req.cache_control.clone(),
+        anthropic_beta: req.anthropic_beta.clone(),
     };
+
+    // Catch breakpoint-cap and TTL-ordering bugs in CI before they
+    // reach upstream. Debug-assert keeps non-debug builds fast; when
+    // the ingress runs validate at parse time, debug-only is enough
+    // here as a defense in depth.
+    debug_assert!(validate_breakpoints(&ar).is_ok());
 
     let mut body =
         serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
