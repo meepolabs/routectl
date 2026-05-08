@@ -120,9 +120,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Public config types are `#[non_exhaustive]`**: `ProviderEntry`
   (enum + every variant), `ProviderRuntimePolicy`, `AliasEntry`,
-  `RetryPolicy`, `RouterOptions`. External callers use the new
-  `ProviderEntry::{openai_compat, anthropic_api, claude_cookie,
-  chatgpt_cookie}` constructors plus chainable
+  `RetryPolicy`, `RouterOptions`. External callers use
+  `ProviderEntry::{openai_compat, anthropic_api}` constructors plus
+  chainable
   `with_runtime/with_extra_headers/with_default_extras/with_reasoning_dialect/with_base_url/with_anthropic_version/with_organization_id/with_auth_kind`
   setters. Variant-specific setters panic on wrong-variant misuse
   rather than silently dropping values.

@@ -536,7 +536,6 @@ async fn openrouter_stream_subset() {
 // Cross-region inference profiles (`us.`-prefixed) are used because they
 // have the broadest streaming-permission surface across AWS accounts.
 
-#[cfg(feature = "bedrock")]
 const BEDROCK_MODELS: &[&str] = &[
     "us.anthropic.claude-3-5-haiku-20241022-v1:0",
     "us.anthropic.claude-sonnet-4-20250514-v1:0",
@@ -545,7 +544,6 @@ const BEDROCK_MODELS: &[&str] = &[
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
 ];
 
-#[cfg(feature = "bedrock")]
 async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
     use routectl_providers::bedrock::{
         auth as bedrock_auth, BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider,
@@ -615,7 +613,6 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
     Some(Arc::new(router))
 }
 
-#[cfg(feature = "bedrock")]
 fn sanitize_provider_name(model_id: &str) -> String {
     model_id
         .chars()
@@ -629,7 +626,6 @@ fn sanitize_provider_name(model_id: &str) -> String {
         .collect()
 }
 
-#[cfg(feature = "bedrock")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bedrock_complete_matrix() {
     let Some(router) = build_bedrock_test_router(BEDROCK_MODELS).await else {
@@ -663,10 +659,8 @@ async fn bedrock_complete_matrix() {
 // real and verifies cache_control + anthropic_beta round-trip
 // losslessly on a live Anthropic-on-Bedrock request.
 
-#[cfg(feature = "bedrock")]
 const BEDROCK_INGRESS_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 
-#[cfg(feature = "bedrock")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openai_ingress_through_bedrock() {
     use axum::http::HeaderMap;
@@ -708,7 +702,6 @@ async fn openai_ingress_through_bedrock() {
     println!("openai-ingress -> bedrock: content={content:?}");
 }
 
-#[cfg(feature = "bedrock")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn anthropic_ingress_through_bedrock_cache_and_beta() {
     use axum::http::HeaderMap;
@@ -812,7 +805,6 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
     );
 }
 
-#[cfg(feature = "bedrock")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn anthropic_ingress_streaming_through_bedrock() {
     use axum::http::HeaderMap;
@@ -879,7 +871,6 @@ async fn anthropic_ingress_streaming_through_bedrock() {
     );
 }
 
-#[cfg(feature = "bedrock")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bedrock_stream_subset() {
     // Stream against the smallest models to keep cost tiny.

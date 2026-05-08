@@ -5,23 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Provider implementations for routectl: openai-compat, anthropic-api, claude-cookie, chatgpt-cookie."
+description = "Provider implementations for routectl."
 
 [features]
 default = ["openai-compat", "anthropic-api", "bedrock"]
-# Cookie-auth providers are gated. Disabled by default in the binary
-# until the impl + ToS-on-user surface is complete.
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
 "anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio"]
 # Native AWS Bedrock provider (SigV4 signing + eventstream streaming).
-# Pulls in the AWS SDK credential / signing crates. ~1MB binary growth.
-# Implies `anthropic-api`: today the only working Invoke body shape is the
-# Anthropic Messages JSON shape, and bedrock/{invoke,eventstream}.rs reuse
-# `crate::anthropic_api::{request, response, sse, types}` directly. Once
-# Converse body translation for non-Anthropic vendors lands (v0.4.0) this
-# implication can be relaxed.
-# Disable with `--no-default-features --features openai-compat,anthropic-api`
-# to skip the AWS deps entirely.
+# Pulls in the AWS SDK credential / signing crates. ~1 MB binary growth.
+# Implies `anthropic-api`: the working Invoke body shape today is the
+# Anthropic Messages JSON shape, and bedrock/{invoke,eventstream}.rs
+# reuse `crate::anthropic_api::{request, response, sse, types}` directly.
+# To skip the AWS deps entirely build with:
+#   --no-default-features --features openai-compat,anthropic-api
 "bedrock" = [
     "anthropic-api",
     "dep:reqwest",
@@ -39,8 +35,6 @@ default = ["openai-compat", "anthropic-api", "bedrock"]
     "dep:http",
     "dep:base64",
 ]
-"claude-cookie" = []
-"chatgpt-cookie" = []
 
 [dependencies]
 routectl-core.workspace = true
