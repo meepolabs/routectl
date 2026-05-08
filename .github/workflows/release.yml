@@ -1,0 +1,259 @@
+name: release
+
+# Builds and signs release artifacts for tags matching `v*`.
+#
+# Targets shipped:
+#   - linux x86_64    .tar.xz  (glibc 2.35, ubuntu-22.04)
+#   - linux aarch64   .tar.xz  (cross-compiled, glibc 2.35)
+#   - macos x86_64    .tar.xz  (intel)
+#   - macos aarch64   .tar.xz  (apple silicon)
+#   - windows x86_64  .zip
+#   - linux x86_64    .deb     (cargo-deb)
+#   - linux aarch64   .deb     (cargo-deb)
+#
+# Every artifact is signed with sigstore cosign in keyless mode -- the
+# signature is bound to this workflow's OIDC identity. Verify with:
+#
+#   cosign verify-blob \
+#     --certificate-identity-regexp '^https://github.com/meepolabs/routectl/' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --bundle <artifact>.cosign.bundle <artifact>
+#
+# Provenance: each artifact is published with a SLSA build provenance
+# attestation via actions/attest-build-provenance.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  BIN_NAME: routectl
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.xz
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.xz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive: tar.xz
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            archive: tar.xz
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: install aarch64 cross toolchain
+        if: ${{ matrix.cross }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }} -p routectl-cli
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+
+      - name: package (unix)
+        if: matrix.archive == 'tar.xz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          dir="${BIN_NAME}-${version}-${{ matrix.target }}"
+          mkdir -p "stage/${dir}"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "stage/${dir}/"
+          cp README.md LICENSE CHANGELOG.md "stage/${dir}/" 2>/dev/null || true
+          (cd stage && tar -cJf "${dir}.tar.xz" "${dir}")
+          mv "stage/${dir}.tar.xz" .
+          shasum -a 256 "${dir}.tar.xz" > "${dir}.tar.xz.sha256"
+          echo "ARTIFACT=${dir}.tar.xz" >> "$GITHUB_ENV"
+
+      - name: package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          $dir = "$env:BIN_NAME-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "stage/$dir" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/$env:BIN_NAME.exe" "stage/$dir/"
+          Copy-Item README.md, LICENSE, CHANGELOG.md "stage/$dir/" -ErrorAction SilentlyContinue
+          Compress-Archive -Path "stage/$dir" -DestinationPath "$dir.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$dir.zip").Hash.ToLower()
+          "$hash  $dir.zip" | Out-File -Encoding ascii "$dir.zip.sha256"
+          "ARTIFACT=$dir.zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: sign artifact (keyless, sigstore)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle "${ARTIFACT}.cosign.bundle" \
+            "${ARTIFACT}"
+
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ env.ARTIFACT }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ matrix.target }}
+          path: |
+            ${{ env.ARTIFACT }}
+            ${{ env.ARTIFACT }}.sha256
+            ${{ env.ARTIFACT }}.cosign.bundle
+          if-no-files-found: error
+
+  deb:
+    name: deb (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: deb-${{ matrix.target }}
+
+      - name: install aarch64 cross toolchain
+        if: ${{ matrix.cross }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: install cargo-deb
+        run: cargo install --locked cargo-deb
+
+      - name: cargo deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo deb -p routectl-cli --target ${{ matrix.target }} --no-build --no-strip || \
+            cargo deb -p routectl-cli --target ${{ matrix.target }}
+          deb_path=$(ls target/${{ matrix.target }}/debian/*.deb | head -1)
+          cp "$deb_path" .
+          deb_name=$(basename "$deb_path")
+          shasum -a 256 "$deb_name" > "${deb_name}.sha256"
+          echo "ARTIFACT=${deb_name}" >> "$GITHUB_ENV"
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: sign artifact (keyless, sigstore)
+        run: |
+          cosign sign-blob --yes \
+            --bundle "${ARTIFACT}.cosign.bundle" \
+            "${ARTIFACT}"
+
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ env.ARTIFACT }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.target }}
+          path: |
+            ${{ env.ARTIFACT }}
+            ${{ env.ARTIFACT }}.sha256
+            ${{ env.ARTIFACT }}.cosign.bundle
+          if-no-files-found: error
+
+  release:
+    name: github release
+    runs-on: ubuntu-22.04
+    needs: [build, deb]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: aggregate checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          : > SHA256SUMS
+          for f in *.sha256; do cat "$f" >> SHA256SUMS; done
+
+      - name: extract release notes from CHANGELOG
+        id: notes
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ {
+              if (capture) exit
+              if ($0 ~ "\\[" v "\\]") { capture=1; next }
+            }
+            capture { print }
+          ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "Release ${GITHUB_REF_NAME}." > release_notes.md
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: release_notes.md
+          fail_on_unmatched_files: true
+          generate_release_notes: false
