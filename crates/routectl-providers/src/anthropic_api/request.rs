@@ -407,7 +407,7 @@ fn build_tool_message(msg: &Message) -> AnthropicMessage {
         MessageContent::Parts(parts) => Value::Array(
             parts
                 .iter()
-                .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
+                .map(|p| serde_json::to_value(translate_content_part(p)).unwrap_or(Value::Null))
                 .collect(),
         ),
         MessageContent::Null => Value::Null,
