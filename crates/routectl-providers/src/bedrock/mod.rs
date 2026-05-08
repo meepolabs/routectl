@@ -231,6 +231,7 @@ impl Provider for BedrockProvider {
         Ok(None)
     }
 
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model, region = %self.cfg.region))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let body = self.normalize_request(&req)?;
 
@@ -286,7 +287,7 @@ impl Provider for BedrockProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let msg = parse_upstream_error_body(resp).await;
+            let msg = parse_upstream_error_body(&self.cfg.id, resp).await;
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
@@ -299,6 +300,7 @@ impl Provider for BedrockProvider {
         Ok(chat_resp)
     }
 
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model, region = %self.cfg.region))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let body = self.normalize_request(&req)?;
 
@@ -357,7 +359,7 @@ impl Provider for BedrockProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let msg = parse_upstream_error_body(resp).await;
+            let msg = parse_upstream_error_body(&self.cfg.id, resp).await;
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
@@ -376,8 +378,17 @@ impl Provider for BedrockProvider {
 /// to the raw text when the body isn't JSON (gateway 5xx, HTML auth-redirect
 /// pages, etc.). Used by both `complete()` and `stream()` so the two paths
 /// surface the same error text to callers.
-async fn parse_upstream_error_body(resp: reqwest::Response) -> String {
+///
+/// Side effect: emits a structured `tracing::warn!` (or `error!` for 5xx)
+/// classifying the failure. 401 -> "auth rejected". 403 -> attempts to
+/// extract the IAM action from the AWS-formatted "User: ... is not
+/// authorized to perform: <action>" body and surfaces it. 400 ->
+/// "validation error" with body excerpt. 5xx -> "upstream 5xx".
+async fn parse_upstream_error_body(provider: &str, resp: reqwest::Response) -> String {
+    let status = resp.status().as_u16();
     let body_text = resp.text().await.unwrap_or_default();
+    log_bedrock_upstream_error(provider, status, &body_text);
+
     serde_json::from_str::<Value>(&body_text)
         .ok()
         .as_ref()
@@ -397,9 +408,147 @@ async fn parse_upstream_error_body(resp: reqwest::Response) -> String {
         })
 }
 
+/// Classify a Bedrock upstream error and emit a structured log line.
+///
+/// Status-based dispatch:
+/// - **401** -> WARN, "auth rejected" (bearer key invalid / SigV4
+///   creds expired)
+/// - **403** -> WARN with the IAM action extracted from the AWS error
+///   body (`User: ... is not authorized to perform: <action>`) and
+///   `principal_present` flag. The action name is the actionable bit:
+///   if `bedrock-runtime:InvokeModelWithResponseStream` shows up here,
+///   the user knows their IAM policy allows InvokeModel but not the
+///   streaming variant -- a common gotcha.
+/// - **400** -> WARN, "validation error" with body excerpt capped at
+///   256 chars
+/// - **5xx** -> WARN, "upstream 5xx" (transient AWS issues)
+/// - other 4xx -> WARN, generic "upstream error"
+///
+/// Body excerpt is bounded to keep log lines scannable. Never logs
+/// credential material because Bedrock error bodies don't contain any.
+fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
+    let excerpt: String = body.chars().take(routectl_core::MAX_LOG_BODY_EXCERPT).collect();
+    match status {
+        401 => {
+            tracing::warn!(
+                provider = %provider,
+                status,
+                body_excerpt = %excerpt,
+                "bedrock upstream auth rejected",
+            );
+        }
+        403 => {
+            let action = extract_iam_action(body);
+            let principal_present = body.contains("User:") || body.contains("Principal:");
+            tracing::warn!(
+                provider = %provider,
+                status,
+                action = ?action,
+                principal_present,
+                body_excerpt = %excerpt,
+                "bedrock IAM access denied",
+            );
+        }
+        400 => {
+            tracing::warn!(
+                provider = %provider,
+                status,
+                body_excerpt = %excerpt,
+                "bedrock validation error",
+            );
+        }
+        s if s >= 500 => {
+            tracing::warn!(
+                provider = %provider,
+                status = s,
+                body_excerpt = %excerpt,
+                "bedrock upstream 5xx",
+            );
+        }
+        _ => {
+            tracing::warn!(
+                provider = %provider,
+                status,
+                body_excerpt = %excerpt,
+                "bedrock upstream error",
+            );
+        }
+    }
+}
+
+/// Extract the IAM action name from an AWS error message of the form
+/// `User: arn:... is not authorized to perform: bedrock-runtime:InvokeModel
+/// on resource: ...`. Returns the substring between "perform: " and the
+/// next whitespace. Returns None if the body doesn't match this shape
+/// or the action segment is empty.
+///
+/// **First-match semantics**: we extract the FIRST occurrence of
+/// `perform: ` in the body. AWS's error template has historically been
+/// stable (the `perform: <action>` seam has held for 10+ years across
+/// IAM error messages and is treated as semi-public API for IAM
+/// debugging tools). If the template ever changes to embed a second
+/// `perform: ` substring (e.g. inside a resource ARN), this extractor
+/// would return the FIRST occurrence -- which would still be the
+/// correct action for current AWS bodies but could be wrong if the
+/// embedded substring appears BEFORE the canonical one. This is a
+/// best-effort log field, not a contract; if the template breaks the
+/// extractor returns either a stale action or `None` and the
+/// surrounding 256-char `body_excerpt` log field still surfaces the
+/// raw error text.
+///
+/// Pure string search rather than `regex` so the bedrock feature does
+/// not pull regex into the binary just for this one log call.
+fn extract_iam_action(body: &str) -> Option<String> {
+    const NEEDLE: &str = "perform: ";
+    let start = body.find(NEEDLE)? + NEEDLE.len();
+    let rest = &body[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(rest.len());
+    if end == 0 {
+        None
+    } else {
+        Some(rest[..end].to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_iam_action_pulls_action_from_aws_403_body() {
+        // Real-world AWS error body shape. The `perform: ` substring
+        // is the stable seam.
+        let body = "User: arn:aws:iam::123456789012:user/foo is not authorized to \
+                    perform: bedrock-runtime:InvokeModelWithResponseStream on resource: \
+                    arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5";
+        assert_eq!(
+            extract_iam_action(body),
+            Some("bedrock-runtime:InvokeModelWithResponseStream".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_iam_action_returns_none_for_unrelated_body() {
+        assert_eq!(extract_iam_action(""), None);
+        assert_eq!(extract_iam_action("Some other validation error"), None);
+        // Edge case: "perform: " followed by EOF or whitespace -> None.
+        assert_eq!(extract_iam_action("perform: "), None);
+    }
+
+    #[test]
+    fn extract_iam_action_first_match_when_pattern_appears_twice() {
+        // First-match semantics: if the AWS template ever embeds a
+        // second `perform: ` (e.g. in a resource ARN), we return the
+        // FIRST occurrence. Pin this so the contract is explicit.
+        let body = "perform: bedrock:InvokeModel on resource: \
+                    arn:aws:fake:perform: bedrock:OtherAction";
+        assert_eq!(
+            extract_iam_action(body),
+            Some("bedrock:InvokeModel".to_string())
+        );
+    }
 
     #[test]
     fn bedrock_creds_debug_redacts_static_secrets() {

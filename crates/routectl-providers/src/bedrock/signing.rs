@@ -37,16 +37,29 @@ pub async fn apply_auth(
 ) -> Result<()> {
     match creds {
         ResolvedCreds::Bearer { key } => {
-            let value = HeaderValue::from_str(&format!("Bearer {key}"))
-                .map_err(|e| Error::Auth(format!("bedrock: invalid bearer key: {e}")))?;
+            tracing::debug!(auth_kind = "Bearer", region = %region, "applying bedrock auth");
+            let value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|e| {
+                tracing::error!(
+                    failure_kind = "bearer_header_invalid",
+                    error = %e,
+                    "bedrock auth failed",
+                );
+                Error::Auth(format!("bedrock: invalid bearer key: {e}"))
+            })?;
             req.headers_mut().insert(AUTHORIZATION, value);
             Ok(())
         }
         ResolvedCreds::Sigv4 { provider } => {
-            let credentials = provider
-                .provide_credentials()
-                .await
-                .map_err(|e| Error::Auth(format!("bedrock: credentials unavailable: {e}")))?;
+            tracing::debug!(auth_kind = "Sigv4", region = %region, "applying bedrock auth");
+            let credentials = provider.provide_credentials().await.map_err(|e| {
+                tracing::error!(
+                    failure_kind = "creds_unavailable",
+                    region = %region,
+                    error = %e,
+                    "bedrock auth failed",
+                );
+                Error::Auth(format!("bedrock: credentials unavailable: {e}"))
+            })?;
             sigv4_sign(req, &credentials, region)
         }
     }
@@ -69,6 +82,10 @@ fn sigv4_sign(
     // SignableRequest synchronously, so the borrow is released before we
     // touch `req.headers_mut()` below. Avoids a per-request copy.
     let body_bytes = req.body().and_then(|b| b.as_bytes()).ok_or_else(|| {
+        tracing::error!(
+            failure_kind = "body_unbuffered",
+            "bedrock auth failed",
+        );
         Error::Auth(
             "bedrock: cannot SigV4-sign a streaming or unbuffered body; \
                  body() must resolve to in-memory bytes"
@@ -87,7 +104,14 @@ fn sigv4_sign(
         .time(SystemTime::now())
         .settings(signing_settings)
         .build()
-        .map_err(|e| Error::Auth(format!("bedrock: signing params build failed: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(
+                failure_kind = "signing_params_build",
+                error = %e,
+                "bedrock auth failed",
+            );
+            Error::Auth(format!("bedrock: signing params build failed: {e}"))
+        })?;
     let signing_params = v4_params.into();
 
     // Collect headers as (&str, &str) pairs for SignableRequest. Non-ASCII
@@ -100,6 +124,12 @@ fn sigv4_sign(
         .iter()
         .map(|(k, v)| {
             v.to_str().map(|val| (k.as_str(), val)).map_err(|e| {
+                tracing::error!(
+                    failure_kind = "non_ascii_header",
+                    header = %k.as_str(),
+                    error = %e,
+                    "bedrock auth failed",
+                );
                 Error::Auth(format!(
                     "bedrock: header `{}` has non-ASCII value, cannot SigV4-sign: {e}",
                     k.as_str()
@@ -111,20 +141,49 @@ fn sigv4_sign(
     let method = req.method().as_str();
     let url = req.url().as_str();
 
-    let signable = SignableRequest::new(method, url, header_pairs.into_iter(), body)
-        .map_err(|e| Error::Auth(format!("bedrock: signable request build failed: {e}")))?;
+    let signable = SignableRequest::new(method, url, header_pairs.into_iter(), body).map_err(
+        |e| {
+            tracing::error!(
+                failure_kind = "signable_request_build",
+                error = %e,
+                "bedrock auth failed",
+            );
+            Error::Auth(format!("bedrock: signable request build failed: {e}"))
+        },
+    )?;
 
     let (instructions, _signature) = sign(signable, &signing_params)
-        .map_err(|e| Error::Auth(format!("bedrock: SigV4 sign failed: {e}")))?
+        .map_err(|e| {
+            tracing::error!(
+                failure_kind = "sigv4_sign",
+                region = %region,
+                error = %e,
+                "bedrock auth failed",
+            );
+            Error::Auth(format!("bedrock: SigV4 sign failed: {e}"))
+        })?
         .into_parts();
 
     // Merge the signing instructions back into the reqwest::Request.
     let (added_headers, added_params) = instructions.into_parts();
     for header in added_headers {
-        let name = HeaderName::from_bytes(header.name().as_bytes())
-            .map_err(|e| Error::Auth(format!("bedrock: signed header name invalid: {e}")))?;
-        let value = HeaderValue::from_str(header.value())
-            .map_err(|e| Error::Auth(format!("bedrock: signed header value invalid: {e}")))?;
+        let name = HeaderName::from_bytes(header.name().as_bytes()).map_err(|e| {
+            tracing::error!(
+                failure_kind = "signed_header_name_invalid",
+                name = %header.name(),
+                error = %e,
+                "bedrock auth failed",
+            );
+            Error::Auth(format!("bedrock: signed header name invalid: {e}"))
+        })?;
+        let value = HeaderValue::from_str(header.value()).map_err(|e| {
+            tracing::error!(
+                failure_kind = "signed_header_value_invalid",
+                error = %e,
+                "bedrock auth failed",
+            );
+            Error::Auth(format!("bedrock: signed header value invalid: {e}"))
+        })?;
         req.headers_mut().insert(name, value);
     }
 
@@ -132,6 +191,11 @@ fn sigv4_sign(
         // SigV4 query-string signing isn't expected for Bedrock POST
         // requests (we use header signing). If the SDK ever returns
         // params, surface that loudly so we can investigate.
+        tracing::error!(
+            failure_kind = "unexpected_query_params",
+            params = ?added_params,
+            "bedrock auth failed",
+        );
         return Err(Error::Auth(format!(
             "bedrock: unexpected SigV4 query-string params from signer: {added_params:?}"
         )));

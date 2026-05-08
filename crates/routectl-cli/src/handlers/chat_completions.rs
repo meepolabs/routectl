@@ -14,6 +14,7 @@ use crate::handlers::ingress_handle::ingress_handle;
 use crate::ingress::openai::OpenAiIngress;
 use crate::server::AppState;
 
+#[tracing::instrument(skip_all, fields(ingress = "openai_compat"))]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
