@@ -280,27 +280,7 @@ impl Provider for BedrockProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            // Read as text first so non-JSON error bodies (gateway
-            // 5xxs, HTML auth-redirect pages, etc.) surface the raw
-            // body instead of "expected value at line 1 column 1".
-            let body_text = resp.text().await.unwrap_or_default();
-            let msg = serde_json::from_str::<Value>(&body_text)
-                .ok()
-                .as_ref()
-                .and_then(|v| {
-                    v.pointer("/message")
-                        .or_else(|| v.pointer("/Message"))
-                        .or_else(|| v.pointer("/error/message"))
-                        .and_then(|x| x.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| {
-                    if body_text.is_empty() {
-                        "upstream error (empty body)".into()
-                    } else {
-                        body_text
-                    }
-                });
+            let msg = parse_upstream_error_body(resp).await;
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
@@ -366,8 +346,8 @@ impl Provider for BedrockProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(Error::upstream(&self.cfg.id, status, body_text));
+            let msg = parse_upstream_error_body(resp).await;
+            return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
         let provider_id = self.cfg.id.clone();
@@ -378,6 +358,32 @@ impl Provider for BedrockProvider {
         };
         Ok(stream)
     }
+}
+
+/// Best-effort parse of a Bedrock error response body. Tries the common
+/// JSON shapes (`/message`, `/Message`, `/error/message`) and falls back
+/// to the raw text when the body isn't JSON (gateway 5xx, HTML auth-redirect
+/// pages, etc.). Used by both `complete()` and `stream()` so the two paths
+/// surface the same error text to callers.
+async fn parse_upstream_error_body(resp: reqwest::Response) -> String {
+    let body_text = resp.text().await.unwrap_or_default();
+    serde_json::from_str::<Value>(&body_text)
+        .ok()
+        .as_ref()
+        .and_then(|v| {
+            v.pointer("/message")
+                .or_else(|| v.pointer("/Message"))
+                .or_else(|| v.pointer("/error/message"))
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| {
+            if body_text.is_empty() {
+                "upstream error (empty body)".into()
+            } else {
+                body_text
+            }
+        })
 }
 
 #[cfg(test)]
