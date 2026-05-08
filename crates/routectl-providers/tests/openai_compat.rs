@@ -68,6 +68,58 @@ fn user_request(model: &str) -> routectl_core::ChatRequest {
 }
 
 // ---------------------------------------------------------------------------
+// extra_headers reserved-name guard (parity with anthropic_api / bedrock)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn extra_headers_reserved_name_does_not_override_authorization() {
+    // TOML-supplied `extra_headers = { "authorization" = "..." }` must not
+    // bypass the provider's Bearer auth. HeaderMap::insert replaces by
+    // name, so without the is_reserved_extra_header guard this would
+    // silently override the auth header and ship the user-supplied value
+    // upstream.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer real-token",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "ok",
+            "model": "test",
+            "created": 1,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "test-provider".into(),
+        base_url: server.uri(),
+        api_key: "real-token".into(),
+        // Attempt to override with a different value -- must be ignored.
+        extra_headers: vec![(
+            "authorization".into(),
+            "Bearer attacker-token".into(),
+        )],
+        default_extras: None,
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        user_agent: None,
+    });
+
+    // If the guard is missing, the wiremock matcher above won't find
+    // "Bearer real-token" (the override would have replaced it) and the
+    // mock server returns 404, surfacing here as an upstream error.
+    let resp = provider.complete(user_request("test")).await;
+    assert!(resp.is_ok(), "guard must keep the real Bearer token: {resp:?}");
+}
+
+// ---------------------------------------------------------------------------
 // complete() integration tests
 // ---------------------------------------------------------------------------
 
