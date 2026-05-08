@@ -88,15 +88,13 @@ impl AnthropicApiProvider {
         format!("{}/v1/messages", self.cfg.base_url.trim_end_matches('/'))
     }
 
-    fn build_headers(
-        &self,
-        rb: reqwest::RequestBuilder,
-    ) -> reqwest::RequestBuilder {
+    fn build_headers(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let mut rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
         rb = match self.cfg.auth_kind {
             AuthKind::ApiKey => rb.header("x-api-key", &self.cfg.api_key),
-            AuthKind::OauthBearer => rb
-                .header("authorization", format!("Bearer {}", self.cfg.api_key)),
+            AuthKind::OauthBearer => {
+                rb.header("authorization", format!("Bearer {}", self.cfg.api_key))
+            }
         };
         for (k, v) in &self.cfg.extra_headers {
             // Defense-in-depth: refuse to let a TOML-supplied

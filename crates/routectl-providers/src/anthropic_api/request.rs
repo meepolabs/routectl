@@ -3,7 +3,8 @@
 use serde_json::{json, Value};
 
 use routectl_core::{
-    ChatRequest, Error, Message, MessageContent, ReasoningDetailKind, Result, Role,
+    ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
+    ReasoningDetailKind, Result, Role, ToolDef,
 };
 
 use super::types::{
@@ -65,6 +66,17 @@ fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
     }
 
     None
+}
+
+/// Translate a typed `CustomTool` into an Anthropic tool body. Mechanical
+/// (Commit 1): drops cache_control, defer_loading, and strict; Commit 2
+/// extends the wire `AnthropicTool` shape and threads them through.
+fn custom_tool_to_anthropic(c: &CustomTool) -> AnthropicTool {
+    AnthropicTool {
+        name: c.name.clone(),
+        description: c.description.clone(),
+        input_schema: c.input_schema.clone(),
+    }
 }
 
 /// Translate an OpenAI-shape tool object into an Anthropic tool.
@@ -182,7 +194,12 @@ fn build_tool_message(msg: &Message) -> AnthropicMessage {
     let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
     let content_val = match &msg.content {
         MessageContent::Text(t) => Value::String(t.clone()),
-        MessageContent::Parts(parts) => Value::Array(parts.clone()),
+        MessageContent::Parts(parts) => Value::Array(
+            parts
+                .iter()
+                .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
+                .collect(),
+        ),
         MessageContent::Null => Value::Null,
     };
     AnthropicMessage {
@@ -223,16 +240,17 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
                     MessageContent::Text(t) => AnthropicContent::Text(t.clone()),
                     MessageContent::Null => AnthropicContent::Text(String::new()),
                     MessageContent::Parts(parts) => {
-                        // Pass parts array directly; Anthropic accepts vision blocks.
+                        // Mechanical patch (Commit 1): preserve today's
+                        // text-only behavior. Commit 2 rewrites this to
+                        // emit every typed block with cache_control intact.
                         AnthropicContent::Blocks(
                             parts
                                 .iter()
-                                .filter_map(|p| {
-                                    p.get("text").and_then(|v| v.as_str()).map(|t| {
-                                        ContentBlock::Text {
-                                            text: t.to_string(),
-                                        }
-                                    })
+                                .filter_map(|p| match p {
+                                    ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+                                        Some(ContentBlock::Text { text: text.clone() })
+                                    }
+                                    _ => None,
                                 })
                                 .collect(),
                         )
@@ -256,13 +274,20 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
         }
     }
 
-    // Translate tools.
+    // Translate tools. Mechanical patch (Commit 1): Custom variants emit
+    // a minimal AnthropicTool; Other(Value) goes through the legacy
+    // translate_tool that decodes OpenAI-shape `{type:"function", ...}`.
+    // Commit 2 wires cache_control / defer_loading / strict and the
+    // builtin passthrough.
     let tools = req
         .tools
         .as_ref()
         .map(|ts| {
             ts.iter()
-                .map(|t| translate_tool(id, t))
+                .map(|t| match t {
+                    ToolDef::Custom(c) => Ok(custom_tool_to_anthropic(c)),
+                    ToolDef::Other(v) => translate_tool(id, v),
+                })
                 .collect::<Result<Vec<_>>>()
         })
         .transpose()?;

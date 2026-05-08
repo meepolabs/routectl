@@ -130,23 +130,7 @@ fn make_request(target: &str, max_tokens: u32, stream: bool) -> ChatRequest {
         }],
         max_tokens: Some(max_tokens),
         stream: Some(stream),
-        temperature: None,
-        top_p: None,
-        stop: None,
-        n: None,
-        seed: None,
-        logprobs: None,
-        top_logprobs: None,
-        logit_bias: None,
-        presence_penalty: None,
-        frequency_penalty: None,
-        user: None,
-        tools: None,
-        tool_choice: None,
-        response_format: None,
-        reasoning: None,
-        chat_template_kwargs: None,
-        provider_extras: None,
+        ..Default::default()
     }
 }
 
