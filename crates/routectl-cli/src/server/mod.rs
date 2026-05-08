@@ -121,8 +121,11 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
+    let opts = routectl_router::BuildOptions::new()
+        .with_strict_translation(config.server.strict_translation);
+
     for (name, entry) in &config.providers {
-        match routectl_router::build_provider(name, entry, &secrets).await {
+        match routectl_router::build_provider_with_options(name, entry, &secrets, opts).await {
             Ok(provider) => {
                 router.register(name.clone(), provider);
             }
