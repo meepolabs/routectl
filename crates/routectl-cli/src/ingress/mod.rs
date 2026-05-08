@@ -13,12 +13,91 @@
 //! The trait is small on purpose: anything beyond translation belongs in
 //! the router (alias resolution, retry, fallback) or core.
 
+use std::collections::BTreeMap;
+
 use axum::http::HeaderMap;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 use serde_json::Value;
 
 pub mod anthropic;
 pub mod openai;
+
+/// Header used by harnesses that can override the canonical `model`
+/// field directly to pin routing to a specific configured alias.
+pub const ALIAS_HEADER: &str = "x-routectl-alias";
+
+/// Resolve a wire `model` value to a routectl alias. Precedence:
+///
+/// 1. `x-routectl-alias` request header (explicit override).
+/// 2. The configured per-ingress `aliases` map.
+/// 3. The original wire `model` value (treated as an alias name
+///    directly, which is how harnesses that set `model = "fast"`
+///    work today).
+pub fn resolve_alias(
+    aliases: &BTreeMap<String, String>,
+    headers: &HeaderMap,
+    wire_model: &str,
+) -> String {
+    if let Some(h) = headers.get(ALIAS_HEADER).and_then(|v| v.to_str().ok()) {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Some(target) = aliases.get(wire_model) {
+        return target.clone();
+    }
+    wire_model.to_string()
+}
+
+#[cfg(test)]
+mod resolve_alias_tests {
+    use super::*;
+
+    fn h(name: &str, val: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            val.parse().unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn header_wins_over_aliases_map() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("claude-opus-4-7-20251022".into(), "heavy".into());
+        let r = resolve_alias(
+            &aliases,
+            &h(ALIAS_HEADER, "fast"),
+            "claude-opus-4-7-20251022",
+        );
+        assert_eq!(r, "fast");
+    }
+
+    #[test]
+    fn aliases_map_resolves_wire_model() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("claude-opus-4-7-20251022".into(), "heavy".into());
+        let r = resolve_alias(&aliases, &HeaderMap::new(), "claude-opus-4-7-20251022");
+        assert_eq!(r, "heavy");
+    }
+
+    #[test]
+    fn unmapped_model_passes_through() {
+        let aliases = BTreeMap::new();
+        let r = resolve_alias(&aliases, &HeaderMap::new(), "fast");
+        assert_eq!(r, "fast");
+    }
+
+    #[test]
+    fn empty_header_value_falls_through_to_aliases() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("a".into(), "b".into());
+        let r = resolve_alias(&aliases, &h(ALIAS_HEADER, "  "), "a");
+        assert_eq!(r, "b");
+    }
+}
 
 /// One server-sent event ready to write to the response stream.
 ///
