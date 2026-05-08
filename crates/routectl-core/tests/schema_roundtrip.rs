@@ -2,8 +2,9 @@
 //! serialize match real-world wire formats and don't lose fields.
 
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Reasoning, ReasoningConfig, ReasoningDetail,
-    ReasoningDetailKind,
+    cache_control::{Breakpoint, BreakpointPosition},
+    CacheControl, ChatChunk, ChatRequest, ChatResponse, ContentPart, KnownContentPart, Reasoning,
+    ReasoningConfig, ReasoningDetail, ReasoningDetailKind, SystemBlock, SystemContent, ToolDef,
 };
 use serde_json::{json, Value};
 
@@ -246,4 +247,264 @@ fn reasoning_top_level_serializes_minimally() {
     };
     let s = serde_json::to_value(&r).unwrap();
     assert_eq!(s, json!({"text": "trace"}));
+}
+
+// ---------------------------------------------------------------------------
+// v0.4.0 canonical extension: cache_control + system + tools + anthropic_beta
+// ---------------------------------------------------------------------------
+
+#[test]
+fn anthropic_request_with_cache_control_on_every_position_round_trips() {
+    // Realistic Claude Code-style request: tool def cache, system cache,
+    // user message cache. This is the primary round-trip lossless path.
+    let input = json!({
+        "model": "claude-opus-4-7-20251022",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Use the tool to look up Rust docs.",
+                "cache_control": {"type": "ephemeral", "ttl": "5m"}
+            }]
+        }],
+        "system": [{
+            "type": "text",
+            "text": "You are a Rust expert.",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        }],
+        "tools": [{
+            "name": "lookup_doc",
+            "description": "Fetch a Rust crate doc page",
+            "input_schema": {"type": "object", "properties": {"crate": {"type": "string"}}},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        }],
+        "anthropic_beta": ["context-1m-2025-08-07"],
+        "max_tokens": 1024
+    });
+    let req: ChatRequest = roundtrip(input);
+    // System lifted to top-level.
+    let SystemContent::Blocks(sys_blocks) = req.system.as_ref().expect("system present") else {
+        panic!("expected SystemContent::Blocks");
+    };
+    assert_eq!(sys_blocks.len(), 1);
+    assert_eq!(
+        sys_blocks[0]
+            .cache_control
+            .as_ref()
+            .unwrap()
+            .effective_ttl(),
+        "1h"
+    );
+    // Tool kept its cache_control.
+    let tools = req.tools.as_ref().expect("tools present");
+    assert_eq!(tools.len(), 1);
+    assert!(matches!(&tools[0], ToolDef::Custom(_)));
+    assert_eq!(tools[0].cache_control().unwrap().effective_ttl(), "1h");
+    // anthropic_beta preserved.
+    assert_eq!(
+        req.anthropic_beta,
+        vec!["context-1m-2025-08-07".to_string()]
+    );
+}
+
+#[test]
+fn top_level_cache_control_round_trips() {
+    let input = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "cache_control": {"type": "ephemeral", "ttl": "5m"}
+    });
+    let req: ChatRequest = roundtrip(input);
+    assert_eq!(req.cache_control.as_ref().unwrap().effective_ttl(), "5m");
+}
+
+#[test]
+fn system_string_form_round_trips() {
+    let input = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "system": "You are helpful."
+    });
+    let req: ChatRequest = roundtrip(input);
+    assert!(matches!(req.system, Some(SystemContent::Text(_))));
+}
+
+#[test]
+fn anthropic_request_with_image_block_round_trips() {
+    let input = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}
+            }, {
+                "type": "text",
+                "text": "what is this?"
+            }]
+        }],
+        "max_tokens": 100
+    });
+    let req: ChatRequest = roundtrip(input);
+    let msg = &req.messages[0];
+    if let routectl_core::MessageContent::Parts(parts) = &msg.content {
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            ContentPart::Known(KnownContentPart::Image { .. })
+        ));
+        assert!(matches!(
+            &parts[1],
+            ContentPart::Known(KnownContentPart::Text { .. })
+        ));
+    } else {
+        panic!("expected Parts");
+    }
+}
+
+#[test]
+fn unknown_content_block_falls_to_other_and_round_trips() {
+    let input = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "server_tool_use",
+                "id": "srvtu_01",
+                "name": "web_search",
+                "input": {"query": "rust"},
+                "cache_control": {"type": "ephemeral", "ttl": "1h"}
+            }]
+        }],
+        "max_tokens": 100
+    });
+    let req: ChatRequest = roundtrip(input);
+    if let routectl_core::MessageContent::Parts(parts) = &req.messages[0].content {
+        assert!(matches!(&parts[0], ContentPart::Other { .. }));
+        assert_eq!(parts[0].cache_control().unwrap().effective_ttl(), "1h");
+        assert_eq!(parts[0].type_tag(), "server_tool_use");
+    } else {
+        panic!("expected Parts");
+    }
+}
+
+#[test]
+fn anthropic_builtin_tool_passes_through_other() {
+    let input = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{
+            "type": "bash_20250124",
+            "name": "bash",
+            "cache_control": {"type": "ephemeral"}
+        }],
+        "max_tokens": 100
+    });
+    let req: ChatRequest = roundtrip(input);
+    let tools = req.tools.as_ref().unwrap();
+    assert!(matches!(&tools[0], ToolDef::Other(_)));
+    assert!(tools[0].cache_control().is_some());
+}
+
+#[test]
+fn usage_with_cache_stats_round_trips() {
+    let input = json!({
+        "id": "msg_01",
+        "model": "claude-opus-4-7",
+        "created": 1700000000,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "hi"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 50,
+            "completion_tokens": 10,
+            "total_tokens": 60,
+            "cache_creation_input_tokens": 4096,
+            "cache_read_input_tokens": 8192,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 2048,
+                "ephemeral_1h_input_tokens": 2048
+            }
+        }
+    });
+    let resp: ChatResponse = roundtrip(input);
+    let u = resp.usage.as_ref().unwrap();
+    assert_eq!(u.cache_creation_input_tokens, Some(4096));
+    assert_eq!(u.cache_read_input_tokens, Some(8192));
+    let cc = u.cache_creation.as_ref().unwrap();
+    assert_eq!(cc.ephemeral_5m_input_tokens, Some(2048));
+    assert_eq!(cc.ephemeral_1h_input_tokens, Some(2048));
+}
+
+#[test]
+fn chunk_with_streaming_usage_round_trips() {
+    let input = json!({
+        "id": "chatcmpl-stream",
+        "model": "claude-opus-4-7",
+        "choices": [],
+        "usage": {
+            "completion_tokens": 100,
+            "cache_read_input_tokens": 4096
+        }
+    });
+    let chunk: ChatChunk = roundtrip(input);
+    let u = chunk.usage.as_ref().unwrap();
+    assert_eq!(u.completion_tokens, Some(100));
+    assert_eq!(u.cache_read_input_tokens, Some(4096));
+}
+
+#[test]
+fn cache_control_validate_enforces_ttl_ordering_via_canonical() {
+    // Build a sequence that mirrors what an Anthropic ingress would
+    // collect across positions and ensure the validator catches the
+    // 5m-then-1h ordering bug.
+    let five = CacheControl::ephemeral_5m();
+    let one = CacheControl::ephemeral_1h();
+    let bps = vec![
+        Breakpoint {
+            position: BreakpointPosition::Tools,
+            control: &five,
+        },
+        Breakpoint {
+            position: BreakpointPosition::System,
+            control: &one,
+        },
+    ];
+    let err = routectl_core::cache_control::validate(&bps).unwrap_err();
+    assert!(err.to_string().contains("after a 5m"));
+}
+
+#[test]
+fn cache_control_validate_accepts_max_breakpoints() {
+    // Helper: build a breakpoint list of size N.
+    fn bps(n: usize, cc: &CacheControl) -> Vec<Breakpoint<'_>> {
+        (0..n)
+            .map(|_| Breakpoint {
+                position: BreakpointPosition::Messages,
+                control: cc,
+            })
+            .collect()
+    }
+    let cc = CacheControl::ephemeral_5m();
+    routectl_core::cache_control::validate(&bps(4, &cc)).unwrap();
+    assert!(routectl_core::cache_control::validate(&bps(5, &cc)).is_err());
+}
+
+#[test]
+fn system_block_helper_constructs_minimally() {
+    // Ensure SystemBlock can be built programmatically without spelling
+    // out every optional field. This is the path used by the OpenAI
+    // ingress when lifting Role::System messages.
+    let block = SystemBlock {
+        kind: "text".into(),
+        text: "you are helpful".into(),
+        cache_control: None,
+        citations: None,
+    };
+    let v = serde_json::to_value(&block).unwrap();
+    assert_eq!(v["type"], "text");
+    assert_eq!(v["text"], "you are helpful");
+    assert!(!v.as_object().unwrap().contains_key("cache_control"));
 }

@@ -46,24 +46,8 @@ fn user_request(model: &str) -> routectl_core::ChatRequest {
             tool_calls: None,
         }],
         temperature: Some(0.5),
-        top_p: None,
         max_tokens: Some(128),
-        stop: None,
-        stream: None,
-        n: None,
-        seed: None,
-        logprobs: None,
-        top_logprobs: None,
-        logit_bias: None,
-        presence_penalty: None,
-        frequency_penalty: None,
-        user: None,
-        tools: None,
-        tool_choice: None,
-        response_format: None,
-        reasoning: None,
-        chat_template_kwargs: None,
-        provider_extras: None,
+        ..Default::default()
     }
 }
 
@@ -103,10 +87,7 @@ async fn extra_headers_reserved_name_does_not_override_authorization() {
         base_url: server.uri(),
         api_key: "real-token".into(),
         // Attempt to override with a different value -- must be ignored.
-        extra_headers: vec![(
-            "authorization".into(),
-            "Bearer attacker-token".into(),
-        )],
+        extra_headers: vec![("authorization".into(), "Bearer attacker-token".into())],
         default_extras: None,
         reasoning_dialect: ReasoningDialect::OpenAi,
         user_agent: None,
@@ -116,7 +97,10 @@ async fn extra_headers_reserved_name_does_not_override_authorization() {
     // "Bearer real-token" (the override would have replaced it) and the
     // mock server returns 404, surfacing here as an upstream error.
     let resp = provider.complete(user_request("test")).await;
-    assert!(resp.is_ok(), "guard must keep the real Bearer token: {resp:?}");
+    assert!(
+        resp.is_ok(),
+        "guard must keep the real Bearer token: {resp:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

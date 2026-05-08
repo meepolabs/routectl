@@ -195,7 +195,11 @@ impl BedrockProvider {
     /// typically done once in the router's factory.
     pub fn new(cfg: BedrockConfig, resolved: auth::ResolvedCreds) -> Self {
         let client = crate::http_client::build(cfg.user_agent.as_deref());
-        Self { cfg, resolved, client }
+        Self {
+            cfg,
+            resolved,
+            client,
+        }
     }
 }
 
@@ -231,7 +235,9 @@ impl Provider for BedrockProvider {
         let body = self.normalize_request(&req)?;
 
         let url = match self.cfg.api_shape {
-            BedrockApiShape::Invoke => endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, false),
+            BedrockApiShape::Invoke => {
+                endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, false)
+            }
             BedrockApiShape::Converse => {
                 endpoint::converse_url(&self.cfg.region, &self.cfg.model_id, false)
             }
@@ -297,7 +303,9 @@ impl Provider for BedrockProvider {
         let body = self.normalize_request(&req)?;
 
         let url = match self.cfg.api_shape {
-            BedrockApiShape::Invoke => endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, true),
+            BedrockApiShape::Invoke => {
+                endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, true)
+            }
             BedrockApiShape::Converse => {
                 endpoint::converse_url(&self.cfg.region, &self.cfg.model_id, true)
             }
@@ -310,7 +318,10 @@ impl Provider for BedrockProvider {
             .client
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "application/vnd.amazon.eventstream")
+            .header(
+                reqwest::header::ACCEPT,
+                "application/vnd.amazon.eventstream",
+            )
             .body(body_str)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
@@ -398,9 +409,18 @@ mod tests {
             session_token: Some("SESSION-NEVER-SHOW".into()),
         };
         let s = format!("{creds:?}");
-        assert!(!s.contains("SECRET-NEVER-SHOW"), "debug leaked secret_key: {s}");
-        assert!(!s.contains("SESSION-NEVER-SHOW"), "debug leaked session_token: {s}");
-        assert!(s.contains("AKIA"), "expected access-key prefix in debug output: {s}");
+        assert!(
+            !s.contains("SECRET-NEVER-SHOW"),
+            "debug leaked secret_key: {s}"
+        );
+        assert!(
+            !s.contains("SESSION-NEVER-SHOW"),
+            "debug leaked session_token: {s}"
+        );
+        assert!(
+            s.contains("AKIA"),
+            "expected access-key prefix in debug output: {s}"
+        );
         assert!(s.contains("redacted"), "expected redaction marker: {s}");
     }
 
