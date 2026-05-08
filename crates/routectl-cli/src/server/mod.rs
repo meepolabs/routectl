@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router as AxumRouter;
-use routectl_auth::MemoryStore;
+use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{Config, Router};
 use tokio::net::TcpListener;
@@ -9,8 +9,15 @@ use tower_http::trace::TraceLayer;
 
 use crate::handlers;
 
+pub mod auth;
+
+use auth::TokenSet;
+
 pub struct AppState {
     pub router: Arc<Router>,
+    pub openai_aliases: std::collections::BTreeMap<String, String>,
+    pub anthropic_aliases: std::collections::BTreeMap<String, String>,
+    pub strict_translation: bool,
 }
 
 /// Validate that `host` is loopback or that `unsafe_public` has been set.
@@ -66,17 +73,48 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
         "routectl listening on http://{bound}"
     );
 
+    let token_set = resolve_listener_tokens(&config).await?;
+
     let state = Arc::new(AppState {
         router: Arc::new(router),
+        openai_aliases: config.ingress.openai.aliases.clone(),
+        anthropic_aliases: config.ingress.anthropic.aliases.clone(),
+        strict_translation: config.server.strict_translation,
     });
 
-    let app = build_axum_router(state);
+    let app = build_axum_router(state, token_set);
 
     axum::serve(listener, app)
         .await
         .map_err(|e| Error::Config(format!("serve: {e}")))?;
 
     Ok(())
+}
+
+async fn resolve_listener_tokens(config: &Config) -> Result<Arc<TokenSet>> {
+    let Some(auth) = config.server.auth.as_ref() else {
+        return Ok(Arc::new(TokenSet::default()));
+    };
+    if auth.tokens.is_empty() {
+        return Ok(Arc::new(TokenSet::default()));
+    }
+
+    let store = MemoryStore::new();
+    let mut resolved: Vec<String> = Vec::with_capacity(auth.tokens.len());
+    for uri in &auth.tokens {
+        let secret_ref = SecretRef::parse(uri)
+            .map_err(|e| Error::Config(format!("[server.auth].tokens entry `{uri}`: {e}")))?;
+        let value = store
+            .get(&secret_ref)
+            .await
+            .map_err(|e| Error::Config(format!("[server.auth].tokens entry `{uri}`: {e}")))?;
+        resolved.push(value);
+    }
+    tracing::info!(
+        token_count = resolved.len(),
+        "listener auth enabled (x-api-key or Authorization: Bearer required)"
+    );
+    Ok(Arc::new(TokenSet::new(resolved)))
 }
 
 async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
@@ -97,17 +135,27 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     Ok(router)
 }
 
-fn build_axum_router(state: Arc<AppState>) -> AxumRouter {
+fn build_axum_router(state: Arc<AppState>, token_set: Arc<TokenSet>) -> AxumRouter {
     use axum::routing::{get, post};
 
-    AxumRouter::new()
+    let mut router = AxumRouter::new()
         .route("/health", get(handlers::health::health))
         .route("/v1/models", get(handlers::models::list_models))
         .route(
             "/v1/chat/completions",
             post(handlers::chat_completions::chat_completions),
         )
-        .route("/v1/messages", post(handlers::messages::messages))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .route("/v1/messages", post(handlers::messages::messages));
+
+    // Mount the auth middleware only when tokens are configured.
+    // Loopback dev (empty token list) gets the historical zero-auth
+    // behavior with no per-request overhead.
+    if !token_set.is_empty() {
+        router = router.layer(axum::middleware::from_fn_with_state(
+            token_set,
+            auth::auth_layer,
+        ));
+    }
+
+    router.layer(TraceLayer::new_for_http()).with_state(state)
 }

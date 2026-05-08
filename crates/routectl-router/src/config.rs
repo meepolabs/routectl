@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use routectl_providers::anthropic_api::AuthKind;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Server bind config.
     #[serde(default)]
@@ -29,6 +29,13 @@ pub struct Config {
     /// `openai`: strip routectl/openrouter extensions for paranoid clients.
     #[serde(default)]
     pub legacy_compat: LegacyCompat,
+
+    /// Per-ingress configuration: model-id -> alias mapping. v0.4.0
+    /// adds two ingress dialects (OpenAI Chat Completions, Anthropic
+    /// Messages); each can have its own alias map for clients that
+    /// can't override the `model` field directly (Claude Code, etc.).
+    #[serde(default)]
+    pub ingress: IngressConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +46,20 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+
+    /// Listener-side auth. When `tokens` is non-empty, every request
+    /// must carry a matching `x-api-key` or `Authorization: Bearer
+    /// <token>` header. Tokens are SecretRef URIs (env://, file://,
+    /// literal:) and are resolved at startup.
+    #[serde(default)]
+    pub auth: Option<ServerAuth>,
+
+    /// When true, lossy translation seams (e.g. cache_control on a
+    /// canonical -> OpenAI-compat egress) return a 400 instead of
+    /// emitting a `tracing::warn!`. Default false (warn-and-drop)
+    /// preserves dev ergonomics; flip to true for production CI.
+    #[serde(default)]
+    pub strict_translation: bool,
 }
 
 impl Default for ServerConfig {
@@ -46,8 +67,35 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            auth: None,
+            strict_translation: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ServerAuth {
+    /// Allowed tokens, stored as SecretRef URIs. Empty list means
+    /// "no auth required" (loopback dev default).
+    #[serde(default)]
+    pub tokens: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IngressConfig {
+    #[serde(default)]
+    pub openai: IngressShape,
+    #[serde(default)]
+    pub anthropic: IngressShape,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IngressShape {
+    /// Map a wire `model` field value to a configured alias. When the
+    /// request model matches a key here, routing uses the value as
+    /// the alias. The `x-routectl-alias` header overrides this.
+    #[serde(default)]
+    pub aliases: BTreeMap<String, String>,
 }
 
 fn default_host() -> String {
