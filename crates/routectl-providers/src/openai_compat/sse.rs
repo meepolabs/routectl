@@ -84,6 +84,12 @@ pub struct ThinkTagAccumulator {
     chunk_index: u32,
 }
 
+impl Default for ThinkTagAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThinkTagAccumulator {
     pub fn new() -> Self {
         Self {
@@ -137,8 +143,7 @@ impl ThinkTagAccumulator {
                 .get("delta")
                 .and_then(|d| d.get("role"))
                 .and_then(|v| v.as_str())
-                .map(|r| serde_json::from_value(serde_json::Value::String(r.into())).ok())
-                .flatten();
+                .and_then(|r| serde_json::from_value(serde_json::Value::String(r.into())).ok());
             let tool_calls = choice_val
                 .get("delta")
                 .and_then(|d| d.get("tool_calls"))

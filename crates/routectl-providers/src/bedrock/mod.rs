@@ -427,7 +427,10 @@ async fn parse_upstream_error_body(provider: &str, resp: reqwest::Response) -> S
 /// Body excerpt is bounded to keep log lines scannable. Never logs
 /// credential material because Bedrock error bodies don't contain any.
 fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
-    let excerpt: String = body.chars().take(routectl_core::MAX_LOG_BODY_EXCERPT).collect();
+    let excerpt: String = body
+        .chars()
+        .take(routectl_core::MAX_LOG_BODY_EXCERPT)
+        .collect();
     match status {
         401 => {
             tracing::warn!(
@@ -502,9 +505,7 @@ fn extract_iam_action(body: &str) -> Option<String> {
     const NEEDLE: &str = "perform: ";
     let start = body.find(NEEDLE)? + NEEDLE.len();
     let rest = &body[start..];
-    let end = rest
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(rest.len());
+    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     if end == 0 {
         None
     } else {
