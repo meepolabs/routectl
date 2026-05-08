@@ -17,6 +17,7 @@ use routectl_core::Error;
 use routectl_router::RouterOptions;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::Instrument;
 
 use crate::ingress::{IngressAdapter, IngressStreamState, SseEvent};
 use crate::server::AppState;
@@ -105,36 +106,47 @@ async fn stream_response<A: IngressAdapter + 'static>(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
 
-    tokio::spawn(async move {
-        let mut upstream = upstream;
-        let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state();
-        while let Some(item) = upstream.next().await {
-            match item {
-                Ok(chunk) => match adapter.render_chunk(chunk, state.as_mut()) {
-                    Ok(events) => {
-                        for ev in events {
-                            if tx.send(Ok(sse_to_axum(ev))).await.is_err() {
-                                return;
+    // Capture the current tracing span (which carries request_id from
+    // the request_id middleware + ingress / router / provider span
+    // hierarchy) and attach it to the spawned task. Without this,
+    // `tokio::spawn` creates a fresh task with no parent span, so any
+    // tracing::error! emitted from chunk-render / upstream-stream
+    // failures lands without correlation context. Operators grepping
+    // `request_id=<id>` would lose the streaming-error trail.
+    let parent_span = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            let mut upstream = upstream;
+            let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state();
+            while let Some(item) = upstream.next().await {
+                match item {
+                    Ok(chunk) => match adapter.render_chunk(chunk, state.as_mut()) {
+                        Ok(events) => {
+                            for ev in events {
+                                if tx.send(Ok(sse_to_axum(ev))).await.is_err() {
+                                    return;
+                                }
                             }
                         }
-                    }
+                        Err(e) => {
+                            tracing::error!(error = ?e, "ingress chunk render failed");
+                            return;
+                        }
+                    },
                     Err(e) => {
-                        tracing::error!(error = ?e, "ingress chunk render failed");
-                        return;
+                        tracing::error!(error = ?e, "upstream stream error");
+                        break;
                     }
-                },
-                Err(e) => {
-                    tracing::error!(error = ?e, "upstream stream error");
-                    break;
+                }
+            }
+            for ev in adapter.render_eos(state.as_mut()) {
+                if tx.send(Ok(sse_to_axum(ev))).await.is_err() {
+                    return;
                 }
             }
         }
-        for ev in adapter.render_eos(state.as_mut()) {
-            if tx.send(Ok(sse_to_axum(ev))).await.is_err() {
-                return;
-            }
-        }
-    });
+        .instrument(parent_span),
+    );
 
     let receiver_stream = ReceiverStream::new(rx);
     Sse::new(receiver_stream)

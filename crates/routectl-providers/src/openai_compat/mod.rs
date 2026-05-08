@@ -146,6 +146,7 @@ impl Provider for OpenAiCompatProvider {
         sse::parse_chunk(&self.cfg.id, raw, self.cfg.reasoning_dialect)
     }
 
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let mut body = self.normalize_request(&req)?;
         // Force non-streaming.
@@ -167,11 +168,16 @@ impl Provider for OpenAiCompatProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(Error::upstream(
-                &self.cfg.id,
-                status,
-                sanitize_upstream_body(&body_text),
-            ));
+            let sanitized = sanitize_upstream_body(&body_text);
+            if status == 401 || status == 403 {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    body_excerpt = %sanitized,
+                    "openai-compat upstream auth failed",
+                );
+            }
+            return Err(Error::upstream(&self.cfg.id, status, sanitized));
         }
 
         let raw: Value = resp
@@ -184,6 +190,7 @@ impl Provider for OpenAiCompatProvider {
         Ok(chat_resp)
     }
 
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let mut body = self.normalize_request(&req)?;
         body["stream"] = Value::Bool(true);
@@ -204,11 +211,16 @@ impl Provider for OpenAiCompatProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(Error::upstream(
-                &self.cfg.id,
-                status,
-                sanitize_upstream_body(&body_text),
-            ));
+            let sanitized = sanitize_upstream_body(&body_text);
+            if status == 401 || status == 403 {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    body_excerpt = %sanitized,
+                    "openai-compat upstream auth failed",
+                );
+            }
+            return Err(Error::upstream(&self.cfg.id, status, sanitized));
         }
 
         let provider_id = self.cfg.id.clone();
@@ -269,7 +281,10 @@ impl Provider for OpenAiCompatProvider {
 /// misconfigured base_url, for example), we strip it down to a short marker
 /// rather than dumping kilobytes of markup through routectl's error envelope.
 fn sanitize_upstream_body(body: &str) -> String {
-    const MAX_LEN: usize = 512;
+    // Aligned with `routectl_core::MAX_LOG_BODY_EXCERPT` so log
+    // `body_excerpt=...` fields are the same length across providers
+    // (operators grep across bedrock and openai-compat together).
+    const MAX_LEN: usize = routectl_core::MAX_LOG_BODY_EXCERPT;
     let trimmed = body.trim();
     let looks_like_html =
         trimmed.starts_with('<') || trimmed.to_ascii_lowercase().contains("<!doctype");
