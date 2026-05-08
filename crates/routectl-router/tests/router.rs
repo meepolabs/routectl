@@ -165,6 +165,7 @@ fn build_router(aliases: BTreeMap<String, AliasEntry>) -> Router {
             r
         },
         legacy_compat: Default::default(),
+        ingress: Default::default(),
     };
     Router::new(Arc::new(cfg))
 }
@@ -555,6 +556,7 @@ fn build_router_with_runtime(
             r
         },
         legacy_compat: Default::default(),
+        ingress: Default::default(),
     };
     Router::new(Arc::new(cfg))
 }
