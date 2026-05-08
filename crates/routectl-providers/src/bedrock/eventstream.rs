@@ -210,6 +210,14 @@ fn handle_invoke_frame(
                         "not_found_error" => 404,
                         _ => 502,
                     };
+                    if matches!(err_type, "authentication_error" | "permission_error") {
+                        tracing::warn!(
+                            provider = %provider_id,
+                            event_type = err_type,
+                            message = %err_msg,
+                            "bedrock in-stream auth/permission exception",
+                        );
+                    }
                     return Err(Error::upstream(
                         provider_id,
                         status,
@@ -223,7 +231,9 @@ fn handle_invoke_frame(
         | "modelStreamErrorException"
         | "validationException"
         | "throttlingException"
-        | "serviceUnavailableException" => {
+        | "serviceUnavailableException"
+        | "accessDeniedException"
+        | "unauthorizedException" => {
             let payload: Value = serde_json::from_slice(payload_bytes).unwrap_or(Value::Null);
             let msg = payload
                 .pointer("/message")
@@ -236,8 +246,21 @@ fn handle_invoke_frame(
                 "throttlingException" => 429,
                 "validationException" => 400,
                 "serviceUnavailableException" => 503,
+                "accessDeniedException" => 403,
+                "unauthorizedException" => 401,
                 _ => 500,
             };
+            if matches!(
+                event_type.as_str(),
+                "accessDeniedException" | "unauthorizedException"
+            ) {
+                tracing::warn!(
+                    provider = %provider_id,
+                    event_type = %event_type,
+                    message = %msg,
+                    "bedrock in-stream auth/permission exception",
+                );
+            }
             Err(Error::upstream(provider_id, status, msg))
         }
         // Unknown frame types -- log and skip rather than fail. AWS

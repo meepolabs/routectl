@@ -5,11 +5,11 @@ use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{Config, Router};
 use tokio::net::TcpListener;
-use tower_http::trace::TraceLayer;
 
 use crate::handlers;
 
 pub mod auth;
+pub mod request_id;
 
 use auth::TokenSet;
 
@@ -178,6 +178,6 @@ fn build_axum_router(state: Arc<AppState>, token_set: Arc<TokenSet>) -> AxumRout
 
     public
         .merge(authed)
-        .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(request_id::middleware))
         .with_state(state)
 }

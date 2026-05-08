@@ -58,7 +58,7 @@ tokio-stream = "0.1"
 
 # Time / ids (used in response shaping)
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 
 # Test deps (used in dev-dependencies of individual crates)
 wiremock = "0.6"

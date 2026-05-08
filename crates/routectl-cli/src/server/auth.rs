@@ -113,6 +113,27 @@ pub async fn auth_layer(
     if tokens.check(req.headers()) {
         next.run(req).await
     } else {
+        // Log the SHAPE of the rejected request (which auth header
+        // the client sent, if any) so operators can distinguish
+        // "client never authenticated" from "client sent the wrong
+        // token". Never log the supplied value or any prefix --
+        // even a few bytes of a leaked secret materially helps an
+        // attacker.
+        let has_x_api_key = req.headers().contains_key("x-api-key");
+        let has_bearer = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| {
+                s.starts_with("Bearer ") || s.starts_with("bearer ")
+            })
+            .unwrap_or(false);
+        tracing::warn!(
+            route = %req.uri().path(),
+            has_x_api_key,
+            has_bearer,
+            "listener auth rejected",
+        );
         let body = json!({
             "error": {
                 "type": "authentication_error",

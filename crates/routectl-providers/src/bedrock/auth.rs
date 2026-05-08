@@ -76,6 +76,13 @@ pub async fn resolve(creds: &BedrockCreds, region: &str) -> Result<ResolvedCreds
             // Probe once so configuration errors surface here, not on
             // the first chat request.
             provider.provide_credentials().await.map_err(|e| {
+                tracing::warn!(
+                    auth_kind = "Profile",
+                    profile = %name,
+                    region = %region,
+                    error = %e,
+                    "bedrock credential resolution failed",
+                );
                 Error::Auth(format!("bedrock: failed to load AWS profile `{name}`: {e}"))
             })?;
             Ok(ResolvedCreds::Sigv4 {
@@ -92,6 +99,12 @@ pub async fn resolve(creds: &BedrockCreds, region: &str) -> Result<ResolvedCreds
                     .await;
             // Probe once for fail-fast.
             chain.provide_credentials().await.map_err(|e| {
+                tracing::warn!(
+                    auth_kind = "DefaultChain",
+                    region = %region,
+                    error = %e,
+                    "bedrock credential resolution failed",
+                );
                 Error::Auth(format!(
                     "bedrock: AWS default credentials chain failed: {e}"
                 ))
