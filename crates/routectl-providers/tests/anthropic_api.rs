@@ -301,6 +301,59 @@ mod tests {
     }
 
     #[test]
+    fn cache_control_on_builtin_tool_counts_against_breakpoint_cap() {
+        // A Builtin tool's `cache_control` (extracted from its raw JSON) must
+        // count toward the 4-breakpoint cap and TTL ordering. Otherwise an
+        // invalid request reaches upstream and 400s there. Pin the
+        // routectl-side validator catches it.
+        let provider = make_provider("https://api.anthropic.com");
+        let mut req = base_req(
+            "claude-opus-4-7",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "a".into(),
+                        cache_control: Some(CacheControl::ephemeral_5m()),
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "b".into(),
+                        cache_control: Some(CacheControl::ephemeral_5m()),
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "c".into(),
+                        cache_control: Some(CacheControl::ephemeral_5m()),
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "d".into(),
+                        cache_control: Some(CacheControl::ephemeral_5m()),
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+        );
+        // Fifth breakpoint: a Builtin tool carrying cache_control in raw
+        // JSON. The validator must extract this value and count it.
+        req.tools = Some(vec![ToolDef::Other(json!({
+            "type": "bash_20250124",
+            "name": "bash",
+            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+        }))]);
+        let err = provider
+            .normalize_request(&req)
+            .expect_err("expected breakpoint cap violation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("breakpoints") && msg.contains("maximum"),
+            "expected breakpoint-cap error message, got: {msg}"
+        );
+    }
+
+    #[test]
     fn anthropic_builtin_tool_passes_through_verbatim() {
         let provider = make_provider("https://api.anthropic.com");
         let mut req = base_req(

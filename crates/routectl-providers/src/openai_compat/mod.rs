@@ -57,6 +57,12 @@ pub struct OpenAiCompatConfig {
     pub reasoning_dialect: ReasoningDialect,
     /// Override the User-Agent on outbound requests. `None` keeps reqwest's default.
     pub user_agent: Option<String>,
+    /// When `true`, requests carrying canonical-only fields (`cache_control`,
+    /// `anthropic_beta`, `ToolDef::Other`, `ContentPart::Other`,
+    /// `SystemContent::Blocks` with cache_control, etc.) are rejected with
+    /// `Error::Validation` instead of warn-and-dropped. Set from
+    /// `[server] strict_translation` at provider build time.
+    pub strict_translation: bool,
 }
 
 pub struct OpenAiCompatProvider {
@@ -121,6 +127,7 @@ impl Provider for OpenAiCompatProvider {
             req,
             self.cfg.reasoning_dialect,
             self.cfg.default_extras.as_ref(),
+            self.cfg.strict_translation,
         )
     }
 
