@@ -30,6 +30,7 @@ fn make_provider(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatProvi
         default_extras: None,
         reasoning_dialect: dialect,
         user_agent: None,
+        strict_translation: false,
     })
 }
 
@@ -91,6 +92,7 @@ async fn extra_headers_reserved_name_does_not_override_authorization() {
         default_extras: None,
         reasoning_dialect: ReasoningDialect::OpenAi,
         user_agent: None,
+        strict_translation: false,
     });
 
     // If the guard is missing, the wiremock matcher above won't find
@@ -449,6 +451,99 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
     // Also verify the round-trip through complete() succeeds.
     let resp = provider.complete(req).await.unwrap();
     assert_eq!(resp.id, "chatcmpl-mt-001");
+}
+
+// ---------------------------------------------------------------------------
+// strict_translation: lossy seam policy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn strict_translation_off_warns_and_allows_request() {
+    // Default mode: cache_control on a user text block is silently dropped
+    // (warn-only), and the request body still serializes. Pin that the
+    // request reaches the upstream wire shape without erroring.
+    use routectl_core::{
+        cache_control::CacheControl, content_part::ContentPart, ChatRequest, KnownContentPart,
+    };
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "openai-compat:test".into(),
+        base_url: "http://localhost".into(),
+        api_key: "k".into(),
+        extra_headers: vec![],
+        default_extras: None,
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        user_agent: None,
+        strict_translation: false,
+    });
+    let req = ChatRequest {
+        model: "gpt-4o".into(),
+        messages: vec![Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "hi".into(),
+                cache_control: Some(CacheControl::ephemeral_5m()),
+            })]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        cache_control: Some(CacheControl::ephemeral_5m()),
+        ..Default::default()
+    };
+    let body = provider
+        .normalize_request(&req)
+        .expect("default warns, returns Ok");
+    assert!(
+        body.get("cache_control").is_none(),
+        "wire body must not carry cache_control on the openai-compat seam"
+    );
+}
+
+#[test]
+fn strict_translation_on_rejects_canonical_only_fields() {
+    // Strict mode: same lossy seam returns an Error::Validation that
+    // names the offending fields. Wired through OpenAiCompatConfig from
+    // [server] strict_translation at provider build time.
+    use routectl_core::{cache_control::CacheControl, ChatRequest};
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "openai-compat:strict".into(),
+        base_url: "http://localhost".into(),
+        api_key: "k".into(),
+        extra_headers: vec![],
+        default_extras: None,
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        user_agent: None,
+        strict_translation: true,
+    });
+    let req = ChatRequest {
+        model: "gpt-4o".into(),
+        messages: vec![Message {
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }],
+        cache_control: Some(CacheControl::ephemeral_5m()),
+        anthropic_beta: vec!["context-1m-2025-08-07".into()],
+        ..Default::default()
+    };
+    let err = provider
+        .normalize_request(&req)
+        .expect_err("strict_translation must reject canonical-only fields");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("strict_translation"),
+        "expected strict_translation marker in error: {msg}"
+    );
+    assert!(
+        msg.contains("cache_control") && msg.contains("anthropic_beta"),
+        "expected both dropped fields named in error: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
