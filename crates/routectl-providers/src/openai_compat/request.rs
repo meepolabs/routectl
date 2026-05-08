@@ -77,22 +77,9 @@ mod tests {
             temperature: Some(0.7),
             top_p: Some(0.9),
             max_tokens: Some(512),
-            stop: None,
-            stream: None,
-            n: None,
-            seed: None,
-            logprobs: None,
-            top_logprobs: None,
-            logit_bias: None,
             presence_penalty: Some(0.1),
             frequency_penalty: Some(0.1),
-            user: None,
-            tools: None,
-            tool_choice: None,
-            response_format: None,
-            reasoning: None,
-            chat_template_kwargs: None,
-            provider_extras: None,
+            ..Default::default()
         }
     }
 

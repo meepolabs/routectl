@@ -29,6 +29,13 @@ pub enum Error {
     #[error("config: {0}")]
     Config(String),
 
+    /// Request rejected before reaching an upstream provider. Produced by
+    /// ingress adapters when a request body fails a static invariant
+    /// (e.g. cache_control 4-breakpoint cap, TTL ordering). HTTP handlers
+    /// surface this as 400 Bad Request.
+    #[error("validation: {0}")]
+    Validation(String),
+
     #[error("streaming: {0}")]
     Streaming(String),
 

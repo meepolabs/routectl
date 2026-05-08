@@ -28,9 +28,7 @@ use super::BedrockCreds;
 pub enum ResolvedCreds {
     /// SigV4-signed requests. The provider is queried per request and
     /// is responsible for any caching/refresh behavior (for SSO etc.).
-    Sigv4 {
-        provider: SharedCredentialsProvider,
-    },
+    Sigv4 { provider: SharedCredentialsProvider },
     /// Bedrock console short-term API key. SigV4 is skipped; the
     /// signing layer attaches `Authorization: Bearer <key>`.
     Bearer { key: String },
@@ -78,9 +76,7 @@ pub async fn resolve(creds: &BedrockCreds, region: &str) -> Result<ResolvedCreds
             // Probe once so configuration errors surface here, not on
             // the first chat request.
             provider.provide_credentials().await.map_err(|e| {
-                Error::Auth(format!(
-                    "bedrock: failed to load AWS profile `{name}`: {e}"
-                ))
+                Error::Auth(format!("bedrock: failed to load AWS profile `{name}`: {e}"))
             })?;
             Ok(ResolvedCreds::Sigv4 {
                 provider: SharedCredentialsProvider::new(provider),
@@ -89,10 +85,11 @@ pub async fn resolve(creds: &BedrockCreds, region: &str) -> Result<ResolvedCreds
 
         BedrockCreds::DefaultChain => {
             let region_obj = aws_types::region::Region::new(region.to_string());
-            let chain = aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
-                .region(region_obj)
-                .build()
-                .await;
+            let chain =
+                aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+                    .region(region_obj)
+                    .build()
+                    .await;
             // Probe once for fail-fast.
             chain.provide_credentials().await.map_err(|e| {
                 Error::Auth(format!(
