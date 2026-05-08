@@ -20,8 +20,8 @@ use std::collections::BTreeMap;
 use axum::http::HeaderMap;
 use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, Message,
-    MessageContent, ReasoningConfig, ReasoningDetail, Result, Role, ToolDef,
+    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, Message, MessageContent,
+    ReasoningConfig, ReasoningDetail, Result,
 };
 use serde_json::{json, Map, Value};
 
@@ -191,22 +191,19 @@ fn translate_thinking(t: &Value) -> ReasoningConfig {
 }
 
 fn validate_request_cache_control(req: &ChatRequest) -> Result<()> {
-    let mut bps: Vec<Breakpoint<'_>> = Vec::new();
+    // Collect owned cache_control values first so refs into them live
+    // long enough for the Breakpoint borrows. This is required for
+    // `ToolDef::Other` whose `cache_control()` returns owned because
+    // it's parsed on demand from the inner Value.
+    let mut owned: Vec<(BreakpointPosition, routectl_core::CacheControl)> = Vec::new();
 
     if let Some(tools) = &req.tools {
-        // Each tool's cache_control is parsed lazily; collect into a
-        // local Vec so the borrowed Breakpoint refs live long enough.
-        // We can't borrow &CacheControl from ToolDef::Other (which
-        // parses on demand). Instead, count breakpoints without
-        // collecting refs there, treating Other tools as opaque.
         for t in tools {
-            if let ToolDef::Custom(c) = t {
-                if let Some(cc) = c.cache_control.as_ref() {
-                    bps.push(Breakpoint {
-                        position: BreakpointPosition::Tools,
-                        control: cc,
-                    });
-                }
+            // Covers both ToolDef::Custom (typed) and ToolDef::Other
+            // (Anthropic builtins like bash_*, web_search_*) -- the
+            // latter would otherwise silently bypass the 4-cap.
+            if let Some(cc) = t.cache_control() {
+                owned.push((BreakpointPosition::Tools, cc));
             }
         }
     }
@@ -214,10 +211,7 @@ fn validate_request_cache_control(req: &ChatRequest) -> Result<()> {
     if let Some(routectl_core::SystemContent::Blocks(blocks)) = &req.system {
         for b in blocks {
             if let Some(cc) = b.cache_control.as_ref() {
-                bps.push(Breakpoint {
-                    position: BreakpointPosition::System,
-                    control: cc,
-                });
+                owned.push((BreakpointPosition::System, cc.clone()));
             }
         }
     }
@@ -226,22 +220,23 @@ fn validate_request_cache_control(req: &ChatRequest) -> Result<()> {
         if let MessageContent::Parts(parts) = &m.content {
             for p in parts {
                 if let Some(cc) = part_cache_control(p) {
-                    bps.push(Breakpoint {
-                        position: BreakpointPosition::Messages,
-                        control: cc,
-                    });
+                    owned.push((BreakpointPosition::Messages, cc.clone()));
                 }
             }
         }
     }
 
     if let Some(cc) = req.cache_control.as_ref() {
-        bps.push(Breakpoint {
-            position: BreakpointPosition::TopLevel,
-            control: cc,
-        });
+        owned.push((BreakpointPosition::TopLevel, cc.clone()));
     }
 
+    let bps: Vec<Breakpoint<'_>> = owned
+        .iter()
+        .map(|(pos, cc)| Breakpoint {
+            position: *pos,
+            control: cc,
+        })
+        .collect();
     cache_control::validate(&bps)
 }
 
@@ -474,8 +469,7 @@ fn emit_delta_events(
     // Text content -> text_delta on the current text block.
     if let Some(text) = delta.content.as_deref() {
         if !text.is_empty() {
-            ensure_block(state, OpenBlockKind::Text, events);
-            let idx = state.open.unwrap().0;
+            let idx = ensure_block(state, OpenBlockKind::Text, events);
             push_block_delta(events, idx, json!({"type": "text_delta", "text": text}));
         }
     }
@@ -487,8 +481,7 @@ fn emit_delta_events(
         }
         match d.kind {
             routectl_core::ReasoningDetailKind::Text => {
-                ensure_block(state, OpenBlockKind::Thinking, events);
-                let idx = state.open.unwrap().0;
+                let idx = ensure_block(state, OpenBlockKind::Thinking, events);
                 if let Some(text) = d.payload.get("text").and_then(|v| v.as_str()) {
                     if !text.is_empty() {
                         push_block_delta(
@@ -545,16 +538,32 @@ fn emit_delta_events(
     // Tool calls -> tool_use blocks with input_json_delta.
     if let Some(tcs) = delta.tool_calls.as_ref() {
         for tc in tcs {
-            apply_tool_call_delta(tc, state, events);
+            apply_tool_call_delta(tc, state, events)?;
         }
     }
 
     Ok(())
 }
 
-fn apply_tool_call_delta(tc: &Value, state: &mut AnthropicStreamState, events: &mut Vec<SseEvent>) {
+/// Maximum permitted tool_call index in a streaming response. Caps
+/// `state.tool_blocks` Vec growth so a malicious or malformed upstream
+/// chunk with `index: 1_000_000` cannot allocate gigabytes per stream.
+/// Anthropic-API limits are far below this; openai-compat upstreams
+/// rarely exceed 16 parallel tool calls.
+const MAX_TOOL_CALL_INDEX: usize = 64;
+
+fn apply_tool_call_delta(
+    tc: &Value,
+    state: &mut AnthropicStreamState,
+    events: &mut Vec<SseEvent>,
+) -> Result<()> {
     // OpenAI shape: {index, id?, type, function: {name?, arguments?}}.
     let call_index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    if call_index > MAX_TOOL_CALL_INDEX {
+        return Err(Error::Streaming(format!(
+            "anthropic ingress: tool_call index {call_index} exceeds maximum of {MAX_TOOL_CALL_INDEX}"
+        )));
+    }
 
     // Allocate a new tool_use block on first sight of this call_index.
     let block_index = match state.tool_blocks.get(call_index).cloned() {
@@ -612,11 +621,22 @@ fn apply_tool_call_delta(tc: &Value, state: &mut AnthropicStreamState, events: &
             );
         }
     }
+    Ok(())
 }
 
-fn ensure_block(state: &mut AnthropicStreamState, kind: OpenBlockKind, events: &mut Vec<SseEvent>) {
-    if state.open.map(|(_, k)| k) == Some(kind) {
-        return;
+/// Open a content block of `kind` if one isn't already open. Returns
+/// the block index in either case (whether it was already open or
+/// just opened). Returning the index removes the
+/// `state.open.unwrap().0` foot-gun at every call site.
+fn ensure_block(
+    state: &mut AnthropicStreamState,
+    kind: OpenBlockKind,
+    events: &mut Vec<SseEvent>,
+) -> usize {
+    if let Some((idx, k)) = state.open {
+        if k == kind {
+            return idx;
+        }
     }
     close_open_block(state, events);
     let idx = state.next_index;
@@ -636,6 +656,7 @@ fn ensure_block(state: &mut AnthropicStreamState, kind: OpenBlockKind, events: &
         }))
         .unwrap_or_default(),
     ));
+    idx
 }
 
 fn close_open_block(state: &mut AnthropicStreamState, events: &mut Vec<SseEvent>) {
@@ -761,30 +782,14 @@ impl IngressAdapter for AnthropicIngress {
     }
 }
 
-/// Quick non-cryptographic message id for synthesized message_start
-/// frames when the upstream chunk omitted one. Anthropic IDs look
-/// like `msg_01ABCDEF...`; we don't try to mimic the exact alphabet.
+/// Synthesized message id for `message_start` frames when the
+/// upstream chunk omitted one. UUID-based to avoid collisions on hosts
+/// with no monotonic clock or under burst load (the prior
+/// `SystemTime::now()` nanosecond version could collide on
+/// concurrent requests).
 fn random_msg_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}")
+    uuid::Uuid::new_v4().simple().to_string()
 }
-
-// Suppress unused KnownContentPart warning when the part-cache helper
-// is the only consumer.
-#[allow(dead_code)]
-fn _force_use_known_part(k: &KnownContentPart) -> Option<&routectl_core::CacheControl> {
-    k.cache_control()
-}
-
-// Suppress unused Role warning -- it shows up implicitly through
-// the canonical Message round-trip but we keep it here for symmetry
-// with the OpenAI ingress imports.
-#[allow(dead_code)]
-fn _force_use_role(_r: Role) {}
 
 #[cfg(test)]
 mod tests {
@@ -1054,5 +1059,90 @@ mod tests {
         let events = ingress().render_eos(state.as_mut());
         let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
         assert_eq!(names, vec!["content_block_stop", "message_stop"]);
+    }
+
+    #[test]
+    fn stream_two_concurrent_tool_calls_each_get_their_own_block() {
+        // M4 (code-reviewer): multi-tool-call streaming was not
+        // covered. Verify both tool calls open their own blocks
+        // and arguments-deltas land on the right block index.
+        use routectl_core::{ChunkChoice, ChunkDelta};
+        let chunk = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    tool_calls: Some(vec![
+                        json!({
+                            "index": 0,
+                            "id": "toolu_01",
+                            "type": "function",
+                            "function": {"name": "calc", "arguments": "{\"a\":"}
+                        }),
+                        json!({
+                            "index": 1,
+                            "id": "toolu_02",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{\"q\":"}
+                        }),
+                    ]),
+                    ..Default::default()
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let mut s = fresh_state();
+        let events = render_chunk_internal(chunk, &mut s).unwrap();
+        let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
+        // Anthropic protocol requires sequential blocks (no
+        // interleaving): block 0 must be stopped before block 1
+        // opens. The translation buffers per chunk, but the wire
+        // ordering is the protocol contract.
+        assert_eq!(
+            names,
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "content_block_start",
+                "content_block_delta"
+            ]
+        );
+        // Two distinct block indices were allocated.
+        assert_eq!(s.tool_blocks.len(), 2);
+        assert_ne!(s.tool_blocks[0].0, s.tool_blocks[1].0);
+    }
+
+    #[test]
+    fn stream_tool_call_index_above_cap_returns_streaming_error() {
+        // note: tool_blocks Vec growth bound.
+        use routectl_core::{ChunkChoice, ChunkDelta};
+        let chunk = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    tool_calls: Some(vec![json!({
+                        "index": 1_000_000_u64,
+                        "id": "toolu_evil",
+                        "type": "function",
+                        "function": {"name": "x", "arguments": "{}"}
+                    })]),
+                    ..Default::default()
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let mut s = fresh_state();
+        let err = render_chunk_internal(chunk, &mut s).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "expected streaming error with 'exceeds maximum', got: {err}"
+        );
     }
 }

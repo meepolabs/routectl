@@ -32,6 +32,7 @@ bytes.workspace = true
 tokio-stream.workspace = true
 futures.workspace = true
 chrono.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 anyhow = "1"
 dirs = "5"
 
