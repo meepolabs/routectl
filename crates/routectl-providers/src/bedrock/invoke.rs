@@ -109,9 +109,7 @@ mod tests {
             region: "us-west-2".into(),
             model_id: "anthropic.claude-haiku-4-5".into(),
             api_shape: BedrockApiShape::Invoke,
-            creds: BedrockCreds::BearerKey {
-                key: "test".into(),
-            },
+            creds: BedrockCreds::BearerKey { key: "test".into() },
             user_agent: None,
             extra_headers: Vec::new(),
             anthropic_beta: vec!["context-1m-2025-08-07".into()],
@@ -131,25 +129,9 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
             }],
-            temperature: None,
-            top_p: None,
             max_tokens: Some(64),
-            stop: None,
             stream: Some(true),
-            n: None,
-            seed: None,
-            logprobs: None,
-            top_logprobs: None,
-            logit_bias: None,
-            presence_penalty: None,
-            frequency_penalty: None,
-            user: None,
-            tools: None,
-            tool_choice: None,
-            response_format: None,
-            reasoning: None,
-            chat_template_kwargs: None,
-            provider_extras: None,
+            ..Default::default()
         }
     }
 
@@ -159,10 +141,7 @@ mod tests {
         let req = user_req();
         let body = normalize_request(&cfg, &req).unwrap();
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
-        assert_eq!(
-            body["anthropic_beta"],
-            json!(["context-1m-2025-08-07"]),
-        );
+        assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]),);
         assert_eq!(body["top_p"], json!(0.9));
         assert!(body.get("stream").is_none(), "stream should be stripped");
     }

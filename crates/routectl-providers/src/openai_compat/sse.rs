@@ -179,6 +179,7 @@ impl ThinkTagAccumulator {
             id: chunk_id,
             model,
             choices: new_choices,
+            usage: None,
         }))
     }
 

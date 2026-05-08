@@ -12,7 +12,7 @@ mod tests {
     use routectl_core::Provider;
     use routectl_core::{
         ChatRequest, Message, MessageContent, ReasoningConfig, ReasoningDetail,
-        ReasoningDetailKind, Role,
+        ReasoningDetailKind, Role, ToolDef,
     };
     use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
     use serde_json::{json, Value};
@@ -64,25 +64,8 @@ mod tests {
         ChatRequest {
             model: model.into(),
             messages: msgs,
-            temperature: None,
-            top_p: None,
             max_tokens: Some(1024),
-            stop: None,
-            stream: None,
-            n: None,
-            seed: None,
-            logprobs: None,
-            top_logprobs: None,
-            logit_bias: None,
-            presence_penalty: None,
-            frequency_penalty: None,
-            user: None,
-            tools: None,
-            tool_choice: None,
-            response_format: None,
-            reasoning: None,
-            chat_template_kwargs: None,
-            provider_extras: None,
+            ..Default::default()
         }
     }
 
@@ -162,7 +145,7 @@ mod tests {
     fn tools_translated_to_anthropic_shape() {
         let provider = make_provider("https://api.anthropic.com");
         let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
-        req.tools = Some(vec![json!({
+        req.tools = Some(vec![ToolDef::Other(json!({
             "type": "function",
             "function": {
                 "name": "get_weather",
@@ -175,7 +158,7 @@ mod tests {
                     "required": ["location"]
                 }
             }
-        })]);
+        }))]);
         let body = provider.normalize_request(&req).unwrap();
 
         let tools = body["tools"].as_array().unwrap();
@@ -738,10 +721,7 @@ mod tests {
             base_url: mock_server.uri(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::ApiKey,
-            extra_headers: vec![(
-                "anthropic-beta".into(),
-                expected_beta.into(),
-            )],
+            extra_headers: vec![("anthropic-beta".into(), expected_beta.into())],
             user_agent: None,
         };
         let provider = AnthropicApiProvider::new(cfg);

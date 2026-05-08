@@ -162,7 +162,9 @@ fn handle_invoke_frame(
     message: Message,
     sse_state: &mut SseState,
 ) -> Result<Option<ChatChunk>> {
-    let event_type = header_str(&message, ":event-type").unwrap_or("").to_string();
+    let event_type = header_str(&message, ":event-type")
+        .unwrap_or("")
+        .to_string();
     let payload_bytes = message.payload();
 
     match event_type.as_str() {
@@ -175,12 +177,9 @@ fn handle_invoke_frame(
                     payload_bytes.len()
                 ))
             })?;
-            let b64 = outer
-                .get("bytes")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    Error::Streaming("bedrock chunk payload missing `bytes` field".into())
-                })?;
+            let b64 = outer.get("bytes").and_then(|v| v.as_str()).ok_or_else(|| {
+                Error::Streaming("bedrock chunk payload missing `bytes` field".into())
+            })?;
             let decoded = B64_STANDARD.decode(b64).map_err(|e| {
                 Error::Streaming(format!("bedrock chunk bytes not valid base64: {e}"))
             })?;
@@ -283,7 +282,11 @@ mod tests {
 
     fn handle(event_type: &str, payload: &str) -> Result<Option<ChatChunk>> {
         let mut sse_state = SseState::default();
-        handle_invoke_frame("test-bedrock", make_frame(event_type, payload), &mut sse_state)
+        handle_invoke_frame(
+            "test-bedrock",
+            make_frame(event_type, payload),
+            &mut sse_state,
+        )
     }
 
     #[test]

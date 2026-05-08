@@ -12,13 +12,11 @@ use routectl_providers::openai_compat::{
 };
 
 #[cfg(feature = "bedrock")]
-use routectl_providers::bedrock::{
-    BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider,
-};
+use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
 
-use crate::config::{ProviderEntry, ReasoningDialect};
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
+use crate::config::{ProviderEntry, ReasoningDialect};
 
 pub async fn build_provider(
     name: &str,

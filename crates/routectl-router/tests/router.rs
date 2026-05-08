@@ -147,6 +147,7 @@ fn ok_chunk(id: &str, model: &str, content: &str) -> ChatChunk {
             },
             finish_reason: None,
         }],
+        usage: None,
     }
 }
 
@@ -180,25 +181,7 @@ fn req(model: &str) -> ChatRequest {
             tool_call_id: None,
             tool_calls: None,
         }],
-        temperature: None,
-        top_p: None,
-        max_tokens: None,
-        stop: None,
-        stream: None,
-        n: None,
-        seed: None,
-        logprobs: None,
-        top_logprobs: None,
-        logit_bias: None,
-        presence_penalty: None,
-        frequency_penalty: None,
-        user: None,
-        tools: None,
-        tool_choice: None,
-        response_format: None,
-        reasoning: None,
-        chat_template_kwargs: None,
-        provider_extras: None,
+        ..Default::default()
     }
 }
 
