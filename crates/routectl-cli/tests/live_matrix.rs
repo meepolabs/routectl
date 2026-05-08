@@ -522,3 +522,157 @@ async fn openrouter_stream_subset() {
     .await;
     print_summary("OpenRouter", "stream", &rows);
 }
+
+// -- Bedrock live matrix ----------------------------------------------------
+//
+// Anthropic-on-Bedrock via InvokeModel + bearer-key auth. Reads
+// `AWS_BEARER_TOKEN_BEDROCK` (short-term Bedrock console API key) and
+// `AWS_REGION`. Skips cleanly when either is unset.
+//
+// Run:
+//   cargo test -p routectl-cli --features live-integration,bedrock --release \
+//     --test live_matrix bedrock -- --nocapture --test-threads=1
+//
+// Cross-region inference profiles (`us.`-prefixed) are used because they
+// have the broadest streaming-permission surface across AWS accounts.
+
+#[cfg(feature = "bedrock")]
+const BEDROCK_MODELS: &[&str] = &[
+    "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "us.anthropic.claude-opus-4-20250514-v1:0",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+];
+
+#[cfg(feature = "bedrock")]
+async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
+    use routectl_providers::bedrock::{
+        auth as bedrock_auth, BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider,
+    };
+
+    let key = std::env::var("AWS_BEARER_TOKEN_BEDROCK").ok()?;
+    if key.trim().is_empty() {
+        return None;
+    }
+    let region = std::env::var("AWS_REGION")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "us-east-1".into());
+
+    let mut providers = BTreeMap::new();
+    let mut aliases = BTreeMap::new();
+    let mut router_providers: Vec<(String, Arc<dyn routectl_core::Provider>)> = Vec::new();
+
+    for model_id in targets {
+        let provider_name = format!("bedrock-{}", sanitize_provider_name(model_id));
+        let creds = BedrockCreds::BearerKey { key: key.clone() };
+        let resolved = bedrock_auth::resolve(&creds, &region)
+            .await
+            .expect("resolve bedrock bearer creds");
+        let cfg = BedrockConfig {
+            id: format!("bedrock:{provider_name}"),
+            region: region.clone(),
+            model_id: (*model_id).to_string(),
+            api_shape: BedrockApiShape::Invoke,
+            creds,
+            user_agent: Some("routectl-live-test/0.4".into()),
+            extra_headers: Vec::new(),
+            anthropic_beta: Vec::new(),
+            additional_model_request_fields: None,
+        };
+        let provider: Arc<dyn routectl_core::Provider> =
+            Arc::new(BedrockProvider::new(cfg, resolved));
+
+        // The router config still needs an entry per provider; its
+        // contents don't matter for the in-memory `register` path
+        // because we replace the runtime via `register()` below. Use
+        // a placeholder OpenAiCompat entry to satisfy the schema.
+        providers.insert(
+            provider_name.clone(),
+            ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:placeholder"),
+        );
+        aliases.insert(
+            (*model_id).to_string(),
+            AliasEntry::new(vec![format!("{provider_name}:{model_id}")]),
+        );
+        router_providers.push((provider_name, provider));
+    }
+
+    let cfg = Arc::new(Config {
+        server: Default::default(),
+        providers,
+        aliases,
+        retry: Default::default(),
+        legacy_compat: Default::default(),
+        ingress: Default::default(),
+    });
+
+    let mut router = Router::new(cfg);
+    for (name, provider) in router_providers {
+        router.register(name, provider);
+    }
+    Some(Arc::new(router))
+}
+
+#[cfg(feature = "bedrock")]
+fn sanitize_provider_name(model_id: &str) -> String {
+    model_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bedrock_complete_matrix() {
+    let Some(router) = build_bedrock_test_router(BEDROCK_MODELS).await else {
+        eprintln!("skip: AWS_BEARER_TOKEN_BEDROCK not set");
+        return;
+    };
+
+    let targets: Vec<String> = BEDROCK_MODELS.iter().map(|s| s.to_string()).collect();
+    let total = targets.len();
+    let r = router.clone();
+    let rows = run_matrix(targets, move |t| {
+        let r = r.clone();
+        async move { run_complete(r, t).await }
+    })
+    .await;
+    print_summary("Bedrock", "complete", &rows);
+
+    let pass = rows.iter().filter(|r| r.ok).count();
+    assert!(
+        pass > 0,
+        "Bedrock: 0/{total} models passed -- routectl or provider broken"
+    );
+}
+
+#[cfg(feature = "bedrock")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bedrock_stream_subset() {
+    // Stream against the smallest models to keep cost tiny.
+    let subset_static: &[&str] = &[
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+    ];
+    let Some(router) = build_bedrock_test_router(subset_static).await else {
+        eprintln!("skip: AWS_BEARER_TOKEN_BEDROCK not set");
+        return;
+    };
+
+    let subset: Vec<String> = subset_static.iter().map(|s| s.to_string()).collect();
+    let r = router.clone();
+    let rows = run_matrix(subset, move |t| {
+        let r = r.clone();
+        async move { run_stream(r, t).await }
+    })
+    .await;
+    print_summary("Bedrock", "stream", &rows);
+}
