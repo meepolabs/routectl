@@ -11,25 +11,36 @@ ignore = []
 
 [licenses]
 version = 2
+# Licenses encountered in the workspace dep tree (verified by `cargo
+# deny check licenses`). Keep tight: every entry is explicit so a new
+# transitive dep with a non-standard license fails CI loudly.
 allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
-    "Zlib",
     "MPL-2.0",
     "CC0-1.0",
-    "OpenSSL",
+    # webpki-roots ships under the Community Data License Agreement
+    # (Permissive 2.0). It vendors the Mozilla CA bundle, which is the
+    # source of the CDLA terms; the actual code is permissively licensed
+    # but the bundle metadata uses CDLA. Required by hyper-rustls /
+    # aws-smithy-http-client transitively.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 
 [bans]
 multiple-versions = "warn"
+# Disallow `version = "*"` style wildcards in registry deps, but ALLOW
+# the workspace path-only inheritance pattern
+# (`routectl-core = { path = "..." }` in workspace deps + `.workspace = true`
+# in member crates). Without this, every internal crate-to-crate dep
+# trips the wildcard rule, which is noise.
 wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 
 [sources]
