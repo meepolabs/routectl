@@ -26,11 +26,14 @@ fn config_with(server_url: &str) -> Config {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 8787,
+            auth: None,
+            strict_translation: false,
         },
         providers,
         aliases,
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
+        ingress: Default::default(),
     }
 }
 
@@ -54,6 +57,7 @@ async fn config_check_passes_for_valid_config() {
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
+        ingress: Default::default(),
     };
     config.providers.insert(
         "mock".into(),
@@ -78,6 +82,7 @@ async fn config_check_fails_for_alias_pointing_at_unknown_provider() {
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
+        ingress: Default::default(),
     };
     config
         .aliases
@@ -100,6 +105,7 @@ fn config_show_redacts_literal_secrets() {
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
+        ingress: Default::default(),
     };
     config.providers.insert(
         "secret".into(),
@@ -136,6 +142,7 @@ fn config_show_keeps_env_uris_intact() {
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
+        ingress: Default::default(),
     };
     config.providers.insert(
         "kc".into(),
