@@ -1,21 +1,20 @@
-# Working on routectl with Claude
+# Working on routectl
 
-This file is a runbook for autonomous agents (Claude Code, qwen via
-opencode-delegate, etc.) working on this repo. Read it once before
-making changes; refer back when a model fails the live matrix.
+This file is a runbook for contributors (humans and autonomous agents)
+working on this repo. Read it once before making changes; refer back
+when a model fails the live matrix.
 
 ## Repo map
 
 - `crates/routectl-core/` -- `Provider` trait + OpenRouter-shape schema
   (`ChatRequest`, `ChatResponse`, `ChatChunk`, `Message`,
   `ReasoningDetail`). Wire shapes only; no provider code.
-- `crates/routectl-providers/` -- concrete provider impls. Three are
-  feature-on by default: `openai_compat` (covers OpenAI, OpenRouter,
-  DeepSeek, vLLM, NIM, llama.cpp, OpenCode-Go, ...), `anthropic_api`
-  (api-key + OAuth-bearer auth), and `bedrock` (gated behind the
-  default-on `bedrock` Cargo feature). Cookie-auth providers
-  (`claude_cookie`, `chatgpt_cookie`) are scaffolded but feature-gated
-  off.
+- `crates/routectl-providers/` -- concrete provider impls. Three ship
+  on by default: `openai_compat` (covers OpenAI, OpenRouter, DeepSeek,
+  Groq, vLLM, NIM, llama.cpp, and any OpenAI-shaped host), `anthropic_api`
+  (api-key + OAuth-bearer auth), and `bedrock` (default-on `bedrock`
+  Cargo feature; opt out with `--no-default-features` for a lean build
+  without the AWS SDK tree).
   - `model_profile.rs` -- per-model quirks table. **Edit here when a
     model needs new behavior** (drops sampling params, requires
     reasoning effort, etc.).
@@ -66,7 +65,7 @@ contract:
   `ContentBlock::Other` on the wire) make most new Anthropic block
   types ship without code edits on the all-Anthropic path.
 
-### When the Anthropic ingress breaks (Claude Code, opencode, etc.)
+### When the Anthropic ingress breaks (a real client sending a real body)
 
 1. **Reproduce against routectl directly** with a captured request
    body:
@@ -119,14 +118,15 @@ strict_translation = false   # set true for production CI
 [server.auth]
 tokens = ["env://ROUTECTL_LISTENER_TOKEN", "literal:sk-routectl-dev"]
 
-# Map Claude Code's model IDs to routectl aliases. CC can't override
-# the `model` field in its API call, so the mapping happens server-side.
+# Map upstream model IDs to routectl aliases. Useful when a client
+# can't override the `model` field directly, so the mapping happens
+# server-side.
 [ingress.anthropic.aliases]
-"claude-opus-4-7-20251022"      = "heavy"
-"claude-sonnet-4-6-20251022"    = "default"
-"claude-haiku-4-5-20251022"     = "fast"
+"claude-opus-4-20250514"      = "heavy"
+"claude-sonnet-4-5-20250929"  = "default"
+"claude-haiku-4-5-20251001"   = "fast"
 
-# Alternative: harness sets `x-routectl-alias: heavy` and the model
+# Alternative: client sets `x-routectl-alias: heavy` and the model
 # field is ignored. Header always wins over the aliases map.
 ```
 
@@ -224,9 +224,9 @@ Refer back when a similar failure mode shows up.
   Handled by `#[serde(default)]` on the optional fields in
   `ChatResponse` / `ChatChunk`.
 
-- **Post-`[DONE]` SSE trailers**. OpenCode-Go emits a
-  `data: {"choices":[],"cost":"0"}` cost-tracker chunk after the
-  `[DONE]` terminator. Handled by an explicit `return` in the SSE
+- **Post-`[DONE]` SSE trailers**. Some openai-compat hosts emit a
+  bookkeeping chunk (e.g. `data: {"choices":[],"cost":"0"}`) after
+  the `[DONE]` terminator. Handled by an explicit `return` in the SSE
   loop at `crates/routectl-providers/src/openai_compat/mod.rs` --
   `[DONE]` stops parsing.
 
