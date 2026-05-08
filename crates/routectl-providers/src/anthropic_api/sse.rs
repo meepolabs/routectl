@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use routectl_core::{
-    schema::{ChunkChoice, ChunkDelta},
+    schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
     ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result,
 };
 
@@ -120,9 +120,22 @@ impl SseState {
                 Ok(None)
             }
 
-            SseEvent::MessageDelta { delta, .. } => {
+            SseEvent::MessageDelta { delta, usage } => {
                 let finish_reason = map_stop_reason(delta.stop_reason.as_deref());
-                if finish_reason.is_none() {
+                let usage_delta = usage.as_ref().map(|u| UsageDelta {
+                    completion_tokens: u.output_tokens,
+                    cache_creation_input_tokens: u.cache_creation_input_tokens,
+                    cache_read_input_tokens: u.cache_read_input_tokens,
+                    cache_creation: u.cache_creation.as_ref().map(|c| CacheCreation {
+                        ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
+                        ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
+                    }),
+                    ..Default::default()
+                });
+                // Emit a chunk if either side carries information; an
+                // empty MessageDelta (no stop_reason and no usage) is
+                // a keepalive in spirit -- skip.
+                if finish_reason.is_none() && usage_delta.is_none() {
                     return Ok(None);
                 }
                 Ok(Some(ChatChunk {
@@ -133,7 +146,7 @@ impl SseState {
                         delta: ChunkDelta::default(),
                         finish_reason,
                     }],
-                    usage: None,
+                    usage: usage_delta,
                 }))
             }
 
