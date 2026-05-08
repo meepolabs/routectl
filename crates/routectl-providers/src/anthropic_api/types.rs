@@ -472,9 +472,24 @@ pub struct SseMessage {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseContentBlockStart {
-    Text { text: String },
-    Thinking { thinking: String },
-    ToolUse { id: String, name: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+    },
+    /// Encrypted thinking block (server emits the data verbatim; no
+    /// per-token deltas follow). Required so a streamed response
+    /// containing `redacted_thinking` deserializes cleanly instead of
+    /// erroring on an unknown variant -- which silently dropped the
+    /// rest of the stream in v0.4.0 pre-fix.
+    RedactedThinking {
+        data: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]

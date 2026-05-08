@@ -12,7 +12,9 @@ use std::any::Any;
 use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Result};
+use routectl_core::{
+    ChatChunk, ChatRequest, ChatResponse, Error, MessageContent, Result, Role, SystemContent,
+};
 use serde_json::Value;
 
 use super::{resolve_alias, IngressAdapter, IngressStreamState, SseEvent};
@@ -54,6 +56,12 @@ impl IngressAdapter for OpenAiIngress {
             ))
         })?;
         req.model = resolve_alias(&self.aliases, headers, &req.model);
+        // Honor the canonical contract: `req.system` is the source of
+        // truth at egress time. Lift any Role::System messages into
+        // `req.system` here at ingress so every egress reads the same
+        // shape. Concat with newlines when multiple system messages
+        // are present (matching the legacy lift-from-egress behavior).
+        lift_system_messages(&mut req);
         Ok(req)
     }
 
@@ -78,6 +86,59 @@ impl IngressAdapter for OpenAiIngress {
 
     fn render_eos(&self, _state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
         vec![SseEvent::unnamed(DONE_SENTINEL)]
+    }
+}
+
+/// If any `Role::System` messages are in `req.messages`, concatenate
+/// their text content with newlines into `req.system` (preserving any
+/// existing `req.system` value) and remove them from the messages
+/// array. No-op when there are no System messages.
+fn lift_system_messages(req: &mut ChatRequest) {
+    let mut lifted: Vec<String> = Vec::new();
+    req.messages.retain(|m| {
+        if !matches!(m.role, Role::System) {
+            return true;
+        }
+        match &m.content {
+            MessageContent::Text(t) => lifted.push(t.clone()),
+            MessageContent::Parts(parts) => {
+                // Collect text parts only -- images/documents in a
+                // System message are not meaningful in canonical and
+                // would have been dropped by the egress anyway.
+                for p in parts {
+                    if let routectl_core::ContentPart::Known(
+                        routectl_core::KnownContentPart::Text { text, .. },
+                    ) = p
+                    {
+                        lifted.push(text.clone());
+                    }
+                }
+            }
+            MessageContent::Null => {}
+        }
+        false
+    });
+
+    if lifted.is_empty() {
+        return;
+    }
+    let lifted_text = lifted.join("\n");
+    match req.system.take() {
+        Some(SystemContent::Text(existing)) => {
+            req.system = Some(SystemContent::Text(format!("{existing}\n{lifted_text}")));
+        }
+        Some(SystemContent::Blocks(mut blocks)) => {
+            blocks.push(routectl_core::SystemBlock {
+                kind: "text".into(),
+                text: lifted_text,
+                cache_control: None,
+                citations: None,
+            });
+            req.system = Some(SystemContent::Blocks(blocks));
+        }
+        None => {
+            req.system = Some(SystemContent::Text(lifted_text));
+        }
     }
 }
 
@@ -159,6 +220,68 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "[DONE]");
         assert!(events[0].event.is_none());
+    }
+
+    #[test]
+    fn openai_ingress_lifts_role_system_to_canonical_system() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "you are helpful"},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let req = OpenAiIngress::default()
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "you are helpful"),
+            other => panic!("expected SystemContent::Text, got {other:?}"),
+        }
+        // System message removed from the messages array.
+        assert_eq!(req.messages.len(), 1);
+        assert!(matches!(req.messages[0].role, Role::User));
+    }
+
+    #[test]
+    fn openai_ingress_concatenates_multiple_role_system_messages() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "be brief"},
+                {"role": "system", "content": "be polite"},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let req = OpenAiIngress::default()
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "be brief\nbe polite"),
+            other => panic!("expected concat, got {other:?}"),
+        }
+        assert_eq!(req.messages.len(), 1);
+    }
+
+    #[test]
+    fn openai_ingress_appends_lifted_system_to_existing_text_system() {
+        // Edge case: caller already set req.system explicitly AND has
+        // Role::System messages. Lift appends to existing.
+        let body = json!({
+            "model": "gpt-4o",
+            "system": "primary",
+            "messages": [
+                {"role": "system", "content": "secondary"},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let req = OpenAiIngress::default()
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "primary\nsecondary"),
+            other => panic!("expected concat, got {other:?}"),
+        }
     }
 
     #[test]
