@@ -10,11 +10,16 @@
 
 pub mod model_profile;
 
+pub(crate) mod http_client;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 
 #[cfg(feature = "anthropic-api")]
 pub mod anthropic_api;
+
+#[cfg(feature = "bedrock")]
+pub mod bedrock;
 
 #[cfg(feature = "claude-cookie")]
 pub mod claude_cookie;
