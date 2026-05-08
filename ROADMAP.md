@@ -94,46 +94,46 @@ Deferred from this milestone into v0.4.0:
 - `Converse` body translation for non-Anthropic Bedrock vendors.
 - Live integration matrix entries for Bedrock.
 
-## v0.4.0 (planned) -- API spec independence
+## v0.4.0 (in flight on `feat/v0.4-ingress-canonical`) -- API spec independence
 
 Two ingress dialects (OpenAI Chat Completions + Anthropic Messages),
 one canonical internal request shape, N egress providers. Lets any
 harness (Claude Code, opencode, Codex, raw curl) pick either wire
 format and route through any backend.
 
+Landed in this milestone:
+
 1. **`POST /v1/messages` Anthropic ingress** with full tool-call
    round-trip, thinking blocks + signature preservation, typed SSE
-   events (`message_start` / `content_block_*` / `message_stop`),
-   server-side model-id -> alias mapping, and `x-routectl-alias`
-   header override.
-2. **Canonical internal shape** as a strict superset of OpenAI and
-   Anthropic. Each provider translates canonical -> its wire format;
-   each ingress translates its wire format -> canonical. N+M
-   translators, not N*M. Lossy seams (cache_control / thinking
-   signatures dropped on canonical -> OpenAI-compat) surface as
-   `tracing::warn!` and an opt-in `strict_translation` policy.
+   events (`message_start` / `content_block_*` / `message_delta` /
+   `message_stop`), server-side model-id -> alias mapping
+   (`[ingress.anthropic.aliases]`), and `x-routectl-alias` header
+   override.
+2. **Canonical internal shape** absorbs Anthropic features
+   losslessly: typed `ContentPart` (Text / Image / ImageUrl /
+   Document / ToolUse / ToolResult / Thinking / RedactedThinking /
+   Other), typed `SystemContent` (Text or Blocks), typed `ToolDef`
+   (Custom / Other), top-level `cache_control` and `anthropic_beta`,
+   and `Usage` cache stats. Forward-compat catchalls
+   (`ContentPart::Other`, `ToolDef::Other`, `ContentBlock::Other`)
+   pass unknown Anthropic block types through verbatim on the
+   all-Anthropic path. `cache_control::validate` enforces the
+   4-breakpoint cap and 1h-before-5m TTL ordering at ingress.
 3. **Listener-side auth** via static config tokens (`[server.auth]
-   tokens = [...]`); inbound auth is decoupled from upstream
-   credentials.
-4. **OAuth refresh, two stages**:
-   - *Per-request file re-read*: opt-in `refresh_per_request = true`
-     on `file://`-backed providers picks up rotated tokens within
-     one request, no restart needed. Cheap to implement, useful when
-     an external sidecar handles the actual refresh dance.
-   - *Full OAuth refresh-token round-trip*: routectl holds the
-     refresh token, calls the OAuth provider's `/token` endpoint
-     before access-token expiry, swaps the new access token into
-     memory, and atomically writes any rotated refresh token back to
-     disk. The "real" answer for OAuth bearer; replaces the need
-     for an external rotator.
-5. **Bedrock follow-ons**:
-   - `routectl doctor` subcommand (active credential probe; IAM
-     action surfacing including the
-     `bedrock:InvokeModelWithResponseStream` streaming-permission
-     case; clock-skew check).
-   - `Converse` body translation (vendor-neutral) for non-Anthropic
-     Bedrock vendors.
-   - Live matrix Bedrock entries (Invoke + Converse).
+   tokens = [...]`) accepts both `x-api-key` and `Authorization:
+   Bearer`. Inbound auth is fully decoupled from upstream credentials
+   (no bridging, no token storage).
+4. **`strict_translation = false` (default)** -- lossy seams emit
+   `tracing::warn!`. Set `[server] strict_translation = true` to
+   upgrade to 400 Bad Request on dropped fields.
+
+Deferred from this milestone:
+
+- **OAuth refresh** (file re-read + full refresh-token round-trip)
+  -- moves to v0.5.0.
+- **Bedrock follow-ons** -- `routectl doctor` subcommand, Converse
+  body translation, live matrix Bedrock entries. Move to v0.4.x
+  follow-on cuts.
 
 ## v0.5.0 (planned) -- Latency-aware routing + observability
 
