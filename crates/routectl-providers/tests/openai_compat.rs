@@ -29,6 +29,7 @@ fn make_provider(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatProvi
         extra_headers: vec![],
         default_extras: None,
         reasoning_dialect: dialect,
+        user_agent: None,
     })
 }
 

@@ -7,9 +7,15 @@ license.workspace = true
 repository.workspace = true
 description = "Fallback chains, retries, and alias resolution for routectl."
 
+[features]
+default = ["bedrock"]
+# Forward the providers crate's `bedrock` feature so the router can
+# build BedrockProvider instances when this is enabled.
+bedrock = ["routectl-providers/bedrock"]
+
 [dependencies]
 routectl-core.workspace = true
-routectl-providers = { workspace = true, features = ["openai-compat", "anthropic-api"] }
+routectl-providers = { workspace = true, default-features = false, features = ["openai-compat", "anthropic-api"] }
 routectl-auth.workspace = true
 async-trait.workspace = true
 async-stream = "0.3"

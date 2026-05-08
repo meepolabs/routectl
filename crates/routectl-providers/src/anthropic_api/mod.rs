@@ -34,8 +34,9 @@ pub enum AuthKind {
     #[default]
     ApiKey,
     /// OAuth bearer for subscription tokens (e.g. Claude Code's
-    /// `sk-ant-oat01-...` access token). Sends `Authorization: Bearer <key>`
-    /// plus the `anthropic-beta: oauth-2025-04-20` gate.
+    /// `sk-ant-oat01-...` access token). Sends `Authorization: Bearer <key>`.
+    /// You must declare the `anthropic-beta: oauth-2025-04-20` gate
+    /// yourself via `extra_headers` -- routectl no longer auto-injects it.
     OauthBearer,
 }
 
@@ -46,6 +47,16 @@ pub struct AnthropicApiConfig {
     pub base_url: String,
     pub anthropic_version: String,
     pub auth_kind: AuthKind,
+    /// Extra HTTP headers applied to every Anthropic API request.
+    /// Use this to declare `anthropic-beta` flags (e.g. `context-1m-2025-08-07`,
+    /// `prompt-caching-2024-07-31`) or any other vendor-required header.
+    /// Applied AFTER auth headers, so callers can override `anthropic-version`
+    /// or `anthropic-beta` if they need to.
+    pub extra_headers: Vec<(String, String)>,
+    /// Override the User-Agent on outbound requests. Useful for IAM
+    /// policies that gate access on `aws:UserAgent` (e.g. Claude Code's
+    /// Bedrock role). `None` keeps reqwest's default UA.
+    pub user_agent: Option<String>,
 }
 
 impl AnthropicApiConfig {
@@ -56,6 +67,8 @@ impl AnthropicApiConfig {
             base_url: "https://api.anthropic.com".into(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::ApiKey,
+            extra_headers: Vec::new(),
+            user_agent: None,
         }
     }
 }
@@ -67,9 +80,7 @@ pub struct AnthropicApiProvider {
 
 impl AnthropicApiProvider {
     pub fn new(cfg: AnthropicApiConfig) -> Self {
-        let client = Client::builder()
-            .build()
-            .expect("failed to build reqwest client");
+        let client = crate::http_client::build(cfg.user_agent.as_deref());
         Self { cfg, client }
     }
 
@@ -77,14 +88,32 @@ impl AnthropicApiProvider {
         format!("{}/v1/messages", self.cfg.base_url.trim_end_matches('/'))
     }
 
-    fn apply_auth_headers(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
-        match self.cfg.auth_kind {
+    fn build_headers(
+        &self,
+        rb: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
+        let mut rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
+        rb = match self.cfg.auth_kind {
             AuthKind::ApiKey => rb.header("x-api-key", &self.cfg.api_key),
             AuthKind::OauthBearer => rb
-                .header("authorization", format!("Bearer {}", self.cfg.api_key))
-                .header("anthropic-beta", "oauth-2025-04-20"),
+                .header("authorization", format!("Bearer {}", self.cfg.api_key)),
+        };
+        for (k, v) in &self.cfg.extra_headers {
+            // Defense-in-depth: refuse to let a TOML-supplied
+            // `extra_headers` entry stomp on the auth header we just
+            // set. Override of `anthropic-version` / `anthropic-beta`
+            // remains intentional and supported.
+            if crate::http_client::is_reserved_extra_header(k) {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "ignoring reserved header from extra_headers (would bypass provider auth)"
+                );
+                continue;
+            }
+            rb = rb.header(k.as_str(), v.as_str());
         }
+        rb
     }
 }
 
@@ -115,7 +144,7 @@ impl Provider for AnthropicApiProvider {
         }
 
         let resp = self
-            .apply_auth_headers(self.client.post(&self.messages_url()))
+            .build_headers(self.client.post(self.messages_url()))
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -149,7 +178,7 @@ impl Provider for AnthropicApiProvider {
         }
 
         let resp = self
-            .apply_auth_headers(self.client.post(&self.messages_url()))
+            .build_headers(self.client.post(self.messages_url()))
             .header("content-type", "application/json")
             .json(&body)
             .send()

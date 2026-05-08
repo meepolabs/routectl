@@ -6,6 +6,90 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Native AWS Bedrock provider** (`type = "bedrock"`). Speaks SigV4
+  directly to `bedrock-runtime.<region>.amazonaws.com`, with both
+  `InvokeModel` (per-vendor body shape, default) and `Converse`
+  (vendor-neutral envelope) request paths selectable via
+  `api_shape = "invoke" | "converse"`. Streaming responses are
+  decoded from the AWS eventstream binary frame format and re-emitted
+  as routectl `ChatChunk`s; in-stream Anthropic `error` events
+  (`overloaded_error`, `rate_limit_error`, etc.) surface as `Error::Upstream`
+  with mapped HTTP status codes rather than silently truncating.
+
+  Credentials resolve via four mutually exclusive `creds.kind` shapes:
+
+  - `bearer-key` -- short-term Bedrock API key from the AWS console.
+    Skips SigV4 entirely and sends `Authorization: Bearer <key>`.
+  - `static` -- raw `access_key_ref` / `secret_key_ref` /
+    optional `session_token_ref`, each via routectl `SecretRef` URIs.
+  - `profile` -- a named profile in `~/.aws/credentials`, with SSO
+    auto-refresh via `aws-config`.
+  - `default-chain` -- standard AWS provider chain (env -> profile ->
+    SSO -> web identity / IRSA -> EC2/ECS metadata).
+
+  Gated behind a `bedrock` Cargo feature (default on for the binary;
+  library consumers can opt out with `--no-default-features` to skip
+  the `aws-config` / `aws-sigv4` / `aws-smithy-eventstream` dep tree).
+
+  Per-provider `user_agent` override is supported and recommended for
+  IAM policies that gate access via the `aws:UserAgent` condition key.
+  Per-provider `anthropic_beta` flags route into the request body's
+  top-level `anthropic_beta` array (Invoke) or
+  `additionalModelRequestFields.anthropic_beta` (Converse).
+  `additional_model_request_fields` is a free-form merge point for
+  vendor-specific knobs.
+
+  Note: Converse adapter is wired but body translation for non-Anthropic
+  vendors is staged for v0.3.1; using `api_shape = "converse"` today
+  returns a clear "not implemented" error.
+
+- **`extra_headers` and `user_agent` on `AnthropicApiConfig`** and
+  `[providers.X]` of type `anthropic-api`. Mirrors the existing fields
+  on `OpenAiCompatConfig`. Use `extra_headers` to declare any
+  `anthropic-beta` flags (e.g. `context-1m-2025-08-07`,
+  `prompt-caching-2024-07-31`). Use `user_agent` to override the
+  outbound UA, useful for IAM-gated upstreams whose policy condition
+  matches on `aws:UserAgent`.
+
+### Security
+
+- **`extra_headers` cannot override auth-bearing headers**. TOML-supplied
+  `extra_headers` entries that case-insensitively match `authorization`,
+  `x-api-key`, or `host` are now ignored with a `tracing::warn!`
+  instead of silently overwriting the provider's auth header. This
+  applies to both `anthropic-api` and `bedrock` providers.
+- **`BedrockCreds` redacts secret material in `Debug` output**.
+  `secret_access_key`, `session_token`, and bearer keys never appear
+  in `tracing` events, panic messages, or test failures.
+  `access_key_id` is shown as a 4-character prefix so operators can
+  identify the active key. `BedrockConfig` is safe by transitivity.
+- **Eventstream parser caps single-frame size at 8 MB**. Defends
+  against a malicious or compromised upstream advertising a giant
+  `total_length` to drive the inbound buffer toward OOM. Real Bedrock
+  chunks are KB-scale.
+
+### Changed
+
+- **BREAKING (config-level)**: `auth_kind = "oauth-bearer"` no longer
+  auto-injects `anthropic-beta: oauth-2025-04-20`. Beta flags are now
+  declared explicitly in `extra_headers`, decoupling auth method from
+  capability gates. This unblocks API-key-auth users from setting
+  `context-1m-*`, `prompt-caching-*`, and `extended-thinking-*` gates
+  via the same channel.
+
+  Migration -- if you used `auth_kind = "oauth-bearer"`, add to your
+  TOML:
+  ```toml
+  [providers.<your-anthropic-provider>.extra_headers]
+  "anthropic-beta" = "oauth-2025-04-20"
+  ```
+  Or, if you want the OAuth gate alongside other beta flags, comma-join:
+  ```toml
+  "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07"
+  ```
+
 ## [0.2.0] - 2026-05-06
 
 ### Added
