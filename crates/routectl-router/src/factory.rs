@@ -49,6 +49,7 @@ impl BuildOptions {
     }
 }
 
+#[tracing::instrument(skip_all, fields(provider = %name))]
 pub async fn build_provider_with_options(
     name: &str,
     entry: &ProviderEntry,
@@ -186,8 +187,26 @@ fn map_bedrock_api_shape(s: BedrockApiShapeConfig) -> BedrockApiShape {
 }
 
 async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
+    tracing::debug!(secret_scheme = scheme_of(uri), "resolving secret ref");
     let secret_ref = SecretRef::parse(uri)?;
     secrets.get(&secret_ref).await
+}
+
+/// Returns the URI scheme of a SecretRef literal (`env://`, `file://`,
+/// `literal:`, or `unknown`) without leaking the value. Used for
+/// structured tracing fields so log lines indicate WHICH source resolved
+/// (env var vs. file vs. inline) without revealing the secret name or
+/// its content.
+fn scheme_of(uri: &str) -> &'static str {
+    if uri.starts_with("env://") {
+        "env://"
+    } else if uri.starts_with("file://") {
+        "file://"
+    } else if uri.starts_with("literal:") {
+        "literal:"
+    } else {
+        "unknown"
+    }
 }
 
 fn map_dialect(d: ReasoningDialect) -> ProviderDialect {

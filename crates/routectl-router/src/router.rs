@@ -93,6 +93,7 @@ impl Router {
             .await
     }
 
+    #[tracing::instrument(skip_all, fields(alias = %req.model))]
     pub async fn complete_with_options(
         &self,
         req: ChatRequest,
@@ -126,8 +127,13 @@ impl Router {
                 // event for THIS provider and move to the next chain
                 // entry -- retrying the same provider would just hit
                 // the gate again.
-                if let Some(gate_err) = self.gate_check(provider_name) {
-                    tracing::warn!(provider = provider_name, ?gate_err, "gate blocked");
+                if let Some((gate_kind, gate_err)) = self.gate_check(provider_name) {
+                    tracing::warn!(
+                        provider = provider_name,
+                        gate_kind,
+                        error = ?gate_err,
+                        "gate blocked",
+                    );
                     last_err = Some(gate_err);
                     if opts.disable_fallbacks {
                         break 'chain;
@@ -203,6 +209,7 @@ impl Router {
     /// chunk reaches us; once the upstream has emitted a chunk,
     /// mid-stream errors propagate. Gate checks (rate limit / breaker)
     /// run before the upstream is touched.
+    #[tracing::instrument(skip_all, fields(alias = %req.model))]
     pub async fn stream_with_options(
         &self,
         req: ChatRequest,
@@ -224,8 +231,13 @@ impl Router {
 
             // Per-attempt gate: streams don't retry against the same
             // provider, so this is also the "single attempt" gate.
-            if let Some(gate_err) = self.gate_check(provider_name) {
-                tracing::warn!(provider = provider_name, ?gate_err, "stream gate blocked");
+            if let Some((gate_kind, gate_err)) = self.gate_check(provider_name) {
+                tracing::warn!(
+                    provider = provider_name,
+                    gate_kind,
+                    error = ?gate_err,
+                    "stream gate blocked",
+                );
                 last_err = Some(gate_err);
                 if opts.disable_fallbacks {
                     break 'chain;
@@ -281,22 +293,24 @@ impl Router {
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
     }
 
-    /// Run RPM bucket + circuit breaker. Returns `Some(err)` if the
-    /// gate refuses this dispatch (pretreated as a fallbackable
-    /// status-0 upstream error).
-    fn gate_check(&self, provider_name: &str) -> Option<Error> {
+    /// Run RPM bucket + circuit breaker. Returns `Some((kind, err))` if
+    /// the gate refuses this dispatch (pretreated as a fallbackable
+    /// status-0 upstream error). The `kind` tag is a stable string
+    /// (`"rate_limit"` or `"circuit_breaker"`) used as a `gate_kind`
+    /// field on the gate-blocked log so operators can filter by reason.
+    fn gate_check(&self, provider_name: &str) -> Option<(&'static str, Error)> {
         let state = self.state.get(provider_name)?.clone();
         let mut s = state.lock();
         match s.try_dispatch(Instant::now()) {
             GateDecision::Allow => None,
-            GateDecision::RateLimited => Some(Error::upstream(
-                provider_name,
-                0,
-                "local rpm_limit exceeded",
+            GateDecision::RateLimited => Some((
+                "rate_limit",
+                Error::upstream(provider_name, 0, "local rpm_limit exceeded"),
             )),
-            GateDecision::CircuitOpen => {
-                Some(Error::upstream(provider_name, 0, "circuit breaker open"))
-            }
+            GateDecision::CircuitOpen => Some((
+                "circuit_breaker",
+                Error::upstream(provider_name, 0, "circuit breaker open"),
+            )),
         }
     }
 
