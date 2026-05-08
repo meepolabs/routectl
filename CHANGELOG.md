@@ -42,7 +42,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   vendor-specific knobs.
 
   Note: Converse adapter is wired but body translation for non-Anthropic
-  vendors is staged for v0.3.1; using `api_shape = "converse"` today
+  vendors is staged for v0.4.0; using `api_shape = "converse"` today
   returns a clear "not implemented" error.
 
 - **`extra_headers` and `user_agent` on `AnthropicApiConfig`** and
