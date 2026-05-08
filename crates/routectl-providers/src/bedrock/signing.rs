@@ -66,6 +66,10 @@ fn sigv4_sign(
     // would produce a syntactically valid request that AWS rejects
     // with a cryptic 403 (signature mismatch) -- diagnosing that
     // failure is much harder than this up-front error.
+    // Borrow the body bytes directly. reqwest's `Body::as_bytes()` returns
+    // `&[u8]` borrowed from the request itself; sign() consumes the
+    // SignableRequest synchronously, so the borrow is released before we
+    // touch `req.headers_mut()` below. Avoids a per-request copy.
     let body_bytes = req
         .body()
         .and_then(|b| b.as_bytes())
@@ -75,9 +79,8 @@ fn sigv4_sign(
                  body() must resolve to in-memory bytes"
                     .into(),
             )
-        })?
-        .to_vec();
-    let body = SignableBody::Bytes(&body_bytes);
+        })?;
+    let body = SignableBody::Bytes(body_bytes);
 
     let identity = credentials.clone().into();
     let signing_settings = SigningSettings::default();
@@ -92,12 +95,25 @@ fn sigv4_sign(
         .map_err(|e| Error::Auth(format!("bedrock: signing params build failed: {e}")))?;
     let signing_params = v4_params.into();
 
-    // Collect headers as (&str, &str) pairs for SignableRequest.
+    // Collect headers as (&str, &str) pairs for SignableRequest. Non-ASCII
+    // values (HeaderValue::to_str() failure) MUST NOT be silently dropped:
+    // the actual outbound request still carries the header, but the signing
+    // input wouldn't, yielding `SignatureDoesNotMatch` on the AWS side that
+    // is opaque to debug. Fail fast and name the offending header.
     let header_pairs: Vec<(&str, &str)> = req
         .headers()
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.as_str(), val)))
-        .collect();
+        .map(|(k, v)| {
+            v.to_str()
+                .map(|val| (k.as_str(), val))
+                .map_err(|e| {
+                    Error::Auth(format!(
+                        "bedrock: header `{}` has non-ASCII value, cannot SigV4-sign: {e}",
+                        k.as_str()
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let method = req.method().as_str();
     let url = req.url().as_str();
@@ -204,6 +220,44 @@ mod tests {
         );
         // x-amz-date is mandatory for SigV4.
         assert!(req.headers().contains_key("x-amz-date"));
+    }
+
+    #[tokio::test]
+    async fn non_ascii_header_value_is_explicit_error_not_silent_drop() {
+        // Defends against the "header silently dropped from signing input"
+        // class of bugs: the signed-header set must equal the actual sent
+        // headers, otherwise AWS returns SignatureDoesNotMatch which is
+        // opaque to debug. We surface the offending header name up-front.
+        let resolved = resolve(
+            &BedrockCreds::Static {
+                access_key: "testkey-redacted".into(),
+                secret_key: "test-secret-key".into(),
+                session_token: None,
+            },
+            "us-west-2",
+        )
+        .await
+        .unwrap();
+
+        let client = reqwest::Client::new();
+        let mut req = client
+            .post("https://bedrock-runtime.us-west-2.amazonaws.com/model/test/invoke")
+            .body("{}")
+            .build()
+            .unwrap();
+        // Insert a non-ASCII byte sequence that to_str() refuses.
+        let bad_value = HeaderValue::from_bytes(b"\xC0\xC1 oops").expect("constructable");
+        req.headers_mut().insert("x-routectl-bad", bad_value);
+
+        let err = apply_auth(&mut req, &resolved, "us-west-2")
+            .await
+            .expect_err("non-ASCII header must error explicitly");
+        let msg = err.to_string();
+        assert!(msg.contains("x-routectl-bad"), "error names header: {msg}");
+        assert!(
+            msg.contains("non-ASCII") || msg.contains("cannot SigV4-sign"),
+            "error explains why: {msg}"
+        );
     }
 
     #[tokio::test]
