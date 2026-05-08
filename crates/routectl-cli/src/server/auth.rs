@@ -124,9 +124,7 @@ pub async fn auth_layer(
             .headers()
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .map(|s| {
-                s.starts_with("Bearer ") || s.starts_with("bearer ")
-            })
+            .map(|s| s.starts_with("Bearer ") || s.starts_with("bearer "))
             .unwrap_or(false);
         tracing::warn!(
             route = %req.uri().path(),

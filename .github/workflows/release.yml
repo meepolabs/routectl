@@ -12,24 +12,34 @@ name: release
 #   - linux aarch64   .deb     (cargo-deb)
 #
 # Every artifact is signed with sigstore cosign in keyless mode -- the
-# signature is bound to this workflow's OIDC identity. Verify with:
+# signature is bound to this workflow's OIDC identity, AND specifically
+# to the release.yml workflow file at the tag's ref. Verify with:
 #
 #   cosign verify-blob \
-#     --certificate-identity-regexp '^https://github.com/meepolabs/routectl/' \
+#     --certificate-identity-regexp '^https://github\.com/meepolabs/routectl/\.github/workflows/release\.yml@refs/tags/v[0-9]' \
+#     --certificate-github-workflow-repository meepolabs/routectl \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
 #     --bundle <artifact>.cosign.bundle <artifact>
 #
-# Provenance: each artifact is published with a SLSA build provenance
-# attestation via actions/attest-build-provenance.
+# Pre-flight: a `validate` job re-runs fmt + clippy + workspace tests
+# from the tag's ref BEFORE any artifact is built. This blocks signed
+# attestations being attached to broken binaries -- the pre-merge PR
+# CI does not protect against a tag pointing at a different SHA.
+#
+# Provenance: each artifact is published with a SLSA build-provenance
+# attestation via actions/attest-build-provenance. Permissions are
+# scoped per job so id-token / attestations / contents writes are only
+# granted where needed.
 
 on:
   push:
     tags: ["v*"]
 
+# Default permissions are minimal. Per-job blocks add what each job
+# needs (id-token + attestations for build/deb, contents:write for
+# release).
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,7 +47,52 @@ env:
   BIN_NAME: routectl
 
 jobs:
+  validate:
+    name: validate (pre-flight)
+    runs-on: ubuntu-22.04
+    # Hard cap. PR CI gates the same checks but a tag can be pushed
+    # against any SHA, so this is the ONLY pre-build gate at release
+    # time -- a hung test must not block the pipeline indefinitely.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (all features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace --release
+        run: cargo test --workspace --release
+
+      - name: cargo check (lean providers build, no aws-* deps)
+        run: cargo check -p routectl-providers --no-default-features --features openai-compat,anthropic-api
+
+      # Re-runs the RustSec advisory check against Cargo.lock at the
+      # tag's ref. ci.yml runs this on PRs and pushes to main/develop,
+      # but a tag pushed against a SHA that hasn't seen CI (or against
+      # a SHA that pre-dates a newly-published advisory) would
+      # otherwise produce signed artifacts containing a known-vulnerable
+      # dep with no second gate. Keep the action version aligned with
+      # ci.yml.
+      - name: cargo audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   build:
+    needs: [validate]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     name: build (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -66,6 +121,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: install rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -148,57 +205,121 @@ jobs:
 
   deb:
     name: deb (${{ matrix.target }})
+    needs: [validate, build]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            cross: false
           - target: aarch64-unknown-linux-gnu
-            cross: true
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          persist-credentials: false
 
-      - uses: Swatinem/rust-cache@v2
+      # Pull the binary the `build` job already produced + signed for
+      # this same target. Using --no-build below ensures the .deb
+      # ships byte-for-byte the same routectl binary that's inside
+      # the .tar.xz artifact, rather than a separate rebuild that
+      # would produce a different SHA256 (different mtime, possibly
+      # different codegen) under the same tag.
+      - name: download build artifact
+        uses: actions/download-artifact@v4
         with:
-          key: deb-${{ matrix.target }}
+          name: artifact-${{ matrix.target }}
+          path: download
 
-      - name: install aarch64 cross toolchain
-        if: ${{ matrix.cross }}
+      - name: stage built binary + verify against build-job sha256
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          cat >> .cargo/config.toml <<'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          dir="${BIN_NAME}-${version}-${{ matrix.target }}"
+
+          # Verify the downloaded .tar.xz matches the .sha256 the build
+          # job computed BEFORE we extract -- defense against an
+          # in-workflow tamper between upload-artifact and download-artifact.
+          # If the artifact channel ever serves a different blob than what
+          # was signed, this fails before we package a tampered binary.
+          expected=$(awk '{print $1}' "download/${dir}.tar.xz.sha256")
+          actual=$(sha256sum "download/${dir}.tar.xz" | awk '{print $1}')
+          if [ "$expected" != "$actual" ]; then
+            echo "FAIL: build-artifact tar.xz sha256 mismatch" >&2
+            echo "  expected: $expected" >&2
+            echo "  actual:   $actual" >&2
+            exit 1
+          fi
+
+          # Extract the .tar.xz so we get the routectl binary in the
+          # layout cargo-deb expects with --no-build. cargo-deb v3.x
+          # auto-rewrites `target/release/routectl` (the asset path in
+          # `[package.metadata.deb].assets`) to
+          # `target/${{ matrix.target }}/release/routectl` when --target
+          # is set, so we stage to the triple-prefixed path.
+          mkdir -p "target/${{ matrix.target }}/release"
+          tar -xf "download/${dir}.tar.xz" -C download
+          cp "download/${dir}/${BIN_NAME}" "target/${{ matrix.target }}/release/${BIN_NAME}"
+          chmod 755 "target/${{ matrix.target }}/release/${BIN_NAME}"
 
       - name: install cargo-deb
         run: cargo install --locked cargo-deb
 
-      - name: cargo deb
+      - name: cargo deb (no-build, repackages built binary)
         shell: bash
         run: |
           set -euo pipefail
-          cargo deb -p routectl-cli --target ${{ matrix.target }} --no-build --no-strip || \
-            cargo deb -p routectl-cli --target ${{ matrix.target }}
-          deb_path=$(ls target/${{ matrix.target }}/debian/*.deb | head -1)
+          cargo deb -p routectl-cli --target ${{ matrix.target }} --no-build --no-strip
+
+          # Assert exactly ONE .deb produced. cargo-deb may emit
+          # versioned + symlink in some configurations; we want the
+          # single canonical archive. `head -1` would silently swallow
+          # a duplicate; this errors loudly.
+          shopt -s nullglob
+          debs=( target/${{ matrix.target }}/debian/*.deb )
+          if [ ${#debs[@]} -ne 1 ]; then
+            echo "FAIL: expected exactly 1 .deb, got ${#debs[@]}" >&2
+            printf '  %s\n' "${debs[@]}" >&2
+            exit 1
+          fi
+          deb_path="${debs[0]}"
           cp "$deb_path" .
           deb_name=$(basename "$deb_path")
           shasum -a 256 "$deb_name" > "${deb_name}.sha256"
           echo "ARTIFACT=${deb_name}" >> "$GITHUB_ENV"
 
+      - name: assert .deb binary == .tar.xz binary (byte-identical)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The .deb cosign signature attests the .deb contents; the
+          # .tar.xz cosign signature (from the build job) attests the
+          # .tar.xz contents. Without this check, a downstream user
+          # verifying both signatures cannot programmatically confirm
+          # the binaries inside are the same. Extract both and compare
+          # SHA256.
+          src_hash=$(sha256sum "target/${{ matrix.target }}/release/${BIN_NAME}" | awk '{print $1}')
+          deb_hash=$(dpkg-deb --fsys-tarfile "${ARTIFACT}" \
+            | tar -xO ./usr/bin/${BIN_NAME} | sha256sum | awk '{print $1}')
+          if [ "$src_hash" != "$deb_hash" ]; then
+            echo "FAIL: .deb binary differs from staged .tar.xz binary" >&2
+            echo "  staged: $src_hash" >&2
+            echo "  in deb: $deb_hash" >&2
+            exit 1
+          fi
+          echo "OK: .deb ships the same routectl as .tar.xz (sha256=$src_hash)"
+
       - name: install cosign
         uses: sigstore/cosign-installer@v3
 
       - name: sign artifact (keyless, sigstore)
+        shell: bash
         run: |
+          set -euo pipefail
           cosign sign-blob --yes \
             --bundle "${ARTIFACT}.cosign.bundle" \
             "${ARTIFACT}"
@@ -221,22 +342,85 @@ jobs:
     name: github release
     runs-on: ubuntu-22.04
     needs: [build, deb]
+    # contents:write to publish the GitHub Release;
+    # id-token:write + attestations:write so we can sign the
+    # aggregate SHA256SUMS file with cosign + emit a build-provenance
+    # attestation. Users typically verify the SHA256SUMS aggregate
+    # rather than each per-artifact .sha256 file, so it MUST be signed
+    # with the same OIDC identity as the per-artifact bundles.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
+      - name: assert all matrix targets present
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Five tar.xz/zip archives + two .deb -- if any is missing
+          # (e.g. a build matrix entry failed under fail-fast: false),
+          # refuse to publish a partial release that would have
+          # plausibly-named artifacts but a missing target. Operators
+          # have to decide whether to re-run the failed shard or accept
+          # the partial release; we don't make that call silently.
+          archive_count=$(ls dist/*.tar.xz dist/*.zip 2>/dev/null | wc -l)
+          deb_count=$(ls dist/*.deb 2>/dev/null | wc -l)
+          if [ "$archive_count" -ne 5 ] || [ "$deb_count" -ne 2 ]; then
+            echo "FAIL: incomplete artifact set" >&2
+            echo "  expected: 5 archives + 2 .deb" >&2
+            echo "  got: $archive_count archives + $deb_count .deb" >&2
+            ls -1 dist/ >&2
+            exit 1
+          fi
+
       - name: aggregate checksums
+        shell: bash
         run: |
           set -euo pipefail
           cd dist
           : > SHA256SUMS
           for f in *.sha256; do cat "$f" >> SHA256SUMS; done
 
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: sign aggregate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          # Users typically verify SHA256SUMS as the canonical truth
+          # source ("download SHA256SUMS, verify, then trust the
+          # individual files it references"). Without signing the
+          # aggregate, each artifact has its own bundle but the
+          # aggregate is unsigned -- a swap of SHA256SUMS would go
+          # undetected even though every individual file checks out.
+          # Sign the aggregate so verification chains through it:
+          #
+          #   cosign verify-blob \
+          #     --certificate-identity-regexp '...' \
+          #     --certificate-oidc-issuer ... \
+          #     --bundle SHA256SUMS.cosign.bundle SHA256SUMS
+          cosign sign-blob --yes \
+            --bundle SHA256SUMS.cosign.bundle \
+            SHA256SUMS
+
+      - name: attest SHA256SUMS provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/SHA256SUMS
+
       - name: extract release notes from CHANGELOG
         id: notes
+        shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
@@ -247,8 +431,22 @@ jobs:
             }
             capture { print }
           ' CHANGELOG.md > release_notes.md
+
+          # Stable releases (v1.2.3) MUST have a matching CHANGELOG
+          # section. Pre-releases (v1.2.3-rc.0, -alpha.1, etc.) get
+          # a stub fallback so we can dry-run the pipeline without
+          # editing CHANGELOG. This catches the silent-failure mode
+          # where a typo in the heading drops us to the stub on a
+          # real release.
           if [ ! -s release_notes.md ]; then
-            echo "Release ${GITHUB_REF_NAME}." > release_notes.md
+            if [[ "$version" == *-* ]]; then
+              echo "Pre-release ${GITHUB_REF_NAME}." > release_notes.md
+            else
+              echo "FAIL: no CHANGELOG section for [$version]" >&2
+              echo "  expected a heading like '## [$version] - YYYY-MM-DD'" >&2
+              echo "  in /CHANGELOG.md" >&2
+              exit 1
+            fi
           fi
 
       - uses: softprops/action-gh-release@v2
