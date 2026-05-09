@@ -170,7 +170,12 @@ impl ThinkTagAccumulator {
                     self.chunk_index,
                 );
                 delta.reasoning_details.push(detail);
-                self.chunk_index += 1;
+                // saturating_add so a multi-day-running stream
+                // (4B+ reasoning chunks) wraps to a no-op rather
+                // than silently colliding with index 0 on rollover
+                // and breaking downstream consumers that key on
+                // index uniqueness within a stream.
+                self.chunk_index = self.chunk_index.saturating_add(1);
             }
 
             new_choices.push(ChunkChoice {

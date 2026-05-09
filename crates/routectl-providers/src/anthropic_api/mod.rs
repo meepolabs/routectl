@@ -17,8 +17,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
+use routectl_core::{
+    sanitize_for_log, sanitize_upstream_body, ChatChunk, ChatRequest, ChatResponse, Error,
+    Provider, Result,
+};
 
+pub(crate) mod parts;
 pub mod request;
 pub mod response;
 pub mod sse;
@@ -134,7 +138,7 @@ impl Provider for AnthropicApiProvider {
         sse::parse_stateless(&self.cfg.id, raw)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let mut body = self.normalize_request(&req)?;
         // Ensure stream is absent / false for the non-streaming path.
@@ -151,35 +155,47 @@ impl Provider for AnthropicApiProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
-        let raw_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
-
+        // On non-2xx, read the body as text FIRST so a non-JSON
+        // upstream response (HTML 502 from a misconfigured proxy,
+        // a CDN cleartext "rate limited" page, Anthropic's
+        // occasional plain-text 529 "overloaded") doesn't get
+        // collapsed into an opaque serde error. JSON parse is
+        // attempted opportunistically to lift `error.message`; on
+        // parse failure we fall back to a sanitized text excerpt
+        // matching the openai-compat / bedrock pattern. Operators
+        // grepping `body_excerpt=...` get a consistent shape across
+        // providers.
         if status >= 400 {
-            let msg = raw_body
-                .pointer("/error/message")
+            let body_text = resp.text().await.unwrap_or_default();
+            let msg = serde_json::from_str::<Value>(&body_text)
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/error/message"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("upstream error")
-                .to_string();
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| sanitize_upstream_body(&body_text));
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
                     auth_kind = ?self.cfg.auth_kind,
-                    message = %msg,
+                    body_excerpt = %msg,
                     "anthropic upstream auth failed",
                 );
             }
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
+        let raw_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         Ok(chat_resp)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
@@ -196,21 +212,22 @@ impl Provider for AnthropicApiProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let raw_body: Value = resp
-                .json()
-                .await
-                .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
-            let msg = raw_body
-                .pointer("/error/message")
+            // Same text-first-then-opportunistic-JSON pattern as
+            // `complete()` -- see comment there.
+            let body_text = resp.text().await.unwrap_or_default();
+            let msg = serde_json::from_str::<Value>(&body_text)
+                .ok()
+                .as_ref()
+                .and_then(|v| v.pointer("/error/message"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("upstream error")
-                .to_string();
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| sanitize_upstream_body(&body_text));
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
                     auth_kind = ?self.cfg.auth_kind,
-                    message = %msg,
+                    body_excerpt = %msg,
                     "anthropic upstream auth failed",
                 );
             }

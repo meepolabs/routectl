@@ -645,6 +645,15 @@ mod tests {
 impl RetryPolicy {
     /// Resolve the retry cap for a given upstream HTTP status code.
     /// Returns 0 for non-retryable errors.
+    ///
+    /// Note: `retry_on_5xx` only applies to 5xx codes that are ALSO
+    /// listed in `fallback_on_status`. A 5xx code an operator removed
+    /// from `fallback_on_status` (e.g. 501 "not implemented") is
+    /// treated as non-retryable here AND as non-fallbackable in
+    /// `should_fallback`, so it propagates immediately to the caller.
+    /// This is intentional: an operator who removes a status from
+    /// `fallback_on_status` is asking routectl to surface the error
+    /// verbatim, and silently retrying anyway would contradict that.
     pub fn retries_for_status(&self, status: u16) -> u32 {
         match status {
             0 => self.retry_on_network.unwrap_or(self.max_attempts),

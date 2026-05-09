@@ -47,10 +47,17 @@ impl AnthropicIngress {
 // Streaming state
 // ---------------------------------------------------------------------------
 
+/// Identity of the currently-open Anthropic content block. Tagged
+/// with the canonical reasoning-detail index for `Thinking` so two
+/// distinct upstream thinking blocks (`detail_index=0` then
+/// `detail_index=1`) emit as two separate Anthropic blocks rather
+/// than getting merged into one. Without this, multi-block thinking
+/// streams reserialize as a single block and break protocol fidelity
+/// with downstream consumers that count blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenBlockKind {
     Text,
-    Thinking,
+    Thinking { detail_index: u32 },
     ToolUse,
 }
 
@@ -177,10 +184,25 @@ fn translate_request(
 
 fn translate_thinking(t: &Value) -> ReasoningConfig {
     let kind = t.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let budget = t
-        .get("budget_tokens")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
+    // Anthropic's `budget_tokens` is JSON-int (effectively u64) but
+    // the canonical `ReasoningConfig.max_tokens` is u32. A naked cast
+    // would silently truncate values above u32::MAX (~4.29B) -- not
+    // reachable today since Anthropic caps the field at 100k, but
+    // saturating to u32::MAX with a WARN keeps the request consistent
+    // with what the caller asked for and surfaces bizarre input
+    // instead of corrupting it.
+    let budget = t.get("budget_tokens").and_then(|v| v.as_u64()).map(|n| {
+        if n > u64::from(u32::MAX) {
+            tracing::warn!(
+                requested = n,
+                capped = u32::MAX,
+                "anthropic ingress: budget_tokens exceeds u32::MAX; saturating",
+            );
+            u32::MAX
+        } else {
+            n as u32
+        }
+    });
     match kind {
         "enabled" => ReasoningConfig {
             enabled: Some(true),
@@ -491,7 +513,15 @@ fn emit_delta_events(
         }
         match d.kind {
             routectl_core::ReasoningDetailKind::Text => {
-                let idx = ensure_block(state, OpenBlockKind::Thinking, events);
+                // Pass the upstream detail index so two distinct
+                // thinking blocks (e.g. provider emits index=0 then
+                // index=1 in the same response) emit as two separate
+                // Anthropic content blocks. `ensure_block` compares
+                // the full `OpenBlockKind` via PartialEq, so an
+                // index change forces a content_block_stop +
+                // content_block_start pair.
+                let detail_index = d.index.unwrap_or(0);
+                let idx = ensure_block(state, OpenBlockKind::Thinking { detail_index }, events);
                 if let Some(text) = d.payload.get("text").and_then(|v| v.as_str()) {
                     if !text.is_empty() {
                         push_block_delta(
@@ -657,7 +687,7 @@ fn ensure_block(
     state.open = Some((idx, kind));
     let block = match kind {
         OpenBlockKind::Text => json!({"type": "text", "text": ""}),
-        OpenBlockKind::Thinking => json!({"type": "thinking", "thinking": ""}),
+        OpenBlockKind::Thinking { .. } => json!({"type": "thinking", "thinking": ""}),
         OpenBlockKind::ToolUse => json!({"type": "tool_use", "id": "", "name": "", "input": {}}),
     };
     events.push(SseEvent::named(
@@ -1202,6 +1232,106 @@ mod tests {
         let events = render_chunk_internal(usage_only, &mut s).unwrap();
         let payload: Value = serde_json::from_str(&events[0].data).unwrap();
         assert!(payload["delta"]["stop_reason"].is_null());
+    }
+
+    #[test]
+    fn stream_distinct_thinking_indices_emit_separate_blocks() {
+        // Two reasoning details with different `index` values must
+        // emit as TWO Anthropic content blocks, not one merged
+        // block. Pre-fix, `ensure_block` only checked
+        // `OpenBlockKind == Thinking` and merged them. Now the
+        // OpenBlockKind variant carries `detail_index` so the
+        // second detail forces a content_block_stop on the first
+        // block and a content_block_start on the new block.
+        use routectl_core::{
+            schema::{ChunkChoice, ChunkDelta},
+            ReasoningDetail, ReasoningDetailKind,
+        };
+        let first = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    reasoning_details: vec![ReasoningDetail {
+                        kind: ReasoningDetailKind::Text,
+                        id: None,
+                        format: Some(ANTHROPIC_FORMAT.into()),
+                        index: Some(0),
+                        payload: json!({"text": "first thought"}),
+                    }],
+                    ..Default::default()
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let second = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    reasoning_details: vec![ReasoningDetail {
+                        kind: ReasoningDetailKind::Text,
+                        id: None,
+                        format: Some(ANTHROPIC_FORMAT.into()),
+                        index: Some(1),
+                        payload: json!({"text": "second thought"}),
+                    }],
+                    ..Default::default()
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+
+        let mut s = fresh_state();
+        let first_events = render_chunk_internal(first, &mut s).unwrap();
+        let second_events = render_chunk_internal(second, &mut s).unwrap();
+
+        // First chunk: message_start + content_block_start (idx=0 thinking)
+        // + content_block_delta. Find the start event and capture its idx.
+        let first_start_idx = first_events
+            .iter()
+            .find_map(|ev| {
+                ev.event
+                    .as_deref()
+                    .filter(|n| *n == "content_block_start")
+                    .map(|_| ())
+            })
+            .map(|_| 0_usize);
+        assert!(
+            first_start_idx.is_some(),
+            "first chunk must open a thinking block; got events: {:?}",
+            first_events
+                .iter()
+                .map(|e| e.event.as_deref())
+                .collect::<Vec<_>>()
+        );
+
+        // Second chunk MUST emit content_block_stop for the previous
+        // index THEN content_block_start for a new index. Without
+        // the fix, neither would appear (just delta on the same
+        // open block).
+        let names: Vec<&str> = second_events
+            .iter()
+            .filter_map(|ev| ev.event.as_deref())
+            .collect();
+        let stop_pos = names.iter().position(|n| *n == "content_block_stop");
+        let start_pos = names.iter().position(|n| *n == "content_block_start");
+        assert!(
+            stop_pos.is_some(),
+            "second-chunk thinking with new detail_index must emit content_block_stop; events: {names:?}"
+        );
+        assert!(
+            start_pos.is_some(),
+            "second-chunk thinking with new detail_index must emit content_block_start; events: {names:?}"
+        );
+        assert!(
+            stop_pos.unwrap() < start_pos.unwrap(),
+            "content_block_stop must precede content_block_start; events: {names:?}"
+        );
     }
 
     #[test]

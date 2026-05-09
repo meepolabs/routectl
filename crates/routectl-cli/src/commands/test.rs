@@ -4,20 +4,60 @@
 use std::sync::Arc;
 
 use routectl_auth::MemoryStore;
-use routectl_core::{schema::MessageContent, ChatRequest, Message, Result, Role};
-use routectl_router::{build_provider, Config, Router};
+use routectl_core::{schema::MessageContent, ChatRequest, Error, Message, Result, Role};
+use routectl_router::{build_provider_with_options, BuildOptions, Config, Router};
 
 pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     let config = Arc::new(config);
     let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
+    // Same BuildOptions path as `serve` so a `routectl test` run
+    // exercises exactly the production translation contract. Without
+    // this, `[server] strict_translation = true` was honored by
+    // serve but silently ignored by test, masking real ingress
+    // misconfigurations from operators using the test command for
+    // pre-production validation.
+    let opts = BuildOptions::new().with_strict_translation(config.server.strict_translation);
+
+    let mut failed: Vec<(String, String)> = Vec::new();
     for (name, entry) in &config.providers {
-        match build_provider(name, entry, &secrets).await {
+        match build_provider_with_options(name, entry, &secrets, opts).await {
             Ok(p) => router.register(name, p),
             Err(e) => {
                 tracing::warn!(provider = name, error = ?e, "skipping provider that failed to build");
+                failed.push((name.clone(), e.to_string()));
             }
+        }
+    }
+
+    // Mirror serve's "fail loudly when a referenced provider can't
+    // build" guard so `routectl test heavy` against a broken
+    // `[aliases.heavy]` chain produces a precise startup error
+    // instead of an `UnknownProvider` at dispatch.
+    if !failed.is_empty() {
+        let failed_names: std::collections::HashSet<&str> =
+            failed.iter().map(|(n, _)| n.as_str()).collect();
+        let referenced = if let Some(alias) = config.aliases.get(target) {
+            alias.chain.iter().any(|t| {
+                let p = t.split_once(':').map(|(p, _)| p).unwrap_or(t);
+                failed_names.contains(p)
+            })
+        } else {
+            target
+                .split_once(':')
+                .map(|(p, _)| failed_names.contains(p))
+                .unwrap_or(false)
+        };
+        if referenced {
+            let detail = failed
+                .iter()
+                .map(|(n, e)| format!("  - {n}: {e}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(Error::Config(format!(
+                "target `{target}` references provider(s) that failed to build:\n{detail}"
+            )));
         }
     }
 

@@ -98,8 +98,17 @@ fn extract_x_api_key(headers: &axum::http::HeaderMap) -> Option<&str> {
 
 fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
     let raw = headers.get("authorization")?.to_str().ok()?;
-    raw.strip_prefix("Bearer ")
-        .or_else(|| raw.strip_prefix("bearer "))
+    // Auth schemes are case-insensitive per RFC 7235 sec 2.1; a
+    // header like `Authorization: BEARER sk-...` from a paranoid
+    // client must not be rejected. Compare the scheme portion
+    // case-insensitively without re-allocating the whole string
+    // by walking only the first 7 chars (`bearer `).
+    let (scheme, rest) = raw.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Some(rest)
+    } else {
+        None
+    }
 }
 
 /// Axum middleware. Mounted only when `TokenSet` is non-empty (the

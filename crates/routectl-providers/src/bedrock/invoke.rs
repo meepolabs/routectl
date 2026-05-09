@@ -69,12 +69,27 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         obj.insert("anthropic_beta".into(), Value::Array(combined));
     }
 
-    // Merge any additional model request fields at the top level. The
-    // user is responsible for not stomping on routectl-managed keys
-    // (`messages`, `system`, etc.).
+    // Merge any additional model request fields at the top level
+    // with the same routectl-managed-keys allow-list as the Anthropic
+    // and openai-compat egresses. The Bedrock-Invoke body is in
+    // Anthropic shape (today); without this filter, a config-file
+    // `additional_model_request_fields = { "messages" = [...] }`
+    // would silently replace the assembled history. Filter here
+    // (rather than at config load) so the WARN line carries the
+    // provider id at request time and matches the operator's
+    // existing log workflow.
     if let Some(extras) = cfg.additional_model_request_fields.as_ref() {
         if let Some(extras_obj) = extras.as_object() {
             for (k, v) in extras_obj {
+                if is_bedrock_invoke_managed_key(k) {
+                    tracing::warn!(
+                        provider = %cfg.id,
+                        key = %k,
+                        "additional_model_request_fields attempted to override \
+                         routectl-managed key; dropped"
+                    );
+                    continue;
+                }
                 obj.insert(k.clone(), v.clone());
             }
         }
@@ -93,6 +108,31 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     obj.remove("model");
 
     Ok(body)
+}
+
+/// Top-level Bedrock-Invoke body keys (Anthropic-shape today) that
+/// `additional_model_request_fields` is NOT permitted to override.
+/// Mirrors the Anthropic egress allow-list plus the Bedrock-specific
+/// `anthropic_version` field. Long-tail Anthropic-only knobs
+/// (`top_k`, `metadata`, `service_tier`) still pass through.
+fn is_bedrock_invoke_managed_key(key: &str) -> bool {
+    matches!(
+        key,
+        "model"
+            | "messages"
+            | "system"
+            | "max_tokens"
+            | "thinking"
+            | "tools"
+            | "tool_choice"
+            | "stream"
+            | "stop_sequences"
+            | "temperature"
+            | "top_p"
+            | "anthropic_beta"
+            | "anthropic_version"
+            | "cache_control"
+    )
 }
 
 /// Parse the Bedrock InvokeModel response body into a `ChatResponse`.
@@ -121,7 +161,10 @@ mod tests {
             user_agent: None,
             extra_headers: Vec::new(),
             anthropic_beta: vec!["context-1m-2025-08-07".into()],
-            additional_model_request_fields: Some(json!({"top_p": 0.9})),
+            // `top_p` is canonical and would now be filtered out;
+            // use `top_k` here as a real long-tail Anthropic-only
+            // knob the allow-list lets through.
+            additional_model_request_fields: Some(json!({"top_k": 40})),
         }
     }
 
@@ -150,12 +193,45 @@ mod tests {
         let body = normalize_request(&cfg, &req).unwrap();
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
         assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]),);
-        assert_eq!(body["top_p"], json!(0.9));
+        assert_eq!(body["top_k"], json!(40));
         assert!(body.get("stream").is_none(), "stream should be stripped");
         assert!(
             body.get("model").is_none(),
             "model must be stripped: Bedrock takes it in the URL, not the body"
         );
+    }
+
+    #[test]
+    fn additional_model_request_fields_cannot_override_managed_keys() {
+        // Regression for the round 6 finding: a misconfigured
+        // `additional_model_request_fields = { "messages" = [...] }`
+        // would silently replace the assembled history. Now blocked
+        // with a WARN, matching the openai-compat / anthropic_api
+        // egress filters.
+        let mut cfg = fake_cfg();
+        cfg.additional_model_request_fields = Some(json!({
+            // managed -- MUST be dropped:
+            "messages": [{"role": "user", "content": "INJECTED"}],
+            "system": "INJECTED",
+            "anthropic_version": "evil-version",
+            "max_tokens": 1,
+            // long-tail -- MUST pass through:
+            "metadata": {"user_id": "u-1"},
+        }));
+        let req = user_req();
+        let body = normalize_request(&cfg, &req).unwrap();
+        // Anthropic-version stays as the Bedrock-required value.
+        assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
+        // Messages stays the user_req() text, NOT "INJECTED".
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_ne!(messages[0]["content"], "INJECTED");
+        // System didn't get stomped.
+        assert!(body.get("system").is_none() || body["system"] != "INJECTED");
+        // max_tokens stays the request's value, not the override.
+        assert_ne!(body["max_tokens"], 1);
+        // Long-tail extras land verbatim.
+        assert_eq!(body["metadata"]["user_id"], "u-1");
     }
 
     #[test]
