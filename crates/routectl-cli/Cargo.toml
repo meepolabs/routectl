@@ -52,8 +52,10 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
-# cargo-deb metadata. Used by `.github/workflows/release.yml` to build
-# .deb packages on tag pushes. Run locally with: `cargo deb -p routectl-cli`.
+# cargo-deb metadata. Preserved so a future PR can re-enable .deb
+# packaging in .github/workflows/release.yml without re-deriving these
+# fields. The release pipeline currently ships bare binaries only;
+# `cargo deb -p routectl-cli` still works locally.
 [package.metadata.deb]
 name = "routectl"
 maintainer = "Meepo Labs <noreply@meepolabs.com>"
