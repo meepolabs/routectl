@@ -333,10 +333,51 @@ impl Router {
         if model.contains(':') {
             return Ok(vec![model.to_string()]);
         }
+        // Fallback to the configured default alias when the request's
+        // `model` field doesn't match any configured alias and isn't a
+        // `provider:model` literal. Lets new client-side model names
+        // route to a sensible chain without requiring an operator to
+        // update [ingress.<dialect>.aliases] for every release. The
+        // default value MUST itself be a valid alias key -- if it
+        // isn't, surface the original UnknownAlias for the request's
+        // `model` so the misconfiguration is visible (and the request
+        // model name appears in the error rather than the default).
+        if let Some(default) = self.config.default_alias.as_deref() {
+            if let Some(alias) = self.config.aliases.get(default) {
+                tracing::info!(
+                    requested_model = %model,
+                    default_alias = %default,
+                    "resolved unknown model to default_alias",
+                );
+                return Ok(alias.chain.clone());
+            }
+            tracing::warn!(
+                requested_model = %model,
+                default_alias = %default,
+                "default_alias is configured but is not itself a valid alias key; falling through to UnknownAlias",
+            );
+        }
         Err(Error::UnknownAlias(model.to_string()))
     }
 
     fn policy_for(&self, model: &str) -> RetryPolicy {
+        // Mirror resolve_chain's default-alias fallback so the retry
+        // policy attached to the default alias's [aliases.<name>.retry]
+        // table applies to defaulted requests, not the unrelated
+        // top-level [retry].
+        if let Some(retry) = self.config.aliases.get(model).and_then(|a| a.retry.clone()) {
+            return retry;
+        }
+        if let Some(default) = self.config.default_alias.as_deref() {
+            if let Some(retry) = self
+                .config
+                .aliases
+                .get(default)
+                .and_then(|a| a.retry.clone())
+            {
+                return retry;
+            }
+        }
         self.config
             .aliases
             .get(model)
