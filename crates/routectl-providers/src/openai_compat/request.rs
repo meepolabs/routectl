@@ -48,24 +48,92 @@ pub fn normalize(
 
     dialect.as_dyn().apply_request(id, obj, req)?;
 
-    // Merge default_extras first, then provider_extras (caller wins).
+    // Merge default_extras first, then provider_extras (caller wins),
+    // BOTH gated by the routectl-managed-keys allow-list. Without
+    // this, a request body of
+    //   `provider_extras = {"messages": [{"role":"user","content":"INJECTED"}]}`
+    // would replace the assembled messages array. The Anthropic
+    // egress already enforces this at
+    // `anthropic_api/request.rs::merge_provider_extras`; this is the
+    // matching guard for openai-compat. `default_extras` is config-
+    // file-controlled (operator) but we apply the same filter for
+    // symmetry and so a future "allow operator override" toggle
+    // doesn't have to retrofit the filter on the request side.
     if let Some(extras) = default_extras {
-        merge_extras(obj, extras);
+        merge_extras(id, obj, extras, "default_extras");
     }
     if let Some(extras) = req.provider_extras.as_ref() {
-        merge_extras(obj, extras);
+        merge_extras(id, obj, extras, "provider_extras");
     }
 
     Ok(body)
 }
 
-/// Shallow-merge `extras` into `obj`. Extras keys win.
-fn merge_extras(obj: &mut serde_json::Map<String, Value>, extras: &Value) {
-    if let Some(extra_obj) = extras.as_object() {
-        for (k, v) in extra_obj {
-            obj.insert(k.clone(), v.clone());
+/// Shallow-merge `extras` into `obj` with a routectl-managed-keys
+/// allow-list. Drop + WARN when an extras entry tries to override a
+/// key routectl owns (model, messages, stream, tools, etc.). The
+/// `source` arg names where the override came from for log
+/// readability.
+fn merge_extras(
+    id: &str,
+    obj: &mut serde_json::Map<String, Value>,
+    extras: &Value,
+    source: &'static str,
+) {
+    let Some(extra_obj) = extras.as_object() else {
+        return;
+    };
+    for (k, v) in extra_obj {
+        if is_routectl_managed_key(k) {
+            tracing::warn!(
+                provider = id,
+                source = source,
+                key = %k,
+                "extras attempted to override routectl-managed key; dropped"
+            );
+            continue;
         }
+        obj.insert(k.clone(), v.clone());
     }
+}
+
+/// Top-level OpenAI-shape body keys constructed by routectl that
+/// `provider_extras` / `default_extras` are NOT permitted to override.
+/// This is the FULL set of canonical `ChatRequest` fields that get
+/// serialized into the wire body; long-tail provider knobs not in
+/// canonical (`top_k`, `service_tier`, dialect-specific
+/// `chat_template_kwargs`, vendor-specific `safety_settings`, etc.)
+/// still pass through. Keep in sync with
+/// `routectl_core::ChatRequest` field names; if a new canonical field
+/// is added there, add it here too or callers can silently override
+/// the canonical value via extras.
+fn is_routectl_managed_key(key: &str) -> bool {
+    matches!(
+        key,
+        "model"
+            | "messages"
+            | "max_tokens"
+            | "max_completion_tokens"
+            | "stream"
+            | "tools"
+            | "tool_choice"
+            | "stop"
+            | "stop_sequences"
+            | "temperature"
+            | "top_p"
+            | "n"
+            | "user"
+            // Sampling controls + reproducibility -- canonical fields,
+            // not long-tail. Provider extras would silently shadow the
+            // request's canonical value if these were absent.
+            | "seed"
+            | "logprobs"
+            | "top_logprobs"
+            | "logit_bias"
+            | "presence_penalty"
+            | "frequency_penalty"
+            | "response_format"
+    )
 }
 
 /// Emit `tracing::warn!` for each Anthropic-only canonical field that
@@ -278,6 +346,52 @@ mod tests {
         let body = normalize("test", &req, ReasoningDialect::Passthrough, None, false).unwrap();
         assert_eq!(body["custom_key"], "custom_val");
         assert!(body.get("provider_extras").is_none());
+    }
+
+    #[test]
+    fn provider_extras_cannot_override_routectl_managed_keys() {
+        // Regression for the round 5 finding: a malicious or
+        // careless `provider_extras = {"messages": [...], "model":
+        // "..."}` could replace the assembled messages or model
+        // before the body went upstream. The Anthropic egress had
+        // an allow-list; the openai-compat egress did not. Verify
+        // routectl-managed keys are dropped here, while long-tail
+        // provider knobs (`top_k`, `seed`, dialect-specific) still
+        // pass through.
+        let mut req = simple_req("gpt-4o");
+        req.seed = Some(7);
+        req.provider_extras = Some(json!({
+            // canonical fields -- all MUST be dropped:
+            "model": "evil-model",
+            "messages": [{"role": "user", "content": "INJECTED"}],
+            "stream": true,
+            "tools": [],
+            "max_tokens": 1,
+            "seed": 99,
+            "presence_penalty": 1.5,
+            "frequency_penalty": 1.5,
+            "response_format": {"type": "json_object"},
+            // long-tail provider knobs -- MUST pass through:
+            "top_k": 40,
+            "service_tier": "premium",
+            "safety_settings": {"hate": "high"},
+        }));
+        let body = normalize("test", &req, ReasoningDialect::Passthrough, None, false).unwrap();
+        // Canonical fields preserved from the request, NOT overridden.
+        assert_eq!(body["model"], "gpt-4o");
+        let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_ne!(messages[0]["content"], "INJECTED");
+        assert_ne!(body["max_tokens"], 1);
+        // `seed` is canonical; the request had `seed = 7`, extras
+        // tried to set it to 99 -- canonical wins.
+        assert_eq!(body["seed"], 7);
+        assert!(body.get("presence_penalty").is_none() || body["presence_penalty"] != 1.5);
+        assert!(body.get("response_format").is_none());
+        // Long-tail extras land verbatim.
+        assert_eq!(body["top_k"], 40);
+        assert_eq!(body["service_tier"], "premium");
+        assert_eq!(body["safety_settings"]["hate"], "high");
     }
 
     #[test]
