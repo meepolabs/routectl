@@ -134,8 +134,19 @@ async fn stream_response<A: IngressAdapter + 'static>(
                         }
                     },
                     Err(e) => {
-                        tracing::error!(error = ?e, "upstream stream error");
-                        break;
+                        // Upstream stream errored mid-stream. Drop
+                        // the channel without emitting adapter EOS
+                        // (`[DONE]` for OpenAI, `message_stop` for
+                        // Anthropic) -- emitting it would let the
+                        // client see a clean completion despite the
+                        // failure, AND would skew router-side health
+                        // accounting (failed probe counted as a
+                        // successful stream). The client sees the
+                        // SSE connection close mid-stream, which
+                        // SSE consumers should already treat as a
+                        // non-clean termination.
+                        tracing::error!(error = ?e, "upstream stream error -- terminating SSE without EOS sentinel");
+                        return;
                     }
                 }
             }
@@ -164,7 +175,25 @@ fn sse_to_axum(ev: SseEvent) -> Event {
 
 fn map_error(e: Error) -> Response {
     let (status, type_str) = error_status_and_type(&e);
-    error_response(status, type_str, &e.to_string(), type_str)
+    // For server-internal classes (config / auth resolution), the
+    // detailed Display message can leak diagnostic info to remote
+    // clients -- AWS SDK error strings, env var names, file paths,
+    // profile names. Log the full error server-side at ERROR level
+    // (operators have logs) and return an opaque message in the
+    // HTTP body. Other classes (Upstream, Validation, ...) carry
+    // user-actionable detail and stay verbose.
+    let public_message: String = match &e {
+        Error::Auth(_) => {
+            tracing::error!(error = %e, "auth error suppressed in HTTP response");
+            "auth error: server-side credential resolution failed".to_string()
+        }
+        Error::Config(_) => {
+            tracing::error!(error = %e, "config error suppressed in HTTP response");
+            "internal configuration error".to_string()
+        }
+        _ => e.to_string(),
+    };
+    error_response(status, type_str, &public_message, type_str)
 }
 
 fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {

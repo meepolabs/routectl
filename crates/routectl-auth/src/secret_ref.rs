@@ -53,11 +53,19 @@ impl SecretRef {
 }
 
 impl fmt::Display for SecretRef {
+    /// Renders a SecretRef without revealing the underlying secret
+    /// value. The `env://` and `file://` arms are pointers (the
+    /// referenced material is the secret, not the URI), so they
+    /// round-trip safely. The `literal:` arm IS the secret material
+    /// in-line, so we redact it here -- any caller that `format!`s
+    /// or logs a SecretRef would otherwise leak the inline value.
+    /// Resolution still happens normally via `SecretStore::get`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SecretRef::Env(var) => write!(f, "env://{var}"),
             SecretRef::File(path) => write!(f, "file://{}", path.display()),
-            SecretRef::Literal(val) => write!(f, "literal:{val}"),
+            SecretRef::Literal(val) if val.is_empty() => write!(f, "literal:"),
+            SecretRef::Literal(_) => write!(f, "literal:[REDACTED]"),
         }
     }
 }

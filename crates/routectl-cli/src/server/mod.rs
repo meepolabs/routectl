@@ -75,6 +75,22 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
 
     let token_set = resolve_listener_tokens(&config).await?;
 
+    // Cross-check: a public bind (post-`--unsafe-public`) without
+    // any configured listener tokens is a configuration mistake --
+    // the operator's intent to "expose this address" only makes
+    // sense alongside auth. Fail fast here rather than running an
+    // open server. Loopback binds are exempt because the local-dev
+    // workflow relies on token-less loopback access. Use IpAddr
+    // semantics on the actually-bound address (covers 127.x.x.x,
+    // ::1, ::ffff:127.0.0.1 etc.) instead of re-parsing the host
+    // string.
+    if !bound.ip().is_loopback() && token_set.is_empty() {
+        return Err(Error::Config(format!(
+            "refusing to serve on public bind `{bound}` without [server.auth].tokens; \
+             configure listener auth before exposing routectl on a non-loopback address"
+        )));
+    }
+
     let state = Arc::new(AppState {
         router: Arc::new(router),
         openai_aliases: config.ingress.openai.aliases.clone(),
@@ -121,9 +137,28 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
+    // Bedrock Converse adapter is stubbed pending M2.7. `config check`
+    // already rejects this shape (commands/config.rs); duplicating the
+    // guard here means `routectl serve` started directly against a
+    // TOML that bypassed `config check` still fails fast at startup
+    // rather than 500-ing on first request. Drop both guards when
+    // M2.7 lands.
+    for (name, entry) in &config.providers {
+        if let routectl_router::ProviderEntry::Bedrock { api_shape, .. } = entry {
+            if matches!(api_shape, routectl_router::BedrockApiShapeConfig::Converse) {
+                return Err(Error::Config(format!(
+                    "provider `{name}`: api_shape = \"converse\" is accepted in TOML but \
+                     the Converse adapter is not implemented yet (M2.7); \
+                     use api_shape = \"invoke\" until the adapter ships"
+                )));
+            }
+        }
+    }
+
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation);
 
+    let mut failed: Vec<(String, String)> = Vec::new();
     for (name, entry) in &config.providers {
         match routectl_router::build_provider_with_options(name, entry, &secrets, opts).await {
             Ok(provider) => {
@@ -131,7 +166,51 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
             }
             Err(e) => {
                 tracing::warn!(provider = %name, error = ?e, "skipping provider (build failed)");
+                failed.push((name.clone(), e.to_string()));
             }
+        }
+    }
+
+    // Provider build failures are normally non-fatal (an operator
+    // may have an unused-but-declared provider whose creds aren't
+    // set in the current environment). But a failed provider that
+    // any [aliases.*].chain entry OR `default_model` actually
+    // references is a real misconfiguration -- without this guard,
+    // the server starts "healthy" and the first real request hits
+    // `Error::UnknownProvider` at dispatch time, with no
+    // configuration-error breadcrumb to follow. Fail loudly here so
+    // operators see the issue at startup, not at first traffic.
+    if !failed.is_empty() {
+        let failed_names: std::collections::HashSet<&str> =
+            failed.iter().map(|(n, _)| n.as_str()).collect();
+        let mut blocking: Vec<String> = Vec::new();
+        for (alias, entry) in &config.aliases {
+            for target in &entry.chain {
+                let provider = target.split_once(':').map(|(p, _)| p).unwrap_or(target);
+                if failed_names.contains(provider) {
+                    blocking.push(format!("alias `{alias}` -> `{target}`"));
+                }
+            }
+        }
+        if let Some(default) = config.default_model.as_deref() {
+            let provider = default.split_once(':').map(|(p, _)| p).unwrap_or(default);
+            if failed_names.contains(provider) {
+                blocking.push(format!("default_model `{default}`"));
+            }
+        }
+        if !blocking.is_empty() {
+            let detail = failed
+                .iter()
+                .map(|(n, e)| format!("  - {n}: {e}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(Error::Config(format!(
+                "{} provider(s) failed to build AND are referenced by routes:\n{}\n\
+                 affected routes:\n  {}",
+                failed.len(),
+                detail,
+                blocking.join("\n  "),
+            )));
         }
     }
 

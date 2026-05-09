@@ -106,13 +106,34 @@ impl ToolDef {
     /// Cache_control if the tool def carries one. The validator uses this
     /// to count breakpoints. Owned because for the `Other` variant the
     /// marker lives inside an arbitrary `Value` and is parsed on demand.
+    ///
+    /// On `Other` variants with a present-but-malformed `cache_control`
+    /// payload (e.g. wrong type, unknown TTL), the parse failure is
+    /// logged via `tracing::warn!` and the function returns `None`.
+    /// Without this, malformed builtin-tool cache_control would
+    /// silently fail to count toward the breakpoint cap, AND would
+    /// re-serialize to upstream verbatim where it produces a vague
+    /// 400. The WARN gives operators a server-side breadcrumb;
+    /// downstream validators still treat this as "no breakpoint",
+    /// matching pre-fix behavior so callers don't trip on a new
+    /// hard error.
     pub fn cache_control(&self) -> Option<CacheControl> {
         match self {
             ToolDef::Custom(c) => c.cache_control.clone(),
-            ToolDef::Other(v) => v
-                .as_object()
-                .and_then(|o| o.get("cache_control"))
-                .and_then(|cc| serde_json::from_value::<CacheControl>(cc.clone()).ok()),
+            ToolDef::Other(v) => {
+                let raw = v.as_object().and_then(|o| o.get("cache_control"))?;
+                match serde_json::from_value::<CacheControl>(raw.clone()) {
+                    Ok(cc) => Some(cc),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "ToolDef::Other carried a malformed cache_control; \
+                             ignored for breakpoint counting (upstream may reject the request)",
+                        );
+                        None
+                    }
+                }
+            }
         }
     }
 }

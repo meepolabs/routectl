@@ -32,6 +32,11 @@ enum Behavior {
     Status(u16),
     StreamFirstChunkErrors(u16),
     StreamMidErrors,
+    /// `provider.stream()` returns Ok, but the stream yields zero
+    /// chunks before EOS. Pins the contract that the router treats
+    /// this as a fallbackable streaming error rather than a clean
+    /// empty completion.
+    StreamEmpty,
 }
 
 impl MockProvider {
@@ -106,6 +111,7 @@ impl Provider for MockProvider {
                 let s = futures::stream::iter(vec![Ok(first), Err(mid_err)]);
                 Ok(s.boxed())
             }
+            Behavior::StreamEmpty => Ok(futures::stream::empty().boxed()),
         }
     }
 }
@@ -1258,4 +1264,123 @@ async fn default_model_accepts_provider_model_literal() {
     assert_eq!(resp.routectl_provider.as_deref(), Some("p1"));
     assert_eq!(resp.model, "fallback-model");
     assert_eq!(p1.calls(), 1);
+}
+
+#[tokio::test]
+async fn stream_empty_first_provider_falls_back() {
+    // A provider whose `stream()` returns Ok but yields zero chunks
+    // before EOS must NOT be reported as a successful empty stream.
+    // Pre-fix the router treated this as `Ok(empty().boxed())` and
+    // the breaker recorded a successful probe for an unhealthy
+    // upstream. Now it must surface as a fallbackable streaming
+    // error so the chain walks to the next provider AND the breaker
+    // records a failure.
+    let p1 = MockProvider::new("p1", vec![Behavior::StreamEmpty]);
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert("multi".into(), alias(&["p1:m", "p2:m"]));
+    let mut r = build_router(aliases);
+    r.register("p1", p1.clone());
+    r.register("p2", p2.clone());
+
+    let stream = r
+        .stream(req("multi"))
+        .await
+        .expect("router stream() must produce p2's stream after p1 falls back");
+    let chunks: Vec<_> = stream.collect().await;
+    assert!(
+        chunks.iter().any(|c| c.is_ok()),
+        "expected at least one Ok chunk from the fallback provider"
+    );
+    assert_eq!(p1.calls(), 1, "p1 must have been tried exactly once");
+    assert!(p2.calls() >= 1, "p2 must have been called as fallback");
+}
+
+#[tokio::test]
+async fn default_model_literal_with_unknown_provider_errors_at_dispatch() {
+    // `routectl config check` rejects a default_model literal whose
+    // provider isn't in [providers], but `Router` constructed
+    // programmatically (without going through `config check`) is
+    // permissive: resolve_chain returns `Ok(["ghost:m"])` and the
+    // error only surfaces at dispatch time as `UnknownProvider`. Pin
+    // that contract so a future change can't silently start surfacing
+    // it as `UnknownAlias` (or vice-versa).
+    let aliases = BTreeMap::new();
+    let mut r = build_router_with_default(aliases, Some("ghost-provider:fallback-model".into()));
+    // Don't register `ghost-provider` -- the lookup must fail.
+    let p = MockProvider::new("real-provider", vec![Behavior::Ok]);
+    r.register("real-provider", p.clone());
+
+    let err = r
+        .complete(req("totally-unmapped-model"))
+        .await
+        .expect_err("dispatch against an unregistered provider must error");
+    match err {
+        Error::UnknownProvider(name) => {
+            assert_eq!(name, "ghost-provider");
+        }
+        other => panic!("expected Error::UnknownProvider, got {other:?}"),
+    }
+    assert_eq!(p.calls(), 0, "real-provider must not be called");
+}
+
+#[tokio::test]
+async fn known_alias_retry_does_not_inherit_from_default_model() {
+    // Pin the LOW finding from internal review review: a request for an
+    // alias that exists but has no [aliases.<name>.retry] table must
+    // NOT borrow retry policy from the configured default_model. The
+    // known alias should fall through to the top-level [retry], same
+    // as if default_model wasn't set. policy_for() previously had a
+    // silent retry-leakage bug here -- this test pins the corrected
+    // behavior so it can't regress.
+    //
+    // Setup:
+    //   alias "fast" -> [no retry override]
+    //   alias "slow" -> retry { max_attempts = 10 }
+    //   default_model = "slow"
+    //   request model = "fast"
+    //
+    // build_router_with_default sets top-level retry max_attempts=1.
+    // If `fast`'s policy borrowed from `slow`, we'd see ~10 calls;
+    // with the corrected policy_for, we see exactly 1 (the alias's
+    // None retry falls through to top-level max_attempts=1).
+    let p_fast = MockProvider::new(
+        "p_fast",
+        vec![
+            Behavior::Status(503),
+            Behavior::Status(503),
+            Behavior::Status(503),
+            Behavior::Status(503),
+            Behavior::Status(503),
+        ],
+    );
+
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fast".into(), alias(&["p_fast:m"])); // no retry override
+
+    let mut slow_retry = RetryPolicy::default();
+    slow_retry.max_attempts = 10;
+    slow_retry.initial_backoff_ms = 1;
+    slow_retry.backoff_multiplier = 1.0;
+    slow_retry.fallback_on_status = vec![503];
+    aliases.insert(
+        "slow".into(),
+        AliasEntry::new(vec!["p_fast:m".into()]).with_retry(slow_retry),
+    );
+
+    let mut r = build_router_with_default(aliases, Some("slow".into()));
+    r.register("p_fast", p_fast.clone());
+
+    let _ = r.complete(req("fast")).await;
+
+    // Top-level max_attempts=1 (the only attempt; no retries). If the
+    // bug came back, default_model's slow retry would leak in and
+    // calls would be much higher.
+    assert_eq!(
+        p_fast.calls(),
+        1,
+        "known alias (no retry override) must use top-level retry, \
+         NOT inherit from default_model -- got {} calls (expected 1)",
+        p_fast.calls()
+    );
 }

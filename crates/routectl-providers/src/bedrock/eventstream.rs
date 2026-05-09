@@ -127,7 +127,24 @@ where
                     )));
                     return;
                 }
-                None => return,
+                None => {
+                    // Upstream closed. If we still have buffered
+                    // bytes, the stream was truncated mid-frame --
+                    // a real failure that must NOT be reported as
+                    // clean EOF. Without this, a connection drop
+                    // partway through a Bedrock eventstream looks
+                    // like a successful completion both to the
+                    // caller AND to the router's circuit breaker
+                    // (which records a "successful" probe for an
+                    // unhealthy upstream).
+                    if !buffer.is_empty() {
+                        yield Err(Error::Streaming(format!(
+                            "bedrock stream truncated: {} buffered bytes left at EOF",
+                            buffer.len()
+                        )));
+                    }
+                    return;
+                }
             }
         }
     };
