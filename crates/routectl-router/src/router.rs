@@ -333,42 +333,52 @@ impl Router {
         if model.contains(':') {
             return Ok(vec![model.to_string()]);
         }
-        // Fallback to the configured default alias when the request's
+        // Fallback to the configured default model when the request's
         // `model` field doesn't match any configured alias and isn't a
         // `provider:model` literal. Lets new client-side model names
-        // route to a sensible chain without requiring an operator to
-        // update [ingress.<dialect>.aliases] for every release. The
-        // default value MUST itself be a valid alias key -- if it
-        // isn't, surface the original UnknownAlias for the request's
-        // `model` so the misconfiguration is visible (and the request
-        // model name appears in the error rather than the default).
-        if let Some(default) = self.config.default_alias.as_deref() {
+        // route to a sensible destination without requiring an operator
+        // to update [ingress.<dialect>.aliases] for every release. The
+        // default value can be either an alias key from [aliases] OR a
+        // `provider:model` literal -- the same shapes the wire `model`
+        // field accepts. If the value is neither, log a WARN and fall
+        // through to UnknownAlias for the ORIGINAL request model so
+        // the offending name still appears in the error.
+        if let Some(default) = self.config.default_model.as_deref() {
             if let Some(alias) = self.config.aliases.get(default) {
                 tracing::info!(
                     requested_model = %model,
-                    default_alias = %default,
-                    "resolved unknown model to default_alias",
+                    default_model = %default,
+                    "resolved unknown model to default_model (alias)",
                 );
                 return Ok(alias.chain.clone());
             }
+            if default.contains(':') {
+                tracing::info!(
+                    requested_model = %model,
+                    default_model = %default,
+                    "resolved unknown model to default_model (provider:model literal)",
+                );
+                return Ok(vec![default.to_string()]);
+            }
             tracing::warn!(
                 requested_model = %model,
-                default_alias = %default,
-                "default_alias is configured but is not itself a valid alias key; falling through to UnknownAlias",
+                default_model = %default,
+                "default_model is configured but is neither an alias key nor a provider:model literal; falling through to UnknownAlias",
             );
         }
         Err(Error::UnknownAlias(model.to_string()))
     }
 
     fn policy_for(&self, model: &str) -> RetryPolicy {
-        // Mirror resolve_chain's default-alias fallback so the retry
-        // policy attached to the default alias's [aliases.<name>.retry]
-        // table applies to defaulted requests, not the unrelated
-        // top-level [retry].
+        // Mirror resolve_chain's default-model fallback: when the
+        // request defaults to an alias, the retry policy on that
+        // alias's [aliases.<name>.retry] table applies. For a
+        // `provider:model` literal default there is no per-alias
+        // retry to inherit -- fall through to the top-level [retry].
         if let Some(retry) = self.config.aliases.get(model).and_then(|a| a.retry.clone()) {
             return retry;
         }
-        if let Some(default) = self.config.default_alias.as_deref() {
+        if let Some(default) = self.config.default_model.as_deref() {
             if let Some(retry) = self
                 .config
                 .aliases
