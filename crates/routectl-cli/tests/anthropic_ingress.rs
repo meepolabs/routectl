@@ -96,6 +96,7 @@ fn anthropic_proxy_config(
         server,
         providers,
         aliases,
+        default_alias: None,
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
         ingress,
