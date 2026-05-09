@@ -50,7 +50,9 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
+use routectl_core::{
+    sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+};
 
 pub mod auth;
 pub mod converse;
@@ -231,7 +233,7 @@ impl Provider for BedrockProvider {
         Ok(None)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model, region = %self.cfg.region))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let body = self.normalize_request(&req)?;
 
@@ -300,7 +302,7 @@ impl Provider for BedrockProvider {
         Ok(chat_resp)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model, region = %self.cfg.region))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let body = self.normalize_request(&req)?;
 

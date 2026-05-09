@@ -30,9 +30,10 @@ use serde_json::{json, Value};
 use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
 use routectl_core::{
     ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
 };
 
+use super::parts::{parse_image_url_source, strip_text_after_tool_use};
 use super::types::{
     AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicRole, AnthropicSystem,
     AnthropicSystemBlock, AnthropicTool, ContentBlock, ThinkingConfig,
@@ -234,6 +235,50 @@ fn openai_function_to_custom(v: &Value) -> Option<AnthropicTool> {
 /// Forward-compat: ContentPart::Other passes through verbatim as
 /// ContentBlock::Other so the Anthropic-in / Anthropic-out path keeps
 /// working when Anthropic ships a new block type.
+/// Walk the canonical `ChatRequest` and reject malformed multi-turn
+/// shapes that the translation helpers would otherwise paper over
+/// with empty-string fallbacks. Anthropic's wire requires:
+///
+/// - Every `Thinking` content part carries a `signature` for replay.
+///   Without it Anthropic / Bedrock 400 with a confusing error;
+///   surfacing the missing signature here gives operators the
+///   precise field to fix.
+/// - Every tool_result message (canonical `Role::Tool`) carries a
+///   `tool_call_id` matching the preceding `tool_use.id`. Without
+///   it Anthropic 400 with "tool_use ids were found without
+///   tool_result blocks immediately after" or a similar error
+///   that doesn't name the bad message.
+fn validate_replay_invariants(id: &str, req: &ChatRequest) -> Result<()> {
+    for (i, msg) in req.messages.iter().enumerate() {
+        if matches!(msg.role, Role::Tool) && msg.tool_call_id.as_deref().unwrap_or("").is_empty() {
+            return Err(Error::normalize_request(
+                id,
+                format!(
+                    "messages[{i}] is a tool_result (Role::Tool) without tool_call_id; \
+                     Anthropic requires the id of the tool_use this is answering",
+                ),
+            ));
+        }
+        if let MessageContent::Parts(parts) = &msg.content {
+            for (j, p) in parts.iter().enumerate() {
+                if let ContentPart::Known(KnownContentPart::Thinking { signature, .. }) = p {
+                    if signature.as_deref().unwrap_or("").is_empty() {
+                        return Err(Error::normalize_request(
+                            id,
+                            format!(
+                                "messages[{i}].content[{j}] is a thinking block without \
+                                 signature; Anthropic requires the upstream-supplied \
+                                 signature to replay thinking on a multi-turn request",
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn translate_content_part(p: &ContentPart) -> ContentBlock {
     match p {
         ContentPart::Known(k) => translate_known_part(k),
@@ -346,19 +391,101 @@ fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
 /// carries reasoning_details (tool-use continuity). thinking blocks with
 /// signatures must be passed back verbatim.
 fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> {
-    if msg.reasoning_details.is_empty() {
-        // No multi-turn reasoning to thread back; fall through to the
-        // generic content translation (Text or Parts).
-        return Ok(translate_simple_content(&msg.content));
+    let has_tool_calls = msg
+        .tool_calls
+        .as_ref()
+        .map(|tc| !tc.is_empty())
+        .unwrap_or(false);
+    if msg.reasoning_details.is_empty() && !has_tool_calls {
+        // No multi-turn reasoning to thread back AND no OpenAI-shape
+        // tool_calls field to re-emit; fall through to the generic
+        // content translation (Text or Parts), but strip trailing
+        // text-after-tool_use first (see helper docstring).
+        return Ok(translate_assistant_simple_content(&msg.content));
     }
 
-    let mut blocks: Vec<ContentBlock> = Vec::new();
+    let mut blocks = emit_reasoning_blocks(id, &msg.reasoning_details)?;
+    append_assistant_message_blocks(&mut blocks, &msg.content);
+    if let Some(tool_calls) = msg.tool_calls.as_ref() {
+        emit_tool_use_blocks_from_calls(id, tool_calls, &mut blocks)?;
+    }
+    Ok(AnthropicContent::Blocks(blocks))
+}
 
-    // Emit reasoning blocks first (in index order).
-    let mut details = msg.reasoning_details.clone();
-    details.sort_by_key(|d| d.index.unwrap_or(0));
+/// Re-emit OpenAI-shape `tool_calls` (the canonical
+/// representation produced by `walk_content_blocks` on the
+/// response side) as Anthropic `ContentBlock::ToolUse` entries
+/// for multi-turn replay. Without this, an OpenAI-ingress
+/// request whose assistant history carries `tool_calls` -- or a
+/// caller that echoes a canonical Message returned by routectl
+/// straight back as a multi-turn turn -- would silently drop the
+/// tool_use blocks, and the next user turn's `tool_result` would
+/// fail upstream with "tool_use ids were found without
+/// preceding tool_use blocks".
+///
+/// OpenAI shape: `{id, type: "function", function: {name, arguments}}`
+/// where `arguments` is a JSON-encoded STRING. Anthropic shape:
+/// `ContentBlock::ToolUse { id, name, input: Value }` where
+/// `input` is the parsed JSON object. We attempt parsing first
+/// and fall back to wrapping the raw string under
+/// `{"_arguments": "..."}` so the upstream can return a useful
+/// error rather than us silently producing a malformed body.
+fn emit_tool_use_blocks_from_calls(
+    id: &str,
+    tool_calls: &[Value],
+    blocks: &mut Vec<ContentBlock>,
+) -> Result<()> {
+    for call in tool_calls {
+        let tool_id = call
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let function = call.get("function");
+        let name = function
+            .and_then(|f| f.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let arguments_raw = function
+            .and_then(|f| f.get("arguments"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}");
+        let input = if arguments_raw.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(arguments_raw).unwrap_or_else(|e| {
+                tracing::warn!(
+                    provider = id,
+                    tool_id = %tool_id,
+                    error = %e,
+                    "tool_call.arguments not valid JSON; wrapping under _arguments for upstream",
+                );
+                json!({ "_arguments": arguments_raw })
+            })
+        };
+        blocks.push(ContentBlock::ToolUse {
+            id: tool_id,
+            name,
+            input,
+            cache_control: None,
+        });
+    }
+    Ok(())
+}
 
-    for detail in &details {
+/// Translate `reasoning_details` into Anthropic `Thinking` /
+/// `RedactedThinking` blocks for echo on a multi-turn assistant turn.
+/// Index-ordered so an upstream that re-orders reasoning blocks
+/// doesn't surprise the downstream signature check. Signatures are
+/// mandatory: Anthropic rejects a `Thinking` block on echo without
+/// the `signature` field that came back on the original response.
+fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<ContentBlock>> {
+    let mut sorted = details.to_vec();
+    sorted.sort_by_key(|d| d.index.unwrap_or(0));
+
+    let mut blocks: Vec<ContentBlock> = Vec::with_capacity(sorted.len());
+    for detail in &sorted {
         match detail.kind {
             ReasoningDetailKind::Text => {
                 if detail.format.as_deref() != Some(ANTHROPIC_FORMAT) {
@@ -407,44 +534,47 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
             }
         }
     }
+    Ok(blocks)
+}
 
-    // Append text or parts from message content. For a Text body, emit
-    // a single Text block; for typed Parts, translate each.
-    match &msg.content {
+/// Append the assistant message's text/parts content AFTER the
+/// reasoning blocks already pushed. For Text, emits a single Text
+/// block (skipped on empty/Null since reasoning-only assistant turns
+/// are valid). For Parts, translates each block (after stripping
+/// trailing text-after-tool_use, which both Bedrock and Anthropic
+/// reject with "tool_use ids were found without tool_result blocks
+/// immediately after").
+fn append_assistant_message_blocks(blocks: &mut Vec<ContentBlock>, content: &MessageContent) {
+    match content {
         MessageContent::Text(t) if !t.is_empty() => blocks.push(ContentBlock::Text {
             text: t.clone(),
             cache_control: None,
         }),
         MessageContent::Text(_) | MessageContent::Null => {}
         MessageContent::Parts(parts) => {
-            for p in parts {
+            let cleaned = strip_text_after_tool_use(parts);
+            for p in cleaned.iter() {
                 blocks.push(translate_content_part(p));
             }
         }
     }
-
-    Ok(AnthropicContent::Blocks(blocks))
 }
 
-/// Translate an OpenAI-style `image_url.url` value into the Anthropic
-/// `source` block. Detects RFC 2397 data URIs (`data:<mt>;base64,<b64>`)
-/// and rewrites them to `{type: "base64", media_type, data}` because
-/// Bedrock + Anthropic both reject `{type: "url"}` for data URIs with
-/// "URL sources are not supported". HTTPS / gs:// / etc. flow through
-/// as URL sources unchanged. Malformed data URIs (no `;base64,`
-/// separator) fall back to URL form so the upstream surfaces a clean
-/// error rather than us dropping the block.
-fn parse_image_url_source(url: &str) -> Value {
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((media_type, b64)) = rest.split_once(";base64,") {
-            return json!({
-                "type": "base64",
-                "media_type": media_type,
-                "data": b64,
-            });
+/// Assistant-message variant of `translate_simple_content` that strips
+/// trailing text-after-tool_use before per-part translation. Called
+/// only from `build_assistant_content`. Text/Null arms delegate to
+/// `translate_simple_content` so the two stay in lockstep -- only the
+/// `Parts` arm needs the strip.
+fn translate_assistant_simple_content(c: &MessageContent) -> AnthropicContent {
+    match c {
+        MessageContent::Parts(parts) => {
+            let cleaned = strip_text_after_tool_use(parts);
+            AnthropicContent::Blocks(cleaned.iter().map(translate_content_part).collect())
         }
+        // Text/Null arms are identical to `translate_simple_content`;
+        // delegate to keep them in one place.
+        _ => translate_simple_content(c),
     }
-    json!({"type": "url", "url": url})
 }
 
 /// Translate plain message content (no multi-turn reasoning context).
@@ -602,6 +732,18 @@ fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::Cac
 // ---------------------------------------------------------------------------
 
 pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
+    // Up-front replay-invariant validation. Anthropic's wire format
+    // requires (a) every Thinking block carry a `signature` for
+    // multi-turn, (b) every tool_result message carry the
+    // `tool_use_id` of the tool_use it answers. The translation
+    // helpers below are infallible (fewer call-site Results to
+    // thread); centralizing the validation here keeps the wire
+    // body construction simple while still surfacing precise
+    // `Error::NormalizeRequest` for malformed input -- otherwise
+    // routectl would emit empty-string fallbacks and the upstream
+    // would 400 with a vague error.
+    validate_replay_invariants(id, req)?;
+
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let thinking = build_thinking(req);
 
@@ -613,32 +755,7 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
         .map(translate_system)
         .or_else(|| lift_legacy_system(&req.messages));
 
-    // Translate non-System messages.
-    let mut anthropic_messages: Vec<AnthropicMessage> = Vec::new();
-    for msg in &req.messages {
-        match msg.role {
-            Role::System => {
-                // Already handled via req.system / lift_legacy_system.
-                // Drop here (do not duplicate in the messages array).
-            }
-            Role::User => {
-                anthropic_messages.push(AnthropicMessage {
-                    role: AnthropicRole::User,
-                    content: translate_simple_content(&msg.content),
-                });
-            }
-            Role::Assistant => {
-                let content = build_assistant_content(id, msg)?;
-                anthropic_messages.push(AnthropicMessage {
-                    role: AnthropicRole::Assistant,
-                    content,
-                });
-            }
-            Role::Tool => {
-                anthropic_messages.push(build_tool_message(msg));
-            }
-        }
-    }
+    let anthropic_messages = translate_messages(id, &req.messages)?;
 
     let tools = req
         .tools
@@ -667,10 +784,6 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
         anthropic_beta: req.anthropic_beta.clone(),
     };
 
-    // Catch breakpoint-cap and TTL-ordering bugs in CI before they
-    // reach upstream. Debug-assert keeps non-debug builds fast; when
-    // the ingress runs validate at parse time, debug-only is enough
-    // here as a defense in depth.
     // Belt-and-braces: validate in release too. The Anthropic ingress
     // already runs this at parse time; running it again here catches
     // direct callers (library users without an ingress) and protects
@@ -680,30 +793,59 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
     let mut body =
         serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
-    // Merge provider_extras last (caller wins). The merge has an
-    // allow-list: routectl-managed top-level keys cannot be stomped
-    // by a malicious or careless `provider_extras` value. This was
-    // an architecture-review finding (MEDIUM-1) -- without the
-    // allow-list, a request with `provider_extras = {"messages":
-    // [{"role":"user","content":"INJECTED"}]}` would replace the
-    // assembled messages array.
-    if let Some(extras) = req.provider_extras.as_ref() {
-        if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) {
-            for (k, v) in extra_obj {
-                if is_routectl_managed_key(k) {
-                    tracing::warn!(
-                        provider = id,
-                        key = %k,
-                        "provider_extras attempted to override routectl-managed key; dropped"
-                    );
-                    continue;
-                }
-                obj.insert(k.clone(), v.clone());
+    merge_provider_extras(id, &mut body, req.provider_extras.as_ref());
+    Ok(body)
+}
+
+/// Iterate the canonical messages and produce the Anthropic-shaped
+/// per-role list. System messages are intentionally dropped here --
+/// they're already lifted into `req.system` (canonical) or by
+/// `lift_legacy_system` for direct callers without an ingress, so
+/// re-emitting them as messages would duplicate.
+fn translate_messages(id: &str, messages: &[Message]) -> Result<Vec<AnthropicMessage>> {
+    let mut out: Vec<AnthropicMessage> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                // Already handled via req.system / lift_legacy_system.
+                // Drop here (do not duplicate in the messages array).
             }
+            Role::User => out.push(AnthropicMessage {
+                role: AnthropicRole::User,
+                content: translate_simple_content(&msg.content),
+            }),
+            Role::Assistant => out.push(AnthropicMessage {
+                role: AnthropicRole::Assistant,
+                content: build_assistant_content(id, msg)?,
+            }),
+            Role::Tool => out.push(build_tool_message(msg)),
         }
     }
+    Ok(out)
+}
 
-    Ok(body)
+/// Merge `provider_extras` into the assembled body. Caller-supplied
+/// keys win EXCEPT for routectl-managed top-level keys (see
+/// `is_routectl_managed_key`); those are dropped with a WARN log so a
+/// malicious or careless `provider_extras = {"messages": [...]}` can't
+/// replace the assembled messages array. This was an architecture-review
+/// finding (MEDIUM-1).
+fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
+    let Some(extras) = extras else { return };
+    let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) else {
+        return;
+    };
+    for (k, v) in extra_obj {
+        if is_routectl_managed_key(k) {
+            tracing::warn!(
+                provider = id,
+                key = %k,
+                "provider_extras attempted to override routectl-managed key; dropped"
+            );
+            continue;
+        }
+        obj.insert(k.clone(), v.clone());
+    }
 }
 
 /// Top-level Anthropic body keys constructed by routectl that
@@ -731,63 +873,173 @@ fn is_routectl_managed_key(key: &str) -> bool {
 }
 
 #[cfg(test)]
-mod parse_image_url_source_tests {
-    use super::parse_image_url_source;
+mod multi_turn_tool_use_tests {
+    use super::*;
+    use routectl_core::{ChatRequest, Message, Role};
     use serde_json::json;
 
+    fn user_msg(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    fn assistant_msg(text: &str, tool_calls: Option<Vec<Value>>) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls,
+        }
+    }
+
+    /// On a multi-turn assistant turn, `Message.tool_calls` (the
+    /// canonical OpenAI-shape representation produced by
+    /// `walk_content_blocks` on the response side) must be re-emitted
+    /// as Anthropic `ContentBlock::ToolUse` entries. Without this,
+    /// echoing a canonical Message back through the Anthropic egress
+    /// drops the tool_use blocks and the next user `tool_result` turn
+    /// fails upstream with "tool_use ids were found without preceding
+    /// tool_use blocks".
     #[test]
-    fn data_uri_with_base64_payload_emits_anthropic_base64_source() {
-        // OpenAI multimodal clients embed images as
-        // data:image/png;base64,XXX. Anthropic + Bedrock require the
-        // base64 source form for these; URL form is rejected with
-        // "URL sources are not supported".
-        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAE=";
-        let got = parse_image_url_source(url);
-        assert_eq!(
-            got,
-            json!({
-                "type": "base64",
-                "media_type": "image/png",
-                "data": "iVBORw0KGgoAAAANSUhEUgAAAAE=",
-            })
+    fn assistant_message_with_tool_calls_emits_tool_use_blocks() {
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                user_msg("calculate 2+2"),
+                assistant_msg(
+                    "Let me calculate.",
+                    Some(vec![json!({
+                        "id": "toolu_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "calc",
+                            "arguments": "{\"expr\":\"2+2\"}",
+                        }
+                    })]),
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let body = normalize("test-anthropic", &req).unwrap();
+        let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+            .expect("assistant message must be present");
+        let blocks = assistant
+            .get("content")
+            .and_then(|v| v.as_array())
+            .expect("assistant content must be Blocks form when tool_calls present");
+
+        let tool_use = blocks
+            .iter()
+            .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
+            .expect("assistant must carry a tool_use block on multi-turn replay");
+        assert_eq!(tool_use["id"], "toolu_abc123");
+        assert_eq!(tool_use["name"], "calc");
+        assert_eq!(tool_use["input"], json!({"expr": "2+2"}));
+    }
+
+    #[test]
+    fn tool_message_without_tool_call_id_is_rejected() {
+        // Anthropic requires `tool_result` to reference the
+        // `tool_use.id` it answers. An empty / missing
+        // `tool_call_id` on a Role::Tool message used to fall
+        // through as `unwrap_or_default()` (empty string) and
+        // upstream returned a vague 400. Reject locally with a
+        // precise NormalizeRequest error.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![Message {
+                role: Role::Tool,
+                content: MessageContent::Text("result content".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        let err = normalize("test-anthropic", &req).unwrap_err();
+        assert!(
+            err.to_string().contains("tool_call_id"),
+            "must mention tool_call_id; got: {err}"
         );
     }
 
     #[test]
-    fn data_uri_with_other_media_types_round_trips() {
-        let cases = [
-            ("data:image/jpeg;base64,QUJDREU=", "image/jpeg", "QUJDREU="),
-            ("data:image/webp;base64,V0VCUA==", "image/webp", "V0VCUA=="),
-            ("data:image/gif;base64,R0lGODlh", "image/gif", "R0lGODlh"),
-        ];
-        for (url, media, b64) in cases {
-            let got = parse_image_url_source(url);
-            assert_eq!(got["type"], "base64", "type for {url}");
-            assert_eq!(got["media_type"], media, "media_type for {url}");
-            assert_eq!(got["data"], b64, "data for {url}");
-        }
+    fn thinking_part_without_signature_is_rejected() {
+        // KnownContentPart::Thinking with `signature: None` previously
+        // emitted an empty-string signature to upstream which fails
+        // multi-turn replay with a vague Anthropic 400. Reject
+        // locally with a precise NormalizeRequest error.
+        use routectl_core::{ContentPart, KnownContentPart};
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::Thinking {
+                        thinking: "let me think".into(),
+                        signature: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        let err = normalize("test-anthropic", &req).unwrap_err();
+        assert!(
+            err.to_string().contains("thinking block without signature"),
+            "must mention signature; got: {err}"
+        );
     }
 
     #[test]
-    fn https_url_passes_through_as_url_source() {
-        let url = "https://example.com/image.png";
-        let got = parse_image_url_source(url);
-        assert_eq!(got, json!({"type": "url", "url": url}));
-    }
-
-    #[test]
-    fn malformed_data_uri_falls_back_to_url_source() {
-        // No `;base64,` separator -- can't parse safely. Fall back
-        // to URL source so upstream surfaces a clean error rather
-        // than us silently dropping the block.
-        let url = "data:image/png,not-base64";
-        let got = parse_image_url_source(url);
-        assert_eq!(got, json!({"type": "url", "url": url}));
-    }
-
-    #[test]
-    fn empty_url_passes_through_as_url_source() {
-        let got = parse_image_url_source("");
-        assert_eq!(got, json!({"type": "url", "url": ""}));
+    fn assistant_tool_call_with_unparseable_arguments_wraps_under_underscore() {
+        // Defensive fallback: a tool_call.arguments string that
+        // isn't valid JSON shouldn't silently produce a malformed
+        // upstream body. We wrap under {"_arguments": "..."} and
+        // emit a WARN, so the upstream returns a useful error.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![assistant_msg(
+                "",
+                Some(vec![json!({
+                    "id": "toolu_xyz",
+                    "type": "function",
+                    "function": {"name": "calc", "arguments": "this is not json"}
+                })]),
+            )],
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req).unwrap();
+        let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+            .unwrap();
+        let blocks = assistant.get("content").and_then(|v| v.as_array()).unwrap();
+        let tool_use = blocks
+            .iter()
+            .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
+            .unwrap();
+        assert_eq!(tool_use["input"], json!({"_arguments": "this is not json"}));
     }
 }

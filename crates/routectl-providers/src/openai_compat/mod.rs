@@ -40,7 +40,10 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT
 use serde_json::Value;
 use tracing::debug;
 
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
+use routectl_core::{
+    sanitize_for_log, sanitize_upstream_body, ChatChunk, ChatRequest, ChatResponse, Error,
+    Provider, Result,
+};
 
 use sse::ThinkTagAccumulator;
 
@@ -146,7 +149,7 @@ impl Provider for OpenAiCompatProvider {
         sse::parse_chunk(&self.cfg.id, raw, self.cfg.reasoning_dialect)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let mut body = self.normalize_request(&req)?;
         // Force non-streaming.
@@ -190,7 +193,7 @@ impl Provider for OpenAiCompatProvider {
         Ok(chat_resp)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %req.model))]
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let mut body = self.normalize_request(&req)?;
         body["stream"] = Value::Bool(true);
@@ -274,27 +277,4 @@ impl Provider for OpenAiCompatProvider {
 
         Ok(Box::pin(out))
     }
-}
-
-/// Trim and sanitize an upstream error body for inclusion in our own error
-/// messages. If the upstream returned HTML (a marketing 404 page from a
-/// misconfigured base_url, for example), we strip it down to a short marker
-/// rather than dumping kilobytes of markup through routectl's error envelope.
-fn sanitize_upstream_body(body: &str) -> String {
-    // Aligned with `routectl_core::MAX_LOG_BODY_EXCERPT` so log
-    // `body_excerpt=...` fields are the same length across providers
-    // (operators grep across bedrock and openai-compat together).
-    const MAX_LEN: usize = routectl_core::MAX_LOG_BODY_EXCERPT;
-    let trimmed = body.trim();
-    let looks_like_html =
-        trimmed.starts_with('<') || trimmed.to_ascii_lowercase().contains("<!doctype");
-    if looks_like_html {
-        return format!("<html error page, {} bytes>", body.len());
-    }
-    if trimmed.len() <= MAX_LEN {
-        return trimmed.to_string();
-    }
-    let mut s = trimmed.chars().take(MAX_LEN).collect::<String>();
-    s.push_str("... [truncated]");
-    s
 }

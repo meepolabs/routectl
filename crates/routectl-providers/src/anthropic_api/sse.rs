@@ -178,7 +178,19 @@ impl SseState {
                 }))
             }
 
-            SseEvent::MessageStop | SseEvent::Ping | SseEvent::Error { .. } => Ok(None),
+            SseEvent::MessageStop | SseEvent::Ping => Ok(None),
+            // Anthropic spec: a 200 response can carry an in-band
+            // error event mid-stream (e.g. `overloaded_error`,
+            // `api_error`). Surface as `Error::Streaming` so the
+            // ingress wrapper terminates the SSE stream with a
+            // visible failure instead of silently completing. The
+            // payload is JSON-shaped (`{"type": "...", "message":
+            // "..."}`); we serialize it raw to preserve detail for
+            // operators reading logs.
+            SseEvent::Error { error } => Err(Error::Streaming(format!(
+                "anthropic in-stream error: {}",
+                error,
+            ))),
         }
     }
 
@@ -300,7 +312,17 @@ impl SseState {
 /// Stateless single-event parse -- used by the trait's normalize_chunk.
 /// Since Anthropic SSE carries both an "event:" line and a "data:" line,
 /// and eventsource-stream gives us the data payload separately, we just
-/// parse the data JSON. Without state we can only handle text_delta safely.
+/// parse the data JSON. Without state we can only handle text_delta and
+/// message_delta safely.
+///
+/// **WARNING: do not use this for production streaming.** Production
+/// callers should use `AnthropicApiProvider::stream` which owns a
+/// stateful `SseState` and correctly maps thinking deltas, tool-use
+/// deltas, signature deltas, and in-stream `error` events to surfaces
+/// the router can act on. This function intentionally returns
+/// `Ok(None)` for every event type that requires state OR an error
+/// signal -- including `error` events. Routing through here would
+/// hide upstream failures from the router's circuit breaker.
 pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
     // Delegate to a throw-away state so we don't lose the id/model.
     // This is intentionally limited; the stateful path in stream() is preferred.
@@ -355,4 +377,46 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Anthropic spec allows a 200 response to carry an in-band
+    /// `error` event mid-stream. Without explicit handling, the
+    /// parser silently consumed it as housekeeping (Ok(None)) and
+    /// the SSE wrapper happily emitted clean EOS to the client,
+    /// hiding upstream failures + breaking router circuit-breaker
+    /// health accounting. Pin the contract so a future change can't
+    /// regress.
+    #[test]
+    fn in_stream_error_event_surfaces_as_streaming_error() {
+        let mut state = SseState::default();
+        let payload =
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"slow down"}}"#;
+        let err = state
+            .parse_event("test-anthropic", payload)
+            .expect_err("error event must surface as Err");
+        match err {
+            Error::Streaming(msg) => {
+                assert!(msg.contains("anthropic in-stream error"), "msg: {msg}");
+                assert!(msg.contains("overloaded_error"), "msg: {msg}");
+            }
+            other => panic!("expected Error::Streaming, got: {other:?}"),
+        }
+    }
+
+    /// Counterpart to the above: housekeeping events still produce
+    /// `Ok(None)`. Pinning this prevents a future change that
+    /// over-corrects the error-mapping fix into surfacing pings as
+    /// failures.
+    #[test]
+    fn ping_event_remains_ok_none() {
+        let mut state = SseState::default();
+        let got = state
+            .parse_event("test-anthropic", r#"{"type":"ping"}"#)
+            .unwrap();
+        assert!(got.is_none(), "ping must be Ok(None), got: {got:?}");
+    }
 }

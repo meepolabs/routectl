@@ -70,9 +70,21 @@ pub enum BreakpointPosition {
     TopLevel,
 }
 
-/// Validate a sequence of breakpoints against Anthropic's two invariants:
+/// Allowed `cache_control.type` values per Anthropic spec. Today only
+/// `ephemeral` is defined; the spec leaves room for future kinds, but
+/// shipping a non-allowlisted kind to upstream just produces a vague
+/// 400. Validating up front gives the operator a precise error.
+const ALLOWED_KINDS: &[&str] = &["ephemeral"];
+
+/// Allowed `cache_control.ttl` values. Anthropic accepts only "5m"
+/// and "1h" today.
+const ALLOWED_TTLS: &[&str] = &["5m", "1h"];
+
+/// Validate a sequence of breakpoints against Anthropic's invariants:
 /// (1) at most 4 breakpoints, (2) longer TTLs (1h) must appear before
-/// shorter ones (5m) in cache-prefix order. Both invariants emit
+/// shorter ones (5m) in cache-prefix order, (3) every breakpoint's
+/// `type` must be in `ALLOWED_KINDS`, (4) every breakpoint's `ttl`
+/// (when present) must be in `ALLOWED_TTLS`. All four emit
 /// `Error::Validation` with a position-aware message.
 pub fn validate(breakpoints: &[Breakpoint<'_>]) -> Result<()> {
     if breakpoints.len() > MAX_BREAKPOINTS {
@@ -85,6 +97,20 @@ pub fn validate(breakpoints: &[Breakpoint<'_>]) -> Result<()> {
 
     let mut last_ttl_was_5m = false;
     for bp in breakpoints {
+        if !ALLOWED_KINDS.contains(&bp.control.kind.as_str()) {
+            return Err(Error::Validation(format!(
+                "cache_control: unknown type `{}` at {:?}; allowed: {ALLOWED_KINDS:?}",
+                bp.control.kind, bp.position,
+            )));
+        }
+        if let Some(ttl) = bp.control.ttl.as_deref() {
+            if !ALLOWED_TTLS.contains(&ttl) {
+                return Err(Error::Validation(format!(
+                    "cache_control: unknown ttl `{}` at {:?}; allowed: {ALLOWED_TTLS:?}",
+                    ttl, bp.position,
+                )));
+            }
+        }
         let ttl = bp.control.effective_ttl();
         if last_ttl_was_5m && ttl == "1h" {
             return Err(Error::Validation(format!(
@@ -219,6 +245,40 @@ mod tests {
         let v = serde_json::to_value(&cc).unwrap();
         assert_eq!(v["type"], "ephemeral");
         assert_eq!(v["ttl"], "5m");
+    }
+
+    #[test]
+    fn unknown_kind_rejected() {
+        let cc = CacheControl {
+            kind: "banana".into(),
+            ttl: Some("5m".into()),
+        };
+        let bps = vec![Breakpoint {
+            position: BreakpointPosition::Tools,
+            control: &cc,
+        }];
+        let err = validate(&bps).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown type `banana`"),
+            "msg: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_ttl_rejected() {
+        let cc = CacheControl {
+            kind: "ephemeral".into(),
+            ttl: Some("forever".into()),
+        };
+        let bps = vec![Breakpoint {
+            position: BreakpointPosition::Tools,
+            control: &cc,
+        }];
+        let err = validate(&bps).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown ttl `forever`"),
+            "msg: {err}"
+        );
     }
 
     #[test]
