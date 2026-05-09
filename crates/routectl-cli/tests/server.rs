@@ -170,6 +170,75 @@ async fn models_lists_configured_aliases() {
     assert!(ids.contains(&"my-alias"), "expected my-alias in {ids:?}");
 }
 
+#[tokio::test]
+async fn models_includes_default_model_and_ingress_aliases() {
+    // /v1/models is the discovery endpoint; without listing the
+    // identifiers routing actually accepts, operators get
+    // misleading "model unavailable" answers when default_model
+    // or ingress alias maps would route the request fine. Pin
+    // that the endpoint advertises every routable name.
+    use std::collections::BTreeMap;
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".into(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k")
+            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fast".into(), AliasEntry::new(vec!["p:gpt-4o".to_string()]));
+    let mut openai_aliases = BTreeMap::new();
+    openai_aliases.insert("openai-renamed-id".into(), "fast".into());
+    let mut anthropic_aliases = BTreeMap::new();
+    anthropic_aliases.insert("claude-some-release".into(), "fast".into());
+
+    let config = Arc::new(Config {
+        server: ServerConfig::default(),
+        providers,
+        aliases,
+        default_model: Some("default-catch-all".into()),
+        retry: RetryPolicy::default(),
+        legacy_compat: routectl_router::LegacyCompat::Openrouter,
+        ingress: routectl_router::IngressConfig {
+            openai: routectl_router::IngressShape {
+                aliases: openai_aliases,
+            },
+            anthropic: routectl_router::IngressShape {
+                aliases: anthropic_aliases,
+            },
+        },
+    });
+    let base = helpers::spawn_test_server(config).await;
+    let body: Value = reqwest::get(format!("{base}/v1/models"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids: Vec<&str> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"fast"), "alias key missing: {ids:?}");
+    assert!(
+        ids.contains(&"openai-renamed-id"),
+        "openai ingress alias missing: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"claude-some-release"),
+        "anthropic ingress alias missing: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"default-catch-all"),
+        "default_model missing: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"p:gpt-4o"),
+        "provider:model literal from chain missing: {ids:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/chat/completions -- non-streaming
 // ---------------------------------------------------------------------------
@@ -368,6 +437,214 @@ async fn unknown_alias_returns_404_error_envelope() {
 // ---------------------------------------------------------------------------
 // Error envelope: malformed JSON body -> 400
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// default_model fallback (end-to-end ingress -> router -> provider)
+//
+// The router unit tests in crates/routectl-router/tests/router.rs cover
+// `Router::complete` directly. This test pins the WHOLE pipe: a real HTTP
+// request hits the openai ingress, the router doesn't recognize the model,
+// the configured `default_model` resolves to a known alias, and the
+// upstream actually receives the call. A future ingress refactor that
+// consumes `req.model` before reaching the router would silently break
+// the catch-all without this test catching it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn chat_completions_unknown_model_routes_to_default_model() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(chat_response_body("gpt-4o", "Hello from default")),
+        )
+        .mount(&upstream)
+        .await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "mock-provider".to_string(),
+        ProviderEntry::openai_compat(upstream.uri(), "literal:test-key")
+            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".to_string(),
+        AliasEntry::new(vec!["mock-provider:gpt-4o".to_string()]),
+    );
+    let config = Arc::new(Config {
+        server: ServerConfig::default(),
+        providers,
+        aliases,
+        default_model: Some("fast".to_string()),
+        retry: RetryPolicy::default(),
+        legacy_compat: routectl_router::LegacyCompat::Openrouter,
+        ingress: Default::default(),
+    });
+
+    let base = helpers::spawn_test_server(config).await;
+
+    // Wire `model` here is NOT in [aliases], NOT a `provider:model`
+    // literal, NOT in [ingress.openai.aliases]. It should land on the
+    // configured default_model ("fast") and reach the mock upstream.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&json!({
+            "model": "claude-some-future-release-2099",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "Hello from default"
+    );
+    assert_eq!(
+        body["routectl_provider"], "mock-provider",
+        "unknown model must reach the configured default_model destination"
+    );
+}
+
+#[tokio::test]
+async fn chat_completions_unknown_model_without_default_returns_error() {
+    // No default_model configured. The router must still error
+    // cleanly with UnknownAlias (not crash, not silently route
+    // somewhere unexpected).
+    let config = openai_compat_config("http://127.0.0.1:1", "mock-provider", "fast");
+    let base = helpers::spawn_test_server(config).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&json!({
+            "model": "totally-unknown-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // UnknownAlias maps to 404 in handlers/ingress_handle.rs. Pin the
+    // exact code so a future change that makes this 503 (network) or
+    // 500 (internal error) trips this test instead of silently passing.
+    assert_eq!(
+        resp.status(),
+        404,
+        "unknown model with no default_model must produce 404 (UnknownAlias)"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "unknown_alias");
+}
+
+#[tokio::test]
+async fn server_fails_startup_when_referenced_provider_cannot_build() {
+    // A provider whose creds can't resolve is fine if no alias /
+    // default_model references it (the operator may have an
+    // unused-but-declared provider in the TOML for environment
+    // variation). But once an alias chain or default_model points
+    // at it, the misconfiguration must surface at startup -- not
+    // as an `UnknownProvider` at first request time, hours after
+    // the operator thought everything was healthy.
+    use std::collections::BTreeMap;
+    use tokio::net::TcpListener;
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "broken".into(),
+        ProviderEntry::openai_compat(
+            "http://127.0.0.1:1",
+            "env://ROUTECTL_TEST_THIS_VAR_IS_NEVER_SET_F3",
+        )
+        .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "fast".into(),
+        AliasEntry::new(vec!["broken:gpt-4o".to_string()]),
+    );
+    let config = Arc::new(Config {
+        server: ServerConfig::default(),
+        providers,
+        aliases,
+        default_model: None,
+        retry: RetryPolicy::default(),
+        legacy_compat: routectl_router::LegacyCompat::Openrouter,
+        ingress: Default::default(),
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let result = routectl_cli::server::serve_on_listener(config, listener).await;
+    match result {
+        Err(routectl_core::Error::Config(msg)) => {
+            assert!(
+                msg.contains("broken"),
+                "error must name the failed provider; got: {msg}"
+            );
+            assert!(
+                msg.contains("alias `fast`"),
+                "error must name the affected alias; got: {msg}"
+            );
+        }
+        Ok(()) => panic!("server must error when an alias references an unbuildable provider"),
+        Err(other) => panic!("expected Error::Config, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn server_starts_when_unbuildable_provider_is_unreferenced() {
+    // Counterpart: an unused-but-declared provider that fails to
+    // build must NOT block startup. This is the intended
+    // partial-config workflow (multiple providers in TOML, only
+    // some active in the current env).
+    use std::collections::BTreeMap;
+    use tokio::net::TcpListener;
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "broken".into(),
+        ProviderEntry::openai_compat(
+            "http://127.0.0.1:1",
+            "env://ROUTECTL_TEST_THIS_VAR_IS_NEVER_SET_F3",
+        )
+        .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+    );
+    providers.insert(
+        "working".into(),
+        ProviderEntry::openai_compat("http://127.0.0.1:2", "literal:test")
+            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+    );
+    let mut aliases = BTreeMap::new();
+    // Only references `working`; `broken` is unused.
+    aliases.insert(
+        "fast".into(),
+        AliasEntry::new(vec!["working:gpt-4o".to_string()]),
+    );
+    let config = Arc::new(Config {
+        server: ServerConfig::default(),
+        providers,
+        aliases,
+        default_model: None,
+        retry: RetryPolicy::default(),
+        legacy_compat: routectl_router::LegacyCompat::Openrouter,
+        ingress: Default::default(),
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = routectl_cli::server::serve_on_listener(config, listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // /health returns 200 -> server actually started despite the
+    // unreferenced broken provider.
+    let resp = reqwest::get(format!("http://{addr}/health")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+}
 
 #[tokio::test]
 async fn malformed_json_returns_400() {

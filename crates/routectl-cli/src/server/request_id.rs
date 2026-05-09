@@ -26,6 +26,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use routectl_core::sanitize_for_log;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -67,7 +68,13 @@ pub async fn middleware(mut req: Request, next: Next) -> Response {
         .unwrap_or_else(|| Uuid::now_v7().to_string());
 
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    // The URI path component is RFC-3986-encoded so newlines and ANSI
+    // escapes would already be percent-encoded by a conformant client,
+    // but a non-conformant tool could smuggle raw bytes via a
+    // hand-rolled HTTP request. `sanitize_for_log` closes that gap
+    // matching the treatment of every other client-controlled string
+    // that flows into a tracing field.
+    let path = sanitize_for_log(req.uri().path());
 
     let span = tracing::info_span!(
         "request",

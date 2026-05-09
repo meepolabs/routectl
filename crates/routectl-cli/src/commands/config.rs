@@ -1,7 +1,5 @@
 //! `routectl config <subcommand>` -- check, show, example.
 
-use std::collections::BTreeMap;
-
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{Config, ProviderEntry};
@@ -15,21 +13,54 @@ pub async fn check(config: &Config) -> Result<()> {
     let mut warnings: Vec<String> = Vec::new();
 
     for (name, entry) in &config.providers {
+        // Bedrock Converse adapter is stubbed pending M2.7. Reject
+        // at config-check time so misconfigurations surface here
+        // instead of as runtime "not implemented" errors at first
+        // request. Drop this guard when the adapter ships.
+        if let ProviderEntry::Bedrock { api_shape, .. } = entry {
+            use routectl_router::BedrockApiShapeConfig;
+            if matches!(api_shape, BedrockApiShapeConfig::Converse) {
+                errors.push(format!(
+                    "provider `{name}`: api_shape = \"converse\" is accepted in TOML but \
+                     the Converse adapter is not implemented yet (M2.7); \
+                     use api_shape = \"invoke\" until the adapter ships"
+                ));
+            }
+        }
+
         for uri in entry.secret_uris() {
             let parsed = match SecretRef::parse(uri) {
                 Ok(r) => r,
                 Err(e) => {
-                    errors.push(format!("provider `{name}`: {uri}: {e}"));
+                    // Render the parsed scheme rather than echoing
+                    // the raw URI. A `literal:hunter2` in the TOML
+                    // would otherwise land in shell history and CI
+                    // logs verbatim via this stdout path.
+                    errors.push(format!(
+                        "provider `{name}`: secret-ref parse failed (scheme `{}`): {e}",
+                        scheme_of(uri),
+                    ));
                     continue;
                 }
             };
             if let Err(e) = secrets.get(&parsed).await {
-                warnings.push(format!("provider `{name}`: cannot resolve `{uri}`: {e}"));
+                warnings.push(format!(
+                    "provider `{name}`: cannot resolve secret-ref (scheme `{}`): {e}",
+                    scheme_of(uri),
+                ));
             }
         }
     }
 
     for (alias, entry) in &config.aliases {
+        if entry.chain.is_empty() {
+            errors.push(format!(
+                "alias `{alias}`: chain is empty -- an alias with no targets resolves \
+                 to UnknownAlias at request time, which is the same as not declaring \
+                 the alias at all"
+            ));
+            continue;
+        }
         for target in &entry.chain {
             let provider_name = target.split_once(':').map(|(p, _)| p).unwrap_or(target);
             if !config.providers.contains_key(provider_name) {
@@ -37,6 +68,27 @@ pub async fn check(config: &Config) -> Result<()> {
                     "alias `{alias}`: target `{target}` references unknown provider `{provider_name}`"
                 ));
             }
+        }
+    }
+
+    // default_model accepts either an alias key OR a `provider:model`
+    // literal (mirrors the wire `model` field). Reject any other
+    // shape at startup -- otherwise the misconfiguration only surfaces
+    // at first request-time as a runtime WARN + UnknownAlias, which
+    // is the wrong place to find out about a typo'd alias name.
+    if let Some(default) = config.default_model.as_deref() {
+        if default.is_empty() {
+            errors.push("default_model is set but empty; remove the field or set a valid alias / provider:model literal".into());
+        } else if let Some((provider_name, _)) = default.split_once(':') {
+            if !config.providers.contains_key(provider_name) {
+                errors.push(format!(
+                    "default_model `{default}` is a provider:model literal but provider `{provider_name}` is not in [providers]"
+                ));
+            }
+        } else if !config.aliases.contains_key(default) {
+            errors.push(format!(
+                "default_model `{default}` is neither an [aliases] key nor a provider:model literal"
+            ));
         }
     }
 
@@ -89,8 +141,18 @@ pub fn example() -> Result<()> {
     Ok(())
 }
 
-// Silence unused-import warning when only this fn is used.
-#[allow(dead_code)]
-fn _unused() -> BTreeMap<String, String> {
-    BTreeMap::new()
+/// Render the scheme prefix of a SecretRef URI without revealing
+/// the underlying name or value. Used in `check`'s user-facing
+/// error/warning lines so a `literal:hunter2` in a TOML doesn't
+/// leak into shell history or CI logs via stdout.
+fn scheme_of(uri: &str) -> &'static str {
+    if uri.starts_with("env://") {
+        "env://"
+    } else if uri.starts_with("file://") {
+        "file://"
+    } else if uri.starts_with("literal:") {
+        "literal:"
+    } else {
+        "unknown"
+    }
 }
