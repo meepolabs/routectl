@@ -265,17 +265,28 @@ fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
             source: source.clone(),
             cache_control: cache_control.clone(),
         },
-        // OpenAI-shape ImageUrl translates to an Anthropic image block
-        // when the URL is HTTPS-direct. base64 data URIs are a separate
-        // shape and we don't synthesize them here -- callers should use
-        // KnownContentPart::Image for that.
+        // OpenAI-shape ImageUrl translates to an Anthropic image
+        // block. Two URL shapes need different Anthropic source forms:
+        //
+        //   - HTTPS direct  ->  {type: "url", url: "..."}
+        //   - data: URI     ->  {type: "base64", media_type: "...", data: "..."}
+        //
+        // Bedrock + Anthropic API both reject data: URIs in the URL
+        // source form ("URL sources are not supported"); they require
+        // the base64 source. OpenAI multimodal clients (claude-code's
+        // OpenAI-compat fallback, vanilla OpenAI SDK, etc.) embed
+        // images via `data:image/<fmt>;base64,<payload>`, so we parse
+        // the data: prefix here and rewrite. Anything else
+        // (https://, gs://, malformed) flows through as URL source --
+        // upstream will surface a clean error if it isn't supported.
         KnownContentPart::ImageUrl {
             image_url,
             cache_control,
         } => {
-            let url = image_url.get("url").cloned().unwrap_or(Value::Null);
+            let url = image_url.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let source = parse_image_url_source(url);
             ContentBlock::Image {
-                source: json!({"type": "url", "url": url}),
+                source,
                 cache_control: cache_control.clone(),
             }
         }
@@ -413,6 +424,27 @@ fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> 
     }
 
     Ok(AnthropicContent::Blocks(blocks))
+}
+
+/// Translate an OpenAI-style `image_url.url` value into the Anthropic
+/// `source` block. Detects RFC 2397 data URIs (`data:<mt>;base64,<b64>`)
+/// and rewrites them to `{type: "base64", media_type, data}` because
+/// Bedrock + Anthropic both reject `{type: "url"}` for data URIs with
+/// "URL sources are not supported". HTTPS / gs:// / etc. flow through
+/// as URL sources unchanged. Malformed data URIs (no `;base64,`
+/// separator) fall back to URL form so the upstream surfaces a clean
+/// error rather than us dropping the block.
+fn parse_image_url_source(url: &str) -> Value {
+    if let Some(rest) = url.strip_prefix("data:") {
+        if let Some((media_type, b64)) = rest.split_once(";base64,") {
+            return json!({
+                "type": "base64",
+                "media_type": media_type,
+                "data": b64,
+            });
+        }
+    }
+    json!({"type": "url", "url": url})
 }
 
 /// Translate plain message content (no multi-turn reasoning context).
@@ -696,4 +728,66 @@ fn is_routectl_managed_key(key: &str) -> bool {
             | "anthropic_beta"
             | "cache_control"
     )
+}
+
+#[cfg(test)]
+mod parse_image_url_source_tests {
+    use super::parse_image_url_source;
+    use serde_json::json;
+
+    #[test]
+    fn data_uri_with_base64_payload_emits_anthropic_base64_source() {
+        // OpenAI multimodal clients embed images as
+        // data:image/png;base64,XXX. Anthropic + Bedrock require the
+        // base64 source form for these; URL form is rejected with
+        // "URL sources are not supported".
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAE=";
+        let got = parse_image_url_source(url);
+        assert_eq!(
+            got,
+            json!({
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "iVBORw0KGgoAAAANSUhEUgAAAAE=",
+            })
+        );
+    }
+
+    #[test]
+    fn data_uri_with_other_media_types_round_trips() {
+        let cases = [
+            ("data:image/jpeg;base64,QUJDREU=", "image/jpeg", "QUJDREU="),
+            ("data:image/webp;base64,V0VCUA==", "image/webp", "V0VCUA=="),
+            ("data:image/gif;base64,R0lGODlh", "image/gif", "R0lGODlh"),
+        ];
+        for (url, media, b64) in cases {
+            let got = parse_image_url_source(url);
+            assert_eq!(got["type"], "base64", "type for {url}");
+            assert_eq!(got["media_type"], media, "media_type for {url}");
+            assert_eq!(got["data"], b64, "data for {url}");
+        }
+    }
+
+    #[test]
+    fn https_url_passes_through_as_url_source() {
+        let url = "https://example.com/image.png";
+        let got = parse_image_url_source(url);
+        assert_eq!(got, json!({"type": "url", "url": url}));
+    }
+
+    #[test]
+    fn malformed_data_uri_falls_back_to_url_source() {
+        // No `;base64,` separator -- can't parse safely. Fall back
+        // to URL source so upstream surfaces a clean error rather
+        // than us silently dropping the block.
+        let url = "data:image/png,not-base64";
+        let got = parse_image_url_source(url);
+        assert_eq!(got, json!({"type": "url", "url": url}));
+    }
+
+    #[test]
+    fn empty_url_passes_through_as_url_source() {
+        let got = parse_image_url_source("");
+        assert_eq!(got, json!({"type": "url", "url": ""}));
+    }
 }
