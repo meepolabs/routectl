@@ -20,17 +20,19 @@ pub struct Config {
     #[serde(default)]
     pub aliases: BTreeMap<String, AliasEntry>,
 
-    /// Catch-all alias for requests whose `model` field doesn't resolve.
-    /// Applied AFTER `[aliases]` lookup and `provider:model` literal
-    /// detection, so configured aliases and explicit literals always
-    /// win. Lets clients send model names that haven't been added to
-    /// `[aliases]` or `[ingress.<dialect>.aliases]` yet (e.g. a fresh
-    /// claude release the operator hasn't mapped yet) without hard-
-    /// failing -- they go to the default chain. The value MUST itself
-    /// be a key in `[aliases]`. When unset, unknown models error with
-    /// `UnknownAlias` (the v0.5 default behavior).
+    /// Catch-all destination for requests whose `model` field doesn't
+    /// resolve. Applied AFTER `[aliases]` lookup and `provider:model`
+    /// literal detection, so configured aliases and explicit literals
+    /// always win. Lets clients send model names that haven't been
+    /// added to `[aliases]` or `[ingress.<dialect>.aliases]` yet (e.g.
+    /// a fresh claude release the operator hasn't mapped yet) without
+    /// hard-failing -- they go to this destination instead. Accepts
+    /// the same shapes the wire `model` field accepts: an alias name
+    /// from `[aliases]` (e.g. `"med"`) or a `provider:model` literal
+    /// (e.g. `"bedrock-default:global.anthropic.claude-sonnet-4-6"`).
+    /// When unset, unknown models error with `UnknownAlias`.
     #[serde(default)]
-    pub default_alias: Option<String>,
+    pub default_model: Option<String>,
 
     /// Default retry policy applied per-provider attempt.
     #[serde(default)]

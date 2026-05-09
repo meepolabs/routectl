@@ -155,13 +155,13 @@ fn build_router(aliases: BTreeMap<String, AliasEntry>) -> Router {
 
 fn build_router_with_default(
     aliases: BTreeMap<String, AliasEntry>,
-    default_alias: Option<String>,
+    default_model: Option<String>,
 ) -> Router {
     let cfg = Config {
         server: Default::default(),
         providers: BTreeMap::new(),
         aliases,
-        default_alias,
+        default_model,
         retry: {
             let mut r = RetryPolicy::default();
             r.max_attempts = 1;
@@ -554,7 +554,7 @@ fn build_router_with_runtime(
         server: Default::default(),
         providers,
         aliases,
-        default_alias: None,
+        default_model: None,
         retry: {
             let mut r = RetryPolicy::default();
             r.max_attempts = 1;
@@ -1157,12 +1157,12 @@ async fn dropped_steady_state_stream_does_not_trip_breaker() {
     assert_eq!(p2.calls(), 0);
 }
 
-// ---------- default_alias fallback ----------
+// ---------- default_model fallback ----------
 
 #[tokio::test]
-async fn default_alias_routes_unknown_model_to_default_chain() {
+async fn default_model_routes_unknown_model_to_default_chain() {
     // Client sends a model name that's not in [aliases] and isn't a
-    // `provider:model` literal. With default_alias="fast", the request
+    // `provider:model` literal. With default_model="fast", the request
     // should land on the "fast" alias's chain.
     let p1 = MockProvider::new("p1", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
@@ -1173,15 +1173,15 @@ async fn default_alias_routes_unknown_model_to_default_chain() {
     let resp = r
         .complete(req("claude-future-model-99-20300101"))
         .await
-        .expect("default_alias must route unknown model");
+        .expect("default_model must route unknown model");
     assert_eq!(resp.routectl_provider.as_deref(), Some("p1"));
     assert_eq!(p1.calls(), 1);
 }
 
 #[tokio::test]
-async fn default_alias_does_not_override_explicit_alias() {
+async fn default_model_does_not_override_explicit_alias() {
     // When the requested model IS itself a configured alias key,
-    // default_alias must NOT preempt it.
+    // default_model must NOT preempt it.
     let p_fast = MockProvider::new("p_fast", vec![Behavior::Ok]);
     let p_slow = MockProvider::new("p_slow", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
@@ -1197,14 +1197,14 @@ async fn default_alias_does_not_override_explicit_alias() {
     assert_eq!(
         p_slow.calls(),
         0,
-        "default_alias must not override an explicit alias hit"
+        "default_model must not override an explicit alias hit"
     );
 }
 
 #[tokio::test]
-async fn default_alias_does_not_override_provider_model_literal() {
+async fn default_model_does_not_override_provider_model_literal() {
     // `provider:model` literal must continue to bypass alias resolution
-    // entirely; default_alias never enters the picture for it.
+    // entirely; default_model never enters the picture for it.
     let p1 = MockProvider::new("p1", vec![Behavior::Ok]);
     let p_default = MockProvider::new("p_default", vec![Behavior::Ok]);
     let mut aliases = BTreeMap::new();
@@ -1220,8 +1220,8 @@ async fn default_alias_does_not_override_provider_model_literal() {
 }
 
 #[tokio::test]
-async fn default_alias_misconfigured_falls_through_to_unknown_alias() {
-    // If default_alias points to a name that ISN'T itself a valid
+async fn default_model_misconfigured_falls_through_to_unknown_alias() {
+    // If default_model points to a name that ISN'T itself a valid
     // [aliases] key, surface the original UnknownAlias error so the
     // misconfiguration is visible. The error references the REQUESTED
     // model, not the misconfigured default, so operators can grep for
@@ -1233,10 +1233,29 @@ async fn default_alias_misconfigured_falls_through_to_unknown_alias() {
     let err = r
         .complete(req("also-not-real"))
         .await
-        .expect_err("must error when default_alias is itself misconfigured");
+        .expect_err("must error when default_model is itself misconfigured");
     let msg = err.to_string();
     assert!(
         msg.contains("also-not-real"),
         "error must reference the requested model, got: {msg}"
     );
+}
+
+#[tokio::test]
+async fn default_model_accepts_provider_model_literal() {
+    // default_model can be a `provider:model` literal in addition to
+    // an alias name. Lets operators point at a specific bedrock model
+    // without having to wrap it in an alias entry first.
+    let p1 = MockProvider::new("p1", vec![Behavior::Ok]);
+    let aliases = BTreeMap::new();
+    let mut r = build_router_with_default(aliases, Some("p1:fallback-model".into()));
+    r.register("p1", p1.clone());
+
+    let resp = r
+        .complete(req("claude-future-model-99"))
+        .await
+        .expect("default_model must accept provider:model literal");
+    assert_eq!(resp.routectl_provider.as_deref(), Some("p1"));
+    assert_eq!(resp.model, "fallback-model");
+    assert_eq!(p1.calls(), 1);
 }
