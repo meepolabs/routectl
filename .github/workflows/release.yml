@@ -2,14 +2,22 @@ name: release
 
 # Builds and signs release artifacts for tags matching `v*`.
 #
-# Targets shipped:
+# Targets shipped (4 archives + 2 deb):
 #   - linux x86_64    .tar.xz  (glibc 2.35, ubuntu-22.04)
 #   - linux aarch64   .tar.xz  (cross-compiled, glibc 2.35)
-#   - macos x86_64    .tar.xz  (intel)
 #   - macos aarch64   .tar.xz  (apple silicon)
 #   - windows x86_64  .zip
-#   - linux x86_64    .deb     (cargo-deb)
-#   - linux aarch64   .deb     (cargo-deb)
+#   - linux x86_64    .deb     (cargo-deb, repackages the .tar.xz binary)
+#   - linux aarch64   .deb     (cargo-deb, repackages the .tar.xz binary)
+#
+# Every artifact ships the same provider feature set:
+# `openai-compat + anthropic-api + bedrock`. The CLI Cargo.toml
+# force-enables all three regardless of build flags, so platform
+# does not change provider availability.
+#
+# Intel macOS dropped: the Apple Silicon transition is complete
+# enough that x86_64-apple-darwin is not worth the CI minutes for
+# a developer tool. Add the matrix entry back if a user asks.
 #
 # Every artifact is signed with sigstore cosign in keyless mode -- the
 # signature is bound to this workflow's OIDC identity, AND specifically
@@ -120,28 +128,37 @@ jobs:
       contents: read
       id-token: write
       attestations: write
-    name: build (${{ matrix.target }})
+    name: build (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
+        # `target` is the LLVM triple consumed by `cargo build --target`.
+        # `name` is the human-friendly suffix used in archive filenames
+        # and workflow-artifact names (`linux-x86_64`,
+        # `macos-aarch64`, etc.) -- the LLVM triple is accurate but
+        # noisy on a release page.
+        # Intel macOS dropped: routectl is a developer tool and the
+        # Apple Silicon transition is past the point where shipping
+        # x86_64-apple-darwin earns its CI minutes. Add it back if
+        # someone asks.
         include:
           - target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
             os: ubuntu-22.04
             archive: tar.xz
             cross: false
           - target: aarch64-unknown-linux-gnu
+            name: linux-aarch64
             os: ubuntu-22.04
             archive: tar.xz
             cross: true
-          - target: x86_64-apple-darwin
-            os: macos-13
-            archive: tar.xz
-            cross: false
           - target: aarch64-apple-darwin
+            name: macos-aarch64
             os: macos-14
             archive: tar.xz
             cross: false
           - target: x86_64-pc-windows-msvc
+            name: windows-x86_64
             os: windows-latest
             archive: zip
             cross: false
@@ -182,7 +199,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${ROUTECTL_TAG#v}"
-          dir="${BIN_NAME}-${version}-${{ matrix.target }}"
+          dir="${BIN_NAME}-${version}-${{ matrix.name }}"
           mkdir -p "stage/${dir}"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "stage/${dir}/"
           cp README.md LICENSE CHANGELOG.md "stage/${dir}/" 2>/dev/null || true
@@ -196,7 +213,7 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:ROUTECTL_TAG -replace '^v',''
-          $dir = "$env:BIN_NAME-$version-${{ matrix.target }}"
+          $dir = "$env:BIN_NAME-$version-${{ matrix.name }}"
           New-Item -ItemType Directory -Force -Path "stage/$dir" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$env:BIN_NAME.exe" "stage/$dir/"
           Copy-Item README.md, LICENSE, CHANGELOG.md "stage/$dir/" -ErrorAction SilentlyContinue
@@ -223,7 +240,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: artifact-${{ matrix.target }}
+          name: artifact-${{ matrix.name }}
           path: |
             ${{ env.ARTIFACT }}
             ${{ env.ARTIFACT }}.sha256
@@ -231,7 +248,7 @@ jobs:
           if-no-files-found: error
 
   deb:
-    name: deb (${{ matrix.target }})
+    name: deb (${{ matrix.name }})
     needs: [validate, build]
     permissions:
       contents: read
@@ -240,9 +257,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `target` is the LLVM triple; `name` is the friendly suffix
+        # used in workflow-artifact names + CI job labels. Must match
+        # the build matrix entries above.
         include:
           - target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
           - target: aarch64-unknown-linux-gnu
+            name: linux-aarch64
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -258,7 +280,7 @@ jobs:
       - name: download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: artifact-${{ matrix.target }}
+          name: artifact-${{ matrix.name }}
           path: download
 
       - name: stage built binary + verify against build-job sha256
@@ -266,7 +288,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${ROUTECTL_TAG#v}"
-          dir="${BIN_NAME}-${version}-${{ matrix.target }}"
+          dir="${BIN_NAME}-${version}-${{ matrix.name }}"
 
           # Verify the downloaded .tar.xz matches the .sha256 the build
           # job computed BEFORE we extract -- defense against an
@@ -358,7 +380,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: deb-${{ matrix.target }}
+          name: deb-${{ matrix.name }}
           path: |
             ${{ env.ARTIFACT }}
             ${{ env.ARTIFACT }}.sha256
@@ -392,17 +414,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Five tar.xz/zip archives + two .deb -- if any is missing
-          # (e.g. a build matrix entry failed under fail-fast: false),
-          # refuse to publish a partial release that would have
-          # plausibly-named artifacts but a missing target. Operators
-          # have to decide whether to re-run the failed shard or accept
-          # the partial release; we don't make that call silently.
+          # Four archives (linux x86_64+aarch64 .tar.xz, macos
+          # aarch64 .tar.xz, windows x86_64 .zip) + two .deb (linux
+          # x86_64 + aarch64). If any is missing (e.g. a build matrix
+          # entry failed under fail-fast: false), refuse to publish a
+          # partial release that would have plausibly-named artifacts
+          # but a missing target. Operators have to decide whether to
+          # re-run the failed shard or accept the partial release; we
+          # don't make that call silently.
           archive_count=$(ls dist/*.tar.xz dist/*.zip 2>/dev/null | wc -l)
           deb_count=$(ls dist/*.deb 2>/dev/null | wc -l)
-          if [ "$archive_count" -ne 5 ] || [ "$deb_count" -ne 2 ]; then
+          if [ "$archive_count" -ne 4 ] || [ "$deb_count" -ne 2 ]; then
             echo "FAIL: incomplete artifact set" >&2
-            echo "  expected: 5 archives + 2 .deb" >&2
+            echo "  expected: 4 archives + 2 .deb" >&2
             echo "  got: $archive_count archives + $deb_count .deb" >&2
             ls -1 dist/ >&2
             exit 1
