@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
+use routectl_core::{
+    sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+};
 
 use crate::config::{Config, RetryPolicy};
 use crate::runtime_state::{GateDecision, ProviderState};
@@ -71,6 +73,27 @@ impl Router {
                 Arc::new(Mutex::new(ProviderState::new(entry.runtime()))),
             );
         }
+
+        // Heuristic startup warning: if default_model is a
+        // `provider:model` literal AND the operator has [aliases.*]
+        // entries with their own [aliases.<name>.retry] tables, the
+        // literal-form default bypasses alias-attached retry. Operators
+        // who care about retry-per-alias should use the alias name as
+        // the default. The warning fires once at startup; it doesn't
+        // change behavior.
+        if let Some(default) = config.default_model.as_deref() {
+            let is_literal = default.contains(':') && !config.aliases.contains_key(default);
+            let any_alias_has_retry = config.aliases.values().any(|a| a.retry.is_some());
+            if is_literal && any_alias_has_retry {
+                tracing::warn!(
+                    default_model = %default,
+                    "default_model is a `provider:model` literal but the [aliases] table has per-alias [retry] overrides; \
+                     literal defaults inherit the top-level [retry] only. \
+                     Set default_model to an alias name to attach a per-alias retry policy.",
+                );
+            }
+        }
+
         Self {
             config,
             providers: Default::default(),
@@ -93,7 +116,7 @@ impl Router {
             .await
     }
 
-    #[tracing::instrument(skip_all, fields(alias = %req.model))]
+    #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn complete_with_options(
         &self,
         req: ChatRequest,
@@ -169,7 +192,13 @@ impl Router {
                         // already encodes "is this error provider-side
                         // and worth working around?" (network/status=0,
                         // configured 5xx, 429, streaming).
-                        if should_fallback(&e, &policy) {
+                        // Capture once: should_fallback is a pure
+                        // predicate but evaluating it twice on the
+                        // same value is a maintenance hazard
+                        // (asymmetric edits would silently break the
+                        // breaker-vs-fallback symmetry).
+                        let do_fallback = should_fallback(&e, &policy);
+                        if do_fallback {
                             self.record_failure(provider_name);
                         }
                         if opts.disable_fallbacks {
@@ -186,7 +215,7 @@ impl Router {
                             continue;
                         }
                         // Done with this provider. Decide fallback vs propagate.
-                        if should_fallback(&e, &policy) {
+                        if do_fallback {
                             tracing::warn!(provider = provider_name, error = ?e, "fallback to next");
                             last_err = Some(e);
                             continue 'chain;
@@ -209,7 +238,7 @@ impl Router {
     /// chunk reaches us; once the upstream has emitted a chunk,
     /// mid-stream errors propagate. Gate checks (rate limit / breaker)
     /// run before the upstream is touched.
-    #[tracing::instrument(skip_all, fields(alias = %req.model))]
+    #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn stream_with_options(
         &self,
         req: ChatRequest,
@@ -274,13 +303,16 @@ impl Router {
                     // are handled by `BreakerAccounting` in the wrapped
                     // stream and apply the same gating implicitly
                     // (`Error::Streaming(_)` is fall-back-able).
-                    if should_fallback(&e, &policy) {
+                    // Capture once -- see parallel comment in
+                    // complete_with_options.
+                    let do_fallback = should_fallback(&e, &policy);
+                    if do_fallback {
                         self.record_failure(provider_name);
                     }
                     if opts.disable_fallbacks {
                         return Err(e);
                     }
-                    if should_fallback(&e, &policy) {
+                    if do_fallback {
                         tracing::warn!(provider = provider_name, error = ?e, "stream fallback to next");
                         last_err = Some(e);
                         continue 'chain;
@@ -345,23 +377,27 @@ impl Router {
         // the offending name still appears in the error.
         if let Some(default) = self.config.default_model.as_deref() {
             if let Some(alias) = self.config.aliases.get(default) {
-                tracing::info!(
-                    requested_model = %model,
+                // DEBUG (not INFO): when default_model is configured
+                // wide-open as a catch-all, this fires on every request
+                // whose model didn't otherwise match. INFO would bury
+                // unrelated lines in production.
+                tracing::debug!(
+                    requested_model = %sanitize_for_log(model),
                     default_model = %default,
                     "resolved unknown model to default_model (alias)",
                 );
                 return Ok(alias.chain.clone());
             }
             if default.contains(':') {
-                tracing::info!(
-                    requested_model = %model,
+                tracing::debug!(
+                    requested_model = %sanitize_for_log(model),
                     default_model = %default,
                     "resolved unknown model to default_model (provider:model literal)",
                 );
                 return Ok(vec![default.to_string()]);
             }
             tracing::warn!(
-                requested_model = %model,
+                requested_model = %sanitize_for_log(model),
                 default_model = %default,
                 "default_model is configured but is neither an alias key nor a provider:model literal; falling through to UnknownAlias",
             );
@@ -370,13 +406,43 @@ impl Router {
     }
 
     fn policy_for(&self, model: &str) -> RetryPolicy {
-        // Mirror resolve_chain's default-model fallback: when the
-        // request defaults to an alias, the retry policy on that
-        // alias's [aliases.<name>.retry] table applies. For a
-        // `provider:model` literal default there is no per-alias
-        // retry to inherit -- fall through to the top-level [retry].
-        if let Some(retry) = self.config.aliases.get(model).and_then(|a| a.retry.clone()) {
-            return retry;
+        // Branches mirror `resolve_chain` exactly to keep
+        // policy-resolution and chain-resolution in lockstep:
+        //
+        //   1. Known alias: use its [aliases.<name>.retry] override if
+        //      set, else fall through to top-level [retry]. The
+        //      default_model retry is NOT consulted -- a known alias
+        //      whose retry is None means "no override, use the
+        //      global", not "borrow from default_model". This matches
+        //      `resolve_chain`'s shape: a known alias never falls
+        //      through to default_model.
+        //
+        //   2. `provider:model` literal: no per-alias retry to
+        //      inherit; use top-level [retry].
+        //
+        //   3. Unknown model with default_model configured: inherit
+        //      the default's per-alias retry override if it has one,
+        //      else top-level [retry]. This is the path
+        //      `resolve_chain` takes when defaulting.
+        //
+        // Invariant: callers only invoke `policy_for` AFTER
+        // `resolve_chain` has succeeded, so the "unknown model with
+        // a misconfigured default_model" path is unreachable in
+        // practice -- `resolve_chain` would have errored. The
+        // `debug_assert!` pins this for debug builds; in release we
+        // fall through to the global retry rather than panicking.
+        debug_assert!(
+            self.resolve_chain(model).is_ok(),
+            "policy_for invoked for `{model}` whose chain doesn't resolve; call resolve_chain first",
+        );
+        if let Some(alias) = self.config.aliases.get(model) {
+            return alias
+                .retry
+                .clone()
+                .unwrap_or_else(|| self.config.retry.clone());
+        }
+        if model.contains(':') {
+            return self.config.retry.clone();
         }
         if let Some(default) = self.config.default_model.as_deref() {
             if let Some(retry) = self
@@ -388,11 +454,7 @@ impl Router {
                 return retry;
             }
         }
-        self.config
-            .aliases
-            .get(model)
-            .and_then(|a| a.retry.clone())
-            .unwrap_or_else(|| self.config.retry.clone())
+        self.config.retry.clone()
     }
 }
 
@@ -528,7 +590,19 @@ async fn try_stream_with_first_chunk(
                 Ok(merged.boxed())
             }
             Some(Err(e)) => Err(e),
-            None => Ok(futures::stream::empty().boxed()),
+            // Upstream returned an empty stream (stream() returned Ok
+            // but no chunk ever arrived). This is NOT a successful
+            // empty completion -- a healthy provider always emits at
+            // least one chunk (even just a usage tail). Treat as a
+            // fallbackable streaming error so the chain walks to the
+            // next provider AND the breaker records a failed probe.
+            // Without this, an upstream that closes the connection
+            // before producing any data would be reported as a
+            // successful completion to both the client and the
+            // router's health accounting.
+            None => Err(Error::Streaming(format!(
+                "{provider_name} stream closed before any chunk arrived",
+            ))),
         }
     };
 

@@ -100,6 +100,111 @@ async fn config_check_fails_for_alias_pointing_at_unknown_provider() {
     }
 }
 
+/// Bare Config with empty providers/aliases plus a `default_model`
+/// override. Five default_model tests share this skeleton; the only
+/// per-test variation is which provider/alias entries get pushed in
+/// after construction. Cuts ~35 lines of repetition vs. inline
+/// `Config { ... }` literals.
+fn bare_config(default_model: Option<String>) -> Config {
+    Config {
+        server: ServerConfig::default(),
+        providers: BTreeMap::new(),
+        aliases: BTreeMap::new(),
+        default_model,
+        retry: RetryPolicy::default(),
+        legacy_compat: LegacyCompat::Openrouter,
+        ingress: Default::default(),
+    }
+}
+
+fn add_mock_provider(config: &mut Config) {
+    config.providers.insert(
+        "mock".into(),
+        ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc")
+            .with_reasoning_dialect(ReasoningDialect::Openai),
+    );
+}
+
+#[tokio::test]
+async fn config_check_fails_when_default_model_alias_does_not_exist() {
+    // Typo'd alias name in default_model would otherwise survive
+    // `routectl config check` and only fire as a runtime WARN at
+    // first request-time. Reject it at startup.
+    let mut config = bare_config(Some("nonexistent-alias".into()));
+    add_mock_provider(&mut config);
+
+    match commands::config::check(&config).await {
+        Err(routectl_core::Error::Config(_)) => {}
+        Ok(_) => panic!("expected config error for unknown default_model alias"),
+        Err(other) => panic!("expected Config error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn config_check_fails_when_default_model_literal_provider_unknown() {
+    let mut config = bare_config(Some("ghost-provider:some-model".into()));
+    add_mock_provider(&mut config);
+
+    match commands::config::check(&config).await {
+        Err(routectl_core::Error::Config(_)) => {}
+        Ok(_) => panic!("expected config error for unknown provider in default_model literal"),
+        Err(other) => panic!("expected Config error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn config_check_fails_when_default_model_is_empty_string() {
+    let config = bare_config(Some(String::new()));
+
+    match commands::config::check(&config).await {
+        Err(routectl_core::Error::Config(_)) => {}
+        Ok(_) => panic!("expected config error for empty default_model"),
+        Err(other) => panic!("expected Config error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn config_check_passes_when_default_model_is_valid_alias() {
+    let mut config = bare_config(Some("fast".into()));
+    add_mock_provider(&mut config);
+    config.aliases.insert(
+        "fast".into(),
+        AliasEntry::new(vec!["mock:gpt-4o".to_string()]),
+    );
+
+    commands::config::check(&config)
+        .await
+        .expect("default_model = existing alias must check ok");
+}
+
+#[tokio::test]
+async fn config_check_fails_for_empty_alias_chain() {
+    // An alias whose `chain = []` resolves to UnknownAlias at
+    // request time, which is the same as not declaring the alias
+    // at all -- a configuration mistake. Reject at startup.
+    let mut config = bare_config(None);
+    add_mock_provider(&mut config);
+    config
+        .aliases
+        .insert("empty".into(), AliasEntry::new(Vec::new()));
+
+    match commands::config::check(&config).await {
+        Err(routectl_core::Error::Config(_)) => {}
+        Ok(_) => panic!("expected config error for empty alias chain"),
+        Err(other) => panic!("expected Config error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn config_check_passes_when_default_model_is_valid_literal() {
+    let mut config = bare_config(Some("mock:gpt-4o".into()));
+    add_mock_provider(&mut config);
+
+    commands::config::check(&config)
+        .await
+        .expect("default_model = provider:model literal with known provider must check ok");
+}
+
 #[test]
 fn config_show_redacts_literal_secrets() {
     let mut config = Config {

@@ -61,10 +61,6 @@ pub struct ModelProfile {
     /// Read by `openai_compat::request`.
     pub requires_reasoning_effort: bool,
 
-    /// Use Anthropic's `adaptive` thinking type instead of fixed
-    /// `budget_tokens`. Set for Opus 4.7+. Read by `anthropic_api::request`.
-    pub supports_adaptive_thinking: bool,
-
     /// Forward `chat_template_kwargs` (vLLM/DashScope/some NIM endpoints).
     /// Set on a per-model basis when the model is served by a thinking
     /// model that needs `enable_thinking`. Read by `openai_compat::request`.
@@ -79,7 +75,6 @@ impl ModelProfile {
         kind: MatchKind::Prefix,
         drops_sampling_params: false,
         requires_reasoning_effort: false,
-        supports_adaptive_thinking: false,
         uses_chat_template_kwargs: false,
     };
 
@@ -131,26 +126,6 @@ pub const PROFILES: &[ModelProfile] = &[
         pattern: "reasoner",
         kind: MatchKind::Substring,
         drops_sampling_params: true,
-        ..ModelProfile::DEFAULT
-    },
-    // Anthropic Opus 4.7+: adaptive thinking. Substring so vendor-prefixed
-    // model names like `anthropic/claude-opus-4-7-20260301` still match.
-    ModelProfile {
-        pattern: "opus-4-7",
-        kind: MatchKind::Substring,
-        supports_adaptive_thinking: true,
-        ..ModelProfile::DEFAULT
-    },
-    ModelProfile {
-        pattern: "opus-4-8",
-        kind: MatchKind::Substring,
-        supports_adaptive_thinking: true,
-        ..ModelProfile::DEFAULT
-    },
-    ModelProfile {
-        pattern: "opus-4-9",
-        kind: MatchKind::Substring,
-        supports_adaptive_thinking: true,
         ..ModelProfile::DEFAULT
     },
 ];
@@ -231,25 +206,6 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_opus_4_7_matches() {
-        let p = profile_for("claude-opus-4-7");
-        assert!(p.supports_adaptive_thinking);
-    }
-
-    #[test]
-    fn anthropic_vendor_prefixed_opus_4_7_matches() {
-        // OpenRouter-style id with vendor prefix.
-        let p = profile_for("anthropic/claude-opus-4-7-20260301");
-        assert!(p.supports_adaptive_thinking);
-    }
-
-    #[test]
-    fn anthropic_opus_4_5_does_not_match() {
-        let p = profile_for("claude-opus-4-5");
-        assert!(!p.supports_adaptive_thinking);
-    }
-
-    #[test]
     fn case_insensitive_match() {
         let p = profile_for("O3-MINI");
         assert!(p.drops_sampling_params);
@@ -260,7 +216,6 @@ mod tests {
         let p = profile_for("totally-unknown-model-xyz");
         assert!(!p.drops_sampling_params);
         assert!(!p.requires_reasoning_effort);
-        assert!(!p.supports_adaptive_thinking);
         assert!(!p.uses_chat_template_kwargs);
     }
 }

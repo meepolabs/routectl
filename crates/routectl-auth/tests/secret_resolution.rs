@@ -5,6 +5,20 @@ use std::os::unix::fs::PermissionsExt;
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use tempfile::NamedTempFile;
 
+// Note on env-mutating tests below: each test uses a UNIQUE
+// `ROUTECTL_TEST_*` key name so no two tests race on the same
+// value. The libc `setenv` / `unsetenv` functions are not
+// thread-safe at the C level (Rust 1.81 marked the wrappers
+// `unsafe` for this reason), but as long as the keys are
+// disjoint AND no other code in this process reads/writes the
+// same keys, the parallel test runner is safe in practice.
+// Adding a `Mutex<()>` here ran into a `clippy::await_holding_lock`
+// warning because the surrounding tests are async; dropping the
+// guard before `.await` reintroduces the race window. The
+// `unique-key` invariant is what makes the current tests correct.
+// If a future test needs to share a key, switch to
+// `#[serial_test::serial]` + dropping `tokio::test`.
+
 // --- SecretRef::parse ---
 
 #[test]
@@ -88,8 +102,23 @@ fn display_file() {
 }
 
 #[test]
-fn display_literal() {
-    assert_eq!(SecretRef::Literal("val".into()).to_string(), "literal:val");
+fn display_literal_redacts_value() {
+    // SecretRef::Literal is the secret material in-line; Display
+    // must NOT echo the value. Any caller that `format!`s a
+    // SecretRef would otherwise leak the literal payload into
+    // logs / shell history / CI output.
+    assert_eq!(
+        SecretRef::Literal("hunter2".into()).to_string(),
+        "literal:[REDACTED]"
+    );
+}
+
+#[test]
+fn display_literal_empty_distinguishable() {
+    // An empty literal stays distinguishable from a redacted one
+    // so operators can spot a placeholder (literal:) vs a real
+    // secret in error/check output without guessing.
+    assert_eq!(SecretRef::Literal(String::new()).to_string(), "literal:");
 }
 
 // --- MemoryStore: env path ---

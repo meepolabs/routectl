@@ -7,6 +7,7 @@
 pub mod cache_control;
 pub mod content_part;
 pub mod error;
+pub mod log_safe;
 pub mod provider;
 pub mod schema;
 pub mod system_content;
@@ -15,6 +16,7 @@ pub mod tool_def;
 pub use cache_control::{Breakpoint, BreakpointPosition, CacheControl};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};
+pub use log_safe::{sanitize_for_log, sanitize_upstream_body};
 pub use provider::Provider;
 pub use schema::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Message, MessageContent,
