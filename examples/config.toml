@@ -161,16 +161,19 @@ session_token_ref = "env://AWS_SESSION_TOKEN"  # optional
 # Recommended pattern: one alias per cost/capability tier so callers
 # pick "heavy" or "cheap" without knowing which model is current.
 
-# ---- Default alias (catch-all for unknown models) ----
-# When a request's `model` field doesn't match any [aliases] key (and
-# isn't a `provider:model` literal), fall back to this alias. Useful
-# for clients like Claude Code that send specific Anthropic-API model
-# names: any release the operator hasn't mapped in
+# ---- Default model (catch-all for unmapped requests) ----
+# When a request's `model` field doesn't match any [aliases] key AND
+# isn't a `provider:model` literal, fall back to this destination.
+# Useful for clients like Claude Code that send specific Anthropic
+# API model names: any release the operator hasn't mapped in
 # [ingress.anthropic.aliases] yet routes here instead of erroring.
-# The value MUST itself be a valid alias name from the [aliases] table
-# below. When unset (the default), unknown models error with
-# `UnknownAlias`.
-default_alias = "med"
+#
+# Accepts the same shapes the wire `model` field accepts:
+#   - an alias name from the [aliases] table  (e.g. "med")
+#   - a `provider:model` literal             (e.g. "bedrock-default:us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+#
+# When unset (the default), unknown models error with `UnknownAlias`.
+default_model = "med"
 
 [aliases.heavy]
 # Top-shelf reasoning, with fallback across providers.
