@@ -150,10 +150,18 @@ fn ok_chunk(id: &str, model: &str, content: &str) -> ChatChunk {
 }
 
 fn build_router(aliases: BTreeMap<String, AliasEntry>) -> Router {
+    build_router_with_default(aliases, None)
+}
+
+fn build_router_with_default(
+    aliases: BTreeMap<String, AliasEntry>,
+    default_alias: Option<String>,
+) -> Router {
     let cfg = Config {
         server: Default::default(),
         providers: BTreeMap::new(),
         aliases,
+        default_alias,
         retry: {
             let mut r = RetryPolicy::default();
             r.max_attempts = 1;
@@ -546,6 +554,7 @@ fn build_router_with_runtime(
         server: Default::default(),
         providers,
         aliases,
+        default_alias: None,
         retry: {
             let mut r = RetryPolicy::default();
             r.max_attempts = 1;
@@ -1146,4 +1155,88 @@ async fn dropped_steady_state_stream_does_not_trip_breaker() {
         "client cancel after first chunk must not open the breaker"
     );
     assert_eq!(p2.calls(), 0);
+}
+
+// ---------- default_alias fallback ----------
+
+#[tokio::test]
+async fn default_alias_routes_unknown_model_to_default_chain() {
+    // Client sends a model name that's not in [aliases] and isn't a
+    // `provider:model` literal. With default_alias="fast", the request
+    // should land on the "fast" alias's chain.
+    let p1 = MockProvider::new("p1", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fast".into(), alias(&["p1:m1"]));
+    let mut r = build_router_with_default(aliases, Some("fast".into()));
+    r.register("p1", p1.clone());
+
+    let resp = r
+        .complete(req("claude-future-model-99-20300101"))
+        .await
+        .expect("default_alias must route unknown model");
+    assert_eq!(resp.routectl_provider.as_deref(), Some("p1"));
+    assert_eq!(p1.calls(), 1);
+}
+
+#[tokio::test]
+async fn default_alias_does_not_override_explicit_alias() {
+    // When the requested model IS itself a configured alias key,
+    // default_alias must NOT preempt it.
+    let p_fast = MockProvider::new("p_fast", vec![Behavior::Ok]);
+    let p_slow = MockProvider::new("p_slow", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fast".into(), alias(&["p_fast:m"]));
+    aliases.insert("slow".into(), alias(&["p_slow:m"]));
+    let mut r = build_router_with_default(aliases, Some("slow".into()));
+    r.register("p_fast", p_fast.clone());
+    r.register("p_slow", p_slow.clone());
+
+    let resp = r.complete(req("fast")).await.expect("ok");
+    assert_eq!(resp.routectl_provider.as_deref(), Some("p_fast"));
+    assert_eq!(p_fast.calls(), 1);
+    assert_eq!(
+        p_slow.calls(),
+        0,
+        "default_alias must not override an explicit alias hit"
+    );
+}
+
+#[tokio::test]
+async fn default_alias_does_not_override_provider_model_literal() {
+    // `provider:model` literal must continue to bypass alias resolution
+    // entirely; default_alias never enters the picture for it.
+    let p1 = MockProvider::new("p1", vec![Behavior::Ok]);
+    let p_default = MockProvider::new("p_default", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fallback".into(), alias(&["p_default:m"]));
+    let mut r = build_router_with_default(aliases, Some("fallback".into()));
+    r.register("p1", p1.clone());
+    r.register("p_default", p_default.clone());
+
+    let resp = r.complete(req("p1:m")).await.expect("ok");
+    assert_eq!(resp.routectl_provider.as_deref(), Some("p1"));
+    assert_eq!(p1.calls(), 1);
+    assert_eq!(p_default.calls(), 0);
+}
+
+#[tokio::test]
+async fn default_alias_misconfigured_falls_through_to_unknown_alias() {
+    // If default_alias points to a name that ISN'T itself a valid
+    // [aliases] key, surface the original UnknownAlias error so the
+    // misconfiguration is visible. The error references the REQUESTED
+    // model, not the misconfigured default, so operators can grep for
+    // the offending request.
+    let mut aliases = BTreeMap::new();
+    aliases.insert("real".into(), alias(&["p1:m"]));
+    let r = build_router_with_default(aliases, Some("does-not-exist".into()));
+
+    let err = r
+        .complete(req("also-not-real"))
+        .await
+        .expect_err("must error when default_alias is itself misconfigured");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("also-not-real"),
+        "error must reference the requested model, got: {msg}"
+    );
 }
