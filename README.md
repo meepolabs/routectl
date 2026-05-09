@@ -21,6 +21,41 @@ A local LLM router. One Rust binary, listening on `127.0.0.1`, that proxies Open
 
 ## Install
 
+### Pre-built binaries
+
+Bare binaries are published per release for linux x86_64, linux aarch64, macos aarch64, and windows x86_64. Download with `curl`, mark executable, drop into `PATH`:
+
+```bash
+# linux x86_64
+curl -fL https://github.com/meepolabs/routectl/releases/latest/download/routectl-$(curl -s https://api.github.com/repos/meepolabs/routectl/releases/latest | grep tag_name | cut -d'"' -f4 | sed 's/^v//')-linux-x86_64 -o /usr/local/bin/routectl
+
+# macos aarch64 (apple silicon)
+curl -fL https://github.com/meepolabs/routectl/releases/latest/download/routectl-$(curl -s https://api.github.com/repos/meepolabs/routectl/releases/latest | grep tag_name | cut -d'"' -f4 | sed 's/^v//')-macos-aarch64 -o /usr/local/bin/routectl
+
+chmod +x /usr/local/bin/routectl
+routectl --help
+```
+
+`curl` does not set the `com.apple.quarantine` xattr, so macOS Gatekeeper does not prompt. If you downloaded via a browser (Safari / Chrome / Firefox) instead, run once:
+
+```bash
+xattr -d com.apple.quarantine /usr/local/bin/routectl
+```
+
+Verify the download against the signed `SHA256SUMS` file at the same release URL:
+
+```bash
+cosign verify-blob \
+  --certificate-identity-regexp '^https://github\.com/meepolabs/routectl/\.github/workflows/release\.yml@refs/tags/v[0-9]' \
+  --certificate-github-workflow-repository meepolabs/routectl \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle SHA256SUMS.cosign.bundle SHA256SUMS
+
+sha256sum -c SHA256SUMS
+```
+
+### From source
+
 Requires Rust 1.75+.
 
 ```bash
