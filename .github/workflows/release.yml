@@ -259,7 +259,7 @@ jobs:
         with:
           subject-path: ${{ env.ARTIFACT }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: artifact-${{ matrix.name }}
           path: |
@@ -399,7 +399,7 @@ jobs:
         with:
           subject-path: ${{ env.ARTIFACT }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.name }}
           path: |
