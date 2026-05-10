@@ -16,7 +16,10 @@ pub mod tool_def;
 pub use cache_control::{Breakpoint, BreakpointPosition, CacheControl};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};
-pub use log_safe::{sanitize_for_log, sanitize_upstream_body};
+pub use log_safe::{
+    debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body,
+    sanitize_upstream_body_with_cap, trace_outgoing_body,
+};
 pub use provider::Provider;
 pub use schema::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Message, MessageContent,

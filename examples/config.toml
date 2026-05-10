@@ -227,6 +227,12 @@ retry_on_429 = 4             # try harder on rate limits
 retry_on_5xx = 1             # fall through faster on flaky upstream
 request_timeout_ms = 30000   # cap per-attempt time
 stream_first_byte_timeout_ms = 10000
+# IMPORTANT: bump `stream_first_byte_timeout_ms` for any alias that
+# routes to a thinking model with high effort. Opus 4.7 + adaptive
+# thinking + `effort = "xhigh"` regularly takes 60-90 seconds before
+# the first SSE byte; the 10s above will fire spuriously and Claude
+# Code will see the request as failed. For long-thinking aliases:
+#   stream_first_byte_timeout_ms = 300000   # 5 min
 
 # ---- Default retry policy (used by aliases without their own block) ----
 

@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    sanitize_for_log, sanitize_upstream_body, ChatChunk, ChatRequest, ChatResponse, Error,
-    Provider, Result,
+    debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
 };
 
 pub(crate) mod parts;
@@ -161,6 +161,13 @@ impl Provider for AnthropicApiProvider {
             obj.remove("stream");
         }
 
+        // PR C / FR-1: emit the outgoing body at trace level so a
+        // grep by request_id correlates ingress -> egress -> upstream
+        // response in one pass during triage. Gated by the
+        // `tracing::Level::TRACE` filter -- production with default
+        // info level pays nothing.
+        trace_outgoing_body("anthropic", &self.cfg.id, &body);
+
         let resp = self
             .build_headers(self.client.post(self.messages_url()))
             .header("content-type", "application/json")
@@ -182,6 +189,11 @@ impl Provider for AnthropicApiProvider {
         // providers.
         if status >= 400 {
             let body_text = resp.text().await.unwrap_or_default();
+            // PR C / FR-1: emit the FULL upstream error body at debug
+            // level so triage doesn't have to reproduce. The 200B
+            // WARN excerpt below stays unchanged for `routectl-warn.log`
+            // scannability.
+            debug_upstream_error_body("anthropic", &self.cfg.id, status, &body_text);
             let msg = serde_json::from_str::<Value>(&body_text)
                 .ok()
                 .as_ref()
@@ -189,6 +201,11 @@ impl Provider for AnthropicApiProvider {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| sanitize_upstream_body(&body_text));
+            // PR C / FR-1: extend the auth-only WARN to all 4xx/5xx
+            // so an operator never has to guess WHY a request failed.
+            // Auth failures keep the auth_kind field for parity with
+            // the documented log shape; other errors get a generic
+            // "anthropic upstream error" tag.
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
@@ -196,6 +213,13 @@ impl Provider for AnthropicApiProvider {
                     auth_kind = ?self.cfg.auth_kind,
                     body_excerpt = %msg,
                     "anthropic upstream auth failed",
+                );
+            } else {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    body_excerpt = %msg,
+                    "anthropic upstream error",
                 );
             }
             return Err(Error::upstream(&self.cfg.id, status, msg));
@@ -217,6 +241,8 @@ impl Provider for AnthropicApiProvider {
             obj.insert("stream".into(), serde_json::Value::Bool(true));
         }
 
+        trace_outgoing_body("anthropic", &self.cfg.id, &body);
+
         let resp = self
             .build_headers(self.client.post(self.messages_url()))
             .header("content-type", "application/json")
@@ -230,6 +256,7 @@ impl Provider for AnthropicApiProvider {
             // Same text-first-then-opportunistic-JSON pattern as
             // `complete()` -- see comment there.
             let body_text = resp.text().await.unwrap_or_default();
+            debug_upstream_error_body("anthropic", &self.cfg.id, status, &body_text);
             let msg = serde_json::from_str::<Value>(&body_text)
                 .ok()
                 .as_ref()
@@ -244,6 +271,13 @@ impl Provider for AnthropicApiProvider {
                     auth_kind = ?self.cfg.auth_kind,
                     body_excerpt = %msg,
                     "anthropic upstream auth failed",
+                );
+            } else {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    body_excerpt = %msg,
+                    "anthropic upstream error",
                 );
             }
             return Err(Error::upstream(&self.cfg.id, status, msg));
