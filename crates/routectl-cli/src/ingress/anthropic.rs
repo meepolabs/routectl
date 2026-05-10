@@ -796,6 +796,15 @@ impl IngressAdapter for AnthropicIngress {
     }
 
     fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
+        // PR C / FR-1: trace-level ingress body for triage. Same
+        // gating + sensitivity story as the openai ingress.
+        if tracing::event_enabled!(tracing::Level::TRACE) {
+            tracing::trace!(
+                ingress = "anthropic",
+                body = %serde_json::to_string(&body).unwrap_or_default(),
+                "anthropic ingress body"
+            );
+        }
         translate_request(&self.aliases, headers, body)
     }
 
