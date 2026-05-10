@@ -81,6 +81,14 @@ fn derive_effort(req: &ChatRequest) -> String {
 /// caller pairs that with a top-level `output_config`); when `false`,
 /// returns the legacy `Enabled { budget_tokens }` shape; `Disabled`
 /// is always returned verbatim regardless of the flag.
+///
+/// Note on `max_tokens` + adaptive: Anthropic's adaptive thinking wire
+/// shape has no field for an explicit budget -- the model picks its
+/// own from the effort string. If a caller sets both
+/// `reasoning.max_tokens` AND the provider has `adaptive_thinking =
+/// true`, the budget is dropped (with a tracing::warn at the call
+/// site). The caller's effort string still travels to
+/// `output_config.effort`.
 fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
@@ -103,6 +111,21 @@ fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
     if adaptive {
         // Opus 4.7+ wire shape. budget_tokens is gone; effort moves
         // to top-level output_config (handled by build_output_config).
+        // If the caller set both an explicit budget AND
+        // adaptive_thinking is on, the budget gets dropped because
+        // there's no wire field for it. Warn so an operator who set
+        // both fields routinely (e.g. a client library that always
+        // sends `reasoning.max_tokens`) can see the discard in logs
+        // and adjust to using `effort` instead.
+        if r.max_tokens.is_some() {
+            tracing::warn!(
+                budget_tokens = r.max_tokens,
+                "reasoning.max_tokens dropped on adaptive thinking path; \
+                 Anthropic's adaptive shape has no budget field -- \
+                 the model picks its own budget from output_config.effort. \
+                 Set reasoning.effort to steer instead."
+            );
+        }
         return Some(ThinkingConfig::Adaptive);
     }
 
@@ -1231,5 +1254,66 @@ mod multi_turn_tool_use_tests {
         let thinking = body.get("thinking").unwrap();
         assert_eq!(thinking["type"], "disabled");
         assert!(body.get("output_config").is_none());
+    }
+
+    /// FX-1: the barefoot adaptive case -- `reasoning.enabled = true`
+    /// with no effort and no budget. Adaptive shape applies; effort
+    /// defaults to "medium". This is the only path where
+    /// `derive_effort` returns the fallback string, so we pin it
+    /// explicitly. (Without this test the default would silently
+    /// drift if anyone changed `derive_effort`.)
+    #[test]
+    fn adaptive_thinking_defaults_effort_to_medium_when_unset() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: None,
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, true).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "medium");
+    }
+
+    /// FX-1: when `adaptive_thinking = true` AND the caller sets an
+    /// explicit `reasoning.max_tokens`, the budget is dropped (the
+    /// adaptive wire shape has no field for it) and a tracing::warn
+    /// fires at normalize time. We can't easily assert the warn in a
+    /// unit test without `tracing-test`, but we CAN pin that the
+    /// resulting body is the adaptive shape with the caller's
+    /// effort string (or "medium" fallback), with no budget_tokens
+    /// leaking into the wire.
+    #[test]
+    fn adaptive_thinking_drops_max_tokens_silently() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("low".into()),
+                max_tokens: Some(8000),
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, true).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        // budget_tokens MUST NOT leak into the adaptive shape.
+        assert!(
+            body["thinking"].get("budget_tokens").is_none(),
+            "adaptive shape must not carry budget_tokens, got {body:?}"
+        );
+        // The caller's effort string survives even though the budget
+        // was dropped.
+        assert_eq!(body["output_config"]["effort"], "low");
     }
 }
