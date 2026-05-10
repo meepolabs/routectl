@@ -182,7 +182,18 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
     }
     if let Some(tools) = &req.tools {
         for t in tools {
-            if matches!(t, ToolDef::Other(_)) {
+            if let ToolDef::Other(v) = t {
+                // OpenAI function-shape tools (`{type:"function",
+                // function:{...}}`) land here today (the OpenAI ingress
+                // does not lift them, so canonical preserves the wire
+                // shape). They serialize verbatim through the
+                // openai-compat egress and reach the upstream
+                // unchanged -- no warn needed. Only Anthropic builtin
+                // / unknown shapes are genuinely dropped at the
+                // upstream's deserialization step.
+                if routectl_core::CustomTool::from_openai_function(v).is_some() {
+                    continue;
+                }
                 warn!(
                     provider = id,
                     "openai-compat egress: Anthropic builtin / non-custom tool dropped",
