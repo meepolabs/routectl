@@ -54,19 +54,92 @@ pub fn sanitize_for_log(s: &str) -> String {
 /// operators see consistent excerpt shapes when grepping `body_excerpt`
 /// across providers.
 pub fn sanitize_upstream_body(body: &str) -> String {
-    const MAX_LEN: usize = crate::MAX_LOG_BODY_EXCERPT;
+    sanitize_upstream_body_with_cap(body, crate::MAX_LOG_BODY_EXCERPT)
+}
+
+/// Variant of [`sanitize_upstream_body`] that takes an explicit
+/// character cap. Used by [`debug_upstream_error_body`] for the 4 KB
+/// debug-level full-body log so a JSON validation error with field
+/// detail isn't truncated by the 512-char excerpt cap.
+pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
     let trimmed = body.trim();
     let looks_like_html =
         trimmed.starts_with('<') || trimmed.to_ascii_lowercase().contains("<!doctype");
     if looks_like_html {
         return format!("<html error page, {} bytes>", body.len());
     }
-    if trimmed.len() <= MAX_LEN {
+    if trimmed.len() <= cap {
         return trimmed.to_string();
     }
-    let mut s = trimmed.chars().take(MAX_LEN).collect::<String>();
+    let mut s = trimmed.chars().take(cap).collect::<String>();
     s.push_str("... [truncated]");
     s
+}
+
+/// Cap on the full upstream error body emitted at `tracing::debug!`.
+/// 4 KB is large enough to fit any field-level JSON validation error
+/// Bedrock / Anthropic / OpenAI returns in practice, while still
+/// bounded so a malicious or compromised upstream can't drive log
+/// volume by returning megabyte-sized error pages.
+pub const MAX_DEBUG_BODY_BYTES: usize = 4096;
+
+/// Outgoing-body trace cap. 16 KB is a generous excerpt for diagnosis
+/// without flooding logs when a debug session gets left on by accident.
+pub const MAX_TRACE_OUTGOING_BODY_BYTES: usize = 16 * 1024;
+
+/// Emit a `tracing::trace!` line carrying the outgoing request body
+/// for a given provider. Inherits the parent span's `request_id` so a
+/// `grep request_id=<id>` correlates ingress -> outgoing -> upstream
+/// response in a single pass.
+///
+/// Gated by `tracing::Level::TRACE` so production with the default
+/// `info` level pays nothing. Operators flip to `trace` only during
+/// active triage; CLAUDE.md "Triage recipes" documents the workflow
+/// + the sensitivity caveat (bodies contain user prompts).
+pub fn trace_outgoing_body(provider_kind: &str, provider_id: &str, body: &serde_json::Value) {
+    if !tracing::event_enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    let s = serde_json::to_string(body).unwrap_or_default();
+    let truncated = if s.len() > MAX_TRACE_OUTGOING_BODY_BYTES {
+        format!(
+            "{}... [truncated at {MAX_TRACE_OUTGOING_BODY_BYTES} bytes]",
+            &s[..MAX_TRACE_OUTGOING_BODY_BYTES]
+        )
+    } else {
+        s
+    };
+    tracing::trace!(
+        provider_kind,
+        provider = provider_id,
+        body = %truncated,
+        "outgoing request body"
+    );
+}
+
+/// Emit a `tracing::debug!` line carrying the full upstream error
+/// body on a 4xx/5xx response. The provider's existing WARN with
+/// `body_excerpt` (200-512 chars) stays at WARN so
+/// `routectl-warn.log` remains scannable; this DEBUG line gives
+/// operators the full picture (capped at 4 KB) when they flip log
+/// level during triage. Inherits parent span for `request_id`
+/// correlation.
+///
+/// HTML pages from misconfigured proxies / CDN error pages are
+/// collapsed via [`sanitize_upstream_body_with_cap`] so the log
+/// doesn't fill with markup.
+pub fn debug_upstream_error_body(provider_kind: &str, provider_id: &str, status: u16, body: &str) {
+    if !tracing::event_enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let cleaned = sanitize_upstream_body_with_cap(body, MAX_DEBUG_BODY_BYTES);
+    tracing::debug!(
+        provider_kind,
+        provider = provider_id,
+        status,
+        body = %cleaned,
+        "upstream error body"
+    );
 }
 
 #[cfg(test)]
@@ -153,5 +226,34 @@ mod tests {
             "expected truncation marker; got tail: ...{}",
             &got[got.len().saturating_sub(20)..]
         );
+    }
+
+    /// PR C / FR-1: the cap-aware variant lets callers pick a larger
+    /// limit (4 KB for the debug-level full-body log) while reusing
+    /// the same HTML collapse + trim logic. Pin the cap behavior so
+    /// debug_upstream_error_body's 4 KB ceiling can't silently drift.
+    #[test]
+    fn upstream_body_with_cap_respects_explicit_limit() {
+        use super::sanitize_upstream_body_with_cap;
+        let body = "y".repeat(10_000);
+        let got = sanitize_upstream_body_with_cap(&body, super::MAX_DEBUG_BODY_BYTES);
+        // 4096 chars + "... [truncated]" tail (15 chars) = 4111
+        assert_eq!(
+            got.len(),
+            super::MAX_DEBUG_BODY_BYTES + "... [truncated]".len()
+        );
+        assert!(got.ends_with("... [truncated]"));
+
+        // Short bodies pass through unchanged.
+        let short = "tiny";
+        assert_eq!(
+            sanitize_upstream_body_with_cap(short, super::MAX_DEBUG_BODY_BYTES),
+            "tiny"
+        );
+
+        // HTML collapse still applies regardless of cap.
+        let html = "<!DOCTYPE html><html>...500 lines...</html>";
+        let got = sanitize_upstream_body_with_cap(html, super::MAX_DEBUG_BODY_BYTES);
+        assert!(got.starts_with("<html error page"));
     }
 }

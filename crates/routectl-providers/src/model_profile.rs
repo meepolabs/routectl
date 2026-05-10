@@ -41,26 +41,6 @@ pub enum MatchKind {
 ///
 /// When adding a flag here, also add a doc comment explaining what it
 /// gates and which provider reads it.
-///
-/// ## Compiled-here vs. TOML-on-the-provider
-///
-/// Quirks that fit a stable model-name lineage with a reliable string
-/// match (e.g. OpenAI o-series `drops_sampling_params`) belong here.
-/// Quirks that ship on Anthropic's release cadence with no clean
-/// naming pattern (e.g. `adaptive_thinking` for Opus 4.7+) belong as
-/// per-provider TOML flags on the relevant `*Config` struct, NOT in
-/// this table -- otherwise routectl is racing the model release
-/// schedule on every Anthropic update. The current criterion: if the
-/// pattern would false-positive on adjacent SKUs (e.g. `opus-4-`
-/// would catch `opus-4-5`/`4-6` which still want the legacy shape)
-/// AND we expect more variants imminently, prefer TOML.
-///
-/// `suggests_adaptive_thinking` is the bridge between the two: a
-/// COMPILED hint (`opus-4-7` substring, etc.) that does NOT change
-/// behavior on its own, but emits a startup/request-time WARN so an
-/// operator sees "you probably want to set
-/// `adaptive_thinking = true` on this provider" without having to
-/// trip the upstream 400 first.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelProfile {
     /// Model id (or fragment of it) to match.
@@ -85,20 +65,6 @@ pub struct ModelProfile {
     /// Set on a per-model basis when the model is served by a thinking
     /// model that needs `enable_thinking`. Read by `openai_compat::request`.
     pub uses_chat_template_kwargs: bool,
-
-    /// Hint-only: this model id matches a pattern that probably wants
-    /// the operator to set `adaptive_thinking = true` on the relevant
-    /// `AnthropicApiConfig` / `BedrockConfig` (the new wire shape
-    /// Anthropic introduced for Opus 4.7+). Does NOT change request
-    /// shape; the actual rewrite is gated by the TOML flag, not by
-    /// this hint. Read by `anthropic_api::request::normalize` solely
-    /// to emit a one-shot WARN that points the operator at the flag
-    /// when their request is about to hit a 400. Set this on rows for
-    /// new Claude models that ship the adaptive shape, AS THEY LAND
-    /// in the wild -- so an operator who configures the model the
-    /// day it ships gets the WARN automatically without waiting on a
-    /// behavior-changing release.
-    pub suggests_adaptive_thinking: bool,
 }
 
 impl ModelProfile {
@@ -110,7 +76,6 @@ impl ModelProfile {
         drops_sampling_params: false,
         requires_reasoning_effort: false,
         uses_chat_template_kwargs: false,
-        suggests_adaptive_thinking: false,
     };
 
     /// Test the profile's pattern against a (lowercase) model id.
@@ -161,22 +126,6 @@ pub const PROFILES: &[ModelProfile] = &[
         pattern: "reasoner",
         kind: MatchKind::Substring,
         drops_sampling_params: true,
-        ..ModelProfile::DEFAULT
-    },
-    // Anthropic Opus 4.7+ uses the adaptive thinking wire shape
-    // (`thinking.type = "adaptive"` + top-level `output_config.effort`).
-    // This is a HINT only -- the rewrite itself is gated by the
-    // provider's TOML `adaptive_thinking` flag. The hint exists so an
-    // operator who configures `model_id =
-    // "global.anthropic.claude-opus-4-7-..."` without setting the
-    // flag sees a WARN at request-normalize time pointing them at
-    // the fix, instead of a cryptic upstream 400. Substring so
-    // `claude-opus-4-7-20260301`, `global.anthropic.claude-opus-4-7-v1:0`,
-    // and any vendor-prefixed shape all match.
-    ModelProfile {
-        pattern: "opus-4-7",
-        kind: MatchKind::Substring,
-        suggests_adaptive_thinking: true,
         ..ModelProfile::DEFAULT
     },
 ];
@@ -268,31 +217,5 @@ mod tests {
         assert!(!p.drops_sampling_params);
         assert!(!p.requires_reasoning_effort);
         assert!(!p.uses_chat_template_kwargs);
-        assert!(!p.suggests_adaptive_thinking);
-    }
-
-    #[test]
-    fn opus_4_7_suggests_adaptive_thinking_via_substring() {
-        // Bare model id (claude-code wire shape after prefix-strip).
-        let p = profile_for("claude-opus-4-7");
-        assert!(p.suggests_adaptive_thinking);
-        // Vendor-prefixed Bedrock inference profile id.
-        let p = profile_for("global.anthropic.claude-opus-4-7-v1:0");
-        assert!(p.suggests_adaptive_thinking);
-        // Vendor-prefixed cross-region profile id.
-        let p = profile_for("us.anthropic.claude-opus-4-7-20260301");
-        assert!(p.suggests_adaptive_thinking);
-    }
-
-    #[test]
-    fn opus_4_6_does_not_suggest_adaptive_thinking() {
-        // Older Claude families still want the legacy thinking shape.
-        // The hint must not trigger on them.
-        let p = profile_for("claude-opus-4-6");
-        assert!(!p.suggests_adaptive_thinking);
-        let p = profile_for("global.anthropic.claude-sonnet-4-6");
-        assert!(!p.suggests_adaptive_thinking);
-        let p = profile_for("claude-haiku-4-5-20251001");
-        assert!(!p.suggests_adaptive_thinking);
     }
 }
