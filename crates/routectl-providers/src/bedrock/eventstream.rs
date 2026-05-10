@@ -190,19 +190,30 @@ where
                 }
                 None => {
                     // Upstream closed. If we still have buffered
-                    // bytes, the stream was truncated mid-frame --
-                    // a real failure that must NOT be reported as
-                    // clean EOF. Without this, a connection drop
-                    // partway through a Bedrock eventstream looks
-                    // like a successful completion both to the
-                    // caller AND to the router's circuit breaker
-                    // (which records a "successful" probe for an
-                    // unhealthy upstream).
+                    // bytes -- OR if smithy has a partial frame's
+                    // prelude buffered internally -- the stream was
+                    // truncated mid-frame. Both must surface as
+                    // errors, not clean EOF.
+                    //
+                    // Without the `smithy_has_prelude_buffered` half
+                    // of this check, an upstream that closes after
+                    // sending exactly 12 bytes (a prelude with no
+                    // body) would report success: our `buffer` is
+                    // empty (we drained the 12 prelude bytes after
+                    // the Incomplete return) but smithy still has
+                    // an incomplete frame staged. The router's
+                    // circuit breaker would record a "successful"
+                    // probe for an unhealthy upstream.
                     if !buffer.is_empty() {
                         yield Err(Error::Streaming(format!(
                             "bedrock stream truncated: {} buffered bytes left at EOF",
                             buffer.len()
                         )));
+                    } else if smithy_has_prelude_buffered {
+                        yield Err(Error::Streaming(
+                            "bedrock stream truncated: prelude consumed but frame body never arrived before EOF"
+                                .to_string(),
+                        ));
                     }
                     return;
                 }
@@ -547,6 +558,88 @@ mod tests {
             match item {
                 Ok(_) => {}
                 Err(e) => panic!("FX-8 regression: stream errored on prelude-split frame: {e:?}"),
+            }
+        }
+    }
+
+    /// FX-8 second-order test: when an upstream sends just a 12-byte
+    /// prelude and then closes the connection, we drain the prelude
+    /// (so `buffer.is_empty()` is true) but smithy still has a
+    /// partial frame staged. Pre-second-fix the EOF check returned
+    /// `Ok(())` to the caller, hiding the truncation. Now the
+    /// `smithy_has_prelude_buffered` half of the EOF check fires.
+    #[tokio::test]
+    async fn eof_after_prelude_only_yields_truncation_error() {
+        // Build a real frame, then take only its 12-byte prelude.
+        let inner = r#"{"type":"ping"}"#;
+        let b64 = B64_STANDARD.encode(inner.as_bytes());
+        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+        let frame = make_frame("chunk", &payload);
+        let mut buf = Vec::new();
+        aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf).unwrap();
+        let prelude_only = Bytes::copy_from_slice(&buf[..12]);
+
+        // Stream yields the prelude bytes once, then EOF.
+        let byte_stream = futures::stream::iter(vec![Ok(prelude_only)]);
+        let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
+
+        let mut saw_truncation = false;
+        while let Some(item) = chunks.next().await {
+            match item {
+                Ok(_) => panic!("expected truncation error, got Ok"),
+                Err(Error::Streaming(msg)) => {
+                    assert!(
+                        msg.contains("truncated") && msg.contains("prelude"),
+                        "expected prelude-truncation message, got: {msg}"
+                    );
+                    saw_truncation = true;
+                }
+                Err(other) => panic!("expected Streaming error, got: {other:?}"),
+            }
+        }
+        assert!(
+            saw_truncation,
+            "stream closed cleanly after prelude-only EOF -- circuit breaker would record success on an unhealthy upstream"
+        );
+    }
+
+    /// FX-8 multi-frame test: two consecutive frames where frame 1 is
+    /// split at byte 12 and frame 2 arrives intact. Verifies the
+    /// `smithy_has_prelude_buffered` flag transitions correctly:
+    /// false -> true (after frame 1 Incomplete + drain) -> false
+    /// (after frame 1 Complete, smithy resets) -> false (frame 2
+    /// completes in one step, no Incomplete in between).
+    #[tokio::test]
+    async fn two_frame_stream_flag_lifecycle() {
+        let make_chunk_bytes = |type_str: &str| -> Vec<u8> {
+            let inner = format!(r#"{{"type":"{type_str}"}}"#);
+            let b64 = B64_STANDARD.encode(inner.as_bytes());
+            let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+            let frame = make_frame("chunk", &payload);
+            let mut buf = Vec::new();
+            aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf).unwrap();
+            buf
+        };
+
+        let frame1 = make_chunk_bytes("ping");
+        let frame2 = make_chunk_bytes("ping");
+
+        // Frame 1 split at 12; frame 2 in one chunk on top.
+        let (head1, tail1) = frame1.split_at(12);
+        let mut combined_tail: Vec<u8> = tail1.to_vec();
+        combined_tail.extend_from_slice(&frame2);
+
+        let byte_stream = futures::stream::iter(vec![
+            Ok(Bytes::copy_from_slice(head1)),
+            Ok(Bytes::from(combined_tail)),
+        ]);
+        let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
+
+        // Both frames are pings -> sse_state yields no ChatChunks.
+        // The test passes if the stream completes without error.
+        while let Some(item) = chunks.next().await {
+            if let Err(e) = item {
+                panic!("two-frame stream errored unexpectedly: {e:?}");
             }
         }
     }
