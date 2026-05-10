@@ -47,6 +47,30 @@ pub struct SseState {
     pub next_detail_index: u32,
     pub next_call_index: u32,
     pub open_block: Option<OpenBlockKind>,
+    /// Captured from `message_start.message.usage`. Anthropic emits
+    /// the input side of usage exactly once, in `message_start`; the
+    /// streaming `message_delta` events carry only output-side updates.
+    /// We carry the captured input fields forward so the final
+    /// `message_delta` chunk we emit downstream has full prompt_tokens
+    /// (sum of input + cache_creation + cache_read), matching what
+    /// OpenAI clients expect on the closing usage frame.
+    pub captured_input_usage: Option<CapturedInputUsage>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CapturedInputUsage {
+    pub input_tokens: u32,
+    pub cache_creation_input_tokens: Option<u32>,
+    pub cache_read_input_tokens: Option<u32>,
+    pub cache_creation: Option<CacheCreation>,
+}
+
+impl CapturedInputUsage {
+    fn prompt_tokens(&self) -> u32 {
+        self.input_tokens
+            .saturating_add(self.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_add(self.cache_read_input_tokens.unwrap_or(0))
+    }
 }
 
 impl SseState {
@@ -60,6 +84,17 @@ impl SseState {
             SseEvent::MessageStart { message } => {
                 self.id = message.id;
                 self.model = message.model;
+                if let Some(u) = message.usage {
+                    self.captured_input_usage = Some(CapturedInputUsage {
+                        input_tokens: u.input_tokens,
+                        cache_creation_input_tokens: u.cache_creation_input_tokens,
+                        cache_read_input_tokens: u.cache_read_input_tokens,
+                        cache_creation: u.cache_creation.as_ref().map(|c| CacheCreation {
+                            ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
+                            ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
+                        }),
+                    });
+                }
                 Ok(None)
             }
 
@@ -150,16 +185,107 @@ impl SseState {
 
             SseEvent::MessageDelta { delta, usage } => {
                 let finish_reason = map_stop_reason(delta.stop_reason.as_deref());
-                let usage_delta = usage.as_ref().map(|u| UsageDelta {
-                    completion_tokens: u.output_tokens,
-                    cache_creation_input_tokens: u.cache_creation_input_tokens,
-                    cache_read_input_tokens: u.cache_read_input_tokens,
-                    cache_creation: u.cache_creation.as_ref().map(|c| CacheCreation {
-                        ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
-                        ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
-                    }),
-                    ..Default::default()
-                });
+                // Build a UsageDelta if either the delta event carries
+                // output-side info OR we captured input-side info at
+                // message_start. Anthropic streams emit input usage
+                // only once (in message_start) so the closing chunk
+                // must carry it forward for OpenAI clients to see the
+                // full prompt_tokens.
+                let captured = self.captured_input_usage.clone();
+                let usage_delta = if usage.is_some() || captured.is_some() {
+                    let cap = captured.as_ref();
+                    // Prompt-tokens selection. Real Anthropic does NOT
+                    // currently emit `input_tokens` on `message_delta`,
+                    // only on `message_start`. The only path that
+                    // populates `usage.input_tokens` here is a chained
+                    // routectl: `crates/routectl-cli/src/ingress/anthropic.rs::emit_message_delta`
+                    // writes the canonical `usage.prompt_tokens`
+                    // (already-summed) into the wire field. So when
+                    // `d` is present and non-zero, treat it as the
+                    // pre-summed prompt total. When `d` is zero or
+                    // missing, fall back to `cap.prompt_tokens()`,
+                    // which sums input + cache_creation + cache_read
+                    // captured from `message_start`. If a future
+                    // upstream emits raw (non-summed) input_tokens on
+                    // `message_delta`, this assumption breaks and we
+                    // would silently undercount; the tests below pin
+                    // both branches so a regression there is loud.
+                    let prompt_tokens = match (
+                        usage.as_ref().and_then(|u| u.input_tokens),
+                        cap.map(|c| c.prompt_tokens()),
+                    ) {
+                        (Some(d), _) if d > 0 => Some(d),
+                        (_, Some(c)) if c > 0 => Some(c),
+                        (Some(d), _) => Some(d),
+                        (_, c) => c,
+                    };
+                    let completion_tokens = usage.as_ref().and_then(|u| u.output_tokens);
+                    let total_tokens = match (prompt_tokens, completion_tokens) {
+                        (Some(p), Some(c)) => Some(p.saturating_add(c)),
+                        (Some(p), None) => Some(p),
+                        (None, Some(c)) => Some(c),
+                        (None, None) => None,
+                    };
+                    // Cache-field merge. Symmetric with prompt_tokens
+                    // above: prefer message_delta's value when present
+                    // and non-zero, else fall back to the captured
+                    // message_start value. An explicit `Some(0)` from
+                    // the delta is treated as "no info" rather than
+                    // "authoritative zero" so a placeholder restatement
+                    // does not blow away non-zero captured numbers.
+                    let pick = |delta: Option<u32>, cap_v: Option<u32>| -> Option<u32> {
+                        match (delta, cap_v) {
+                            (Some(d), _) if d > 0 => Some(d),
+                            (_, Some(c)) if c > 0 => Some(c),
+                            (Some(d), _) => Some(d),
+                            (_, c) => c,
+                        }
+                    };
+                    let cache_creation_input_tokens = pick(
+                        usage.as_ref().and_then(|u| u.cache_creation_input_tokens),
+                        cap.and_then(|c| c.cache_creation_input_tokens),
+                    );
+                    let cache_read_input_tokens = pick(
+                        usage.as_ref().and_then(|u| u.cache_read_input_tokens),
+                        cap.and_then(|c| c.cache_read_input_tokens),
+                    );
+                    // Per-TTL `cache_creation` breakdown: merge field-
+                    // by-field through the same zero-aware `pick`
+                    // helper. Without this, a delta carrying a
+                    // partial or empty `cache_creation` object would
+                    // wholesale-replace the richer object captured at
+                    // `message_start`, silently losing per-TTL detail.
+                    let delta_cc = usage.as_ref().and_then(|u| u.cache_creation.as_ref());
+                    let cap_cc = cap.and_then(|c| c.cache_creation.as_ref());
+                    let cache_creation_5m = pick(
+                        delta_cc.and_then(|c| c.ephemeral_5m_input_tokens),
+                        cap_cc.and_then(|c| c.ephemeral_5m_input_tokens),
+                    );
+                    let cache_creation_1h = pick(
+                        delta_cc.and_then(|c| c.ephemeral_1h_input_tokens),
+                        cap_cc.and_then(|c| c.ephemeral_1h_input_tokens),
+                    );
+                    let cache_creation =
+                        if cache_creation_5m.is_some() || cache_creation_1h.is_some() {
+                            Some(CacheCreation {
+                                ephemeral_5m_input_tokens: cache_creation_5m,
+                                ephemeral_1h_input_tokens: cache_creation_1h,
+                            })
+                        } else {
+                            None
+                        };
+                    Some(UsageDelta {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                        cache_creation,
+                        ..Default::default()
+                    })
+                } else {
+                    None
+                };
                 // Emit a chunk if either side carries information; an
                 // empty MessageDelta (no stop_reason and no usage) is
                 // a keepalive in spirit -- skip.
@@ -418,5 +544,285 @@ mod tests {
             .parse_event("test-anthropic", r#"{"type":"ping"}"#)
             .unwrap();
         assert!(got.is_none(), "ping must be Ok(None), got: {got:?}");
+    }
+
+    /// `message_start.usage` carries the input side of token accounting.
+    /// Real Anthropic emits non-zero `input_tokens` plus cache numbers
+    /// here; some upstream variants (and routectl's own Anthropic
+    /// ingress today) emit zeros that get corrected later in
+    /// `message_delta`. The state must capture whatever's in
+    /// `message_start.usage` so the closing chunk can sum them into
+    /// `prompt_tokens`.
+    #[test]
+    fn message_start_captures_input_usage_for_summing() {
+        let mut state = SseState::default();
+        let payload = r#"{
+            "type":"message_start",
+            "message": {
+                "id": "msg_01",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-opus-4-7",
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 300
+                }
+            }
+        }"#;
+        let _ = state.parse_event("test", payload).unwrap();
+        let cap = state
+            .captured_input_usage
+            .as_ref()
+            .expect("input usage captured from message_start");
+        assert_eq!(cap.input_tokens, 100);
+        assert_eq!(cap.cache_creation_input_tokens, Some(200));
+        assert_eq!(cap.cache_read_input_tokens, Some(300));
+        // sum surfaces as the prompt_tokens helper.
+        assert_eq!(cap.prompt_tokens(), 600);
+    }
+
+    /// Closing `message_delta` chunk must carry the full
+    /// `prompt_tokens` (sum of input + cache_creation + cache_read)
+    /// so OpenAI clients see the cumulative context size at end-of-
+    /// stream, not zero (the prior bug) or just the new turn's
+    /// non-cached count.
+    #[test]
+    fn message_delta_emits_prompt_tokens_from_captured_input() {
+        let mut state = SseState::default();
+        // message_start with non-trivial input + cache numbers.
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_start",
+                    "message": {
+                        "id":"msg_01","type":"message","role":"assistant",
+                        "content":[],"model":"claude-opus-4-7",
+                        "stop_reason":null,"stop_sequence":null,
+                        "usage": {
+                            "input_tokens": 50,
+                            "output_tokens": 0,
+                            "cache_creation_input_tokens": 100,
+                            "cache_read_input_tokens": 200
+                        }
+                    }
+                }"#,
+            )
+            .unwrap();
+        // message_delta with output usage and stop_reason.
+        let chunk = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
+                    "usage": {"output_tokens": 25}
+                }"#,
+            )
+            .unwrap()
+            .expect("closing chunk emitted");
+        let usage = chunk.usage.expect("usage on closing chunk");
+        // 50 + 100 + 200 = 350
+        assert_eq!(usage.prompt_tokens, Some(350));
+        assert_eq!(usage.completion_tokens, Some(25));
+        assert_eq!(usage.total_tokens, Some(375));
+    }
+
+    /// When `message_delta.usage.input_tokens` is present (e.g. from
+    /// routectl's own Anthropic ingress emitting the post-cache total),
+    /// prefer it over the captured `message_start` value. This is the
+    /// "chained routectl" scenario: an upstream routectl renders the
+    /// final input count to `message_delta.usage.input_tokens` because
+    /// `message_start.usage` was hardcoded to zero.
+    #[test]
+    fn message_delta_input_tokens_overrides_captured_zero() {
+        let mut state = SseState::default();
+        // message_start with zero input (the upstream-hardcoded case).
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_start",
+                    "message": {
+                        "id":"msg_01","type":"message","role":"assistant",
+                        "content":[],"model":"claude-opus-4-7",
+                        "stop_reason":null,"stop_sequence":null,
+                        "usage": {"input_tokens": 0, "output_tokens": 0}
+                    }
+                }"#,
+            )
+            .unwrap();
+        let chunk = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
+                    "usage": {
+                        "input_tokens": 12345,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0
+                    }
+                }"#,
+            )
+            .unwrap()
+            .expect("closing chunk emitted");
+        let usage = chunk.usage.expect("usage");
+        assert_eq!(usage.prompt_tokens, Some(12345));
+        assert_eq!(usage.completion_tokens, Some(50));
+    }
+
+    /// Pin the chained-routectl invariant: when both message_start AND
+    /// message_delta carry non-zero input_tokens, the delta value
+    /// (which an upstream routectl writes as the already-summed
+    /// prompt_tokens) wins. Use DISTINCT values so the test
+    /// distinguishes "delta wins" from "captured wins" -- a regression
+    /// flipping the match arm order would fail this test.
+    #[test]
+    fn message_delta_input_tokens_wins_over_captured_when_both_nonzero() {
+        let mut state = SseState::default();
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_start",
+                    "message": {
+                        "id":"msg_01","type":"message","role":"assistant",
+                        "content":[],"model":"claude-opus-4-7",
+                        "stop_reason":null,"stop_sequence":null,
+                        "usage": {"input_tokens": 50, "output_tokens": 0}
+                    }
+                }"#,
+            )
+            .unwrap();
+        // Delta sends a DIFFERENT non-zero input count (the chained-
+        // upstream's pre-summed value, e.g. after a cache hit on the
+        // upstream side that wasn't visible to our message_start).
+        let chunk = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
+                    "usage": {"input_tokens": 99, "output_tokens": 10}
+                }"#,
+            )
+            .unwrap()
+            .expect("closing chunk emitted");
+        let usage = chunk.usage.expect("usage");
+        // 99 (delta) wins, NOT 50 (captured) and NOT 149 (sum).
+        assert_eq!(usage.prompt_tokens, Some(99));
+        assert_eq!(usage.completion_tokens, Some(10));
+        assert_eq!(usage.total_tokens, Some(109));
+    }
+
+    /// Pin the cache-merge zero-aware fallback: if the closing
+    /// `message_delta.usage` restates `cache_*` as explicit zero while
+    /// `message_start` had non-zero captured values, keep the captured
+    /// values. Otherwise a placeholder restatement would erase real
+    /// cache stats.
+    #[test]
+    fn message_delta_cache_zero_does_not_overwrite_captured_nonzero() {
+        let mut state = SseState::default();
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_start",
+                    "message": {
+                        "id":"msg_01","type":"message","role":"assistant",
+                        "content":[],"model":"claude-opus-4-7",
+                        "stop_reason":null,"stop_sequence":null,
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 0,
+                            "cache_creation_input_tokens": 100,
+                            "cache_read_input_tokens": 200
+                        }
+                    }
+                }"#,
+            )
+            .unwrap();
+        let chunk = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
+                    "usage": {
+                        "output_tokens": 7,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0
+                    }
+                }"#,
+            )
+            .unwrap()
+            .expect("closing chunk");
+        let usage = chunk.usage.expect("usage");
+        assert_eq!(usage.cache_creation_input_tokens, Some(100));
+        assert_eq!(usage.cache_read_input_tokens, Some(200));
+    }
+
+    /// Pin the per-TTL `cache_creation` field-level merge: a delta
+    /// carrying a partial or empty `cache_creation` object must NOT
+    /// wholesale-replace the captured object's per-TTL detail. Each
+    /// field falls back independently through the same zero-aware
+    /// pick.
+    #[test]
+    fn message_delta_partial_cache_creation_object_merges_per_ttl() {
+        let mut state = SseState::default();
+        // message_start with both TTL buckets set.
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_start",
+                    "message": {
+                        "id":"msg_01","type":"message","role":"assistant",
+                        "content":[],"model":"claude-opus-4-7",
+                        "stop_reason":null,"stop_sequence":null,
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "cache_creation": {
+                                "ephemeral_5m_input_tokens": 50,
+                                "ephemeral_1h_input_tokens": 100
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .unwrap();
+        // Delta restates ONLY the 5m bucket (e.g. an upstream that
+        // tracks 5m only); 1h is absent in the wire payload.
+        let chunk = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
+                    "usage": {
+                        "output_tokens": 5,
+                        "cache_creation": {
+                            "ephemeral_5m_input_tokens": 75
+                        }
+                    }
+                }"#,
+            )
+            .unwrap()
+            .expect("closing chunk");
+        let usage = chunk.usage.expect("usage");
+        let cc = usage.cache_creation.expect("cache_creation present");
+        // 5m: delta's 75 wins over captured 50.
+        assert_eq!(cc.ephemeral_5m_input_tokens, Some(75));
+        // 1h: absent from delta, falls back to captured 100. Pre-fix
+        // this would be None (whole-object replacement lost it).
+        assert_eq!(cc.ephemeral_1h_input_tokens, Some(100));
     }
 }
