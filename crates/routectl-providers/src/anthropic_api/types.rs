@@ -28,6 +28,12 @@ pub struct AnthropicRequest {
     pub system: Option<AnthropicSystem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+    /// Top-level effort knob for the Opus 4.7+ adaptive thinking path.
+    /// Only emitted alongside `ThinkingConfig::Adaptive`. See
+    /// `OutputConfig` and `ThinkingConfig::Adaptive` for the wire
+    /// shape; the request normalizer decides whether to populate this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -330,8 +336,29 @@ fn take_str(obj: &mut Map<String, Value>, key: &str) -> Result<String, String> {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
-    Enabled { budget_tokens: u32 },
+    Enabled {
+        budget_tokens: u32,
+    },
+    /// Opus 4.7+ wire shape. The model picks its own budget; the
+    /// operator steers via top-level `output_config.effort` (a string
+    /// like "low" | "medium" | "high" | "xhigh" | "max"). No
+    /// `budget_tokens` field. Older Claude models (4.5/4.6 family)
+    /// still want the `Enabled` shape, so this variant only ships
+    /// when `AnthropicApiConfig::adaptive_thinking` (or the Bedrock
+    /// equivalent) is `Some(true)` -- the request normalizer in
+    /// `request.rs` decides which variant to emit per-call.
+    Adaptive,
     Disabled,
+}
+
+/// Top-level `output_config` field on `AnthropicRequest`. Only emitted
+/// alongside `ThinkingConfig::Adaptive`. Anthropic validates the
+/// `effort` string -- routectl passes whatever the canonical
+/// `req.reasoning.effort` carries through verbatim ("low", "medium",
+/// "high", "xhigh", "max", or anything Anthropic adds later).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OutputConfig {
+    pub effort: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +624,7 @@ mod tests {
             max_tokens: 100,
             system: None,
             thinking: None,
+            output_config: None,
             temperature: None,
             top_p: None,
             stop_sequences: None,
@@ -618,6 +646,7 @@ mod tests {
             max_tokens: 100,
             system: None,
             thinking: None,
+            output_config: None,
             temperature: None,
             top_p: None,
             stop_sequences: None,
