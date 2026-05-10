@@ -50,6 +50,18 @@ impl IngressAdapter for OpenAiIngress {
     }
 
     fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
+        // PR C / FR-1: trace-level ingress body for triage. Inherits
+        // the parent span's `request_id` so a `grep request_id=<id>`
+        // shows ingress -> outgoing -> upstream response in one
+        // pass. Gated by `tracing::Level::TRACE`; default `info`
+        // level pays nothing.
+        if tracing::event_enabled!(tracing::Level::TRACE) {
+            tracing::trace!(
+                ingress = "openai",
+                body = %serde_json::to_string(&body).unwrap_or_default(),
+                "openai ingress body"
+            );
+        }
         let mut req: ChatRequest = serde_json::from_value(body).map_err(|e| {
             Error::Validation(format!(
                 "openai ingress: invalid /v1/chat/completions body: {e}"

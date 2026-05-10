@@ -171,10 +171,70 @@ where
                         break;
                     }
                     Err(e) => {
-                        yield Err(Error::Streaming(format!(
-                            "bedrock eventstream decode failed: {e}"
-                        )));
-                        return;
+                        // FX-4 + FX-5/7: skip the failed frame instead
+                        // of killing the stream.
+                        //
+                        // Pre-fix, any decode error propagated as
+                        // stream-fatal `Err(Streaming)`. That conflated
+                        // a single transient bad frame with a stream-
+                        // wide failure -- forcing claude-code to
+                        // restart the entire response over for what
+                        // could have been a 1-frame glitch.
+                        //
+                        // FX-4: read the advertised `total_length`
+                        // from `buffer[0..4]` (already DoS-capped at
+                        // the top of the loop), drain that many bytes
+                        // (or clear the whole buffer if it's smaller
+                        // than the advertised length), reset the
+                        // decoder, and continue. The Anthropic SSE
+                        // state machine inside `sse_state` is
+                        // tolerant to one missing event.
+                        //
+                        // FX-5/7: dump the failed frame's prelude +
+                        // first 256 bytes as hex at WARN so a future
+                        // framing bug is diagnosable from a single
+                        // log capture instead of an ad-hoc tcpdump
+                        // session.
+                        let advertised = if buffer.len() >= 4 {
+                            u32::from_be_bytes([
+                                buffer[0], buffer[1], buffer[2], buffer[3],
+                            ]) as usize
+                        } else {
+                            0
+                        };
+                        let dump_len = advertised.min(256).min(buffer.len());
+                        let hex: String = buffer[..dump_len]
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        tracing::warn!(
+                            provider = %provider_id,
+                            err = %e,
+                            frame_len = advertised,
+                            hex = %hex,
+                            "bedrock eventstream frame decode failed; skipping frame"
+                        );
+
+                        // Skip past the failed frame.
+                        if advertised > 0 && buffer.len() >= advertised {
+                            // Full malformed frame in buffer -- drain
+                            // exactly the advertised length so frame
+                            // N+1 stays aligned.
+                            let _ = buffer.split_to(advertised);
+                        } else {
+                            // Partial or zero-length: drop everything
+                            // we have. Realignment would require the
+                            // upstream to mark a new frame boundary
+                            // (which it does on every send), so the
+                            // worst case is one extra frame lost.
+                            buffer.clear();
+                        }
+                        // Reset the decoder so its internal
+                        // `prelude_read` state and our flag align.
+                        decoder = MessageFrameDecoder::new();
+                        smithy_has_prelude_buffered = false;
+                        continue;
                     }
                 }
             }
@@ -260,21 +320,39 @@ fn handle_invoke_frame(
         "chunk" => {
             // Payload is JSON: { "bytes": "<base64>" } where the
             // base64-decoded bytes is an Anthropic Messages SSE event.
-            let outer: Value = serde_json::from_slice(payload_bytes).map_err(|e| {
-                Error::Streaming(format!(
-                    "bedrock chunk payload not JSON: {e} (raw len={})",
-                    payload_bytes.len()
-                ))
-            })?;
+            //
+            // FX-3: a malformed chunk's outer JSON used to be
+            // stream-fatal. Demote to `Ok(None)` + WARN so a single
+            // bad frame doesn't kill an in-flight response. The
+            // failed frame's bytes never reach the SSE state machine,
+            // and `sse_state` is tolerant to one missing event.
+            let outer: Value = match serde_json::from_slice(payload_bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        err = %e,
+                        raw_len = payload_bytes.len(),
+                        "bedrock chunk payload not JSON; skipping"
+                    );
+                    return Ok(None);
+                }
+            };
             let b64 = outer.get("bytes").and_then(|v| v.as_str()).ok_or_else(|| {
                 Error::Streaming("bedrock chunk payload missing `bytes` field".into())
             })?;
             let decoded = B64_STANDARD.decode(b64).map_err(|e| {
                 Error::Streaming(format!("bedrock chunk bytes not valid base64: {e}"))
             })?;
-            let inner = std::str::from_utf8(&decoded).map_err(|e| {
-                Error::Streaming(format!("bedrock chunk bytes not valid utf-8: {e}"))
-            })?;
+            // FX-2: use `from_utf8_lossy` rather than strict
+            // `from_utf8`. A multi-byte char (emoji, CJK character)
+            // split exactly across two SSE chunk boundaries used to
+            // surface as `Streaming("not valid utf-8")` and kill the
+            // stream. Replacement with U+FFFD lets the response
+            // finish; the model rarely emits a single replacement
+            // char where text was intended.
+            let inner_owned = String::from_utf8_lossy(&decoded).into_owned();
+            let inner = inner_owned.as_str();
             // Detect Anthropic-shape `error` events injected into an
             // otherwise-200 stream (e.g. `overloaded_error` mid-stream).
             // The default SseState swallows these as `Ok(None)` -- we
@@ -640,6 +718,106 @@ mod tests {
         while let Some(item) = chunks.next().await {
             if let Err(e) = item {
                 panic!("two-frame stream errored unexpectedly: {e:?}");
+            }
+        }
+    }
+
+    /// FX-2: a multi-byte UTF-8 sequence in a chunk payload that
+    /// happens to be invalid (split across frames in real life, or
+    /// just a bad byte) must NOT kill the stream. Pre-fix the strict
+    /// `std::str::from_utf8` would surface as `Streaming("not valid
+    /// utf-8")` and terminate. After FX-2, lossy decoding inserts
+    /// U+FFFD and the chunk continues.
+    #[tokio::test]
+    async fn lossy_utf8_in_chunk_payload_does_not_fail_stream() {
+        // Build inner SSE event with a bare 0xFE byte (invalid UTF-8
+        // start byte) embedded in a text delta.
+        let mut inner = b"{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi"
+            .to_vec();
+        inner.push(0xFE); // invalid UTF-8 start byte
+        inner.extend_from_slice(b"\"}}");
+
+        let b64 = B64_STANDARD.encode(&inner);
+        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+        let frame = make_frame("chunk", &payload);
+        let mut buf = Vec::new();
+        aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf).unwrap();
+
+        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(buf))]);
+        let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
+
+        // The lossy decode replaces 0xFE with U+FFFD; the resulting
+        // string is valid JSON wrapping a text delta, so the stream
+        // yields a chunk (not an error).
+        while let Some(item) = chunks.next().await {
+            match item {
+                Ok(_) => {}
+                Err(e) => panic!("FX-2 regression: stream errored on lossy-utf8 payload: {e:?}"),
+            }
+        }
+    }
+
+    /// FX-3: a chunk frame whose payload is malformed JSON used to be
+    /// stream-fatal. Now it emits a per-frame WARN and skips the
+    /// frame, returning `Ok(None)` from `handle_invoke_frame`.
+    #[test]
+    fn malformed_chunk_json_skips_via_handle_invoke_frame() {
+        // Direct unit test of handle_invoke_frame -- the chunk arm
+        // is what we changed in FX-3.
+        let mut sse_state = SseState::default();
+        // Payload that's not a JSON object at all.
+        let res = handle_invoke_frame(
+            "test-bedrock",
+            make_frame("chunk", "not even close to json"),
+            &mut sse_state,
+        );
+        match res {
+            Ok(None) => {} // expected
+            Ok(Some(_)) => panic!("FX-3: malformed chunk should skip, not yield"),
+            Err(e) => panic!(
+                "FX-3 regression: malformed chunk JSON returned Err instead of Ok(None): {e:?}"
+            ),
+        }
+    }
+
+    /// FX-4 + FX-5/7: a frame with a corrupted `total_length` causes
+    /// smithy to return Err. Pre-fix this killed the stream. After
+    /// FX-4 we emit a WARN with hex dump, skip exactly the
+    /// advertised length (or clear buffer if smaller), reset the
+    /// decoder, and continue. The next valid frame yields normally.
+    #[tokio::test]
+    async fn malformed_frame_skip_continues_stream() {
+        // Build a valid frame, then corrupt its CRC bytes (the last
+        // 4 bytes) so smithy fails its CRC check on decode.
+        let inner = r#"{"type":"ping"}"#;
+        let b64 = B64_STANDARD.encode(inner.as_bytes());
+        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+        let frame_good = make_frame("chunk", &payload);
+        let mut buf_good = Vec::new();
+        aws_smithy_eventstream::frame::write_message_to(&frame_good, &mut buf_good).unwrap();
+
+        // Corrupt frame: same total_length, but flip the message CRC
+        // bytes (last 4 bytes of the frame). Smithy's frame decoder
+        // reads the message-CRC at the end and Errors on mismatch,
+        // which exercises the FX-4 skip path.
+        let mut buf_bad = buf_good.clone();
+        let n = buf_bad.len();
+        buf_bad[n - 4] ^= 0xFF;
+        buf_bad[n - 3] ^= 0xFF;
+
+        // Sequence: bad frame, good frame.
+        let mut combined = buf_bad;
+        combined.extend_from_slice(&buf_good);
+        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(combined))]);
+        let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
+
+        // We should NOT see an Err from the stream -- the bad frame
+        // is skipped (with a WARN) and the good frame's `ping`
+        // produces no chunks but doesn't fail. Pre-FX-4 this would
+        // yield an Err on the bad frame's CRC mismatch.
+        while let Some(item) = chunks.next().await {
+            if let Err(e) = item {
+                panic!("FX-4 regression: stream errored instead of skipping: {e:?}");
             }
         }
     }
