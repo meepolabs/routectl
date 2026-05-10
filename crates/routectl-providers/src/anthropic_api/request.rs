@@ -36,15 +36,25 @@ use routectl_core::{
 use super::parts::{parse_image_url_source, strip_text_after_tool_use};
 use super::types::{
     AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicRole, AnthropicSystem,
-    AnthropicSystemBlock, AnthropicTool, ContentBlock, ThinkingConfig,
+    AnthropicSystemBlock, AnthropicTool, ContentBlock, OutputConfig, ThinkingConfig,
 };
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 /// Proportional budget_tokens as fraction of max_tokens per effort level.
+/// Only consulted on the legacy `ThinkingConfig::Enabled` path -- the
+/// adaptive-thinking path passes `effort` through verbatim into
+/// `output_config.effort` and never calls this.
 fn effort_ratio(effort: &str) -> f64 {
     match effort {
+        // `max` arrived with the Opus 4.7+ adaptive thinking shape,
+        // but the legacy `Enabled { budget_tokens }` path may still
+        // see it on a non-adaptive provider. 0.99 leaves 1% of
+        // max_tokens for the visible response so the request is
+        // accepted; in practice operators who want `max` should set
+        // `adaptive_thinking = true` on the provider.
+        "max" => 0.99,
         "xhigh" => 0.95,
         "high" => 0.80,
         "medium" => 0.50,
@@ -54,35 +64,84 @@ fn effort_ratio(effort: &str) -> f64 {
     }
 }
 
-fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
+/// Effort string to use for top-level `output_config.effort`. Returns
+/// `req.reasoning.effort` verbatim when set; falls back to "medium"
+/// otherwise (Anthropic requires the field when adaptive thinking is
+/// active and validates the string).
+fn derive_effort(req: &ChatRequest) -> String {
+    req.reasoning
+        .as_ref()
+        .and_then(|r| r.effort.clone())
+        .unwrap_or_else(|| "medium".to_string())
+}
+
+/// Decide which `ThinkingConfig` variant (if any) to emit. The
+/// `adaptive` flag selects the wire shape: when `true` AND thinking
+/// would otherwise be `Enabled`, returns `Adaptive` instead (the
+/// caller pairs that with a top-level `output_config`); when `false`,
+/// returns the legacy `Enabled { budget_tokens }` shape; `Disabled`
+/// is always returned verbatim regardless of the flag.
+fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
     if r.enabled == Some(false) {
         return Some(ThinkingConfig::Disabled);
     }
+    if r.effort.as_deref() == Some("none") {
+        return Some(ThinkingConfig::Disabled);
+    }
+
+    // Did the caller actually ask for thinking? Any of: explicit
+    // enabled=true, a budget, an effort string (other than "none").
+    let thinking_active = r.enabled == Some(true)
+        || r.max_tokens.is_some()
+        || r.effort.as_deref().is_some_and(|e| e != "none");
+    if !thinking_active {
+        return None;
+    }
+
+    if adaptive {
+        // Opus 4.7+ wire shape. budget_tokens is gone; effort moves
+        // to top-level output_config (handled by build_output_config).
+        return Some(ThinkingConfig::Adaptive);
+    }
+
+    // Legacy wire shape: Enabled { budget_tokens }. Translate the
+    // canonical signal (explicit budget > effort > enabled=true).
     if let Some(budget) = r.max_tokens {
         return Some(ThinkingConfig::Enabled {
             budget_tokens: budget,
         });
     }
     if let Some(effort) = r.effort.as_deref() {
-        if effort == "none" {
-            return Some(ThinkingConfig::Disabled);
-        }
         let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let budget = ((max as f64) * effort_ratio(effort)).max(1.0) as u32;
         return Some(ThinkingConfig::Enabled {
             budget_tokens: budget,
         });
     }
-    if r.enabled == Some(true) {
-        let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-        let budget = (max / 2).max(1);
-        return Some(ThinkingConfig::Enabled {
-            budget_tokens: budget,
-        });
+    // r.enabled == Some(true) without budget or effort.
+    let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    let budget = (max / 2).max(1);
+    Some(ThinkingConfig::Enabled {
+        budget_tokens: budget,
+    })
+}
+
+/// Pair `ThinkingConfig::Adaptive` with a top-level `output_config`.
+/// Returns `Some(OutputConfig)` only when the thinking variant is
+/// `Adaptive`; otherwise `None`.
+fn build_output_config(
+    req: &ChatRequest,
+    thinking: &Option<ThinkingConfig>,
+) -> Option<OutputConfig> {
+    if matches!(thinking, Some(ThinkingConfig::Adaptive)) {
+        Some(OutputConfig {
+            effort: derive_effort(req),
+        })
+    } else {
+        None
     }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +790,7 @@ fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::Cac
 // Top-level normalize
 // ---------------------------------------------------------------------------
 
-pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
+pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result<Value> {
     // Up-front replay-invariant validation. Anthropic's wire format
     // requires (a) every Thinking block carry a `signature` for
     // multi-turn, (b) every tool_result message carry the
@@ -745,7 +804,8 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
     validate_replay_invariants(id, req)?;
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-    let thinking = build_thinking(req);
+    let thinking = build_thinking(req, adaptive_thinking);
+    let output_config = build_output_config(req, &thinking);
 
     // System: prefer req.system (canonical); fall back to lifting any
     // Role::System messages for direct callers that bypass an ingress.
@@ -763,8 +823,12 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
         .map(|ts| ts.iter().map(translate_tool).collect::<Vec<_>>());
 
     // Anthropic requires temperature = 1.0 when thinking is enabled.
+    // Both `Enabled { budget_tokens }` (legacy 4.5/4.6) and `Adaptive`
+    // (4.7+) trigger the same constraint -- the model can't sample
+    // alternative continuations while it's spending budget on
+    // visible-or-hidden chain-of-thought.
     let temperature = match &thinking {
-        Some(ThinkingConfig::Enabled { .. }) => Some(1.0f64),
+        Some(ThinkingConfig::Enabled { .. }) | Some(ThinkingConfig::Adaptive) => Some(1.0f64),
         _ => req.temperature,
     };
 
@@ -774,6 +838,7 @@ pub fn normalize(id: &str, req: &ChatRequest) -> Result<Value> {
         max_tokens,
         system,
         thinking,
+        output_config,
         temperature,
         top_p: req.top_p,
         stop_sequences: req.stop.clone(),
@@ -931,7 +996,7 @@ mod multi_turn_tool_use_tests {
             ..Default::default()
         };
 
-        let body = normalize("test-anthropic", &req).unwrap();
+        let body = normalize("test-anthropic", &req, false).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         let assistant = messages
             .iter()
@@ -972,7 +1037,7 @@ mod multi_turn_tool_use_tests {
             }],
             ..Default::default()
         };
-        let err = normalize("test-anthropic", &req).unwrap_err();
+        let err = normalize("test-anthropic", &req, false).unwrap_err();
         assert!(
             err.to_string().contains("tool_call_id"),
             "must mention tool_call_id; got: {err}"
@@ -1004,7 +1069,7 @@ mod multi_turn_tool_use_tests {
             }],
             ..Default::default()
         };
-        let err = normalize("test-anthropic", &req).unwrap_err();
+        let err = normalize("test-anthropic", &req, false).unwrap_err();
         assert!(
             err.to_string().contains("thinking block without signature"),
             "must mention signature; got: {err}"
@@ -1029,7 +1094,7 @@ mod multi_turn_tool_use_tests {
             )],
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req).unwrap();
+        let body = normalize("test-anthropic", &req, false).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         let assistant = messages
             .iter()
@@ -1041,5 +1106,130 @@ mod multi_turn_tool_use_tests {
             .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
             .unwrap();
         assert_eq!(tool_use["input"], json!({"_arguments": "this is not json"}));
+    }
+
+    /// FX-1: with `adaptive_thinking = true`, the wire shape is the
+    /// Opus 4.7+ form -- `thinking: {type:"adaptive"}` (no
+    /// `budget_tokens`) plus a top-level `output_config: {effort:...}`
+    /// carrying the canonical `reasoning.effort` string verbatim.
+    #[test]
+    fn adaptive_thinking_emits_adaptive_shape_with_output_config() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("xhigh".into()),
+                max_tokens: Some(8000),
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, true).unwrap();
+
+        // thinking serializes to {"type":"adaptive"} -- no budget_tokens.
+        let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(thinking["type"], "adaptive");
+        assert!(
+            thinking.get("budget_tokens").is_none(),
+            "adaptive shape must not carry budget_tokens, got {thinking:?}"
+        );
+
+        // output_config carries the effort verbatim.
+        let oc = body.get("output_config").expect("output_config present");
+        assert_eq!(oc["effort"], "xhigh");
+
+        // Anthropic requires temperature == 1.0 with thinking active --
+        // both Enabled and Adaptive variants trigger the same constraint.
+        assert_eq!(body["temperature"], 1.0);
+    }
+
+    /// FX-1: with `adaptive_thinking = false` (or absent), the wire
+    /// shape is the legacy `Enabled { budget_tokens }` form. Older
+    /// Claude models (4.5/4.6 family) still want this shape and would
+    /// 400 on the adaptive form.
+    #[test]
+    fn legacy_thinking_unchanged_when_flag_false() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-opus-4-6".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false).unwrap();
+
+        let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(thinking["type"], "enabled");
+        // budget_tokens = max_tokens (1024) * effort_ratio("high")=0.80 = 819
+        assert_eq!(thinking["budget_tokens"], 819);
+
+        // No output_config on the legacy path.
+        assert!(
+            body.get("output_config").is_none(),
+            "legacy shape must not emit output_config, got {body:?}"
+        );
+
+        assert_eq!(body["temperature"], 1.0);
+    }
+
+    /// FX-1: `effort = "max"` on the legacy path maps to a near-total
+    /// budget (max_tokens * 0.99). Adaptive path passes "max"
+    /// verbatim into `output_config.effort` and never calls
+    /// `effort_ratio`. This test pins the legacy mapping so a
+    /// non-adaptive provider receiving `max` from the canonical
+    /// surface still produces a serializable body.
+    #[test]
+    fn effort_max_maps_to_99_percent_legacy_path() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1000),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("max".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false).unwrap();
+        let thinking = body.get("thinking").unwrap();
+        assert_eq!(thinking["type"], "enabled");
+        // 1000 * 0.99 = 990
+        assert_eq!(thinking["budget_tokens"], 990);
+    }
+
+    /// FX-1: `reasoning.effort = "none"` produces `Disabled` on both
+    /// paths. The adaptive flag does not coerce a Disabled into an
+    /// Adaptive -- if the caller said no thinking, we honor it.
+    #[test]
+    fn disabled_thinking_unchanged_under_adaptive_flag() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(512),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("none".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: None,
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, true).unwrap();
+        let thinking = body.get("thinking").unwrap();
+        assert_eq!(thinking["type"], "disabled");
+        assert!(body.get("output_config").is_none());
     }
 }

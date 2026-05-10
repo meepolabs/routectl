@@ -579,6 +579,7 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
             extra_headers: Vec::new(),
             anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
+            adaptive_thinking: None,
         };
         let provider: Arc<dyn routectl_core::Provider> =
             Arc::new(BedrockProvider::new(cfg, resolved));

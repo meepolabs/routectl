@@ -63,6 +63,22 @@ where
         let mut buffer = BytesMut::new();
         let mut decoder = MessageFrameDecoder::new();
         let mut sse_state = SseState::default();
+        // FX-8 supporting state: tracks whether smithy has already
+        // consumed the 12-byte prelude into its internal buffer but
+        // has not yet returned Complete. The advertised-length DoS
+        // guard reads `buffer[0..4]` as the next frame's
+        // `total_length` -- but that's only valid when no prelude has
+        // been previously consumed. Once smithy has the prelude
+        // buffered (after an Incomplete return), `buffer[0..4]` is
+        // the START OF THE HEADERS section, not a length, and the cap
+        // check would spuriously fire on header bytes that look like
+        // a giant little-endian integer (e.g. `0x0b3a6576` from
+        // `\x0b:ev` = the `:event-type` length-prefix + colon + start
+        // of the header name). Set to true when we drain the
+        // prelude on Incomplete; cleared back to false when smithy
+        // returns Complete (which internally calls `self.reset()` so
+        // its `prelude_read` flag goes back to false).
+        let mut smithy_has_prelude_buffered = false;
 
         let mut byte_stream = Box::pin(byte_stream);
         loop {
@@ -74,7 +90,7 @@ where
             // the small one and decode the giant one without checking
             // its advertised total_length.
             loop {
-                if buffer.len() >= 4 {
+                if !smithy_has_prelude_buffered && buffer.len() >= 4 {
                     let advertised = u32::from_be_bytes([
                         buffer[0], buffer[1], buffer[2], buffer[3],
                     ]) as usize;
@@ -95,6 +111,12 @@ where
                             )
                         })?;
                         let _ = buffer.split_to(consumed);
+                        // smithy.decode_frame internally calls
+                        // `self.reset()` on a successful Complete,
+                        // clearing its `prelude_read` flag. Mirror
+                        // that here so the cap check above re-engages
+                        // for the next frame's prelude.
+                        smithy_has_prelude_buffered = false;
 
                         match handle_invoke_frame(&provider_id, message, &mut sse_state) {
                             Ok(maybe_chunk) => {
@@ -108,7 +130,46 @@ where
                             }
                         }
                     }
-                    Ok(DecodedFrame::Incomplete) => break,
+                    Ok(DecodedFrame::Incomplete) => {
+                        // FX-8: drain whatever bytes smithy consumed
+                        // before returning Incomplete.
+                        //
+                        // Bug: `MessageFrameDecoder::decode_frame` reads
+                        // the 12-byte prelude into its internal state on
+                        // first call and sets `prelude_read = true`.
+                        // It returns Incomplete because the rest of the
+                        // frame hasn't arrived. Without this drain, the
+                        // next outer-loop iteration creates a fresh
+                        // cursor at offset 0 of the buffer -- but the
+                        // prelude bytes are still there. On re-entry,
+                        // smithy skips re-reading the prelude (because
+                        // `prelude_read=true`) and reads the next N
+                        // bytes from cursor offset 0 as the headers
+                        // section -- which is actually still the
+                        // prelude. The big-endian `total_length` field
+                        // gets interpreted as a sequence of header
+                        // tag/value pairs, fails UTF-8 validation, and
+                        // surfaces as `InvalidUtf8String` on a frame
+                        // whose actual payload is perfectly valid.
+                        //
+                        // Symptom in the wild: any Bedrock streaming
+                        // response that arrives in multiple HTTP body
+                        // chunks (i.e. essentially every long Opus
+                        // response) hits a mid-stream UTF-8 error.
+                        // Mirror smithy's prelude consumption back to
+                        // our `BytesMut` so the next iteration's fresh
+                        // cursor starts past the consumed prelude bytes.
+                        let consumed = cursor.position() as usize;
+                        if consumed > 0 {
+                            let _ = buffer.split_to(consumed);
+                            // Track that smithy still has the prelude
+                            // buffered internally -- the cap check at
+                            // the top of the loop must skip until
+                            // smithy returns Complete (and resets).
+                            smithy_has_prelude_buffered = true;
+                        }
+                        break;
+                    }
                     Err(e) => {
                         yield Err(Error::Streaming(format!(
                             "bedrock eventstream decode failed: {e}"
@@ -432,4 +493,61 @@ mod tests {
     // here because clippy folds it; if the constant ever drifts
     // below 1 MB or above 64 MB, code review (or this comment) is
     // the place to catch that.
+
+    /// FX-8 regression: a Bedrock eventstream frame split exactly at
+    /// the 12-byte prelude boundary across two HTTP body chunks must
+    /// still decode cleanly. Pre-fix this surfaced as an
+    /// `InvalidUtf8String` error inside smithy because the cursor
+    /// position wasn't drained from our buffer when the decoder
+    /// returned `Incomplete` -- the second iteration's fresh cursor
+    /// re-read the prelude bytes as the headers section.
+    ///
+    /// A neighboring bug fell out of the same fix: the
+    /// advertised-length DoS guard reads `buffer[0..4]` as the next
+    /// frame's `total_length`, but only when no prelude has been
+    /// previously consumed. The fix tracks this via the
+    /// `smithy_has_prelude_buffered` flag so the cap check skips
+    /// post-Incomplete iterations -- otherwise the first 4 bytes of
+    /// the headers section get misread as a frame size of ~188 MB
+    /// and the cap fires spuriously.
+    #[tokio::test]
+    async fn frame_split_at_prelude_boundary_streaming() {
+        // Construct a `chunk` event whose payload is a base64-wrapped
+        // Anthropic SSE event. Use `ping` because it's the simplest
+        // shape that SseState accepts without further deltas.
+        let inner = r#"{"type":"ping"}"#;
+        let b64 = B64_STANDARD.encode(inner.as_bytes());
+        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+        let frame = make_frame("chunk", &payload);
+
+        // Encode the frame to its on-the-wire bytes.
+        let mut buf = Vec::new();
+        aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf)
+            .expect("encode eventstream frame");
+        assert!(buf.len() > 12, "frame must be larger than its 12B prelude");
+
+        // Split at exactly byte 12 -- the prelude boundary. This is
+        // the worst case for FX-8 because smithy reads the prelude
+        // into its internal state on the first decode call and
+        // returns Incomplete; without our drain, the next call
+        // reads the prelude bytes again as headers.
+        let (head, tail) = buf.split_at(12);
+        let head = Bytes::copy_from_slice(head);
+        let tail = Bytes::copy_from_slice(tail);
+
+        let byte_stream = futures::stream::iter(vec![Ok(head), Ok(tail)]);
+        let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
+
+        // The `ping` event maps to no ChatChunk (sse_state returns
+        // None) but it MUST NOT fail the stream. Pre-fix this would
+        // yield an Err via the InvalidUtf8String path; with FX-8 but
+        // without the cap-check skip, it would fire the
+        // `advertised ... exceeds cap` error.
+        while let Some(item) = chunks.next().await {
+            match item {
+                Ok(_) => {}
+                Err(e) => panic!("FX-8 regression: stream errored on prelude-split frame: {e:?}"),
+            }
+        }
+    }
 }
