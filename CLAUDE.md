@@ -199,6 +199,44 @@ shows every event for one specific request: ingress parse, alias
 resolution, fallback hops, retry attempts, upstream calls, response
 shape, errors.
 
+### Triage recipes (full bodies on demand)
+
+When `body_excerpt=...` in a WARN line isn't enough -- typically when an
+upstream returns a generic `400 "request not valid"` and you need to
+see WHICH wire field tripped it -- flip the log level. The output
+includes ingress body, outgoing egress body, and the full upstream
+error body, all carrying the same `request_id` so a single grep
+correlates them:
+
+```bash
+# Full upstream error bodies (4 KB cap, debug):
+ROUTECTL_LOG=routectl=debug ./routectl serve
+
+# Also outgoing + ingress bodies (16 KB cap, trace):
+ROUTECTL_LOG=routectl=trace ./routectl serve
+
+# Trace one specific request end-to-end:
+ROUTECTL_LOG=routectl=trace ./routectl serve 2>&1 | grep request_id=<id>
+```
+
+What you get at debug:
+- Existing `body_excerpt=...` WARN on every 4xx/5xx (200B truncated,
+  scannable in `routectl-warn.log`)
+- New `body=...` DEBUG with the full upstream error body (4 KB cap,
+  HTML-collapsed)
+
+What you get at trace, additionally:
+- `body=...` TRACE with the JSON body routectl sent to the upstream
+  (16 KB cap)
+- `body=...` TRACE with the body the client sent on
+  `/v1/chat/completions` or `/v1/messages` (no cap; the canonical
+  schema bounds it via `MAX_INGRESS_BODY_BYTES`)
+
+Sensitivity caveat: bodies contain user prompts. Leave `ROUTECTL_LOG`
+at the default `info` level in production. Only flip to debug/trace
+during active triage and prefer redirecting the output to a file
+(`./routectl serve 2>/tmp/triage.log`) rather than tailing live.
+
 ### Auth-failure log shapes (no secret values, ever)
 
 | Surface | Log line |

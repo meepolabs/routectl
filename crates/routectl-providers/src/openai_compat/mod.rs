@@ -41,8 +41,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use routectl_core::{
-    sanitize_for_log, sanitize_upstream_body, ChatChunk, ChatRequest, ChatResponse, Error,
-    Provider, Result,
+    debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
 };
 
 use sse::ThinkTagAccumulator;
@@ -159,6 +159,11 @@ impl Provider for OpenAiCompatProvider {
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions");
 
+        // PR C / FR-1: trace-level outgoing body for triage. Gated
+        // by `tracing::Level::TRACE`; default `info` filter pays
+        // nothing.
+        trace_outgoing_body("openai-compat", &self.cfg.id, &body);
+
         let resp = self
             .client
             .post(&url)
@@ -171,13 +176,26 @@ impl Provider for OpenAiCompatProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
+            // PR C / FR-1: full upstream error body at debug level.
+            // The truncated WARN excerpt below stays for warn-log
+            // scannability.
+            debug_upstream_error_body("openai-compat", &self.cfg.id, status, &body_text);
             let sanitized = sanitize_upstream_body(&body_text);
+            // PR C / FR-1: extend the auth-only WARN to all 4xx/5xx
+            // so an operator never has to guess WHY a request failed.
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
                     body_excerpt = %sanitized,
                     "openai-compat upstream auth failed",
+                );
+            } else {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    body_excerpt = %sanitized,
+                    "openai-compat upstream error",
                 );
             }
             return Err(Error::upstream(&self.cfg.id, status, sanitized));
@@ -202,6 +220,8 @@ impl Provider for OpenAiCompatProvider {
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions (stream)");
 
+        trace_outgoing_body("openai-compat", &self.cfg.id, &body);
+
         let resp = self
             .client
             .post(&url)
@@ -214,6 +234,7 @@ impl Provider for OpenAiCompatProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
+            debug_upstream_error_body("openai-compat", &self.cfg.id, status, &body_text);
             let sanitized = sanitize_upstream_body(&body_text);
             if status == 401 || status == 403 {
                 tracing::warn!(
@@ -221,6 +242,13 @@ impl Provider for OpenAiCompatProvider {
                     status,
                     body_excerpt = %sanitized,
                     "openai-compat upstream auth failed",
+                );
+            } else {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    body_excerpt = %sanitized,
+                    "openai-compat upstream error",
                 );
             }
             return Err(Error::upstream(&self.cfg.id, status, sanitized));

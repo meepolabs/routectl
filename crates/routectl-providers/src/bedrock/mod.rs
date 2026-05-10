@@ -246,6 +246,11 @@ impl Provider for BedrockProvider {
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let body = self.normalize_request(&req)?;
 
+        // PR C / FR-1: trace-level outgoing body for triage. Same
+        // gating + sensitivity story as the other two providers --
+        // see `routectl_core::log_safe::trace_outgoing_body`.
+        routectl_core::trace_outgoing_body("bedrock", &self.cfg.id, &body);
+
         let url = match self.cfg.api_shape {
             BedrockApiShape::Invoke => {
                 endpoint::invoke_url(&self.cfg.region, &self.cfg.model_id, false)
@@ -314,6 +319,8 @@ impl Provider for BedrockProvider {
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let body = self.normalize_request(&req)?;
+
+        routectl_core::trace_outgoing_body("bedrock", &self.cfg.id, &body);
 
         let url = match self.cfg.api_shape {
             BedrockApiShape::Invoke => {
@@ -399,6 +406,13 @@ async fn parse_upstream_error_body(provider: &str, resp: reqwest::Response) -> S
     let status = resp.status().as_u16();
     let body_text = resp.text().await.unwrap_or_default();
     log_bedrock_upstream_error(provider, status, &body_text);
+    // PR C / FR-1: emit the FULL upstream error body at debug level
+    // alongside the status-specific WARN above. The WARN excerpt
+    // (200B) keeps `routectl-warn.log` scannable; the DEBUG line gives
+    // operators the field-level detail when they flip log level
+    // during triage. INV-4 (Haiku 4.5 generic 400) becomes diagnosable
+    // from a single log capture instead of having to reproduce.
+    routectl_core::debug_upstream_error_body("bedrock", provider, status, &body_text);
 
     serde_json::from_str::<Value>(&body_text)
         .ok()
