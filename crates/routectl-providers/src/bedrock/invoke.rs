@@ -34,7 +34,11 @@ const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
 /// vendors, prefer Converse (vendor-neutral) -- the InvokeModel adapter
 /// here does not currently shape Mistral/Llama/Cohere bodies.
 pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value> {
-    let mut body = crate::anthropic_api::request::normalize(&cfg.id, req)?;
+    let mut body = crate::anthropic_api::request::normalize(
+        &cfg.id,
+        req,
+        cfg.adaptive_thinking.unwrap_or(false),
+    )?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::NormalizeRequest(
             cfg.id.clone(),
@@ -165,6 +169,7 @@ mod tests {
             // use `top_k` here as a real long-tail Anthropic-only
             // knob the allow-list lets through.
             additional_model_request_fields: Some(json!({"top_k": 40})),
+            adaptive_thinking: None,
         }
     }
 
@@ -270,6 +275,37 @@ mod tests {
         // User text block preserved with cache_control.
         let blk = &body["messages"][0]["content"][0];
         assert_eq!(blk["cache_control"]["ttl"], "5m");
+        // Bedrock-required version still set.
+        assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
+    }
+
+    /// FX-1: `BedrockConfig::adaptive_thinking = Some(true)` propagates
+    /// through `normalize_request` -> `anthropic_api::request::normalize`
+    /// and produces the Opus 4.7+ wire shape (no `budget_tokens`,
+    /// top-level `output_config.effort`). This is the integration
+    /// point that lets a Bedrock provider opt into adaptive thinking
+    /// without touching the shared anthropic_api normalizer's
+    /// signature beyond the `bool` flag.
+    #[test]
+    fn adaptive_thinking_propagates_from_bedrock_cfg() {
+        use routectl_core::ReasoningConfig;
+        let mut cfg = fake_cfg();
+        cfg.adaptive_thinking = Some(true);
+
+        let mut req = user_req();
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("high".into()),
+            max_tokens: Some(2000),
+            exclude: None,
+            enabled: Some(true),
+        });
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // thinking is the adaptive shape (no budget_tokens) and the
+        // effort moves to top-level output_config.
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+        assert_eq!(body["output_config"]["effort"], "high");
         // Bedrock-required version still set.
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
     }
