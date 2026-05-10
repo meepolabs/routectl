@@ -714,9 +714,13 @@ mod tests {
 
         let resp = provider.normalize_response(raw).unwrap();
         let usage = resp.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 100);
+        // prompt_tokens is the SUM of input + cache_creation + cache_read
+        // (OpenAI-spec correct: total prompt size, with the per-bucket
+        // breakdown still on the cache_* fields). Anthropic's
+        // input_tokens=100 (new only) + cache_read=20 = 120.
+        assert_eq!(usage.prompt_tokens, 120);
         assert_eq!(usage.completion_tokens, 50);
-        assert_eq!(usage.total_tokens, 150);
+        assert_eq!(usage.total_tokens, 170);
     }
 
     #[test]
