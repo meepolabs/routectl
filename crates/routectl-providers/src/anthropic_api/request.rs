@@ -29,8 +29,8 @@ use serde_json::{json, Value};
 
 use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
 use routectl_core::{
-    ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
+    sanitize_for_log, ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message,
+    MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
 };
 
 use super::parts::{parse_image_url_source, strip_text_after_tool_use};
@@ -826,6 +826,29 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
     // would 400 with a vague error.
     validate_replay_invariants(id, req)?;
 
+    // Discovery hint: if the model id matches a compiled pattern
+    // that suggests adaptive thinking (today: `opus-4-7` substring)
+    // BUT the provider's `adaptive_thinking` TOML flag is off, the
+    // upstream is about to 400 with an unhelpful error message. WARN
+    // so the operator sees the cause + the fix without grepping. We
+    // don't auto-flip the flag because the operator may have a
+    // legitimate reason to keep the legacy shape (e.g. testing the
+    // legacy code path against a non-adaptive model id) -- the WARN
+    // is the right granularity. One log line per request is
+    // acceptable: this only fires when the operator hasn't yet
+    // configured the flag, and the request is about to fail anyway.
+    if !adaptive_thinking
+        && crate::model_profile::profile_for(&req.model).suggests_adaptive_thinking
+    {
+        tracing::warn!(
+            provider = id,
+            model = %sanitize_for_log(&req.model),
+            "model id matches a pattern that likely needs `adaptive_thinking = true` \
+             on the provider config; the legacy thinking shape will probably 400 upstream. \
+             Set `adaptive_thinking = true` on this provider in TOML to fix.",
+        );
+    }
+
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let thinking = build_thinking(req, adaptive_thinking);
     let output_config = build_output_config(req, &thinking);
@@ -850,6 +873,16 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
     // (4.7+) trigger the same constraint -- the model can't sample
     // alternative continuations while it's spending budget on
     // visible-or-hidden chain-of-thought.
+    //
+    // Note: the Adaptive arm is by ANALOGY with Enabled. The Enabled
+    // requirement is documented in Anthropic's published schema; the
+    // Adaptive requirement has not been explicitly verified against
+    // their 4.7+ docs. If a future release shows the Adaptive shape
+    // accepting non-1.0 temperature, the safe direction to weaken
+    // this match is to drop the Adaptive arm (let req.temperature
+    // pass through). Pinning to 1.0 in the meantime is the
+    // conservative default: it cannot 400 (Anthropic accepts 1.0)
+    // but might pass when the caller intended a different value.
     let temperature = match &thinking {
         Some(ThinkingConfig::Enabled { .. }) | Some(ThinkingConfig::Adaptive) => Some(1.0f64),
         _ => req.temperature,
@@ -942,6 +975,16 @@ fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
 /// `inference_geo` are still allowed through (they're how the ingress
 /// forwards request fields canonical doesn't know about).
 fn is_routectl_managed_key(key: &str) -> bool {
+    // Note: `output_config` is intentionally NOT in this list. It IS
+    // a routectl-computed top-level field on the adaptive thinking
+    // path, but the caller already controls its `effort` value via
+    // `req.reasoning.effort` -- so a `provider_extras = {output_config:
+    // {effort: ...}}` override doesn't grant any privilege the caller
+    // didn't already have. We accept the asymmetry with `thinking`
+    // (which IS protected) rather than expand the protected set. If
+    // Anthropic adds a security-sensitive field under `output_config`
+    // in the future, revisit -- but `effort` itself is just a
+    // model-steering knob.
     matches!(
         key,
         "model"
