@@ -61,6 +61,16 @@ pub struct AnthropicApiConfig {
     /// policies that gate access on `aws:UserAgent` (e.g. Claude Code's
     /// Bedrock role). `None` keeps reqwest's default UA.
     pub user_agent: Option<String>,
+    /// Use the Opus 4.7+ adaptive thinking wire shape. When `Some(true)`,
+    /// `request::normalize` rewrites `thinking: {type:"enabled",
+    /// budget_tokens:N}` to `thinking: {type:"adaptive"}` and lifts
+    /// `reasoning.effort` (verbatim string) into top-level
+    /// `output_config.effort`. Older Claude models (4.5/4.6 family) keep
+    /// the legacy shape so the flag is opt-in per provider rather than a
+    /// compiled model-name match -- adaptive thinking is rolling out
+    /// gradually and there is no clean naming pattern to gate on.
+    /// `None` and `Some(false)` both mean "legacy shape".
+    pub adaptive_thinking: Option<bool>,
 }
 
 impl AnthropicApiConfig {
@@ -73,6 +83,7 @@ impl AnthropicApiConfig {
             auth_kind: AuthKind::ApiKey,
             extra_headers: Vec::new(),
             user_agent: None,
+            adaptive_thinking: None,
         }
     }
 }
@@ -126,7 +137,11 @@ impl Provider for AnthropicApiProvider {
     }
 
     fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
-        request::normalize(&self.cfg.id, req)
+        request::normalize(
+            &self.cfg.id,
+            req,
+            self.cfg.adaptive_thinking.unwrap_or(false),
+        )
     }
 
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {

@@ -89,6 +89,7 @@ pub async fn build_provider_with_options(
             auth_kind,
             extra_headers,
             user_agent,
+            adaptive_thinking,
             runtime: _,
         } => {
             let api_key = resolve(secrets, api_key_ref).await?;
@@ -103,6 +104,7 @@ pub async fn build_provider_with_options(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
                 user_agent: user_agent.clone(),
+                adaptive_thinking: *adaptive_thinking,
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }
@@ -116,6 +118,7 @@ pub async fn build_provider_with_options(
             extra_headers,
             anthropic_beta,
             additional_model_request_fields,
+            adaptive_thinking,
             runtime: _,
         } => {
             // Bedrock Converse adapter is stubbed pending M2.7 --
@@ -152,6 +155,7 @@ pub async fn build_provider_with_options(
                     .collect(),
                 anthropic_beta: anthropic_beta.clone(),
                 additional_model_request_fields: additional_model_request_fields.clone(),
+                adaptive_thinking: *adaptive_thinking,
             };
             Ok(Arc::new(BedrockProvider::new(cfg, resolved)))
         }
