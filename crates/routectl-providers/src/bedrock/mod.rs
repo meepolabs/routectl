@@ -182,6 +182,15 @@ pub struct BedrockConfig {
     /// merged at the top level; for `Converse`, merged into
     /// `additionalModelRequestFields`.
     pub additional_model_request_fields: Option<Value>,
+    /// Use the Opus 4.7+ adaptive thinking wire shape on this provider.
+    /// Same semantics as `AnthropicApiConfig::adaptive_thinking`. Set
+    /// this on Bedrock providers whose `model_id` is an opus-4-7+
+    /// inference profile (e.g. `global.anthropic.claude-opus-4-7-v1:0`);
+    /// the body normalizer rewrites `thinking: {type:"enabled",
+    /// budget_tokens:N}` to `thinking: {type:"adaptive"}` and lifts
+    /// effort into top-level `output_config.effort`. `None` and
+    /// `Some(false)` both keep the legacy shape.
+    pub adaptive_thinking: Option<bool>,
 }
 
 pub struct BedrockProvider {
@@ -605,6 +614,7 @@ mod tests {
             extra_headers: Vec::new(),
             anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
+            adaptive_thinking: None,
         };
         let s = format!("{cfg:?}");
         assert!(
