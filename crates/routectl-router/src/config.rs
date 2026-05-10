@@ -164,6 +164,15 @@ pub enum ProviderEntry {
         /// Override the outbound User-Agent. Useful for IAM-gated upstreams.
         #[serde(default)]
         user_agent: Option<String>,
+        /// Use the Opus 4.7+ adaptive thinking wire shape on this provider.
+        /// When `true`, routectl rewrites `thinking: {type:"enabled",
+        /// budget_tokens:N}` to `thinking: {type:"adaptive"}` and lifts
+        /// `reasoning.effort` (verbatim string) into top-level
+        /// `output_config.effort`. Older Claude models (4.5/4.6 family)
+        /// still accept the legacy shape, so this is opt-in per provider
+        /// rather than a compiled model-name match. Default: `false`.
+        #[serde(default)]
+        adaptive_thinking: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -187,6 +196,13 @@ pub enum ProviderEntry {
         anthropic_beta: Vec<String>,
         #[serde(default)]
         additional_model_request_fields: Option<serde_json::Value>,
+        /// Use the Opus 4.7+ adaptive thinking wire shape on this provider.
+        /// Same semantics as the AnthropicApi variant above. Set this on
+        /// Bedrock providers whose `model_id` is an opus-4-7+ inference
+        /// profile (e.g. `global.anthropic.claude-opus-4-7-v1:0`).
+        /// Default: `false`.
+        #[serde(default)]
+        adaptive_thinking: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -298,6 +314,7 @@ impl ProviderEntry {
             auth_kind: AuthKind::ApiKey,
             extra_headers: BTreeMap::new(),
             user_agent: None,
+            adaptive_thinking: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
