@@ -66,6 +66,9 @@ pub struct CapturedInputUsage {
 }
 
 impl CapturedInputUsage {
+    /// Sum of input + cache_creation + cache_read tokens. Mirrors the
+    /// canonical `Usage.prompt_tokens` semantics.
+    #[cfg(test)]
     fn prompt_tokens(&self) -> u32 {
         self.input_tokens
             .saturating_add(self.cache_creation_input_tokens.unwrap_or(0))
@@ -191,32 +194,6 @@ impl SseState {
                 let captured = self.captured_input_usage.clone();
                 let usage_delta = if usage.is_some() || captured.is_some() {
                     let cap = captured.as_ref();
-                    // Real Anthropic does NOT emit `input_tokens` on
-                    // `message_delta`; only a chained routectl does, and
-                    // there it carries the already-summed prompt total
-                    // from `crates/routectl-cli/src/ingress/anthropic.rs`.
-                    // So `d` non-zero is treated as the pre-summed total;
-                    // zero/missing falls back to summing cap on the
-                    // message_start side. A future upstream that emits
-                    // raw (non-summed) input_tokens on message_delta
-                    // would silently undercount -- tests below pin both
-                    // branches so the regression is loud.
-                    let prompt_tokens = match (
-                        usage.as_ref().and_then(|u| u.input_tokens),
-                        cap.map(|c| c.prompt_tokens()),
-                    ) {
-                        (Some(d), _) if d > 0 => Some(d),
-                        (_, Some(c)) if c > 0 => Some(c),
-                        (Some(d), _) => Some(d),
-                        (_, c) => c,
-                    };
-                    let completion_tokens = usage.as_ref().and_then(|u| u.output_tokens);
-                    let total_tokens = match (prompt_tokens, completion_tokens) {
-                        (Some(p), Some(c)) => Some(p.saturating_add(c)),
-                        (Some(p), None) => Some(p),
-                        (None, Some(c)) => Some(c),
-                        (None, None) => None,
-                    };
                     // Prefer delta when present and non-zero; fall back
                     // to captured. Some(0) is "no info", not
                     // "authoritative zero" -- placeholder restatements
@@ -238,6 +215,36 @@ impl SseState {
                         usage.as_ref().and_then(|u| u.cache_read_input_tokens),
                         cap.and_then(|c| c.cache_read_input_tokens),
                     );
+                    // prompt_tokens = raw input + cache fields. Anthropic
+                    // spec: input_tokens carries the raw input only; cache
+                    // fields are separate. Sum them at the OpenAI seam.
+                    // Picks the raw input from delta (real Anthropic does
+                    // not currently emit input_tokens on message_delta;
+                    // routectl-rendered upstreams now also emit raw) and
+                    // falls back to message_start's captured value.
+                    let raw_input = pick(
+                        usage.as_ref().and_then(|u| u.input_tokens),
+                        cap.map(|c| c.input_tokens),
+                    );
+                    let prompt_tokens = match (
+                        raw_input,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                    ) {
+                        (None, None, None) => None,
+                        (i, c1, c2) => Some(
+                            i.unwrap_or(0)
+                                .saturating_add(c1.unwrap_or(0))
+                                .saturating_add(c2.unwrap_or(0)),
+                        ),
+                    };
+                    let completion_tokens = usage.as_ref().and_then(|u| u.output_tokens);
+                    let total_tokens = match (prompt_tokens, completion_tokens) {
+                        (Some(p), Some(c)) => Some(p.saturating_add(c)),
+                        (Some(p), None) => Some(p),
+                        (None, Some(c)) => Some(c),
+                        (None, None) => None,
+                    };
                     // Per-TTL merge via the same `pick` so a delta with
                     // partial/empty `cache_creation` doesn't wholesale-
                     // replace the richer message_start object.
@@ -706,6 +713,55 @@ mod tests {
         assert_eq!(usage.prompt_tokens, Some(99));
         assert_eq!(usage.completion_tokens, Some(10));
         assert_eq!(usage.total_tokens, Some(109));
+    }
+
+    /// Per-spec semantics: when a delta carries RAW `input_tokens`
+    /// alongside non-zero `cache_creation_input_tokens` and
+    /// `cache_read_input_tokens`, the canonical prompt_tokens MUST be
+    /// the sum of all three. Pre-fix, routectl assumed the delta's
+    /// `input_tokens` was already-summed and silently undercounted
+    /// when a non-routectl Anthropic upstream sent raw values.
+    #[test]
+    fn message_delta_sums_raw_input_plus_cache_per_spec() {
+        let mut state = SseState::default();
+        let _ = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_start",
+                    "message": {
+                        "id":"msg_01","type":"message","role":"assistant",
+                        "content":[],"model":"claude-opus-4-7",
+                        "stop_reason":null,"stop_sequence":null,
+                        "usage": {"input_tokens": 0, "output_tokens": 0}
+                    }
+                }"#,
+            )
+            .unwrap();
+        // Hypothetical non-routectl Anthropic upstream: sends RAW
+        // input_tokens on message_delta, NOT pre-summed. cache fields
+        // are separate (per Anthropic spec).
+        let chunk = state
+            .parse_event(
+                "test",
+                r#"{
+                    "type":"message_delta",
+                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "cache_creation_input_tokens": 200,
+                        "cache_read_input_tokens": 300
+                    }
+                }"#,
+            )
+            .unwrap()
+            .expect("closing chunk emitted");
+        let usage = chunk.usage.expect("usage");
+        // 100 raw + 200 cache_creation + 300 cache_read = 600
+        assert_eq!(usage.prompt_tokens, Some(600));
+        assert_eq!(usage.completion_tokens, Some(50));
+        assert_eq!(usage.total_tokens, Some(650));
     }
 
     /// Pin the cache-merge zero-aware fallback: if the closing
