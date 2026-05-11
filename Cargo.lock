@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "routectl-auth"
-version = "0.3.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "async-trait",
  "routectl-core",
@@ -1998,7 +1998,7 @@ dependencies = [
 
 [[package]]
 name = "routectl-cli"
-version = "0.3.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "routectl-core"
-version = "0.3.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "routectl-providers"
-version = "0.3.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "routectl-router"
-version = "0.3.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "async-stream",
  "async-trait",
