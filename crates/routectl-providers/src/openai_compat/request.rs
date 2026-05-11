@@ -68,6 +68,24 @@ pub fn normalize(
     //     for OpenAI / Passthrough since neither has a preserve
     //     shape on the wire).
     let dyn_dialect = dialect.as_dyn();
+    let resolved_strip = match history_reasoning {
+        HistoryReasoning::Auto => dyn_dialect.strip_history_reasoning(),
+        HistoryReasoning::Strip => true,
+        HistoryReasoning::Preserve => false,
+    };
+    if resolved_strip && request_carries_reasoning(req) {
+        // Operator visibility: silent strip of canonical reasoning
+        // is a config choice, not a wire constraint. Warn so the
+        // operator sees the loss when DeepSeek-v4-style upstreams
+        // start 400ing on missing echo-back.
+        warn!(
+            provider = id,
+            mode = ?history_reasoning,
+            "openai-compat egress: assistant reasoning_content stripped from outgoing history. \
+             Set `history_reasoning = \"preserve\"` on the provider if your upstream requires \
+             echo-back (DeepSeek v4+, recent vLLM)."
+        );
+    }
     match history_reasoning {
         HistoryReasoning::Auto => {
             if dyn_dialect.strip_history_reasoning() {
@@ -277,6 +295,19 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
         )));
     }
     Ok(())
+}
+
+/// True when the canonical request carries any assistant reasoning
+/// content the strip path would silently drop. Used by the lossy-seam
+/// warn at the dispatch site so an operator on a DeepSeek-v4 / vLLM
+/// host can see "you're stripping reasoning, which is why your
+/// upstream is 400ing" without flipping debug logs.
+fn request_carries_reasoning(req: &ChatRequest) -> bool {
+    req.messages.iter().any(|m| {
+        matches!(m.role, routectl_core::Role::Assistant)
+            && (m.reasoning.as_deref().is_some_and(|s| !s.is_empty())
+                || !m.reasoning_details.is_empty())
+    })
 }
 
 #[cfg(test)]
