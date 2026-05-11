@@ -3,8 +3,9 @@
 //!
 //!   1. Direct serde serialization of `ChatRequest`.
 //!   2. Drop routectl-internal fields the upstream never wants.
-//!   3. Hand off dialect-specific shaping to `Dialect::apply_request`.
-//!   4. Merge `default_extras` then `provider_extras` last (callers win).
+//!   3. Apply outgoing-history reasoning policy (strip vs preserve).
+//!   4. Hand off dialect-specific shaping to `Dialect::apply_request`.
+//!   5. Merge `default_extras` then `provider_extras` last (callers win).
 //!
 //! Per-dialect logic lives in `dialects/*.rs`; this module is a thin
 //! envelope around that dispatch.
@@ -15,11 +16,14 @@ use tracing::warn;
 use routectl_core::{ChatRequest, Error, Result, ToolDef};
 
 use super::dialect::ReasoningDialect;
+use super::dialects::util::strip_history_reasoning;
+use super::HistoryReasoning;
 
 pub fn normalize(
     id: &str,
     req: &ChatRequest,
     dialect: ReasoningDialect,
+    history_reasoning: HistoryReasoning,
     default_extras: Option<&Value>,
     strict_translation: bool,
 ) -> Result<Value> {
@@ -46,7 +50,39 @@ pub fn normalize(
     obj.remove("cache_control");
     obj.remove("anthropic_beta");
 
-    dialect.as_dyn().apply_request(id, obj, req)?;
+    // Outgoing-history reasoning policy. Resolution rules:
+    //
+    //   - HistoryReasoning::Auto: defer to the dialect's default. If
+    //     the dialect declares `strip_history_reasoning()`, run the
+    //     strip helper. Otherwise leave the canonical-shape reasoning
+    //     fields in the body (OpenAI / OpenRouter / Passthrough). For
+    //     OpenRouter this means the typed `reasoning_details` array
+    //     reaches the upstream verbatim, which is the right shape.
+    //   - HistoryReasoning::Strip: always strip, regardless of
+    //     dialect. Use for DeepSeek v3 / vLLM <= 0.6 hosts that 400
+    //     on echo-back.
+    //   - HistoryReasoning::Preserve: hand off to the dialect's
+    //     `preserve_history_reasoning` impl, which knows the
+    //     dialect-native preserve shape (`reasoning_content` for
+    //     DeepSeek/Vllm, `reasoning_details` for OpenRouter, no-op
+    //     for OpenAI / Passthrough since neither has a preserve
+    //     shape on the wire).
+    let dyn_dialect = dialect.as_dyn();
+    match history_reasoning {
+        HistoryReasoning::Auto => {
+            if dyn_dialect.strip_history_reasoning() {
+                strip_history_reasoning(id, obj)?;
+            }
+        }
+        HistoryReasoning::Strip => {
+            strip_history_reasoning(id, obj)?;
+        }
+        HistoryReasoning::Preserve => {
+            dyn_dialect.preserve_history_reasoning(id, obj)?;
+        }
+    }
+
+    dyn_dialect.apply_request(id, obj, req)?;
 
     // Merge default_extras first, then provider_extras (caller wins),
     // BOTH gated by the routectl-managed-keys allow-list. Without
@@ -273,7 +309,7 @@ mod tests {
     #[test]
     fn openai_passthrough_normal_model() {
         let req = simple_req("gpt-4o");
-        let body = normalize("test", &req, ReasoningDialect::OpenAi, None, false).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::OpenAi, HistoryReasoning::Auto, None, false).unwrap();
         // temperature preserved for non-reasoning models
         assert!(body.get("temperature").is_some());
         assert!(body.get("reasoning").is_none());
@@ -283,7 +319,7 @@ mod tests {
     #[test]
     fn openai_drops_sampling_for_o_series() {
         let req = simple_req("o3-mini");
-        let body = normalize("test", &req, ReasoningDialect::OpenAi, None, false).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::OpenAi, HistoryReasoning::Auto, None, false).unwrap();
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
         assert!(body.get("presence_penalty").is_none());
@@ -296,14 +332,14 @@ mod tests {
             effort: Some("high".into()),
             ..Default::default()
         });
-        let body = normalize("test", &req, ReasoningDialect::OpenAi, None, false).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::OpenAi, HistoryReasoning::Auto, None, false).unwrap();
         assert_eq!(body["reasoning_effort"], "high");
     }
 
     #[test]
     fn deepseek_drops_sampling_for_reasoner() {
         let req = simple_req("deepseek-reasoner");
-        let body = normalize("test", &req, ReasoningDialect::DeepSeek, None, false).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::DeepSeek, HistoryReasoning::Auto, None, false).unwrap();
         assert!(body.get("temperature").is_none());
     }
 
@@ -319,7 +355,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
         });
-        let body = normalize("test", &req, ReasoningDialect::DeepSeek, None, false).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::DeepSeek, HistoryReasoning::Auto, None, false).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         for m in msgs {
             assert!(m.get("reasoning_content").is_none());
@@ -335,7 +371,7 @@ mod tests {
             enabled: Some(true),
             ..Default::default()
         });
-        let body = normalize("test", &req, ReasoningDialect::Vllm, None, false).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::Vllm, HistoryReasoning::Auto, None, false).unwrap();
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
     }
 
@@ -343,7 +379,7 @@ mod tests {
     fn provider_extras_merged_last() {
         let mut req = simple_req("gpt-4o");
         req.provider_extras = Some(json!({"custom_key": "custom_val"}));
-        let body = normalize("test", &req, ReasoningDialect::Passthrough, None, false).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::Passthrough, HistoryReasoning::Auto, None, false).unwrap();
         assert_eq!(body["custom_key"], "custom_val");
         assert!(body.get("provider_extras").is_none());
     }
@@ -376,7 +412,7 @@ mod tests {
             "service_tier": "premium",
             "safety_settings": {"hate": "high"},
         }));
-        let body = normalize("test", &req, ReasoningDialect::Passthrough, None, false).unwrap();
+        let body = normalize("test", &req, ReasoningDialect::Passthrough, HistoryReasoning::Auto, None, false).unwrap();
         // Canonical fields preserved from the request, NOT overridden.
         assert_eq!(body["model"], "gpt-4o");
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
@@ -406,6 +442,7 @@ mod tests {
             "test",
             &req_mut,
             ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
             Some(&defaults),
             false,
         )
