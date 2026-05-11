@@ -747,6 +747,14 @@ fn emit_message_delta(
 
     if let Some(u) = usage {
         let mut wire_usage = Map::new();
+        // Real Anthropic emits `input_tokens` in message_delta.usage too
+        // (mirroring message_start.usage with the final post-cache count).
+        // Without this, downstream consumers see prompt_tokens=0 on
+        // streaming responses, since message_start.usage we emit is
+        // hardcoded to {input_tokens:0, output_tokens:0}.
+        if let Some(n) = u.prompt_tokens {
+            wire_usage.insert("input_tokens".into(), json!(n));
+        }
         if let Some(n) = u.completion_tokens {
             wire_usage.insert("output_tokens".into(), json!(n));
         }
@@ -1241,6 +1249,47 @@ mod tests {
         let events = render_chunk_internal(usage_only, &mut s).unwrap();
         let payload: Value = serde_json::from_str(&events[0].data).unwrap();
         assert!(payload["delta"]["stop_reason"].is_null());
+    }
+
+    /// Closing chunk's `usage.prompt_tokens` must be rendered into
+    /// `message_delta.usage.input_tokens` so a chained downstream
+    /// (another routectl, or any Anthropic SSE consumer) can read the
+    /// prompt size. message_start.usage is hardcoded to zero, so this
+    /// is the only surface where input-side numbers reach the wire.
+    #[test]
+    fn message_delta_renders_input_tokens_from_canonical_prompt_tokens() {
+        use routectl_core::{schema::CacheCreation, UsageDelta};
+        let mut s = fresh_state();
+        // Drive a content chunk so message_start lands first.
+        let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
+        let closing = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![],
+            usage: Some(UsageDelta {
+                prompt_tokens: Some(12345),
+                completion_tokens: Some(50),
+                total_tokens: Some(12395),
+                cache_creation_input_tokens: Some(100),
+                cache_read_input_tokens: Some(200),
+                cache_creation: Some(CacheCreation {
+                    ephemeral_5m_input_tokens: Some(50),
+                    ephemeral_1h_input_tokens: Some(50),
+                }),
+                ..Default::default()
+            }),
+        };
+        let events = render_chunk_internal(closing, &mut s).unwrap();
+        let delta_event = events
+            .iter()
+            .find(|e| e.event.as_deref() == Some("message_delta"))
+            .expect("message_delta emitted");
+        let payload: Value = serde_json::from_str(&delta_event.data).unwrap();
+        let wire_usage = &payload["usage"];
+        assert_eq!(wire_usage["input_tokens"], 12345);
+        assert_eq!(wire_usage["output_tokens"], 50);
+        assert_eq!(wire_usage["cache_creation_input_tokens"], 100);
+        assert_eq!(wire_usage["cache_read_input_tokens"], 200);
     }
 
     #[test]
