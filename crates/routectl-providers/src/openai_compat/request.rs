@@ -27,12 +27,8 @@ pub fn normalize(
     default_extras: Option<&Value>,
     strict_translation: bool,
 ) -> Result<Value> {
-    // Lossy seams (Anthropic-canonical fields the OpenAI-compat wire
-    // can't carry): cache_control, anthropic_beta, ToolDef::Other /
-    // ContentPart::Other catchalls (Anthropic builtin tools and
-    // forward-compat block types), SystemContent::Blocks with
-    // per-block cache_control. Default mode warns and continues;
-    // strict_translation flips this to a hard 400.
+    // Lossy seams: Anthropic-canonical fields the OpenAI-compat wire
+    // can't carry. Default mode warns + continues; strict mode 400s.
     check_dropped_anthropic_fields(id, req, strict_translation)?;
 
     let mut body =
@@ -42,19 +38,13 @@ pub fn normalize(
         .as_object_mut()
         .ok_or_else(|| Error::normalize_request(id, "serialized request is not an object"))?;
 
-    // Lower canonical `system` (Anthropic-shape top-level field) back
-    // into a synthetic `role: "system"` message at the start of the
-    // messages array. The OpenAI ingress lifts wire `role: "system"`
-    // into `req.system`; without this inverse step, the canonical
-    // `system` field leaks onto the OpenAI-compat wire. Most hosts
-    // ignore unknown fields, but strict ones (e.g. NVIDIA NIM) reject
-    // with `400 Validation: Unsupported parameter(s): system`.
+    // Lower canonical `system` (Anthropic-shape top-level field) into a
+    // synthetic `role: "system"` message. Strict OpenAI-compat hosts
+    // (NIM) reject the top-level field with `400 Validation:
+    // Unsupported parameter(s): system`.
     if let Some(sys) = req.system.as_ref() {
         let text = sys.flatten();
         if !text.is_empty() {
-            // Default `messages` to an empty array if absent so a
-            // system-only request (no user message in the body yet)
-            // still gets the system message lowered correctly.
             let messages = obj
                 .entry("messages")
                 .or_insert_with(|| Value::Array(Vec::new()))
@@ -66,7 +56,6 @@ pub fn normalize(
         }
     }
 
-    // Remove routectl-internal fields that upstream never wants.
     // Dialects that need `chat_template_kwargs` re-inject it themselves.
     obj.remove("system");
     obj.remove("reasoning");
@@ -75,23 +64,6 @@ pub fn normalize(
     obj.remove("cache_control");
     obj.remove("anthropic_beta");
 
-    // Outgoing-history reasoning policy. Resolution rules:
-    //
-    //   - HistoryReasoning::Auto: defer to the dialect's default. If
-    //     the dialect declares `strip_history_reasoning()`, run the
-    //     strip helper. Otherwise leave the canonical-shape reasoning
-    //     fields in the body (OpenAI / OpenRouter / Passthrough). For
-    //     OpenRouter this means the typed `reasoning_details` array
-    //     reaches the upstream verbatim, which is the right shape.
-    //   - HistoryReasoning::Strip: always strip, regardless of
-    //     dialect. Use for DeepSeek v3 / vLLM <= 0.6 hosts that 400
-    //     on echo-back.
-    //   - HistoryReasoning::Preserve: hand off to the dialect's
-    //     `preserve_history_reasoning` impl, which knows the
-    //     dialect-native preserve shape (`reasoning_content` for
-    //     DeepSeek/Vllm, `reasoning_details` for OpenRouter, no-op
-    //     for OpenAI / Passthrough since neither has a preserve
-    //     shape on the wire).
     let dyn_dialect = dialect.as_dyn();
     let dialect_strips = dyn_dialect.strip_history_reasoning();
     let resolved_strip = match history_reasoning {
@@ -124,17 +96,10 @@ pub fn normalize(
 
     dyn_dialect.apply_request(id, obj, req)?;
 
-    // Merge default_extras first, then provider_extras (caller wins),
-    // BOTH gated by the routectl-managed-keys allow-list. Without
-    // this, a request body of
-    //   `provider_extras = {"messages": [{"role":"user","content":"INJECTED"}]}`
-    // would replace the assembled messages array. The Anthropic
-    // egress already enforces this at
-    // `anthropic_api/request.rs::merge_provider_extras`; this is the
-    // matching guard for openai-compat. `default_extras` is config-
-    // file-controlled (operator) but we apply the same filter for
-    // symmetry and so a future "allow operator override" toggle
-    // doesn't have to retrofit the filter on the request side.
+    // default_extras then provider_extras (caller wins). Both gated
+    // by the managed-key allow-list -- without this, a request body
+    // of `provider_extras = {"messages":[...]}` could replace the
+    // assembled messages.
     if let Some(extras) = default_extras {
         merge_extras(id, obj, extras, "default_extras");
     }
@@ -173,16 +138,11 @@ fn merge_extras(
     }
 }
 
-/// Top-level OpenAI-shape body keys constructed by routectl that
-/// `provider_extras` / `default_extras` are NOT permitted to override.
-/// This is the FULL set of canonical `ChatRequest` fields that get
-/// serialized into the wire body; long-tail provider knobs not in
-/// canonical (`top_k`, `service_tier`, dialect-specific
-/// `chat_template_kwargs`, vendor-specific `safety_settings`, etc.)
-/// still pass through. Keep in sync with
-/// `routectl_core::ChatRequest` field names; if a new canonical field
-/// is added there, add it here too or callers can silently override
-/// the canonical value via extras.
+/// Canonical `ChatRequest` field names that routectl owns on the wire.
+/// `provider_extras` / `default_extras` cannot override these; long-tail
+/// provider knobs (`top_k`, `service_tier`, dialect-specific
+/// `chat_template_kwargs`, vendor-specific `safety_settings`) still
+/// pass through. Keep in sync with `routectl_core::ChatRequest`.
 fn is_routectl_managed_key(key: &str) -> bool {
     matches!(
         key,
@@ -210,17 +170,11 @@ fn is_routectl_managed_key(key: &str) -> bool {
     )
 }
 
-/// Emit `tracing::warn!` for each Anthropic-only canonical field that
-/// the openai-compat egress will drop. Quiet when none apply (the
-/// common case). This is the OpenAI-compat egress's contribution to
-/// the "lossy seam policy" -- the v0.4.0 plan calls out that an
-/// Anthropic-in / OpenAI-compat-out request should produce visible
-/// signal when fields are dropped, not silent degradation.
-///
-/// In default mode each finding emits a `tracing::warn!` and the
-/// function returns `Ok(())`. In strict mode the findings are
-/// collected and returned as an `Error::Validation` (HTTP 400),
-/// rejecting the request before it hits upstream.
+/// Emit `tracing::warn!` for each Anthropic-only canonical field
+/// dropped on the openai-compat wire. Default mode warns + returns
+/// `Ok(())`; strict mode collects the findings and returns an
+/// `Error::Validation` (HTTP 400) so the operator sees the loss
+/// before the upstream does.
 fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> Result<()> {
     let mut findings: Vec<String> = Vec::new();
     let mut record = |msg: String| {
@@ -328,11 +282,10 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
     Ok(())
 }
 
-/// True when the canonical request carries any assistant reasoning
-/// content the strip path would silently drop. Used by the lossy-seam
-/// warn at the dispatch site so an operator on a DeepSeek-v4 / vLLM
-/// host can see "you're stripping reasoning, which is why your
-/// upstream is 400ing" without flipping debug logs.
+/// True when the canonical request carries assistant reasoning that
+/// the strip path would silently drop. Drives the operator-visibility
+/// warn so a DeepSeek-v4 / vLLM operator can see why their upstream
+/// 400s without enabling debug logs.
 fn request_carries_reasoning(req: &ChatRequest) -> bool {
     req.messages.iter().any(|m| {
         matches!(m.role, routectl_core::Role::Assistant)

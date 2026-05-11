@@ -123,25 +123,16 @@ impl IngressAdapter for OpenAiIngress {
     }
 }
 
-/// Coalesce `reasoning_content` into `reasoning` on each message in
-/// the wire body BEFORE serde deserialization. Mirrors
-/// `routectl_providers::openai_compat::response::merge_reasoning_keys`
-/// applied to the request side: DeepSeek-style upstreams (and clients
-/// echoing them) carry the reasoning text under `reasoning_content`,
-/// but canonical `Message.reasoning` is the only string slot. Without
-/// this step, that text drops on the floor at parse time.
+/// Coalesce `reasoning_content` into `reasoning` on each message
+/// before serde deserialization. Mirrors the response-side
+/// `merge_reasoning_keys`: DeepSeek-style upstreams carry the text
+/// under `reasoning_content`, but canonical `Message.reasoning` is
+/// the only string slot.
 ///
-/// Prefer-non-null semantics, same as the response coalescer:
-///   - If `reasoning` is present and non-null, leave it; drop
-///     `reasoning_content`.
-///   - Else if `reasoning_content` is non-null, promote it to
-///     `reasoning` and drop the source.
-///   - Else drop both keys.
-///
-/// Why not a serde alias on `Message.reasoning`: NIM emits BOTH keys
-/// (one null) which would deserialize-fail with "duplicate field
-/// reasoning". The schema comment in `routectl_core::Message`
-/// documents this constraint.
+/// Prefer-non-null: keep non-null `reasoning`; else promote non-null
+/// `reasoning_content`; else drop both. Coalescing here (vs. a serde
+/// alias) handles NIM's both-keys-one-null shape that would
+/// deserialize-fail with "duplicate field reasoning".
 fn coalesce_message_reasoning_keys(body: &mut Value) {
     let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) else {
         return;
