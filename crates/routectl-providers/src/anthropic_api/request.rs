@@ -312,41 +312,35 @@ fn openai_function_to_custom(v: &Value) -> Option<AnthropicTool> {
 /// Translate canonical `tool_choice` values into the Anthropic-shape
 /// object the Messages API requires.
 ///
-/// Canonical (after the OpenAI ingress passes the wire `tool_choice`
-/// through verbatim) carries one of:
-///   - `None` -- caller didn't set `tool_choice`
-///   - bare strings `"auto"`, `"required"`, `"none"` (OpenAI shape)
-///   - object `{type:"function","function":{"name":"X"}}` (OpenAI shape)
-///   - object `{type:"auto"|"any"|"tool"|"none", name?}` (Anthropic
-///     shape, e.g. from a claude-code -> Anthropic-ingress request)
-///
-/// Mapping to the Anthropic wire:
-///   - `"auto"` -> `{"type":"auto"}`
-///   - `"required"` -> `{"type":"any"}`
-///   - `"none"` -> field dropped (Anthropic has no native equivalent;
-///     a warn fires when tools is non-empty so the caller can see the
-///     dropped intent)
-///   - `{"type":"function","function":{"name":X}}` -> `{"type":"tool","name":X}`
-///   - already-Anthropic-shape object: passthrough verbatim (preserves
-///     the Anthropic-ingress -> Anthropic-egress path)
-///   - anything else: passthrough verbatim (let the upstream decide)
-fn translate_tool_choice(tc: Option<&Value>) -> Option<Value> {
+/// Mapping:
+///   - bare `"auto"` -> `{"type":"auto"}`
+///   - bare `"required"` -> `{"type":"any"}`
+///   - bare `"none"` -> field dropped; the caller must also drop
+///     `tools` (otherwise Anthropic defaults to `auto` and may call
+///     them, silently flipping the caller's "do not call tools" intent)
+///   - OpenAI `{"type":"function","function":{"name":X}}` ->
+///     `{"type":"tool","name":X}`
+///   - already-Anthropic shape -> passthrough
+///   - anything else -> passthrough (let the upstream decide)
+fn translate_tool_choice(tc: Option<&Value>, has_tools: bool) -> Option<Value> {
     let tc = tc?;
     match tc {
         Value::String(s) => match s.as_str() {
             "auto" => Some(serde_json::json!({"type":"auto"})),
             "required" => Some(serde_json::json!({"type":"any"})),
             "none" => {
-                tracing::warn!(
-                    "tool_choice=\"none\" dropped: Anthropic has no native equivalent; \
-                     upstream will default to tool_choice=auto and may call tools"
-                );
+                if has_tools {
+                    tracing::warn!(
+                        "tool_choice=\"none\" with tools present: routectl drops both fields so \
+                         Anthropic cannot auto-select (Anthropic has no native equivalent of \
+                         OpenAI's \"none\")"
+                    );
+                }
                 None
             }
             _ => Some(tc.clone()),
         },
         Value::Object(map) => match map.get("type").and_then(|v| v.as_str()) {
-            // OpenAI function shape -> Anthropic tool shape.
             Some("function") => {
                 let name = map
                     .get("function")
@@ -354,12 +348,16 @@ fn translate_tool_choice(tc: Option<&Value>) -> Option<Value> {
                     .and_then(|n| n.as_str());
                 match name {
                     Some(n) => Some(serde_json::json!({"type":"tool","name":n})),
-                    None => Some(tc.clone()),
+                    None => {
+                        tracing::warn!(
+                            "tool_choice with type=\"function\" but missing function.name; \
+                             passed through as-is and Anthropic will reject it"
+                        );
+                        Some(tc.clone())
+                    }
                 }
             }
-            // Already-Anthropic shape -> passthrough.
             Some("auto") | Some("any") | Some("tool") | Some("none") => Some(tc.clone()),
-            // Unknown object shape -> let the upstream decide.
             _ => Some(tc.clone()),
         },
         _ => Some(tc.clone()),
@@ -897,10 +895,22 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
 
     let anthropic_messages = translate_messages(id, &req.messages)?;
 
-    let tools = req
-        .tools
-        .as_ref()
-        .map(|ts| ts.iter().map(translate_tool).collect::<Vec<_>>());
+    // tool_choice="none" forbids tool use; Anthropic has no native
+    // equivalent, so we strip BOTH the field and the tools list.
+    // Otherwise Anthropic defaults to auto-select and may call tools
+    // anyway -- the caller's intent silently flips.
+    let suppress_tools = matches!(
+        req.tool_choice.as_ref(),
+        Some(Value::String(s)) if s == "none"
+    );
+    let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
+    let tools = if suppress_tools {
+        None
+    } else {
+        req.tools
+            .as_ref()
+            .map(|ts| ts.iter().map(translate_tool).collect::<Vec<_>>())
+    };
 
     // Anthropic requires temperature = 1.0 when thinking is enabled.
     // Both `Enabled { budget_tokens }` (legacy 4.5/4.6) and `Adaptive`
@@ -924,7 +934,7 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
         stop_sequences: req.stop.clone(),
         stream: None, // caller sets this
         tools,
-        tool_choice: translate_tool_choice(req.tool_choice.as_ref()),
+        tool_choice: translate_tool_choice(req.tool_choice.as_ref(), has_tools),
         cache_control: req.cache_control.clone(),
         anthropic_beta: req.anthropic_beta.clone(),
     };
@@ -1414,6 +1424,38 @@ mod multi_turn_tool_use_tests {
         assert!(
             body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
             "expected tool_choice dropped, got: {body:?}"
+        );
+    }
+
+    /// `tool_choice = "none"` plus `tools` present must drop BOTH on the
+    /// Anthropic wire. Anthropic has no native "none" -- if we send the
+    /// tools but no tool_choice, Anthropic defaults to auto-select and
+    /// the caller's "do not call tools" intent silently flips to "auto".
+    #[test]
+    fn tool_choice_none_with_tools_strips_tools_too() {
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            tool_choice: Some(json!("none")),
+            tools: Some(vec![routectl_core::ToolDef::Custom(routectl_core::CustomTool {
+                name: "get_weather".into(),
+                description: Some("weather lookup".into()),
+                input_schema: json!({"type":"object"}),
+                cache_control: None,
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            })]),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, false).unwrap();
+        assert!(
+            body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
+            "expected tool_choice dropped, got: {body:?}"
+        );
+        assert!(
+            body.get("tools").is_none() || body["tools"].is_null(),
+            "expected tools dropped alongside tool_choice=none, got: {body:?}"
         );
     }
 
