@@ -869,24 +869,19 @@ fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::Cac
 // ---------------------------------------------------------------------------
 
 pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result<Value> {
-    // Up-front replay-invariant validation. Anthropic's wire format
-    // requires (a) every Thinking block carry a `signature` for
-    // multi-turn, (b) every tool_result message carry the
-    // `tool_use_id` of the tool_use it answers. The translation
-    // helpers below are infallible (fewer call-site Results to
-    // thread); centralizing the validation here keeps the wire
-    // body construction simple while still surfacing precise
-    // `Error::NormalizeRequest` for malformed input -- otherwise
-    // routectl would emit empty-string fallbacks and the upstream
-    // would 400 with a vague error.
+    // Anthropic's wire requires (a) every Thinking block carry a
+    // `signature` for multi-turn, (b) every tool_result carry the
+    // `tool_use_id` of the tool_use it answers. Validate up front so
+    // routectl doesn't emit empty-string fallbacks that 400 vaguely
+    // upstream.
     validate_replay_invariants(id, req)?;
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let thinking = build_thinking(req, adaptive_thinking);
     let output_config = build_output_config(req, &thinking);
 
-    // System: prefer req.system (canonical); fall back to lifting any
-    // Role::System messages for direct callers that bypass an ingress.
+    // Prefer canonical req.system; fall back to lifting Role::System
+    // messages for direct callers that bypass an ingress.
     let system = req
         .system
         .as_ref()
@@ -896,9 +891,7 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
     let anthropic_messages = translate_messages(id, &req.messages)?;
 
     // tool_choice="none" forbids tool use; Anthropic has no native
-    // equivalent, so we strip BOTH the field and the tools list.
-    // Otherwise Anthropic defaults to auto-select and may call tools
-    // anyway -- the caller's intent silently flips.
+    // equivalent, so strip BOTH the field and the tools list.
     let suppress_tools = matches!(
         req.tool_choice.as_ref(),
         Some(Value::String(s)) if s == "none"
@@ -912,11 +905,9 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
             .map(|ts| ts.iter().map(translate_tool).collect::<Vec<_>>())
     };
 
-    // Anthropic requires temperature = 1.0 when thinking is enabled.
-    // Both `Enabled { budget_tokens }` (legacy 4.5/4.6) and `Adaptive`
-    // (4.7+) trigger the same constraint -- the model can't sample
-    // alternative continuations while it's spending budget on
-    // visible-or-hidden chain-of-thought.
+    // Anthropic requires temperature=1.0 when thinking is enabled
+    // (legacy and adaptive both): no alternative-continuation sampling
+    // while spending reasoning budget.
     let temperature = match &thinking {
         Some(ThinkingConfig::Enabled { .. }) | Some(ThinkingConfig::Adaptive) => Some(1.0f64),
         _ => req.temperature,
@@ -1437,15 +1428,17 @@ mod multi_turn_tool_use_tests {
             model: "claude-sonnet-4-5-20250929".into(),
             messages: vec![user_msg("hi")],
             tool_choice: Some(json!("none")),
-            tools: Some(vec![routectl_core::ToolDef::Custom(routectl_core::CustomTool {
-                name: "get_weather".into(),
-                description: Some("weather lookup".into()),
-                input_schema: json!({"type":"object"}),
-                cache_control: None,
-                defer_loading: None,
-                strict: None,
-                type_tag: None,
-            })]),
+            tools: Some(vec![routectl_core::ToolDef::Custom(
+                routectl_core::CustomTool {
+                    name: "get_weather".into(),
+                    description: Some("weather lookup".into()),
+                    input_schema: json!({"type":"object"}),
+                    cache_control: None,
+                    defer_loading: None,
+                    strict: None,
+                    type_tag: None,
+                },
+            )]),
             ..Default::default()
         };
         let body = normalize("test", &req, false).unwrap();
