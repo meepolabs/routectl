@@ -9,7 +9,7 @@ use routectl_core::{ChatRequest, Message, Result};
 
 use super::super::dialect::ReasoningDialect;
 use super::util::{
-    lift_delta_reasoning_content, lift_reasoning_content_field, strip_history_reasoning,
+    lift_delta_reasoning_content, lift_reasoning_content_field, preserve_history_reasoning_content,
 };
 use super::Dialect;
 
@@ -31,7 +31,7 @@ impl Dialect for VllmDialect {
 
     fn apply_request(
         &self,
-        id: &str,
+        _id: &str,
         obj: &mut serde_json::Map<String, Value>,
         req: &ChatRequest,
     ) -> Result<()> {
@@ -47,8 +47,20 @@ impl Dialect for VllmDialect {
                 json!({ "enable_thinking": enabled }),
             );
         }
-        strip_history_reasoning(id, obj)?;
+        // History-reasoning shaping (strip vs preserve) is owned by
+        // the egress runtime; see DeepSeekDialect::apply_request for
+        // the rationale.
         Ok(())
+    }
+
+    /// vLLM (recent versions) accepts the same `reasoning_content`
+    /// preserve shape as DeepSeek for echo-back history.
+    fn preserve_history_reasoning(
+        &self,
+        id: &str,
+        obj: &mut serde_json::Map<String, Value>,
+    ) -> Result<()> {
+        preserve_history_reasoning_content(id, obj)
     }
 
     fn apply_response(&self, _id: &str, msg: &mut Message) -> Result<()> {
