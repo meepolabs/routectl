@@ -50,6 +50,33 @@ pub struct Config {
     /// can't override the `model` field directly (Claude Code, etc.).
     #[serde(default)]
     pub ingress: IngressConfig,
+
+    /// Bedrock-wide settings that apply to every Bedrock provider.
+    /// Currently carries the global `anthropic_beta` allowlist; future
+    /// shared knobs (e.g. region-default, retry-default) land here too.
+    #[serde(default)]
+    pub bedrock: BedrockGlobalConfig,
+}
+
+/// Bedrock-wide configuration shared by every `[providers.X]` entry
+/// of `kind = "bedrock"`. Bedrock's accepted `anthropic_beta` set is
+/// model-independent (verified identical across haiku-4-5,
+/// sonnet-4-6, opus-4-7), so the allowlist belongs here rather than
+/// duplicated per-provider.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BedrockGlobalConfig {
+    /// Override the routectl-shipped `BEDROCK_INVOKE_ACCEPTED_BETAS`
+    /// const. When `None` (the default), the const is the allowlist.
+    /// When `Some(list)`, `list` REPLACES the const entirely -- this
+    /// is the FULL allowlist for every Bedrock-Invoke provider in the
+    /// config, not an extension. Use this to add flags AWS gated
+    /// after the routectl release, or to remove flags AWS deprecated.
+    ///
+    /// Per-provider `[providers.X] anthropic_beta` is unrelated and
+    /// keeps its existing semantics (operator-asserted floor that is
+    /// always sent and bypasses the allowlist filter).
+    #[serde(default)]
+    pub anthropic_beta: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
