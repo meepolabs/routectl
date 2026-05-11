@@ -18,11 +18,13 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     // serve but silently ignored by test, masking real ingress
     // misconfigurations from operators using the test command for
     // pre-production validation.
-    let opts = BuildOptions::new().with_strict_translation(config.server.strict_translation);
+    let opts = BuildOptions::new()
+        .with_strict_translation(config.server.strict_translation)
+        .with_bedrock_anthropic_beta_allowlist(config.bedrock.anthropic_beta.clone());
 
     let mut failed: Vec<(String, String)> = Vec::new();
     for (name, entry) in &config.providers {
-        match build_provider_with_options(name, entry, &secrets, opts).await {
+        match build_provider_with_options(name, entry, &secrets, opts.clone()).await {
             Ok(p) => router.register(name, p),
             Err(e) => {
                 tracing::warn!(provider = name, error = ?e, "skipping provider that failed to build");

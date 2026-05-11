@@ -178,6 +178,17 @@ pub struct BedrockConfig {
     /// array; for `Converse`, they go in
     /// `additionalModelRequestFields.anthropic_beta`.
     pub anthropic_beta: Vec<String>,
+    /// Optional override for the routectl-shipped Bedrock-Invoke
+    /// `anthropic_beta` allowlist. When `None`, the const
+    /// `BEDROCK_INVOKE_ACCEPTED_BETAS` in
+    /// `crates/routectl-providers/src/bedrock/invoke.rs` is the
+    /// allowlist. When `Some(list)`, `list` REPLACES the const
+    /// entirely. Sourced from the top-level `[bedrock] anthropic_beta`
+    /// TOML field which applies to every Bedrock provider in the
+    /// config (the allowlist is global to Bedrock, not per-model).
+    /// Operators populate this to add flags AWS gated after the last
+    /// routectl release, or to remove flags AWS deprecated.
+    pub anthropic_beta_allowlist: Option<Vec<String>>,
     /// Free-form fields merged into the request body. For `Invoke`,
     /// merged at the top level; for `Converse`, merged into
     /// `additionalModelRequestFields`.
@@ -627,6 +638,7 @@ mod tests {
             user_agent: None,
             extra_headers: Vec::new(),
             anthropic_beta: Vec::new(),
+            anthropic_beta_allowlist: None,
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
