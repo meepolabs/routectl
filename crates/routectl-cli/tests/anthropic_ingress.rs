@@ -100,6 +100,7 @@ fn anthropic_proxy_config(
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
         ingress,
+        ..Default::default()
     })
 }
 
@@ -1595,6 +1596,7 @@ async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
         user_agent: None,
         extra_headers: Vec::new(),
         anthropic_beta: vec![],
+        anthropic_beta_allowlist: None,
         additional_model_request_fields: None,
         adaptive_thinking: None,
     };
