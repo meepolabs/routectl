@@ -62,6 +62,19 @@ impl IngressAdapter for OpenAiIngress {
                 "openai ingress body"
             );
         }
+        let mut body = body;
+        // Coalesce DeepSeek/vLLM-shape `reasoning_content` into
+        // canonical `reasoning` on each message BEFORE serde
+        // deserialization. Without this, opencode-style clients
+        // echoing assistant `reasoning_content` on the wire have
+        // their reasoning silently dropped (canonical `Message`
+        // doesn't serde-alias to `reasoning_content`; aliasing was
+        // explicitly rejected on the schema because NIM emits BOTH
+        // keys with one null and serde would dup-fail). The
+        // coalescer mirrors `merge_reasoning_keys` in
+        // `openai_compat::response.rs` -- same prefer-non-null
+        // semantics applied at parse time.
+        coalesce_message_reasoning_keys(&mut body);
         let mut req: ChatRequest = serde_json::from_value(body).map_err(|e| {
             Error::Validation(format!(
                 "openai ingress: invalid /v1/chat/completions body: {e}"
@@ -119,6 +132,48 @@ fn lift_openai_function_tools(req: &mut ChatRequest) {
         if let routectl_core::ToolDef::Other(v) = tool {
             if let Some(custom) = routectl_core::CustomTool::from_openai_function(v) {
                 *tool = routectl_core::ToolDef::Custom(custom);
+            }
+        }
+    }
+}
+
+/// Coalesce `reasoning_content` into `reasoning` on each message in
+/// the wire body BEFORE serde deserialization. Mirrors
+/// `routectl_providers::openai_compat::response::merge_reasoning_keys`
+/// applied to the request side: DeepSeek-style upstreams (and clients
+/// echoing them) carry the reasoning text under `reasoning_content`,
+/// but canonical `Message.reasoning` is the only string slot. Without
+/// this step, that text drops on the floor at parse time.
+///
+/// Prefer-non-null semantics, same as the response coalescer:
+///   - If `reasoning` is present and non-null, leave it; drop
+///     `reasoning_content`.
+///   - Else if `reasoning_content` is non-null, promote it to
+///     `reasoning` and drop the source.
+///   - Else drop both keys.
+///
+/// Why not a serde alias on `Message.reasoning`: NIM emits BOTH keys
+/// (one null) which would deserialize-fail with "duplicate field
+/// reasoning". The schema comment in `routectl_core::Message`
+/// documents this constraint.
+fn coalesce_message_reasoning_keys(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for msg in messages.iter_mut() {
+        let Some(obj) = msg.as_object_mut() else {
+            continue;
+        };
+        let rc = obj.remove("reasoning_content");
+        let r_is_null = obj.get("reasoning").map_or(true, |v| v.is_null());
+        if r_is_null {
+            match rc {
+                Some(v) if !v.is_null() => {
+                    obj.insert("reasoning".into(), v);
+                }
+                _ => {
+                    obj.remove("reasoning");
+                }
             }
         }
     }
@@ -395,5 +450,74 @@ mod tests {
         assert_eq!(v["routectl_provider"], "test");
         // Suppress unused-import warnings.
         let _ = MessageContent::Text("".into());
+    }
+
+    /// DeepSeek-style upstreams (and clients echoing them, like
+    /// opencode) carry assistant reasoning under `reasoning_content`
+    /// on the wire. The OpenAI ingress must coalesce that into
+    /// canonical `reasoning` BEFORE serde deserialization, otherwise
+    /// the field drops on the floor and the egress has nothing to
+    /// echo back. Pin the contract.
+    #[test]
+    fn ingress_coalesces_reasoning_content_into_reasoning() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role":"user","content":"hi"},
+                {"role":"assistant","content":"answer","reasoning_content":"my hidden chain"}
+            ]
+        });
+        let req = OpenAiIngress::default()
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        let assistant = &req.messages[1];
+        assert_eq!(assistant.reasoning.as_deref(), Some("my hidden chain"));
+    }
+
+    /// Counterpart: when both `reasoning` and `reasoning_content` are
+    /// present (NIM does this with one set to null), the coalescer
+    /// must prefer the non-null value rather than serde-dup-failing.
+    #[test]
+    fn ingress_coalesces_reasoning_keys_with_null_reasoning_field() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role":"assistant","content":"x","reasoning":null,"reasoning_content":"the real one"}
+            ]
+        });
+        let req = OpenAiIngress::default()
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        assert_eq!(req.messages[0].reasoning.as_deref(), Some("the real one"));
+    }
+
+    #[test]
+    fn ingress_prefers_existing_non_null_reasoning_over_reasoning_content() {
+        // If both fields are non-null, `reasoning` wins (it's the
+        // canonical field name). Drop `reasoning_content` afterward.
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role":"assistant","content":"x","reasoning":"primary","reasoning_content":"secondary"}
+            ]
+        });
+        let req = OpenAiIngress::default()
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        assert_eq!(req.messages[0].reasoning.as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn ingress_coalesce_no_op_when_neither_field_present() {
+        // No reasoning fields at all -- canonical message has
+        // reasoning = None.
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role":"user","content":"hi"}]
+        });
+        let req = OpenAiIngress::default()
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        assert!(req.messages[0].reasoning.is_none());
     }
 }
