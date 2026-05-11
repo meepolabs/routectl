@@ -11,11 +11,12 @@ doc. If it 4xxs or behaves weirdly, find the matching row.
 
 | If you're using... | Set on `[providers.X]` | Set on `[aliases.X.retry]` |
 |---|---|---|
-| **Claude Opus 4.7+ / Sonnet 4.7+** | `adaptive_thinking = true` | `stream_first_byte_timeout_ms = 300000` (when using `effort = "high"` / `"xhigh"` / `"max"`) |
+| **Claude Opus 4.7+ / Sonnet 4.7+** | `adaptive_thinking = true` | -- |
+| **Any thinking model + high-effort latency** | `stream_first_byte_timeout_ms = 300000` (provider-level applies to every alias hitting it) | -- |
 | **DeepSeek v4 / v4.1 (any host)** | `history_reasoning = "preserve"` | -- |
 | **DeepSeek v3 / older vLLM** | -- (default `history_reasoning = "auto"` strips for you) | -- |
 | **NVIDIA NIM hosting DeepSeek** | `default_extras = { reasoning_effort = "high" }` (only if you want thinking on by default) | -- |
-| **Any reasoning / thinking model with high effort** | -- | `stream_first_byte_timeout_ms = 300000` |
+| **NIM cold-start streaming** | `stream_first_byte_timeout_ms = 180000` (3 min) | -- |
 | **Anthropic + 1M-context beta** | `extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }` | -- |
 | **OAuth bearer to Anthropic** | `auth_kind = "oauth-bearer"` + the matching beta header | -- |
 
@@ -30,17 +31,28 @@ The 4.7+ generation rejects the legacy `thinking: {type: "enabled", budget_token
 ```toml
 [providers.bedrock-opus47]
 type = "bedrock"
-model_id = "global.anthropic.claude-opus-4-7-v1:0"
+model_id = "us.anthropic.claude-opus-4-7-v1:0"
 adaptive_thinking = true        # rewrites to {type:"adaptive"} + output_config.effort
 ```
 
-**Recommended when using `reasoning.effort = "high"` / `"xhigh"` / `"max"`:** Opus 4.7 + max-effort regularly takes 60-90 seconds before first SSE byte. Bump the per-alias timeout or it fires spuriously and your client sees a failed request:
+**Recommended when using `reasoning.effort = "high"` / `"xhigh"` / `"max"`:** Opus 4.7 + max-effort regularly takes 60-90 seconds before first SSE byte. Bump the timeouts -- prefer the provider-level fields when many aliases share this upstream:
+
+```toml
+[providers.bedrock-opus47]
+# ...the fields above, plus:
+stream_first_byte_timeout_ms = 300000   # 5 min, applies to every alias
+request_timeout_ms = 600000             # 10 min, applies to every alias
+```
+
+Or if only one alias needs the bump:
 
 ```toml
 [aliases.heavy.retry]
-stream_first_byte_timeout_ms = 300000   # 5 min
-request_timeout_ms = 600000             # 10 min
+stream_first_byte_timeout_ms = 300000
+request_timeout_ms = 600000
 ```
+
+Resolution priority: `alias.retry.X` > `provider.X` > top-level `[retry].X` > unset (no cap).
 
 **Why opt-in per provider, not auto-detect by name:** Anthropic is rolling adaptive thinking out gradually with no clean naming pattern. `opus-4-7` matches today's model but misses `opus-5` / `sonnet-4-7`; `opus-4-` catches the still-legacy `4-5`/`4-6`. TOML opt-in lets you flip the day a new model lands.
 
@@ -97,12 +109,15 @@ reasoning_dialect = "openai"
 default_extras = { reasoning_effort = "high" }   # always-on thinking
 ```
 
-**Heads-up: NIM cold-start latency on streaming.** First-byte timeouts of 60s+ are common on NIM. Bump per-alias:
+**Heads-up: NIM cold-start latency on streaming.** First-byte timeouts of 60s+ are common on NIM. Set the bump on the provider so every alias hitting it inherits:
 
 ```toml
-[aliases.nim-heavy.retry]
-stream_first_byte_timeout_ms = 180000   # 3 min
+[providers.nim]
+# ...the fields above, plus:
+stream_first_byte_timeout_ms = 180000   # 3 min, all NIM-routed aliases benefit
 ```
+
+Or per-alias if only a single alias needs it.
 
 ### Anthropic (api.anthropic.com)
 
@@ -141,7 +156,7 @@ The **`converse` api_shape** is accepted in TOML but the body translator is stub
 [providers.bedrock-opus47]
 type = "bedrock"
 region = "us-east-1"
-model_id = "global.anthropic.claude-opus-4-7-v1:0"
+model_id = "us.anthropic.claude-opus-4-7-v1:0"
 api_shape = "invoke"
 adaptive_thinking = true
 creds = { kind = "default-chain" }
@@ -181,7 +196,7 @@ reasoning_dialect = "openai"
 
 ### `stream_first_byte_timeout_ms`
 
-Default is 10s (set in `[retry]`). Fine for most non-thinking models, too aggressive for any thinking model with high effort. Bump per-alias when needed.
+Default is 10s (set in `[retry]`). Fine for most non-thinking models, too aggressive for any thinking model with high effort or any cold-start-prone host.
 
 | Model class | Suggested timeout |
 |---|---|
@@ -191,16 +206,20 @@ Default is 10s (set in `[retry]`). Fine for most non-thinking models, too aggres
 | Thinking-capable, max effort | 300000-600000 |
 | NIM cold-start (any model) | 180000+ |
 
-These belong on the alias's `[aliases.X.retry]` block, not on `[retry]` -- the global default should stay tight to surface real timeouts on routine calls.
+**Resolution priority** (alias > provider > global):
 
-**Open design question (not yet implemented):** should routectl support per-provider or per-model timeout config? Today timeouts are alias-level only. Per-provider would reduce repetition when many aliases share an upstream. Per-model would be overkill -- model_id is just a string in `provider:model` literals. **Provider-level is the most likely future addition.** Until then, set per-alias.
+1. `[aliases.X.retry] stream_first_byte_timeout_ms` -- per-alias override (use when one alias needs different timing than its peers)
+2. `[providers.Y] stream_first_byte_timeout_ms` -- per-provider default (use when an upstream is uniformly slow; every alias routing through it inherits)
+3. `[retry] stream_first_byte_timeout_ms` -- workspace default (keep tight to surface real timeouts on routine calls)
+
+Provider-level is usually what you want for "this upstream is slow." Alias-level is for "this routing decision is latency-sensitive."
 
 ### `request_timeout_ms`
 
-Default is 60s. Long-thinking responses can run 5-10 min on max effort. Bump alongside the first-byte timeout:
+Default is unset (no cap; relies on reqwest's default). Same alias > provider > global resolution as the first-byte timeout. Bump alongside the first-byte timeout for long-thinking responses:
 
 ```toml
-[aliases.heavy.retry]
+[providers.bedrock-opus47]
 stream_first_byte_timeout_ms = 300000   # 5 min until first byte
 request_timeout_ms = 600000             # 10 min full request
 ```
