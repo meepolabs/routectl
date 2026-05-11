@@ -1524,3 +1524,94 @@ async fn cross_response_openai_tool_calls_become_anthropic_tool_use_blocks() {
     assert_eq!(tool_use["input"], json!({"expr": "2+2"}));
     assert_eq!(body["stop_reason"], "tool_use");
 }
+
+// ---------------------------------------------------------------------------
+// INV-6 cross-crate regression: Anthropic ingress -> Bedrock-Invoke egress
+// ---------------------------------------------------------------------------
+//
+// claude-code's TS SDK ships up to ten anthropic-beta flags via the HTTP
+// header on every /v1/messages request. The Anthropic ingress lifts the
+// header into canonical req.anthropic_beta; the Bedrock-Invoke egress's
+// filter_bedrock_invoke_betas drops values Bedrock has not gated. The
+// combined behavior must (a) preserve flags Bedrock accepts, (b) drop
+// flags Bedrock rejects, (c) dedup duplicates introduced by either
+// surface, (d) preserve operator-asserted flags from cfg.anthropic_beta.
+//
+// Wiremock against the actual Bedrock SigV4 path is deferred to a
+// future live-matrix expansion (no AWS creds in the test env). This
+// parser-level test exercises the ingress -> egress wiring directly.
+// `bedrock` is unconditionally enabled in routectl-cli's
+// routectl-providers dep, so no cfg gate is needed here.
+
+#[tokio::test]
+async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
+    use axum::http::HeaderMap;
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+    use routectl_cli::ingress::IngressAdapter;
+    use routectl_providers::bedrock::{
+        invoke as bedrock_invoke, BedrockApiShape, BedrockConfig, BedrockCreds,
+    };
+
+    // Arrange: simulate the inbound HTTP shape claude-code sends.
+    let ingress = AnthropicIngress::new(BTreeMap::new());
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "anthropic-beta",
+        "context-1m-2025-08-07,oauth-2025-04-20,redact-thinking-2026-02-12"
+            .parse()
+            .unwrap(),
+    );
+    let inbound_body = json!({
+        "model": "claude-opus-4-7",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+        // Body-side flag duplicating one from the header (the SDK
+        // sometimes echoes both surfaces).
+        "anthropic_beta": ["context-1m-2025-08-07"]
+    });
+
+    let req = ingress.parse_request(&headers, inbound_body).unwrap();
+
+    // The ingress merge already deduped header-vs-body, so canonical
+    // has the union deduped: 3 unique flags.
+    assert_eq!(
+        req.anthropic_beta,
+        vec![
+            "context-1m-2025-08-07",
+            "oauth-2025-04-20",
+            "redact-thinking-2026-02-12",
+        ],
+        "ingress merge did not behave as expected"
+    );
+
+    // Construct a minimal Bedrock provider config (BearerKey skips the
+    // SigV4 signing path; no HTTP fires from this test).
+    let cfg = BedrockConfig {
+        id: "bedrock:opus47-test".into(),
+        region: "us-west-2".into(),
+        model_id: "global.anthropic.claude-opus-4-7-v1:0".into(),
+        api_shape: BedrockApiShape::Invoke,
+        creds: BedrockCreds::BearerKey { key: "test".into() },
+        user_agent: None,
+        extra_headers: Vec::new(),
+        anthropic_beta: vec![],
+        additional_model_request_fields: None,
+        adaptive_thinking: None,
+    };
+
+    // Act: run the canonical request through the Bedrock-Invoke
+    // body shaper. This is the same call site that fires per-request
+    // in BedrockProvider::complete / stream.
+    let body = bedrock_invoke::normalize_request(&cfg, &req).unwrap();
+
+    // Assert: only the Bedrock-accepted flag survives in the upstream
+    // body; the rejected flags were dropped at DEBUG by the filter.
+    let arr = body["anthropic_beta"]
+        .as_array()
+        .expect("anthropic_beta should be present with one element");
+    let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(strs, vec!["context-1m-2025-08-07"]);
+    // Per CLAUDE.md the Bedrock body field also carries
+    // anthropic_version (Bedrock-specific).
+    assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
+}
