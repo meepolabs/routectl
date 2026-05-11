@@ -374,6 +374,58 @@ Refer back when a similar failure mode shows up.
   object form into the Anthropic tagged-enum shape; Anthropic-shape
   inputs pass through unchanged.
 
+- **Anthropic structured-output `output_format` (legacy) silently
+  dropped at the ingress.** Anthropic's current wire shape is
+  `output_config.format = {type: "json_schema", schema: ...}`. Older
+  callers (and the Claude-Code legacy SDK path) still send a
+  top-level `output_format` field; serde on `ChatRequest` does not
+  know that name and silently dropped it before Layer 1 fix. Now
+  `merge_output_format` in
+  `crates/routectl-cli/src/ingress/anthropic.rs` rewrites the
+  legacy field into `output_config.format` (preserving any existing
+  `output_config.effort`); when both shapes arrive on one request it
+  prefers the nested form and WARNs, mirroring claude-code's own
+  deprecation message. The egresses need no extra translation:
+  Bedrock-Invoke for Claude is Anthropic-shape passthrough, and the
+  Anthropic-API egress already merges `provider_extras["output_config"]`
+  into the body.
+
+- **Forward-compat sweep on the Anthropic ingress.** Anthropic adds
+  new top-level body fields on a quarterly cadence (e.g. recent
+  additions: `context_management`, `context_hint`, `speed`,
+  `diagnostics`, `mcp_servers`). Without an explicit pull-out, serde
+  on `ChatRequest` silently drops them at the ingress boundary.
+  `translate_request` now sweeps every key NOT in
+  `CANONICAL_CHAT_REQUEST_WIRE_FIELDS` into `provider_extras` so the
+  egress's `merge_provider_extras` forwards them upstream verbatim.
+  When canonical adds a new field, also add it to the
+  `CANONICAL_CHAT_REQUEST_WIRE_FIELDS` const in
+  `crates/routectl-cli/src/ingress/anthropic.rs`.
+
+- **Inbound `anthropic-beta` HTTP header was dropped.** The
+  `@anthropic-ai/sdk` Beta API translates the SDK option `betas:
+  [...]` into the `anthropic-beta: a,b,c` HTTP header (not into the
+  body's `anthropic_beta` array). claude-code uses this surface for
+  first-party betas (context-management, prompt-cache-1h,
+  adaptive-thinking, ...). routectl now lifts inbound header values
+  into canonical `req.anthropic_beta` (deduplicated, preserving body
+  order) so the egress emits them in the upstream body.
+  Anthropic accepts either surface.
+
+- **Response `stop_reason` round-trip was lossy for Anthropic-only
+  values.** The Anthropic egress maps `stop_reason -> finish_reason`
+  for the OpenAI overlap (`end_turn`/`stop_sequence` -> `stop`,
+  `max_tokens` -> `length`, `tool_use` -> `tool_calls`) and passes
+  everything else through verbatim. The Anthropic ingress used to
+  reverse-map only those four and clobber unknown values to
+  `end_turn`, breaking claude-code's per-stop-reason error handling
+  for `pause_turn`, `refusal`, and `model_context_window_exceeded`.
+  Fixed: `openai_finish_to_anthropic_stop` now passes through unknown
+  values. The `stop_sequence -> stop -> end_turn` ambiguity remains
+  (information lost at the canonical layer); preserving it would
+  require an additional native finish-reason field on the canonical
+  Choice.
+
 ## Adding a new model to the matrix
 
 Step-by-step example: "OpenAI launches o5-mini on OpenRouter."
