@@ -129,11 +129,24 @@ pub fn walk_content_blocks(
 /// Translate Anthropic `usage` into the canonical `Usage`, including
 /// the cache-stats extension (cache_creation_input_tokens,
 /// cache_read_input_tokens, per-TTL breakdown).
+///
+/// Anthropic reports `input_tokens` as ONLY the new, non-cached tokens.
+/// OpenAI's `prompt_tokens` is the full prompt size (with cached subset
+/// reported separately). To stay OpenAI-spec correct on the wire,
+/// `prompt_tokens` is the SUM of new + cache-creation + cache-read
+/// inputs, while the per-bucket breakdown stays available on the
+/// extension fields.
 fn translate_usage(u: &AnthropicUsage) -> Usage {
+    let cache_creation = u.cache_creation_input_tokens.unwrap_or(0);
+    let cache_read = u.cache_read_input_tokens.unwrap_or(0);
+    let prompt_tokens = u
+        .input_tokens
+        .saturating_add(cache_creation)
+        .saturating_add(cache_read);
     Usage {
-        prompt_tokens: u.input_tokens,
+        prompt_tokens,
         completion_tokens: u.output_tokens,
-        total_tokens: u.input_tokens + u.output_tokens,
+        total_tokens: prompt_tokens.saturating_add(u.output_tokens),
         reasoning_tokens: u.reasoning_tokens,
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_read_input_tokens: u.cache_read_input_tokens,
@@ -206,6 +219,56 @@ mod tests {
         let cc = u.cache_creation.unwrap();
         assert_eq!(cc.ephemeral_5m_input_tokens, Some(2048));
         assert_eq!(cc.ephemeral_1h_input_tokens, Some(2048));
+    }
+
+    #[test]
+    fn prompt_tokens_sums_input_plus_cache_creation_plus_cache_read() {
+        // Anthropic reports input_tokens as ONLY the new (non-cached)
+        // tokens. OpenAI's prompt_tokens is the full prompt size.
+        // Translation must sum the three buckets so OpenAI clients
+        // reading the canonical response see the cumulative context
+        // size, not just the new turn's tokens.
+        let raw = json!({
+            "id": "msg_03",
+            "model": "claude-opus-4-7",
+            "content": [{"type":"text","text":"ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 4096,
+                "cache_read_input_tokens": 8192
+            }
+        });
+        let resp = normalize("test", raw).unwrap();
+        let u = resp.usage.unwrap();
+        // 50 + 4096 + 8192 = 12338
+        assert_eq!(u.prompt_tokens, 12338);
+        // total_tokens reflects the summed prompt + completion.
+        assert_eq!(u.total_tokens, 12338 + 10);
+        // Per-bucket breakdown still available for clients that want it.
+        assert_eq!(u.cache_creation_input_tokens, Some(4096));
+        assert_eq!(u.cache_read_input_tokens, Some(8192));
+    }
+
+    #[test]
+    fn prompt_tokens_with_no_cache_equals_input_tokens() {
+        // First turn (or non-cached path): cache_* = None, so
+        // prompt_tokens == input_tokens unchanged.
+        let raw = json!({
+            "id": "msg_04",
+            "model": "claude-opus-4-7",
+            "content": [{"type":"text","text":"ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20
+            }
+        });
+        let resp = normalize("test", raw).unwrap();
+        let u = resp.usage.unwrap();
+        assert_eq!(u.prompt_tokens, 100);
+        assert_eq!(u.total_tokens, 120);
     }
 
     #[test]
