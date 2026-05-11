@@ -429,11 +429,18 @@ Refer back when a similar failure mode shows up.
   set as of 2026-05-10; `filter_bedrock_invoke_betas` drops unknowns
   at DEBUG (not WARN -- the TS SDK reliably sends ~5 unsupported
   flags every request and WARN would flood `routectl-warn.log`).
-  Operator extension hatch: `[providers.X] anthropic_beta = [...]`
-  in TOML -- those flags pass through the filter unconditionally,
-  decoupling routectl releases from AWS allowlist drift. When the
-  Bedrock Converse adapter (M2.7) lands, the analogous filter
-  belongs there too -- see the `TODO(M5)` in `invoke.rs`.
+  Two complementary operator escape hatches:
+  - **Global override** -- `[bedrock] anthropic_beta = [...]` at the
+    top level of TOML REPLACES the const allowlist for every Bedrock
+    provider in the config. Use this to add flags AWS gated after
+    your routectl release, or to remove flags AWS deprecated. The
+    const is the default when this field is unset.
+  - **Per-provider floor** -- `[providers.X] anthropic_beta = [...]`
+    is unchanged: those flags are always sent and bypass the filter
+    (operator-asserted), independent of the global allowlist.
+
+  When the Bedrock Converse adapter (M2.7) lands, the analogous
+  filter belongs there too -- see the `TODO(M5)` in `invoke.rs`.
 
 - **Response `stop_reason` round-trip was lossy for Anthropic-only
   values.** The Anthropic egress maps `stop_reason -> finish_reason`

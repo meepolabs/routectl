@@ -178,6 +178,7 @@ fn build_router_with_default(
         },
         legacy_compat: Default::default(),
         ingress: Default::default(),
+        ..Default::default()
     };
     Router::new(Arc::new(cfg))
 }
@@ -570,6 +571,7 @@ fn build_router_with_runtime(
         },
         legacy_compat: Default::default(),
         ingress: Default::default(),
+        ..Default::default()
     };
     Router::new(Arc::new(cfg))
 }

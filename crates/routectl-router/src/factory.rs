@@ -30,7 +30,7 @@ pub async fn build_provider(
 
 /// Server-wide options that influence per-provider construction.
 /// Defaults are equivalent to the legacy `build_provider` behavior.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct BuildOptions {
     /// When `true`, providers reject requests carrying canonical-only
@@ -38,6 +38,13 @@ pub struct BuildOptions {
     /// egress receiving an Anthropic `cache_control` block). Default
     /// `false` -- warn-and-drop. Set from `[server] strict_translation`.
     pub strict_translation: bool,
+    /// Optional override for the Bedrock-Invoke `anthropic_beta`
+    /// allowlist. Sourced from the top-level `[bedrock] anthropic_beta`
+    /// TOML field. When `Some`, replaces the routectl-shipped const
+    /// `BEDROCK_INVOKE_ACCEPTED_BETAS`. When `None`, the const wins.
+    /// Applies to every Bedrock provider in the config (Bedrock's
+    /// allowlist is global, not per-model).
+    pub bedrock_anthropic_beta_allowlist: Option<Vec<String>>,
 }
 
 impl BuildOptions {
@@ -47,6 +54,11 @@ impl BuildOptions {
 
     pub fn with_strict_translation(mut self, strict: bool) -> Self {
         self.strict_translation = strict;
+        self
+    }
+
+    pub fn with_bedrock_anthropic_beta_allowlist(mut self, allowlist: Option<Vec<String>>) -> Self {
+        self.bedrock_anthropic_beta_allowlist = allowlist;
         self
     }
 }
@@ -158,6 +170,7 @@ pub async fn build_provider_with_options(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
                 anthropic_beta: anthropic_beta.clone(),
+                anthropic_beta_allowlist: opts.bedrock_anthropic_beta_allowlist.clone(),
                 additional_model_request_fields: additional_model_request_fields.clone(),
                 adaptive_thinking: *adaptive_thinking,
             };

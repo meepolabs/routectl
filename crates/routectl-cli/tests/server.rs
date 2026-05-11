@@ -63,6 +63,7 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     })
 }
 
@@ -103,6 +104,7 @@ fn two_provider_config(first_base: &str, second_base: &str) -> Arc<Config> {
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     })
 }
 
@@ -206,6 +208,7 @@ async fn models_includes_default_model_and_ingress_aliases() {
                 aliases: anthropic_aliases,
             },
         },
+        ..Default::default()
     });
     let base = helpers::spawn_test_server(config).await;
     let body: Value = reqwest::get(format!("{base}/v1/models"))
@@ -481,6 +484,7 @@ async fn chat_completions_unknown_model_routes_to_default_model() {
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     });
 
     let base = helpers::spawn_test_server(config).await;
@@ -575,6 +579,7 @@ async fn server_fails_startup_when_referenced_provider_cannot_build() {
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -631,6 +636,7 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
