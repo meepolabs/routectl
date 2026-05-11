@@ -312,8 +312,16 @@ fn render_messages_response(resp: ChatResponse) -> Value {
     body.insert("stop_sequence".into(), Value::Null);
 
     let usage = resp.usage.as_ref().map(|u| {
+        // Anthropic's `input_tokens` is the RAW input portion; cache
+        // fields are separate. Canonical `prompt_tokens` is the summed
+        // total (OpenAI semantics), so subtract cache fields to recover
+        // the raw input that the Anthropic spec wants on the wire.
+        let raw_input = u
+            .prompt_tokens
+            .saturating_sub(u.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_sub(u.cache_read_input_tokens.unwrap_or(0));
         json!({
-            "input_tokens": u.prompt_tokens,
+            "input_tokens": raw_input,
             "output_tokens": u.completion_tokens,
             "cache_creation_input_tokens": u.cache_creation_input_tokens,
             "cache_read_input_tokens": u.cache_read_input_tokens,
@@ -747,13 +755,18 @@ fn emit_message_delta(
 
     if let Some(u) = usage {
         let mut wire_usage = Map::new();
-        // Real Anthropic emits `input_tokens` in message_delta.usage too
-        // (mirroring message_start.usage with the final post-cache count).
-        // Without this, downstream consumers see prompt_tokens=0 on
-        // streaming responses, since message_start.usage we emit is
-        // hardcoded to {input_tokens:0, output_tokens:0}.
-        if let Some(n) = u.prompt_tokens {
-            wire_usage.insert("input_tokens".into(), json!(n));
+        // Anthropic's wire semantics: `input_tokens` is the RAW input
+        // portion (cache_creation and cache_read are separate fields).
+        // Canonical `prompt_tokens` is the summed total, so subtract
+        // cache fields to recover the raw value. Real Anthropic emits
+        // `input_tokens` on message_delta mirroring the message_start
+        // value, and downstream consumers need it because routectl's
+        // emit_message_start hardcodes {input_tokens:0, output_tokens:0}.
+        if let Some(prompt) = u.prompt_tokens {
+            let raw_input = prompt
+                .saturating_sub(u.cache_creation_input_tokens.unwrap_or(0))
+                .saturating_sub(u.cache_read_input_tokens.unwrap_or(0));
+            wire_usage.insert("input_tokens".into(), json!(raw_input));
         }
         if let Some(n) = u.completion_tokens {
             wire_usage.insert("output_tokens".into(), json!(n));
@@ -1252,15 +1265,18 @@ mod tests {
     }
 
     /// Closing chunk's `usage.prompt_tokens` must be rendered into
-    /// `message_delta.usage.input_tokens` so a chained downstream
-    /// (another routectl, or any Anthropic SSE consumer) can read the
-    /// prompt size. message_start.usage is hardcoded to zero, so this
-    /// is the only surface where input-side numbers reach the wire.
+    /// Anthropic's `input_tokens` on message_delta carries the RAW
+    /// input portion (cache_creation and cache_read are separate
+    /// fields per spec). routectl computes raw = prompt_tokens -
+    /// cache_creation - cache_read so the wire body matches the
+    /// Anthropic spec rather than echoing canonical's summed
+    /// prompt_tokens. A receiver-side anthropic SSE state machine
+    /// (`anthropic_api/sse.rs`) sums raw + cache fields back into
+    /// canonical prompt_tokens.
     #[test]
-    fn message_delta_renders_input_tokens_from_canonical_prompt_tokens() {
+    fn message_delta_renders_raw_input_tokens_per_anthropic_spec() {
         use routectl_core::{schema::CacheCreation, UsageDelta};
         let mut s = fresh_state();
-        // Drive a content chunk so message_start lands first.
         let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
         let closing = ChatChunk {
             id: "msg_01".into(),
@@ -1286,7 +1302,8 @@ mod tests {
             .expect("message_delta emitted");
         let payload: Value = serde_json::from_str(&delta_event.data).unwrap();
         let wire_usage = &payload["usage"];
-        assert_eq!(wire_usage["input_tokens"], 12345);
+        // raw input = 12345 - 100 - 200 = 12045 (per Anthropic spec).
+        assert_eq!(wire_usage["input_tokens"], 12045);
         assert_eq!(wire_usage["output_tokens"], 50);
         assert_eq!(wire_usage["cache_creation_input_tokens"], 100);
         assert_eq!(wire_usage["cache_read_input_tokens"], 200);
