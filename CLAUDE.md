@@ -217,6 +217,11 @@ ROUTECTL_LOG=routectl=trace ./routectl serve
 
 # Trace one specific request end-to-end:
 ROUTECTL_LOG=routectl=trace ./routectl serve 2>&1 | grep request_id=<id>
+
+# Which Bedrock-Invoke beta flags are getting filtered (operator
+# suspects AWS allowlist drift; see issues.md::INV-6):
+ROUTECTL_LOG=routectl_providers::bedrock=debug ./routectl serve 2>&1 \
+  | grep "dropping beta flag"
 ```
 
 What you get at debug:
@@ -411,6 +416,24 @@ Refer back when a similar failure mode shows up.
   into canonical `req.anthropic_beta` (deduplicated, preserving body
   order) so the egress emits them in the upstream body.
   Anthropic accepts either surface.
+
+- **Bedrock-Invoke rejects unsupported `anthropic_beta` values.**
+  Bedrock validates each entry of `anthropic_beta` independently and
+  400s the entire request on the first unsupported value -- there is
+  no per-flag fallback. claude-code's TS SDK ships up to ten betas
+  via the `anthropic-beta` HTTP header, only ten of which Bedrock
+  has gated for distribution (one global allowlist; verified
+  identical across haiku-4-5 / sonnet-4-6 / opus-4-7). The
+  `BEDROCK_INVOKE_ACCEPTED_BETAS` const in
+  `crates/routectl-providers/src/bedrock/invoke.rs` is the empirical
+  set as of 2026-05-10; `filter_bedrock_invoke_betas` drops unknowns
+  at DEBUG (not WARN -- the TS SDK reliably sends ~5 unsupported
+  flags every request and WARN would flood `routectl-warn.log`).
+  Operator extension hatch: `[providers.X] anthropic_beta = [...]`
+  in TOML -- those flags pass through the filter unconditionally,
+  decoupling routectl releases from AWS allowlist drift. When the
+  Bedrock Converse adapter (M2.7) lands, the analogous filter
+  belongs there too -- see the `TODO(M5)` in `invoke.rs`.
 
 - **Response `stop_reason` round-trip was lossy for Anthropic-only
   values.** The Anthropic egress maps `stop_reason -> finish_reason`
