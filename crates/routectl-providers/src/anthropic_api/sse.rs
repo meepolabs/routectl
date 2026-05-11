@@ -225,10 +225,9 @@ impl SseState {
                         match (delta, cap_v) {
                             (Some(d), _) if d > 0 => Some(d),
                             (_, Some(c)) if c > 0 => Some(c),
-                            (Some(d), Some(c)) => Some(d.max(c)),
-                            (Some(0), None) | (None, Some(0)) => None,
-                            (Some(d), None) => Some(d),
-                            (None, c) => c,
+                            // Both arms above guarded; the rest are
+                            // zero-or-absent on both sides.
+                            _ => None,
                         }
                     };
                     let cache_creation_input_tokens = pick(
