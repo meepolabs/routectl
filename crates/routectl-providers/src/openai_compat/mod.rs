@@ -58,6 +58,12 @@ pub struct OpenAiCompatConfig {
     pub default_extras: Option<Value>,
     /// Which reasoning wire-format quirks apply.
     pub reasoning_dialect: ReasoningDialect,
+    /// How to handle reasoning fields on outgoing assistant messages
+    /// in multi-turn history. `Auto` defers to the dialect's default
+    /// (DeepSeek/Vllm strip, OpenAI/OpenRouter pass through). `Strip`
+    /// and `Preserve` are explicit overrides. See
+    /// `HistoryReasoning` docs for the v3-vs-v4 motivation.
+    pub history_reasoning: HistoryReasoning,
     /// Override the User-Agent on outbound requests. `None` keeps reqwest's default.
     pub user_agent: Option<String>,
     /// When `true`, requests carrying canonical-only fields (`cache_control`,
@@ -66,6 +72,31 @@ pub struct OpenAiCompatConfig {
     /// `Error::Validation` instead of warn-and-dropped. Set from
     /// `[server] strict_translation` at provider build time.
     pub strict_translation: bool,
+}
+
+/// Outgoing-history reasoning policy. Sibling of the router-side
+/// `HistoryReasoning` TOML enum; the factory maps between the two.
+///
+/// Background: DeepSeek v3 explicitly REJECTED `reasoning_content` in
+/// echo-back history (would 400). DeepSeek v4 inverted the contract --
+/// it now REQUIRES `reasoning_content` to be passed back, with a 400
+/// reading `"reasoning_content in the thinking mode must be passed
+/// back to the API"` if the field is missing. The same wire dialect
+/// (`reasoning_dialect = "deepseek"`) supports both versions, so the
+/// strip-or-preserve choice cannot live on the dialect itself; this
+/// per-provider knob carries the operator's intent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HistoryReasoning {
+    /// Use the dialect's default. DeepSeek and Vllm strip; OpenAI and
+    /// OpenRouter pass through. Backward-compatible default.
+    #[default]
+    Auto,
+    /// Force-strip reasoning fields from outgoing assistant messages.
+    Strip,
+    /// Force-emit the dialect-native preserve shape on outgoing
+    /// assistant messages (DeepSeek/Vllm: `reasoning_content`;
+    /// OpenRouter: `reasoning_details`).
+    Preserve,
 }
 
 pub struct OpenAiCompatProvider {
