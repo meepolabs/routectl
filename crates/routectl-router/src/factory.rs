@@ -15,10 +15,10 @@ use routectl_providers::openai_compat::{
 #[cfg(feature = "bedrock")]
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
 
+use crate::config::HistoryReasoning;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{ProviderEntry, ReasoningDialect};
-use crate::config::HistoryReasoning;
 
 pub async fn build_provider(
     name: &str,
