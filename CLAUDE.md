@@ -353,6 +353,27 @@ Refer back when a similar failure mode shows up.
   `sanitize_upstream_body` in
   `crates/routectl-providers/src/openai_compat/mod.rs`.
 
+- **Strict openai-compat hosts 400 on top-level `system`**. NIM
+  rejects with `Validation: Unsupported parameter(s): system` because
+  `system` is the Anthropic-shape top-level field; OpenAI carries it
+  as a `role: "system"` message. The OpenAI ingress lifts wire
+  `role: "system"` into canonical `req.system`; the openai-compat
+  egress at
+  `crates/routectl-providers/src/openai_compat/request.rs::normalize`
+  does the inverse lower (synthetic `role: "system"` message
+  prepended; top-level `system` removed) so neither lenient (OpenAI,
+  OpenRouter, opencode-go) nor strict (NIM) hosts see the
+  Anthropic-shape field.
+
+- **Anthropic `tool_choice` rejects bare-string OpenAI shape**.
+  Bedrock validators 400 on `tool_choice: "auto"` (OpenAI) where
+  Anthropic expects `{"type":"auto"}`. Handled at the Anthropic-API
+  egress by `translate_tool_choice` in
+  `crates/routectl-providers/src/anthropic_api/request.rs`. Maps
+  `"auto"|"none"|"required"` plus the OpenAI `{"type":"function",...}`
+  object form into the Anthropic tagged-enum shape; Anthropic-shape
+  inputs pass through unchanged.
+
 ## Adding a new model to the matrix
 
 Step-by-step example: "OpenAI launches o5-mini on OpenRouter."
