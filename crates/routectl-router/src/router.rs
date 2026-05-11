@@ -466,20 +466,10 @@ impl Router {
         self.config.retry.clone()
     }
 
-    /// Compose a per-attempt policy by overlaying the target provider's
-    /// timeout config onto the alias-resolved `RetryPolicy`. The
-    /// alias-level override always wins; provider-level fills in only
-    /// when the alias didn't set the field.
-    ///
-    /// Resolution per timeout field (alias > provider > whatever was
-    /// already in `base`):
-    ///   - alias.retry.X is Some -> already in `base` from `policy_for`
-    ///   - alias.retry.X is None AND provider.X is Some -> use provider
-    ///   - both None -> leave `base.X` as None (router falls back to
-    ///     reqwest's default)
-    ///
-    /// Pure function over config; no allocation in the steady state
-    /// (clone of a small RetryPolicy struct).
+    /// Overlay the target provider's timeout config onto the alias-
+    /// resolved `RetryPolicy`. Alias-level fields in `base` always
+    /// win; provider-level fills in only when the alias left the
+    /// field None. Both None falls through to reqwest's default.
     fn compose_attempt_policy(&self, base: &RetryPolicy, provider_name: &str) -> RetryPolicy {
         let provider_runtime = self
             .config

@@ -185,31 +185,22 @@ impl SseState {
 
             SseEvent::MessageDelta { delta, usage } => {
                 let finish_reason = map_stop_reason(delta.stop_reason.as_deref());
-                // Build a UsageDelta if either the delta event carries
-                // output-side info OR we captured input-side info at
-                // message_start. Anthropic streams emit input usage
-                // only once (in message_start) so the closing chunk
-                // must carry it forward for OpenAI clients to see the
-                // full prompt_tokens.
+                // Anthropic emits input usage only on message_start, so
+                // the closing chunk must carry it forward for OpenAI
+                // clients to see full prompt_tokens.
                 let captured = self.captured_input_usage.clone();
                 let usage_delta = if usage.is_some() || captured.is_some() {
                     let cap = captured.as_ref();
-                    // Prompt-tokens selection. Real Anthropic does NOT
-                    // currently emit `input_tokens` on `message_delta`,
-                    // only on `message_start`. The only path that
-                    // populates `usage.input_tokens` here is a chained
-                    // routectl: `crates/routectl-cli/src/ingress/anthropic.rs::emit_message_delta`
-                    // writes the canonical `usage.prompt_tokens`
-                    // (already-summed) into the wire field. So when
-                    // `d` is present and non-zero, treat it as the
-                    // pre-summed prompt total. When `d` is zero or
-                    // missing, fall back to `cap.prompt_tokens()`,
-                    // which sums input + cache_creation + cache_read
-                    // captured from `message_start`. If a future
-                    // upstream emits raw (non-summed) input_tokens on
-                    // `message_delta`, this assumption breaks and we
-                    // would silently undercount; the tests below pin
-                    // both branches so a regression there is loud.
+                    // Real Anthropic does NOT emit `input_tokens` on
+                    // `message_delta`; only a chained routectl does, and
+                    // there it carries the already-summed prompt total
+                    // from `crates/routectl-cli/src/ingress/anthropic.rs`.
+                    // So `d` non-zero is treated as the pre-summed total;
+                    // zero/missing falls back to summing cap on the
+                    // message_start side. A future upstream that emits
+                    // raw (non-summed) input_tokens on message_delta
+                    // would silently undercount -- tests below pin both
+                    // branches so the regression is loud.
                     let prompt_tokens = match (
                         usage.as_ref().and_then(|u| u.input_tokens),
                         cap.map(|c| c.prompt_tokens()),
@@ -226,13 +217,10 @@ impl SseState {
                         (None, Some(c)) => Some(c),
                         (None, None) => None,
                     };
-                    // Cache-field merge. Symmetric with prompt_tokens
-                    // above: prefer message_delta's value when present
-                    // and non-zero, else fall back to the captured
-                    // message_start value. An explicit `Some(0)` from
-                    // the delta is treated as "no info" rather than
-                    // "authoritative zero" so a placeholder restatement
-                    // does not blow away non-zero captured numbers.
+                    // Prefer delta when present and non-zero; fall back
+                    // to captured. Some(0) is "no info", not
+                    // "authoritative zero" -- placeholder restatements
+                    // must not blow away non-zero captured numbers.
                     let pick = |delta: Option<u32>, cap_v: Option<u32>| -> Option<u32> {
                         match (delta, cap_v) {
                             (Some(d), _) if d > 0 => Some(d),
@@ -251,12 +239,9 @@ impl SseState {
                         usage.as_ref().and_then(|u| u.cache_read_input_tokens),
                         cap.and_then(|c| c.cache_read_input_tokens),
                     );
-                    // Per-TTL `cache_creation` breakdown: merge field-
-                    // by-field through the same zero-aware `pick`
-                    // helper. Without this, a delta carrying a
-                    // partial or empty `cache_creation` object would
-                    // wholesale-replace the richer object captured at
-                    // `message_start`, silently losing per-TTL detail.
+                    // Per-TTL merge via the same `pick` so a delta with
+                    // partial/empty `cache_creation` doesn't wholesale-
+                    // replace the richer message_start object.
                     let delta_cc = usage.as_ref().and_then(|u| u.cache_creation.as_ref());
                     let cap_cc = cap.and_then(|c| c.cache_creation.as_ref());
                     let cache_creation_5m = pick(
