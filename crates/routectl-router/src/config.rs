@@ -543,6 +543,27 @@ pub struct ProviderRuntimePolicy {
     /// Defaults to 30s when `circuit_failures` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_cooldown_ms: Option<u64>,
+    /// Per-attempt request timeout that applies to every alias chain
+    /// entry routing through this provider. Only used when the alias's
+    /// `[aliases.X.retry] request_timeout_ms` is unset; the alias-level
+    /// override always wins.
+    ///
+    /// Resolution order (alias > provider > global):
+    ///   alias.retry.request_timeout_ms
+    ///     -> provider.request_timeout_ms (this field)
+    ///       -> [retry] request_timeout_ms (workspace global)
+    ///         -> None (no cap, reqwest's default)
+    ///
+    /// Use this when many aliases share the same upstream and the
+    /// timeout is an upstream characteristic (e.g., NIM cold-start),
+    /// not a routing decision (e.g., "heavy alias retries less").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_ms: Option<u64>,
+    /// Per-attempt first-byte timeout for streaming responses through
+    /// this provider. Same alias > provider > global resolution as
+    /// `request_timeout_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_byte_timeout_ms: Option<u64>,
 }
 
 fn default_anthropic_base() -> String {

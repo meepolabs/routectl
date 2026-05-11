@@ -170,8 +170,14 @@ impl Router {
                     backoff = mul_duration(backoff, policy.backoff_multiplier);
                 }
 
-                let result =
-                    run_with_timeout(provider_name, provider.as_ref(), &attempt_req, &policy).await;
+                let attempt_policy = self.compose_attempt_policy(&policy, provider_name);
+                let result = run_with_timeout(
+                    provider_name,
+                    provider.as_ref(),
+                    &attempt_req,
+                    &attempt_policy,
+                )
+                .await;
                 attempts_made += 1;
 
                 match result {
@@ -277,7 +283,10 @@ impl Router {
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
 
-            match try_stream_with_first_chunk(provider_name, provider, attempt_req, &policy).await {
+            let attempt_policy = self.compose_attempt_policy(&policy, provider_name);
+            match try_stream_with_first_chunk(provider_name, provider, attempt_req, &attempt_policy)
+                .await
+            {
                 Ok(stream) => {
                     // DON'T record_success here. A first chunk arriving
                     // is not the same as a healthy upstream -- a provider
@@ -455,6 +464,37 @@ impl Router {
             }
         }
         self.config.retry.clone()
+    }
+
+    /// Compose a per-attempt policy by overlaying the target provider's
+    /// timeout config onto the alias-resolved `RetryPolicy`. The
+    /// alias-level override always wins; provider-level fills in only
+    /// when the alias didn't set the field.
+    ///
+    /// Resolution per timeout field (alias > provider > whatever was
+    /// already in `base`):
+    ///   - alias.retry.X is Some -> already in `base` from `policy_for`
+    ///   - alias.retry.X is None AND provider.X is Some -> use provider
+    ///   - both None -> leave `base.X` as None (router falls back to
+    ///     reqwest's default)
+    ///
+    /// Pure function over config; no allocation in the steady state
+    /// (clone of a small RetryPolicy struct).
+    fn compose_attempt_policy(&self, base: &RetryPolicy, provider_name: &str) -> RetryPolicy {
+        let provider_runtime = self
+            .config
+            .providers
+            .get(provider_name)
+            .map(|e| e.runtime());
+        let mut out = base.clone();
+        if out.request_timeout_ms.is_none() {
+            out.request_timeout_ms = provider_runtime.and_then(|p| p.request_timeout_ms);
+        }
+        if out.stream_first_byte_timeout_ms.is_none() {
+            out.stream_first_byte_timeout_ms =
+                provider_runtime.and_then(|p| p.stream_first_byte_timeout_ms);
+        }
+        out
     }
 }
 
@@ -666,4 +706,112 @@ fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {
 fn mul_duration(d: Duration, factor: f64) -> Duration {
     let nanos = d.as_nanos() as f64 * factor;
     Duration::from_nanos(nanos.min(u64::MAX as f64) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AliasEntry, ProviderEntry, RetryPolicy};
+    use std::collections::BTreeMap;
+
+    /// Build a Router with one openai-compat provider that has the given
+    /// runtime-policy timeouts, and an alias chain of length 1 pointing
+    /// at it. The base RetryPolicy passed to compose_attempt_policy
+    /// represents what `policy_for(alias)` resolved to.
+    fn build_router_with_provider_timeouts(
+        provider_request_timeout: Option<u64>,
+        provider_first_byte_timeout: Option<u64>,
+    ) -> Router {
+        let mut providers = BTreeMap::new();
+        let mut entry = ProviderEntry::openai_compat("https://example.test/v1", "literal:k");
+        if let ProviderEntry::OpenaiCompat { runtime, .. } = &mut entry {
+            runtime.request_timeout_ms = provider_request_timeout;
+            runtime.stream_first_byte_timeout_ms = provider_first_byte_timeout;
+        }
+        providers.insert("p1".to_string(), entry);
+
+        let mut aliases = BTreeMap::new();
+        aliases.insert("a".to_string(), AliasEntry::new(vec!["p1:m".to_string()]));
+
+        let cfg = Config {
+            server: Default::default(),
+            providers,
+            aliases,
+            default_model: None,
+            retry: RetryPolicy::default(),
+            legacy_compat: Default::default(),
+            ingress: Default::default(),
+        };
+        Router::new(Arc::new(cfg))
+    }
+
+    #[test]
+    fn compose_inherits_timeout_from_provider_when_alias_left_none() {
+        // Alias-resolved policy has no timeout overrides.
+        // Provider config sets both timeouts.
+        // Expected: provider's values land in the per-attempt policy.
+        let router = build_router_with_provider_timeouts(Some(180_000), Some(60_000));
+        let base = RetryPolicy::default(); // both timeout fields None
+        let composed = router.compose_attempt_policy(&base, "p1");
+        assert_eq!(composed.request_timeout_ms, Some(180_000));
+        assert_eq!(composed.stream_first_byte_timeout_ms, Some(60_000));
+    }
+
+    #[test]
+    fn compose_alias_override_wins_over_provider() {
+        // Alias-resolved policy has BOTH timeouts set explicitly.
+        // Provider config also sets values. Alias wins.
+        let router = build_router_with_provider_timeouts(Some(180_000), Some(60_000));
+        let base = RetryPolicy {
+            request_timeout_ms: Some(30_000),
+            stream_first_byte_timeout_ms: Some(5_000),
+            ..RetryPolicy::default()
+        };
+        let composed = router.compose_attempt_policy(&base, "p1");
+        assert_eq!(composed.request_timeout_ms, Some(30_000));
+        assert_eq!(composed.stream_first_byte_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn compose_independent_per_field_resolution() {
+        // Alias sets ONLY request_timeout_ms; provider sets ONLY
+        // stream_first_byte_timeout_ms. Expected: each field falls
+        // through independently.
+        let router = build_router_with_provider_timeouts(None, Some(120_000));
+        let base = RetryPolicy {
+            request_timeout_ms: Some(45_000),
+            ..RetryPolicy::default()
+        };
+        let composed = router.compose_attempt_policy(&base, "p1");
+        assert_eq!(composed.request_timeout_ms, Some(45_000));
+        assert_eq!(composed.stream_first_byte_timeout_ms, Some(120_000));
+    }
+
+    #[test]
+    fn compose_no_provider_entry_passes_base_through_unchanged() {
+        // If the chain entry's provider isn't in config (e.g. test
+        // harness that registered a Provider without adding a config
+        // ProviderEntry), provider-level lookup returns None and the
+        // base policy survives unchanged.
+        let router = build_router_with_provider_timeouts(Some(99_999), Some(99_999));
+        let base = RetryPolicy {
+            request_timeout_ms: Some(7_000),
+            ..RetryPolicy::default()
+        };
+        let composed = router.compose_attempt_policy(&base, "missing-provider");
+        assert_eq!(composed.request_timeout_ms, Some(7_000));
+        assert!(composed.stream_first_byte_timeout_ms.is_none());
+    }
+
+    #[test]
+    fn compose_no_overrides_anywhere_yields_none() {
+        // Belt-and-braces: alias = None, provider = None, default
+        // policy = None. composed.request_timeout_ms stays None
+        // (router falls through to reqwest's default).
+        let router = build_router_with_provider_timeouts(None, None);
+        let base = RetryPolicy::default();
+        let composed = router.compose_attempt_policy(&base, "p1");
+        assert!(composed.request_timeout_ms.is_none());
+        assert!(composed.stream_first_byte_timeout_ms.is_none());
+    }
 }
