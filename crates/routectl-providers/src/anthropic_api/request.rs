@@ -1512,4 +1512,30 @@ mod multi_turn_tool_use_tests {
         let body = normalize("test", &req, false).unwrap();
         assert_eq!(body["tool_choice"], weird);
     }
+
+    /// `output_config` arriving via `provider_extras` (the path used
+    /// by the Anthropic ingress for structured-output requests) is
+    /// merged into the upstream body so `output_config.format` reaches
+    /// api.anthropic.com unchanged. The egress doesn't need a
+    /// dedicated field for this -- the provider_extras allow-list
+    /// already lets `output_config` through.
+    #[test]
+    fn structured_output_format_merges_from_provider_extras() {
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            provider_extras: Some(json!({
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {"type": "object"}
+                    }
+                }
+            })),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, false).unwrap();
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
+    }
 }
