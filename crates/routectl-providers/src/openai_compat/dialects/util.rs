@@ -182,15 +182,22 @@ pub(super) fn preserve_history_reasoning_content(
             m.remove("reasoning");
             continue;
         }
-        // Try the plaintext slot.
-        if let Some(reasoning) = m.remove("reasoning") {
-            if let Some(s) = reasoning.as_str() {
-                if !s.is_empty() {
-                    m.insert("reasoning_content".into(), Value::String(s.to_string()));
+        // Try the plaintext slot. Treat `Value::Null` the same as
+        // absent so the NIM dual-null shape (`reasoning: null` +
+        // `reasoning_details: [...]`) doesn't preempt the
+        // reasoning_details fallback below.
+        if let Some(reasoning) = m.get("reasoning") {
+            if !reasoning.is_null() {
+                if let Some(s) = reasoning.as_str() {
+                    if !s.is_empty() {
+                        m.insert("reasoning_content".into(), Value::String(s.to_string()));
+                    }
                 }
+                m.remove("reasoning");
+                m.remove("reasoning_details");
+                continue;
             }
-            m.remove("reasoning_details");
-            continue;
+            m.remove("reasoning");
         }
         // Fall back to lowering reasoning_details to a string.
         if let Some(details) = m.remove("reasoning_details") {
@@ -293,9 +300,14 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
             continue;
         }
         let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+        // Truncate before logging: `kind` originates from
+        // upstream/ingress JSON and is otherwise unbounded; this
+        // keeps a long attacker-controlled type string from
+        // polluting structured logs.
+        let kind_for_log = if kind.len() > 64 { &kind[..64] } else { kind };
         tracing::warn!(
             provider = provider_id,
-            detail_type = kind,
+            detail_type = kind_for_log,
             "preserve_history_reasoning_content: non-text reasoning detail dropped during lowering",
         );
     }

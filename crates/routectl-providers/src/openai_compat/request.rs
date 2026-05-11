@@ -52,9 +52,13 @@ pub fn normalize(
     if let Some(sys) = req.system.as_ref() {
         let text = sys.flatten();
         if !text.is_empty() {
+            // Default `messages` to an empty array if absent so a
+            // system-only request (no user message in the body yet)
+            // still gets the system message lowered correctly.
             let messages = obj
-                .get_mut("messages")
-                .and_then(Value::as_array_mut)
+                .entry("messages")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
                 .ok_or_else(|| {
                     Error::normalize_request(id, "serialized messages is not an array")
                 })?;
@@ -89,16 +93,13 @@ pub fn normalize(
     //     for OpenAI / Passthrough since neither has a preserve
     //     shape on the wire).
     let dyn_dialect = dialect.as_dyn();
+    let dialect_strips = dyn_dialect.strip_history_reasoning();
     let resolved_strip = match history_reasoning {
-        HistoryReasoning::Auto => dyn_dialect.strip_history_reasoning(),
+        HistoryReasoning::Auto => dialect_strips,
         HistoryReasoning::Strip => true,
         HistoryReasoning::Preserve => false,
     };
     if resolved_strip && request_carries_reasoning(req) {
-        // Operator visibility: silent strip of canonical reasoning
-        // is a config choice, not a wire constraint. Warn so the
-        // operator sees the loss when DeepSeek-v4-style upstreams
-        // start 400ing on missing echo-back.
         warn!(
             provider = id,
             mode = ?history_reasoning,
@@ -109,7 +110,7 @@ pub fn normalize(
     }
     match history_reasoning {
         HistoryReasoning::Auto => {
-            if dyn_dialect.strip_history_reasoning() {
+            if dialect_strips {
                 strip_history_reasoning(id, obj)?;
             }
         }
@@ -187,6 +188,7 @@ fn is_routectl_managed_key(key: &str) -> bool {
         key,
         "model"
             | "messages"
+            | "system"
             | "max_tokens"
             | "max_completion_tokens"
             | "stream"
@@ -198,9 +200,6 @@ fn is_routectl_managed_key(key: &str) -> bool {
             | "top_p"
             | "n"
             | "user"
-            // Sampling controls + reproducibility -- canonical fields,
-            // not long-tail. Provider extras would silently shadow the
-            // request's canonical value if these were absent.
             | "seed"
             | "logprobs"
             | "top_logprobs"
@@ -666,6 +665,37 @@ mod tests {
         assert_eq!(body["top_k"], 40);
         assert_eq!(body["service_tier"], "premium");
         assert_eq!(body["safety_settings"]["hate"], "high");
+    }
+
+    #[test]
+    fn extras_cannot_re_inject_top_level_system() {
+        // Regression: the `system` lowering above strips the top-level
+        // `system` key. If extras (default or provider) could
+        // reintroduce it, strict hosts (NIM) would 400 again. The
+        // managed-key allow-list must include `system`.
+        use routectl_core::SystemContent;
+        let mut req = simple_req("test-model");
+        req.system = Some(SystemContent::Text("real system prompt".into()));
+        req.provider_extras = Some(json!({
+            "system": "INJECTED via provider_extras",
+        }));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            Some(&json!({"system": "INJECTED via default_extras"})),
+            false,
+        )
+        .unwrap();
+        assert!(
+            body.get("system").is_none(),
+            "top-level `system` must remain stripped, got: {body}"
+        );
+        // The lowered system message is at messages[0].
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "real system prompt");
     }
 
     #[test]
