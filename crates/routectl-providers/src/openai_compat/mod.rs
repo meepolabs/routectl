@@ -160,6 +160,7 @@ impl Provider for OpenAiCompatProvider {
             &self.cfg.id,
             req,
             self.cfg.reasoning_dialect,
+            self.cfg.history_reasoning,
             self.cfg.default_extras.as_ref(),
             self.cfg.strict_translation,
         )

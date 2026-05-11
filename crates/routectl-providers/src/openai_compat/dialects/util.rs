@@ -109,7 +109,13 @@ pub(super) fn lift_delta_reasoning_content(
 /// Strip `reasoning_content`, `reasoning_details`, and `reasoning` from
 /// every message in the outgoing request body. DeepSeek 400s when an
 /// echoed assistant message carries any of these.
-pub(super) fn strip_history_reasoning(
+///
+/// Visibility: `pub(in crate::openai_compat)` so the egress runtime in
+/// `super::super::request::normalize` can call it directly. The
+/// strip-or-preserve choice is owned by the runtime, not the dialect
+/// trait, because it depends on the per-provider `history_reasoning`
+/// TOML knob (which dialects don't see).
+pub(in crate::openai_compat) fn strip_history_reasoning(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
 ) -> Result<()> {
@@ -126,6 +132,174 @@ pub(super) fn strip_history_reasoning(
         }
     }
     Ok(())
+}
+
+/// Preserve outgoing assistant reasoning as a `reasoning_content`
+/// string field. DeepSeek v4+ and recent vLLM hosts require this on
+/// echo-back to the API.
+///
+/// For each assistant message the body carries:
+///   - If `reasoning_content` is already present, leave it.
+///   - Else if `reasoning` is present (canonical's plaintext slot),
+///     RENAME it to `reasoning_content`. The canonical schema uses
+///     `reasoning` for OpenRouter compat; DeepSeek wants the field
+///     under its own name.
+///   - Else if `reasoning_details` is present, lower the typed array
+///     to a string by joining each detail's `text` payload in order
+///     (Anthropic-aligned details get flattened into a single string;
+///     non-text details are dropped with a tracing::warn).
+///   - Drop `reasoning` and `reasoning_details` after the rewrite so
+///     DeepSeek doesn't 400 on the echoed Anthropic-shape array.
+pub(super) fn preserve_history_reasoning_content(
+    id: &str,
+    obj: &mut serde_json::Map<String, Value>,
+) -> Result<()> {
+    let messages = obj
+        .get_mut("messages")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| Error::normalize_request(id, "messages is not an array"))?;
+
+    for msg in messages.iter_mut() {
+        let Some(m) = msg.as_object_mut() else {
+            continue;
+        };
+        // Only assistant messages carry reasoning.
+        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "assistant" {
+            // Strip reasoning fields from non-assistant messages
+            // anyway -- DeepSeek 400s if they sneak onto user / tool
+            // messages too.
+            m.remove("reasoning_content");
+            m.remove("reasoning_details");
+            m.remove("reasoning");
+            continue;
+        }
+        // Already has reasoning_content -- leave it. Belt-and-braces
+        // remove the legacy slots so the wire body has exactly one
+        // surface.
+        if m.contains_key("reasoning_content") {
+            m.remove("reasoning_details");
+            m.remove("reasoning");
+            continue;
+        }
+        // Try the plaintext slot.
+        if let Some(reasoning) = m.remove("reasoning") {
+            if let Some(s) = reasoning.as_str() {
+                if !s.is_empty() {
+                    m.insert("reasoning_content".into(), Value::String(s.to_string()));
+                }
+            }
+            m.remove("reasoning_details");
+            continue;
+        }
+        // Fall back to lowering reasoning_details to a string.
+        if let Some(details) = m.remove("reasoning_details") {
+            let lowered = lower_reasoning_details_to_text(&details, id);
+            if !lowered.is_empty() {
+                m.insert("reasoning_content".into(), Value::String(lowered));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Preserve outgoing assistant reasoning as a structured
+/// `reasoning_details` array. OpenRouter accepts the Anthropic-aligned
+/// typed shape verbatim.
+///
+/// For each assistant message:
+///   - If `reasoning_details` is already present, leave it and drop
+///     the legacy `reasoning` / `reasoning_content` slots.
+///   - Else if `reasoning` is present, lift it to a single
+///     `reasoning_details` entry with format = `format_tag` so the
+///     downstream consumer can round-trip continuation correctly.
+///   - Else if `reasoning_content` is present, same lift.
+pub(super) fn preserve_history_reasoning_details(
+    id: &str,
+    obj: &mut serde_json::Map<String, Value>,
+    format_tag: &str,
+) -> Result<()> {
+    let messages = obj
+        .get_mut("messages")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| Error::normalize_request(id, "messages is not an array"))?;
+
+    for msg in messages.iter_mut() {
+        let Some(m) = msg.as_object_mut() else {
+            continue;
+        };
+        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "assistant" {
+            m.remove("reasoning_content");
+            m.remove("reasoning_details");
+            m.remove("reasoning");
+            continue;
+        }
+        if m.contains_key("reasoning_details") {
+            m.remove("reasoning");
+            m.remove("reasoning_content");
+            continue;
+        }
+        let plaintext = m
+            .remove("reasoning")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .or_else(|| {
+                m.remove("reasoning_content")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+            });
+        if let Some(text) = plaintext {
+            if !text.is_empty() {
+                m.insert(
+                    "reasoning_details".into(),
+                    serde_json::json!([{
+                        "type": "reasoning.text",
+                        "format": format_tag,
+                        "index": 0,
+                        "text": text,
+                    }]),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Lower a `reasoning_details` array (Anthropic-aligned typed shape)
+/// to a plaintext string by joining each entry's `text` payload in
+/// order. Non-text details are skipped with a `tracing::warn!` so
+/// operators see information loss when an upstream sends typed
+/// reasoning that doesn't survive the lowering.
+fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String {
+    let Some(arr) = details.as_array() else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for d in arr {
+        let Some(obj) = d.as_object() else {
+            continue;
+        };
+        if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+            parts.push(text.to_string());
+            continue;
+        }
+        // Anthropic-aligned schema sometimes nests text under
+        // `payload.text`. Honor both shapes.
+        if let Some(text) = obj
+            .get("payload")
+            .and_then(|p| p.get("text"))
+            .and_then(|v| v.as_str())
+        {
+            parts.push(text.to_string());
+            continue;
+        }
+        let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+        tracing::warn!(
+            provider = provider_id,
+            detail_type = kind,
+            "preserve_history_reasoning_content: non-text reasoning detail dropped during lowering",
+        );
+    }
+    parts.join("")
 }
 
 /// Set of OpenAI/DeepSeek-style request fields that reasoning-only
