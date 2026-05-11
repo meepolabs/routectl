@@ -57,7 +57,7 @@ Release binary still <6MB.
 - **Modularization**: `ModelProfile` registry for per-model quirks;
   `Dialect` trait + `openai_compat/dialects/` per-dialect modules.
 
-## v0.3.0 (in flight on `feat/v0.3-bedrock`) -- Native AWS Bedrock + Anthropic header polish
+## v0.3.0 (DONE) -- Native AWS Bedrock + Anthropic header polish
 
 Two themes landed together because they share the Anthropic Messages
 wire format:
@@ -69,7 +69,7 @@ wire format:
    / IRSA / IMDS), plus a `bearer-key` flavor for the AWS console's
    short-term token. `InvokeModel` body shape (Anthropic Messages
    today; per-vendor as new vendors are added) and `Converse`
-   transport are wired; `Converse` body translation deferred to v0.4.0.
+   transport are wired; `Converse` body translation deferred.
    Streaming responses decoded from the AWS eventstream binary frame
    format. Gated behind a default-on `bedrock` Cargo feature so
    library consumers can opt out of the AWS dep tree with
@@ -87,20 +87,11 @@ wire format:
    to defend against advertised-length OOM. Secret-file reads cap at
    1 MiB.
 
-Deferred from this milestone into v0.4.0:
-
-- `routectl doctor` subcommand (active credential probe + IAM action
-  surfacing for Bedrock).
-- `Converse` body translation for non-Anthropic Bedrock vendors.
-- Live integration matrix entries for Bedrock.
-
-## v0.4.0 (in flight on `feat/v0.4-ingress-canonical`) -- API spec independence
+## v0.4.0 (DONE) -- API spec independence
 
 Two ingress dialects (OpenAI Chat Completions + Anthropic Messages),
 one canonical internal request shape, N egress providers. Any client
 that speaks either wire format can route through any backend.
-
-Landed in this milestone:
 
 1. **`POST /v1/messages` Anthropic ingress** with full tool-call
    round-trip, thinking blocks + signature preservation, typed SSE
@@ -125,26 +116,68 @@ Landed in this milestone:
 4. **`strict_translation = false` (default)** -- lossy seams emit
    `tracing::warn!`. Set `[server] strict_translation = true` to
    upgrade to 400 Bad Request on dropped fields.
+5. **Adaptive thinking** for Anthropic Opus 4.7+ via per-provider
+   `adaptive_thinking = true` -- rewrites to the new
+   `thinking: {type: "adaptive"}` + `output_config: {effort: "..."}`
+   shape.
+6. **Universal 4xx/5xx logging** -- ingress / egress / upstream-error
+   bodies all available behind tracing levels with `request_id`
+   correlation.
 
-Deferred from this milestone:
+## v0.5.0 (in flight on `develop`) -- Translation-pipe hardening + dogfood fixes
 
-- **OAuth refresh** (file re-read + full refresh-token round-trip)
-  -- moves to v0.5.0.
-- **Bedrock follow-ons** -- `routectl doctor` subcommand, Converse
-  body translation, live matrix Bedrock entries. Move to v0.4.x
-  follow-on cuts.
+Bug-fix and ergonomics cycle driven by daily dogfood of the v0.4
+surface. Real-world wire-shape mismatches surfaced and got pinned;
+operator-facing config knobs landed where compiled defaults didn't
+fit every host.
 
-## v0.5.0 (planned) -- Latency-aware routing + observability
+1. **Translation-correctness fixes**:
+   - `tool_choice` shape coercion in the Anthropic-API egress (OpenAI
+     bare-string and OpenAI function-object -> Anthropic tagged enum;
+     Anthropic-shape passes through). Closes the Bedrock 400 path.
+   - Top-level `system` field lowered back to a synthetic
+     `role: "system"` message on the openai-compat egress. Fixes
+     strict hosts (NIM) rejecting the Anthropic-shape leak.
+   - `prompt_tokens` translation sums `input + cache_creation +
+     cache_read` on Anthropic ingress streaming usage.
+   - OpenAI ingress coalesces `reasoning_content` keys before schema
+     deserialization (mirrors response-side merge).
 
-Originally scoped for v0.3.1; deferred to focus v0.4.0 on the API
-spec work.
+2. **Per-provider config knobs**:
+   - `history_reasoning = auto | strip | preserve` for openai-compat
+     hosts. DeepSeek v4 and vLLM 0.7+ require preserve; older
+     versions and DeepSeek v3 require strip; opt-in per provider.
+   - `request_timeout_ms` and `stream_first_byte_timeout_ms` at the
+     provider level, with alias > provider > global resolution.
+     Removes alias-level repetition for uniformly slow upstreams.
+
+3. **Operator visibility**:
+   - WARN at openai-compat egress when canonical reasoning is
+     silently stripped (auto-mode + strip dialect + carrying
+     reasoning).
+   - `docs/PROVIDER-QUIRKS.md` operator config guide -- per-model
+     rows, troubleshooting matrix, alias > provider > global
+     resolution explained.
+
+Deferred (not in this milestone):
+
+- `routectl doctor` subcommand (active credential probe + IAM action
+  surfacing for Bedrock).
+- `Converse` body translation for non-Anthropic Bedrock vendors.
+- WARN on `default_model` fallthrough (currently DEBUG; visibility
+  feature request).
+
+## v0.6.0+ (planned) -- Latency-aware routing + observability
+
+Originally scoped for v0.3.1; deferred to focus earlier milestones on
+correctness work.
 
 1. **Latency-based routing** across multiple healthy providers in a
    chain (sliding-window p95 tracking, weighted random).
 2. **Spend tracking** -- per-provider request count + token usage
    metric, exposed via `/v1/metrics` for Prometheus scrape.
 
-## Post-v0.5 (deferred / never)
+## Post-v0.6 (deferred / never)
 
 - Caching layer (use a proxy if you want this)
 - Web UI / config editor (CLI-only by design)
