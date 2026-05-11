@@ -29,6 +29,7 @@ fn make_provider(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatProvi
         extra_headers: vec![],
         default_extras: None,
         reasoning_dialect: dialect,
+        history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
     })
@@ -91,6 +92,7 @@ async fn extra_headers_reserved_name_does_not_override_authorization() {
         extra_headers: vec![("authorization".into(), "Bearer attacker-token".into())],
         default_extras: None,
         reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
     });
@@ -472,6 +474,7 @@ fn strict_translation_off_warns_and_allows_request() {
         extra_headers: vec![],
         default_extras: None,
         reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
     });
@@ -514,6 +517,7 @@ fn strict_translation_on_rejects_canonical_only_fields() {
         extra_headers: vec![],
         default_extras: None,
         reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: true,
     });
