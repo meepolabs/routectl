@@ -138,6 +138,27 @@ pub enum ProviderEntry {
         default_extras: Option<serde_json::Value>,
         #[serde(default)]
         reasoning_dialect: ReasoningDialect,
+        /// How to handle the `reasoning` / `reasoning_content` /
+        /// `reasoning_details` fields on outgoing assistant messages
+        /// in multi-turn history.
+        ///
+        ///   - `auto` (default): use the dialect's default. DeepSeek
+        ///     and vLLM strip; OpenAI and OpenRouter pass through.
+        ///   - `strip`: force-drop reasoning fields from outgoing
+        ///     assistant messages, regardless of dialect. Use for
+        ///     DeepSeek v3 / vLLM <= 0.6 hosts that 400 on echo-back.
+        ///   - `preserve`: emit the dialect-native preserve shape on
+        ///     outgoing assistant messages (DeepSeek/vLLM emit
+        ///     `reasoning_content`; OpenRouter emits `reasoning_details`).
+        ///     Required by DeepSeek v4+, which 400s with
+        ///     `"reasoning_content in the thinking mode must be passed
+        ///     back"` if echo-back is missing.
+        ///
+        /// The `auto` default preserves backward compatibility for
+        /// existing configs. Operators upgrading to DeepSeek v4 must
+        /// set `history_reasoning = "preserve"` explicitly.
+        #[serde(default)]
+        history_reasoning: HistoryReasoning,
         /// Override the outbound User-Agent.
         #[serde(default)]
         user_agent: Option<String>,
@@ -301,6 +322,7 @@ impl ProviderEntry {
             extra_headers: BTreeMap::new(),
             default_extras: None,
             reasoning_dialect: ReasoningDialect::default(),
+            history_reasoning: HistoryReasoning::default(),
             user_agent: None,
             runtime: ProviderRuntimePolicy::default(),
         }
@@ -551,6 +573,22 @@ pub enum ReasoningDialect {
     RawThinkTag,
     Openrouter,
     Passthrough,
+}
+
+/// Outgoing-history reasoning policy for openai-compat providers.
+/// See `ProviderEntry::OpenaiCompat::history_reasoning` for semantics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistoryReasoning {
+    /// Use the dialect's default (DeepSeek/vLLM strip; OpenAI/OpenRouter
+    /// pass through). Backward-compatible.
+    #[default]
+    Auto,
+    /// Force-strip reasoning fields from outgoing assistant messages.
+    Strip,
+    /// Force-emit the dialect's preserve shape on outgoing assistant
+    /// messages.
+    Preserve,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -8,12 +8,14 @@ use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{Error, Provider, Result};
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
 use routectl_providers::openai_compat::{
-    OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect as ProviderDialect,
+    HistoryReasoning as ProviderHistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider,
+    ReasoningDialect as ProviderDialect,
 };
 
 #[cfg(feature = "bedrock")]
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
 
+use crate::config::HistoryReasoning;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{ProviderEntry, ReasoningDialect};
@@ -63,6 +65,7 @@ pub async fn build_provider_with_options(
             extra_headers,
             default_extras,
             reasoning_dialect,
+            history_reasoning,
             user_agent,
             runtime: _,
         } => {
@@ -77,6 +80,7 @@ pub async fn build_provider_with_options(
                     .collect(),
                 default_extras: default_extras.clone(),
                 reasoning_dialect: map_dialect(*reasoning_dialect),
+                history_reasoning: map_history_reasoning(*history_reasoning),
                 user_agent: user_agent.clone(),
                 strict_translation: opts.strict_translation,
             };
@@ -239,5 +243,13 @@ fn map_dialect(d: ReasoningDialect) -> ProviderDialect {
         ReasoningDialect::RawThinkTag => ProviderDialect::RawThinkTag,
         ReasoningDialect::Openrouter => ProviderDialect::OpenRouter,
         ReasoningDialect::Passthrough => ProviderDialect::Passthrough,
+    }
+}
+
+fn map_history_reasoning(h: HistoryReasoning) -> ProviderHistoryReasoning {
+    match h {
+        HistoryReasoning::Auto => ProviderHistoryReasoning::Auto,
+        HistoryReasoning::Strip => ProviderHistoryReasoning::Strip,
+        HistoryReasoning::Preserve => ProviderHistoryReasoning::Preserve,
     }
 }
