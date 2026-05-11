@@ -35,6 +35,7 @@ fn config_with(server_url: &str) -> Config {
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     }
 }
 
@@ -60,6 +61,7 @@ async fn config_check_passes_for_valid_config() {
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     };
     config.providers.insert(
         "mock".into(),
@@ -86,6 +88,7 @@ async fn config_check_fails_for_alias_pointing_at_unknown_provider() {
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     };
     config
         .aliases
@@ -114,6 +117,7 @@ fn bare_config(default_model: Option<String>) -> Config {
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     }
 }
 
@@ -215,6 +219,7 @@ fn config_show_redacts_literal_secrets() {
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     };
     config.providers.insert(
         "secret".into(),
@@ -253,6 +258,7 @@ fn config_show_keeps_env_uris_intact() {
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     };
     config.providers.insert(
         "kc".into(),

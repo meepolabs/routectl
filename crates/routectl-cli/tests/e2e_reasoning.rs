@@ -51,6 +51,7 @@ fn deepseek_alias_config(upstream_base: &str) -> Arc<Config> {
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
         ingress: Default::default(),
+        ..Default::default()
     })
 }
 
