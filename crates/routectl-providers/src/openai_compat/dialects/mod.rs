@@ -42,6 +42,29 @@ pub trait Dialect: Send + Sync {
         false
     }
 
+    /// Mutate outgoing message history to preserve reasoning in the
+    /// dialect-native shape:
+    ///   - DeepSeek / Vllm: rename canonical `reasoning` to wire
+    ///     `reasoning_content` (DeepSeek v4+ requires echo-back).
+    ///   - OpenRouter: keep `reasoning_details` typed array as-is.
+    ///   - OpenAI / Passthrough / RawThinkTag: default no-op (no
+    ///     well-defined preserve shape on the wire).
+    ///
+    /// Called by the egress runtime when `history_reasoning =
+    /// "preserve"` is explicitly set on the provider, OR when the
+    /// dialect's default (`history_reasoning = "auto"`) is preserve.
+    /// Today `auto` defaults to strip for DeepSeek/Vllm and to no-op
+    /// for the others, so this method only fires on explicit operator
+    /// opt-in.
+    fn preserve_history_reasoning(
+        &self,
+        id: &str,
+        obj: &mut serde_json::Map<String, Value>,
+    ) -> Result<()> {
+        let _ = (id, obj);
+        Ok(())
+    }
+
     /// Returns true if the response carries a `reasoning_content` field
     /// that should be lifted into `reasoning_details`. Used as a sanity
     /// flag for tests; the actual lifting happens in `apply_response`.
