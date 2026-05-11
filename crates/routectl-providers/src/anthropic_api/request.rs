@@ -309,6 +309,63 @@ fn openai_function_to_custom(v: &Value) -> Option<AnthropicTool> {
     })
 }
 
+/// Translate canonical `tool_choice` values into the Anthropic-shape
+/// object the Messages API requires.
+///
+/// Canonical (after the OpenAI ingress passes the wire `tool_choice`
+/// through verbatim) carries one of:
+///   - `None` -- caller didn't set `tool_choice`
+///   - bare strings `"auto"`, `"required"`, `"none"` (OpenAI shape)
+///   - object `{type:"function","function":{"name":"X"}}` (OpenAI shape)
+///   - object `{type:"auto"|"any"|"tool"|"none", name?}` (Anthropic
+///     shape, e.g. from a claude-code -> Anthropic-ingress request)
+///
+/// Mapping to the Anthropic wire:
+///   - `"auto"` -> `{"type":"auto"}`
+///   - `"required"` -> `{"type":"any"}`
+///   - `"none"` -> field dropped (Anthropic has no native equivalent;
+///     a warn fires when tools is non-empty so the caller can see the
+///     dropped intent)
+///   - `{"type":"function","function":{"name":X}}` -> `{"type":"tool","name":X}`
+///   - already-Anthropic-shape object: passthrough verbatim (preserves
+///     the Anthropic-ingress -> Anthropic-egress path)
+///   - anything else: passthrough verbatim (let the upstream decide)
+fn translate_tool_choice(tc: Option<&Value>) -> Option<Value> {
+    let tc = tc?;
+    match tc {
+        Value::String(s) => match s.as_str() {
+            "auto" => Some(serde_json::json!({"type":"auto"})),
+            "required" => Some(serde_json::json!({"type":"any"})),
+            "none" => {
+                tracing::warn!(
+                    "tool_choice=\"none\" dropped: Anthropic has no native equivalent; \
+                     upstream will default to tool_choice=auto and may call tools"
+                );
+                None
+            }
+            _ => Some(tc.clone()),
+        },
+        Value::Object(map) => match map.get("type").and_then(|v| v.as_str()) {
+            // OpenAI function shape -> Anthropic tool shape.
+            Some("function") => {
+                let name = map
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str());
+                match name {
+                    Some(n) => Some(serde_json::json!({"type":"tool","name":n})),
+                    None => Some(tc.clone()),
+                }
+            }
+            // Already-Anthropic shape -> passthrough.
+            Some("auto") | Some("any") | Some("tool") | Some("none") => Some(tc.clone()),
+            // Unknown object shape -> let the upstream decide.
+            _ => Some(tc.clone()),
+        },
+        _ => Some(tc.clone()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Content blocks
 // ---------------------------------------------------------------------------
@@ -867,7 +924,7 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
         stop_sequences: req.stop.clone(),
         stream: None, // caller sets this
         tools,
-        tool_choice: req.tool_choice.clone(),
+        tool_choice: translate_tool_choice(req.tool_choice.as_ref()),
         cache_control: req.cache_control.clone(),
         anthropic_beta: req.anthropic_beta.clone(),
     };
@@ -1315,5 +1372,102 @@ mod multi_turn_tool_use_tests {
         // The caller's effort string survives even though the budget
         // was dropped.
         assert_eq!(body["output_config"]["effort"], "low");
+    }
+
+    /// Tool-choice translation lives in the egress (different upstreams
+    /// want different shapes; the OpenAI ingress passes wire `tool_choice`
+    /// through verbatim). Pin the canonical -> Anthropic mapping for
+    /// every shape we expect callers to send.
+    #[test]
+    fn tool_choice_string_auto_translates_to_anthropic_object() {
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            tool_choice: Some(json!("auto")),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, false).unwrap();
+        assert_eq!(body["tool_choice"], json!({"type":"auto"}));
+    }
+
+    #[test]
+    fn tool_choice_string_required_translates_to_any() {
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            tool_choice: Some(json!("required")),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, false).unwrap();
+        assert_eq!(body["tool_choice"], json!({"type":"any"}));
+    }
+
+    #[test]
+    fn tool_choice_string_none_drops_field() {
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            tool_choice: Some(json!("none")),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, false).unwrap();
+        assert!(
+            body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
+            "expected tool_choice dropped, got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn tool_choice_function_object_translates_to_anthropic_tool() {
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            tool_choice: Some(json!({"type":"function","function":{"name":"get_weather"}})),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, false).unwrap();
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type":"tool","name":"get_weather"})
+        );
+    }
+
+    /// Anthropic-shape tool_choice (e.g. from claude-code via Anthropic
+    /// ingress) must passthrough verbatim. Without this, the Anthropic
+    /// ingress -> Anthropic egress path would double-translate and
+    /// silently corrupt the field.
+    #[test]
+    fn tool_choice_already_anthropic_shape_passes_through_verbatim() {
+        for tc in [
+            json!({"type":"auto"}),
+            json!({"type":"any"}),
+            json!({"type":"tool","name":"X"}),
+            json!({"type":"none"}),
+        ] {
+            let req = ChatRequest {
+                model: "claude-sonnet-4-5-20250929".into(),
+                messages: vec![user_msg("hi")],
+                tool_choice: Some(tc.clone()),
+                ..Default::default()
+            };
+            let body = normalize("test", &req, false).unwrap();
+            assert_eq!(body["tool_choice"], tc, "expected passthrough for {tc:?}");
+        }
+    }
+
+    /// Unknown shapes are not coerced; let the upstream surface its
+    /// own error. The OpenAI ingress still passes them through the
+    /// canonical body, so the egress sees them here.
+    #[test]
+    fn tool_choice_unknown_object_passes_through_verbatim() {
+        let weird = json!({"type":"some_future_mode","extra":"bag"});
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            tool_choice: Some(weird.clone()),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, false).unwrap();
+        assert_eq!(body["tool_choice"], weird);
     }
 }

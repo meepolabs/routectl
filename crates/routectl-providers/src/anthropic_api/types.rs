@@ -535,6 +535,13 @@ pub struct SseMessageDelta {
 
 #[derive(Debug, Deserialize)]
 pub struct SseDeltaUsage {
+    /// Real Anthropic and routectl's own Anthropic ingress render
+    /// `input_tokens` in `message_delta.usage` (mirroring the value
+    /// from `message_start.usage` with the final post-cache count).
+    /// Optional because some upstream variants only emit it on
+    /// `message_start`.
+    #[serde(default)]
+    pub input_tokens: Option<u32>,
     #[serde(default)]
     pub output_tokens: Option<u32>,
     #[serde(default)]

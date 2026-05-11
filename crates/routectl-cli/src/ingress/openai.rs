@@ -74,11 +74,15 @@ impl IngressAdapter for OpenAiIngress {
         // shape. Concat with newlines when multiple system messages
         // are present (matching the legacy lift-from-egress behavior).
         lift_system_messages(&mut req);
-        // Translate OpenAI function tools (`{type: "function", function:
-        // {...}}`) into canonical `ToolDef::Custom` so all egresses see
-        // the canonical tool representation. Builtin / unknown tool
-        // shapes pass through as `ToolDef::Other`.
-        lift_openai_function_tools(&mut req);
+        // tool_choice and OpenAI function tools are NOT translated at
+        // the ingress: different egresses want different shapes
+        // (openai-compat passes through verbatim, Anthropic egress
+        // translates). The ToolDef deserializer routes
+        // `{type:"function",...}` to `ToolDef::Other`, where the
+        // Anthropic egress's `translate_tool` already lifts it to
+        // `AnthropicTool::Custom`. Translating here once and undoing
+        // it at the openai-compat egress would be lossy and
+        // double-touched -- leave canonical as the wire form.
         Ok(req)
     }
 
@@ -103,24 +107,6 @@ impl IngressAdapter for OpenAiIngress {
 
     fn render_eos(&self, _state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
         vec![SseEvent::unnamed(DONE_SENTINEL)]
-    }
-}
-
-/// Walk `req.tools` and translate `ToolDef::Other` entries that match
-/// the OpenAI function-tool shape (`{type: "function", function:
-/// {name, description?, parameters?, strict?}}`) into `ToolDef::Custom`.
-/// Other `ToolDef::Other` shapes (Anthropic builtins, server-side tools,
-/// forward-compat) pass through verbatim.
-fn lift_openai_function_tools(req: &mut ChatRequest) {
-    let Some(tools) = req.tools.as_mut() else {
-        return;
-    };
-    for tool in tools.iter_mut() {
-        if let routectl_core::ToolDef::Other(v) = tool {
-            if let Some(custom) = routectl_core::CustomTool::from_openai_function(v) {
-                *tool = routectl_core::ToolDef::Custom(custom);
-            }
-        }
     }
 }
 
@@ -320,12 +306,16 @@ mod tests {
     }
 
     #[test]
-    fn openai_ingress_lifts_function_tools_into_custom() {
-        // OpenAI tool wire shape `{type: "function", function: {...}}`
-        // must arrive in canonical as `ToolDef::Custom`. Without the
-        // ingress translation it would land in `ToolDef::Other` (since
-        // the type discriminator is "function", not "custom") and miss
-        // the canonical typed surface.
+    fn openai_ingress_passes_function_tools_through_as_other_verbatim() {
+        // OpenAI function tool wire shape `{type: "function", function:
+        // {...}}` must pass through canonical as `ToolDef::Other` with
+        // the original Value preserved verbatim. Round-1 of the
+        // dogfood fix had the ingress lift this to `ToolDef::Custom`,
+        // which broke the openai-compat egress path: `Custom`
+        // serializes flat (no `type:"function"` wrapper) so DeepSeek
+        // 400'd. The Anthropic egress's `translate_tool` already
+        // converts function-shape `Other` to `AnthropicTool::Custom`,
+        // so dropping the ingress lift loses nothing on that path.
         let body = json!({
             "model": "gpt-4o",
             "messages": [{"role": "user", "content": "hi"}],
@@ -344,18 +334,17 @@ mod tests {
             }]
         });
         let req = OpenAiIngress::default()
-            .parse_request(&HeaderMap::new(), body)
+            .parse_request(&HeaderMap::new(), body.clone())
             .unwrap();
         let tools = req.tools.expect("tools present");
         assert_eq!(tools.len(), 1);
         match &tools[0] {
-            routectl_core::ToolDef::Custom(c) => {
-                assert_eq!(c.name, "get_weather");
-                assert_eq!(c.description.as_deref(), Some("Get current weather"));
-                assert_eq!(c.strict, Some(true));
-                assert!(c.input_schema.is_object());
+            routectl_core::ToolDef::Other(v) => {
+                // Verbatim preservation: the wire JSON survives the
+                // round-trip through canonical.
+                assert_eq!(v, &body["tools"][0]);
             }
-            other => panic!("expected ToolDef::Custom, got {other:?}"),
+            other => panic!("expected ToolDef::Other (function-shape passthrough), got {other:?}"),
         }
     }
 
@@ -378,6 +367,39 @@ mod tests {
             .unwrap();
         let tools = req.tools.expect("tools present");
         assert!(matches!(&tools[0], routectl_core::ToolDef::Other(_)));
+    }
+
+    #[test]
+    fn tool_choice_passes_through_canonical_unchanged() {
+        // tool_choice translation belongs in the egress (different
+        // upstreams want different shapes -- openai-compat wants the
+        // OpenAI shape unchanged, Anthropic wants {"type":"auto"}, etc).
+        // The ingress is shape-agnostic and passes whatever the wire
+        // carried. Round-1 of the dogfood fix mistakenly translated
+        // here, breaking openai-compat egresses (DeepSeek 400'd on
+        // an Anthropic-shape tool_choice). Pin the contract.
+        for tc in [
+            json!("auto"),
+            json!("required"),
+            json!("none"),
+            json!({"type":"function","function":{"name":"X"}}),
+            json!({"type":"auto"}),
+            json!({"type":"tool","name":"X"}),
+        ] {
+            let body = json!({
+                "model": "gpt-4o",
+                "messages": [{"role":"user","content":"hi"}],
+                "tool_choice": tc.clone(),
+            });
+            let req = OpenAiIngress::default()
+                .parse_request(&HeaderMap::new(), body)
+                .unwrap();
+            assert_eq!(
+                req.tool_choice,
+                Some(tc.clone()),
+                "ingress must pass tool_choice through verbatim: {tc:?}"
+            );
+        }
     }
 
     #[test]
