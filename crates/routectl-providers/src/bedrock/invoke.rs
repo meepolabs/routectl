@@ -309,4 +309,33 @@ mod tests {
         // Bedrock-required version still set.
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
     }
+
+    /// Structured output (`output_config.format`) flows through
+    /// provider_extras -> Bedrock-Invoke body verbatim. Bedrock-Invoke
+    /// for Claude is pure Anthropic-shape passthrough (only the
+    /// `anthropic_version` body field differs from api.anthropic.com),
+    /// so when the canonical request carries `output_config` in
+    /// provider_extras (placed there by the Anthropic ingress, see
+    /// `routectl_cli::ingress::anthropic::translate_request`), the
+    /// Bedrock egress must emit the field unchanged. Confirms the
+    /// user's "Layer 3 needs json_schema -> tool-use translation"
+    /// theory is wrong: Bedrock-Invoke needs no extra translation.
+    #[test]
+    fn structured_output_format_passes_through_to_bedrock_invoke_body() {
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.provider_extras = Some(json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {"type": "object", "properties": {"x": {"type": "integer"}}}
+                }
+            }
+        }));
+        let body = normalize_request(&cfg, &req).unwrap();
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
+        // Bedrock-required version still set.
+        assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
+    }
 }
