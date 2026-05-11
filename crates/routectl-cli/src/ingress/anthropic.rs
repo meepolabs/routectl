@@ -103,9 +103,22 @@ impl IngressStreamState for AnthropicStreamState {
 ///
 /// - `thinking` -> `reasoning` (canonical `ReasoningConfig`).
 /// - `metadata.user_id` -> `user`.
-/// - `top_k` and other non-canonical fields -> `provider_extras`.
+/// - `output_format` (legacy) -> `output_config.format` (current).
+/// - `stop_sequences` -> `stop` (canonical name).
 /// - `model` is rewritten through `resolve_alias` (`x-routectl-alias`
 ///   header > configured `aliases` map > original wire model).
+///
+/// Any top-level field the canonical doesn't model -- for example
+/// Anthropic-only knobs `top_k`, `service_tier`, `output_config`,
+/// `container`, `inference_geo`, `context_management`, `context_hint`,
+/// `speed`, `diagnostics`, `mcp_servers`, plus anything Anthropic
+/// adds in the future -- is swept into `provider_extras` so the
+/// egress merges it back into the upstream body verbatim. This keeps
+/// routectl forward-compatible: Anthropic ships a new top-level
+/// field, claude-code starts emitting it, routectl forwards it
+/// without a code change. Without this sweep, serde's
+/// silently-drop-unknown behavior would lose the field at the ingress
+/// boundary (the original `output_format` bug).
 fn translate_request(
     aliases: &BTreeMap<String, String>,
     headers: &HeaderMap,
@@ -116,21 +129,35 @@ fn translate_request(
     })?;
 
     // Pull out fields that need explicit translation BEFORE we let
-    // serde have a go at the rest.
+    // serde have a go at the rest. Each of these is either renamed
+    // or split across multiple canonical fields, so the catch-all
+    // sweep must not see them.
     let thinking = obj.remove("thinking");
     let metadata = obj.remove("metadata");
-    let top_k = obj.remove("top_k");
-    let service_tier = obj.remove("service_tier");
-    let output_config = obj.remove("output_config");
-    let container = obj.remove("container");
-    let inference_geo = obj.remove("inference_geo");
-
-    // Whatever is left is canonical-shape (model, messages, system,
-    // max_tokens, temperature, top_p, stop_sequences, stream, tools,
-    // tool_choice, anthropic_beta, cache_control). Anthropic uses
-    // `stop_sequences` while canonical uses `stop` -- rename.
+    let output_format = obj.remove("output_format");
     if let Some(stops) = obj.remove("stop_sequences") {
         obj.insert("stop".into(), stops);
+    }
+
+    // Catch-all sweep: anything left that isn't a canonical
+    // ChatRequest field gets stashed in provider_extras. This is the
+    // forward-compat seam -- new Anthropic fields land in extras and
+    // the egress's merge_provider_extras forwards them upstream
+    // without ever needing to touch the ingress strip list.
+    let extras = sweep_anthropic_extras(obj);
+    let mut extras = match extras {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+
+    // Fold legacy top-level `output_format` into `output_config.format`.
+    // claude-code 2.1.x sends one of three shapes: top-level
+    // `output_format` (deprecated), nested `output_config.format`
+    // (current), or both (claude-code itself logs a warning when both
+    // are present and prefers the nested form -- mirror that here).
+    let output_config = merge_output_format(extras.remove("output_config"), output_format);
+    if let Some(oc) = output_config {
+        extras.insert("output_config".into(), oc);
     }
 
     let mut req: ChatRequest = serde_json::from_value(body)
@@ -141,6 +168,19 @@ fn translate_request(
     // -> heavy) does the lookup. Falls through to the original wire
     // model if neither matches.
     req.model = resolve_alias(aliases, headers, &req.model);
+
+    // Lift the inbound `anthropic-beta` HTTP header into canonical
+    // `req.anthropic_beta`. The Anthropic TypeScript SDK translates
+    // `betas: [...]` (a typed SDK option) into the
+    // `anthropic-beta: a,b,c` HTTP header, so claude-code's first-party
+    // betas (context-management, prompt-cache-1h, adaptive-thinking,
+    // ...) arrive on the header surface. The egress emits
+    // `anthropic_beta` as a body field (Anthropic accepts either), so
+    // routing through canonical normalizes both wire shapes onto one
+    // egress path. Comma-separated header values are split + trimmed
+    // and merged with any existing body-level `anthropic_beta`,
+    // preserving order and dropping duplicates.
+    merge_inbound_anthropic_beta_header(headers, &mut req);
 
     // Translate thinking config.
     if let Some(t) = thinking {
@@ -154,23 +194,6 @@ fn translate_request(
         }
     }
 
-    // Anything not represented in canonical lives in provider_extras.
-    let mut extras = Map::new();
-    if let Some(v) = top_k {
-        extras.insert("top_k".into(), v);
-    }
-    if let Some(v) = service_tier {
-        extras.insert("service_tier".into(), v);
-    }
-    if let Some(v) = output_config {
-        extras.insert("output_config".into(), v);
-    }
-    if let Some(v) = container {
-        extras.insert("container".into(), v);
-    }
-    if let Some(v) = inference_geo {
-        extras.insert("inference_geo".into(), v);
-    }
     if !extras.is_empty() {
         req.provider_extras = Some(Value::Object(extras));
     }
@@ -180,6 +203,141 @@ fn translate_request(
     validate_request_cache_control(&req)?;
 
     Ok(req)
+}
+
+/// Field names the canonical `ChatRequest` deserializes directly from
+/// an Anthropic-shape wire body. Anything NOT in this list and not
+/// otherwise pre-handled (`thinking`, `metadata`, `output_format`,
+/// `stop_sequences`) is Anthropic-only and gets stashed in
+/// `provider_extras`.
+///
+/// Keep this list in sync with `routectl_core::schema::ChatRequest`
+/// field names. The build pins the contract: a missing entry here is
+/// a silent drop, exactly like the bug that motivated this design.
+const CANONICAL_CHAT_REQUEST_WIRE_FIELDS: &[&str] = &[
+    "model",
+    "messages",
+    "system",
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "stop",
+    "stream",
+    "n",
+    "seed",
+    "logprobs",
+    "top_logprobs",
+    "logit_bias",
+    "presence_penalty",
+    "frequency_penalty",
+    "user",
+    "tools",
+    "tool_choice",
+    "response_format",
+    "cache_control",
+    "anthropic_beta",
+    "reasoning",
+    "chat_template_kwargs",
+    "provider_extras",
+];
+
+/// Move every key not in `CANONICAL_CHAT_REQUEST_WIRE_FIELDS` out of
+/// `obj` and return them as a JSON object. The caller threads the
+/// returned object into `provider_extras`.
+fn sweep_anthropic_extras(obj: &mut Map<String, Value>) -> Value {
+    let extra_keys: Vec<String> = obj
+        .keys()
+        .filter(|k| !CANONICAL_CHAT_REQUEST_WIRE_FIELDS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    let mut extras = Map::new();
+    for k in extra_keys {
+        if let Some(v) = obj.remove(&k) {
+            extras.insert(k, v);
+        }
+    }
+    Value::Object(extras)
+}
+
+/// Parse the inbound `anthropic-beta` HTTP header(s) and merge the
+/// values into `req.anthropic_beta` (deduplicated, preserving order).
+/// Multiple header instances and comma-separated values within one
+/// instance both expand correctly.
+fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatRequest) {
+    let mut all: Vec<String> = req.anthropic_beta.clone();
+    for hv in headers.get_all("anthropic-beta").iter() {
+        let Ok(s) = hv.to_str() else {
+            tracing::warn!(
+                "anthropic ingress: anthropic-beta header is not valid UTF-8; ignoring"
+            );
+            continue;
+        };
+        for piece in s.split(',') {
+            let trimmed = piece.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !all.iter().any(|existing| existing == trimmed) {
+                all.push(trimmed.to_string());
+            }
+        }
+    }
+    req.anthropic_beta = all;
+}
+
+/// Fold legacy top-level `output_format` into `output_config.format`.
+///
+/// Anthropic's current wire shape for structured outputs is
+/// `output_config.format`; the top-level `output_format` is the
+/// SDK-side field name claude-code itself documents as deprecated.
+/// If both shapes arrive on the same request, prefer the nested
+/// (current) form and drop the legacy one with a WARN so the
+/// operator sees the conflict. Otherwise rewrite the legacy field
+/// into the nested form, preserving any `output_config.effort` the
+/// caller already set.
+fn merge_output_format(output_config: Option<Value>, output_format: Option<Value>) -> Option<Value> {
+    let Some(legacy) = output_format else {
+        return output_config;
+    };
+    let nested_format_present = output_config
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|o| o.get("format"))
+        .is_some();
+    if nested_format_present {
+        tracing::warn!(
+            "anthropic ingress: both output_format and output_config.format provided; \
+             dropping the deprecated output_format"
+        );
+        return output_config;
+    }
+    // No conflict. Promote the legacy field into output_config.format,
+    // preserving any other output_config keys (like `effort`).
+    let mut obj = match output_config {
+        Some(Value::Object(o)) => o,
+        Some(other) => {
+            tracing::warn!(
+                kind = %value_type_name(&other),
+                "anthropic ingress: output_config is not an object; replacing with \
+                 {{format: <output_format>}} so structured output reaches upstream"
+            );
+            Map::new()
+        }
+        None => Map::new(),
+    };
+    obj.insert("format".into(), legacy);
+    Some(Value::Object(obj))
+}
+
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 fn translate_thinking(t: &Value) -> ReasoningConfig {
@@ -422,12 +580,37 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
     blocks
 }
 
-fn openai_finish_to_anthropic_stop(fr: &str) -> &'static str {
+/// Reverse of `routectl_providers::anthropic_api::response::map_stop_reason`.
+///
+/// The egress maps Anthropic stop_reasons -> OpenAI finish_reasons:
+/// `end_turn` / `stop_sequence` -> `stop`, `max_tokens` -> `length`,
+/// `tool_use` -> `tool_calls`. Anything else (incl. forward-compat
+/// values like `pause_turn`, `refusal`,
+/// `model_context_window_exceeded`) passes through unchanged.
+///
+/// The ingress side here reverses the OpenAI overlap and PASSES
+/// THROUGH any value not in that set so future-proof Anthropic-only
+/// stop reasons don't get clobbered to `end_turn`. This had been
+/// silently rewriting `pause_turn`, `refusal`, and
+/// `model_context_window_exceeded` to `end_turn`, breaking
+/// claude-code's per-stop-reason error handling.
+///
+/// The `stop_sequence` -> `stop` -> `end_turn` ambiguity remains
+/// (information lost at the canonical layer); the more common
+/// `end_turn` wins on the reverse path. To preserve `stop_sequence`
+/// faithfully, the egress would need to set an additional native
+/// finish-reason field on the canonical Choice.
+fn openai_finish_to_anthropic_stop(fr: &str) -> &str {
     match fr {
         "stop" => "end_turn",
         "length" => "max_tokens",
         "tool_calls" => "tool_use",
-        _ => "end_turn",
+        // Forward-compat: any value the egress passed through verbatim
+        // (i.e. an Anthropic stop_reason that doesn't have an OpenAI
+        // analogue) must survive the ingress reverse mapping or it
+        // gets squashed to "end_turn" and the caller's error handling
+        // breaks.
+        other => other,
     }
 }
 
