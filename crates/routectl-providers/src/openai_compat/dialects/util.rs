@@ -318,3 +318,164 @@ pub(super) fn drop_sampling_params(obj: &mut serde_json::Map<String, Value>) {
         obj.remove(*key);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn body_with_messages(messages: Value) -> serde_json::Map<String, Value> {
+        let mut obj = serde_json::Map::new();
+        obj.insert("messages".into(), messages);
+        obj
+    }
+
+    // ----- strip_history_reasoning -----
+
+    #[test]
+    fn strip_history_reasoning_removes_all_three_fields_from_assistant() {
+        let mut obj = body_with_messages(json!([{
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_content": "hidden",
+            "reasoning_details": [{"type":"reasoning.text","text":"d"}],
+            "reasoning": "r",
+        }]));
+        strip_history_reasoning("test", &mut obj).unwrap();
+        let m = obj["messages"][0].as_object().unwrap();
+        assert!(m.get("reasoning_content").is_none());
+        assert!(m.get("reasoning_details").is_none());
+        assert!(m.get("reasoning").is_none());
+        // Non-reasoning fields untouched.
+        assert_eq!(m["content"], "ok");
+    }
+
+    #[test]
+    fn strip_history_reasoning_no_op_when_no_reasoning_fields() {
+        let mut obj = body_with_messages(json!([{"role":"user","content":"hi"}]));
+        let before = obj["messages"][0].clone();
+        strip_history_reasoning("test", &mut obj).unwrap();
+        assert_eq!(obj["messages"][0], before);
+    }
+
+    // ----- preserve_history_reasoning_content -----
+
+    #[test]
+    fn preserve_content_renames_reasoning_to_reasoning_content_on_assistant() {
+        // Canonical lands as `reasoning` on the wire (per the schema's
+        // serde rename). DeepSeek v4 wants it as `reasoning_content`.
+        let mut obj = body_with_messages(json!([{
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "I considered the options",
+        }]));
+        preserve_history_reasoning_content("test", &mut obj).unwrap();
+        let m = obj["messages"][0].as_object().unwrap();
+        assert_eq!(
+            m.get("reasoning_content").and_then(|v| v.as_str()),
+            Some("I considered the options")
+        );
+        assert!(m.get("reasoning").is_none());
+        assert!(m.get("reasoning_details").is_none());
+    }
+
+    #[test]
+    fn preserve_content_keeps_existing_reasoning_content_intact() {
+        let mut obj = body_with_messages(json!([{
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_content": "already there",
+            "reasoning": "should be dropped",
+            "reasoning_details": [{"type":"reasoning.text","text":"d"}],
+        }]));
+        preserve_history_reasoning_content("test", &mut obj).unwrap();
+        let m = obj["messages"][0].as_object().unwrap();
+        assert_eq!(m["reasoning_content"], "already there");
+        assert!(m.get("reasoning").is_none());
+        assert!(m.get("reasoning_details").is_none());
+    }
+
+    #[test]
+    fn preserve_content_lowers_reasoning_details_array_to_string() {
+        // When only the typed array is present, lower it to a single
+        // joined string so DeepSeek can echo it as `reasoning_content`.
+        let mut obj = body_with_messages(json!([{
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_details": [
+                {"type":"reasoning.text","text":"first ","format":"deepseek-v1"},
+                {"type":"reasoning.text","text":"second","format":"deepseek-v1"},
+            ],
+        }]));
+        preserve_history_reasoning_content("test", &mut obj).unwrap();
+        let m = obj["messages"][0].as_object().unwrap();
+        assert_eq!(m["reasoning_content"], "first second");
+        assert!(m.get("reasoning_details").is_none());
+    }
+
+    #[test]
+    fn preserve_content_strips_reasoning_from_non_assistant_messages() {
+        // DeepSeek 400s if reasoning fields appear on user/tool
+        // messages too. Belt-and-braces: strip them from any role
+        // that isn't assistant.
+        let mut obj = body_with_messages(json!([
+            {"role":"user","content":"hi","reasoning":"shouldnotbehere"},
+            {"role":"tool","content":"r","reasoning_content":"alsono"},
+        ]));
+        preserve_history_reasoning_content("test", &mut obj).unwrap();
+        let user = obj["messages"][0].as_object().unwrap();
+        let tool = obj["messages"][1].as_object().unwrap();
+        assert!(user.get("reasoning").is_none());
+        assert!(tool.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn preserve_content_drops_empty_reasoning() {
+        // Empty reasoning string is not worth round-tripping; drop.
+        let mut obj = body_with_messages(json!([{
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "",
+        }]));
+        preserve_history_reasoning_content("test", &mut obj).unwrap();
+        let m = obj["messages"][0].as_object().unwrap();
+        assert!(m.get("reasoning_content").is_none());
+        assert!(m.get("reasoning").is_none());
+    }
+
+    // ----- preserve_history_reasoning_details -----
+
+    #[test]
+    fn preserve_details_keeps_existing_array_drops_legacy_slots() {
+        let mut obj = body_with_messages(json!([{
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_details": [{"type":"reasoning.text","text":"already"}],
+            "reasoning": "stale legacy",
+            "reasoning_content": "stale legacy",
+        }]));
+        preserve_history_reasoning_details("test", &mut obj, "deepseek-v1").unwrap();
+        let m = obj["messages"][0].as_object().unwrap();
+        assert!(m.get("reasoning_details").is_some());
+        assert_eq!(m["reasoning_details"][0]["text"], "already");
+        assert!(m.get("reasoning").is_none());
+        assert!(m.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn preserve_details_lifts_reasoning_string_into_typed_array() {
+        let mut obj = body_with_messages(json!([{
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "thought process",
+        }]));
+        preserve_history_reasoning_details("test", &mut obj, "openrouter-v1").unwrap();
+        let m = obj["messages"][0].as_object().unwrap();
+        let arr = m["reasoning_details"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "reasoning.text");
+        assert_eq!(arr[0]["format"], "openrouter-v1");
+        assert_eq!(arr[0]["text"], "thought process");
+        assert_eq!(arr[0]["index"], 0);
+    }
+}
