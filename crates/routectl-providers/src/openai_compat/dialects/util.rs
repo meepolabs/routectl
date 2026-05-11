@@ -271,9 +271,13 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
             continue;
         }
         let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("?");
-        // Truncate to bound log-pollution; `kind` originates from
-        // upstream/ingress JSON and is otherwise unbounded.
-        let kind_for_log = if kind.len() > 64 { &kind[..64] } else { kind };
+        // Char-boundary-safe truncation: `&str[..n]` panics on non-ASCII
+        // when n splits a multi-byte char. `kind` is upstream JSON and
+        // may be Unicode.
+        let kind_for_log = match kind.char_indices().nth(64) {
+            Some((boundary, _)) => &kind[..boundary],
+            None => kind,
+        };
         tracing::warn!(
             provider = provider_id,
             detail_type = kind_for_log,
@@ -458,5 +462,23 @@ mod tests {
         assert_eq!(arr[0]["format"], "openrouter-v1");
         assert_eq!(arr[0]["text"], "thought process");
         assert_eq!(arr[0]["index"], 0);
+    }
+
+    #[test]
+    fn lower_reasoning_details_with_unicode_type_does_not_panic() {
+        // Regression: a non-ASCII `type` field (legitimate for
+        // non-English locales or fuzzing) used to panic the log
+        // truncation when the byte slice landed inside a multi-byte
+        // char. Char-boundary-safe truncation must handle this.
+        // 4-byte chars: a string of 100 emoji is 400 bytes, byte 64
+        // lands inside char 16's third byte.
+        let multi_byte_type = "\u{1F4A1}".repeat(100); // 100 light bulb emoji
+        let details = json!([{
+            "type": multi_byte_type,
+            // No `text` field -> falls through to the warn path that
+            // truncates `kind` for logging.
+        }]);
+        // Must not panic.
+        let _ = lower_reasoning_details_to_text(&details, "test");
     }
 }
