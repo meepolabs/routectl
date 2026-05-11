@@ -42,8 +42,29 @@ pub fn normalize(
         .as_object_mut()
         .ok_or_else(|| Error::normalize_request(id, "serialized request is not an object"))?;
 
+    // Lower canonical `system` (Anthropic-shape top-level field) back
+    // into a synthetic `role: "system"` message at the start of the
+    // messages array. The OpenAI ingress lifts wire `role: "system"`
+    // into `req.system`; without this inverse step, the canonical
+    // `system` field leaks onto the OpenAI-compat wire. Most hosts
+    // ignore unknown fields, but strict ones (e.g. NVIDIA NIM) reject
+    // with `400 Validation: Unsupported parameter(s): system`.
+    if let Some(sys) = req.system.as_ref() {
+        let text = sys.flatten();
+        if !text.is_empty() {
+            let messages = obj
+                .get_mut("messages")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| {
+                    Error::normalize_request(id, "serialized messages is not an array")
+                })?;
+            messages.insert(0, serde_json::json!({"role": "system", "content": text}));
+        }
+    }
+
     // Remove routectl-internal fields that upstream never wants.
     // Dialects that need `chat_template_kwargs` re-inject it themselves.
+    obj.remove("system");
     obj.remove("reasoning");
     obj.remove("provider_extras");
     obj.remove("chat_template_kwargs");
@@ -665,5 +686,92 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["key"], "from_request");
+    }
+
+    #[test]
+    fn system_text_lowered_to_role_system_message() {
+        // Canonical `system: "you are a helpful bot"` MUST be lowered
+        // into a synthetic `role: "system"` message at the start of
+        // the messages array, and the top-level `system` field MUST
+        // be removed. NIM strict-rejects unknown top-level fields with
+        // `400 Validation: Unsupported parameter(s): system`.
+        use routectl_core::SystemContent;
+        let mut req = simple_req("test-model");
+        req.system = Some(SystemContent::Text("you are a helpful bot".into()));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            body.get("system").is_none(),
+            "top-level `system` must be stripped, body: {body}"
+        );
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "you are a helpful bot");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn system_blocks_flattened_to_role_system_message() {
+        // SystemContent::Blocks (Anthropic-shape per-block array)
+        // collapses to a single newline-joined string for the
+        // synthetic role:"system" message, since OpenAI-compat has no
+        // wire shape for typed system blocks.
+        use routectl_core::{SystemBlock, SystemContent};
+        let mut req = simple_req("test-model");
+        req.system = Some(SystemContent::Blocks(vec![
+            SystemBlock {
+                kind: "text".into(),
+                text: "first block".into(),
+                cache_control: None,
+                citations: None,
+            },
+            SystemBlock {
+                kind: "text".into(),
+                text: "second block".into(),
+                cache_control: None,
+                citations: None,
+            },
+        ]));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(body.get("system").is_none());
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "first block\nsecond block");
+    }
+
+    #[test]
+    fn empty_system_does_not_inject_message() {
+        // SystemContent::Text("") flattens to "" -- skip injection,
+        // don't waste a wire slot on a noop system prompt.
+        use routectl_core::SystemContent;
+        let mut req = simple_req("test-model");
+        req.system = Some(SystemContent::Text(String::new()));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(body.get("system").is_none());
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "user", "no system message injected");
     }
 }
