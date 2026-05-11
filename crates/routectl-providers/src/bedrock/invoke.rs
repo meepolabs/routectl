@@ -114,12 +114,24 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // because it ships up to ten betas, only five of which Bedrock
     // accepts.
     //
+    // The allowlist itself is `cfg.anthropic_beta_allowlist` when
+    // set (sourced from the global `[bedrock] anthropic_beta` TOML
+    // field), otherwise the routectl-shipped const
+    // `BEDROCK_INVOKE_ACCEPTED_BETAS`. The TOML override is the
+    // operator's escape hatch for AWS allowlist drift between
+    // routectl releases.
+    //
     // TODO(M5): when the Bedrock Converse adapter lands, the
     // analogous filter belongs on the Converse path too -- Converse
     // stores betas under `additionalModelRequestFields.anthropic_beta`.
     // At that point pull both sites onto a shared helper. Today: one
     // site, one filter.
-    filter_bedrock_invoke_betas(&cfg.id, obj, &cfg.anthropic_beta);
+    filter_bedrock_invoke_betas(
+        &cfg.id,
+        obj,
+        &cfg.anthropic_beta,
+        cfg.anthropic_beta_allowlist.as_deref(),
+    );
 
     // Merge any additional model request fields at the top level
     // with the same routectl-managed-keys allow-list as the Anthropic
@@ -187,33 +199,45 @@ fn is_bedrock_invoke_managed_key(key: &str) -> bool {
     )
 }
 
-/// Filter `obj["anthropic_beta"]` in place against the union of
-/// `BEDROCK_INVOKE_ACCEPTED_BETAS` and `cfg_betas` (the
-/// operator-asserted extension hatch). Drops unknown values at
-/// `tracing::debug!` (not WARN) -- claude-code's TS SDK reliably
-/// sends ~5 unsupported flags per request, and WARN would flood
-/// `routectl-warn.log` with no operator value. The filtered
-/// outgoing array is still visible at TRACE via
+/// Filter `obj["anthropic_beta"]` in place against the union of the
+/// effective Bedrock-Invoke allowlist and `cfg_betas` (the
+/// operator-asserted extension hatch).
+///
+/// The effective allowlist is `allowlist_override` when `Some` (the
+/// global `[bedrock] anthropic_beta` TOML override) or the const
+/// `BEDROCK_INVOKE_ACCEPTED_BETAS` otherwise.
+///
+/// Drops unknown values at `tracing::debug!` (not WARN) -- claude-code's
+/// TS SDK reliably sends ~5 unsupported flags per request, and WARN
+/// would flood `routectl-warn.log` with no operator value. The
+/// filtered outgoing array is still visible at TRACE via
 /// `routectl_core::log_safe::trace_outgoing_body`.
 ///
-/// When the filtered array is empty, removes the field entirely
-/// so we do not send `anthropic_beta: []` (Bedrock's validator
-/// accepts it, but absence is the cleaner wire shape and matches
-/// what callers without any betas already send).
+/// When the filtered array is empty, removes the field entirely so
+/// we do not send `anthropic_beta: []` (Bedrock's validator accepts
+/// it, but absence is the cleaner wire shape and matches what
+/// callers without any betas already send).
 ///
 /// Operator-supplied flags from `cfg_betas` pass through
 /// unconditionally because the operator typed them into TOML --
 /// the trust boundary is the same as `extra_headers` and
 /// `additional_model_request_fields`. This is the documented
-/// extension hatch for AWS allowlist drift between routectl
-/// releases (see CLAUDE.md gotcha + `issues.md::INV-6`).
+/// per-provider extension hatch (orthogonal to the global
+/// allowlist override).
 fn filter_bedrock_invoke_betas(
     provider_id: &str,
     obj: &mut serde_json::Map<String, Value>,
     cfg_betas: &[String],
+    allowlist_override: Option<&[String]>,
 ) {
     let Some(arr) = obj.get("anthropic_beta").and_then(|v| v.as_array()).cloned() else {
         return;
+    };
+    let in_allowlist = |flag: &str| -> bool {
+        match allowlist_override {
+            Some(list) => list.iter().any(|s| s == flag),
+            None => BEDROCK_INVOKE_ACCEPTED_BETAS.contains(&flag),
+        }
     };
     let mut kept: Vec<Value> = Vec::with_capacity(arr.len());
     for item in arr {
@@ -224,7 +248,7 @@ fn filter_bedrock_invoke_betas(
             kept.push(item);
             continue;
         };
-        let in_const = BEDROCK_INVOKE_ACCEPTED_BETAS.contains(&flag);
+        let allowed = in_allowlist(flag);
         let in_cfg = cfg_betas.iter().any(|s| s == flag);
         // Dedup: if `kept` already has this flag, skip. The Anthropic
         // ingress already dedups header-vs-body merges; this catches
@@ -233,7 +257,7 @@ fn filter_bedrock_invoke_betas(
         if already_kept {
             continue;
         }
-        if in_const || in_cfg {
+        if allowed || in_cfg {
             kept.push(Value::String(flag.to_string()));
         } else {
             tracing::debug!(
@@ -276,6 +300,7 @@ mod tests {
             user_agent: None,
             extra_headers: Vec::new(),
             anthropic_beta: vec!["context-1m-2025-08-07".into()],
+            anthropic_beta_allowlist: None,
             // `top_p` is canonical and would now be filtered out;
             // use `top_k` here as a real long-tail Anthropic-only
             // knob the allow-list lets through.
@@ -464,6 +489,7 @@ mod tests {
             user_agent: None,
             extra_headers: Vec::new(),
             anthropic_beta: vec![],
+            anthropic_beta_allowlist: None,
             additional_model_request_fields: None,
             adaptive_thinking: None,
         }
@@ -588,5 +614,41 @@ mod tests {
             "duplicate flag was not deduped: {strs:?}"
         );
         assert!(strs.contains(&"claude-code-20250219"), "missing: {strs:?}");
+    }
+
+    /// `cfg.anthropic_beta_allowlist = Some(list)` REPLACES the
+    /// routectl-shipped const allowlist entirely. Sourced from the
+    /// global `[bedrock] anthropic_beta` TOML field. Lets operators
+    /// add flags AWS gated post-release, or remove flags AWS
+    /// deprecated, without a routectl rebuild.
+    #[test]
+    fn invoke_anthropic_beta_allowlist_overrides_the_const() {
+        // Arrange: a request with two flags. One is in the const
+        // allowlist (would normally pass) but NOT in the operator's
+        // override (so it gets dropped). The other is in the override
+        // but not the const (so it gets accepted thanks to the override).
+        let mut cfg = fake_cfg_no_betas();
+        cfg.anthropic_beta_allowlist = Some(vec![
+            "future-flag-2026-12-31".into(),
+        ]);
+        let mut req = user_req();
+        req.anthropic_beta = vec![
+            // Was in const, NOT in override: should be DROPPED.
+            "context-1m-2025-08-07".into(),
+            // NOT in const, in override: should be ACCEPTED.
+            "future-flag-2026-12-31".into(),
+        ];
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        let arr = body["anthropic_beta"].as_array().unwrap();
+        let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(
+            strs,
+            vec!["future-flag-2026-12-31"],
+            "override allowlist did not replace const: {strs:?}"
+        );
     }
 }

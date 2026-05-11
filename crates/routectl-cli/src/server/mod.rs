@@ -156,11 +156,12 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     }
 
     let opts = routectl_router::BuildOptions::new()
-        .with_strict_translation(config.server.strict_translation);
+        .with_strict_translation(config.server.strict_translation)
+        .with_bedrock_anthropic_beta_allowlist(config.bedrock.anthropic_beta.clone());
 
     let mut failed: Vec<(String, String)> = Vec::new();
     for (name, entry) in &config.providers {
-        match routectl_router::build_provider_with_options(name, entry, &secrets, opts).await {
+        match routectl_router::build_provider_with_options(name, entry, &secrets, opts.clone()).await {
             Ok(provider) => {
                 router.register(name.clone(), provider);
             }

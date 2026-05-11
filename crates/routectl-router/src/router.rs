@@ -731,6 +731,7 @@ mod tests {
             retry: RetryPolicy::default(),
             legacy_compat: Default::default(),
             ingress: Default::default(),
+            ..Default::default()
         };
         Router::new(Arc::new(cfg))
     }

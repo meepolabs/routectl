@@ -335,6 +335,7 @@ async fn build_test_router(
         retry: Default::default(),
         legacy_compat: Default::default(),
         ingress: Default::default(),
+        ..Default::default()
     });
 
     let mut router = Router::new(cfg.clone());
@@ -578,6 +579,7 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
             user_agent: Some("routectl-live-test/0.4".into()),
             extra_headers: Vec::new(),
             anthropic_beta: Vec::new(),
+            anthropic_beta_allowlist: None,
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
@@ -607,6 +609,7 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
         retry: Default::default(),
         legacy_compat: Default::default(),
         ingress: Default::default(),
+        ..Default::default()
     });
 
     let mut router = Router::new(cfg);
