@@ -52,6 +52,17 @@ pub fn normalize(
                 .ok_or_else(|| {
                     Error::normalize_request(id, "serialized messages is not an array")
                 })?;
+            // Direct callers (no ingress) may send both req.system AND
+            // Role::System messages. Drop the existing role:system
+            // entries so the lowered system prompt isn't duplicated.
+            // The OpenAI ingress already does this lift at parse time;
+            // doing it here protects library callers too.
+            messages.retain(|m| {
+                m.as_object()
+                    .and_then(|o| o.get("role"))
+                    .and_then(|r| r.as_str())
+                    != Some("system")
+            });
             messages.insert(0, serde_json::json!({"role": "system", "content": text}));
         }
     }
@@ -756,5 +767,49 @@ mod tests {
         assert!(body.get("system").is_none());
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "user", "no system message injected");
+    }
+
+    #[test]
+    fn direct_caller_with_both_req_system_and_role_system_dedupes() {
+        // Direct callers (no ingress) might send both `req.system` AND
+        // a Role::System message. The egress must drop the existing
+        // role:system entries when injecting from req.system, so the
+        // wire body doesn't carry two competing system prompts.
+        use routectl_core::SystemContent;
+        let mut req = simple_req("test-model");
+        req.system = Some(SystemContent::Text("the real system prompt".into()));
+        req.messages.insert(
+            0,
+            Message {
+                role: Role::System,
+                content: MessageContent::Text("legacy duplicate".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let system_count = messages.iter().filter(|m| m["role"] == "system").count();
+        assert_eq!(
+            system_count, 1,
+            "expected exactly one role:system message, got: {body}"
+        );
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "the real system prompt");
+        assert_ne!(
+            messages[0]["content"], "legacy duplicate",
+            "the lowered req.system must win, not the legacy Role::System message"
+        );
     }
 }
