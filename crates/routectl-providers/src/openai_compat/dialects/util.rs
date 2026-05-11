@@ -135,21 +135,10 @@ pub(in crate::openai_compat) fn strip_history_reasoning(
 }
 
 /// Preserve outgoing assistant reasoning as a `reasoning_content`
-/// string field. DeepSeek v4+ and recent vLLM hosts require this on
-/// echo-back to the API.
-///
-/// For each assistant message the body carries:
-///   - If `reasoning_content` is already present, leave it.
-///   - Else if `reasoning` is present (canonical's plaintext slot),
-///     RENAME it to `reasoning_content`. The canonical schema uses
-///     `reasoning` for OpenRouter compat; DeepSeek wants the field
-///     under its own name.
-///   - Else if `reasoning_details` is present, lower the typed array
-///     to a string by joining each detail's `text` payload in order
-///     (Anthropic-aligned details get flattened into a single string;
-///     non-text details are dropped with a tracing::warn).
-///   - Drop `reasoning` and `reasoning_details` after the rewrite so
-///     DeepSeek doesn't 400 on the echoed Anthropic-shape array.
+/// string field. DeepSeek v4+ and recent vLLM require this on
+/// echo-back; the canonical schema uses `reasoning` for OpenRouter
+/// compat, so we rename. Falls back to lowering `reasoning_details`
+/// to a joined text string.
 pub(super) fn preserve_history_reasoning_content(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
@@ -163,29 +152,21 @@ pub(super) fn preserve_history_reasoning_content(
         let Some(m) = msg.as_object_mut() else {
             continue;
         };
-        // Only assistant messages carry reasoning.
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
         if role != "assistant" {
-            // Strip reasoning fields from non-assistant messages
-            // anyway -- DeepSeek 400s if they sneak onto user / tool
-            // messages too.
+            // DeepSeek 400s if reasoning fields appear on user/tool messages.
             m.remove("reasoning_content");
             m.remove("reasoning_details");
             m.remove("reasoning");
             continue;
         }
-        // Already has reasoning_content -- leave it. Belt-and-braces
-        // remove the legacy slots so the wire body has exactly one
-        // surface.
         if m.contains_key("reasoning_content") {
             m.remove("reasoning_details");
             m.remove("reasoning");
             continue;
         }
-        // Try the plaintext slot. Treat `Value::Null` the same as
-        // absent so the NIM dual-null shape (`reasoning: null` +
-        // `reasoning_details: [...]`) doesn't preempt the
-        // reasoning_details fallback below.
+        // Treat `Value::Null` in `reasoning` as absent so NIM's dual-null
+        // shape doesn't preempt the reasoning_details fallback.
         if let Some(reasoning) = m.get("reasoning") {
             if !reasoning.is_null() {
                 if let Some(s) = reasoning.as_str() {
@@ -199,7 +180,6 @@ pub(super) fn preserve_history_reasoning_content(
             }
             m.remove("reasoning");
         }
-        // Fall back to lowering reasoning_details to a string.
         if let Some(details) = m.remove("reasoning_details") {
             let lowered = lower_reasoning_details_to_text(&details, id);
             if !lowered.is_empty() {
@@ -212,15 +192,9 @@ pub(super) fn preserve_history_reasoning_content(
 
 /// Preserve outgoing assistant reasoning as a structured
 /// `reasoning_details` array. OpenRouter accepts the Anthropic-aligned
-/// typed shape verbatim.
-///
-/// For each assistant message:
-///   - If `reasoning_details` is already present, leave it and drop
-///     the legacy `reasoning` / `reasoning_content` slots.
-///   - Else if `reasoning` is present, lift it to a single
-///     `reasoning_details` entry with format = `format_tag` so the
-///     downstream consumer can round-trip continuation correctly.
-///   - Else if `reasoning_content` is present, same lift.
+/// typed shape verbatim. If only the plaintext `reasoning` slot is
+/// present, lift it into a single typed entry tagged with
+/// `format_tag`.
 pub(super) fn preserve_history_reasoning_details(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
@@ -272,10 +246,8 @@ pub(super) fn preserve_history_reasoning_details(
 }
 
 /// Lower a `reasoning_details` array (Anthropic-aligned typed shape)
-/// to a plaintext string by joining each entry's `text` payload in
-/// order. Non-text details are skipped with a `tracing::warn!` so
-/// operators see information loss when an upstream sends typed
-/// reasoning that doesn't survive the lowering.
+/// to plaintext by joining each entry's `text` (or `payload.text`)
+/// in order. Non-text entries warn + skip.
 fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String {
     let Some(arr) = details.as_array() else {
         return String::new();
@@ -289,8 +261,7 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
             parts.push(text.to_string());
             continue;
         }
-        // Anthropic-aligned schema sometimes nests text under
-        // `payload.text`. Honor both shapes.
+        // Anthropic-aligned schema nests text under `payload.text`.
         if let Some(text) = obj
             .get("payload")
             .and_then(|p| p.get("text"))
@@ -300,10 +271,8 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
             continue;
         }
         let kind = obj.get("type").and_then(|v| v.as_str()).unwrap_or("?");
-        // Truncate before logging: `kind` originates from
-        // upstream/ingress JSON and is otherwise unbounded; this
-        // keeps a long attacker-controlled type string from
-        // polluting structured logs.
+        // Truncate to bound log-pollution; `kind` originates from
+        // upstream/ingress JSON and is otherwise unbounded.
         let kind_for_log = if kind.len() > 64 { &kind[..64] } else { kind };
         tracing::warn!(
             provider = provider_id,
