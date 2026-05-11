@@ -891,7 +891,10 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
     let anthropic_messages = translate_messages(id, &req.messages)?;
 
     // tool_choice="none" forbids tool use; Anthropic has no native
-    // equivalent, so strip BOTH the field and the tools list.
+    // equivalent for the bare-string OpenAI form, so strip BOTH the
+    // field and the tools list. The Anthropic-shape `{"type":"none"}`
+    // object form passes through above and Anthropic suppresses tool
+    // use server-side, so it doesn't need the extra strip.
     let suppress_tools = matches!(
         req.tool_choice.as_ref(),
         Some(Value::String(s)) if s == "none"
@@ -1415,6 +1418,10 @@ mod multi_turn_tool_use_tests {
         assert!(
             body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
             "expected tool_choice dropped, got: {body:?}"
+        );
+        assert!(
+            body.get("tools").is_none() || body["tools"].is_null(),
+            "expected no tools field when caller sent neither tools nor tool_choice"
         );
     }
 
