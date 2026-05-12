@@ -1,0 +1,740 @@
+//! Unit tests for the Responses-API request orchestrator + sub-modules.
+//!
+//! Pulled into request.rs via `#[path = "request_tests.rs"] mod tests;`
+//! to keep the orchestrator file under the 800-line cap while still
+//! letting tests reach the `pub(crate)`-visible API surface.
+
+use serde_json::{from_value, json, Value};
+
+use routectl_core::{
+    cache_control::CacheControl, ChatRequest, ContentPart, CustomTool, KnownContentPart,
+    Message, MessageContent, ReasoningConfig, Role, SystemBlock, SystemContent, ToolDef,
+};
+
+use super::translate;
+use crate::openai_responses::{AuthKind, OpenAiResponsesConfig};
+
+// ---------------------------------------------------------------------------
+// Test scaffolding
+// ---------------------------------------------------------------------------
+
+fn cfg() -> OpenAiResponsesConfig {
+    let mut c = OpenAiResponsesConfig::new("openai-responses:test", "literal:test");
+    c.account_id = Some("acct-uuid".into());
+    c.auth_kind = AuthKind::ChatgptOauth;
+    c
+}
+
+fn req_with(messages: Vec<Message>) -> ChatRequest {
+    ChatRequest {
+        model: "gpt-5".into(),
+        messages,
+        ..Default::default()
+    }
+}
+
+fn user_text(text: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Text(text.into()),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+fn assistant_parts(parts: Vec<ContentPart>) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: MessageContent::Parts(parts),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+fn assistant_text(text: &str) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: MessageContent::Text(text.into()),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+fn tool_message(call_id: &str, output: &str) -> Message {
+    Message {
+        role: Role::Tool,
+        content: MessageContent::Text(output.into()),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: Some(call_id.into()),
+        tool_calls: None,
+    }
+}
+
+/// Convert the request to a JSON Value -- avoids over-tying tests to
+/// the struct internals when serde wire shape is what we care about.
+fn translate_to_json(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Value {
+    let r = translate(cfg, req).expect("translate");
+    serde_json::to_value(&r).expect("serialize")
+}
+
+// ---------------------------------------------------------------------------
+// system.rs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn system_content_concatenates_text_blocks_to_instructions() {
+    // Arrange
+    let mut req = req_with(vec![user_text("hi")]);
+    req.system = Some(SystemContent::Blocks(vec![
+        SystemBlock {
+            kind: "text".into(),
+            text: "be helpful".into(),
+            cache_control: None,
+            citations: None,
+        },
+        SystemBlock {
+            kind: "text".into(),
+            text: "be concise".into(),
+            cache_control: None,
+            citations: None,
+        },
+    ]));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["instructions"], json!("be helpful\n\nbe concise"));
+}
+
+#[test]
+fn system_content_with_cache_control_warns_and_strips() {
+    // Arrange
+    let mut req = req_with(vec![user_text("hi")]);
+    req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+        kind: "text".into(),
+        text: "be helpful".into(),
+        cache_control: Some(CacheControl::ephemeral_5m()),
+        citations: None,
+    }]));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: cache_control silently dropped on the wire; instructions
+    // still carry the prompt text.
+    assert_eq!(v["instructions"], json!("be helpful"));
+    assert!(v.get("cache_control").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// messages.rs -- per-role translation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn user_text_message_translates_to_input_text() {
+    // Arrange
+    let req = req_with(vec![user_text("ping")]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(
+        v["input"],
+        json!([
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "ping"}
+            ]}
+        ])
+    );
+}
+
+#[test]
+fn assistant_text_message_translates_to_output_text() {
+    // Arrange
+    let req = req_with(vec![user_text("ping"), assistant_text("pong")]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    let assistant = &v["input"][1];
+    assert_eq!(assistant["type"], "message");
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(
+        assistant["content"],
+        json!([{"type": "output_text", "text": "pong"}])
+    );
+}
+
+#[test]
+fn assistant_thinking_translates_to_reasoning_with_encrypted_content() {
+    // Arrange: assistant turn with a Thinking block carrying a
+    // signature. The egress should emit a Reasoning input item.
+    let parts = vec![
+        ContentPart::Known(KnownContentPart::Thinking {
+            thinking: "step 1".into(),
+            signature: Some("sig-xyz".into()),
+        }),
+        ContentPart::Known(KnownContentPart::Text {
+            text: "final".into(),
+            cache_control: None,
+        }),
+    ];
+    let req = req_with(vec![user_text("ping"), assistant_parts(parts)]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: reasoning item emitted FIRST, then the message item.
+    let reasoning = &v["input"][1];
+    assert_eq!(reasoning["type"], "reasoning");
+    assert_eq!(reasoning["encrypted_content"], "sig-xyz");
+    assert_eq!(
+        reasoning["summary"],
+        json!([{"type": "summary_text", "text": "step 1"}])
+    );
+    let message = &v["input"][2];
+    assert_eq!(message["type"], "message");
+    assert_eq!(message["role"], "assistant");
+    assert_eq!(
+        message["content"],
+        json!([{"type": "output_text", "text": "final"}])
+    );
+}
+
+#[test]
+fn assistant_thinking_without_signature_emits_empty_encrypted_content() {
+    // Arrange
+    let parts = vec![ContentPart::Known(KnownContentPart::Thinking {
+        thinking: "hmm".into(),
+        signature: None,
+    })];
+    let req = req_with(vec![user_text("ping"), assistant_parts(parts)]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: encrypted_content emitted as empty string, not null.
+    // codex's arc_monitor.rs:325-336 treats empty as "no replay" so
+    // this is safe.
+    let reasoning = &v["input"][1];
+    assert_eq!(reasoning["type"], "reasoning");
+    assert_eq!(reasoning["encrypted_content"], "");
+    assert!(reasoning["encrypted_content"].is_string());
+}
+
+#[test]
+fn assistant_tool_use_translates_to_function_call() {
+    // Arrange: assistant turn carrying a ToolUse part.
+    let parts = vec![ContentPart::Known(KnownContentPart::ToolUse {
+        id: "call_42".into(),
+        name: "calc".into(),
+        input: json!({"a": 1}),
+        cache_control: None,
+    })];
+    let req = req_with(vec![user_text("compute"), assistant_parts(parts)]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: function_call input item follows the user message.
+    let fc = &v["input"][1];
+    assert_eq!(fc["type"], "function_call");
+    assert_eq!(fc["call_id"], "call_42");
+    assert_eq!(fc["name"], "calc");
+    // Arguments must be a JSON string (Responses API quirk).
+    assert!(fc["arguments"].is_string());
+    let args: Value = serde_json::from_str(fc["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(args, json!({"a": 1}));
+}
+
+#[test]
+fn tool_role_translates_to_function_call_output() {
+    // Arrange
+    let req = req_with(vec![
+        user_text("compute"),
+        tool_message("call_42", "42"),
+    ]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    let fco = &v["input"][1];
+    assert_eq!(fco["type"], "function_call_output");
+    assert_eq!(fco["call_id"], "call_42");
+    assert_eq!(fco["output"], "42");
+}
+
+// ---------------------------------------------------------------------------
+// tools.rs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tool_def_function_translates_with_strict_field() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.tools = Some(vec![ToolDef::Custom(CustomTool {
+        name: "calc".into(),
+        description: Some("do math".into()),
+        input_schema: json!({"type": "object"}),
+        cache_control: None,
+        defer_loading: None,
+        strict: Some(true),
+        type_tag: None,
+    })]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(
+        v["tools"],
+        json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "calc",
+                    "description": "do math",
+                    "parameters": {"type": "object"},
+                    "strict": true
+                }
+            }
+        ])
+    );
+}
+
+#[test]
+fn tool_def_other_passes_through_verbatim() {
+    // Arrange: Anthropic builtin shape carried through ToolDef::Other.
+    let builtin = json!({
+        "type": "bash_20250124",
+        "name": "bash"
+    });
+    let mut req = req_with(vec![user_text("ping")]);
+    req.tools = Some(vec![from_value::<ToolDef>(builtin.clone()).unwrap()]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: passthrough verbatim
+    assert_eq!(v["tools"], json!([builtin]));
+}
+
+#[test]
+fn tool_choice_auto_serializes_as_string() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.tool_choice = Some(json!("auto"));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["tool_choice"], json!("auto"));
+}
+
+#[test]
+fn tool_choice_required_serializes_as_string() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.tool_choice = Some(json!("required"));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["tool_choice"], json!("required"));
+}
+
+#[test]
+fn tool_choice_none_serializes_as_string() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.tool_choice = Some(json!("none"));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["tool_choice"], json!("none"));
+}
+
+#[test]
+fn tool_choice_named_function_uses_nested_shape() {
+    // Arrange: OpenAI-shape input.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.tool_choice = Some(json!({
+        "type": "function",
+        "function": {"name": "calc"}
+    }));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: chat-completions-shape nested form on the wire.
+    assert_eq!(
+        v["tool_choice"],
+        json!({"type": "function", "function": {"name": "calc"}})
+    );
+}
+
+// ---------------------------------------------------------------------------
+// extras.rs -- reasoning + provider_extras
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reasoning_effort_maps_to_responses_reasoning() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("high".into()),
+        max_tokens: None,
+        exclude: None,
+        enabled: None,
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["reasoning"], json!({"effort": "high", "summary": "auto"}));
+}
+
+#[test]
+fn reasoning_max_tokens_warns_and_drops() {
+    // Arrange: caller supplied a budget. Effort still flows through.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("medium".into()),
+        max_tokens: Some(2048),
+        exclude: None,
+        enabled: None,
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: no budget field on the wire; effort survives.
+    let r = &v["reasoning"];
+    assert_eq!(r["effort"], "medium");
+    assert!(r.get("max_tokens").is_none());
+    assert!(r.get("budget_tokens").is_none());
+}
+
+#[test]
+fn provider_extras_prompt_cache_key_forwards() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"prompt_cache_key": "user-42"}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["prompt_cache_key"], "user-42");
+}
+
+#[test]
+fn provider_extras_service_tier_forwards() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"service_tier": "priority"}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["service_tier"], "priority");
+}
+
+#[test]
+fn provider_extras_text_forwards() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"text": {"verbosity": "high"}}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: text passthrough preserves the operator-supplied shape.
+    assert_eq!(v["text"], json!({"verbosity": "high"}));
+}
+
+#[test]
+fn provider_extras_include_forwards() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"include": ["reasoning.encrypted_content"]}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[test]
+fn provider_extras_unknown_key_does_not_forward() {
+    // Arrange: long-tail key the egress doesn't recognize.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"frequency_penalty_v2": 0.5}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(v.get("frequency_penalty_v2").is_none());
+}
+
+#[test]
+fn store_false_hardcoded_for_chatgpt_oauth() {
+    // Arrange: default cfg uses ChatgptOauth.
+    let req = req_with(vec![user_text("ping")]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["store"], json!(false));
+}
+
+#[test]
+fn store_provider_extras_override_ignored_for_chatgpt_oauth() {
+    // Arrange: operator tries to flip store on -- must be ignored.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"store": true}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["store"], json!(false));
+}
+
+// ---------------------------------------------------------------------------
+// HIGH-1: user image content
+// ---------------------------------------------------------------------------
+
+fn user_image_base64(media_type: &str, data: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Image {
+            source: json!({
+                "type": "base64",
+                "media_type": media_type,
+                "data": data
+            }),
+            cache_control: None,
+        })]),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+fn user_image_url(url: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Image {
+            source: json!({
+                "type": "url",
+                "url": url
+            }),
+            cache_control: None,
+        })]),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+#[test]
+fn user_image_base64_translates_to_input_image_data_url() {
+    // Arrange: user turn containing a base64 PNG image.
+    let req = req_with(vec![user_image_base64("image/png", "AAAA")]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: content block becomes {type:"input_image",
+    // image_url:"data:image/png;base64,AAAA"}.
+    let content = &v["input"][0]["content"][0];
+    assert_eq!(content["type"], "input_image");
+    assert_eq!(content["image_url"], "data:image/png;base64,AAAA");
+    // detail is absent (None -> omitted).
+    assert!(content.get("detail").is_none());
+}
+
+#[test]
+fn user_image_url_translates_to_input_image_url() {
+    // Arrange: user turn carrying an https URL image source.
+    let req = req_with(vec![user_image_url("https://example.com/cat.jpg")]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    let content = &v["input"][0]["content"][0];
+    assert_eq!(content["type"], "input_image");
+    assert_eq!(content["image_url"], "https://example.com/cat.jpg");
+}
+
+#[test]
+fn user_image_unknown_source_kind_warns_and_drops() {
+    // Arrange: source.type is an unsupported kind (forward-compat
+    // extension). The part should be dropped; the message item should
+    // still be emitted but with no content blocks (empty -> skipped).
+    let msg = Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Image {
+            source: json!({"type": "s3", "bucket": "my-bucket", "key": "img.png"}),
+            cache_control: None,
+        })]),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    };
+    let req = req_with(vec![msg]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: the single unknown-source image was dropped so the user
+    // message has no content and was skipped entirely.
+    assert_eq!(v["input"], json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// HIGH-2: tool result with image parts
+// ---------------------------------------------------------------------------
+
+fn tool_message_parts(call_id: &str, parts: Vec<ContentPart>) -> Message {
+    Message {
+        role: Role::Tool,
+        content: MessageContent::Parts(parts),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: Some(call_id.into()),
+        tool_calls: None,
+    }
+}
+
+#[test]
+fn tool_role_text_only_translates_to_string_output() {
+    // Arrange: single text part -- common path.
+    let req = req_with(vec![
+        user_text("run"),
+        tool_message("call_1", "result"),
+    ]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: output is a flat string.
+    let fco = &v["input"][1];
+    assert_eq!(fco["type"], "function_call_output");
+    assert_eq!(fco["call_id"], "call_1");
+    assert_eq!(fco["output"], json!("result"));
+}
+
+#[test]
+fn tool_role_with_image_part_translates_to_items_array() {
+    // Arrange: tool result contains only an image (e.g. screenshot tool).
+    let parts = vec![ContentPart::Known(KnownContentPart::Image {
+        source: json!({
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBORw"
+        }),
+        cache_control: None,
+    })];
+    let req = req_with(vec![user_text("screenshot"), tool_message_parts("call_9", parts)]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: output is an items array with one input_image entry.
+    let fco = &v["input"][1];
+    assert_eq!(fco["type"], "function_call_output");
+    assert_eq!(
+        fco["output"],
+        json!([
+            {"type": "input_image", "image_url": "data:image/png;base64,iVBORw"}
+        ])
+    );
+}
+
+#[test]
+fn tool_role_mixed_text_and_image_emits_items_array() {
+    // Arrange: tool result has both text and an image.
+    let parts = vec![
+        ContentPart::Known(KnownContentPart::Text {
+            text: "here is the screenshot".into(),
+            cache_control: None,
+        }),
+        ContentPart::Known(KnownContentPart::Image {
+            source: json!({
+                "type": "url",
+                "url": "https://example.com/shot.png"
+            }),
+            cache_control: None,
+        }),
+    ];
+    let req = req_with(vec![user_text("screenshot"), tool_message_parts("call_7", parts)]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: mixed -> items array with both kinds present.
+    let fco = &v["input"][1];
+    assert_eq!(
+        fco["output"],
+        json!([
+            {"type": "input_text", "text": "here is the screenshot"},
+            {"type": "input_image", "image_url": "https://example.com/shot.png"}
+        ])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MED-1: client_metadata passthrough
+// ---------------------------------------------------------------------------
+
+#[test]
+fn provider_extras_client_metadata_forwards() {
+    // Arrange
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({
+        "client_metadata": {"user_id": "u-123", "session": "s-abc"}
+    }));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: client_metadata forwarded verbatim.
+    assert_eq!(
+        v["client_metadata"],
+        json!({"user_id": "u-123", "session": "s-abc"})
+    );
+}

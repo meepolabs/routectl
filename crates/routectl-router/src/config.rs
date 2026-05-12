@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 
 use routectl_providers::anthropic_api::AuthKind;
+#[cfg(feature = "openai-responses")]
+use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -224,6 +226,46 @@ pub enum ProviderEntry {
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
+    /// OpenAI Responses API provider. Three auth surfaces (the relevant stage wires
+    /// the first; the relevant stage/E land the others):
+    ///   - `chatgpt-oauth`: ChatGPT subscription JWT.
+    ///   - `api-key`: standard OpenAI API key.
+    ///   - `bedrock-mantle`: AWS Mantle proxy over SigV4.
+    /// `base_url` is optional: when unset, the factory picks the
+    /// auth_kind-appropriate default at provider build time.
+    #[cfg(feature = "openai-responses")]
+    #[non_exhaustive]
+    OpenaiResponses {
+        /// Resolves to the bearer JWT (ChatgptOauth) or API key
+        /// (ApiKey). Ignored for BedrockMantle which signs via SigV4.
+        api_key_ref: String,
+        /// ChatGPT account UUID. Required when `auth_kind =
+        /// "chatgpt-oauth"`; must be absent for the other variants.
+        #[serde(default)]
+        account_id_ref: Option<String>,
+        /// Endpoint base URL. None -> factory picks an auth_kind-
+        /// appropriate default. Operators can pin a specific value
+        /// to point at a staging shard, a localhost mock, etc.
+        #[serde(default)]
+        base_url: Option<String>,
+        /// Which auth surface to dispatch on. Default
+        /// `chatgpt-oauth`.
+        #[serde(default)]
+        auth_kind: OpenaiResponsesAuthKind,
+        /// Extra HTTP headers applied to every request (after auth).
+        #[serde(default)]
+        extra_headers: BTreeMap<String, String>,
+        /// Override the outbound User-Agent. None -> default
+        /// `routectl/<version> codex-cli`.
+        #[serde(default)]
+        user_agent: Option<String>,
+        /// Override the `originator` header on the ChatgptOauth surface.
+        /// None -> `codex_cli_rs` (codex's `DEFAULT_ORIGINATOR`).
+        #[serde(default)]
+        originator: Option<String>,
+        #[serde(default, flatten)]
+        runtime: ProviderRuntimePolicy,
+    },
     /// Native AWS Bedrock provider. Speaks SigV4 directly to
     /// `bedrock-runtime.<region>.amazonaws.com`. Pick `api_shape` to
     /// switch between vendor-specific InvokeModel (default) and
@@ -322,6 +364,8 @@ impl ProviderEntry {
             Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => runtime,
             #[cfg(feature = "bedrock")]
             Self::Bedrock { runtime, .. } => runtime,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses { runtime, .. } => runtime,
         }
     }
 
@@ -364,6 +408,8 @@ impl ProviderEntry {
             Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => *runtime = rt,
             #[cfg(feature = "bedrock")]
             Self::Bedrock { runtime, .. } => *runtime = rt,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses { runtime, .. } => *runtime = rt,
         }
         self
     }
@@ -426,6 +472,17 @@ impl ProviderEntry {
             }
             #[cfg(feature = "bedrock")]
             Self::Bedrock { creds, .. } => creds.redact(),
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                api_key_ref,
+                account_id_ref,
+                ..
+            } => {
+                *api_key_ref = redact_literal_secret(api_key_ref);
+                if let Some(a) = account_id_ref {
+                    *a = redact_literal_secret(a);
+                }
+            }
         }
     }
 
@@ -436,6 +493,18 @@ impl ProviderEntry {
             }
             #[cfg(feature = "bedrock")]
             Self::Bedrock { creds, .. } => creds.secret_uris(),
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                api_key_ref,
+                account_id_ref,
+                ..
+            } => {
+                let mut v = vec![api_key_ref.as_str()];
+                if let Some(a) = account_id_ref {
+                    v.push(a.as_str());
+                }
+                v
+            }
         }
     }
 }

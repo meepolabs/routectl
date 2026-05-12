@@ -183,6 +183,111 @@ user_agent = "claude-code/1.2.3"
     }
 }
 
+#[cfg(feature = "openai-responses")]
+mod openai_responses_tests {
+    use routectl_auth::MemoryStore;
+    use routectl_core::Error;
+    use routectl_router::{build_provider, Config, ProviderEntry};
+
+    #[tokio::test]
+    async fn factory_builds_openai_responses_chatgpt_oauth_provider() {
+        // Arrange
+        let toml_src = r#"
+[providers.gpt]
+type = "openai-responses"
+api_key_ref = "literal:test-jwt"
+account_id_ref = "literal:acct-uuid"
+auth_kind = "chatgpt-oauth"
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        let entry = cfg.providers.get("gpt").expect("gpt entry");
+        let store = MemoryStore;
+
+        // Act
+        let provider = build_provider("gpt", entry, &store).await.expect("build");
+
+        // Assert
+        assert_eq!(provider.id(), "openai-responses:gpt");
+    }
+
+    #[tokio::test]
+    async fn factory_rejects_chatgpt_oauth_without_account_id_ref() {
+        // Arrange
+        let toml_src = r#"
+[providers.gpt]
+type = "openai-responses"
+api_key_ref = "literal:test-jwt"
+auth_kind = "chatgpt-oauth"
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        let entry = cfg.providers.get("gpt").expect("gpt entry");
+        let store = MemoryStore;
+
+        // Act
+        let result = build_provider("gpt", entry, &store).await;
+
+        // Assert
+        match result {
+            Err(Error::Config(msg)) => {
+                assert!(msg.contains("chatgpt-oauth"), "msg: {msg}");
+                assert!(msg.contains("account_id_ref"), "msg: {msg}");
+            }
+            Ok(_) => panic!("expected Err, got Ok"),
+            Err(other) => panic!("expected Error::Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn factory_rejects_api_key_with_account_id_ref() {
+        // Arrange
+        let toml_src = r#"
+[providers.gpt-api]
+type = "openai-responses"
+api_key_ref = "literal:sk-test"
+account_id_ref = "literal:acct-uuid"
+auth_kind = "api-key"
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        let entry = cfg.providers.get("gpt-api").expect("gpt-api entry");
+        let store = MemoryStore;
+
+        // Act
+        let result = build_provider("gpt-api", entry, &store).await;
+
+        // Assert
+        match result {
+            Err(Error::Config(msg)) => {
+                assert!(msg.contains("account_id_ref"), "msg: {msg}");
+                assert!(msg.contains("chatgpt-oauth"), "msg: {msg}");
+            }
+            Ok(_) => panic!("expected Err, got Ok"),
+            Err(other) => panic!("expected Error::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openai_responses_default_auth_kind_is_chatgpt_oauth() {
+        use routectl_providers::openai_responses::AuthKind;
+
+        // Arrange: auth_kind omitted -> default.
+        let toml_src = r#"
+[providers.gpt]
+type = "openai-responses"
+api_key_ref = "literal:test-jwt"
+account_id_ref = "literal:acct-uuid"
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+
+        // Assert
+        match cfg.providers.get("gpt").unwrap() {
+            ProviderEntry::OpenaiResponses { auth_kind, .. } => {
+                assert_eq!(*auth_kind, AuthKind::ChatgptOauth);
+            }
+            other => panic!("expected OpenaiResponses, got {other:?}"),
+        }
+    }
+}
+
 #[cfg(feature = "bedrock")]
 mod bedrock_tests {
     use routectl_router::{BedrockApiShapeConfig, BedrockCredsConfig, Config, ProviderEntry};
