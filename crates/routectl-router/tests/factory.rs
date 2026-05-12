@@ -23,32 +23,6 @@ async fn build_anthropic_api_resolves_secret() {
     assert_eq!(provider.id(), "anthropic-api:anthropic");
 }
 
-#[tokio::test]
-async fn build_claude_cookie_returns_not_enabled() {
-    let store = MemoryStore;
-    let entry = ProviderEntry::claude_cookie("literal:fake-cookie");
-    match build_provider("claude-pro", &entry, &store).await {
-        Err(Error::Auth(msg)) => {
-            assert!(msg.contains("claude-cookie"), "got: {msg}");
-            assert!(msg.contains("not enabled"), "got: {msg}");
-        }
-        Ok(_) => panic!("expected Err"),
-        Err(other) => panic!("expected Error::Auth, got: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn build_chatgpt_cookie_returns_not_enabled() {
-    let store = MemoryStore;
-    let entry = ProviderEntry::chatgpt_cookie("literal:fake-cookie");
-
-    match build_provider("chatgpt-plus", &entry, &store).await {
-        Err(Error::Auth(_)) => {}
-        Ok(_) => panic!("expected Err"),
-        Err(other) => panic!("expected Error::Auth, got: {other:?}"),
-    }
-}
-
 /// Defensive test: a custom `base_url` and `anthropic_version` in the
 /// TOML config must round-trip cleanly into the Anthropic provider.
 /// Locks in that future refactors don't silently re-hardcode the

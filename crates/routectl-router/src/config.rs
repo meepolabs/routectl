@@ -254,20 +254,6 @@ pub enum ProviderEntry {
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
-    #[non_exhaustive]
-    ClaudeCookie {
-        session_ref: String,
-        #[serde(default)]
-        organization_id: Option<String>,
-        #[serde(default, flatten)]
-        runtime: ProviderRuntimePolicy,
-    },
-    #[non_exhaustive]
-    ChatgptCookie {
-        session_ref: String,
-        #[serde(default, flatten)]
-        runtime: ProviderRuntimePolicy,
-    },
 }
 
 /// TOML-side mirror of `routectl_providers::bedrock::BedrockApiShape`.
@@ -333,10 +319,7 @@ impl ProviderEntry {
     /// match so the router doesn't repeat it.
     pub fn runtime(&self) -> &ProviderRuntimePolicy {
         match self {
-            Self::OpenaiCompat { runtime, .. }
-            | Self::AnthropicApi { runtime, .. }
-            | Self::ClaudeCookie { runtime, .. }
-            | Self::ChatgptCookie { runtime, .. } => runtime,
+            Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => runtime,
             #[cfg(feature = "bedrock")]
             Self::Bedrock { runtime, .. } => runtime,
         }
@@ -376,27 +359,9 @@ impl ProviderEntry {
         self
     }
 
-    pub fn claude_cookie(session_ref: impl Into<String>) -> Self {
-        Self::ClaudeCookie {
-            session_ref: session_ref.into(),
-            organization_id: None,
-            runtime: ProviderRuntimePolicy::default(),
-        }
-    }
-
-    pub fn chatgpt_cookie(session_ref: impl Into<String>) -> Self {
-        Self::ChatgptCookie {
-            session_ref: session_ref.into(),
-            runtime: ProviderRuntimePolicy::default(),
-        }
-    }
-
     pub fn with_runtime(mut self, rt: ProviderRuntimePolicy) -> Self {
         match &mut self {
-            Self::OpenaiCompat { runtime, .. }
-            | Self::AnthropicApi { runtime, .. }
-            | Self::ClaudeCookie { runtime, .. }
-            | Self::ChatgptCookie { runtime, .. } => *runtime = rt,
+            Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => *runtime = rt,
             #[cfg(feature = "bedrock")]
             Self::Bedrock { runtime, .. } => *runtime = rt,
         }
@@ -454,25 +419,10 @@ impl ProviderEntry {
         self
     }
 
-    pub fn with_organization_id(mut self, org_id: impl Into<String>) -> Self {
-        match &mut self {
-            Self::ClaudeCookie {
-                organization_id, ..
-            } => *organization_id = Some(org_id.into()),
-            _ => {
-                panic!("ProviderEntry::with_organization_id only applies to claude-cookie")
-            }
-        }
-        self
-    }
-
     pub fn redact_secrets(&mut self) {
         match self {
             Self::OpenaiCompat { api_key_ref, .. } | Self::AnthropicApi { api_key_ref, .. } => {
                 *api_key_ref = redact_literal_secret(api_key_ref);
-            }
-            Self::ClaudeCookie { session_ref, .. } | Self::ChatgptCookie { session_ref, .. } => {
-                *session_ref = redact_literal_secret(session_ref);
             }
             #[cfg(feature = "bedrock")]
             Self::Bedrock { creds, .. } => creds.redact(),
@@ -483,9 +433,6 @@ impl ProviderEntry {
         match self {
             Self::OpenaiCompat { api_key_ref, .. } | Self::AnthropicApi { api_key_ref, .. } => {
                 vec![api_key_ref.as_str()]
-            }
-            Self::ClaudeCookie { session_ref, .. } | Self::ChatgptCookie { session_ref, .. } => {
-                vec![session_ref.as_str()]
             }
             #[cfg(feature = "bedrock")]
             Self::Bedrock { creds, .. } => creds.secret_uris(),
@@ -607,8 +554,6 @@ pub enum ProviderKind {
     #[default]
     OpenaiCompat,
     AnthropicApi,
-    ClaudeCookie,
-    ChatgptCookie,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
