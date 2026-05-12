@@ -89,7 +89,7 @@ fn derive_effort(req: &ChatRequest) -> String {
 /// true`, the budget is dropped (with a tracing::warn at the call
 /// site). The caller's effort string still travels to
 /// `output_config.effort`.
-fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
+pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
     if r.enabled == Some(false) {
@@ -173,7 +173,7 @@ fn build_output_config(
 
 /// Convert canonical `SystemContent` to wire `AnthropicSystem`. Preserves
 /// per-block cache_control and citations.
-fn translate_system(s: &SystemContent) -> AnthropicSystem {
+pub(crate) fn translate_system(s: &SystemContent) -> AnthropicSystem {
     match s {
         SystemContent::Text(t) => AnthropicSystem::Text(t.clone()),
         SystemContent::Blocks(blocks) => AnthropicSystem::Blocks(
@@ -196,7 +196,10 @@ fn translate_system(s: &SystemContent) -> AnthropicSystem {
 /// present, or when all System messages contain only non-text content
 /// (Parts without text blocks, Null) -- avoids emitting a meaningless
 /// `system: ""` upstream and the extra newlines from joining blanks.
-fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
+///
+/// `pub(crate)` so the Bedrock Converse egress can reuse the same
+/// legacy-shape fallback (single source of truth).
+pub(crate) fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
     let texts: Vec<String> = messages
         .iter()
         .filter(|m| matches!(m.role, Role::System))
@@ -261,7 +264,7 @@ fn translate_custom_tool(c: &CustomTool) -> AnthropicTool {
     }
 }
 
-fn translate_tool(td: &ToolDef) -> AnthropicTool {
+pub(crate) fn translate_tool(td: &ToolDef) -> AnthropicTool {
     match td {
         ToolDef::Custom(c) => translate_custom_tool(c),
         ToolDef::Other(v) => {
