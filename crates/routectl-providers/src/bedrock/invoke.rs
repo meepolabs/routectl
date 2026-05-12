@@ -21,43 +21,12 @@ use serde_json::Value;
 
 use routectl_core::{ChatRequest, ChatResponse, Error, Result};
 
+use super::betas::filter_bedrock_betas;
 use super::BedrockConfig;
 
 /// The Bedrock-required `anthropic_version` body field. Distinct from
 /// the Anthropic API's `anthropic-version: 2023-06-01` header.
 const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
-
-/// Anthropic beta flags Bedrock InvokeModel accepts as of the
-/// 2026-05-10 bisect. See `issues.md::INV-6` for the 36-flag table
-/// and the rationale for each rejected flag.
-///
-/// One global allowlist across all Anthropic-on-Bedrock models
-/// (haiku-4-5, sonnet-4-6, opus-4-7 verified -- Bedrock has one
-/// allowlist, not per-model). Bedrock validates each entry of the
-/// request's `anthropic_beta` array independently and 400s the
-/// entire request on the first unsupported value, with no per-flag
-/// fallback. Without filtering, claude-code's TS SDK (which emits
-/// up to ten betas via the `anthropic-beta` HTTP header that the
-/// Anthropic ingress now lifts into the body) fails 100% of
-/// requests after the v0.5 ingress-header lift.
-///
-/// Operators can extend this set per-deployment via
-/// `[providers.X] anthropic_beta = [...]` in TOML. Operator-supplied
-/// flags pass through `filter_bedrock_invoke_betas` unconditionally
-/// because the operator typed them into the config (same trust
-/// boundary as `extra_headers` and `additional_model_request_fields`).
-const BEDROCK_INVOKE_ACCEPTED_BETAS: &[&str] = &[
-    "context-1m-2025-08-07",
-    "claude-code-20250219",
-    "interleaved-thinking-2025-05-14",
-    "context-management-2025-06-27",
-    "effort-2025-11-24",
-    "fine-grained-tool-streaming-2025-05-14",
-    "computer-use-2025-01-24",
-    "computer-use-2024-10-22",
-    "mcp-client-2025-04-04",
-    "search-results-2025-06-09",
-];
 
 /// Build the InvokeModel request body from a routectl `ChatRequest`.
 ///
@@ -105,28 +74,22 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         obj.insert("anthropic_beta".into(), Value::Array(combined));
     }
 
-    // Filter the merged anthropic_beta against the Bedrock-Invoke
-    // accepted set (issues.md::INV-6). Operator-supplied flags from
+    // Filter the merged anthropic_beta against the Bedrock accepted
+    // set (issues.md::INV-6). Operator-supplied flags from
     // cfg.anthropic_beta pass through unconditionally; flags lifted
     // from the inbound `anthropic-beta` HTTP header that Bedrock has
     // not gated for distribution get dropped at DEBUG. Without this
     // filter, claude-code's TS SDK 400s every Bedrock request
-    // because it ships up to ten betas, only five of which Bedrock
-    // accepts.
+    // because it ships up to ten betas, only a subset of which Bedrock
+    // accepts. Shared with the Converse adapter via `super::betas`.
     //
     // The allowlist itself is `cfg.anthropic_beta_allowlist` when
     // set (sourced from the global `[bedrock] anthropic_beta` TOML
     // field), otherwise the routectl-shipped const
-    // `BEDROCK_INVOKE_ACCEPTED_BETAS`. The TOML override is the
-    // operator's escape hatch for AWS allowlist drift between
+    // `BEDROCK_ACCEPTED_BETAS` (in `super::betas`). The TOML override
+    // is the operator's escape hatch for AWS allowlist drift between
     // routectl releases.
-    //
-    // TODO(M5): when the Bedrock Converse adapter lands, the
-    // analogous filter belongs on the Converse path too -- Converse
-    // stores betas under `additionalModelRequestFields.anthropic_beta`.
-    // At that point pull both sites onto a shared helper. Today: one
-    // site, one filter.
-    filter_bedrock_invoke_betas(
+    filter_bedrock_betas(
         &cfg.id,
         obj,
         &cfg.anthropic_beta,
@@ -199,80 +162,12 @@ fn is_bedrock_invoke_managed_key(key: &str) -> bool {
     )
 }
 
-/// Filter `obj["anthropic_beta"]` in place against the union of the
-/// effective Bedrock-Invoke allowlist and `cfg_betas` (the
-/// operator-asserted extension hatch).
-///
-/// The effective allowlist is `allowlist_override` when `Some` (the
-/// global `[bedrock] anthropic_beta` TOML override) or the const
-/// `BEDROCK_INVOKE_ACCEPTED_BETAS` otherwise.
-///
-/// Drops unknown values at `tracing::debug!` (not WARN) -- claude-code's
-/// TS SDK reliably sends ~5 unsupported flags per request, and WARN
-/// would flood `routectl-warn.log` with no operator value. The
-/// filtered outgoing array is still visible at TRACE via
-/// `routectl_core::log_safe::trace_outgoing_body`.
-///
-/// When the filtered array is empty, removes the field entirely so
-/// we do not send `anthropic_beta: []` (Bedrock's validator accepts
-/// it, but absence is the cleaner wire shape and matches what
-/// callers without any betas already send).
-///
-/// Operator-supplied flags from `cfg_betas` pass through
-/// unconditionally because the operator typed them into TOML --
-/// the trust boundary is the same as `extra_headers` and
-/// `additional_model_request_fields`. This is the documented
-/// per-provider extension hatch (orthogonal to the global
-/// allowlist override).
-fn filter_bedrock_invoke_betas(
-    provider_id: &str,
-    obj: &mut serde_json::Map<String, Value>,
-    cfg_betas: &[String],
-    allowlist_override: Option<&[String]>,
-) {
-    let Some(arr) = obj.get("anthropic_beta").and_then(|v| v.as_array()).cloned() else {
-        return;
-    };
-    let in_allowlist = |flag: &str| -> bool {
-        match allowlist_override {
-            Some(list) => list.iter().any(|s| s == flag),
-            None => BEDROCK_INVOKE_ACCEPTED_BETAS.contains(&flag),
-        }
-    };
-    let mut kept: Vec<Value> = Vec::with_capacity(arr.len());
-    for item in arr {
-        let Some(flag) = item.as_str() else {
-            // Non-string entries should not appear; preserve verbatim
-            // so the upstream surfaces a clean validation error
-            // instead of a silent drop.
-            kept.push(item);
-            continue;
-        };
-        let allowed = in_allowlist(flag);
-        let in_cfg = cfg_betas.iter().any(|s| s == flag);
-        // Dedup: if `kept` already has this flag, skip. The Anthropic
-        // ingress already dedups header-vs-body merges; this catches
-        // any direct caller that constructs duplicates explicitly.
-        let already_kept = kept.iter().any(|v| v.as_str() == Some(flag));
-        if already_kept {
-            continue;
-        }
-        if allowed || in_cfg {
-            kept.push(Value::String(flag.to_string()));
-        } else {
-            tracing::debug!(
-                provider = %provider_id,
-                flag = %flag,
-                "dropping beta flag not in Bedrock InvokeModel accepted set"
-            );
-        }
-    }
-    if kept.is_empty() {
-        obj.remove("anthropic_beta");
-    } else {
-        obj.insert("anthropic_beta".into(), Value::Array(kept));
-    }
-}
+/// Filter `obj["anthropic_beta"]` against the Bedrock-Invoke
+/// allowlist. See `super::betas::filter_bedrock_betas` for the full
+/// contract; this section now delegates to the shared helper so the
+/// Converse adapter can apply the identical filter.
+//
+// (function moved to `super::betas::filter_bedrock_betas`)
 
 /// Parse the Bedrock InvokeModel response body into a `ChatResponse`.
 ///
@@ -496,7 +391,7 @@ mod tests {
     }
 
     /// Pre-canned request whose canonical anthropic_beta has 4 flags,
-    /// 2 in BEDROCK_INVOKE_ACCEPTED_BETAS and 2 not. After
+    /// 2 in `super::betas::BEDROCK_ACCEPTED_BETAS` and 2 not. After
     /// normalize_request, only the two accepted survive in the body.
     #[test]
     fn invoke_filters_unsupported_anthropic_beta_against_accepted_set() {
@@ -540,7 +435,7 @@ mod tests {
         // Arrange
         let mut cfg = fake_cfg_no_betas();
         cfg.anthropic_beta = vec![
-            // A flag NOT in BEDROCK_INVOKE_ACCEPTED_BETAS, but the
+            // A flag NOT in `super::betas::BEDROCK_ACCEPTED_BETAS`, but the
             // operator typed it -- they assert it is safe (e.g. AWS
             // gated it for their account before the next routectl
             // release).
