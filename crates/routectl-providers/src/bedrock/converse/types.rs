@@ -116,9 +116,10 @@ pub struct ConverseMessage {
 
 /// One content block inside a message. Single-key untagged union: each
 /// variant emits exactly one top-level key (`text` / `image` / `toolUse`
-/// / `toolResult` / `cachePoint` / `document`). Forward-compat: unknown
-/// content shapes from canonical fall through `ConverseContentBlock::Other`
-/// which serializes whatever serde_json::Value the operator supplied.
+/// / `toolResult` / `cachePoint` / `document` / `reasoningContent`).
+/// Forward-compat: unknown content shapes from canonical fall through
+/// `ConverseContentBlock::Other` which serializes whatever
+/// serde_json::Value the operator supplied.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum ConverseContentBlock {
@@ -143,11 +144,53 @@ pub enum ConverseContentBlock {
         #[serde(rename = "cachePoint")]
         cache_point: CachePoint,
     },
+    /// Reasoning content block. Required for multi-turn replay against
+    /// thinking-enabled Claude on Converse: the prior assistant's
+    /// reasoning (text + signature, or redacted base64 bytes) must echo
+    /// back verbatim. AWS schema mirrors the response side -- a single
+    /// `reasoningContent` key wrapping a union of `reasoningText` (text +
+    /// optional signature) or `redactedContent` (base64 string). The
+    /// signature is "Required: No" per AWS docs, but Anthropic 400s on
+    /// replay without it; the canonical -> Converse translator surfaces
+    /// the missing signature locally as a clean NormalizeRequest error.
+    ReasoningContent {
+        #[serde(rename = "reasoningContent")]
+        reasoning_content: ConverseRequestReasoningBlock,
+    },
     /// Forward-compat passthrough -- caller-supplied raw JSON. Used when
     /// an operator's `provider_extras` contains a future block type
-    /// (citationsContent, reasoningContent, video, ...) routectl doesn't
-    /// model yet. The Value is serialized as-is.
+    /// (citationsContent, video, ...) routectl doesn't model yet. The
+    /// Value is serialized as-is.
     Other(Value),
+}
+
+/// Request-side reasoning block. AWS models this as a tagged union:
+/// either `reasoningText: {text, signature?}` for visible chain-of-thought
+/// or `redactedContent: <base64-string>` for safety-redacted bytes.
+/// Untagged + skip-when-None on each arm so the wire form emits exactly
+/// one top-level key per AWS's "only one member can be specified" rule.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum ConverseRequestReasoningBlock {
+    ReasoningText {
+        #[serde(rename = "reasoningText")]
+        reasoning_text: ConverseRequestReasoningText,
+    },
+    RedactedContent {
+        #[serde(rename = "redactedContent")]
+        redacted_content: String,
+    },
+}
+
+/// AWS `ReasoningTextBlock`. `text` is required; `signature` is required
+/// in practice for replay even though AWS docs mark it optional, so the
+/// translator errors on absent signature rather than serializing the
+/// field as `null`.
+#[derive(Debug, Serialize)]
+pub struct ConverseRequestReasoningText {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -501,5 +544,50 @@ mod tests {
 
         // Assert
         assert_eq!(v, json!({"text": "result"}));
+    }
+
+    #[test]
+    fn reasoning_content_text_serializes_with_text_and_signature() {
+        // Arrange: Anthropic-on-Converse multi-turn replay shape.
+        let block = ConverseContentBlock::ReasoningContent {
+            reasoning_content: ConverseRequestReasoningBlock::ReasoningText {
+                reasoning_text: ConverseRequestReasoningText {
+                    text: "step 1".to_string(),
+                    signature: Some("sig123".to_string()),
+                },
+            },
+        };
+
+        // Act
+        let v = serde_json::to_value(&block).unwrap();
+
+        // Assert
+        assert_eq!(
+            v,
+            json!({
+                "reasoningContent": {
+                    "reasoningText": {"text": "step 1", "signature": "sig123"}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn reasoning_content_redacted_serializes_with_base64_string() {
+        // Arrange
+        let block = ConverseContentBlock::ReasoningContent {
+            reasoning_content: ConverseRequestReasoningBlock::RedactedContent {
+                redacted_content: "AAECAwQF".to_string(),
+            },
+        };
+
+        // Act
+        let v = serde_json::to_value(&block).unwrap();
+
+        // Assert
+        assert_eq!(
+            v,
+            json!({"reasoningContent": {"redactedContent": "AAECAwQF"}})
+        );
     }
 }
