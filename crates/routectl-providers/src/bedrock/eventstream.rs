@@ -284,23 +284,19 @@ where
     Box::pin(stream)
 }
 
-/// Decode Bedrock Converse-stream frames into routectl `ChatChunk`s.
-/// Translation of the AWS-shaped events lives in `converse.rs` (planned
-/// for v0.4.0); for now this stub mirrors the Invoke shape so the trait
-/// surface holds. Yields a single not-implemented `Err` on first poll
-/// so callers see an explicit error rather than a silently-empty stream.
+/// Decode Bedrock ConverseStream frames into routectl `ChatChunk`s.
+/// Delegates to `super::converse::eventstream_stream` for the
+/// Converse-specific frame routing; this wrapper exists so the
+/// dispatch site in `super::mod` can call a stable name regardless of
+/// which sub-module owns the impl.
 pub fn converse_stream<S>(
-    _provider_id: String,
-    _byte_stream: S,
+    provider_id: String,
+    byte_stream: S,
 ) -> BoxStream<'static, Result<ChatChunk>>
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
-    Box::pin(futures::stream::once(async {
-        Err(Error::Streaming(
-            "bedrock converse-stream chunk translation not implemented yet (M2.7)".into(),
-        ))
-    }))
+    super::converse::eventstream_stream(provider_id, byte_stream)
 }
 
 /// Map a single decoded eventstream frame into an optional ChatChunk.

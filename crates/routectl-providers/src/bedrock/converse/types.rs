@@ -5,6 +5,11 @@
 //! `toolUseId`, `inputSchema`, ...). Optionals skip when None so the
 //! emitted JSON omits absent fields rather than rendering `null`.
 //!
+//! Response- and streaming-side wire types live in `response_types.rs`;
+//! the file split keeps each side under the 800-line cap and lets
+//! `Deserialize`-only types stay separate from the `Serialize`-only
+//! request shapes.
+//!
 //! Internal to the provider; consumers only see routectl-core types.
 
 use serde::Serialize;
