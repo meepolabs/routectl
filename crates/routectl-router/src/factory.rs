@@ -15,6 +15,11 @@ use routectl_providers::openai_compat::{
 #[cfg(feature = "bedrock")]
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
 
+#[cfg(feature = "openai-responses")]
+use routectl_providers::openai_responses::{
+    AuthKind as OpenaiResponsesAuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
+};
+
 use crate::config::HistoryReasoning;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
@@ -123,6 +128,40 @@ pub async fn build_provider_with_options(
                 adaptive_thinking: *adaptive_thinking,
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
+        }
+        #[cfg(feature = "openai-responses")]
+        ProviderEntry::OpenaiResponses {
+            api_key_ref,
+            account_id_ref,
+            base_url,
+            auth_kind,
+            extra_headers,
+            user_agent,
+            originator,
+            runtime: _,
+        } => {
+            validate_openai_responses_account_id(name, *auth_kind, account_id_ref)?;
+            let api_key = resolve(secrets, api_key_ref).await?;
+            let account_id = match account_id_ref {
+                Some(uri) => Some(resolve(secrets, uri).await?),
+                None => None,
+            };
+            let resolved_base_url =
+                base_url.clone().unwrap_or_else(|| default_responses_base(*auth_kind));
+            let cfg = OpenAiResponsesConfig {
+                id: format!("openai-responses:{name}"),
+                api_key,
+                account_id,
+                base_url: resolved_base_url,
+                auth_kind: *auth_kind,
+                extra_headers: extra_headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                user_agent: user_agent.clone(),
+                originator: originator.clone(),
+            };
+            Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
         }
         #[cfg(feature = "bedrock")]
         ProviderEntry::Bedrock {
@@ -240,5 +279,53 @@ fn map_history_reasoning(h: HistoryReasoning) -> ProviderHistoryReasoning {
         HistoryReasoning::Auto => ProviderHistoryReasoning::Auto,
         HistoryReasoning::Strip => ProviderHistoryReasoning::Strip,
         HistoryReasoning::Preserve => ProviderHistoryReasoning::Preserve,
+    }
+}
+
+/// Pick the default Responses API base URL for a given auth_kind. The
+/// factory uses this whenever the operator left `base_url` unset.
+/// Centralizing the mapping here (rather than computing it on TOML
+/// deserialize) avoids the chicken-and-egg problem that `auth_kind`
+/// isn't known at the same time `base_url`'s serde default would
+/// fire.
+#[cfg(feature = "openai-responses")]
+fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
+    match auth_kind {
+        OpenaiResponsesAuthKind::ChatgptOauth => "https://chatgpt.com/backend-api/codex".into(),
+        OpenaiResponsesAuthKind::ApiKey => "https://api.openai.com/v1".into(),
+        // BedrockMantle URL is region-specific; CG.D wires in a
+        // region-aware default. The placeholder here forces the
+        // operator to set `base_url` explicitly today (the
+        // provider's NotImplemented auth would fire first anyway).
+        OpenaiResponsesAuthKind::BedrockMantle => {
+            "https://bedrock-mantle.us-east-1.api.aws/openai/v1".into()
+        }
+    }
+}
+
+/// Validate the `account_id_ref` invariant: required for ChatgptOauth,
+/// forbidden for the other variants. A misconfigured TOML surfaces
+/// here as a clean `Error::Config` rather than a confusing upstream
+/// 401/403 at first request time.
+#[cfg(feature = "openai-responses")]
+fn validate_openai_responses_account_id(
+    name: &str,
+    auth_kind: OpenaiResponsesAuthKind,
+    account_id_ref: &Option<String>,
+) -> Result<()> {
+    use routectl_core::Error;
+
+    let has_account = account_id_ref.is_some();
+    let needs_account = matches!(auth_kind, OpenaiResponsesAuthKind::ChatgptOauth);
+    match (needs_account, has_account) {
+        (true, true) | (false, false) => Ok(()),
+        (true, false) => Err(Error::Config(format!(
+            "openai-responses provider `{name}`: auth_kind = \"chatgpt-oauth\" \
+             requires `account_id_ref` (the ChatGPT account UUID)"
+        ))),
+        (false, true) => Err(Error::Config(format!(
+            "openai-responses provider `{name}`: `account_id_ref` is only valid \
+             when auth_kind = \"chatgpt-oauth\"; remove it for {auth_kind:?}"
+        ))),
     }
 }
