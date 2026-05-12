@@ -9,12 +9,14 @@ when a model fails the live matrix.
 - `crates/routectl-core/` -- `Provider` trait + OpenRouter-shape schema
   (`ChatRequest`, `ChatResponse`, `ChatChunk`, `Message`,
   `ReasoningDetail`). Wire shapes only; no provider code.
-- `crates/routectl-providers/` -- concrete provider impls. Three ship
+- `crates/routectl-providers/` -- concrete provider impls. Four ship
   on by default: `openai_compat` (covers OpenAI, OpenRouter, DeepSeek,
   Groq, vLLM, NIM, llama.cpp, and any OpenAI-shaped host), `anthropic_api`
-  (api-key + OAuth-bearer auth), and `bedrock` (default-on `bedrock`
+  (api-key + OAuth-bearer auth), `bedrock` (default-on `bedrock`
   Cargo feature; opt out with `--no-default-features` for a lean build
-  without the AWS SDK tree).
+  without the AWS SDK tree), and `openai_responses` (default-on
+  `openai-responses` Cargo feature; ChatGPT Codex endpoint via
+  `chatgpt-oauth` bearer JWT).
   - `model_profile.rs` -- per-model quirks table. **Edit here when a
     model needs new behavior** (drops sampling params, requires
     reasoning effort, etc.).
@@ -25,9 +27,24 @@ when a model fails the live matrix.
     `signing.rs` wraps `aws-sigv4`; `invoke.rs` reuses
     `anthropic_api::request/response` for the Anthropic Messages
     body shape; `eventstream.rs` decodes the AWS binary frame format
-    for streaming. **Converse body translation is stubbed** -- it's
-    on the v0.4.0 list; calling it today returns a clear
-    not-implemented error.
+    for streaming.
+  - `openai_responses/` -- OpenAI Responses API provider. Three auth
+    surfaces: `chatgpt-oauth` (operational; ChatGPT subscription bearer
+    JWT at `chatgpt.com/backend-api/codex`), `api-key` (deferred; standard
+    `api.openai.com/v1`), `bedrock-mantle` (deferred; AWS Mantle proxy).
+    Wire-shape notes: the chatgpt-oauth endpoint is stream-only (`complete()`
+    forces `stream:true` and drains SSE to `response.completed`); tool
+    definitions use the flat Responses shape (`{type,name,description,
+    parameters}`) NOT the nested chat-completions shape; `tool_choice`
+    named-function uses `{"type":"function","name":"X"}` NOT the nested
+    `function.name` form; `instructions` must always be serialized (even
+    when empty -- the server 400s if the field is absent). Module files:
+    `auth.rs` (header injection), `messages.rs` (reasoning replay +
+    encrypted_content), `extras.rs` (store/prompt_cache_key/text
+    controls), `request.rs` (top-level body assembly), `types.rs`
+    (request wire types), `response.rs` + `response_types.rs` (response
+    normalization), `sse.rs` (streaming state machine), `tools.rs`
+    (tool + tool_choice translation).
 - `crates/routectl-router/` -- alias resolution, fallback chain, retry
   policy, provider factory.
 - `crates/routectl-auth/` -- `SecretStore` trait + default impl that
@@ -455,6 +472,34 @@ Refer back when a similar failure mode shows up.
   (information lost at the canonical layer); preserving it would
   require an additional native finish-reason field on the canonical
   Choice.
+
+- **OpenAI Responses chatgpt-oauth endpoint is stream-only.** Sending
+  `stream:false` returns HTTP 400 `{"detail":"Stream must be set to true"}`.
+  `OpenAiResponsesProvider::complete()` forces `stream:true`, drains the SSE
+  stream until a `response.completed` (or `response.failed` /
+  `response.cancelled`) event, and extracts the `response` field from that
+  event as the final body. The streaming tests in `mod.rs::e2e_tests` use
+  a wiremock that returns an SSE `response.completed` event rather than a
+  plain JSON body.
+
+- **OpenAI Responses tools/tool_choice must use the flat Responses shape.**
+  The chatgpt-oauth backend 400s with
+  `"Missing required parameter: 'tools[0].name'"` on the nested
+  chat-completions shape `{type:"function",function:{name,...}}`. The flat
+  shape is `{type:"function",name,description,parameters,strict}` (no
+  nested `function` key). Similarly, `tool_choice` named-function must be
+  `{"type":"function","name":"X"}` (flat); the nested form
+  `{"type":"function","function":{"name":"X"}}` returns
+  `"Unknown parameter: 'tool_choice.function'"`. Both are handled in
+  `openai_responses/types.rs` (`ResponsesTool::Function` variant) and
+  `openai_responses/tools.rs` (`translate_tool_choice_object`).
+
+- **OpenAI Responses `instructions` field must always serialize.** The
+  chatgpt-oauth backend returns HTTP 400 `{"detail":"Instructions are
+  required"}` when the field is absent. An empty string `""` is accepted.
+  The field on `ResponsesRequest` does NOT carry
+  `#[serde(skip_serializing_if = "String::is_empty")]` -- it is always
+  emitted (possibly as `""`) so the server never sees the field missing.
 
 ## Adding a new model to the matrix
 

@@ -32,7 +32,10 @@ use serde_json::Value;
 pub(crate) struct ResponsesRequest {
     pub(crate) model: String,
 
-    #[serde(skip_serializing_if = "String::is_empty")]
+    // Always serialized, even when empty. The chatgpt-oauth backend returns
+    // {"detail":"Instructions are required"} (400) when the field is absent
+    // entirely; an empty string "" is accepted and treated as "no system
+    // prompt" by the server.
     pub(crate) instructions: String,
 
     pub(crate) input: Vec<ResponseInputItem>,
@@ -203,13 +206,28 @@ pub(crate) enum ReasoningContentItem {
 /// tool shape; `Other` is the forward-compat catchall for
 /// `ToolDef::Other` values that the egress passes through verbatim
 /// (Anthropic builtins / future shapes).
+///
+/// Wire shape: the chatgpt-oauth backend rejects the chat-completions
+/// nested shape `{type,function:{name,...}}` with:
+///   "Missing required parameter: 'tools[0].name'"
+/// and requires the flat Responses shape:
+///   {type:"function", name:"X", description:"...", parameters:{}}
+/// Smoke-confirmed 2026-05-12.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum ResponsesTool {
+    /// Flat Responses-shape function tool. All fields are top-level
+    /// (no nested `function` object). The chat-completions nested shape
+    /// (`{type,function:{name,...}}`) 400s on the codex backend.
     Function {
         #[serde(rename = "type")]
         kind: ResponsesFunctionTag,
-        function: ResponsesFunctionDef,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        parameters: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
     },
     Other(Value),
 }
@@ -221,16 +239,6 @@ pub(crate) enum ResponsesTool {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ResponsesFunctionTag {
     Function,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct ResponsesFunctionDef {
-    pub(crate) name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) description: Option<String>,
-    pub(crate) parameters: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) strict: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -429,32 +437,32 @@ mod tests {
     }
 
     #[test]
-    fn responses_tool_function_serializes_with_type_function_wrapper() {
-        // Arrange
+    fn responses_tool_function_serializes_flat_shape() {
+        // Arrange -- flat Responses shape (NOT the nested chat-completions shape).
+        // The chatgpt-oauth backend 400s with "Missing required parameter:
+        // 'tools[0].name'" on the nested {"type":"function","function":{...}}
+        // shape; the flat shape is accepted (smoke 2026-05-12).
         let tool = ResponsesTool::Function {
             kind: ResponsesFunctionTag::Function,
-            function: ResponsesFunctionDef {
-                name: "calc".into(),
-                description: Some("do math".into()),
-                parameters: json!({"type": "object"}),
-                strict: Some(true),
-            },
+            name: "calc".into(),
+            description: Some("do math".into()),
+            parameters: json!({"type": "object"}),
+            strict: Some(true),
         };
 
         // Act
         let v = serde_json::to_value(&tool).unwrap();
 
-        // Assert
+        // Assert: flat shape -- name/description/parameters/strict are
+        // top-level fields, NOT nested under a "function" key.
         assert_eq!(
             v,
             json!({
                 "type": "function",
-                "function": {
-                    "name": "calc",
-                    "description": "do math",
-                    "parameters": {"type": "object"},
-                    "strict": true
-                }
+                "name": "calc",
+                "description": "do math",
+                "parameters": {"type": "object"},
+                "strict": true
             })
         );
     }

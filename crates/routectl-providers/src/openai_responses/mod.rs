@@ -192,15 +192,22 @@ impl Provider for OpenAiResponsesProvider {
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        // The chatgpt-oauth Responses endpoint is stream-only: it returns
+        // HTTP 400 {"detail":"Stream must be set to true"} when stream=false.
+        // We implement complete() by forcing stream=true, consuming the SSE
+        // until the `response.completed` event fires (which carries the full
+        // ResponsesResponse body), then translating that body to ChatResponse.
+        // Confirmed stream-only behavior: smoke 2026-05-12.
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
-            obj.insert("stream".into(), Value::Bool(false));
+            obj.insert("stream".into(), Value::Bool(true));
         }
         trace_outgoing_body("openai-responses", &self.cfg.id, &body);
 
         let rb = self.build_headers(self.client.post(self.responses_url()))?;
         let resp = rb
             .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
             .json(&body)
             .send()
             .await
@@ -236,10 +243,38 @@ impl Provider for OpenAiResponsesProvider {
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
-        let raw_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        // Drain the SSE stream until `response.completed` (or `response.failed`).
+        // The completed event's `response` field is the full ResponsesResponse body.
+        let byte_stream = resp.bytes_stream();
+        let event_stream = byte_stream.eventsource();
+        futures::pin_mut!(event_stream);
+        let mut completed_body: Option<Value> = None;
+        while let Some(result) = event_stream.next().await {
+            let event = result.map_err(|e| Error::Streaming(e.to_string()))?;
+            if event.data.is_empty() {
+                continue;
+            }
+            let parsed: Value = serde_json::from_str(&event.data)
+                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            let kind = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match kind {
+                "response.completed" | "response.failed" | "response.cancelled" => {
+                    if let Some(r) = parsed.get("response") {
+                        completed_body = Some(r.clone());
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let raw_body = completed_body.ok_or_else(|| {
+            Error::upstream(
+                &self.cfg.id,
+                0,
+                "openai-responses: stream ended without response.completed event".to_string(),
+            )
+        })?;
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         Ok(chat_resp)
@@ -382,9 +417,11 @@ mod e2e_tests {
 
     #[tokio::test]
     async fn complete_post_returns_chat_response() {
-        // Arrange
+        // Arrange: complete() forces stream=true and drains SSE until
+        // `response.completed`. The mock must return a proper SSE stream
+        // with that terminal event (not a plain JSON body).
         let server = MockServer::start().await;
-        let upstream = serde_json::json!({
+        let completed_body = serde_json::json!({
             "id": "resp_01",
             "object": "response",
             "status": "completed",
@@ -397,9 +434,18 @@ mod e2e_tests {
             }],
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
         });
+        // Wrap in a `response.completed` SSE event (the only one we need).
+        let event_body = format!(
+            "data: {{\"type\":\"response.completed\",\"response\":{}}}\n\n",
+            serde_json::to_string(&completed_body).unwrap()
+        );
         Mock::given(method("POST"))
             .and(path("/responses"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(upstream))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(event_body),
+            )
             .mount(&server)
             .await;
         let provider = make_provider(&server.uri());
