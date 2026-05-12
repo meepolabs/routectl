@@ -205,6 +205,21 @@ where
                             "bedrock converse-stream truncated: prelude consumed but frame body never arrived before EOF"
                                 .to_string(),
                         ));
+                    } else if state.pending_stop_reason.is_some() {
+                        // messageStop arrived but metadata never did.
+                        // AWS docs put metadata last, but a network
+                        // truncation or middleware quirk can drop it
+                        // silently. Without this flush, finish_reason
+                        // (and any partial usage we held) vanish from
+                        // the wire and clients see a stream that just
+                        // stops. Emit the closing chunk with the
+                        // captured stop_reason and an empty UsageDelta.
+                        tracing::warn!(
+                            provider = %provider_id,
+                            "stream ended after messageStop without metadata; \
+                             emitting closing chunk with no usage info"
+                        );
+                        yield Ok(build_closing_chunk(&mut state, None));
                     }
                     return;
                 }
