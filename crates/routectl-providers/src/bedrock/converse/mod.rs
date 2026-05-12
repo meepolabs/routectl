@@ -52,23 +52,6 @@ mod system;
 mod tools;
 mod types;
 
-pub use types::*;
-
-// Public re-exports of response-side types so other modules in the
-// bedrock crate (and integration tests) can name them without the
-// inner `response_types::` path.
-pub use response_types::{
-    ConverseCacheDetail, ConverseMetrics, ConverseOutput, ConverseReasoningContent,
-    ConverseReasoningText, ConverseResponse, ConverseResponseContentBlock, ConverseResponseMessage,
-    ConverseResponseToolUse, ConverseUsage, StreamContentBlockDelta, StreamContentBlockStart,
-    StreamContentBlockStartPayload, StreamContentBlockStop, StreamDelta, StreamMessageStart,
-    StreamMessageStop, StreamMetadata, StreamReasoningDelta, StreamToolUseDelta,
-    StreamToolUseStart,
-};
-
-// Re-export the eventstream entry point so `super::eventstream::
-// converse_stream` can delegate without exposing the inner module
-// publicly to the rest of the providers crate.
 pub(super) use eventstream::stream as eventstream_stream;
 
 use serde_json::Value;

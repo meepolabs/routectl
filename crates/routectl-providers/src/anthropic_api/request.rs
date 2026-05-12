@@ -29,8 +29,9 @@ use serde_json::{json, Value};
 
 use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
 use routectl_core::{
-    ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
+    is_canonical_request_key, ChatRequest, ContentPart, CustomTool, Error, KnownContentPart,
+    Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent,
+    ToolDef,
 };
 
 use super::parts::{parse_image_url_source, strip_text_after_tool_use};
@@ -1000,28 +1001,20 @@ fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
     }
 }
 
-/// Top-level Anthropic body keys constructed by routectl that
-/// `provider_extras` is NOT permitted to override. Anthropic-only
-/// extras like `top_k`, `service_tier`, `output_config`, `container`,
-/// `inference_geo` are still allowed through (they're how the ingress
-/// forwards request fields canonical doesn't know about).
+/// Top-level Anthropic body keys that routectl owns. Delegates to the
+/// shared canonical list and adds Anthropic-API-specific keys that are
+/// not on `ChatRequest` but are written by this egress from canonical
+/// fields:
+///   - `thinking`  -- translated from `req.reasoning` by `build_thinking`;
+///                    not a raw ChatRequest field but routectl writes it.
 fn is_routectl_managed_key(key: &str) -> bool {
-    matches!(
-        key,
-        "model"
-            | "messages"
-            | "system"
-            | "max_tokens"
-            | "thinking"
-            | "tools"
-            | "tool_choice"
-            | "stream"
-            | "stop_sequences"
-            | "temperature"
-            | "top_p"
-            | "anthropic_beta"
-            | "cache_control"
-    )
+    is_canonical_request_key(key)
+        || matches!(
+            key,
+            // Anthropic-API-specific managed keys not on ChatRequest:
+            // `thinking` is built from req.reasoning by this egress.
+            "thinking"
+        )
 }
 
 #[cfg(test)]

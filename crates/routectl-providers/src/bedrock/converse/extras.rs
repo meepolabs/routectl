@@ -11,7 +11,7 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::ChatRequest;
+use routectl_core::{is_canonical_request_key, ChatRequest};
 
 use crate::anthropic_api::request::build_thinking;
 use crate::anthropic_api::types::ThinkingConfig;
@@ -174,25 +174,39 @@ fn insert_operator_extras(cfg: &BedrockConfig, bag: &mut Map<String, Value>) {
     }
 }
 
-/// Top-level Converse keys (and the small set of bag entries routectl
-/// owns) that operator overrides may not stomp. `output_config` is in
-/// the list because the adaptive-thinking path writes it from
-/// `req.reasoning.effort` -- without it, an operator supplying
-/// `additional_model_request_fields.output_config` could collide with
-/// the routectl-managed value.
+/// Keys in `additionalModelRequestFields` that routectl manages. This
+/// guards the bag level, not the top-level Converse request body. The
+/// function delegates to the shared canonical list first (catching any
+/// attempt to smuggle a ChatRequest-level key name into the bag, e.g.
+/// `provider_extras = {"messages": [...]}` which after bag assembly
+/// would forward a second `messages` value downstream) and then adds
+/// the Converse-bag-specific keys that routectl writes from canonical
+/// fields:
+///
+///   - `thinking`      -- built by `insert_thinking` from `req.reasoning`.
+///   - `output_config` -- written by the adaptive-thinking path.
+///
+/// Note: `anthropic_beta` and `cache_control` are already covered by
+/// `is_canonical_request_key` (they are `ChatRequest` wire fields) and
+/// do not need to be listed here.
+///
+/// Converse top-level body fields (`inferenceConfig`, `toolConfig`,
+/// `additionalModelResponseFieldPaths`) also appear here because an
+/// operator TOML that sets `additional_model_request_fields.messages`
+/// would produce a malformed Converse body if forwarded.
 fn is_converse_managed_key(key: &str) -> bool {
-    matches!(
-        key,
-        "messages"
-            | "system"
-            | "inferenceConfig"
-            | "toolConfig"
-            | "additionalModelResponseFieldPaths"
-            | "anthropic_beta"
-            | "thinking"
-            | "output_config"
-            | "cache_control"
-    )
+    is_canonical_request_key(key)
+        || matches!(
+            key,
+            // Converse-bag-level keys routectl writes from canonical fields.
+            "thinking"
+                | "output_config"
+                // Converse top-level body fields -- should never appear in
+                // the bag; if they do, drop them to avoid confusing AWS.
+                | "inferenceConfig"
+                | "toolConfig"
+                | "additionalModelResponseFieldPaths"
+        )
 }
 
 #[cfg(test)]

@@ -47,7 +47,7 @@ pub fn map_stop_reason(stop_reason: Option<&str>) -> Option<String> {
 /// because reasoning_details is the canonical surface for them; the
 /// Anthropic ingress reconstructs `thinking` blocks from
 /// reasoning_details on egress.
-pub fn walk_content_blocks(
+pub(crate) fn walk_content_blocks(
     id: &str,
     blocks: &[ContentBlock],
 ) -> Result<(String, Vec<ReasoningDetail>, Option<Vec<Value>>, Vec<ContentPart>)> {
