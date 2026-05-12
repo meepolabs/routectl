@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use routectl_core::{ChatRequest, ToolDef};
 
-use super::types::{ResponsesFunctionDef, ResponsesFunctionTag, ResponsesTool};
+use super::types::{ResponsesFunctionTag, ResponsesTool};
 
 /// Translate `req.tools` into the Responses `tools` array. Returns an
 /// empty Vec when no tools are configured -- the parent
@@ -31,14 +31,16 @@ pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
     for td in tools {
         match td {
             ToolDef::Custom(c) => {
+                // Flat Responses shape: {type, name, description?, parameters, strict?}
+                // The chat-completions nested shape ({type, function:{name,...}}) is
+                // rejected by the chatgpt-oauth backend with
+                // "Missing required parameter: 'tools[0].name'" (smoke 2026-05-12).
                 out.push(ResponsesTool::Function {
                     kind: ResponsesFunctionTag::Function,
-                    function: ResponsesFunctionDef {
-                        name: c.name.clone(),
-                        description: c.description.clone(),
-                        parameters: c.input_schema.clone(),
-                        strict: c.strict,
-                    },
+                    name: c.name.clone(),
+                    description: c.description.clone(),
+                    parameters: c.input_schema.clone(),
+                    strict: c.strict,
                 });
             }
             ToolDef::Other(v) => {
@@ -101,9 +103,13 @@ fn translate_tool_choice_object(map: &serde_json::Map<String, Value>) -> Option<
         );
         return None;
     }
+    // Flat Responses shape: {"type":"function","name":"X"}
+    // The chat-completions nested shape ({"type":"function","function":{"name":"X"}})
+    // is rejected by the chatgpt-oauth backend with
+    // "Unknown parameter: 'tool_choice.function'" (smoke 2026-05-12).
     Some(json!({
         "type": "function",
-        "function": {"name": name}
+        "name": name
     }))
 }
 
