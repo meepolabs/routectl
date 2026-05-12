@@ -19,53 +19,53 @@ use routectl_core::CacheControl;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
-pub struct AnthropicRequest {
-    pub model: String,
-    pub messages: Vec<AnthropicMessage>,
-    pub max_tokens: u32,
+pub(crate) struct AnthropicRequest {
+    pub(crate) model: String,
+    pub(crate) messages: Vec<AnthropicMessage>,
+    pub(crate) max_tokens: u32,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<AnthropicSystem>,
+    pub(crate) system: Option<AnthropicSystem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingConfig>,
+    pub(crate) thinking: Option<ThinkingConfig>,
     /// Top-level effort knob for the Opus 4.7+ adaptive thinking path.
     /// Only emitted alongside `ThinkingConfig::Adaptive`. See
     /// `OutputConfig` and `ThinkingConfig::Adaptive` for the wire
     /// shape; the request normalizer decides whether to populate this.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_config: Option<OutputConfig>,
+    pub(crate) output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
+    pub(crate) temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
+    pub(crate) top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_sequences: Option<Vec<String>>,
+    pub(crate) stop_sequences: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
+    pub(crate) stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<AnthropicTool>>,
+    pub(crate) tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<Value>,
+    pub(crate) tool_choice: Option<Value>,
 
     /// Top-level cache breakpoint (auto-cache mode).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
+    pub(crate) cache_control: Option<CacheControl>,
 
     /// Body-level beta flags. Distinct from the `anthropic-beta`
     /// HTTP header; both are valid surfaces.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub anthropic_beta: Vec<String>,
+    pub(crate) anthropic_beta: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AnthropicMessage {
-    pub role: AnthropicRole,
-    pub content: AnthropicContent,
+pub(crate) struct AnthropicMessage {
+    pub(crate) role: AnthropicRole,
+    pub(crate) content: AnthropicContent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AnthropicRole {
+pub(crate) enum AnthropicRole {
     User,
     Assistant,
 }
@@ -74,7 +74,7 @@ pub enum AnthropicRole {
 /// content blocks (assistant turns that may carry thinking blocks).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum AnthropicContent {
+pub(crate) enum AnthropicContent {
     Text(String),
     Blocks(Vec<ContentBlock>),
 }
@@ -83,20 +83,20 @@ pub enum AnthropicContent {
 /// of typed text blocks with per-block cache_control.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum AnthropicSystem {
+pub(crate) enum AnthropicSystem {
     Text(String),
     Blocks(Vec<AnthropicSystemBlock>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AnthropicSystemBlock {
+pub(crate) struct AnthropicSystemBlock {
     #[serde(rename = "type")]
-    pub kind: String,
-    pub text: String,
+    pub(crate) kind: String,
+    pub(crate) text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
+    pub(crate) cache_control: Option<CacheControl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub citations: Option<Value>,
+    pub(crate) citations: Option<Value>,
 }
 
 /// One content block in an Anthropic message.
@@ -106,7 +106,7 @@ pub struct AnthropicSystemBlock {
 /// Anthropic-in / Anthropic-out path keeps working when Anthropic
 /// ships a new block type before routectl knows about it.
 #[derive(Debug, Clone)]
-pub enum ContentBlock {
+pub(crate) enum ContentBlock {
     Text {
         text: String,
         cache_control: Option<CacheControl>,
@@ -335,7 +335,7 @@ fn take_str(obj: &mut Map<String, Value>, key: &str) -> Result<String, String> {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ThinkingConfig {
+pub(crate) enum ThinkingConfig {
     Enabled {
         budget_tokens: u32,
     },
@@ -357,8 +357,8 @@ pub enum ThinkingConfig {
 /// `req.reasoning.effort` carries through verbatim ("low", "medium",
 /// "high", "xhigh", "max", or anything Anthropic adds later).
 #[derive(Debug, Serialize, Deserialize)]
-pub struct OutputConfig {
-    pub effort: String,
+pub(crate) struct OutputConfig {
+    pub(crate) effort: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +370,7 @@ pub struct OutputConfig {
 /// passes through arbitrary JSON for builtin and forward-compat tool
 /// shapes (`bash_*`, `code_execution_*`, `web_search_*`, ...).
 #[derive(Debug, Clone)]
-pub enum AnthropicTool {
+pub(crate) enum AnthropicTool {
     Custom {
         name: String,
         description: Option<String>,
@@ -427,34 +427,34 @@ impl Serialize for AnthropicTool {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct AnthropicResponse {
-    pub id: String,
-    pub model: String,
-    pub content: Vec<ContentBlock>,
-    pub stop_reason: Option<String>,
-    pub usage: Option<AnthropicUsage>,
+pub(crate) struct AnthropicResponse {
+    pub(crate) id: String,
+    pub(crate) model: String,
+    pub(crate) content: Vec<ContentBlock>,
+    pub(crate) stop_reason: Option<String>,
+    pub(crate) usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AnthropicUsage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
+pub(crate) struct AnthropicUsage {
+    pub(crate) input_tokens: u32,
+    pub(crate) output_tokens: u32,
     #[serde(default)]
-    pub cache_read_input_tokens: Option<u32>,
+    pub(crate) cache_read_input_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_creation_input_tokens: Option<u32>,
+    pub(crate) cache_creation_input_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_creation: Option<AnthropicCacheCreation>,
+    pub(crate) cache_creation: Option<AnthropicCacheCreation>,
     #[serde(default)]
-    pub reasoning_tokens: Option<u32>,
+    pub(crate) reasoning_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AnthropicCacheCreation {
+pub(crate) struct AnthropicCacheCreation {
     #[serde(default)]
-    pub ephemeral_5m_input_tokens: Option<u32>,
+    pub(crate) ephemeral_5m_input_tokens: Option<u32>,
     #[serde(default)]
-    pub ephemeral_1h_input_tokens: Option<u32>,
+    pub(crate) ephemeral_1h_input_tokens: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +463,7 @@ pub struct AnthropicCacheCreation {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum SseEvent {
+pub(crate) enum SseEvent {
     MessageStart {
         message: SseMessage,
     },
@@ -490,15 +490,15 @@ pub enum SseEvent {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SseMessage {
-    pub id: String,
-    pub model: String,
-    pub usage: Option<AnthropicUsage>,
+pub(crate) struct SseMessage {
+    pub(crate) id: String,
+    pub(crate) model: String,
+    pub(crate) usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum SseContentBlockStart {
+pub(crate) enum SseContentBlockStart {
     Text {
         text: String,
     },
@@ -521,7 +521,7 @@ pub enum SseContentBlockStart {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum SseDelta {
+pub(crate) enum SseDelta {
     TextDelta { text: String },
     ThinkingDelta { thinking: String },
     SignatureDelta { signature: String },
@@ -529,27 +529,27 @@ pub enum SseDelta {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SseMessageDelta {
-    pub stop_reason: Option<String>,
+pub(crate) struct SseMessageDelta {
+    pub(crate) stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SseDeltaUsage {
+pub(crate) struct SseDeltaUsage {
     /// Real Anthropic and routectl's own Anthropic ingress render
     /// `input_tokens` in `message_delta.usage` (mirroring the value
     /// from `message_start.usage` with the final post-cache count).
     /// Optional because some upstream variants only emit it on
     /// `message_start`.
     #[serde(default)]
-    pub input_tokens: Option<u32>,
+    pub(crate) input_tokens: Option<u32>,
     #[serde(default)]
-    pub output_tokens: Option<u32>,
+    pub(crate) output_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_creation_input_tokens: Option<u32>,
+    pub(crate) cache_creation_input_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_read_input_tokens: Option<u32>,
+    pub(crate) cache_read_input_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_creation: Option<AnthropicCacheCreation>,
+    pub(crate) cache_creation: Option<AnthropicCacheCreation>,
 }
 
 #[cfg(test)]
