@@ -107,6 +107,13 @@ pub fn normalize(
 
     dyn_dialect.apply_request(id, obj, req)?;
 
+    // Lift Anthropic-shape request fields to OpenAI-wire shape. Runs
+    // after dialect apply so dialect shaping is visible, and before
+    // extras merge so operator-supplied provider_extras cannot clobber
+    // the lift (managed-key allow-list already blocks "tools" et al,
+    // but belt-and-suspenders ordering matters for clarity).
+    super::wire_lift::lift_all(id, obj, req, strict_translation)?;
+
     // default_extras then provider_extras (caller wins). Both gated
     // by the managed-key allow-list -- without this, a request body
     // of `provider_extras = {"messages":[...]}` could replace the
@@ -233,11 +240,8 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
                 if routectl_core::CustomTool::from_openai_function(v).is_some() {
                     continue;
                 }
-                warn!(
-                    provider = id,
-                    "openai-compat egress: Anthropic builtin / non-custom tool dropped",
-                );
-                record("Anthropic builtin / non-custom tool".into());
+                // wire_lift::tools::lift is the canonical write point for
+                // the Anthropic-builtin warn; no second warn here.
             } else if let ToolDef::Custom(c) = t {
                 if c.cache_control.is_some() {
                     warn!(
