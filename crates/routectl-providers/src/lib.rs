@@ -23,3 +23,6 @@ pub mod anthropic_api;
 
 #[cfg(feature = "bedrock")]
 pub mod bedrock;
+
+#[cfg(feature = "openai-responses")]
+pub mod openai_responses;
