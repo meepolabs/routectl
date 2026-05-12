@@ -55,6 +55,7 @@ use routectl_core::{
 };
 
 pub mod auth;
+pub(crate) mod betas;
 pub mod converse;
 pub mod endpoint;
 pub mod eventstream;
