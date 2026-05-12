@@ -13,21 +13,6 @@ pub async fn check(config: &Config) -> Result<()> {
     let mut warnings: Vec<String> = Vec::new();
 
     for (name, entry) in &config.providers {
-        // Bedrock Converse adapter is stubbed pending M2.7. Reject
-        // at config-check time so misconfigurations surface here
-        // instead of as runtime "not implemented" errors at first
-        // request. Drop this guard when the adapter ships.
-        if let ProviderEntry::Bedrock { api_shape, .. } = entry {
-            use routectl_router::BedrockApiShapeConfig;
-            if matches!(api_shape, BedrockApiShapeConfig::Converse) {
-                errors.push(format!(
-                    "provider `{name}`: api_shape = \"converse\" is accepted in TOML but \
-                     the Converse adapter is not implemented yet (M2.7); \
-                     use api_shape = \"invoke\" until the adapter ships"
-                ));
-            }
-        }
-
         for uri in entry.secret_uris() {
             let parsed = match SecretRef::parse(uri) {
                 Ok(r) => r,

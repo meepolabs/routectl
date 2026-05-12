@@ -898,3 +898,132 @@ async fn bedrock_stream_subset() {
     .await;
     print_summary("Bedrock", "stream", &rows);
 }
+
+// -- Bedrock Converse live matrix -------------------------------------------
+//
+// Same bearer-key auth as the Invoke matrix above. Models are the same
+// cross-region inference profiles; the only difference is api_shape =
+// Converse. The goal is to verify that the Converse adapter produces
+// equivalent canonical output to the Invoke adapter for the same model.
+//
+// Run:
+//   cargo test -p routectl-cli --features live-integration,bedrock --release \
+//     --test live_matrix bedrock_converse -- --nocapture --test-threads=1
+//
+// Requires AWS_BEARER_TOKEN_BEDROCK and (optionally) AWS_REGION in env.
+// Skips cleanly when the key is absent.
+
+const BEDROCK_CONVERSE_MODELS: &[&str] = &[
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+];
+
+async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Router>> {
+    use routectl_providers::bedrock::{
+        auth as bedrock_auth, BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider,
+    };
+
+    let key = std::env::var("AWS_BEARER_TOKEN_BEDROCK").ok()?;
+    if key.trim().is_empty() {
+        return None;
+    }
+    let region = std::env::var("AWS_REGION")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "us-east-1".into());
+
+    let mut providers = BTreeMap::new();
+    let mut aliases = BTreeMap::new();
+    let mut router_providers: Vec<(String, Arc<dyn routectl_core::Provider>)> = Vec::new();
+
+    for model_id in targets {
+        let provider_name = format!("bedrock-converse-{}", sanitize_provider_name(model_id));
+        let creds = BedrockCreds::BearerKey { key: key.clone() };
+        let resolved = bedrock_auth::resolve(&creds, &region)
+            .await
+            .expect("resolve bedrock bearer creds");
+        let cfg = BedrockConfig {
+            id: format!("bedrock:{provider_name}"),
+            region: region.clone(),
+            model_id: (*model_id).to_string(),
+            api_shape: BedrockApiShape::Converse,
+            creds,
+            user_agent: Some("routectl-live-test/0.4".into()),
+            extra_headers: Vec::new(),
+            anthropic_beta: Vec::new(),
+            anthropic_beta_allowlist: None,
+            additional_model_request_fields: None,
+            adaptive_thinking: None,
+        };
+        let provider: Arc<dyn routectl_core::Provider> =
+            Arc::new(BedrockProvider::new(cfg, resolved));
+
+        providers.insert(
+            provider_name.clone(),
+            ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:placeholder"),
+        );
+        aliases.insert(
+            (*model_id).to_string(),
+            AliasEntry::new(vec![format!("{provider_name}:{model_id}")]),
+        );
+        router_providers.push((provider_name, provider));
+    }
+
+    let cfg = Arc::new(Config {
+        server: Default::default(),
+        providers,
+        aliases,
+        default_model: None,
+        retry: Default::default(),
+        legacy_compat: Default::default(),
+        ingress: Default::default(),
+        ..Default::default()
+    });
+
+    let mut router = Router::new(cfg);
+    for (name, provider) in router_providers {
+        router.register(name, provider);
+    }
+    Some(Arc::new(router))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bedrock_converse_complete_matrix() {
+    let Some(router) = build_bedrock_converse_test_router(BEDROCK_CONVERSE_MODELS).await else {
+        eprintln!("skip: AWS_BEARER_TOKEN_BEDROCK not set");
+        return;
+    };
+
+    let targets: Vec<String> = BEDROCK_CONVERSE_MODELS.iter().map(|s| s.to_string()).collect();
+    let total = targets.len();
+    let r = router.clone();
+    let rows = run_matrix(targets, move |t| {
+        let r = r.clone();
+        async move { run_complete(r, t).await }
+    })
+    .await;
+    print_summary("Bedrock-Converse", "complete", &rows);
+
+    let pass = rows.iter().filter(|r| r.ok).count();
+    assert!(
+        pass > 0,
+        "Bedrock-Converse: 0/{total} models passed -- routectl or provider broken"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bedrock_converse_stream_matrix() {
+    let Some(router) = build_bedrock_converse_test_router(BEDROCK_CONVERSE_MODELS).await else {
+        eprintln!("skip: AWS_BEARER_TOKEN_BEDROCK not set");
+        return;
+    };
+
+    let targets: Vec<String> = BEDROCK_CONVERSE_MODELS.iter().map(|s| s.to_string()).collect();
+    let r = router.clone();
+    let rows = run_matrix(targets, move |t| {
+        let r = r.clone();
+        async move { run_stream(r, t).await }
+    })
+    .await;
+    print_summary("Bedrock-Converse", "stream", &rows);
+}
