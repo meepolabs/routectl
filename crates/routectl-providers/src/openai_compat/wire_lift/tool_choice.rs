@@ -27,6 +27,7 @@ pub fn lift(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
     req: &ChatRequest,
+    _strict: bool,
 ) -> Result<()> {
     let tc = match req.tool_choice.as_ref() {
         Some(v) => v,
@@ -130,7 +131,7 @@ mod tests {
     fn run(tc: Option<Value>) -> Option<Value> {
         let req = make_req(tc);
         let mut obj = serde_json::Map::new();
-        lift("test", &mut obj, &req).unwrap();
+        lift("test", &mut obj, &req, false).unwrap();
         obj.get("tool_choice").cloned()
     }
 

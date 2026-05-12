@@ -27,23 +27,23 @@ use serde_json::Value;
 /// extra in `additional_model_request_fields` can land it later.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseRequest {
-    pub messages: Vec<ConverseMessage>,
+pub(crate) struct ConverseRequest {
+    pub(crate) messages: Vec<ConverseMessage>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<Vec<ConverseSystemBlock>>,
+    pub(crate) system: Option<Vec<ConverseSystemBlock>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub inference_config: Option<InferenceConfig>,
+    pub(crate) inference_config: Option<InferenceConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_config: Option<ToolConfig>,
+    pub(crate) tool_config: Option<ToolConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_model_request_fields: Option<Value>,
+    pub(crate) additional_model_request_fields: Option<Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub additional_model_response_field_paths: Option<Vec<String>>,
+    pub(crate) additional_model_response_field_paths: Option<Vec<String>>,
 }
 
 /// Inference parameters supported by every Converse-eligible model.
@@ -51,15 +51,15 @@ pub struct ConverseRequest {
 /// `additionalModelRequestFields`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InferenceConfig {
+pub(crate) struct InferenceConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
+    pub(crate) max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
+    pub(crate) temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f64>,
+    pub(crate) top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_sequences: Option<Vec<String>>,
+    pub(crate) stop_sequences: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ pub struct InferenceConfig {
 /// `additional_model_request_fields` if an operator asks for it).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ConverseSystemBlock {
+pub(crate) enum ConverseSystemBlock {
     #[serde(rename = "text")]
     Text(String),
     #[serde(rename = "cachePoint")]
@@ -85,15 +85,15 @@ pub enum ConverseSystemBlock {
 /// valid value is `"default"`. `ttl` is optional and accepts `"5m"` |
 /// `"1h"` (extended-TTL caching).
 #[derive(Debug, Serialize)]
-pub struct CachePoint {
+pub(crate) struct CachePoint {
     #[serde(rename = "type")]
-    pub kind: String,
+    pub(crate) kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
+    pub(crate) ttl: Option<String>,
 }
 
 impl CachePoint {
-    pub fn default_with_ttl(ttl: Option<String>) -> Self {
+    pub(crate) fn default_with_ttl(ttl: Option<String>) -> Self {
         Self {
             kind: "default".to_string(),
             ttl,
@@ -106,12 +106,12 @@ impl CachePoint {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
-pub struct ConverseMessage {
+pub(crate) struct ConverseMessage {
     /// `"user"` or `"assistant"`. Converse rejects anything else
     /// (system goes in the top-level `system` array; tool results ride
     /// inside a user-role `toolResult` content block).
-    pub role: String,
-    pub content: Vec<ConverseContentBlock>,
+    pub(crate) role: String,
+    pub(crate) content: Vec<ConverseContentBlock>,
 }
 
 /// One content block inside a message. Single-key untagged union: each
@@ -122,7 +122,7 @@ pub struct ConverseMessage {
 /// serde_json::Value the operator supplied.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub enum ConverseContentBlock {
+pub(crate) enum ConverseContentBlock {
     Text {
         text: String,
     },
@@ -171,7 +171,7 @@ pub enum ConverseContentBlock {
 /// one top-level key per AWS's "only one member can be specified" rule.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub enum ConverseRequestReasoningBlock {
+pub(crate) enum ConverseRequestReasoningBlock {
     ReasoningText {
         #[serde(rename = "reasoningText")]
         reasoning_text: ConverseRequestReasoningText,
@@ -187,25 +187,25 @@ pub enum ConverseRequestReasoningBlock {
 /// translator errors on absent signature rather than serializing the
 /// field as `null`.
 #[derive(Debug, Serialize)]
-pub struct ConverseRequestReasoningText {
-    pub text: String,
+pub(crate) struct ConverseRequestReasoningText {
+    pub(crate) text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
+    pub(crate) signature: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct ConverseImage {
+pub(crate) struct ConverseImage {
     /// `"png" | "jpeg" | "gif" | "webp"`. AWS validates this strictly.
-    pub format: String,
-    pub source: ConverseImageSource,
+    pub(crate) format: String,
+    pub(crate) source: ConverseImageSource,
 }
 
 #[derive(Debug, Serialize)]
-pub struct ConverseImageSource {
+pub(crate) struct ConverseImageSource {
     /// Base64-encoded image bytes. AWS reference doc says "if you use an
     /// AWS SDK, you don't need to encode the image bytes in base64"; we
     /// don't use the SDK and we send JSON, so the wire form IS base64.
-    pub bytes: String,
+    pub(crate) bytes: String,
 }
 
 /// AWS Converse `document` content block. AWS schema:
@@ -217,37 +217,37 @@ pub struct ConverseImageSource {
 /// absent we use a generic placeholder so AWS doesn't reject the block
 /// outright.
 #[derive(Debug, Serialize)]
-pub struct ConverseDocument {
+pub(crate) struct ConverseDocument {
     /// Document MIME format: pdf, csv, doc, docx, xls, xlsx, html, txt, md.
-    pub format: String,
+    pub(crate) format: String,
     /// Filename for the document. Required by AWS.
-    pub name: String,
-    pub source: ConverseDocumentSource,
+    pub(crate) name: String,
+    pub(crate) source: ConverseDocumentSource,
 }
 
 #[derive(Debug, Serialize)]
-pub struct ConverseDocumentSource {
+pub(crate) struct ConverseDocumentSource {
     /// Base64-encoded document bytes.
-    pub bytes: String,
+    pub(crate) bytes: String,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseToolUse {
-    pub tool_use_id: String,
-    pub name: String,
-    pub input: Value,
+pub(crate) struct ConverseToolUse {
+    pub(crate) tool_use_id: String,
+    pub(crate) name: String,
+    pub(crate) input: Value,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseToolResult {
-    pub tool_use_id: String,
-    pub content: Vec<ConverseToolResultContent>,
+pub(crate) struct ConverseToolResult {
+    pub(crate) tool_use_id: String,
+    pub(crate) content: Vec<ConverseToolResultContent>,
     /// `"success" | "error"`. Only honored by Nova and Claude 3+.
     /// Optional in the wire schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
+    pub(crate) status: Option<String>,
 }
 
 /// One block inside a `toolResult.content` array. Single-key untagged
@@ -257,7 +257,7 @@ pub struct ConverseToolResult {
 /// data.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub enum ConverseToolResultContent {
+pub(crate) enum ConverseToolResultContent {
     Text { text: String },
     Json { json: Value },
     Image { image: ConverseImage },
@@ -270,10 +270,10 @@ pub enum ConverseToolResultContent {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ToolConfig {
-    pub tools: Vec<ConverseToolDef>,
+pub(crate) struct ToolConfig {
+    pub(crate) tools: Vec<ConverseToolDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<ConverseToolChoice>,
+    pub(crate) tool_choice: Option<ConverseToolChoice>,
 }
 
 /// One tool entry. Single-key union: `{toolSpec}` for declared tools,
@@ -284,7 +284,7 @@ pub struct ToolConfig {
 /// no canonical caller emits it yet.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub enum ConverseToolDef {
+pub(crate) enum ConverseToolDef {
     Spec {
         #[serde(rename = "toolSpec")]
         tool_spec: ConverseToolSpec,
@@ -297,16 +297,16 @@ pub enum ConverseToolDef {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseToolSpec {
-    pub name: String,
+pub(crate) struct ConverseToolSpec {
+    pub(crate) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub input_schema: ConverseInputSchema,
+    pub(crate) description: Option<String>,
+    pub(crate) input_schema: ConverseInputSchema,
 }
 
 #[derive(Debug, Serialize)]
-pub struct ConverseInputSchema {
-    pub json: Value,
+pub(crate) struct ConverseInputSchema {
+    pub(crate) json: Value,
 }
 
 /// AWS toolChoice union: `{auto:{}}`, `{any:{}}`, `{tool:{name}}`. None
@@ -315,7 +315,7 @@ pub struct ConverseInputSchema {
 /// strings.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub enum ConverseToolChoice {
+pub(crate) enum ConverseToolChoice {
     Auto { auto: EmptyObject },
     Any { any: EmptyObject },
     Tool { tool: ConverseSpecificTool },
@@ -324,11 +324,11 @@ pub enum ConverseToolChoice {
 /// Empty struct that serializes to `{}`. AWS requires the empty-object
 /// shape on the auto / any variants.
 #[derive(Debug, Serialize)]
-pub struct EmptyObject {}
+pub(crate) struct EmptyObject {}
 
 #[derive(Debug, Serialize)]
-pub struct ConverseSpecificTool {
-    pub name: String,
+pub(crate) struct ConverseSpecificTool {
+    pub(crate) name: String,
 }
 
 #[cfg(test)]

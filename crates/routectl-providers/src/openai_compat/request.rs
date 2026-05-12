@@ -13,7 +13,7 @@
 use serde_json::Value;
 use tracing::warn;
 
-use routectl_core::{ChatRequest, Error, Result, ToolDef};
+use routectl_core::{is_canonical_request_key, ChatRequest, Error, Result, ToolDef};
 
 use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
@@ -156,37 +156,24 @@ fn merge_extras(
     }
 }
 
-/// Canonical `ChatRequest` field names that routectl owns on the wire.
-/// `provider_extras` / `default_extras` cannot override these; long-tail
-/// provider knobs (`top_k`, `service_tier`, dialect-specific
-/// `chat_template_kwargs`, vendor-specific `safety_settings`) still
-/// pass through. Keep in sync with `routectl_core::ChatRequest`.
+/// OpenAI-compat wire keys that routectl owns. Delegates to the shared
+/// canonical list (`routectl_core::is_canonical_request_key`) and adds
+/// keys that are openai-compat-specific wire artefacts not on `ChatRequest`
+/// but still managed by this egress:
+///
+///   - `output_config` -- Anthropic-shape nested structured-output config.
+///     The openai-compat egress uses `response_format` for JSON mode; an
+///     `output_config` key in `provider_extras` would land on OpenAI-shape
+///     hosts that don't understand it, so it is blocked here. (The
+///     Anthropic-API egress lets `output_config` through from provider_extras
+///     because that is the intended forwarding path for Anthropic upstreams.)
 fn is_routectl_managed_key(key: &str) -> bool {
-    matches!(
-        key,
-        "model"
-            | "messages"
-            | "system"
-            | "max_tokens"
-            | "max_completion_tokens"
-            | "stream"
-            | "tools"
-            | "tool_choice"
-            | "stop"
-            | "stop_sequences"
-            | "temperature"
-            | "top_p"
-            | "n"
-            | "user"
-            | "seed"
-            | "logprobs"
-            | "top_logprobs"
-            | "logit_bias"
-            | "presence_penalty"
-            | "frequency_penalty"
-            | "response_format"
-            | "output_config"
-    )
+    is_canonical_request_key(key)
+        || matches!(
+            key,
+            // Anthropic-only nested output config; not valid on OpenAI wire.
+            "output_config"
+        )
 }
 
 /// Emit `tracing::warn!` for each Anthropic-only canonical field

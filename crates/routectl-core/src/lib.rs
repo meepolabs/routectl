@@ -9,6 +9,7 @@ pub mod content_part;
 pub mod error;
 pub mod log_safe;
 pub mod provider;
+pub mod reserved;
 pub mod schema;
 pub mod system_content;
 pub mod tool_def;
@@ -21,6 +22,7 @@ pub use log_safe::{
     sanitize_upstream_body_with_cap, trace_outgoing_body,
 };
 pub use provider::Provider;
+pub use reserved::is_canonical_request_key;
 pub use schema::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Message, MessageContent,
     Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, Role, Usage, UsageDelta,
