@@ -137,24 +137,6 @@ pub async fn build_provider_with_options(
             adaptive_thinking,
             runtime: _,
         } => {
-            // Bedrock Converse adapter is stubbed pending M2.7 --
-            // reject at provider build time so EVERY caller (serve,
-            // test, and any future direct user of `build_provider*`)
-            // fails fast rather than letting a misconfigured provider
-            // construct successfully and then 500 on first dispatch.
-            // The matching server-startup guard in
-            // `routectl-cli/src/server/mod.rs::build_router_from_config`
-            // (round 5) and the `config check` guard
-            // (`routectl-cli/src/commands/config.rs`, round 3) become
-            // redundant when this fires; keep them for defense-in-depth
-            // until M2.7 lands, then drop all three together.
-            if matches!(api_shape, BedrockApiShapeConfig::Converse) {
-                return Err(Error::Config(format!(
-                    "provider `{name}`: api_shape = \"converse\" is accepted in TOML but \
-                     the Converse adapter is not implemented yet (M2.7); \
-                     use api_shape = \"invoke\" until the adapter ships"
-                )));
-            }
             let bedrock_creds = resolve_bedrock_creds(secrets, creds).await?;
             let resolved =
                 routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
