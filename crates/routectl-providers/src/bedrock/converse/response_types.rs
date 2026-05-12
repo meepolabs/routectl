@@ -26,8 +26,8 @@ use serde_json::Value;
 /// pulled in via `additionalModelResponseFieldPaths` here.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseResponse {
-    pub output: ConverseOutput,
+pub(crate) struct ConverseResponse {
+    pub(crate) output: ConverseOutput,
     /// `"end_turn" | "tool_use" | "max_tokens" | "stop_sequence" |
     /// "guardrail_intervened" | "content_filtered" |
     /// "malformed_model_output" | "malformed_tool_use" |
@@ -35,27 +35,27 @@ pub struct ConverseResponse {
     /// schema doesn't mark it required and a malformed reply could
     /// theoretically omit it; we map it to `finish_reason`.
     #[serde(default)]
-    pub stop_reason: Option<String>,
+    pub(crate) stop_reason: Option<String>,
     #[serde(default)]
-    pub usage: Option<ConverseUsage>,
+    pub(crate) usage: Option<ConverseUsage>,
     #[serde(default)]
-    pub metrics: Option<ConverseMetrics>,
+    pub(crate) metrics: Option<ConverseMetrics>,
     /// AWS-side reflection of `additionalModelResponseFieldPaths` from
     /// the request. Captured for forward compat; routectl currently
     /// doesn't surface it on canonical `ChatResponse`.
     #[serde(default)]
-    pub additional_model_response_fields: Option<Value>,
+    pub(crate) additional_model_response_fields: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ConverseOutput {
-    pub message: ConverseResponseMessage,
+pub(crate) struct ConverseOutput {
+    pub(crate) message: ConverseResponseMessage,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ConverseResponseMessage {
-    pub role: String,
-    pub content: Vec<ConverseResponseContentBlock>,
+pub(crate) struct ConverseResponseMessage {
+    pub(crate) role: String,
+    pub(crate) content: Vec<ConverseResponseContentBlock>,
 }
 
 /// One content block on the response side. Single-key untagged union
@@ -64,7 +64,7 @@ pub struct ConverseResponseMessage {
 /// without a rebuild.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub enum ConverseResponseContentBlock {
+pub(crate) enum ConverseResponseContentBlock {
     Text {
         text: String,
     },
@@ -81,10 +81,10 @@ pub enum ConverseResponseContentBlock {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseResponseToolUse {
-    pub tool_use_id: String,
-    pub name: String,
-    pub input: Value,
+pub(crate) struct ConverseResponseToolUse {
+    pub(crate) tool_use_id: String,
+    pub(crate) name: String,
+    pub(crate) input: Value,
 }
 
 /// AWS reasoning union. Per the AWS docs only one of the two members is
@@ -93,18 +93,18 @@ pub struct ConverseResponseToolUse {
 /// base64-encoded bytes.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseReasoningContent {
+pub(crate) struct ConverseReasoningContent {
     #[serde(default)]
-    pub reasoning_text: Option<ConverseReasoningText>,
+    pub(crate) reasoning_text: Option<ConverseReasoningText>,
     #[serde(default)]
-    pub redacted_content: Option<String>,
+    pub(crate) redacted_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ConverseReasoningText {
-    pub text: String,
+pub(crate) struct ConverseReasoningText {
+    pub(crate) text: String,
     #[serde(default)]
-    pub signature: Option<String>,
+    pub(crate) signature: Option<String>,
 }
 
 /// AWS-side TokenUsage. `cacheWriteInputTokens` is the AWS Converse
@@ -115,33 +115,33 @@ pub struct ConverseReasoningText {
 /// the canonical `cache_creation` per-TTL object.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseUsage {
+pub(crate) struct ConverseUsage {
     #[serde(default)]
-    pub input_tokens: u32,
+    pub(crate) input_tokens: u32,
     #[serde(default)]
-    pub output_tokens: u32,
+    pub(crate) output_tokens: u32,
     #[serde(default)]
-    pub total_tokens: Option<u32>,
+    pub(crate) total_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_read_input_tokens: Option<u32>,
+    pub(crate) cache_read_input_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_write_input_tokens: Option<u32>,
+    pub(crate) cache_write_input_tokens: Option<u32>,
     #[serde(default)]
-    pub cache_details: Option<Vec<ConverseCacheDetail>>,
+    pub(crate) cache_details: Option<Vec<ConverseCacheDetail>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseCacheDetail {
-    pub input_tokens: u32,
+pub(crate) struct ConverseCacheDetail {
+    pub(crate) input_tokens: u32,
     /// `"5m"` | `"1h"` -- mirrors the request-side `CachePoint.ttl`.
-    pub ttl: String,
+    pub(crate) ttl: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConverseMetrics {
-    pub latency_ms: u64,
+pub(crate) struct ConverseMetrics {
+    pub(crate) latency_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,17 +155,17 @@ pub struct ConverseMetrics {
 // shapes.
 
 #[derive(Debug, Deserialize)]
-pub struct StreamMessageStart {
+pub(crate) struct StreamMessageStart {
     #[serde(default)]
-    pub role: Option<String>,
+    pub(crate) role: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamContentBlockStart {
-    pub content_block_index: u32,
+pub(crate) struct StreamContentBlockStart {
+    pub(crate) content_block_index: u32,
     #[serde(default)]
-    pub start: Option<StreamContentBlockStartPayload>,
+    pub(crate) start: Option<StreamContentBlockStartPayload>,
 }
 
 /// `start` payload of a `contentBlockStart` event. Today AWS only
@@ -173,7 +173,7 @@ pub struct StreamContentBlockStart {
 /// without a typed start payload.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub enum StreamContentBlockStartPayload {
+pub(crate) enum StreamContentBlockStartPayload {
     ToolUse {
         #[serde(rename = "toolUse")]
         tool_use: StreamToolUseStart,
@@ -183,17 +183,17 @@ pub enum StreamContentBlockStartPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamToolUseStart {
-    pub tool_use_id: String,
-    pub name: String,
+pub(crate) struct StreamToolUseStart {
+    pub(crate) tool_use_id: String,
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamContentBlockDelta {
-    pub content_block_index: u32,
+pub(crate) struct StreamContentBlockDelta {
+    pub(crate) content_block_index: u32,
     #[serde(default)]
-    pub delta: Option<StreamDelta>,
+    pub(crate) delta: Option<StreamDelta>,
 }
 
 /// `delta` payload of a `contentBlockDelta` event. Per AWS docs the
@@ -201,7 +201,7 @@ pub struct StreamContentBlockDelta {
 /// citation, image, toolResult) is populated per frame.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub enum StreamDelta {
+pub(crate) enum StreamDelta {
     Text {
         text: String,
     },
@@ -219,10 +219,10 @@ pub enum StreamDelta {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct StreamToolUseDelta {
+pub(crate) struct StreamToolUseDelta {
     /// Partial JSON arguments accumulated by the AWS SDK; concatenate
     /// all deltas for a given block to assemble the full tool input.
-    pub input: String,
+    pub(crate) input: String,
 }
 
 /// Streaming counterpart of `ConverseReasoningContent`. AWS picks a
@@ -231,37 +231,37 @@ pub struct StreamToolUseDelta {
 /// safety-redacted bytes.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamReasoningDelta {
+pub(crate) struct StreamReasoningDelta {
     #[serde(default)]
-    pub text: Option<String>,
+    pub(crate) text: Option<String>,
     #[serde(default)]
-    pub signature: Option<String>,
+    pub(crate) signature: Option<String>,
     #[serde(default)]
-    pub redacted_content: Option<String>,
+    pub(crate) redacted_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamContentBlockStop {
-    pub content_block_index: u32,
+pub(crate) struct StreamContentBlockStop {
+    pub(crate) content_block_index: u32,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamMessageStop {
+pub(crate) struct StreamMessageStop {
     #[serde(default)]
-    pub stop_reason: Option<String>,
+    pub(crate) stop_reason: Option<String>,
     #[serde(default)]
-    pub additional_model_response_fields: Option<Value>,
+    pub(crate) additional_model_response_fields: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamMetadata {
+pub(crate) struct StreamMetadata {
     #[serde(default)]
-    pub usage: Option<ConverseUsage>,
+    pub(crate) usage: Option<ConverseUsage>,
     #[serde(default)]
-    pub metrics: Option<ConverseMetrics>,
+    pub(crate) metrics: Option<ConverseMetrics>,
 }
 
 #[cfg(test)]
