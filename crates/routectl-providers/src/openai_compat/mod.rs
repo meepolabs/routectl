@@ -29,6 +29,7 @@ pub mod request;
 pub mod response;
 pub mod sse;
 pub(crate) mod util;
+pub(crate) mod wire_lift;
 
 pub use dialect::ReasoningDialect;
 

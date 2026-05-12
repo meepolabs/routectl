@@ -1210,7 +1210,6 @@ async fn cross_anthropic_stop_sequences_renamed_to_stop() {
 }
 
 #[tokio::test]
-#[ignore = "GAP: openai-compat egress emits Anthropic-shape tools (input_schema) instead of OpenAI shape (type:function/function:{name,parameters}). claude-code -> DeepSeek/Qwen/opencode-go tool calls are broken."]
 async fn cross_anthropic_tools_translated_to_openai_function_shape() {
     // Anthropic tools: `{name, description, input_schema}`.
     // OpenAI tools:    `{type:"function", function:{name, description, parameters}}`.
@@ -1248,7 +1247,6 @@ async fn cross_anthropic_tools_translated_to_openai_function_shape() {
 }
 
 #[tokio::test]
-#[ignore = "GAP: tool_choice {type:tool, name} not rewritten to OpenAI {type:function, function:{name}}. claude-code's forced-tool calls won't be honored on OpenAI hosts."]
 async fn cross_anthropic_tool_choice_translated_to_openai_shape() {
     // Anthropic: tool_choice = {"type":"auto"} | {"type":"any"} |
     //                          {"type":"tool", "name":"..."} | {"type":"none"}
