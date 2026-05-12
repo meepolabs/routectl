@@ -99,6 +99,47 @@ api_key_ref = "file:///abs/path/to/anthropic-oauth-token"
 auth_kind = "oauth-bearer"
 extra_headers = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
 
+# ---- OpenAI Responses API provider (default-on; built behind the
+# `openai-responses` Cargo feature). Talks the OpenAI Responses wire
+# shape. Three auth surfaces:
+#
+#   chatgpt-oauth (CG.A, wired today):
+#     ChatGPT subscription JWT. Targets the codex backend at
+#     https://chatgpt.com/backend-api/codex. Sends:
+#         Authorization: Bearer <jwt>
+#         ChatGPT-Account-Id: <uuid>
+#         originator: codex_cli_rs   (overridable via `originator`)
+#         User-Agent:  routectl/<ver> codex-cli (override via `user_agent`)
+#     `account_id_ref` is REQUIRED for this auth_kind; the factory
+#     errors at startup if it's absent.
+#
+#   api-key (CG.E, deferred): standard OpenAI key at
+#     https://api.openai.com/v1. Routectl returns NotImplemented today.
+#
+#   bedrock-mantle (CG.D, deferred): AWS Mantle proxy at
+#     https://bedrock-mantle.<region>.api.aws/openai/v1. SigV4-signed.
+#     Routectl returns NotImplemented today.
+#
+# base_url is optional: when unset, the factory picks an auth_kind-
+# appropriate default at provider build time. Pin a value here to
+# point at a staging shard / localhost mock.
+[providers.gpt]
+type = "openai-responses"
+api_key_ref = "file:///abs/path/to/chatgpt-oauth-jwt"
+account_id_ref = "literal:00000000-0000-0000-0000-000000000000"  # your ChatGPT account UUID
+auth_kind = "chatgpt-oauth"
+# originator = "codex_cli_rs"        # default; override only if needed
+# user_agent = "my-cli/1.0"
+
+# Commented-out preview of the bedrock-mantle auth path. Wire shape is
+# OpenAI Responses, but the request is SigV4-signed against AWS's
+# Mantle proxy instead of going to ChatGPT's backend. Lands in CG.D.
+# [providers.gpt-bedrock]
+# type = "openai-responses"
+# api_key_ref = "literal:unused"     # ignored; Mantle uses AWS creds
+# auth_kind = "bedrock-mantle"
+# base_url = "https://bedrock-mantle.us-east-1.api.aws/openai/v1"
+
 # ---- Bedrock provider (default-on; built behind the `bedrock` Cargo
 # feature). Talks to bedrock-runtime.<region>.amazonaws.com directly,
 # no gateway. Pick ONE creds shape per provider entry.
