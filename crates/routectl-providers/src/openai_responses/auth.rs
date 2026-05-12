@@ -12,8 +12,12 @@
 //!   `default_client.rs::default_headers` and
 //!   `backend-client/src/client.rs::headers`.
 //!
-//! - `ApiKey` (deferred to the relevant stage): the standard OpenAI surface at
-//!   `https://api.openai.com/v1/responses`. Returns NotImplemented.
+//! - `ApiKey` (wired in the relevant stage): the standard OpenAI surface at
+//!   `https://api.openai.com/v1/responses`. Injects only
+//!   `Authorization: Bearer <api_key>` -- ChatGPT-Account-Id and
+//!   originator are ChatGPT-OAuth-specific and absent here. Operators
+//!   needing `OpenAI-Organization` / `OpenAI-Project` set them via
+//!   `extra_headers`.
 //!
 //! - `BedrockMantle` (deferred to the relevant stage): the Mantle proxy at
 //!   `https://bedrock-mantle.<region>.api.aws/openai/v1`. Returns
@@ -47,10 +51,7 @@ pub(crate) fn apply(
 ) -> Result<RequestBuilder> {
     match cfg.auth_kind {
         AuthKind::ChatgptOauth => Ok(apply_chatgpt_oauth(rb, cfg)),
-        AuthKind::ApiKey => Err(Error::Auth(format!(
-            "openai-responses provider `{}`: api-key auth_kind not yet supported (the relevant stage)",
-            cfg.id
-        ))),
+        AuthKind::ApiKey => Ok(apply_api_key(rb, cfg)),
         AuthKind::BedrockMantle => Err(Error::Auth(format!(
             "openai-responses provider `{}`: bedrock-mantle auth_kind not yet supported (the relevant stage)",
             cfg.id
@@ -80,6 +81,18 @@ fn apply_chatgpt_oauth(rb: RequestBuilder, cfg: &OpenAiResponsesConfig) -> Reque
     }
 
     rb
+}
+
+/// Standard OpenAI API-key header injection for the public
+/// `api.openai.com/v1/responses` endpoint. Only `Authorization: Bearer
+/// <api_key>` is required; `ChatGPT-Account-Id` and `originator` are
+/// ChatGPT-OAuth-specific and intentionally absent. The factory's
+/// `validate_openai_responses_account_id` already rejects an
+/// `account_id_ref` paired with `auth_kind = "api-key"`, so we never
+/// see `cfg.account_id` set on this path. User-Agent is set at the
+/// client level (mirrors the chatgpt-oauth path).
+fn apply_api_key(rb: RequestBuilder, cfg: &OpenAiResponsesConfig) -> RequestBuilder {
+    rb.header("authorization", format!("Bearer {}", cfg.api_key))
 }
 
 #[cfg(test)]
@@ -182,24 +195,38 @@ mod tests {
     }
 
     #[test]
-    fn api_key_auth_returns_not_implemented() {
-        // Arrange
+    fn api_key_auth_headers_inject_bearer_only() {
+        // Arrange: ApiKey carries no account_id_ref by config-time
+        // invariant (factory rejects the combination).
         let mut cfg = base_cfg(AuthKind::ApiKey);
         cfg.account_id = None;
+        cfg.api_key = "sk-test-123".into();
         let client = Client::new();
         let rb = client.post("https://api.openai.com/v1/responses");
 
         // Act
-        let err = apply(rb, &cfg).expect_err("expected Err");
+        let rb = apply(rb, &cfg).expect("apply");
+        let req = rb.build().expect("build");
 
-        // Assert
-        match err {
-            Error::Auth(msg) => {
-                assert!(msg.contains("api-key"), "msg: {msg}");
-                assert!(msg.contains("the relevant stage"), "msg: {msg}");
-            }
-            other => panic!("expected Error::Auth, got {other:?}"),
-        }
+        // Assert: Bearer auth present; ChatGPT-OAuth-specific headers
+        // (ChatGPT-Account-Id, originator) are absent.
+        assert_eq!(
+            header(&req, "authorization").as_deref(),
+            Some("Bearer sk-test-123")
+        );
+        assert!(
+            header(&req, "chatgpt-account-id").is_none(),
+            "ChatGPT-Account-Id must not be set for api-key"
+        );
+        assert!(
+            header(&req, "originator").is_none(),
+            "originator must not be set for api-key"
+        );
+        // Per-request UA absent (client-level only).
+        assert!(
+            header(&req, "user-agent").is_none(),
+            "UA should not be set as a per-request header"
+        );
     }
 
     #[test]

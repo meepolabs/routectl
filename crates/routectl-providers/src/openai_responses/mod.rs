@@ -1,18 +1,19 @@
 //! OpenAI Responses API provider (`openai-responses` provider type).
 //!
-//! Three auth surfaces (only one operational as of the relevant stage):
+//! Three auth surfaces:
 //!
 //!   - `chatgpt-oauth` (the relevant stage, default): ChatGPT subscription surface
 //!     at `https://chatgpt.com/backend-api/codex`. Uses
 //!     Authorization: Bearer <jwt> + ChatGPT-Account-Id + originator
 //!     headers (codex parity). Fully wired: `complete()` + `stream()`
 //!     both ship.
-//!   - `api-key` (the relevant stage, deferred): standard OpenAI surface at
-//!     `https://api.openai.com/v1`. Calling today returns a clean
-//!     not-implemented Error from auth.rs.
+//!   - `api-key` (the relevant stage): standard OpenAI surface at
+//!     `https://api.openai.com/v1`. Uses Authorization: Bearer
+//!     <api_key> only; `OpenAI-Organization` / `OpenAI-Project` can
+//!     be set via `extra_headers` if needed.
 //!   - `bedrock-mantle` (the relevant stage, deferred): AWS Mantle proxy at
-//!     `https://bedrock-mantle.<region>.api.aws/openai/v1`. Same
-//!     behavior as `api-key`: not-implemented Error today.
+//!     `https://bedrock-mantle.<region>.api.aws/openai/v1`. Returns
+//!     a clean not-implemented Error from auth.rs today.
 //!
 //! Wire shape: OpenAI Responses API.
 //!   - Request reference: `codex-rs/codex-api/src/common.rs::
@@ -24,11 +25,12 @@
 //!     present; codex's `arc_monitor.rs:325-336` treats empty as a
 //!     no-op for replay so this is safe.
 //!
-//! the relevant stage wires `complete()` and `stream()` end-to-end for the
-//! chatgpt-oauth auth_kind; response translation lives in `response.rs`
-//! and the streaming state machine in `sse.rs`. The remaining auth
-//! surfaces (api-key, bedrock-mantle) still stub via auth.rs and the
-//! live-smoke gate lands in the relevant stage.
+//! Stream forcing: `complete()` always forces `stream:true` because
+//! the chatgpt-oauth endpoint rejects `stream:false` with HTTP 400
+//! `{"detail":"Stream must be set to true"}`. The public api-key
+//! endpoint accepts both, but forcing uniformly keeps one code path.
+//! Both auth surfaces share the same SSE drain extracting the
+//! `response` field from `response.completed`.
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -71,7 +73,8 @@ pub enum AuthKind {
     /// ChatGPT subscription via OAuth bearer JWT. Default.
     #[default]
     ChatgptOauth,
-    /// Standard OpenAI API key. Deferred to the relevant stage.
+    /// Standard OpenAI API key against `api.openai.com/v1/responses`.
+    /// Wired in the relevant stage.
     ApiKey,
     /// AWS Bedrock Mantle proxy (OpenAI-shape over SigV4). Deferred
     /// to the relevant stage.
