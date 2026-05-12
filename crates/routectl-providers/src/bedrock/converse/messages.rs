@@ -14,15 +14,15 @@
 use serde_json::Value;
 
 use routectl_core::{
-    ContentPart, KnownContentPart, Message, MessageContent, Result, Role,
+    ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role,
 };
 
 use crate::anthropic_api::parts::strip_text_after_tool_use;
 
 use super::types::{
     CachePoint, ConverseContentBlock, ConverseDocument, ConverseDocumentSource, ConverseImage,
-    ConverseImageSource, ConverseMessage, ConverseToolResult, ConverseToolResultContent,
-    ConverseToolUse,
+    ConverseImageSource, ConverseMessage, ConverseRequestReasoningBlock,
+    ConverseRequestReasoningText, ConverseToolResult, ConverseToolResultContent, ConverseToolUse,
 };
 
 /// Translate every message in `req.messages` into a `ConverseMessage`,
@@ -124,7 +124,7 @@ fn build_assistant_content_blocks(
 ) -> Result<Vec<ConverseContentBlock>> {
     if let MessageContent::Parts(parts) = content {
         let cleaned = strip_text_after_tool_use(parts);
-        return Ok(content_blocks_from_parts(id, &cleaned));
+        return content_blocks_from_parts(id, &cleaned);
     }
     content_blocks_with_cache_control(id, content)
 }
@@ -136,7 +136,7 @@ fn content_blocks_with_cache_control(
     match content {
         MessageContent::Text(t) => Ok(vec![ConverseContentBlock::Text { text: t.clone() }]),
         MessageContent::Null => Ok(Vec::new()),
-        MessageContent::Parts(parts) => Ok(content_blocks_from_parts(id, parts)),
+        MessageContent::Parts(parts) => content_blocks_from_parts(id, parts),
     }
 }
 
@@ -145,10 +145,10 @@ fn content_blocks_with_cache_control(
 /// sibling `{cachePoint}` block is emitted IMMEDIATELY AFTER the
 /// translated block (avoids the orphan-cachePoint shape that AWS
 /// rejects when a translation drops the underlying block).
-fn content_blocks_from_parts(id: &str, parts: &[ContentPart]) -> Vec<ConverseContentBlock> {
+fn content_blocks_from_parts(id: &str, parts: &[ContentPart]) -> Result<Vec<ConverseContentBlock>> {
     let mut out: Vec<ConverseContentBlock> = Vec::with_capacity(parts.len());
     for p in parts {
-        if let Some(block) = translate_content_part(id, p) {
+        if let Some(block) = translate_content_part(id, p)? {
             let cc = p.cache_control().cloned();
             out.push(block);
             if let Some(cc) = cc {
@@ -159,18 +159,23 @@ fn content_blocks_from_parts(id: &str, parts: &[ContentPart]) -> Vec<ConverseCon
                 });
             }
         }
-        // A translation that returns None deliberately drops the block
-        // (e.g. unmodellable thinking on the Converse wire). We must
-        // NOT emit an orphan cachePoint for it -- AWS rejects a
+        // A translation that returns Ok(None) deliberately drops the
+        // block (e.g. unmodellable image_url on the Converse wire). We
+        // must NOT emit an orphan cachePoint for it -- AWS rejects a
         // cachePoint without a preceding content block.
     }
-    out
+    Ok(out)
 }
 
 /// Translate one canonical ContentPart -> Converse content block.
-/// Returns None when the block has no Converse equivalent and is
-/// dropped (with a tracing diagnostic).
-fn translate_content_part(id: &str, p: &ContentPart) -> Option<ConverseContentBlock> {
+/// Returns Ok(None) when the block has no Converse equivalent and is
+/// dropped (with a tracing diagnostic). Returns Err only on hard
+/// translation failures (e.g. thinking block without a signature, which
+/// would 400 AWS on multi-turn replay).
+fn translate_content_part(
+    id: &str,
+    p: &ContentPart,
+) -> Result<Option<ConverseContentBlock>> {
     match p {
         ContentPart::Known(k) => translate_known_part(id, k),
         ContentPart::Other { type_tag, .. } => {
@@ -180,62 +185,86 @@ fn translate_content_part(id: &str, p: &ContentPart) -> Option<ConverseContentBl
                 "dropping unknown ContentPart::Other on Converse egress; \
                  forward-compat block types not yet modeled"
             );
-            None
+            Ok(None)
         }
     }
 }
 
-fn translate_known_part(id: &str, k: &KnownContentPart) -> Option<ConverseContentBlock> {
+fn translate_known_part(
+    id: &str,
+    k: &KnownContentPart,
+) -> Result<Option<ConverseContentBlock>> {
     match k {
-        KnownContentPart::Text { text, .. } => Some(ConverseContentBlock::Text {
+        KnownContentPart::Text { text, .. } => Ok(Some(ConverseContentBlock::Text {
             text: text.clone(),
-        }),
-        KnownContentPart::Image { source, .. } => translate_image_source(id, source),
-        KnownContentPart::ImageUrl { image_url, .. } => translate_image_url(id, image_url),
+        })),
+        KnownContentPart::Image { source, .. } => Ok(translate_image_source(id, source)),
+        KnownContentPart::ImageUrl { image_url, .. } => Ok(translate_image_url(id, image_url)),
         KnownContentPart::Document {
             source,
             title,
             ..
-        } => translate_document(id, source, title.as_deref()),
+        } => Ok(translate_document(id, source, title.as_deref())),
         KnownContentPart::ToolUse {
             id: tu_id,
             name,
             input,
             ..
-        } => Some(ConverseContentBlock::ToolUse {
+        } => Ok(Some(ConverseContentBlock::ToolUse {
             tool_use: ConverseToolUse {
                 tool_use_id: tu_id.clone(),
                 name: name.clone(),
                 input: input.clone(),
             },
-        }),
+        })),
         KnownContentPart::ToolResult {
             tool_use_id,
             content,
             is_error,
             ..
-        } => Some(ConverseContentBlock::ToolResult {
+        } => Ok(Some(ConverseContentBlock::ToolResult {
             tool_result: ConverseToolResult {
                 tool_use_id: tool_use_id.clone(),
                 content: translate_tool_result_content(content),
                 status: is_error.map(|e| if e { "error".into() } else { "success".into() }),
             },
-        }),
-        KnownContentPart::Thinking { .. } | KnownContentPart::RedactedThinking { .. } => {
-            // Converse models thinking via `reasoningContent` blocks,
-            // which routectl doesn't surface canonically yet. Drop on
-            // the egress so an echoed thinking block from a multi-turn
-            // tool-use trajectory doesn't 400 the Converse upstream
-            // with "missing thinking signature" -- but log at WARN
-            // (not DEBUG) so the drop is discoverable. The request_id
-            // span field is auto-included on the WARN line for
-            // correlation across fallback hops.
-            tracing::warn!(
-                provider = id,
-                "thinking block dropped on Converse egress \
-                 (M5.B will model reasoningContent on Converse path)"
-            );
-            None
+        })),
+        KnownContentPart::Thinking { thinking, signature } => {
+            // Multi-turn replay against thinking-enabled Claude on
+            // Converse REQUIRES the signature -- AWS validates that
+            // each `reasoningText` block carries the upstream-supplied
+            // signature, and 400s with a confusing
+            // "validation: invalid reasoning content" otherwise.
+            // Surface the missing signature locally so the operator
+            // sees the precise field to fix instead of a vague AWS
+            // error on the second turn.
+            let Some(sig) = signature.as_ref().filter(|s| !s.is_empty()).cloned() else {
+                return Err(Error::normalize_request(
+                    id,
+                    "thinking block on Converse egress missing signature; \
+                     cannot replay (Anthropic/Bedrock requires the \
+                     upstream-supplied signature on every reasoningContent \
+                     block in a multi-turn request)",
+                ));
+            };
+            Ok(Some(ConverseContentBlock::ReasoningContent {
+                reasoning_content: ConverseRequestReasoningBlock::ReasoningText {
+                    reasoning_text: ConverseRequestReasoningText {
+                        text: thinking.clone(),
+                        signature: Some(sig),
+                    },
+                },
+            }))
+        }
+        KnownContentPart::RedactedThinking { data } => {
+            // Pass-through verbatim: canonical schema already holds the
+            // base64 string, AWS expects a base64 string. AWS accepts
+            // empty/short strings here so no validation needed.
+            Ok(Some(ConverseContentBlock::ReasoningContent {
+                reasoning_content: ConverseRequestReasoningBlock::RedactedContent {
+                    redacted_content: data.clone(),
+                },
+            }))
         }
     }
 }
@@ -309,6 +338,7 @@ fn media_type_to_image_format(mt: &str) -> Option<String> {
 ///   - `{type: "text", media_type: "text/plain", data: "..."}` (plain
 ///     text body; AWS doesn't require base64 for text formats but we
 ///     normalize to base64 for one-shape simplicity).
+///
 /// Returns None when the source shape is unrecognized (URL refs aren't
 /// supported on the JSON Converse wire) or the media type doesn't map
 /// to an AWS-validated `format` value.

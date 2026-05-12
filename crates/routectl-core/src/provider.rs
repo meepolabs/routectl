@@ -1,6 +1,6 @@
-//! Provider trait. Every backend (openai-compat, anthropic-api) implements
-//! this. Reasoning normalization is mandatory: request -> provider-shape,
-//! provider-shape -> response, chunks -> normalized chunks.
+//! Provider trait. Every backend (openai-compat, anthropic-api, bedrock)
+//! implements this. Reasoning normalization is mandatory: request ->
+//! provider-shape, provider-shape -> response, chunks -> normalized chunks.
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
