@@ -136,6 +136,59 @@ hub-and-spoke seam end-to-end:
   frames, asserts the rendered SSE event sequence
   (`message_start` -> `content_block_*` -> `message_stop`).
 
+## OpenAI Responses API (`type = "openai-responses"`, chatgpt-oauth surface)
+
+Hits `https://chatgpt.com/backend-api/codex/responses` with a ChatGPT
+subscription bearer JWT (`Authorization: Bearer <jwt>`) and
+`ChatGPT-Account-Id` header. This is the wire surface used by the
+OpenAI Codex CLI.
+
+Required env vars for the live matrix:
+```bash
+export OPENAI_BEARER_KEY="$(jq -r '.openai.access' ~/.local/share/opencode/auth.json)"
+export OPENAI_ACCOUNT_ID="$(jq -r '.openai.accountId' ~/.local/share/opencode/auth.json)"
+```
+
+Run the openai-responses matrix:
+```bash
+cargo test -p routectl-cli --features live-integration --release \
+  --test live_matrix openai_responses -- --nocapture --test-threads=1
+```
+
+Wire-shape notes validated in CG.C smoke (2026-05-12):
+
+- **Stream-only**: the endpoint rejects `stream:false` with HTTP 400
+  `{"detail":"Stream must be set to true"}`. `complete()` forces
+  `stream:true` internally and collects to `response.completed`.
+- **Flat tool definitions**: `{type,name,description,parameters,strict}`
+  at the top level (NOT nested `{type,function:{...}}`). The nested form
+  400s with `"Missing required parameter: 'tools[0].name'"`.
+- **Flat tool_choice**: named-function form is `{"type":"function","name":"X"}`
+  (NOT `{"type":"function","function":{"name":"X"}}`). The nested form
+  400s with `"Unknown parameter: 'tool_choice.function'"`.
+- **instructions always required**: the `instructions` field must be
+  present in the body (even as `""`). Absent field -> 400
+  `{"detail":"Instructions are required"}`.
+- **originator header**: `originator: codex_cli_rs` required; present by
+  default, no operator action needed.
+- **store flag**: `store:false` sent by default on the chatgpt-oauth
+  surface (codex parity).
+- **prompt_cache_key**: forwarded from `provider_extras["prompt_cache_key"]`
+  if present; omitted otherwise. The endpoint auto-assigns a cache key
+  when the field is absent.
+- **encrypted_content (reasoning replay)**: sent on prior-turn reasoning
+  items when `encrypted_content` is non-empty. Empty string is accepted
+  and treated as no-op (codex `arc_monitor.rs:325-336`).
+
+| Model | Mode | Status | Notes |
+|---|---|---|---|
+| `gpt-5.3-codex` | complete + stream | PASS | Default codex CLI model; smoke 2026-05-12 |
+| `gpt-5.4` | complete + stream | PASS | General-purpose flagship |
+| `gpt-5.4-mini` | complete + stream | PASS | Faster/cheaper variant |
+
+Verified: 4 wire-shape bugs found and fixed in CG.C before the matrix ran.
+See `CLAUDE.md` "Common gotchas" for the full fix record.
+
 ## Adding a new model
 
 If you find a model not in the matrix that you want covered:
