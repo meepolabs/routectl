@@ -440,3 +440,417 @@ fn anthropic_beta_global_allowlist_override_replaces_const_on_converse() {
         "global allowlist override did not replace const: {strs:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Q4: thinking + redacted_thinking translate to AWS reasoningContent
+// ---------------------------------------------------------------------------
+
+#[test]
+fn thinking_block_with_signature_translates_to_converse_reasoning_text() {
+    // Arrange: a multi-turn assistant replay carrying a Thinking
+    // content block. AWS Converse expects the prior reasoning to
+    // ride as `{reasoningContent: {reasoningText: {text, signature}}}`.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![
+            user_msg("question"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Thinking {
+                        thinking: "let me think".into(),
+                        signature: Some("sig_abc".into()),
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "answer".into(),
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert: the assistant message's first content block is a
+    // reasoningContent with a reasoningText carrying the verbatim
+    // signature.
+    let messages = body["messages"].as_array().unwrap();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("missing assistant message");
+    let content = assistant["content"].as_array().unwrap();
+    assert_eq!(
+        content[0]["reasoningContent"]["reasoningText"]["text"],
+        "let me think"
+    );
+    assert_eq!(
+        content[0]["reasoningContent"]["reasoningText"]["signature"],
+        "sig_abc"
+    );
+    // And the trailing text block survives intact.
+    assert_eq!(content[1]["text"], "answer");
+}
+
+#[test]
+fn thinking_block_without_signature_returns_err() {
+    // Arrange: missing signature must surface as a NormalizeRequest
+    // error locally rather than producing a body AWS will 400 with a
+    // confusing "invalid reasoning content" error on the second turn.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![
+            user_msg("q"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::Thinking {
+                        thinking: "no sig here".into(),
+                        signature: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    // Act
+    let result = normalize_request(&cfg, &req);
+
+    // Assert
+    let err = result.expect_err("expected error on missing signature");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing signature") || msg.contains("cannot replay"),
+        "expected normalize_request error about missing signature, got: {msg}"
+    );
+}
+
+#[test]
+fn thinking_block_with_empty_signature_returns_err() {
+    // Arrange: an empty-string signature is logically identical to
+    // a missing signature -- AWS will reject it with a confusing
+    // validation error if we let it through. Surface the same
+    // NormalizeRequest error as the None case so the operator sees
+    // a clear local message instead of a vague AWS 400.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![
+            user_msg("q"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::Thinking {
+                        thinking: "empty sig here".into(),
+                        signature: Some("".into()),
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    // Act
+    let result = normalize_request(&cfg, &req);
+
+    // Assert
+    let err = result.expect_err("expected error on empty signature");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing signature") || msg.contains("cannot replay"),
+        "expected normalize_request error about missing signature, got: {msg}"
+    );
+}
+
+#[test]
+fn redacted_thinking_translates_to_converse_redacted_content() {
+    // Arrange: redacted thinking carries safety-redacted reasoning
+    // bytes in canonical schema. They round-trip into AWS as
+    // `{reasoningContent: {redactedContent: <base64>}}` -- pass-through
+    // verbatim, no signature.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![
+            user_msg("q"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::RedactedThinking {
+                        data: "AAECAwQF".into(),
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "ok".into(),
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert
+    let assistant = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .unwrap();
+    let content = assistant["content"].as_array().unwrap();
+    assert_eq!(content[0]["reasoningContent"]["redactedContent"], "AAECAwQF");
+    // No reasoningText sibling on the redacted variant.
+    assert!(content[0]["reasoningContent"]
+        .get("reasoningText")
+        .is_none());
+}
+
+#[test]
+fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
+    // Arrange: the canonical multi-turn shape that triggers AWS 400s
+    // pre-fix -- assistant message carrying [Thinking, Text, ToolUse]
+    // followed by a user-role tool_result, then a user follow-up.
+    // With the fix, the assistant's reasoningContent block rides
+    // verbatim and AWS accepts the second-turn replay.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![
+            user_msg("what is the weather in Tokyo?"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Thinking {
+                        thinking: "user wants weather; I'll call the tool".into(),
+                        signature: Some("sig_round1".into()),
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "Let me check.".into(),
+                        cache_control: None,
+                    }),
+                    ContentPart::Known(KnownContentPart::ToolUse {
+                        id: "tu_1".into(),
+                        name: "get_weather".into(),
+                        input: json!({"location": "Tokyo"}),
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: MessageContent::Text("sunny, 22C".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some("tu_1".into()),
+                tool_calls: None,
+            },
+        ],
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert: assistant message carries reasoningContent + text +
+    // toolUse in order, and the tool message lands as a synthesized
+    // user-role toolResult.
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["role"], "assistant");
+    let assistant_content = messages[1]["content"].as_array().unwrap();
+    assert_eq!(
+        assistant_content[0]["reasoningContent"]["reasoningText"]["text"],
+        "user wants weather; I'll call the tool"
+    );
+    assert_eq!(
+        assistant_content[0]["reasoningContent"]["reasoningText"]["signature"],
+        "sig_round1"
+    );
+    // strip_text_after_tool_use removes trailing text after a tool_use
+    // but the leading text before the tool_use survives.
+    assert_eq!(assistant_content[1]["text"], "Let me check.");
+    assert_eq!(assistant_content[2]["toolUse"]["toolUseId"], "tu_1");
+    // Tool message becomes a synthesized user-role toolResult.
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(
+        messages[2]["content"][0]["toolResult"]["toolUseId"],
+        "tu_1"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M-A: true round-trip: response -> canonical -> request
+// ---------------------------------------------------------------------------
+
+#[test]
+fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use() {
+    // Arrange: a synthetic AWS Converse response body that contains a
+    // reasoningContent block (with a real signature value), a text block,
+    // and a toolUse block. This mirrors the actual shape returned by
+    // Claude on Bedrock Converse when interleaved-thinking is on.
+    let cfg = fake_cfg();
+    let raw_response = json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"reasoningContent": {
+                        "reasoningText": {
+                            "text": "I should call get_weather to answer",
+                            "signature": "rt_sig_roundtrip_abc123"
+                        }
+                    }},
+                    {"text": "Let me check the weather."},
+                    {"toolUse": {
+                        "toolUseId": "tu_rt_1",
+                        "name": "get_weather",
+                        "input": {"location": "Osaka"}
+                    }}
+                ]
+            }
+        },
+        "stopReason": "tool_use"
+    });
+
+    // Act (step 1): decode the response into a canonical ChatResponse.
+    let chat_response =
+        super::super::normalize_response("bedrock:test-converse", raw_response).unwrap();
+
+    // Verify the response decoded correctly before the round-trip.
+    let resp_msg = &chat_response.choices[0].message;
+    let rd = &resp_msg.reasoning_details;
+    assert_eq!(rd.len(), 1, "expected one reasoning_detail from response");
+    let sig_from_resp = rd[0].payload["signature"].as_str().unwrap();
+    assert_eq!(sig_from_resp, "rt_sig_roundtrip_abc123");
+
+    // Step 2: reconstruct a canonical ChatRequest by promoting the
+    // response content + reasoning_details back into a new assistant
+    // Message (this mirrors what a multi-turn orchestrator does when
+    // replaying the prior turn). The reasoning block must use the
+    // signature extracted from reasoning_details.
+    let assistant_parts = match &resp_msg.content {
+        MessageContent::Parts(p) => {
+            // Prepend the Thinking block reconstructed from reasoning_details.
+            let mut parts = vec![ContentPart::Known(KnownContentPart::Thinking {
+                thinking: rd[0].payload["text"].as_str().unwrap_or("").to_string(),
+                signature: Some(sig_from_resp.to_string()),
+            })];
+            parts.extend_from_slice(p);
+            parts
+        }
+        MessageContent::Text(t) => {
+            // Pure-text response (shouldn't happen here, but be safe).
+            vec![ContentPart::Known(KnownContentPart::Thinking {
+                thinking: rd[0].payload["text"].as_str().unwrap_or("").to_string(),
+                signature: Some(sig_from_resp.to_string()),
+            }),
+            ContentPart::Known(KnownContentPart::Text {
+                text: t.clone(),
+                cache_control: None,
+            })]
+        }
+        MessageContent::Null => vec![],
+    };
+
+    let tool_result_msg = Message {
+        role: Role::Tool,
+        content: MessageContent::Text("rainy, 18C".into()),
+        reasoning: None,
+        reasoning_details: vec![],
+        name: None,
+        tool_call_id: Some("tu_rt_1".into()),
+        tool_calls: None,
+    };
+
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![
+            user_msg("what is the weather in Osaka?"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(assistant_parts),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            tool_result_msg,
+        ],
+        ..Default::default()
+    };
+
+    // Act (step 3): translate the reconstructed request to a Converse body.
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert: assistant message carries:
+    //   [0] reasoningContent.reasoningText with the ORIGINAL signature
+    //   [1] text block
+    //   [2] toolUse block with original toolUseId and name
+    let msgs = body["messages"].as_array().unwrap();
+    let assistant = msgs
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("expected assistant message in Converse body");
+    let content = assistant["content"].as_array().unwrap();
+
+    assert_eq!(
+        content[0]["reasoningContent"]["reasoningText"]["signature"],
+        "rt_sig_roundtrip_abc123",
+        "signature must survive response -> canonical -> request round-trip"
+    );
+    assert_eq!(
+        content[0]["reasoningContent"]["reasoningText"]["text"],
+        "I should call get_weather to answer",
+        "reasoning text must survive round-trip"
+    );
+    // The text block precedes the toolUse (strip_text_after_tool_use only
+    // removes text AFTER the last toolUse, not before it).
+    assert_eq!(
+        content[1]["text"], "Let me check the weather.",
+        "text block must survive round-trip"
+    );
+    assert_eq!(
+        content[2]["toolUse"]["toolUseId"], "tu_rt_1",
+        "toolUseId must survive round-trip"
+    );
+    assert_eq!(
+        content[2]["toolUse"]["name"], "get_weather",
+        "tool name must survive round-trip"
+    );
+}
