@@ -23,9 +23,11 @@ use routectl_core::{
 };
 
 use super::types::{
-    FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningSummaryItem, ResponseInputItem,
-    ResponsesContentItem,
+    FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningContentItem,
+    ReasoningSummaryItem, ResponseInputItem, ResponsesContentItem,
 };
+use super::OPENAI_RESPONSES_FORMAT;
+use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 
 /// Walk the canonical `messages[]` and produce a flat `input[]` array
 /// in Responses-shape. System messages are dropped here (lifted into
@@ -78,6 +80,21 @@ fn translate_user_message(
 /// stream, then emits items in the order [reasoning?, message?,
 /// tool_calls...] so multi-turn replay preserves the original ordering
 /// the model sees.
+///
+/// Reasoning replay (critical correctness path): the Responses-side
+/// canonical channel for prior-turn reasoning is
+/// `msg.reasoning_details` (the response translator stamps every
+/// reasoning block there with `format = "openai-responses-v1"` and
+/// preserves the upstream `encrypted_content` signature). Routing
+/// reasoning solely through content-parts would lose the signature
+/// because `ContentPart::Thinking` has no slot for the JWT payload.
+///
+/// Mutual-exclusion rule: `reasoning_details` (the response-side
+/// channel) and `ContentPart::Thinking` (the request-side channel)
+/// MUST NOT both populate on the same assistant turn. When they do,
+/// prefer `reasoning_details` and skip Thinking parts to avoid
+/// duplicate Reasoning items on the wire. Log at debug so the
+/// duplicate is visible during triage.
 fn translate_assistant_message(
     id: &str,
     msg: &Message,
@@ -86,6 +103,13 @@ fn translate_assistant_message(
     let mut reasoning_items: Vec<ResponseInputItem> = Vec::new();
     let mut message_content: Vec<ResponsesContentItem> = Vec::new();
     let mut tool_calls: Vec<ResponseInputItem> = Vec::new();
+
+    // Phase 1: lift reasoning_details into Reasoning input items.
+    // Only entries tagged with the Responses format participate; other
+    // formats (e.g. Anthropic) ride a different replay shape that the
+    // canonical hub doesn't translate here.
+    lift_reasoning_details(&msg.reasoning_details, &mut reasoning_items);
+    let suppress_thinking_parts = !reasoning_items.is_empty();
 
     match &msg.content {
         MessageContent::Text(t) if !t.is_empty() => {
@@ -97,6 +121,7 @@ fn translate_assistant_message(
                 walk_assistant_part(
                     id,
                     p,
+                    suppress_thinking_parts,
                     &mut reasoning_items,
                     &mut message_content,
                     &mut tool_calls,
@@ -114,6 +139,93 @@ fn translate_assistant_message(
     }
     out.extend(tool_calls);
     Ok(())
+}
+
+/// Walk `reasoning_details` and emit one Reasoning input item per
+/// distinct upstream item id (or one fall-through item when no id is
+/// preserved). Multiple details sharing the same `id` collapse to a
+/// single Reasoning item carrying the union of summary, content, and
+/// encrypted_content surfaces. Format-tagged with anything other than
+/// `openai-responses-v1` is skipped: those entries come from a
+/// different upstream and replaying them here would corrupt the wire.
+fn lift_reasoning_details(
+    details: &[ReasoningDetail],
+    out: &mut Vec<ResponseInputItem>,
+) {
+    if details.is_empty() {
+        return;
+    }
+    // Bucket by id (None-id details ride a single unnamed bucket).
+    // Preserve arrival order via the `order` vector so output is
+    // deterministic.
+    let mut order: Vec<Option<String>> = Vec::new();
+    let mut groups: std::collections::HashMap<Option<String>, ReasoningGroup> =
+        std::collections::HashMap::new();
+
+    for d in details {
+        if d.format.as_deref() != Some(OPENAI_RESPONSES_FORMAT) {
+            continue;
+        }
+        let key = d.id.clone();
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+            groups.insert(key.clone(), ReasoningGroup::default());
+        }
+        let group = groups.get_mut(&key).expect("inserted above");
+        match d.kind {
+            ReasoningDetailKind::Summary => {
+                if let Some(text) = d.payload.get("text").and_then(|v| v.as_str()) {
+                    group.summary.push(ReasoningSummaryItem::SummaryText {
+                        text: text.to_string(),
+                    });
+                }
+            }
+            ReasoningDetailKind::Text => {
+                if let Some(text) = d.payload.get("text").and_then(|v| v.as_str()) {
+                    group.content.push(ReasoningContentItem::ReasoningText {
+                        text: text.to_string(),
+                    });
+                }
+            }
+            ReasoningDetailKind::Encrypted => {
+                if let Some(sig) = d
+                    .payload
+                    .get("encrypted_content")
+                    .and_then(|v| v.as_str())
+                {
+                    if group.encrypted_content.is_none() {
+                        group.encrypted_content = Some(sig.to_string());
+                    } else {
+                        // Multiple Encrypted details on the same id:
+                        // surface as an inner reasoning_encrypted
+                        // content block so no signature is lost.
+                        group
+                            .content
+                            .push(ReasoningContentItem::ReasoningEncrypted {
+                                encrypted_content: sig.to_string(),
+                            });
+                    }
+                }
+            }
+        }
+    }
+
+    for key in order {
+        let group = groups.remove(&key).expect("recorded in order");
+        out.push(ResponseInputItem::Reasoning {
+            id: key,
+            summary: group.summary,
+            content: group.content,
+            encrypted_content: group.encrypted_content.unwrap_or_default(),
+        });
+    }
+}
+
+#[derive(Default)]
+struct ReasoningGroup {
+    summary: Vec<ReasoningSummaryItem>,
+    content: Vec<ReasoningContentItem>,
+    encrypted_content: Option<String>,
 }
 
 fn translate_tool_message(
@@ -212,9 +324,18 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
 /// the encrypted_content carrier with an empty summary); `Text` ->
 /// message content (output_text); `ToolUse` -> a separate
 /// `FunctionCall` input item. Everything else drops with a WARN.
+///
+/// `suppress_thinking_parts` is true when `reasoning_details` already
+/// produced Reasoning items: in that case Thinking + RedactedThinking
+/// content parts are skipped (with a debug log) to avoid duplicate
+/// Reasoning items on the wire. The canonical schema invariant is
+/// that the two surfaces are mutually exclusive; we prefer the
+/// response-side `reasoning_details` because it carries the JWT
+/// signature in a slot that ContentPart::Thinking lacks.
 fn walk_assistant_part(
     id: &str,
     p: &ContentPart,
+    suppress_thinking_parts: bool,
     reasoning: &mut Vec<ResponseInputItem>,
     message_content: &mut Vec<ResponsesContentItem>,
     tool_calls: &mut Vec<ResponseInputItem>,
@@ -231,16 +352,34 @@ fn walk_assistant_part(
             thinking,
             signature,
         }) => {
-            reasoning.push(translate_thinking_part(thinking, signature.as_deref()));
+            if suppress_thinking_parts {
+                tracing::debug!(
+                    provider = id,
+                    role = "assistant",
+                    "skipping Thinking content-part because reasoning_details already emitted Reasoning items"
+                );
+            } else {
+                reasoning.push(translate_thinking_part(thinking, signature.as_deref()));
+            }
         }
         ContentPart::Known(KnownContentPart::RedactedThinking { data }) => {
-            // Redacted blocks have no plaintext summary; ride the
-            // base64 bytes verbatim in encrypted_content so the
-            // server-side replay gate has something to key on.
-            reasoning.push(ResponseInputItem::Reasoning {
-                summary: Vec::new(),
-                encrypted_content: data.clone(),
-            });
+            if suppress_thinking_parts {
+                tracing::debug!(
+                    provider = id,
+                    role = "assistant",
+                    "skipping RedactedThinking content-part because reasoning_details already emitted Reasoning items"
+                );
+            } else {
+                // Redacted blocks have no plaintext summary; ride the
+                // base64 bytes verbatim in encrypted_content so the
+                // server-side replay gate has something to key on.
+                reasoning.push(ResponseInputItem::Reasoning {
+                    id: None,
+                    summary: Vec::new(),
+                    content: Vec::new(),
+                    encrypted_content: data.clone(),
+                });
+            }
         }
         ContentPart::Known(KnownContentPart::ToolUse {
             id: tu_id,
@@ -292,7 +431,9 @@ pub(super) fn translate_thinking_part(
         }]
     };
     ResponseInputItem::Reasoning {
+        id: None,
         summary,
+        content: Vec::new(),
         encrypted_content: signature.unwrap_or("").to_string(),
     }
 }
