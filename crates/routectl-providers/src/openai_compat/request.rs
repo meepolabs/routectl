@@ -185,6 +185,7 @@ fn is_routectl_managed_key(key: &str) -> bool {
             | "presence_penalty"
             | "frequency_penalty"
             | "response_format"
+            | "output_config"
     )
 }
 
