@@ -238,6 +238,26 @@ auth_kind = "chatgpt-oauth"
     }
 
     #[tokio::test]
+    async fn factory_builds_openai_responses_api_key_provider() {
+        // Arrange: api-key surface, no account_id_ref, default base_url.
+        let toml_src = r#"
+[providers.gpt-api]
+type = "openai-responses"
+api_key_ref = "literal:sk-test-123"
+auth_kind = "api-key"
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        let entry = cfg.providers.get("gpt-api").expect("gpt-api entry");
+        let store = MemoryStore;
+
+        // Act
+        let provider = build_provider("gpt-api", entry, &store).await.expect("build");
+
+        // Assert
+        assert_eq!(provider.id(), "openai-responses:gpt-api");
+    }
+
+    #[tokio::test]
     async fn factory_rejects_api_key_with_account_id_ref() {
         // Arrange
         let toml_src = r#"
