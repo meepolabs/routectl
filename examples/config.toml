@@ -130,6 +130,15 @@ account_id_ref = "literal:00000000-0000-0000-0000-000000000000"  # your ChatGPT 
 auth_kind = "chatgpt-oauth"
 # originator = "codex_cli_rs"        # default; override only if needed
 # user_agent = "my-cli/1.0"
+#
+# Model slugs accepted by the chatgpt-oauth endpoint (as of 2026-05-12):
+#   gpt-5.3-codex   -- default for the codex CLI; code-focused
+#   gpt-5.4         -- general-purpose flagship
+#   gpt-5.4-mini    -- faster / lower-cost variant
+#   gpt-5.5         -- next-generation (when available to your subscription)
+#   gpt-5.2         -- previous-generation; still accepts requests
+#   codex-auto-review  -- automated review surface
+# Use in [aliases] as: "gpt:gpt-5.3-codex"
 
 # Commented-out preview of the bedrock-mantle auth path. Wire shape is
 # OpenAI Responses, but the request is SigV4-signed against AWS's

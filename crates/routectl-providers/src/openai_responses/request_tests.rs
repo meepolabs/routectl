@@ -300,18 +300,18 @@ fn tool_def_function_translates_with_strict_field() {
     // Act
     let v = translate_to_json(&cfg(), &req);
 
-    // Assert
+    // Assert: flat Responses shape (NOT the nested chat-completions shape).
+    // The chatgpt-oauth backend 400s with "Missing required parameter:
+    // 'tools[0].name'" on the nested {"type","function":{...}} shape.
     assert_eq!(
         v["tools"],
         json!([
             {
                 "type": "function",
-                "function": {
-                    "name": "calc",
-                    "description": "do math",
-                    "parameters": {"type": "object"},
-                    "strict": true
-                }
+                "name": "calc",
+                "description": "do math",
+                "parameters": {"type": "object"},
+                "strict": true
             }
         ])
     );
@@ -374,8 +374,8 @@ fn tool_choice_none_serializes_as_string() {
 }
 
 #[test]
-fn tool_choice_named_function_uses_nested_shape() {
-    // Arrange: OpenAI-shape input.
+fn tool_choice_named_function_uses_flat_shape() {
+    // Arrange: OpenAI-shape input (nested {"type","function":{"name":...}}).
     let mut req = req_with(vec![user_text("ping")]);
     req.tool_choice = Some(json!({
         "type": "function",
@@ -385,10 +385,12 @@ fn tool_choice_named_function_uses_nested_shape() {
     // Act
     let v = translate_to_json(&cfg(), &req);
 
-    // Assert: chat-completions-shape nested form on the wire.
+    // Assert: flat Responses shape on the wire (NOT nested chat-completions).
+    // The chatgpt-oauth backend 400s with "Unknown parameter:
+    // 'tool_choice.function'" on the nested shape (smoke 2026-05-12).
     assert_eq!(
         v["tool_choice"],
-        json!({"type": "function", "function": {"name": "calc"}})
+        json!({"type": "function", "name": "calc"})
     );
 }
 
