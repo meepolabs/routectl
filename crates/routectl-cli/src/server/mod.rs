@@ -42,7 +42,30 @@ pub fn check_bind_safety(host: &str, unsafe_public: bool) -> Result<()> {
 }
 
 fn is_loopback(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "::1" | "localhost")
+    use std::net::IpAddr;
+    use std::str::FromStr;
+    match IpAddr::from_str(host) {
+        Ok(addr) => addr.is_loopback(),
+        Err(_) => host == "localhost",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback;
+
+    #[test]
+    fn is_loopback_covers_full_127_range() {
+        // Arrange + Act + Assert
+        assert!(is_loopback("127.0.0.1"));
+        assert!(is_loopback("127.0.0.2"));
+        assert!(is_loopback("127.255.255.254"));
+        assert!(is_loopback("::1"));
+        assert!(is_loopback("localhost"));
+        assert!(!is_loopback("0.0.0.0"));
+        assert!(!is_loopback("192.168.1.1"));
+        assert!(!is_loopback("not-an-address"));
+    }
 }
 
 /// Bind a TCP listener, then serve. Exposes the bound address for tests.

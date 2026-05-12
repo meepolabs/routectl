@@ -246,14 +246,6 @@ impl Provider for BedrockProvider {
         }
     }
 
-    fn normalize_chunk(&self, _raw: &str) -> Result<Option<ChatChunk>> {
-        // Bedrock streaming uses binary eventstream frames, not text
-        // SSE -- the stateless `normalize_chunk` shape doesn't apply.
-        // The router never calls this for Bedrock streams; the actual
-        // chunk decoding happens inside `stream()` via `eventstream`.
-        Ok(None)
-    }
-
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model), region = %self.cfg.region))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let body = self.normalize_request(&req)?;
