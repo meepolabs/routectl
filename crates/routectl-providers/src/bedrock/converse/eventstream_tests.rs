@@ -8,12 +8,24 @@
 
 use super::*;
 use aws_smithy_types::event_stream::{Header, HeaderValue, Message as AwsMessage};
+use futures::stream as fstream;
 
 fn make_frame(event_type: &str, payload_json: &str) -> AwsMessage {
     AwsMessage::new(Bytes::from(payload_json.to_string().into_bytes())).add_header(Header::new(
         ":event-type",
         HeaderValue::String(event_type.to_string().into()),
     ))
+}
+
+/// Encode a single AWS eventstream frame to its on-the-wire bytes.
+/// Used by the EOF-flush test below to drive the public `stream()`
+/// async function with a synthetic byte stream.
+fn encode_frame(event_type: &str, payload_json: &str) -> Bytes {
+    let frame = make_frame(event_type, payload_json);
+    let mut buf = Vec::new();
+    aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf)
+        .expect("encode eventstream frame");
+    Bytes::from(buf)
 }
 
 fn run(event_type: &str, payload: &str, state: &mut ConverseStreamState) -> Vec<ChatChunk> {
@@ -322,4 +334,54 @@ fn tool_call_index_is_stable_across_two_tool_blocks() {
         c2[0].choices[0].delta.tool_calls.as_ref().unwrap()[0]["index"],
         1
     );
+}
+
+#[tokio::test]
+async fn stream_eof_after_message_stop_without_metadata_emits_closing_chunk() {
+    // Arrange: synthesize the full happy-path frame sequence MINUS
+    // the metadata frame -- a real-world failure mode where AWS
+    // middleware truncates the connection after messageStop. Pre-fix
+    // the decoder held the captured stop_reason in state and never
+    // flushed it, so finish_reason silently vanished from the wire
+    // and clients saw a stream that just stopped.
+    let frames: Vec<std::result::Result<Bytes, reqwest::Error>> = vec![
+        Ok(encode_frame("messageStart", r#"{"role":"assistant"}"#)),
+        Ok(encode_frame("contentBlockStart", r#"{"contentBlockIndex":0}"#)),
+        Ok(encode_frame(
+            "contentBlockDelta",
+            r#"{"contentBlockIndex":0,"delta":{"text":"hello"}}"#,
+        )),
+        Ok(encode_frame(
+            "contentBlockStop",
+            r#"{"contentBlockIndex":0}"#,
+        )),
+        Ok(encode_frame(
+            "messageStop",
+            r#"{"stopReason":"end_turn"}"#,
+        )),
+        // No metadata frame -- EOF here.
+    ];
+    let byte_stream = fstream::iter(frames);
+
+    // Act
+    let chunks: Vec<_> = stream("test".to_string(), byte_stream)
+        .collect::<Vec<_>>()
+        .await;
+
+    // Assert: the final chunk carries the captured stop_reason as
+    // finish_reason and an absent usage delta (we never saw metadata).
+    let last = chunks
+        .last()
+        .expect("expected at least one chunk")
+        .as_ref()
+        .expect("EOF flush yielded an Err");
+    assert_eq!(last.choices[0].finish_reason.as_deref(), Some("stop"));
+    assert!(
+        last.usage.is_none(),
+        "EOF flush should emit empty usage when metadata never arrived"
+    );
+    // And no error chunk was yielded -- the EOF is graceful when
+    // buffer is empty + no prelude pending.
+    let any_err = chunks.iter().any(|c| c.is_err());
+    assert!(!any_err, "EOF after messageStop should not error");
 }
