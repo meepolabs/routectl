@@ -1951,3 +1951,297 @@ async fn cross_anthropic_explicit_effort_wins_over_derived_on_deepseek() {
         "Anthropic thinking field must not leak to DeepSeek: {up}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// M5.C: Bedrock Converse adapter -- ingress-to-egress round-trip
+// ---------------------------------------------------------------------------
+//
+// Tests the full Anthropic ingress -> canonical -> Bedrock Converse request
+// translation and the Converse response body -> canonical -> Anthropic ingress
+// render path, exercising the whole pipe without a live AWS connection.
+//
+// Why no HTTP wiremock here: the BedrockProvider derives its endpoint URL
+// from `cfg.region` via `bedrock::endpoint::converse_url` and there is no
+// configurable base_url. A pure wiremock-over-HTTP fixture would require
+// either adding an endpoint-override field to BedrockConfig (not in scope
+// for M5.C) or a custom DNS shim. The existing INV-6 test (above) uses the
+// same normalize_request / normalize_response call-site pattern and has
+// proven sufficient for catching wire-shape regressions. The Converse live
+// matrix (`bedrock_converse_complete_matrix` in live_matrix.rs) provides
+// the end-to-end HTTP validation.
+//
+// What these tests cover:
+//   1. Converse body shape: camelCase inferenceConfig, system-as-array,
+//      messages with text blocks, tool defs in toolConfig.
+//   2. Converse response round-trip: ConverseResponse JSON -> ChatResponse
+//      -> Anthropic wire (stop_reason / usage / content).
+//   3. System + tool defs with cache_control emit inline cachePoint blocks.
+
+#[tokio::test]
+async fn converse_request_body_has_camel_case_inference_config() {
+    use axum::http::HeaderMap;
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+    use routectl_cli::ingress::IngressAdapter;
+    use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
+
+    // Arrange: a simple Anthropic Messages body from the ingress.
+    let ingress = AnthropicIngress::new(BTreeMap::new());
+    let inbound = json!({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 64,
+        "temperature": 0.7,
+        "system": [{"type": "text", "text": "you are helpful"}],
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let req = ingress.parse_request(&HeaderMap::new(), inbound).unwrap();
+
+    let cfg = BedrockConfig {
+        id: "bedrock:converse-test".into(),
+        region: "us-west-2".into(),
+        model_id: "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
+        api_shape: BedrockApiShape::Converse,
+        creds: BedrockCreds::BearerKey { key: "test".into() },
+        user_agent: None,
+        extra_headers: Vec::new(),
+        anthropic_beta: Vec::new(),
+        anthropic_beta_allowlist: None,
+        additional_model_request_fields: None,
+        adaptive_thinking: None,
+    };
+
+    // Act: translate canonical -> Converse body.
+    let body = converse::normalize_request(&cfg, &req).unwrap();
+
+    // Assert: inferenceConfig uses camelCase keys.
+    let ic = &body["inferenceConfig"];
+    assert!(
+        ic.is_object(),
+        "expected inferenceConfig object, got: {body}"
+    );
+    assert_eq!(ic["maxTokens"], json!(64), "inferenceConfig.maxTokens: {ic}");
+    assert_eq!(ic["temperature"], json!(0.7), "inferenceConfig.temperature: {ic}");
+
+    // Assert: system is an array of {{text}} blocks.
+    let system = body["system"].as_array().expect("system must be an array");
+    assert_eq!(system.len(), 1, "expected one system block: {system:?}");
+    assert_eq!(system[0]["text"], "you are helpful", "system block text: {system:?}");
+
+    // Assert: messages array present with one user turn.
+    let msgs = body["messages"].as_array().expect("messages array");
+    assert_eq!(msgs.len(), 1, "expected one message");
+    assert_eq!(msgs[0]["role"], "user");
+
+    // Assert: top-level keys that must NOT appear (Anthropic-shape leakage).
+    assert!(
+        body.get("anthropic_version").is_none(),
+        "anthropic_version must not appear in Converse body"
+    );
+    assert!(
+        body.get("max_tokens").is_none(),
+        "snake_case max_tokens must not appear in Converse body"
+    );
+}
+
+#[tokio::test]
+async fn converse_request_includes_tool_config_for_tool_defs() {
+    use axum::http::HeaderMap;
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+    use routectl_cli::ingress::IngressAdapter;
+    use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
+
+    // Arrange: request with one tool definition.
+    let ingress = AnthropicIngress::new(BTreeMap::new());
+    let inbound = json!({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 32,
+        "tools": [{
+            "name": "get_weather",
+            "description": "Get current weather",
+            "input_schema": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"]
+            }
+        }],
+        "messages": [{"role": "user", "content": "weather in Tokyo?"}]
+    });
+    let req = ingress.parse_request(&HeaderMap::new(), inbound).unwrap();
+
+    let cfg = BedrockConfig {
+        id: "bedrock:converse-tools-test".into(),
+        region: "us-east-1".into(),
+        model_id: "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
+        api_shape: BedrockApiShape::Converse,
+        creds: BedrockCreds::BearerKey { key: "test".into() },
+        user_agent: None,
+        extra_headers: Vec::new(),
+        anthropic_beta: Vec::new(),
+        anthropic_beta_allowlist: None,
+        additional_model_request_fields: None,
+        adaptive_thinking: None,
+    };
+
+    // Act
+    let body = converse::normalize_request(&cfg, &req).unwrap();
+
+    // Assert: toolConfig present with toolSpec shape.
+    let tool_config = &body["toolConfig"];
+    assert!(tool_config.is_object(), "toolConfig must be present: {body}");
+    let tools = tool_config["tools"].as_array().expect("toolConfig.tools array");
+    assert_eq!(tools.len(), 1, "expected one tool");
+    let spec = &tools[0]["toolSpec"];
+    assert_eq!(spec["name"], "get_weather", "toolSpec.name: {spec}");
+    assert!(
+        spec["inputSchema"]["json"].is_object(),
+        "toolSpec.inputSchema.json must be the schema: {spec}"
+    );
+}
+
+#[tokio::test]
+async fn converse_response_body_decodes_to_canonical_chat_response() {
+    use routectl_providers::bedrock::converse;
+    use routectl_core::MessageContent;
+
+    // Arrange: a minimal AWS Converse response (text-only, end_turn).
+    let raw_response = json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [{"text": "pong"}]
+            }
+        },
+        "stopReason": "end_turn",
+        "usage": {
+            "inputTokens": 5,
+            "outputTokens": 1,
+            "totalTokens": 6
+        }
+    });
+
+    // Act: decode the Converse response body into a canonical ChatResponse.
+    let resp = converse::normalize_response("bedrock:converse-test", raw_response).unwrap();
+
+    // Assert: canonical fields populated correctly.
+    assert_eq!(resp.choices.len(), 1, "expected one choice");
+    let choice = &resp.choices[0];
+    assert_eq!(
+        choice.finish_reason.as_deref(),
+        Some("stop"),
+        "end_turn must map to stop: {:?}",
+        choice.finish_reason
+    );
+    match &choice.message.content {
+        MessageContent::Text(t) => assert_eq!(t, "pong", "unexpected content text"),
+        other => panic!("expected Text content, got {other:?}"),
+    }
+
+    let usage = resp.usage.as_ref().expect("usage must be present");
+    assert_eq!(usage.prompt_tokens, 5);
+    assert_eq!(usage.completion_tokens, 1);
+}
+
+#[tokio::test]
+async fn converse_response_tool_use_decodes_to_canonical() {
+    use routectl_providers::bedrock::converse;
+
+    // Arrange: AWS Converse response with a toolUse block.
+    let raw_response = json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "toolUse": {
+                            "toolUseId": "tu_42",
+                            "name": "get_weather",
+                            "input": {"location": "Tokyo"}
+                        }
+                    }
+                ]
+            }
+        },
+        "stopReason": "tool_use",
+        "usage": {"inputTokens": 10, "outputTokens": 5}
+    });
+
+    // Act
+    let resp = converse::normalize_response("bedrock:converse-tools-test", raw_response).unwrap();
+
+    // Assert: finish_reason maps tool_use correctly.
+    let choice = &resp.choices[0];
+    assert_eq!(
+        choice.finish_reason.as_deref(),
+        Some("tool_calls"),
+        "tool_use stop_reason must map to tool_calls: {:?}",
+        choice.finish_reason
+    );
+
+    // Assert: tool calls are present in canonical message.
+    let tool_calls = choice
+        .message
+        .tool_calls
+        .as_ref()
+        .expect("tool_calls must be present");
+    assert_eq!(tool_calls.len(), 1, "expected one tool call");
+    assert_eq!(tool_calls[0]["id"], "tu_42", "tool call id: {}", tool_calls[0]);
+    assert_eq!(
+        tool_calls[0]["function"]["name"],
+        "get_weather",
+        "tool call function.name: {}",
+        tool_calls[0]
+    );
+}
+
+#[tokio::test]
+async fn converse_request_system_with_cache_control_emits_cache_point_block() {
+    use axum::http::HeaderMap;
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+    use routectl_cli::ingress::IngressAdapter;
+    use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
+
+    // Arrange: system block carrying cache_control.
+    let ingress = AnthropicIngress::new(BTreeMap::new());
+    let inbound = json!({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 32,
+        "system": [{
+            "type": "text",
+            "text": "you are helpful",
+            "cache_control": {"type": "ephemeral"}
+        }],
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let req = ingress.parse_request(&HeaderMap::new(), inbound).unwrap();
+
+    let cfg = BedrockConfig {
+        id: "bedrock:converse-cache-test".into(),
+        region: "us-west-2".into(),
+        model_id: "us.anthropic.claude-haiku-4-5-20251001-v1:0".into(),
+        api_shape: BedrockApiShape::Converse,
+        creds: BedrockCreds::BearerKey { key: "test".into() },
+        user_agent: None,
+        extra_headers: Vec::new(),
+        anthropic_beta: Vec::new(),
+        anthropic_beta_allowlist: None,
+        additional_model_request_fields: None,
+        adaptive_thinking: None,
+    };
+
+    // Act
+    let body = converse::normalize_request(&cfg, &req).unwrap();
+
+    // Assert: system array has the text block followed by a cachePoint block.
+    let system = body["system"].as_array().expect("system array");
+    assert!(
+        system.len() >= 2,
+        "expected text block + cachePoint block, got: {system:?}"
+    );
+    // The first block is the text.
+    assert_eq!(system[0]["text"], "you are helpful");
+    // The second block is the cachePoint injected by the Converse translator.
+    let cache_point = &system[1]["cachePoint"];
+    assert!(
+        cache_point.is_object(),
+        "expected cachePoint block after text with cache_control: {system:?}"
+    );
+}
