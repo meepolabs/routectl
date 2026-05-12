@@ -23,6 +23,3 @@ pub mod anthropic_api;
 
 #[cfg(feature = "bedrock")]
 pub mod bedrock;
-
-pub mod chatgpt_cookie;
-pub mod claude_cookie;
