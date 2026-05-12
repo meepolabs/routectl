@@ -36,6 +36,7 @@ chrono.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 anyhow = "1"
 dirs = "6"
+subtle = "2"
 
 [features]
 # Enable live integration tests that hit real providers using API keys

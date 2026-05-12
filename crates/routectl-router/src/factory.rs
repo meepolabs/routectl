@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use routectl_auth::{SecretRef, SecretStore};
-use routectl_core::{Error, Provider, Result};
+use routectl_core::{Provider, Result};
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
 use routectl_providers::openai_compat::{
     HistoryReasoning as ProviderHistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider,
@@ -158,12 +158,6 @@ pub async fn build_provider_with_options(
             };
             Ok(Arc::new(BedrockProvider::new(cfg, resolved)))
         }
-        ProviderEntry::ClaudeCookie { .. } => Err(Error::Auth(format!(
-            "provider `{name}`: claude-cookie is not enabled in this build (v0.2 feature)"
-        ))),
-        ProviderEntry::ChatgptCookie { .. } => Err(Error::Auth(format!(
-            "provider `{name}`: chatgpt-cookie is not enabled in this build (v0.2 feature)"
-        ))),
     }
 }
 
