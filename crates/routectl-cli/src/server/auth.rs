@@ -18,15 +18,18 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::json;
+use subtle::ConstantTimeEq;
 
 /// Set of valid tokens. `None` (or empty) means "no auth required".
 ///
-/// Token comparison is intentionally a per-token constant-time
-/// equality so an attacker reaching the listener cannot binary-search
-/// a valid token via response-time differences. This matters most
-/// when `--unsafe-public` is set (the listener is reachable beyond
-/// loopback); on pure loopback the risk is theoretical, but the cost
-/// of a constant-time loop is negligible.
+/// Token comparison uses `subtle::ConstantTimeEq` so an attacker
+/// reaching the listener cannot binary-search a valid token via
+/// response-time differences. The comparison does NOT short-circuit
+/// on length mismatch: we accumulate hits across all tokens so the
+/// loop count is constant regardless of which entry matches (or none
+/// does). This matters most when `--unsafe-public` is set (listener
+/// reachable beyond loopback); on pure loopback the risk is
+/// theoretical, but the cost of a constant-time loop is negligible.
 #[derive(Debug, Default, Clone)]
 pub struct TokenSet {
     tokens: Arc<Vec<Vec<u8>>>,
@@ -62,34 +65,21 @@ impl TokenSet {
         false
     }
 
+    /// Constant-time membership test. Iterates every token and
+    /// accumulates a hit via `subtle::ConstantTimeEq` -- no
+    /// length-based short-circuit, no early return on first match.
+    /// The number of iterations is always `self.tokens.len()` so the
+    /// loop timing does not leak whether and where a match occurred.
     fn contains(&self, candidate: &[u8]) -> bool {
-        // Iterate every entry rather than short-circuiting -- the
-        // length check + constant_time_eq below is what makes
-        // comparison resistant to byte-by-byte timing inference.
-        // Keeping the loop unbounded over the token list would be
-        // overkill and is not a meaningful threat (the set is small
-        // and known at startup), so we accept O(N) over the set
-        // size.
-        let mut hit = false;
+        let mut hit: u8 = 0;
         for token in self.tokens.iter() {
-            if token.len() == candidate.len() && constant_time_eq(token, candidate) {
-                hit = true;
-            }
+            // ct_eq returns Choice(1) on equal, Choice(0) on unequal.
+            // unwrap_u8() extracts that as 1 or 0.
+            // Tokens of different lengths always produce 0 (no match).
+            hit |= token.as_slice().ct_eq(candidate).unwrap_u8();
         }
-        hit
+        hit != 0
     }
-}
-
-/// Byte-wise constant-time equality. Both inputs MUST be the same
-/// length (the caller checks). Avoids `==` on `&[u8]` and
-/// `String::==` which short-circuit on first mismatch.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    debug_assert_eq!(a.len(), b.len());
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 fn extract_x_api_key(headers: &axum::http::HeaderMap) -> Option<&str> {
@@ -111,6 +101,19 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
     }
 }
 
+/// Returns `true` if the `Authorization` header carries a Bearer
+/// token (scheme is "bearer", case-insensitive, per RFC 7235 sec 2.1).
+/// Used by the auth rejection log to record whether the client even
+/// attempted Bearer auth.
+fn has_bearer_header(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split_once(' '))
+        .map(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .unwrap_or(false)
+}
+
 /// Axum middleware. Mounted only when `TokenSet` is non-empty (the
 /// server skips the layer entirely otherwise so loopback dev is
 /// unchanged).
@@ -129,12 +132,7 @@ pub async fn auth_layer(
         // even a few bytes of a leaked secret materially helps an
         // attacker.
         let has_x_api_key = req.headers().contains_key("x-api-key");
-        let has_bearer = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.starts_with("Bearer ") || s.starts_with("bearer "))
-            .unwrap_or(false);
+        let has_bearer = has_bearer_header(req.headers());
         tracing::warn!(
             route = %req.uri().path(),
             has_x_api_key,
@@ -209,5 +207,35 @@ mod tests {
     fn non_bearer_authorization_scheme_ignored() {
         let ts = TokenSet::new(vec!["sk-good".into()]);
         assert!(!ts.check(&hm(&[("authorization", "Basic c2s6Zm9v")])));
+    }
+
+    // Fix 1: different-length candidate returns false, no panic.
+    #[test]
+    fn different_length_candidate_returns_false() {
+        // Arrange: token set with a known-length token.
+        let ts = TokenSet::new(vec!["sk-long-token".into()]);
+
+        // Act + Assert: shorter and longer candidates must both fail
+        // cleanly without panicking.
+        assert!(!ts.check(&hm(&[("x-api-key", "short")])));
+        assert!(!ts.check(&hm(&[("x-api-key", "sk-long-token-extra")])));
+    }
+
+    // Fix 2: uppercase BEARER scheme must produce has_bearer=true.
+    #[test]
+    fn has_bearer_header_is_case_insensitive() {
+        // Arrange
+        let upper = hm(&[("authorization", "BEARER sk-x")]);
+        let mixed = hm(&[("authorization", "Bearer sk-x")]);
+        let lower = hm(&[("authorization", "bearer sk-x")]);
+        let basic = hm(&[("authorization", "Basic dXNlcjpwYXNz")]);
+        let empty = hm(&[]);
+
+        // Act + Assert
+        assert!(has_bearer_header(&upper), "BEARER should be recognized");
+        assert!(has_bearer_header(&mixed), "Bearer should be recognized");
+        assert!(has_bearer_header(&lower), "bearer should be recognized");
+        assert!(!has_bearer_header(&basic), "Basic scheme should not match");
+        assert!(!has_bearer_header(&empty), "absent header should be false");
     }
 }
