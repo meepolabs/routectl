@@ -8,30 +8,35 @@
 //! shape. The extras merge allow-list enforces the same invariant at
 //! the key level, but defense in depth requires lift-before-merge.
 //!
-//! Dispatch order is fixed for stability across releases. As of
-//! Wave 1 (`tools` + `tool_choice` only), neither lift consults the
-//! other's state: tools are translated independently of the chosen
-//! tool, and tool_choice's name passthrough does not validate against
-//! the lifted tool list (an unknown name surfaces as the upstream's
-//! own validation error rather than routectl-side rejection).
+//! Dispatch order is fixed for stability across releases.
 //!
-//! When M2 adds `content`, `tool_use`, `tool_result`, and
-//! `response_format` lifts, the order will need real
-//! before/after constraints (e.g. content before tool_use because
-//! tool_use blocks may strip text siblings); pinning the order now
-//! avoids cascading edits later.
+//! Order rationale:
+//!   - `tools` and `tool_choice` are independent of message content.
+//!   - `content` runs BEFORE `tool_use` so image rewriting sees the
+//!     original assistant content array. `tool_use` may strip blocks
+//!     and collapse `content` to a string or null after the lift.
+//!   - `response_format` rewrites top-level keys only and runs last so
+//!     no later lift can clobber its output.
+//!   - `tool_use` runs before `tool_result` because tool_use lifts
+//!     INTO an assistant message (sibling fields), while tool_result
+//!     SPLITS user messages into multiple wire messages. Doing tool_use
+//!     first keeps message indices stable for tool_use's per-message
+//!     edits; tool_result then reshapes the array shape.
 //!
 //! Current order:
 //!   1. tools
 //!   2. tool_choice
-//!   // content::lift        (TODO(M2)) -- content before tool_use
-//!   //                                   so tool_use sees originals.
-//!   // tool_use::lift       (TODO(M2)) -- may strip blocks; sees originals.
-//!   // tool_result::lift    (TODO(M2))
-//!   // response_format::lift (TODO(M2)) -- last on request body.
+//!   3. content
+//!   4. response_format
+//!   5. tool_use
+//!   6. tool_result
 
-mod tools;
+mod content;
+mod response_format;
 mod tool_choice;
+mod tool_result;
+mod tool_use;
+mod tools;
 
 use routectl_core::{ChatRequest, Result};
 
@@ -43,5 +48,9 @@ pub fn lift_all(
 ) -> Result<()> {
     tools::lift(id, obj, req, strict)?;
     tool_choice::lift(id, obj, req)?;
+    content::lift(id, obj, req, strict)?;
+    response_format::lift(id, obj, req, strict)?;
+    tool_use::lift(id, obj, req, strict)?;
+    tool_result::lift(id, obj, req, strict)?;
     Ok(())
 }
