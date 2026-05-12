@@ -94,7 +94,19 @@ pub(crate) enum ResponseInputItem {
         content: Vec<ResponsesContentItem>,
     },
     Reasoning {
+        /// Upstream-stable item id (e.g. "rs_1"). Skipped when None so
+        /// fresh client-side Thinking blocks (no upstream provenance)
+        /// don't ship a synthetic id. When the canonical envelope
+        /// preserves the upstream id via `reasoning_details[].id`, the
+        /// replay path forwards it verbatim so server-side dedup works.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         summary: Vec<ReasoningSummaryItem>,
+        /// Optional inner content array (reasoning_text /
+        /// reasoning_encrypted entries). Skipped when empty so the
+        /// fresh-Thinking-block path produces minimal JSON.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        content: Vec<ReasoningContentItem>,
         /// Echo-back signature for multi-turn reasoning replay. Empty
         /// string when the canonical Thinking block lacks a signature
         /// (e.g. fresh first-turn requests); the server treats empty as
@@ -169,6 +181,18 @@ pub(crate) enum ResponsesContentItem {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ReasoningSummaryItem {
     SummaryText { text: String },
+}
+
+/// One content block on a `Reasoning` input item (the inner `content`
+/// array, sibling to `summary`). Codex's `ReasoningItemContent` carries
+/// both `reasoning_text` and the plain `text` alias; the egress emits
+/// `reasoning_text` for byte-stable replay since that's the spelling
+/// codex itself sends and a few model variants strict-match on it.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ReasoningContentItem {
+    ReasoningText { text: String },
+    ReasoningEncrypted { encrypted_content: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -273,10 +297,40 @@ mod tests {
     fn reasoning_input_item_emits_summary_and_encrypted_content() {
         // Arrange
         let item = ResponseInputItem::Reasoning {
+            id: None,
             summary: vec![ReasoningSummaryItem::SummaryText {
                 text: "step one".to_string(),
             }],
+            content: Vec::new(),
             encrypted_content: "sig-abc".to_string(),
+        };
+
+        // Act
+        let v = serde_json::to_value(&item).unwrap();
+
+        // Assert: id + content omitted because skip_serializing_if.
+        assert_eq!(
+            v,
+            json!({
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "step one"}],
+                "encrypted_content": "sig-abc"
+            })
+        );
+    }
+
+    #[test]
+    fn reasoning_input_item_with_id_and_content_serializes_full_shape() {
+        // Arrange
+        let item = ResponseInputItem::Reasoning {
+            id: Some("rs_1".to_string()),
+            summary: vec![ReasoningSummaryItem::SummaryText {
+                text: "consider".to_string(),
+            }],
+            content: vec![ReasoningContentItem::ReasoningText {
+                text: "detail".to_string(),
+            }],
+            encrypted_content: "SIG".to_string(),
         };
 
         // Act
@@ -287,8 +341,10 @@ mod tests {
             v,
             json!({
                 "type": "reasoning",
-                "summary": [{"type": "summary_text", "text": "step one"}],
-                "encrypted_content": "sig-abc"
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "consider"}],
+                "content": [{"type": "reasoning_text", "text": "detail"}],
+                "encrypted_content": "SIG"
             })
         );
     }
