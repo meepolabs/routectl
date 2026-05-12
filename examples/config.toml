@@ -113,8 +113,10 @@ extra_headers = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
 #     `account_id_ref` is REQUIRED for this auth_kind; the factory
 #     errors at startup if it's absent.
 #
-#   api-key (CG.E, deferred): standard OpenAI key at
-#     https://api.openai.com/v1. Routectl returns NotImplemented today.
+#   api-key (CG.E, wired today): standard OpenAI key at
+#     https://api.openai.com/v1. Sends only `Authorization: Bearer
+#     <api_key>`. account_id_ref must be omitted for this surface.
+#     Set OpenAI-Organization / OpenAI-Project via `extra_headers`.
 #
 #   bedrock-mantle (CG.D, deferred): AWS Mantle proxy at
 #     https://bedrock-mantle.<region>.api.aws/openai/v1. SigV4-signed.
@@ -139,6 +141,15 @@ auth_kind = "chatgpt-oauth"
 #   gpt-5.2         -- previous-generation; still accepts requests
 #   codex-auto-review  -- automated review surface
 # Use in [aliases] as: "gpt:gpt-5.3-codex"
+
+# Commented-out preview of the api-key auth path. Standard OpenAI
+# Responses API at api.openai.com -- no ChatGPT subscription needed.
+# [providers.gpt-api]
+# type = "openai-responses"
+# api_key_ref = "env://OPENAI_API_KEY"
+# auth_kind = "api-key"
+# # account_id_ref MUST be omitted for api-key (factory rejects it).
+# # extra_headers = { "OpenAI-Organization" = "org-...", "OpenAI-Project" = "proj_..." }
 
 # Commented-out preview of the bedrock-mantle auth path. Wire shape is
 # OpenAI Responses, but the request is SigV4-signed against AWS's
