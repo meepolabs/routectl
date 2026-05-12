@@ -45,7 +45,11 @@ fn is_loopback(host: &str) -> bool {
     use std::net::IpAddr;
     use std::str::FromStr;
     match IpAddr::from_str(host) {
-        Ok(addr) => addr.is_loopback(),
+        Ok(IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.is_loopback(),
+            None => v6.is_loopback(),
+        },
         Err(_) => host == "localhost",
     }
 }
@@ -65,6 +69,15 @@ mod tests {
         assert!(!is_loopback("0.0.0.0"));
         assert!(!is_loopback("192.168.1.1"));
         assert!(!is_loopback("not-an-address"));
+    }
+
+    #[test]
+    fn is_loopback_handles_ipv4_mapped_ipv6() {
+        // Arrange + Act + Assert: IPv4-mapped IPv6 addresses
+        // (::ffff:127.x.x.x) must be treated as loopback; non-loopback
+        // IPv4-mapped addresses must not be.
+        assert!(is_loopback("::ffff:127.0.0.1"));
+        assert!(!is_loopback("::ffff:192.168.1.1"));
     }
 }
 

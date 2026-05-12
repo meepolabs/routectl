@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use routectl_core::schema::CacheCreation;
 use routectl_core::{
-    ChatResponse, Choice, Error, Message, MessageContent, ReasoningDetail, ReasoningDetailKind,
-    Result, Role, Usage,
+    ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
 };
 
 use super::response_types::{
@@ -41,7 +41,7 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
     let resp: ConverseResponse = serde_json::from_value(body.clone())
         .map_err(|e| Error::normalize_response(provider_id, e.to_string()))?;
 
-    let (text, reasoning_details, tool_calls) =
+    let (text, reasoning_details, tool_calls, parts) =
         walk_content_blocks(provider_id, &resp.output.message.content)?;
     let finish_reason = map_stop_reason(resp.stop_reason.as_deref());
     let usage = resp.usage.as_ref().map(translate_usage);
@@ -56,9 +56,10 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         Role::Assistant
     };
 
+    let content = select_message_content(text, parts);
     let message = Message {
         role,
-        content: MessageContent::Text(text),
+        content,
         reasoning: None,
         reasoning_details,
         name: None,
@@ -91,20 +92,30 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
 
 /// Walk Converse content blocks. Mirrors
 /// `anthropic_api::response::walk_content_blocks` shape: returns flat
-/// text, reasoning_details, and OpenAI-shape tool_calls.
+/// text, reasoning_details, OpenAI-shape tool_calls, and a `parts`
+/// vector preserving every block in arrival order. Reasoning blocks
+/// surface on `reasoning_details` only (not in `parts`); the
+/// caller-side `select_message_content` collapses to flat Text when the
+/// only Parts entries are Text-typed and emits Parts otherwise so
+/// multimodal/forward-compat content survives end-to-end.
 fn walk_content_blocks(
     provider_id: &str,
     blocks: &[ConverseResponseContentBlock],
-) -> Result<(String, Vec<ReasoningDetail>, Option<Vec<Value>>)> {
+) -> Result<(String, Vec<ReasoningDetail>, Option<Vec<Value>>, Vec<ContentPart>)> {
     let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_details: Vec<ReasoningDetail> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut detail_index: u32 = 0;
+    let mut parts: Vec<ContentPart> = Vec::new();
 
     for block in blocks {
         match block {
             ConverseResponseContentBlock::Text { text } => {
                 text_parts.push(text.clone());
+                parts.push(ContentPart::Known(KnownContentPart::Text {
+                    text: text.clone(),
+                    cache_control: None,
+                }));
             }
             ConverseResponseContentBlock::ToolUse { tool_use } => {
                 let arguments = serde_json::to_string(&tool_use.input)
@@ -113,6 +124,12 @@ fn walk_content_blocks(
                     "id": tool_use.tool_use_id,
                     "type": "function",
                     "function": {"name": tool_use.name, "arguments": arguments}
+                }));
+                parts.push(ContentPart::Known(KnownContentPart::ToolUse {
+                    id: tool_use.tool_use_id.clone(),
+                    name: tool_use.name.clone(),
+                    input: tool_use.input.clone(),
+                    cache_control: None,
                 }));
             }
             ConverseResponseContentBlock::ReasoningContent { reasoning_content } => {
@@ -138,16 +155,17 @@ fn walk_content_blocks(
                 }
             }
             ConverseResponseContentBlock::Other(v) => {
-                let tag = v
-                    .as_object()
-                    .and_then(|o| o.keys().next())
-                    .map(String::as_str)
-                    .unwrap_or("unknown");
+                let (tag, extras) = extract_other_tag_and_extras(v);
                 warn!(
                     provider = provider_id,
                     block_type = %tag,
                     "unknown converse content block dropped from flat-text output"
                 );
+                parts.push(ContentPart::Other {
+                    type_tag: tag,
+                    cache_control: None,
+                    extras,
+                });
             }
         }
     }
@@ -158,7 +176,55 @@ fn walk_content_blocks(
     } else {
         Some(tool_calls)
     };
-    Ok((text, reasoning_details, tool_calls_opt))
+    Ok((text, reasoning_details, tool_calls_opt, parts))
+}
+
+/// Pull the single-key tag + inner-fields out of an unknown Converse
+/// content block. AWS unions are single-key objects (`{video: {...}}`,
+/// `{citationsContent: {...}}`, ...); the Other variant catches whichever
+/// key didn't match a typed arm. We extract the inner object as the
+/// `extras` map so a forward-compat ContentPart::Other carries the
+/// original payload through the canonical schema -- the egress sees the
+/// same shape the upstream produced.
+fn extract_other_tag_and_extras(
+    v: &Value,
+) -> (String, serde_json::Map<String, Value>) {
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => return ("unknown".to_string(), serde_json::Map::new()),
+    };
+    let (tag, inner) = obj
+        .iter()
+        .next()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .unwrap_or_else(|| ("unknown".to_string(), Value::Null));
+    let extras = match inner {
+        Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    (tag, extras)
+}
+
+/// Choose between `MessageContent::Text(joined)` and
+/// `MessageContent::Parts(parts)`. Mirrors the Anthropic-API egress's
+/// helper: collapse to Text only when every emitted Part is a Text
+/// entry; otherwise preserve every block (multimodal, forward-compat,
+/// reasoning markers) by emitting Parts. Reasoning blocks aren't in
+/// parts -- they ride on reasoning_details -- so a text + reasoning
+/// response still collapses to Text here.
+// TODO(M12): extract to a providers-internal shared module; the
+// twin in crates/routectl-providers/src/anthropic_api/response.rs
+// is byte-identical. M12 (managed-key dedup wave) is the natural
+// landing for this.
+fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageContent {
+    let only_text = parts.iter().all(|p| {
+        matches!(p, ContentPart::Known(KnownContentPart::Text { .. }))
+    });
+    if only_text {
+        MessageContent::Text(text)
+    } else {
+        MessageContent::Parts(parts)
+    }
 }
 
 /// Map a Converse stopReason to canonical OpenAI-shape finish_reason.
@@ -318,11 +384,27 @@ mod tests {
         let args = tcs[0]["function"]["arguments"].as_str().unwrap();
         let parsed: Value = serde_json::from_str(args).unwrap();
         assert_eq!(parsed, json!({"location": "Tokyo"}));
-        // Surviving text comes through on content.
-        if let MessageContent::Text(t) = &resp.choices[0].message.content {
-            assert_eq!(t, "let me check");
-        } else {
-            panic!("expected text content");
+        // Mixed text + tool_use response emits Parts so the tool_use
+        // block survives end-to-end. The text block also survives in
+        // parts.
+        match &resp.choices[0].message.content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+                        assert_eq!(text, "let me check");
+                    }
+                    other => panic!("expected Text, got {other:?}"),
+                }
+                match &parts[1] {
+                    ContentPart::Known(KnownContentPart::ToolUse { id, name, .. }) => {
+                        assert_eq!(id, "tu_42");
+                        assert_eq!(name, "get_weather");
+                    }
+                    other => panic!("expected ToolUse, got {other:?}"),
+                }
+            }
+            other => panic!("expected Parts, got {other:?}"),
         }
     }
 
@@ -389,7 +471,9 @@ mod tests {
     #[test]
     fn unknown_block_type_is_dropped_with_warn_not_error() {
         // Arrange: a future AWS block type. Forward compat means we
-        // log + drop rather than fail.
+        // preserve it as ContentPart::Other in Parts emission rather
+        // than failing or silently dropping. The tag and inner fields
+        // round-trip so an egress that knows the type can re-emit it.
         let raw = json!({
             "output": {
                 "message": {
@@ -407,11 +491,87 @@ mod tests {
         let resp = translate("test", &raw).unwrap();
 
         // Assert
-        if let MessageContent::Text(t) = &resp.choices[0].message.content {
-            assert_eq!(t, "after");
-        } else {
-            panic!("expected text content");
+        match &resp.choices[0].message.content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    ContentPart::Other { type_tag, extras, .. } => {
+                        assert_eq!(type_tag, "futureBlock");
+                        assert_eq!(
+                            extras.get("x").and_then(|v| v.as_i64()),
+                            Some(1)
+                        );
+                    }
+                    other => panic!("expected Other, got {other:?}"),
+                }
+                match &parts[1] {
+                    ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+                        assert_eq!(text, "after");
+                    }
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
+            other => panic!("expected Parts, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn text_only_response_collapses_to_message_content_text() {
+        // OpenAI-ingress wire stability: pure-text response stays as
+        // flat MessageContent::Text so existing OpenAI clients see the
+        // same shape they always have.
+        let raw = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"text": "hello "},
+                        {"text": "world"}
+                    ]
+                }
+            },
+            "stopReason": "end_turn"
+        });
+
+        let resp = translate("test", &raw).unwrap();
+
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "hello world"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_plus_reasoning_response_still_collapses_to_text() {
+        // Reasoning blocks ride on reasoning_details, not on parts.
+        // A response with text + reasoning still has only Text in
+        // parts, so the content collapses to MessageContent::Text and
+        // signature/data is preserved on reasoning_details for replay.
+        let raw = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"reasoningContent": {
+                            "reasoningText": {"text": "step 1", "signature": "sig123"}
+                        }},
+                        {"text": "answer"}
+                    ]
+                }
+            },
+            "stopReason": "end_turn"
+        });
+
+        let resp = translate("test", &raw).unwrap();
+
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "answer"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        let details = &resp.choices[0].message.reasoning_details;
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].payload["text"], "step 1");
+        assert_eq!(details[0].payload["signature"], "sig123");
     }
 
     #[test]

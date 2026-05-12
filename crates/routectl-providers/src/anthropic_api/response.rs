@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use routectl_core::schema::CacheCreation;
 use routectl_core::{
-    ChatResponse, Choice, Error, Message, MessageContent, ReasoningDetail, ReasoningDetailKind,
-    Result, Role, Usage,
+    ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
 };
 
 use super::types::{AnthropicResponse, AnthropicUsage, ContentBlock};
@@ -37,15 +37,25 @@ pub fn map_stop_reason(stop_reason: Option<&str>) -> Option<String> {
     Some(reason.to_string())
 }
 
-/// Walk content blocks and produce (text, reasoning_details, tool_calls).
+/// Walk content blocks and produce (text, reasoning_details, tool_calls,
+/// parts). The first three mirror the legacy flat-text shape; `parts`
+/// preserves every block (text + thinking + image + tool_use + Other)
+/// in arrival order so non-text content can flow through to ingresses
+/// that support typed content (the Anthropic ingress passes parts back
+/// as Anthropic blocks; the OpenAI ingress collapses to a flat string).
+/// Thinking and RedactedThinking are intentionally omitted from `parts`
+/// because reasoning_details is the canonical surface for them; the
+/// Anthropic ingress reconstructs `thinking` blocks from
+/// reasoning_details on egress.
 pub fn walk_content_blocks(
     id: &str,
     blocks: &[ContentBlock],
-) -> Result<(String, Vec<ReasoningDetail>, Option<Vec<Value>>)> {
+) -> Result<(String, Vec<ReasoningDetail>, Option<Vec<Value>>, Vec<ContentPart>)> {
     let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_details: Vec<ReasoningDetail> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut detail_index: u32 = 0;
+    let mut parts: Vec<ContentPart> = Vec::new();
 
     for block in blocks {
         match block {
@@ -75,6 +85,10 @@ pub fn walk_content_blocks(
             }
             ContentBlock::Text { text, .. } => {
                 text_parts.push(text.clone());
+                parts.push(ContentPart::Known(KnownContentPart::Text {
+                    text: text.clone(),
+                    cache_control: None,
+                }));
             }
             ContentBlock::ToolUse {
                 id: tool_id,
@@ -90,28 +104,54 @@ pub fn walk_content_blocks(
                     "type": "function",
                     "function": {"name": name, "arguments": arguments}
                 }));
+                parts.push(ContentPart::Known(KnownContentPart::ToolUse {
+                    id: tool_id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    cache_control: None,
+                }));
             }
             ContentBlock::ToolResult { .. } => {
                 // Not expected in a response; skip.
             }
-            ContentBlock::Image { .. } => {
+            ContentBlock::Image { source, .. } => {
                 warn!(
                     provider = id,
                     "image block in response dropped from flat-text output"
                 );
+                parts.push(ContentPart::Known(KnownContentPart::Image {
+                    source: source.clone(),
+                    cache_control: None,
+                }));
             }
-            ContentBlock::Document { .. } => {
+            ContentBlock::Document {
+                source,
+                title,
+                citations,
+                ..
+            } => {
                 warn!(
                     provider = id,
                     "document block in response dropped from flat-text output"
                 );
+                parts.push(ContentPart::Known(KnownContentPart::Document {
+                    source: source.clone(),
+                    title: title.clone(),
+                    citations: citations.clone(),
+                    cache_control: None,
+                }));
             }
-            ContentBlock::Other { type_tag, .. } => {
+            ContentBlock::Other { type_tag, extras, .. } => {
                 warn!(
                     provider = id,
                     block_type = %type_tag,
                     "unknown content block type in response dropped from flat-text output",
                 );
+                parts.push(ContentPart::Other {
+                    type_tag: type_tag.clone(),
+                    cache_control: None,
+                    extras: extras.clone(),
+                });
             }
         }
     }
@@ -123,7 +163,31 @@ pub fn walk_content_blocks(
         Some(tool_calls)
     };
 
-    Ok((text, reasoning_details, tool_calls_opt))
+    Ok((text, reasoning_details, tool_calls_opt, parts))
+}
+
+/// Choose between `MessageContent::Text(joined)` and
+/// `MessageContent::Parts(parts)`. When the response only contained Text
+/// blocks (i.e. parts.len() == count of Text-flavored entries), collapse
+/// to flat Text for OpenAI-ingress wire stability. Otherwise emit Parts
+/// so multimodal/forward-compat blocks ride through to ingresses that
+/// preserve them. Thinking/RedactedThinking aren't in `parts` -- they
+/// surface via reasoning_details -- so a response with only text +
+/// thinking still collapses cleanly to Text here, while text + image
+/// emits Parts.
+// TODO(M12): extract to a providers-internal shared module; the
+// twin in crates/routectl-providers/src/bedrock/converse/response.rs
+// is byte-identical. M12 (managed-key dedup wave) is the natural
+// landing for this.
+fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageContent {
+    let only_text = parts.iter().all(|p| {
+        matches!(p, ContentPart::Known(KnownContentPart::Text { .. }))
+    });
+    if only_text {
+        MessageContent::Text(text)
+    } else {
+        MessageContent::Parts(parts)
+    }
 }
 
 /// Translate Anthropic `usage` into the canonical `Usage`, including
@@ -161,13 +225,14 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
     let resp: AnthropicResponse =
         serde_json::from_value(raw).map_err(|e| Error::normalize_response(id, e.to_string()))?;
 
-    let (text, reasoning_details, tool_calls) = walk_content_blocks(id, &resp.content)?;
+    let (text, reasoning_details, tool_calls, parts) = walk_content_blocks(id, &resp.content)?;
     let usage = resp.usage.as_ref().map(translate_usage);
     let finish_reason = map_stop_reason(resp.stop_reason.as_deref());
 
+    let content = select_message_content(text, parts);
     let message = Message {
         role: Role::Assistant,
-        content: MessageContent::Text(text),
+        content,
         reasoning: None,
         reasoning_details,
         name: None,
@@ -287,10 +352,105 @@ mod tests {
         });
         let resp = normalize("test", raw).unwrap();
         let msg = &resp.choices[0].message;
-        if let MessageContent::Text(t) = &msg.content {
-            assert_eq!(t, "after");
-        } else {
-            panic!("expected Text content");
+        // The presence of an Other block forces Parts emission so the
+        // forward-compat block survives end-to-end.
+        match &msg.content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    ContentPart::Other { type_tag, .. } => {
+                        assert_eq!(type_tag, "server_tool_use");
+                    }
+                    other => panic!("expected Other, got {other:?}"),
+                }
+                match &parts[1] {
+                    ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+                        assert_eq!(text, "after");
+                    }
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_only_response_collapses_to_message_content_text() {
+        // OpenAI-ingress wire stability: when the response is purely
+        // Text blocks (the common path), keep emitting flat
+        // MessageContent::Text so existing OpenAI clients see the
+        // same shape they always have.
+        let raw = json!({
+            "id": "msg_05",
+            "model": "claude-opus-4-7",
+            "content": [
+                {"type": "text", "text": "hello "},
+                {"type": "text", "text": "world"}
+            ],
+            "stop_reason": "end_turn"
+        });
+        let resp = normalize("test", raw).unwrap();
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "hello world"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_plus_thinking_response_still_collapses_to_text() {
+        // Thinking lives on reasoning_details, not on parts. A response
+        // with text + thinking still has only Text in `parts`, so
+        // select_message_content collapses to MessageContent::Text and
+        // the signature rides on reasoning_details for replay.
+        let raw = json!({
+            "id": "msg_06",
+            "model": "claude-opus-4-7",
+            "content": [
+                {"type": "thinking", "thinking": "step 1", "signature": "sig_x"},
+                {"type": "text", "text": "answer"}
+            ],
+            "stop_reason": "end_turn"
+        });
+        let resp = normalize("test", raw).unwrap();
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "answer"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        let details = &resp.choices[0].message.reasoning_details;
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].payload["text"], "step 1");
+        assert_eq!(details[0].payload["signature"], "sig_x");
+    }
+
+    #[test]
+    fn forward_compat_unknown_block_emits_parts_preserving_other() {
+        // [text, future_block_v2, text] -- the unknown block forces
+        // Parts emission so the operator's forward-compat block
+        // survives the response normalization. The Other variant
+        // preserves the original type_tag and extras.
+        let raw = json!({
+            "id": "msg_07",
+            "model": "claude-opus-4-7",
+            "content": [
+                {"type": "text", "text": "before"},
+                {"type": "future_block_v2", "custom_field": "x"},
+                {"type": "text", "text": "after"}
+            ],
+            "stop_reason": "end_turn"
+        });
+        let resp = normalize("test", raw).unwrap();
+        match &resp.choices[0].message.content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 3);
+                match &parts[1] {
+                    ContentPart::Other { type_tag, extras, .. } => {
+                        assert_eq!(type_tag, "future_block_v2");
+                        assert_eq!(extras.get("custom_field").and_then(|v| v.as_str()), Some("x"));
+                    }
+                    other => panic!("expected Other, got {other:?}"),
+                }
+            }
+            other => panic!("expected Parts, got {other:?}"),
         }
     }
 }
