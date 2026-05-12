@@ -137,24 +137,6 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
-    // Bedrock Converse adapter is stubbed pending M2.7. `config check`
-    // already rejects this shape (commands/config.rs); duplicating the
-    // guard here means `routectl serve` started directly against a
-    // TOML that bypassed `config check` still fails fast at startup
-    // rather than 500-ing on first request. Drop both guards when
-    // M2.7 lands.
-    for (name, entry) in &config.providers {
-        if let routectl_router::ProviderEntry::Bedrock { api_shape, .. } = entry {
-            if matches!(api_shape, routectl_router::BedrockApiShapeConfig::Converse) {
-                return Err(Error::Config(format!(
-                    "provider `{name}`: api_shape = \"converse\" is accepted in TOML but \
-                     the Converse adapter is not implemented yet (M2.7); \
-                     use api_shape = \"invoke\" until the adapter ships"
-                )));
-            }
-        }
-    }
-
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
         .with_bedrock_anthropic_beta_allowlist(config.bedrock.anthropic_beta.clone());
