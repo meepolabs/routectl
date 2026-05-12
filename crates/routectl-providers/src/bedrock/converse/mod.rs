@@ -38,18 +38,38 @@
 //! are handled with the same warn-or-error policy as the openai-compat
 //! egress.
 //!
-//! Scope: this is M5.A (request side + types). M5.B (`response.rs` and
-//! `eventstream.rs`) and M5.C (dispatch wiring + drop-three-startup
-//! guards + live matrix row) follow.
+//! Scope: M5.A built request + types; M5.B (this module's `response.rs`
+//! and `eventstream.rs`) covers the response side. M5.C (dispatch
+//! wiring + drop-three-startup-guards + live matrix row) follows.
 
+mod eventstream;
 mod extras;
 mod messages;
 mod request;
+mod response;
+mod response_types;
 mod system;
 mod tools;
 mod types;
 
 pub use types::*;
+
+// Public re-exports of response-side types so other modules in the
+// bedrock crate (and integration tests) can name them without the
+// inner `response_types::` path.
+pub use response_types::{
+    ConverseCacheDetail, ConverseMetrics, ConverseOutput, ConverseReasoningContent,
+    ConverseReasoningText, ConverseResponse, ConverseResponseContentBlock, ConverseResponseMessage,
+    ConverseResponseToolUse, ConverseUsage, StreamContentBlockDelta, StreamContentBlockStart,
+    StreamContentBlockStartPayload, StreamContentBlockStop, StreamDelta, StreamMessageStart,
+    StreamMessageStop, StreamMetadata, StreamReasoningDelta, StreamToolUseDelta,
+    StreamToolUseStart,
+};
+
+// Re-export the eventstream entry point so `super::eventstream::
+// converse_stream` can delegate without exposing the inner module
+// publicly to the rest of the providers crate.
+pub(super) use eventstream::stream as eventstream_stream;
 
 use serde_json::Value;
 
@@ -64,12 +84,6 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
 }
 
 /// Parse the Bedrock Converse response body into a `ChatResponse`.
-///
-/// M5.A leaves this stubbed; M5.B replaces with a walk over
-/// `output.message.content[]` and `stopReason -> finish_reason`
-/// translation.
-pub fn normalize_response(_provider_id: &str, _raw: Value) -> Result<ChatResponse> {
-    Err(Error::Config(
-        "bedrock converse::normalize_response not implemented yet (M5.B)".into(),
-    ))
+pub fn normalize_response(provider_id: &str, raw: Value) -> Result<ChatResponse> {
+    response::translate(provider_id, &raw)
 }
