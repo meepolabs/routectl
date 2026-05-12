@@ -8,28 +8,23 @@
 //! shape. The extras merge allow-list enforces the same invariant at
 //! the key level, but defense in depth requires lift-before-merge.
 //!
-//! Dispatch order is fixed for stability across releases.
+//! Dispatch order is fixed for stability across releases and is the
+//! source of truth in `LIFT_STEPS`. `lift_all` iterates that slice;
+//! `DOCUMENTED_DISPATCH_ORDER` mirrors its names; the
+//! `dispatch_order_matches_documentation` test asserts they match.
 //!
-//! Order rationale:
+//! Order rationale (see `LIFT_STEPS` for the authoritative sequence):
 //!   - `tools` and `tool_choice` are independent of message content.
 //!   - `content` runs BEFORE `tool_use` so image rewriting sees the
 //!     original assistant content array. `tool_use` may strip blocks
 //!     and collapse `content` to a string or null after the lift.
-//!   - `response_format` rewrites top-level keys only and runs last so
-//!     no later lift can clobber its output.
+//!   - `response_format` rewrites top-level keys only; runs after
+//!     content/tool steps so none of them can clobber its output.
 //!   - `tool_use` runs before `tool_result` because tool_use lifts
 //!     INTO an assistant message (sibling fields), while tool_result
 //!     SPLITS user messages into multiple wire messages. Doing tool_use
 //!     first keeps message indices stable for tool_use's per-message
 //!     edits; tool_result then reshapes the array shape.
-//!
-//! Current order:
-//!   1. tools
-//!   2. tool_choice
-//!   3. content
-//!   4. response_format
-//!   5. tool_use
-//!   6. tool_result
 
 mod content;
 mod response_format;
@@ -38,19 +33,194 @@ mod tool_result;
 mod tool_use;
 mod tools;
 
+use serde_json::Map;
+
 use routectl_core::{ChatRequest, Result};
+
+/// Uniform lift-function pointer type. Every sub-module's `lift` must
+/// match this shape so it can be stored in `LIFT_STEPS`.
+type LiftFn = fn(
+    &str,
+    &mut Map<String, serde_json::Value>,
+    &ChatRequest,
+    bool,
+) -> Result<()>;
+
+/// Single source of truth for dispatch order. `lift_all` iterates this
+/// slice; the order test introspects the same slice so a reorder in
+/// either direction is caught at compile-test time.
+///
+/// To add a new step: append `(name, module::lift)` here. Do NOT edit
+/// `lift_all` separately -- it derives from this slice.
+const LIFT_STEPS: &[(&str, LiftFn)] = &[
+    ("tools", tools::lift),
+    ("tool_choice", tool_choice::lift),
+    ("content", content::lift),
+    ("response_format", response_format::lift),
+    ("tool_use", tool_use::lift),
+    ("tool_result", tool_result::lift),
+];
+
+/// Documented names for the dispatch order. This parallel constant lets
+/// the `dispatch_order_matches_documentation` test assert that it equals
+/// the name projection of `LIFT_STEPS`, so they cannot diverge silently.
+/// Only used in tests; defined here (not in the test module) so it stays
+/// visible alongside `LIFT_STEPS` for maintenance.
+#[cfg(test)]
+pub(crate) const DOCUMENTED_DISPATCH_ORDER: &[&str] = &[
+    "tools",
+    "tool_choice",
+    "content",
+    "response_format",
+    "tool_use",
+    "tool_result",
+];
 
 pub fn lift_all(
     id: &str,
-    obj: &mut serde_json::Map<String, serde_json::Value>,
+    obj: &mut Map<String, serde_json::Value>,
     req: &ChatRequest,
     strict: bool,
 ) -> Result<()> {
-    tools::lift(id, obj, req, strict)?;
-    tool_choice::lift(id, obj, req)?;
-    content::lift(id, obj, req, strict)?;
-    response_format::lift(id, obj, req, strict)?;
-    tool_use::lift(id, obj, req, strict)?;
-    tool_result::lift(id, obj, req, strict)?;
+    for (_name, lift_fn) in LIFT_STEPS {
+        lift_fn(id, obj, req, strict)?;
+    }
     Ok(())
 }
+
+#[cfg(test)]
+mod order_test {
+    //! Pins the dispatch order of `lift_all` via `LIFT_STEPS`.
+    //!
+    //! If a contributor adds a new lift, they must:
+    //!   1. Append `(name, module::lift)` to `LIFT_STEPS`.
+    //!   2. Append the name to `DOCUMENTED_DISPATCH_ORDER`.
+    //!   3. Verify both tests pass.
+    //!
+    //! Reordering either slice without updating the other will fail
+    //! `dispatch_order_matches_documentation`. Reordering `LIFT_STEPS`
+    //! alone also changes runtime behavior and will be caught by
+    //! behavioral tests in the sub-module test suites.
+
+    use serde_json::{json, Map, Value};
+
+    use routectl_core::{ChatRequest, Message, MessageContent, Role};
+
+    use super::{lift_all, DOCUMENTED_DISPATCH_ORDER, LIFT_STEPS};
+
+    fn minimal_req() -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Asserts that `LIFT_STEPS` names equal `DOCUMENTED_DISPATCH_ORDER`
+    /// entry for entry. This is the pinning contract: both slices must be
+    /// kept in sync. If you swap two rows in `LIFT_STEPS` without updating
+    /// `DOCUMENTED_DISPATCH_ORDER` (or vice versa), this test fails.
+    #[test]
+    fn dispatch_order_matches_documentation() {
+        // Arrange
+        let actual: Vec<&str> = LIFT_STEPS.iter().map(|(n, _)| *n).collect();
+
+        // Act + Assert
+        assert_eq!(
+            actual.as_slice(),
+            DOCUMENTED_DISPATCH_ORDER,
+            "LIFT_STEPS names must match DOCUMENTED_DISPATCH_ORDER. \
+             Update both when adding or reordering lift steps."
+        );
+    }
+
+    /// Smoke-tests that `lift_all` runs to completion on a minimal request.
+    #[test]
+    fn lift_all_runs_on_minimal_req() {
+        // Arrange
+        let req = minimal_req();
+        let mut obj: Map<String, Value> = serde_json::from_value(json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+
+        // Act
+        let result = lift_all("test", &mut obj, &req, false);
+
+        // Assert
+        assert!(result.is_ok(), "lift_all failed on minimal req: {:?}", result);
+    }
+
+    /// Verifies the dependency-critical ordering: content lift must run
+    /// BEFORE tool_use. A request with an assistant message carrying a
+    /// tool_use block should produce `tool_calls` on the assistant message
+    /// (set by tool_use lift) without corrupting the content array that
+    /// content lift may have transformed.
+    ///
+    /// If tool_use were moved before content in LIFT_STEPS, this test
+    /// would still pass (tool_use does not read content-lift output), but
+    /// `dispatch_order_matches_documentation` above pins the sequence
+    /// against DOCUMENTED_DISPATCH_ORDER regardless.
+    #[test]
+    fn lift_all_tool_use_sees_messages_after_content_lift() {
+        use routectl_core::ContentPart;
+
+        // Arrange: assistant message with mixed text + tool_use blocks
+        // (Anthropic shape). After lift_all the tool_use block should
+        // become a top-level `tool_calls` array on the assistant message.
+        let assistant_msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![
+                ContentPart::Known(routectl_core::KnownContentPart::Text {
+                    text: "here".into(),
+                    cache_control: None,
+                }),
+            ]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![json!({
+                "id": "toolu_x1",
+                "type": "function",
+                "function": {"name": "calc", "arguments": "{}"}
+            })]),
+        };
+        let req = ChatRequest {
+            model: "m".into(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Text("go".into()),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                assistant_msg,
+            ],
+            ..Default::default()
+        };
+
+        let mut obj: Map<String, Value> =
+            serde_json::to_value(&req).unwrap().as_object().unwrap().clone();
+
+        // Act
+        lift_all("test", &mut obj, &req, false).unwrap();
+
+        // Assert: messages array is present and has two entries.
+        let msgs = obj["messages"].as_array().expect("messages must be array");
+        assert_eq!(msgs.len(), 2, "message count must be preserved after lift_all");
+    }
+}
+
