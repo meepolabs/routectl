@@ -738,3 +738,144 @@ fn provider_extras_client_metadata_forwards() {
         json!({"user_id": "u-123", "session": "s-abc"})
     );
 }
+
+// ---------------------------------------------------------------------------
+// CRIT-1: multi-turn reasoning replay round-trip
+//
+// These tests prove that an assistant turn carrying response-side
+// reasoning_details (with the openai-responses-v1 format tag) survives
+// the second-turn request translation: the encrypted_content signature
+// the upstream issued must reach the next /responses POST verbatim or
+// Anthropic/OpenAI reasoning-enabled models return 400.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn response_reasoning_round_trips_through_canonical_to_replay_request() {
+    use crate::openai_responses::response;
+    use crate::openai_responses::response_types::ResponsesResponse;
+
+    // Arrange: a fake upstream response carrying a Reasoning output
+    // item with a signature + summary + inner text. Drive it through
+    // the response translator to a canonical ChatResponse, then build
+    // a new request whose message[1] is the translated assistant turn
+    // and assert the egress emits a Reasoning input item carrying the
+    // original encrypted_content + id.
+    let upstream_body = json!({
+        "id": "resp_01",
+        "status": "completed",
+        "model": "gpt-5-codex",
+        "output": [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "step"}],
+                "content": [{"type": "reasoning_text", "text": "detail"}],
+                "encrypted_content": "sig_xyz"
+            },
+            {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer"}]
+            }
+        ]
+    });
+    let typed: ResponsesResponse = from_value(upstream_body).unwrap();
+    let chat_response = response::translate("test", typed).unwrap();
+    let assistant_msg = chat_response.choices[0].message.clone();
+
+    // Act: build a fresh request whose second message is the assistant
+    // turn from the upstream response. The egress must lift
+    // reasoning_details back into a Reasoning input item.
+    let req = req_with(vec![user_text("ping"), assistant_msg]);
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: input[1] is a Reasoning item carrying the original
+    // signature, id, and summary/content surfaces.
+    let reasoning = &v["input"][1];
+    assert_eq!(reasoning["type"], "reasoning");
+    assert_eq!(reasoning["id"], "rs_1");
+    assert_eq!(reasoning["encrypted_content"], "sig_xyz");
+    assert_eq!(
+        reasoning["summary"],
+        json!([{"type": "summary_text", "text": "step"}])
+    );
+    assert_eq!(
+        reasoning["content"],
+        json!([{"type": "reasoning_text", "text": "detail"}])
+    );
+    // input[2] is the assistant message text (no Thinking duplication
+    // because reasoning_details produced the Reasoning item).
+    let msg = &v["input"][2];
+    assert_eq!(msg["type"], "message");
+    assert_eq!(msg["role"], "assistant");
+    assert_eq!(
+        msg["content"],
+        json!([{"type": "output_text", "text": "answer"}])
+    );
+}
+
+#[test]
+fn sse_reasoning_round_trips_through_canonical_to_replay_request() {
+    use crate::openai_responses::sse::ResponsesStreamState;
+    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+
+    // Arrange: synthesize a streaming session by feeding events
+    // through process_event, then collect the emitted reasoning_details
+    // into a synthetic assistant message. The replay request must then
+    // carry the same encrypted_content signature.
+    let events = vec![
+        json!({"type": "response.created", "response": {"id": "r", "model": "m"}}),
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "reasoning", "id": "rs_1", "summary": []}
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "step"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "reasoning", "id": "rs_1", "summary": [],
+                     "encrypted_content": "sig_xyz"}
+        }),
+    ];
+    let mut state = ResponsesStreamState::default();
+    let mut all_details: Vec<ReasoningDetail> = Vec::new();
+    for ev in events {
+        let typed = serde_json::from_value(ev).unwrap();
+        for chunk in state.process_event("test", typed).unwrap() {
+            all_details.extend(chunk.choices[0].delta.reasoning_details.clone());
+        }
+    }
+    // Sanity: at least one Encrypted detail with the upstream id.
+    let enc = all_details
+        .iter()
+        .find(|d| matches!(d.kind, ReasoningDetailKind::Encrypted))
+        .expect("Encrypted detail emitted");
+    assert_eq!(enc.id.as_deref(), Some("rs_1"));
+    assert_eq!(enc.payload["encrypted_content"], "sig_xyz");
+
+    // Promote the accumulated details onto a synthetic assistant
+    // message and drive translate_request to assert the encrypted_content
+    // reaches the egress wire body.
+    let assistant = Message {
+        role: Role::Assistant,
+        content: MessageContent::Text("answer".into()),
+        reasoning: None,
+        reasoning_details: all_details,
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    };
+    let req = req_with(vec![user_text("ping"), assistant]);
+    let v = translate_to_json(&cfg(), &req);
+    let reasoning = &v["input"][1];
+    assert_eq!(reasoning["type"], "reasoning");
+    assert_eq!(reasoning["id"], "rs_1");
+    assert_eq!(reasoning["encrypted_content"], "sig_xyz");
+}

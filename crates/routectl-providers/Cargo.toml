@@ -12,7 +12,7 @@ description = "Provider implementations for routectl."
 default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"]
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
 "anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio"]
-"openai-responses" = ["dep:reqwest", "dep:tokio"]
+"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:async-stream", "dep:uuid", "dep:tokio"]
 # Native AWS Bedrock provider (SigV4 signing + eventstream streaming).
 # Pulls in the AWS SDK credential / signing crates. ~1 MB binary growth.
 # Implies `anthropic-api`: the working Invoke body shape today is the
