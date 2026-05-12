@@ -1,0 +1,325 @@
+//! Tests for the Converse-stream eventstream decoder.
+//!
+//! Lives in a sibling file so `eventstream.rs` stays under the
+//! project's 800-line ceiling. Imported via
+//! `#[path = "eventstream_tests.rs"] mod tests;` from `eventstream.rs`,
+//! which means `super::*` here resolves to the parent module's
+//! private items (`handle_converse_frame`, `ConverseStreamState`).
+
+use super::*;
+use aws_smithy_types::event_stream::{Header, HeaderValue, Message as AwsMessage};
+
+fn make_frame(event_type: &str, payload_json: &str) -> AwsMessage {
+    AwsMessage::new(Bytes::from(payload_json.to_string().into_bytes())).add_header(Header::new(
+        ":event-type",
+        HeaderValue::String(event_type.to_string().into()),
+    ))
+}
+
+fn run(event_type: &str, payload: &str, state: &mut ConverseStreamState) -> Vec<ChatChunk> {
+    handle_converse_frame("test", make_frame(event_type, payload), state).unwrap()
+}
+
+#[test]
+fn message_start_emits_no_chunk() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let chunks = run("messageStart", r#"{"role":"assistant"}"#, &mut state);
+
+    // Assert
+    assert!(chunks.is_empty());
+}
+
+#[test]
+fn text_block_lifecycle_yields_text_deltas() {
+    // Arrange: start, two deltas, stop.
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let _ = run("contentBlockStart", r#"{"contentBlockIndex":0}"#, &mut state);
+    let c1 = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,"delta":{"text":"hello "}}"#,
+        &mut state,
+    );
+    let c2 = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,"delta":{"text":"world"}}"#,
+        &mut state,
+    );
+    let stop = run("contentBlockStop", r#"{"contentBlockIndex":0}"#, &mut state);
+
+    // Assert
+    assert_eq!(c1.len(), 1);
+    assert_eq!(c1[0].choices[0].delta.content.as_deref(), Some("hello "));
+    assert_eq!(c2.len(), 1);
+    assert_eq!(c2[0].choices[0].delta.content.as_deref(), Some("world"));
+    assert!(stop.is_empty());
+}
+
+#[test]
+fn tool_use_lifecycle_emits_tool_call_deltas() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act: start with tool_use payload, two arg deltas, stop.
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":1,
+            "start":{"toolUse":{"toolUseId":"tu_42","name":"calc"}}}"#,
+        &mut state,
+    );
+    let c1 = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":1,"delta":{"toolUse":{"input":"{\"a\":"}}}"#,
+        &mut state,
+    );
+    let c2 = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":1,"delta":{"toolUse":{"input":"1}"}}}"#,
+        &mut state,
+    );
+
+    // Assert: each delta carries an OpenAI-shape tool_calls entry
+    // with the same `index` (stable across deltas for one tool).
+    assert_eq!(c1.len(), 1);
+    let tcs1 = c1[0].choices[0].delta.tool_calls.as_ref().unwrap();
+    assert_eq!(tcs1[0]["index"], 0);
+    assert_eq!(tcs1[0]["id"], "tu_42");
+    assert_eq!(tcs1[0]["function"]["name"], "calc");
+    assert_eq!(tcs1[0]["function"]["arguments"], "{\"a\":");
+    let tcs2 = c2[0].choices[0].delta.tool_calls.as_ref().unwrap();
+    assert_eq!(tcs2[0]["index"], 0);
+    assert_eq!(tcs2[0]["function"]["arguments"], "1}");
+}
+
+#[test]
+fn reasoning_text_delta_emits_thinking_chunk() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let _ = run("contentBlockStart", r#"{"contentBlockIndex":0}"#, &mut state);
+    let chunks = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,
+            "delta":{"reasoningContent":{"text":"step 1"}}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert_eq!(chunks.len(), 1);
+    let delta = &chunks[0].choices[0].delta;
+    assert_eq!(delta.reasoning.as_deref(), Some("step 1"));
+    assert_eq!(delta.reasoning_details.len(), 1);
+    assert!(matches!(
+        delta.reasoning_details[0].kind,
+        ReasoningDetailKind::Text
+    ));
+}
+
+#[test]
+fn reasoning_signature_after_text_uses_same_detail_index() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let _ = run("contentBlockStart", r#"{"contentBlockIndex":0}"#, &mut state);
+    let text_chunks = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,
+            "delta":{"reasoningContent":{"text":"thinking"}}}"#,
+        &mut state,
+    );
+    let sig_chunks = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,
+            "delta":{"reasoningContent":{"signature":"sig"}}}"#,
+        &mut state,
+    );
+
+    // Assert: the same detail_index threads both deltas so client
+    // can attach signature to the right reasoning entry.
+    let text_idx = text_chunks[0].choices[0].delta.reasoning_details[0]
+        .index
+        .unwrap();
+    let sig_idx = sig_chunks[0].choices[0].delta.reasoning_details[0]
+        .index
+        .unwrap();
+    assert_eq!(text_idx, sig_idx);
+}
+
+#[test]
+fn message_stop_capture_then_metadata_emits_closing_chunk_with_finish_and_usage() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act: AWS event order is messageStop -> metadata. messageStop
+    // alone shouldn't yield a chunk (we hold the stop_reason).
+    let mid = run(
+        "messageStop",
+        r#"{"stopReason":"end_turn"}"#,
+        &mut state,
+    );
+    assert!(mid.is_empty());
+    let closing = run(
+        "metadata",
+        r#"{"usage":{"inputTokens":10,"outputTokens":5,"totalTokens":15},
+            "metrics":{"latencyMs":42}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert_eq!(closing.len(), 1);
+    assert_eq!(closing[0].choices[0].finish_reason.as_deref(), Some("stop"));
+    let u = closing[0].usage.as_ref().unwrap();
+    assert_eq!(u.prompt_tokens, Some(10));
+    assert_eq!(u.completion_tokens, Some(5));
+    assert_eq!(u.total_tokens, Some(15));
+}
+
+#[test]
+fn unknown_stop_reason_passes_through_on_closing_chunk() {
+    // Arrange: Converse-only stop_reason.
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let _ = run(
+        "messageStop",
+        r#"{"stopReason":"guardrail_intervened"}"#,
+        &mut state,
+    );
+    let closing = run(
+        "metadata",
+        r#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert_eq!(
+        closing[0].choices[0].finish_reason.as_deref(),
+        Some("guardrail_intervened")
+    );
+}
+
+#[test]
+fn model_stream_error_exception_surfaces_as_upstream_500() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let res = handle_converse_frame(
+        "test",
+        make_frame("modelStreamErrorException", r#"{"message":"glitch"}"#),
+        &mut state,
+    );
+
+    // Assert: maps to 500 (default for non-throttling/validation
+    // exceptions). The caller (router) re-classifies based on
+    // status; we only need to make sure it's an Upstream variant
+    // with the body propagated.
+    let err = res.unwrap_err();
+    match err {
+        Error::Upstream { status, body, .. } => {
+            assert_eq!(status, 500);
+            assert!(body.contains("glitch"), "body: {body}");
+        }
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[test]
+fn validation_exception_surfaces_as_upstream_400() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let res = handle_converse_frame(
+        "test",
+        make_frame("validationException", r#"{"message":"bad model"}"#),
+        &mut state,
+    );
+
+    // Assert
+    match res.unwrap_err() {
+        Error::Upstream { status, body, .. } => {
+            assert_eq!(status, 400);
+            assert!(body.contains("bad model"));
+        }
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[test]
+fn throttling_exception_surfaces_as_upstream_429() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let res = handle_converse_frame(
+        "test",
+        make_frame("throttlingException", r#"{"message":"slow down"}"#),
+        &mut state,
+    );
+
+    // Assert
+    match res.unwrap_err() {
+        Error::Upstream { status, .. } => assert_eq!(status, 429),
+        other => panic!("expected Upstream, got {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_event_type_is_skipped_not_errored() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let chunks = run("someBrandNewConverseEvent", "{}", &mut state);
+
+    // Assert
+    assert!(chunks.is_empty());
+}
+
+#[test]
+fn tool_call_index_is_stable_across_two_tool_blocks() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act: two tool_use blocks at indices 1 and 2 should get
+    // call_index 0 and 1 in canonical tool_calls.
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":1,
+            "start":{"toolUse":{"toolUseId":"a","name":"f1"}}}"#,
+        &mut state,
+    );
+    let c1 = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":1,"delta":{"toolUse":{"input":"x"}}}"#,
+        &mut state,
+    );
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":2,
+            "start":{"toolUse":{"toolUseId":"b","name":"f2"}}}"#,
+        &mut state,
+    );
+    let c2 = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":2,"delta":{"toolUse":{"input":"y"}}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert_eq!(
+        c1[0].choices[0].delta.tool_calls.as_ref().unwrap()[0]["index"],
+        0
+    );
+    assert_eq!(
+        c2[0].choices[0].delta.tool_calls.as_ref().unwrap()[0]["index"],
+        1
+    );
+}
