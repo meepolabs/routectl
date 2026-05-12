@@ -26,7 +26,7 @@ pub(crate) mod parts;
 pub mod request;
 pub mod response;
 pub mod sse;
-pub mod types;
+pub(crate) mod types;
 
 use sse::SseState;
 
