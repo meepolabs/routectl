@@ -186,16 +186,16 @@ pub struct BedrockConfig {
     /// `[bedrock] allowed_betas` TOML and cloned onto every Bedrock
     /// provider. routectl ships no const default -- AWS schema drift
     /// is operator-tracked. See `examples/bedrock.toml` for the
-    /// empirical 2026-05-12 baseline. Empty list means "no flags
-    /// survive filtering" (defense in depth; startup validation
-    /// rejects this state when a Bedrock provider is configured).
+    /// empirical 2026-05-12 baseline. Empty list = pass-through (no
+    /// filter applied), the discovery default.
     pub allowed_betas: Vec<String>,
     /// Bedrock-accepted top-level body fields. On Invoke this filters
     /// the Anthropic-shape body before send; on Converse it filters
     /// the `additionalModelRequestFields` bag. Sourced from
-    /// `[bedrock] allowed_body_fields` TOML. Empty list means
-    /// "drop everything" (defense in depth; startup validation
-    /// rejects this state when a Bedrock provider is configured).
+    /// `[bedrock] allowed_body_fields` TOML. Empty list = pass-through
+    /// (no filter applied). When non-empty, must include the routectl-
+    /// mandatory keys (`messages`, `anthropic_version`, `max_tokens`);
+    /// startup validation enforces this.
     pub allowed_body_fields: Vec<String>,
     /// Free-form fields merged into the request body. For `Invoke`,
     /// merged at the top level; for `Converse`, merged into
