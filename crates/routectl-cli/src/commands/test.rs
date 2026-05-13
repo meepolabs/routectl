@@ -14,11 +14,10 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
-    // Reject configs that use `kind = "bedrock"` without populating
-    // the operator-supplied `[bedrock]` allowlists. Mirrors the same
-    // check in `server::build_router_from_config` so `routectl test`
-    // surfaces the misconfiguration instead of producing a confusing
-    // 400 from AWS at request time.
+    // Surface incoherent `[bedrock]` config (e.g. populated
+    // `allowed_body_fields` missing routectl-mandatory keys) here
+    // instead of at first-request 400. Empty lists are pass-through
+    // and accepted; see `validate_bedrock_global_config`.
     validate_bedrock_global_config(&config)?;
 
     // Same BuildOptions path as `serve` so a `routectl test` run

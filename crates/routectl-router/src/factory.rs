@@ -27,14 +27,15 @@ use crate::config::{ProviderEntry, ReasoningDialect};
 
 /// Convenience wrapper that builds a provider with `BuildOptions::default()`.
 ///
-/// Note for Bedrock providers: the default `BuildOptions` carries empty
+/// Note for Bedrock providers: `BuildOptions::default()` carries empty
 /// `bedrock_allowed_betas` / `bedrock_allowed_body_fields` lists, which
-/// the per-provider `validate_bedrock_allowlists` guard rejects. Use
-/// `build_provider_with_options` and populate the lists from
-/// `[bedrock] allowed_betas` / `[bedrock] allowed_body_fields` -- see
-/// `examples/bedrock.toml` for the empirical baseline. routectl-cli
-/// callers (`server`, `commands::test`) already do this; only library
-/// consumers reaching for `build_provider` directly need to switch.
+/// puts both filters in pass-through mode -- routectl forwards every
+/// flag/field to AWS as-is. That is the correct discovery default; if
+/// you want filtering, populate the lists from
+/// `[bedrock] allowed_betas` / `[bedrock] allowed_body_fields` (see
+/// `examples/bedrock.toml`) and pass them via
+/// `build_provider_with_options`. routectl-cli callers (`server`,
+/// `commands::test`) do this automatically.
 pub async fn build_provider(
     name: &str,
     entry: &ProviderEntry,
@@ -56,13 +57,12 @@ pub struct BuildOptions {
     /// Bedrock-accepted `anthropic_beta` flags. Sourced from
     /// `[bedrock] allowed_betas` TOML and applied to every Bedrock
     /// provider. routectl ships no const default; AWS schema drift is
-    /// operator-tracked. Empty when no Bedrock provider is configured;
-    /// see `validate_bedrock_global_config` for the startup check that
-    /// rejects an empty list when one is.
+    /// operator-tracked. Empty list = pass-through (no filter applied).
     pub bedrock_allowed_betas: Vec<String>,
     /// Bedrock-accepted top-level body fields / Converse extras keys.
-    /// Sourced from `[bedrock] allowed_body_fields` TOML. Same
-    /// per-deployment shape as `bedrock_allowed_betas`.
+    /// Sourced from `[bedrock] allowed_body_fields` TOML. Empty list =
+    /// pass-through (no filter applied) -- the same discovery-mode
+    /// default as `bedrock_allowed_betas`.
     pub bedrock_allowed_body_fields: Vec<String>,
 }
 
