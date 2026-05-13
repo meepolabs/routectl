@@ -1,29 +1,38 @@
-# [bedrock] global section -- copy this into your config.toml when any
-# provider has `kind = "bedrock"`. routectl ships no built-in default
-# for either list below; AWS schema drift on the gated set is operator-
-# tracked, not release-bound. Without the section, every Bedrock
-# request 400s on the egress (forward-compat sweep entries from the
-# Anthropic ingress carry fields AWS does not accept).
+# [bedrock] global section -- copy this into your config.toml when you
+# want to gate which `anthropic_beta` flags and top-level body fields
+# routectl forwards to AWS Bedrock.
 #
-# Both lists below are the empirically verified baseline as of
+# Both lists below are OPTIONAL. routectl ships no built-in default;
+# AWS schema drift on the gated set is operator-tracked, not release-
+# bound. If you omit either list (or omit the entire [bedrock] section)
+# the corresponding filter runs in PASS-THROUGH mode -- routectl
+# forwards every flag/field as-is. This is the discovery-mode default:
+# bring up routectl, capture observed traffic via
+#
+#   ROUTECTL_LOG=routectl_providers::bedrock=trace ./routectl serve
+#
+# extract the field/flag names from the trace `body=...` lines, and
+# populate the lists with what your account expects.
+#
+# When you DO populate `allowed_body_fields`, startup validation
+# requires the routectl-mandatory keys (`messages`, `anthropic_version`,
+# `max_tokens`); a partial list silently breaks every Bedrock request,
+# so it surfaces as a clean Error::Config at startup.
+#
+# The lists below are the empirically verified baseline as of
 # 2026-05-12, derived from direct boto3 traffic against
 # `bedrock-runtime.us-west-2.amazonaws.com` (haiku-4-5 / sonnet-4-6 /
 # opus-4-7 -- identical results across all three; Bedrock has one
 # allowlist, not per-model). See `issues.md::INV-6` and `INV-7` for
 # the full table and rationale per rejected entry.
-#
-# Update these lists as your account's gating evolves -- no routectl
-# rebuild required. Startup validation rejects an empty list when any
-# provider has `kind = "bedrock"`, and rejects an `allowed_body_fields`
-# list missing the routectl-mandatory keys
-# (`anthropic_version`, `max_tokens`, `messages`).
 
 [bedrock]
 
 # AWS validates each anthropic_beta value independently and 400s the
 # entire request on the first unsupported flag. claude-code's TS SDK
 # ships up to ten betas via the `anthropic-beta` HTTP header; those
-# that are not on this list drop at DEBUG before send.
+# that are not on this list drop at DEBUG before send. Empty list (or
+# omitted field) = pass-through (no filtering).
 allowed_betas = [
   "context-1m-2025-08-07",
   "claude-code-20250219",
@@ -51,9 +60,11 @@ allowed_betas = [
 # `additionalModelRequestFields` keys (Converse). Forward-compat sweep
 # entries from the Anthropic ingress (e.g. `mcp_servers`, `diagnostics`,
 # `context_hint`, `speed`) are NOT on this list and drop at DEBUG
-# before send. Keep the routectl-mandatory keys
-# (`anthropic_version`, `max_tokens`, `messages`) -- startup validation
-# enforces this.
+# before send. When set, must include the routectl-mandatory keys
+# (`anthropic_version`, `max_tokens`, `messages`) -- startup
+# validation enforces this. Empty list (or omitted field) = pass-
+# through (no filtering); good for initial bring-up to observe what
+# fields get sent.
 allowed_body_fields = [
   "anthropic_version",
   "anthropic_beta",

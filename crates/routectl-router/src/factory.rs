@@ -357,9 +357,11 @@ fn validate_openai_responses_account_id(
 }
 
 /// Routectl-mandatory body fields: keys routectl writes into every
-/// Bedrock-Invoke body. If `[bedrock] allowed_body_fields` is missing
-/// any of these, the egress drops them on send and the upstream 400s
-/// the malformed body. Surfaces here as a clean startup error instead.
+/// Bedrock-Invoke body. If `[bedrock] allowed_body_fields` is non-empty
+/// AND missing any of these, the egress drops them on send and the
+/// upstream 400s the malformed body. Surfaces here as a clean startup
+/// error instead. (Skipped entirely when `allowed_body_fields` is
+/// empty -- that puts the filter in pass-through mode.)
 ///
 /// Keep in sync with `is_bedrock_invoke_managed_key` in
 /// `routectl-providers/src/bedrock/invoke.rs` -- that is the writer
@@ -367,33 +369,34 @@ fn validate_openai_responses_account_id(
 #[cfg(feature = "bedrock")]
 const BEDROCK_REQUIRED_BODY_FIELDS: &[&str] = &["anthropic_version", "max_tokens", "messages"];
 
+/// Validate the per-deployment Bedrock allowlists.
+///
+/// Empty lists are PASS-THROUGH mode -- no filter applies, so no
+/// validation is needed. The operator is in discovery mode (capturing
+/// observed traffic via `ROUTECTL_LOG=routectl_providers::bedrock=trace`
+/// to build their list) or has explicitly opted out of routectl-side
+/// filtering. Either way, validation is only meaningful when the
+/// operator has populated a non-empty list and we want to catch
+/// configurations that would silently break their requests.
+///
+/// When `allowed_body_fields` is non-empty, validate:
+///   - Routectl-mandatory keys (`messages`, `anthropic_version`,
+///     `max_tokens`) are present -- otherwise the egress drops a key
+///     routectl just wrote and the upstream 400s.
+///   - If any provider has a `[providers.X] anthropic_beta` floor,
+///     `anthropic_beta` is on the list -- otherwise the filter
+///     silently drops the operator-asserted always-send array.
 #[cfg(feature = "bedrock")]
 fn validate_bedrock_allowlists(
     has_provider_beta_floor: bool,
-    allowed_betas: &[String],
+    _allowed_betas: &[String],
     allowed_body_fields: &[String],
 ) -> Result<()> {
     use routectl_core::Error;
 
-    if allowed_betas.is_empty() {
-        return Err(Error::Config(
-            "[bedrock] allowed_betas is empty but at least one provider has \
-             kind = \"bedrock\". routectl ships no default; populate the \
-             list with the AWS-gated betas for your account. See \
-             examples/bedrock.toml for the empirical 2026-05-12 baseline."
-                .into(),
-        ));
-    }
-
+    // Pass-through mode: nothing to validate.
     if allowed_body_fields.is_empty() {
-        return Err(Error::Config(
-            "[bedrock] allowed_body_fields is empty but at least one \
-             provider has kind = \"bedrock\". routectl ships no default; \
-             populate the list with the AWS-accepted body fields for your \
-             account. See examples/bedrock.toml for the empirical 2026-05-12 \
-             baseline."
-                .into(),
-        ));
+        return Ok(());
     }
 
     let missing: Vec<&str> = BEDROCK_REQUIRED_BODY_FIELDS
@@ -405,7 +408,9 @@ fn validate_bedrock_allowlists(
         return Err(Error::Config(format!(
             "[bedrock] allowed_body_fields is missing routectl-mandatory keys \
              {missing:?}. Without these, every Bedrock request 400s on the \
-             egress. See examples/bedrock.toml for the full baseline."
+             egress. See examples/bedrock.toml for the full baseline; or \
+             remove `[bedrock] allowed_body_fields` entirely to disable \
+             filtering and run in discovery mode."
         )));
     }
 
@@ -423,18 +428,31 @@ fn validate_bedrock_allowlists(
     Ok(())
 }
 
-/// Reject configurations that wire a `kind = "bedrock"` provider
-/// without populating the operator-supplied `[bedrock] allowed_betas`
-/// and `[bedrock] allowed_body_fields` lists. routectl ships no
-/// const defaults for either surface (AWS schema drift is operator-
-/// tracked, not release-bound), so an empty list at startup means
-/// every flag/field drops on the egress and the upstream 400s every
-/// request -- a confusing failure mode that this guard converts into
-/// a clean `Error::Config` with a copy-paste hint to the empirical
-/// baseline in `examples/bedrock.toml`.
+/// Validate that `[bedrock]` allowlists are coherent with the
+/// configured providers. Returns Ok in two cases:
+///
+///   - No provider has `kind = "bedrock"` (no-op).
+///   - `[bedrock] allowed_body_fields` is empty (pass-through mode --
+///     routectl forwards the assembled body verbatim, so there is
+///     nothing to validate). This is the discovery-mode default:
+///     bring up routectl, observe traffic via
+///     `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then build
+///     `allowed_betas` / `allowed_body_fields` from what you see.
+///
+/// Returns Err only when the operator has populated a non-empty
+/// `allowed_body_fields` that:
+///
+///   - Is missing routectl-mandatory keys (`messages`,
+///     `anthropic_version`, `max_tokens`), which would silently break
+///     every Bedrock request.
+///   - Is missing `anthropic_beta` while a `[providers.X]` entry sets
+///     a `anthropic_beta` floor that the filter would then drop.
+///
+/// `allowed_betas` is independent: empty there just disables betas
+/// filtering, allowed there just gates which betas survive. No
+/// validation of `allowed_betas` shape is needed.
 ///
 /// Call once per process startup BEFORE building any providers.
-/// No-op when no Bedrock provider is configured.
 #[cfg(feature = "bedrock")]
 pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<()> {
     let mut bedrock_in_use = false;
@@ -557,28 +575,30 @@ mod bedrock_validation_tests {
     }
 
     #[test]
-    fn bedrock_provider_with_empty_allowed_betas_errors() {
-        // Arrange: provider needs Bedrock; allowed_betas missing.
+    fn bedrock_provider_with_empty_allowlists_is_pass_through() {
+        // Discovery mode: operator omits the [bedrock] section entirely.
+        // Validation passes; the filters run in pass-through mode so the
+        // operator can observe traffic via trace logs and build their
+        // list from what they see.
         let cfg = config_with(
             true,
             BedrockGlobalConfig {
                 allowed_betas: Vec::new(),
-                allowed_body_fields: baseline_fields(),
+                allowed_body_fields: Vec::new(),
             },
         );
 
-        // Act
-        let err = validate_bedrock_global_config(&cfg).unwrap_err();
+        let result = validate_bedrock_global_config(&cfg);
 
-        // Assert
-        let msg = err.to_string();
-        assert!(msg.contains("allowed_betas"), "msg: {msg}");
-        assert!(msg.contains("examples/bedrock.toml"), "msg: {msg}");
+        assert!(result.is_ok(), "expected pass-through Ok, got {result:?}");
     }
 
     #[test]
-    fn bedrock_provider_with_empty_allowed_body_fields_errors() {
-        // Arrange
+    fn bedrock_provider_with_only_allowed_betas_set_is_ok() {
+        // Operator chose to gate betas only; body-fields remain in
+        // pass-through mode. Validation should accept this -- the
+        // empty body-fields list short-circuits the required-keys
+        // check.
         let cfg = config_with(
             true,
             BedrockGlobalConfig {
@@ -587,12 +607,9 @@ mod bedrock_validation_tests {
             },
         );
 
-        // Act
-        let err = validate_bedrock_global_config(&cfg).unwrap_err();
+        let result = validate_bedrock_global_config(&cfg);
 
-        // Assert
-        let msg = err.to_string();
-        assert!(msg.contains("allowed_body_fields"), "msg: {msg}");
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 
     #[test]
