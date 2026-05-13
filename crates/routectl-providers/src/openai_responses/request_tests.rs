@@ -7,8 +7,8 @@
 use serde_json::{from_value, json, Value};
 
 use routectl_core::{
-    cache_control::CacheControl, ChatRequest, ContentPart, CustomTool, KnownContentPart,
-    Message, MessageContent, ReasoningConfig, Role, SystemBlock, SystemContent, ToolDef,
+    cache_control::CacheControl, ChatRequest, ContentPart, CustomTool, KnownContentPart, Message,
+    MessageContent, ReasoningConfig, Role, SystemBlock, SystemContent, ToolDef,
 };
 
 use super::translate;
@@ -264,10 +264,7 @@ fn assistant_tool_use_translates_to_function_call() {
 #[test]
 fn tool_role_translates_to_function_call_output() {
     // Arrange
-    let req = req_with(vec![
-        user_text("compute"),
-        tool_message("call_42", "42"),
-    ]);
+    let req = req_with(vec![user_text("compute"), tool_message("call_42", "42")]);
 
     // Act
     let v = translate_to_json(&cfg(), &req);
@@ -645,10 +642,7 @@ fn tool_message_parts(call_id: &str, parts: Vec<ContentPart>) -> Message {
 #[test]
 fn tool_role_text_only_translates_to_string_output() {
     // Arrange: single text part -- common path.
-    let req = req_with(vec![
-        user_text("run"),
-        tool_message("call_1", "result"),
-    ]);
+    let req = req_with(vec![user_text("run"), tool_message("call_1", "result")]);
 
     // Act
     let v = translate_to_json(&cfg(), &req);
@@ -671,7 +665,10 @@ fn tool_role_with_image_part_translates_to_items_array() {
         }),
         cache_control: None,
     })];
-    let req = req_with(vec![user_text("screenshot"), tool_message_parts("call_9", parts)]);
+    let req = req_with(vec![
+        user_text("screenshot"),
+        tool_message_parts("call_9", parts),
+    ]);
 
     // Act
     let v = translate_to_json(&cfg(), &req);
@@ -703,7 +700,10 @@ fn tool_role_mixed_text_and_image_emits_items_array() {
             cache_control: None,
         }),
     ];
-    let req = req_with(vec![user_text("screenshot"), tool_message_parts("call_7", parts)]);
+    let req = req_with(vec![
+        user_text("screenshot"),
+        tool_message_parts("call_7", parts),
+    ]);
 
     // Act
     let v = translate_to_json(&cfg(), &req);

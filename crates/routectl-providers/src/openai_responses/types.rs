@@ -163,8 +163,12 @@ pub(crate) enum FunctionCallOutputContentItem {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ResponsesContentItem {
-    InputText { text: String },
-    OutputText { text: String },
+    InputText {
+        text: String,
+    },
+    OutputText {
+        text: String,
+    },
     /// Image block on a user message. `image_url` is either a
     /// `data:<media_type>;base64,<data>` URI (for base64 sources) or an
     /// https URL (for url sources). `detail` is forwarded verbatim when

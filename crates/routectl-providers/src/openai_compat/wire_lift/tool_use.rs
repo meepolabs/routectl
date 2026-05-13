@@ -57,10 +57,7 @@ pub fn lift(
     Ok(())
 }
 
-fn rewrite_assistant_message(
-    id: &str,
-    msg: &mut Map<String, Value>,
-) -> Result<()> {
+fn rewrite_assistant_message(id: &str, msg: &mut Map<String, Value>) -> Result<()> {
     let parts = match msg.get("content").and_then(|c| c.as_array()) {
         Some(p) => p.clone(),
         None => return Ok(()),
@@ -213,13 +210,17 @@ mod tests {
 
         // Assert
         let assistant = &obj["messages"][1];
-        assert!(assistant["content"].is_null(), "content should be null when only tool_use");
+        assert!(
+            assistant["content"].is_null(),
+            "content should be null when only tool_use"
+        );
         let tcs = assistant["tool_calls"].as_array().unwrap();
         assert_eq!(tcs.len(), 1);
         assert_eq!(tcs[0]["id"], "toolu_01");
         assert_eq!(tcs[0]["type"], "function");
         assert_eq!(tcs[0]["function"]["name"], "calculator");
-        let args: Value = serde_json::from_str(tcs[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        let args: Value =
+            serde_json::from_str(tcs[0]["function"]["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(args, json!({"expr": "2+2"}));
     }
 

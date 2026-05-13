@@ -743,7 +743,10 @@ async fn legacy_output_format_preserves_existing_output_config_effort() {
     assert_eq!(resp.status(), 200);
     let received = upstream.received_requests().await.unwrap();
     let up: Value = serde_json::from_slice(&received[0].body).unwrap();
-    assert!(up.get("output_format").is_none(), "legacy field leaked: {up}");
+    assert!(
+        up.get("output_format").is_none(),
+        "legacy field leaked: {up}"
+    );
     let oc = up.get("output_config").expect("output_config present");
     assert_eq!(oc["effort"], "high");
     assert_eq!(oc["format"]["type"], "json_schema");
@@ -786,7 +789,10 @@ async fn both_legacy_and_nested_present_drops_legacy_with_warn() {
     assert_eq!(resp.status(), 200);
     let received = upstream.received_requests().await.unwrap();
     let up: Value = serde_json::from_slice(&received[0].body).unwrap();
-    assert!(up.get("output_format").is_none(), "legacy field leaked: {up}");
+    assert!(
+        up.get("output_format").is_none(),
+        "legacy field leaked: {up}"
+    );
     let format = up
         .get("output_config")
         .and_then(|oc| oc.get("format"))
@@ -876,11 +882,7 @@ async fn anthropic_ingress_forwards_speed() {
 async fn anthropic_ingress_forwards_diagnostics() {
     // Diagnostic feedback object emitted on the `repl_main_thread`
     // path when the prompt-cache diagnostics flag is active.
-    assert_field_reaches_upstream(
-        "diagnostics",
-        json!({"previous_message_id": "msg_01ABC"}),
-    )
-    .await;
+    assert_field_reaches_upstream("diagnostics", json!({"previous_message_id": "msg_01ABC"})).await;
 }
 
 #[tokio::test]
@@ -955,9 +957,10 @@ async fn anthropic_beta_http_header_forwarded_to_upstream() {
     assert_eq!(resp.status(), 200);
     let received = upstream.received_requests().await.unwrap();
     let up: Value = serde_json::from_slice(&received[0].body).unwrap();
-    let betas = up.get("anthropic_beta").and_then(|v| v.as_array()).expect(
-        "inbound anthropic-beta header was not lifted to upstream body",
-    );
+    let betas = up
+        .get("anthropic_beta")
+        .and_then(|v| v.as_array())
+        .expect("inbound anthropic-beta header was not lifted to upstream body");
     let names: Vec<&str> = betas.iter().filter_map(|v| v.as_str()).collect();
     assert!(
         names.contains(&"context-management-2025-06-27"),
@@ -1171,7 +1174,11 @@ async fn capture_openai_egress_body(anthropic_body: Value) -> Value {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "ingress rejected: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "ingress rejected: {}",
+        resp.status()
+    );
     let received = upstream.received_requests().await.unwrap();
     serde_json::from_slice(&received[0].body).unwrap()
 }
@@ -1205,7 +1212,10 @@ async fn cross_anthropic_stop_sequences_renamed_to_stop() {
         "stop_sequences": ["</block>"]
     }))
     .await;
-    assert!(up.get("stop_sequences").is_none(), "stop_sequences leaked: {up}");
+    assert!(
+        up.get("stop_sequences").is_none(),
+        "stop_sequences leaked: {up}"
+    );
     assert_eq!(up["stop"], json!(["</block>"]));
 }
 
@@ -1233,7 +1243,10 @@ async fn cross_anthropic_tools_translated_to_openai_function_shape() {
     let tools = up["tools"].as_array().expect("tools array on egress body");
     assert_eq!(tools.len(), 1);
     let t = &tools[0];
-    assert_eq!(t["type"], "function", "missing OpenAI `type:function` discriminant: {t}");
+    assert_eq!(
+        t["type"], "function",
+        "missing OpenAI `type:function` discriminant: {t}"
+    );
     assert_eq!(t["function"]["name"], "calculator");
     assert_eq!(
         t["function"]["parameters"]["properties"]["expr"]["type"],
@@ -1304,7 +1317,9 @@ async fn cross_anthropic_image_block_translated_to_openai_image_url() {
         img_part["type"], "image_url",
         "Anthropic image shape leaked through to OpenAI host: {img_part}"
     );
-    let url = img_part["image_url"]["url"].as_str().expect("image_url.url");
+    let url = img_part["image_url"]["url"]
+        .as_str()
+        .expect("image_url.url");
     assert!(
         url.starts_with("data:image/png;base64,"),
         "image_url not data URL: {url}"
@@ -1348,9 +1363,7 @@ async fn cross_anthropic_assistant_tool_use_translated_to_openai_tool_calls() {
     let tool_calls = assistant
         .get("tool_calls")
         .and_then(|v| v.as_array())
-        .expect(&format!(
-            "assistant has no tool_calls field; OpenAI host will not see the call. msg={assistant}"
-        ));
+        .unwrap_or_else(|| panic!("assistant has no tool_calls field; OpenAI host will not see the call. msg={assistant}"));
     assert_eq!(tool_calls.len(), 1);
     let tc = &tool_calls[0];
     assert_eq!(tc["id"], "toolu_01ABC");
@@ -1445,9 +1458,9 @@ async fn cross_anthropic_output_config_format_translates_to_openai_response_form
         up.get("output_config").is_none(),
         "Anthropic output_config leaked into OpenAI body: {up}"
     );
-    let rf = up
-        .get("response_format")
-        .expect(&format!("response_format missing -- structured output silently dropped on OpenAI host: {up}"));
+    let rf = up.get("response_format").unwrap_or_else(|| {
+        panic!("response_format missing -- structured output silently dropped on OpenAI host: {up}")
+    });
     assert_eq!(rf["type"], "json_schema");
 }
 
@@ -1515,7 +1528,7 @@ async fn cross_anthropic_multi_turn_tool_use_translates_to_openai_tool_round_tri
     assert_eq!(msgs[1]["content"], "I'll check");
     let tcs = msgs[1]["tool_calls"]
         .as_array()
-        .expect(&format!("assistant missing tool_calls: {}", msgs[1]));
+        .unwrap_or_else(|| panic!("assistant missing tool_calls: {}", msgs[1]));
     assert_eq!(tcs.len(), 1);
     assert_eq!(tcs[0]["id"], "toolu_X");
     assert_eq!(tcs[0]["type"], "function");
@@ -1600,13 +1613,11 @@ async fn cross_response_openai_tool_calls_become_anthropic_tool_use_blocks() {
     let body: Value = resp.json().await.unwrap();
     let content = body["content"]
         .as_array()
-        .expect(&format!("response content not array: {body}"));
+        .unwrap_or_else(|| panic!("response content not array: {body}"));
     let tool_use = content
         .iter()
         .find(|b| b["type"] == "tool_use")
-        .expect(&format!(
-            "no tool_use block on Anthropic response; claude-code won't see the tool call. body={body}"
-        ));
+        .unwrap_or_else(|| panic!("no tool_use block on Anthropic response; claude-code won't see the tool call. body={body}"));
     assert_eq!(tool_use["id"], "call_01ABC");
     assert_eq!(tool_use["name"], "calculator");
     assert_eq!(tool_use["input"], json!({"expr": "2+2"}));
@@ -2018,13 +2029,24 @@ async fn converse_request_body_has_camel_case_inference_config() {
         ic.is_object(),
         "expected inferenceConfig object, got: {body}"
     );
-    assert_eq!(ic["maxTokens"], json!(64), "inferenceConfig.maxTokens: {ic}");
-    assert_eq!(ic["temperature"], json!(0.7), "inferenceConfig.temperature: {ic}");
+    assert_eq!(
+        ic["maxTokens"],
+        json!(64),
+        "inferenceConfig.maxTokens: {ic}"
+    );
+    assert_eq!(
+        ic["temperature"],
+        json!(0.7),
+        "inferenceConfig.temperature: {ic}"
+    );
 
     // Assert: system is an array of {{text}} blocks.
     let system = body["system"].as_array().expect("system must be an array");
     assert_eq!(system.len(), 1, "expected one system block: {system:?}");
-    assert_eq!(system[0]["text"], "you are helpful", "system block text: {system:?}");
+    assert_eq!(
+        system[0]["text"], "you are helpful",
+        "system block text: {system:?}"
+    );
 
     // Assert: messages array present with one user turn.
     let msgs = body["messages"].as_array().expect("messages array");
@@ -2086,8 +2108,13 @@ async fn converse_request_includes_tool_config_for_tool_defs() {
 
     // Assert: toolConfig present with toolSpec shape.
     let tool_config = &body["toolConfig"];
-    assert!(tool_config.is_object(), "toolConfig must be present: {body}");
-    let tools = tool_config["tools"].as_array().expect("toolConfig.tools array");
+    assert!(
+        tool_config.is_object(),
+        "toolConfig must be present: {body}"
+    );
+    let tools = tool_config["tools"]
+        .as_array()
+        .expect("toolConfig.tools array");
     assert_eq!(tools.len(), 1, "expected one tool");
     let spec = &tools[0]["toolSpec"];
     assert_eq!(spec["name"], "get_weather", "toolSpec.name: {spec}");
@@ -2099,8 +2126,8 @@ async fn converse_request_includes_tool_config_for_tool_defs() {
 
 #[tokio::test]
 async fn converse_response_body_decodes_to_canonical_chat_response() {
-    use routectl_providers::bedrock::converse;
     use routectl_core::MessageContent;
+    use routectl_providers::bedrock::converse;
 
     // Arrange: a minimal AWS Converse response (text-only, end_turn).
     let raw_response = json!({
@@ -2183,10 +2210,13 @@ async fn converse_response_tool_use_decodes_to_canonical() {
         .as_ref()
         .expect("tool_calls must be present");
     assert_eq!(tool_calls.len(), 1, "expected one tool call");
-    assert_eq!(tool_calls[0]["id"], "tu_42", "tool call id: {}", tool_calls[0]);
     assert_eq!(
-        tool_calls[0]["function"]["name"],
-        "get_weather",
+        tool_calls[0]["id"], "tu_42",
+        "tool call id: {}",
+        tool_calls[0]
+    );
+    assert_eq!(
+        tool_calls[0]["function"]["name"], "get_weather",
         "tool call function.name: {}",
         tool_calls[0]
     );

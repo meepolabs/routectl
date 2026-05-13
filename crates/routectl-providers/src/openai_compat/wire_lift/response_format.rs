@@ -212,7 +212,10 @@ mod tests {
         let req = req_with_extras(Some(extras));
         let mut obj = Map::new();
         // Simulate a careless dialect or merge that left it on the body.
-        obj.insert("output_config".into(), json!({"format": {"type": "json_object"}}));
+        obj.insert(
+            "output_config".into(),
+            json!({"format": {"type": "json_object"}}),
+        );
 
         // Act
         lift("test", &mut obj, &req, false).unwrap();

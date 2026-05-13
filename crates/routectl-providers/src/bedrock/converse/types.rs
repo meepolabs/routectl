@@ -122,6 +122,7 @@ pub(crate) struct ConverseMessage {
 /// serde_json::Value the operator supplied.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
+#[allow(dead_code)] // Other(Value) is the forward-compat passthrough variant
 pub(crate) enum ConverseContentBlock {
     Text {
         text: String,
@@ -398,7 +399,9 @@ mod tests {
     #[test]
     fn tool_choice_auto_serializes_to_auto_with_empty_object() {
         // Arrange
-        let tc = ConverseToolChoice::Auto { auto: EmptyObject {} };
+        let tc = ConverseToolChoice::Auto {
+            auto: EmptyObject {},
+        };
 
         // Act
         let v = serde_json::to_value(&tc).unwrap();
@@ -410,7 +413,9 @@ mod tests {
     #[test]
     fn tool_choice_any_serializes_to_any_with_empty_object() {
         // Arrange
-        let tc = ConverseToolChoice::Any { any: EmptyObject {} };
+        let tc = ConverseToolChoice::Any {
+            any: EmptyObject {},
+        };
 
         // Act
         let v = serde_json::to_value(&tc).unwrap();

@@ -228,9 +228,10 @@ pub enum ProviderEntry {
     },
     /// OpenAI Responses API provider. Three auth surfaces (CG.A wires
     /// the first; CG.D/E land the others):
-    ///   - `chatgpt-oauth`: ChatGPT subscription JWT.
-    ///   - `api-key`: standard OpenAI API key.
-    ///   - `bedrock-mantle`: AWS Mantle proxy over SigV4.
+    /// - `chatgpt-oauth`: ChatGPT subscription JWT.
+    /// - `api-key`: standard OpenAI API key.
+    /// - `bedrock-mantle`: AWS Mantle proxy over SigV4.
+    ///
     /// `base_url` is optional: when unset, the factory picks the
     /// auth_kind-appropriate default at provider build time.
     #[cfg(feature = "openai-responses")]
@@ -405,7 +406,9 @@ impl ProviderEntry {
 
     pub fn with_runtime(mut self, rt: ProviderRuntimePolicy) -> Self {
         match &mut self {
-            Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => *runtime = rt,
+            Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => {
+                *runtime = rt
+            }
             #[cfg(feature = "bedrock")]
             Self::Bedrock { runtime, .. } => *runtime = rt,
             #[cfg(feature = "openai-responses")]
