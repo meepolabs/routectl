@@ -31,6 +31,10 @@ allowed_betas = [
   "context-management-2025-06-27",
   "effort-2025-11-24",
   "fine-grained-tool-streaming-2025-05-14",
+  # Capability-expanding betas. AWS account gating still controls the
+  # actual enablement; including these here only declares "if AWS
+  # gates them on, allow them through routectl." Verify your account
+  # has the corresponding capabilities enabled before relying on them.
   "computer-use-2025-01-24",
   "computer-use-2024-10-22",
   "mcp-client-2025-04-04",
