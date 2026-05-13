@@ -31,8 +31,8 @@ use routectl_core::{
 };
 
 use super::response_types::{
-    IncompleteDetails, ReasoningContent, ReasoningSummary, ResponseOutputItem, ResponsesOutputContent,
-    ResponsesResponse, ResponsesUsage,
+    IncompleteDetails, ReasoningContent, ReasoningSummary, ResponseOutputItem,
+    ResponsesOutputContent, ResponsesResponse, ResponsesUsage,
 };
 use super::OPENAI_RESPONSES_FORMAT;
 
@@ -47,7 +47,11 @@ pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<Ch
     let (text, reasoning_details, tool_calls, parts, has_function_call) =
         walk_output(provider_id, &body.output)?;
 
-    let finish_reason = map_finish_reason(status.as_deref(), incomplete_reason.as_deref(), has_function_call);
+    let finish_reason = map_finish_reason(
+        status.as_deref(),
+        incomplete_reason.as_deref(),
+        has_function_call,
+    );
     let usage = body.usage.as_ref().map(translate_usage);
 
     let content = select_message_content(text, parts);
@@ -93,10 +97,17 @@ pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<Ch
 ///   - parts vector with every block in arrival order
 ///   - whether at least one function_call was present (drives the
 ///     `finish_reason` mapping above)
+#[allow(clippy::type_complexity)] // multi-tuple return matches the wire walk; alias would obscure intent
 fn walk_output(
     provider_id: &str,
     output: &[ResponseOutputItem],
-) -> Result<(String, Vec<ReasoningDetail>, Option<Vec<Value>>, Vec<ContentPart>, bool)> {
+) -> Result<(
+    String,
+    Vec<ReasoningDetail>,
+    Option<Vec<Value>>,
+    Vec<ContentPart>,
+    bool,
+)> {
     let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_details: Vec<ReasoningDetail> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
@@ -256,7 +267,7 @@ fn walk_output(
                 // `ContentPart::Other.extras` so a future Anthropic /
                 // Bedrock egress (or a Responses round-trip that
                 // re-emits the same shape) can reconstruct the block.
-                let (type_tag, extras) = split_other_value(&raw);
+                let (type_tag, extras) = split_other_value(raw);
                 tracing::debug!(
                     provider = provider_id,
                     type_tag = %type_tag,
@@ -277,7 +288,13 @@ fn walk_output(
     } else {
         Some(tool_calls)
     };
-    Ok((text, reasoning_details, tool_calls_opt, parts, has_function_call))
+    Ok((
+        text,
+        reasoning_details,
+        tool_calls_opt,
+        parts,
+        has_function_call,
+    ))
 }
 
 /// Choose `MessageContent::Text` over `Parts` when every emitted part
@@ -286,9 +303,9 @@ fn walk_output(
 /// still collapses to Text here. Tool calls + refusals + unknown items
 /// force Parts so they survive end-to-end.
 fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageContent {
-    let only_text = parts.iter().all(|p| {
-        matches!(p, ContentPart::Known(KnownContentPart::Text { .. }))
-    });
+    let only_text = parts
+        .iter()
+        .all(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })));
     if only_text {
         MessageContent::Text(text)
     } else {

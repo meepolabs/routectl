@@ -249,8 +249,7 @@ fn handle_converse_frame(
             // wire shape doesn't have a "role assigned" event. We still
             // parse the payload so a malformed start surfaces as a
             // streaming error rather than a silent skip.
-            let _: StreamMessageStart =
-                parse_payload(provider_id, payload, "messageStart")?;
+            let _: StreamMessageStart = parse_payload(provider_id, payload, "messageStart")?;
             Ok(vec![])
         }
         "contentBlockStart" => {
@@ -271,8 +270,7 @@ fn handle_converse_frame(
             Ok(vec![])
         }
         "messageStop" => {
-            let ev: StreamMessageStop =
-                parse_payload(provider_id, payload, "messageStop")?;
+            let ev: StreamMessageStop = parse_payload(provider_id, payload, "messageStop")?;
             // Capture stop_reason for the metadata-or-EOS chunk. AWS
             // emits messageStop before metadata, so we hold it.
             state.pending_stop_reason = ev.stop_reason;
@@ -364,9 +362,10 @@ fn handle_block_delta(
                 _ => {
                     let di = state.next_detail_index;
                     state.next_detail_index += 1;
-                    state
-                        .blocks
-                        .insert(ev.content_block_index, BlockState::Reasoning { detail_index: di });
+                    state.blocks.insert(
+                        ev.content_block_index,
+                        BlockState::Reasoning { detail_index: di },
+                    );
                     di
                 }
             };
@@ -391,7 +390,10 @@ fn handle_block_delta(
     }
 }
 
-fn build_closing_chunk(state: &mut ConverseStreamState, usage: Option<&ConverseUsage>) -> ChatChunk {
+fn build_closing_chunk(
+    state: &mut ConverseStreamState,
+    usage: Option<&ConverseUsage>,
+) -> ChatChunk {
     let finish_reason = state
         .pending_stop_reason
         .take()
@@ -582,7 +584,9 @@ fn decode_exception_event(provider_id: &str, event_type: &str, payload: &[u8]) -
 }
 
 fn truncate_excerpt(s: &str) -> String {
-    s.chars().take(routectl_core::MAX_LOG_BODY_EXCERPT).collect()
+    s.chars()
+        .take(routectl_core::MAX_LOG_BODY_EXCERPT)
+        .collect()
 }
 
 fn header_str<'a>(message: &'a Message, name: &str) -> Option<&'a str> {

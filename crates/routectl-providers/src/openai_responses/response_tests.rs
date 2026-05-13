@@ -125,10 +125,7 @@ fn response_status_completed_with_function_call_maps_to_finish_tool_calls() {
         }]
     });
     let resp = parse(body);
-    assert_eq!(
-        resp.choices[0].finish_reason.as_deref(),
-        Some("tool_calls")
-    );
+    assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("tool_calls"));
 }
 
 #[test]
@@ -192,7 +189,9 @@ fn response_unknown_output_item_passes_through_as_other() {
         MessageContent::Parts(parts) => {
             assert_eq!(parts.len(), 2);
             match &parts[0] {
-                ContentPart::Other { type_tag, extras, .. } => {
+                ContentPart::Other {
+                    type_tag, extras, ..
+                } => {
                     assert_eq!(type_tag, "web_search_call");
                     assert_eq!(extras.get("id").and_then(|v| v.as_str()), Some("ws_1"));
                 }
@@ -245,12 +244,11 @@ fn response_mixed_parts_keeps_message_content_parts() {
         MessageContent::Parts(parts) => {
             assert_eq!(parts.len(), 2);
             match &parts[1] {
-                ContentPart::Other { type_tag, extras, .. } => {
+                ContentPart::Other {
+                    type_tag, extras, ..
+                } => {
                     assert_eq!(type_tag, "refusal");
-                    assert_eq!(
-                        extras.get("refusal").and_then(|v| v.as_str()),
-                        Some("no")
-                    );
+                    assert_eq!(extras.get("refusal").and_then(|v| v.as_str()), Some("no"));
                 }
                 other => panic!("expected Other, got {other:?}"),
             }
@@ -288,9 +286,7 @@ fn response_function_call_arguments_invalid_json_preserved_as_string() {
             let tu = parts
                 .iter()
                 .find_map(|p| match p {
-                    ContentPart::Known(KnownContentPart::ToolUse { input, .. }) => {
-                        Some(input)
-                    }
+                    ContentPart::Known(KnownContentPart::ToolUse { input, .. }) => Some(input),
                     _ => None,
                 })
                 .expect("ToolUse part present");
@@ -361,7 +357,9 @@ fn response_unknown_output_item_preserves_value() {
             let other = parts
                 .iter()
                 .find_map(|p| match p {
-                    ContentPart::Other { type_tag, extras, .. } => Some((type_tag, extras)),
+                    ContentPart::Other {
+                        type_tag, extras, ..
+                    } => Some((type_tag, extras)),
                     _ => None,
                 })
                 .expect("Other part present");

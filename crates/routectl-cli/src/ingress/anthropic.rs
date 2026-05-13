@@ -267,9 +267,7 @@ fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatReques
     let mut all: Vec<String> = req.anthropic_beta.clone();
     for hv in headers.get_all("anthropic-beta").iter() {
         let Ok(s) = hv.to_str() else {
-            tracing::warn!(
-                "anthropic ingress: anthropic-beta header is not valid UTF-8; ignoring"
-            );
+            tracing::warn!("anthropic ingress: anthropic-beta header is not valid UTF-8; ignoring");
             continue;
         };
         for piece in s.split(',') {
@@ -295,7 +293,10 @@ fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatReques
 /// operator sees the conflict. Otherwise rewrite the legacy field
 /// into the nested form, preserving any `output_config.effort` the
 /// caller already set.
-fn merge_output_format(output_config: Option<Value>, output_format: Option<Value>) -> Option<Value> {
+fn merge_output_format(
+    output_config: Option<Value>,
+    output_format: Option<Value>,
+) -> Option<Value> {
     let Some(legacy) = output_format else {
         return output_config;
     };

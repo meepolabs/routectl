@@ -4,10 +4,12 @@
 //!
 //! - `ChatgptOauth` (wired in the relevant stage): the ChatGPT subscription surface
 //!   at `https://chatgpt.com/backend-api/codex`. Injects:
-//!       Authorization: Bearer <jwt>
-//!       ChatGPT-Account-Id: <uuid>
-//!       originator: <cfg.originator or "codex_cli_rs">
-//!       User-Agent:  <cfg.user_agent or "routectl/<ver> codex-cli">
+//!   ```text
+//!   Authorization: Bearer <jwt>
+//!   ChatGPT-Account-Id: <uuid>
+//!   originator: <cfg.originator or "codex_cli_rs">
+//!   User-Agent:  <cfg.user_agent or "routectl/<ver> codex-cli">
+//!   ```
 //!   The originator and ChatGPT-Account-Id headers mirror codex's
 //!   `default_client.rs::default_headers` and
 //!   `backend-client/src/client.rs::headers`.
@@ -45,10 +47,7 @@ pub(crate) fn default_user_agent() -> String {
 /// Apply auth headers to an in-flight `RequestBuilder` per
 /// `cfg.auth_kind`. Returns the modified builder on success or an
 /// Error for the deferred variants.
-pub(crate) fn apply(
-    rb: RequestBuilder,
-    cfg: &OpenAiResponsesConfig,
-) -> Result<RequestBuilder> {
+pub(crate) fn apply(rb: RequestBuilder, cfg: &OpenAiResponsesConfig) -> Result<RequestBuilder> {
     match cfg.auth_kind {
         AuthKind::ChatgptOauth => Ok(apply_chatgpt_oauth(rb, cfg)),
         AuthKind::ApiKey => Ok(apply_api_key(rb, cfg)),

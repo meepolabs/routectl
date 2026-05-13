@@ -44,4 +44,3 @@ pub trait Provider: Send + Sync {
     /// Streaming completion. Each yielded chunk is already normalized.
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>>;
 }
-

@@ -98,9 +98,7 @@ fn translate_tool_choice_object(map: &serde_json::Map<String, Value>) -> Option<
 
     let name = extract_tool_name(map)?;
     if name.is_empty() {
-        tracing::warn!(
-            "tool_choice missing or invalid name; dropping field on Responses egress"
-        );
+        tracing::warn!("tool_choice missing or invalid name; dropping field on Responses egress");
         return None;
     }
     // Flat Responses shape: {"type":"function","name":"X"}

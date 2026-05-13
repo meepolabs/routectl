@@ -3,20 +3,20 @@
 //! Sibling of `types.rs` (which carries the Serialize-only request
 //! shapes). Splitting the deserialize-only types here keeps each file
 //! under the 800-line cap and makes ownership obvious:
-//!   - `types.rs`           -- request body (egress -> upstream)
-//!   - `response_types.rs`  -- response body + SSE event payloads
-//!                             (upstream -> ingress)
+//! - `types.rs`           -- request body (egress -> upstream)
+//! - `response_types.rs`  -- response body + SSE event payloads
+//!   (upstream -> ingress)
 //!
 //! Reference:
-//!   - `codex-rs/codex-api/src/common.rs` -- ResponsesResponse +
-//!     ResponseCompleted shapes.
-//!   - `codex-rs/codex-api/src/sse/responses.rs:179-192` -- the
-//!     `ResponsesStreamEvent` flat-schema shape (codex deserializes
-//!     every Responses SSE event into the same struct with all fields
-//!     optional and dispatches on `kind`/`type`).
-//!   - `codex-rs/app-server-protocol/schema/typescript/ResponseItem.ts`
-//!     -- per-item-type schemas (reasoning, message, function_call,
-//!     function_call_output).
+//! - `codex-rs/codex-api/src/common.rs` -- ResponsesResponse +
+//!   ResponseCompleted shapes.
+//! - `codex-rs/codex-api/src/sse/responses.rs:179-192` -- the
+//!   `ResponsesStreamEvent` flat-schema shape (codex deserializes
+//!   every Responses SSE event into the same struct with all fields
+//!   optional and dispatches on `kind`/`type`).
+//! - `codex-rs/app-server-protocol/schema/typescript/ResponseItem.ts`
+//!   -- per-item-type schemas (reasoning, message, function_call,
+//!   function_call_output).
 //!
 //! All types tolerate missing fields (`#[serde(default)]`) so a
 //! minimal upstream reply parses cleanly. Forward compat: every
@@ -76,17 +76,15 @@ pub(crate) struct IncompleteDetails {
 /// custom Deserialize impl (see below) so the `Other` variant can
 /// preserve the full raw JSON for forward-compat egress passthrough.
 ///
-///   - `message`        -- assistant content (text or refusal)
-///   - `reasoning`      -- chain-of-thought summary + optional
-///                         encrypted_content signature
-///   - `function_call`  -- tool invocation
-///   - `Other(Value)`   -- forward compat (function_call_output on the
-///                         response side, future custom_tool_call,
-///                         web_search, mcp_call, etc.). Carries the
-///                         original JSON value verbatim so the
-///                         response translator can lift the `type` tag
-///                         into `ContentPart::Other.type_tag` and the
-///                         remaining fields into `extras`.
+/// - `message`        -- assistant content (text or refusal)
+/// - `reasoning`      -- chain-of-thought summary + optional
+///   encrypted_content signature
+/// - `function_call`  -- tool invocation
+/// - `Other(Value)`   -- forward compat (function_call_output on the
+///   response side, future custom_tool_call, web_search, mcp_call,
+///   etc.). Carries the original JSON value verbatim so the response
+///   translator can lift the `type` tag into `ContentPart::Other.type_tag`
+///   and the remaining fields into `extras`.
 ///
 /// `#[allow(dead_code)]` on the wire-only fields (id, role, status)
 /// because they're deserialized for forward-compat round-trip but
@@ -148,8 +146,8 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 // type is still an error (the translator depends on
                 // typed fields), but UNKNOWN types fall to Other and
                 // preserve their JSON.
-                let m: MessageItemPayload = serde_json::from_value(value)
-                    .map_err(serde::de::Error::custom)?;
+                let m: MessageItemPayload =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(ResponseOutputItem::Message {
                     id: m.id,
                     role: m.role,
@@ -158,8 +156,8 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 })
             }
             "reasoning" => {
-                let r: ReasoningItemPayload = serde_json::from_value(value)
-                    .map_err(serde::de::Error::custom)?;
+                let r: ReasoningItemPayload =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(ResponseOutputItem::Reasoning {
                     id: r.id,
                     summary: r.summary,
@@ -169,8 +167,8 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 })
             }
             "function_call" => {
-                let f: FunctionCallItemPayload = serde_json::from_value(value)
-                    .map_err(serde::de::Error::custom)?;
+                let f: FunctionCallItemPayload =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(ResponseOutputItem::FunctionCall {
                     id: f.id,
                     call_id: f.call_id,
@@ -270,13 +268,12 @@ pub(crate) enum ReasoningSummary {
 
 /// One content block on a `Reasoning` output item.
 ///
-///   - `reasoning_text`      -- visible chain-of-thought text
-///   - `text`                -- alias for `reasoning_text` emitted by
-///                              some Responses-API model variants
-///                              (codex `protocol/src/models.rs:1198-
-///                              1203` documents both tags coexisting
-///                              on the `ReasoningItemContent` union)
-///   - `reasoning_encrypted` -- safety-redacted reasoning
+/// - `reasoning_text`      -- visible chain-of-thought text
+/// - `text`                -- alias for `reasoning_text` emitted by
+///   some Responses-API model variants (codex
+///   `protocol/src/models.rs:1198-1203` documents both tags coexisting
+///   on the `ReasoningItemContent` union)
+/// - `reasoning_encrypted` -- safety-redacted reasoning
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ReasoningContent {
@@ -501,7 +498,10 @@ mod tests {
         // translator can lift the type tag and extras.
         match &resp.output[0] {
             ResponseOutputItem::Other(v) => {
-                assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("web_search_call"));
+                assert_eq!(
+                    v.get("type").and_then(|t| t.as_str()),
+                    Some("web_search_call")
+                );
                 assert_eq!(v.get("id").and_then(|t| t.as_str()), Some("ws_1"));
             }
             other => panic!("expected Other, got {other:?}"),

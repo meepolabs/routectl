@@ -18,9 +18,7 @@
 //! (first-turn requests, or providers that didn't surface one) flow
 //! through cleanly as empty-string `encrypted_content`.
 
-use routectl_core::{
-    ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role,
-};
+use routectl_core::{ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role};
 
 use super::types::{
     FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningContentItem,
@@ -54,11 +52,7 @@ pub(super) fn build_input(id: &str, messages: &[Message]) -> Result<Vec<Response
 // Per-role translation
 // ---------------------------------------------------------------------------
 
-fn translate_user_message(
-    id: &str,
-    msg: &Message,
-    out: &mut Vec<ResponseInputItem>,
-) -> Result<()> {
+fn translate_user_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputItem>) -> Result<()> {
     let content = build_user_content(id, &msg.content)?;
     if content.is_empty() {
         tracing::debug!(
@@ -148,10 +142,7 @@ fn translate_assistant_message(
 /// encrypted_content surfaces. Format-tagged with anything other than
 /// `openai-responses-v1` is skipped: those entries come from a
 /// different upstream and replaying them here would corrupt the wire.
-fn lift_reasoning_details(
-    details: &[ReasoningDetail],
-    out: &mut Vec<ResponseInputItem>,
-) {
+fn lift_reasoning_details(details: &[ReasoningDetail], out: &mut Vec<ResponseInputItem>) {
     if details.is_empty() {
         return;
     }
@@ -188,11 +179,7 @@ fn lift_reasoning_details(
                 }
             }
             ReasoningDetailKind::Encrypted => {
-                if let Some(sig) = d
-                    .payload
-                    .get("encrypted_content")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(sig) = d.payload.get("encrypted_content").and_then(|v| v.as_str()) {
                     if group.encrypted_content.is_none() {
                         group.encrypted_content = Some(sig.to_string());
                     } else {
@@ -228,11 +215,7 @@ struct ReasoningGroup {
     encrypted_content: Option<String>,
 }
 
-fn translate_tool_message(
-    id: &str,
-    msg: &Message,
-    out: &mut Vec<ResponseInputItem>,
-) -> Result<()> {
+fn translate_tool_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputItem>) -> Result<()> {
     let Some(call_id) = msg.tool_call_id.as_ref().filter(|s| !s.is_empty()).cloned() else {
         return Err(Error::normalize_request(
             id,
@@ -264,9 +247,7 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
                 match p {
                     ContentPart::Known(KnownContentPart::Text { text, .. }) => {
                         if !text.is_empty() {
-                            out.push(ResponsesContentItem::InputText {
-                                text: text.clone(),
-                            });
+                            out.push(ResponsesContentItem::InputText { text: text.clone() });
                         }
                     }
                     ContentPart::Known(KnownContentPart::Image { source, .. }) => {
@@ -343,9 +324,7 @@ fn walk_assistant_part(
     match p {
         ContentPart::Known(KnownContentPart::Text { text, .. }) => {
             if !text.is_empty() {
-                message_content.push(ResponsesContentItem::OutputText {
-                    text: text.clone(),
-                });
+                message_content.push(ResponsesContentItem::OutputText { text: text.clone() });
             }
         }
         ContentPart::Known(KnownContentPart::Thinking {
@@ -449,10 +428,7 @@ fn translate_image_source(id: &str, source: &serde_json::Value) -> Option<Respon
                 .get("media_type")
                 .and_then(|m| m.as_str())
                 .unwrap_or("application/octet-stream");
-            let data = source
-                .get("data")
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
+            let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
             if data.is_empty() {
                 tracing::warn!(
                     provider = id,
@@ -502,9 +478,7 @@ fn build_tool_output_body(id: &str, parts: &[ContentPart]) -> FunctionCallOutput
     let has_non_text = parts.iter().any(|p| {
         matches!(
             p,
-            ContentPart::Known(
-                KnownContentPart::Image { .. } | KnownContentPart::ImageUrl { .. }
-            )
+            ContentPart::Known(KnownContentPart::Image { .. } | KnownContentPart::ImageUrl { .. })
         )
     });
 

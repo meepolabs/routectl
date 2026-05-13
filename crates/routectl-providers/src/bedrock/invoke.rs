@@ -162,12 +162,8 @@ fn is_bedrock_invoke_managed_key(key: &str) -> bool {
     )
 }
 
-/// Filter `obj["anthropic_beta"]` against the Bedrock-Invoke
-/// allowlist. See `super::betas::filter_bedrock_betas` for the full
-/// contract; this section now delegates to the shared helper so the
-/// Converse adapter can apply the identical filter.
-//
-// (function moved to `super::betas::filter_bedrock_betas`)
+// `filter_bedrock_betas` moved to `super::betas`; the Converse adapter
+// applies the identical filter via the same helper.
 
 /// Parse the Bedrock InvokeModel response body into a `ChatResponse`.
 ///
@@ -399,10 +395,10 @@ mod tests {
         let cfg = fake_cfg_no_betas();
         let mut req = user_req();
         req.anthropic_beta = vec![
-            "context-1m-2025-08-07".into(), // accepted
-            "oauth-2025-04-20".into(),      // rejected by Bedrock
+            "context-1m-2025-08-07".into(),           // accepted
+            "oauth-2025-04-20".into(),                // rejected by Bedrock
             "interleaved-thinking-2025-05-14".into(), // accepted
-            "redact-thinking-2026-02-12".into(), // rejected by Bedrock
+            "redact-thinking-2026-02-12".into(),      // rejected by Bedrock
         ];
 
         // Act
@@ -411,7 +407,10 @@ mod tests {
         // Assert: only the accepted subset survives.
         let arr = body["anthropic_beta"].as_array().unwrap();
         let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
-        assert!(strs.contains(&"context-1m-2025-08-07"), "missing accepted: {strs:?}");
+        assert!(
+            strs.contains(&"context-1m-2025-08-07"),
+            "missing accepted: {strs:?}"
+        );
         assert!(
             strs.contains(&"interleaved-thinking-2025-05-14"),
             "missing accepted: {strs:?}"
@@ -463,10 +462,7 @@ mod tests {
         // Arrange
         let cfg = fake_cfg_no_betas();
         let mut req = user_req();
-        req.anthropic_beta = vec![
-            "oauth-2025-04-20".into(),
-            "files-api-2025-04-14".into(),
-        ];
+        req.anthropic_beta = vec!["oauth-2025-04-20".into(), "files-api-2025-04-14".into()];
 
         // Act
         let body = normalize_request(&cfg, &req).unwrap();
@@ -523,9 +519,7 @@ mod tests {
         // override (so it gets dropped). The other is in the override
         // but not the const (so it gets accepted thanks to the override).
         let mut cfg = fake_cfg_no_betas();
-        cfg.anthropic_beta_allowlist = Some(vec![
-            "future-flag-2026-12-31".into(),
-        ]);
+        cfg.anthropic_beta_allowlist = Some(vec!["future-flag-2026-12-31".into()]);
         let mut req = user_req();
         req.anthropic_beta = vec![
             // Was in const, NOT in override: should be DROPPED.

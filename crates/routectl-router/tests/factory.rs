@@ -251,7 +251,9 @@ auth_kind = "api-key"
         let store = MemoryStore;
 
         // Act
-        let provider = build_provider("gpt-api", entry, &store).await.expect("build");
+        let provider = build_provider("gpt-api", entry, &store)
+            .await
+            .expect("build");
 
         // Assert
         assert_eq!(provider.id(), "openai-responses:gpt-api");
