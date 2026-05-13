@@ -42,11 +42,16 @@ use serde_json::Value;
 use tracing::debug;
 
 use routectl_core::{
-    debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    debug_upstream_error_body, extract_upstream_message, sanitize_for_log, trace_outgoing_body,
+    trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
 };
 
 use sse::ThinkTagAccumulator;
+
+/// Provider-kind discriminator string used in tracing fields. Single
+/// source of truth so call sites grep clean (`provider_kind=openai-compat`)
+/// and a typo-on-rename can't silently break operator log filters.
+const PROVIDER_KIND: &str = "openai-compat";
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatConfig {
@@ -195,7 +200,7 @@ impl Provider for OpenAiCompatProvider {
         // PR C / FR-1: trace-level outgoing body for triage. Gated
         // by `tracing::Level::TRACE`; default `info` filter pays
         // nothing.
-        trace_outgoing_body("openai-compat", &self.cfg.id, &body);
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
             .client
@@ -212,8 +217,8 @@ impl Provider for OpenAiCompatProvider {
             // PR C / FR-1: full upstream error body at debug level.
             // The truncated WARN excerpt below stays for warn-log
             // scannability.
-            debug_upstream_error_body("openai-compat", &self.cfg.id, status, &body_text);
-            let sanitized = sanitize_upstream_body(&body_text);
+            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
+            let sanitized = extract_upstream_message(&body_text);
             // PR C / FR-1: extend the auth-only WARN to all 4xx/5xx
             // so an operator never has to guess WHY a request failed.
             if status == 401 || status == 403 {
@@ -239,6 +244,13 @@ impl Provider for OpenAiCompatProvider {
             .await
             .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
 
+        // FR-2: trace the raw upstream body BEFORE normalization
+        // mutates it (`coalesce_reasoning_content_in_response`
+        // rewrites `reasoning_content` -> `reasoning` in place).
+        // Operators triaging "what did the upstream return" want
+        // the wire form, not the post-processed form.
+        trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw);
+
         let mut chat_resp = self.normalize_response(raw)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         Ok(chat_resp)
@@ -253,7 +265,7 @@ impl Provider for OpenAiCompatProvider {
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions (stream)");
 
-        trace_outgoing_body("openai-compat", &self.cfg.id, &body);
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
             .client
@@ -267,8 +279,8 @@ impl Provider for OpenAiCompatProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
-            debug_upstream_error_body("openai-compat", &self.cfg.id, status, &body_text);
-            let sanitized = sanitize_upstream_body(&body_text);
+            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
+            let sanitized = extract_upstream_message(&body_text);
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
@@ -336,6 +348,11 @@ impl Provider for OpenAiCompatProvider {
             }
         };
 
-        Ok(Box::pin(out))
+        Ok(routectl_core::wrap_stream_with_summary(
+            out,
+            "upstream",
+            PROVIDER_KIND,
+            self.cfg.id.clone(),
+        ))
     }
 }

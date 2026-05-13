@@ -339,13 +339,28 @@ pub struct ReasoningDetail {
     pub payload: Value,
 }
 
+/// Discriminator on a `ReasoningDetail`. Determines what fields the
+/// detail's `payload` object carries and how downstream egresses
+/// interpret it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningDetailKind {
+    /// OpenAI Responses reasoning summary block. `payload.text`
+    /// carries a one-paragraph summary the model surfaces alongside
+    /// the answer; not the full chain-of-thought.
     #[serde(rename = "reasoning.summary")]
     Summary,
+    /// OpenAI Responses encrypted reasoning. `payload.encrypted_content`
+    /// is an opaque blob the model emits and expects back verbatim on
+    /// follow-up turns for chain-of-thought continuity. Round-trip
+    /// only; never displayed to the user.
     #[serde(rename = "reasoning.encrypted")]
     Encrypted,
+    /// Anthropic-shape thinking block. `payload.text` is the visible
+    /// thinking content; `payload.signature` is mandatory for
+    /// multi-turn replay (Anthropic 400s on follow-ups missing it).
+    /// Format string `anthropic-claude-v1` distinguishes from other
+    /// `Text`-kind details.
     #[serde(rename = "reasoning.text")]
     Text,
 }

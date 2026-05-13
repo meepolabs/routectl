@@ -47,6 +47,8 @@ pub enum ContentPart {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum KnownContentPart {
+    /// Plain text block. The most common content shape; carried by
+    /// every wire dialect routectl translates.
     Text {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +70,11 @@ pub enum KnownContentPart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// Anthropic-shape document block. `source` is the document payload
+    /// (base64 / url / text); `title` and `citations` carry retrieval
+    /// metadata for the model. OpenAI-shape inputs do not have an
+    /// equivalent and lift `title` / `citations` only on Anthropic
+    /// egresses.
     Document {
         source: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,6 +84,10 @@ pub enum KnownContentPart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// Tool-call request block emitted by an assistant turn. `id`
+    /// matches the corresponding `ToolResult.tool_use_id` on the
+    /// follow-up user turn. `input` is the JSON-encoded args object the
+    /// model decided to pass to the tool.
     ToolUse {
         id: String,
         name: String,
@@ -84,6 +95,11 @@ pub enum KnownContentPart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// Tool-call response block emitted by a user turn carrying the
+    /// tool's output back to the model. `tool_use_id` matches the
+    /// corresponding `ToolUse.id` from the prior assistant turn.
+    /// `is_error` flags structured tool errors so the model can
+    /// disambiguate from successful results.
     ToolResult {
         tool_use_id: String,
         content: Value,
@@ -99,9 +115,11 @@ pub enum KnownContentPart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
-    RedactedThinking {
-        data: String,
-    },
+    /// Redacted-by-Anthropic thinking block. The `data` field is an
+    /// opaque encrypted payload AWS / Anthropic substituted for content
+    /// their safety system flagged. Preserve verbatim on round-trip;
+    /// never log the contents.
+    RedactedThinking { data: String },
 }
 
 impl ContentPart {

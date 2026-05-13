@@ -111,6 +111,8 @@ fn tool_use_lifecycle_emits_tool_call_deltas() {
     assert_eq!(tcs2[0]["function"]["arguments"], "1}");
 }
 
+/// Strategy A: per-delta `reasoning` string lands live, structured
+/// detail is deferred to contentBlockStop.
 #[test]
 fn reasoning_text_delta_emits_thinking_chunk() {
     // Arrange
@@ -129,23 +131,22 @@ fn reasoning_text_delta_emits_thinking_chunk() {
         &mut state,
     );
 
-    // Assert
+    // Assert: live string only on the per-delta chunk.
     assert_eq!(chunks.len(), 1);
     let delta = &chunks[0].choices[0].delta;
     assert_eq!(delta.reasoning.as_deref(), Some("step 1"));
-    assert_eq!(delta.reasoning_details.len(), 1);
-    assert!(matches!(
-        delta.reasoning_details[0].kind,
-        ReasoningDetailKind::Text
-    ));
+    assert!(
+        delta.reasoning_details.is_empty(),
+        "live thinking chunk must not carry the structured detail (deferred to contentBlockStop)"
+    );
 }
 
+/// Strategy A: signature_delta records onto state and emits no
+/// chunk; the aggregated detail at contentBlockStop carries both
+/// text and signature with the same detail_index.
 #[test]
 fn reasoning_signature_after_text_uses_same_detail_index() {
-    // Arrange
     let mut state = ConverseStreamState::default();
-
-    // Act
     let _ = run(
         "contentBlockStart",
         r#"{"contentBlockIndex":0}"#,
@@ -157,22 +158,25 @@ fn reasoning_signature_after_text_uses_same_detail_index() {
             "delta":{"reasoningContent":{"text":"thinking"}}}"#,
         &mut state,
     );
+    // Signature delta is silent under Strategy A.
     let sig_chunks = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":0,
             "delta":{"reasoningContent":{"signature":"sig"}}}"#,
         &mut state,
     );
+    assert_eq!(text_chunks.len(), 1);
+    assert!(
+        sig_chunks.is_empty(),
+        "signature delta is buffered, not emitted directly"
+    );
 
-    // Assert: the same detail_index threads both deltas so client
-    // can attach signature to the right reasoning entry.
-    let text_idx = text_chunks[0].choices[0].delta.reasoning_details[0]
-        .index
-        .unwrap();
-    let sig_idx = sig_chunks[0].choices[0].delta.reasoning_details[0]
-        .index
-        .unwrap();
-    assert_eq!(text_idx, sig_idx);
+    // contentBlockStop emits the terminal aggregated detail.
+    let stop_chunks = run("contentBlockStop", r#"{"contentBlockIndex":0}"#, &mut state);
+    assert_eq!(stop_chunks.len(), 1);
+    let detail = &stop_chunks[0].choices[0].delta.reasoning_details[0];
+    assert_eq!(detail.payload["text"], "thinking");
+    assert_eq!(detail.payload["signature"], "sig");
 }
 
 #[test]
