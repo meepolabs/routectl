@@ -56,6 +56,7 @@ use routectl_core::{
 
 pub mod auth;
 pub(crate) mod betas;
+pub(crate) mod body_fields;
 pub mod converse;
 pub mod endpoint;
 pub mod eventstream;
@@ -177,19 +178,25 @@ pub struct BedrockConfig {
     /// Anthropic beta gates passed through to the model. For `Invoke`
     /// shape, these go in the request body's top-level `anthropic_beta`
     /// array; for `Converse`, they go in
-    /// `additionalModelRequestFields.anthropic_beta`.
+    /// `additionalModelRequestFields.anthropic_beta`. Per-provider
+    /// floor that bypasses the `allowed_betas` filter (operator
+    /// asserts these by typing them into TOML).
     pub anthropic_beta: Vec<String>,
-    /// Optional override for the routectl-shipped Bedrock-Invoke
-    /// `anthropic_beta` allowlist. When `None`, the const
-    /// `BEDROCK_INVOKE_ACCEPTED_BETAS` in
-    /// `crates/routectl-providers/src/bedrock/invoke.rs` is the
-    /// allowlist. When `Some(list)`, `list` REPLACES the const
-    /// entirely. Sourced from the top-level `[bedrock] anthropic_beta`
-    /// TOML field which applies to every Bedrock provider in the
-    /// config (the allowlist is global to Bedrock, not per-model).
-    /// Operators populate this to add flags AWS gated after the last
-    /// routectl release, or to remove flags AWS deprecated.
-    pub anthropic_beta_allowlist: Option<Vec<String>>,
+    /// Bedrock-accepted `anthropic_beta` flags. Sourced from
+    /// `[bedrock] allowed_betas` TOML and cloned onto every Bedrock
+    /// provider. routectl ships no const default -- AWS schema drift
+    /// is operator-tracked. See `examples/bedrock.toml` for the
+    /// empirical 2026-05-12 baseline. Empty list means "no flags
+    /// survive filtering" (defense in depth; startup validation
+    /// rejects this state when a Bedrock provider is configured).
+    pub allowed_betas: Vec<String>,
+    /// Bedrock-accepted top-level body fields. On Invoke this filters
+    /// the Anthropic-shape body before send; on Converse it filters
+    /// the `additionalModelRequestFields` bag. Sourced from
+    /// `[bedrock] allowed_body_fields` TOML. Empty list means
+    /// "drop everything" (defense in depth; startup validation
+    /// rejects this state when a Bedrock provider is configured).
+    pub allowed_body_fields: Vec<String>,
     /// Free-form fields merged into the request body. For `Invoke`,
     /// merged at the top level; for `Converse`, merged into
     /// `additionalModelRequestFields`.
@@ -631,7 +638,8 @@ mod tests {
             user_agent: None,
             extra_headers: Vec::new(),
             anthropic_beta: Vec::new(),
-            anthropic_beta_allowlist: None,
+            allowed_betas: Vec::new(),
+            allowed_body_fields: Vec::new(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
