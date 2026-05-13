@@ -618,9 +618,12 @@ fn emit_tool_use_blocks_from_calls(
 /// Translate `reasoning_details` into Anthropic `Thinking` /
 /// `RedactedThinking` blocks for echo on a multi-turn assistant turn.
 /// Index-ordered so an upstream that re-orders reasoning blocks
-/// doesn't surprise the downstream signature check. Signatures are
-/// mandatory: Anthropic rejects a `Thinking` block on echo without
-/// the `signature` field that came back on the original response.
+/// doesn't surprise the downstream signature check. Anthropic rejects
+/// a `Thinking` block on echo without the `signature` field; when a
+/// detail's signature is missing or empty (Anthropic 4.5 occasionally
+/// omits `signature_delta` on tool-only thinking turns), the detail
+/// is logged at DEBUG and skipped so replay doesn't 400 on a
+/// guaranteed-malformed echo.
 fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<ContentBlock>> {
     let mut sorted = details.to_vec();
     sorted.sort_by_key(|d| d.index.unwrap_or(0));
@@ -642,16 +645,31 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
                     .payload
                     .get("signature")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        Error::normalize_request(
-                            id,
-                            "thinking block missing signature in reasoning_details",
-                        )
-                    })?
-                    .to_string();
+                    .unwrap_or("");
+                if signature.is_empty() {
+                    // Anthropic 400s on a Thinking block without a
+                    // signature, so passing it through would fail the
+                    // request entirely. Skipping the block is better
+                    // than that, but it IS a lossy round-trip when
+                    // some blocks have signatures and others don't
+                    // (Claude 4.5 occasionally omits signature_delta
+                    // on tool-only thinking turns) -- the replayed
+                    // history loses ordering/cache fidelity for the
+                    // unsigned blocks. Logged at WARN so operators
+                    // can see this happened and correlate with any
+                    // upstream cache misses or quality drift.
+                    tracing::warn!(
+                        provider = id,
+                        detail_index = ?detail.index,
+                        "skipping Thinking block on replay: signature missing or empty \
+                         (multi-block thinking history is now partially echoed; \
+                         see CLAUDE.md \"Anthropic streaming reasoning replay\" residual)"
+                    );
+                    continue;
+                }
                 blocks.push(ContentBlock::Thinking {
                     thinking,
-                    signature,
+                    signature: signature.to_string(),
                     cache_control: None,
                 });
             }
@@ -872,7 +890,40 @@ fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::Cac
 // Top-level normalize
 // ---------------------------------------------------------------------------
 
-pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result<Value> {
+/// Filter `req.anthropic_beta` against the operator-supplied
+/// `allowed_betas` list. Empty allowlist = pass-through (default).
+/// Otherwise, drop entries not in the list at DEBUG so operators
+/// triaging unexpected behavior can see WHICH flags got removed.
+/// Mirrors the Bedrock-egress `filter_bedrock_betas` shape.
+fn filter_anthropic_betas(
+    provider_id: &str,
+    requested: &[String],
+    allowed: &[String],
+) -> Vec<String> {
+    if allowed.is_empty() {
+        return requested.to_vec();
+    }
+    let mut kept = Vec::with_capacity(requested.len());
+    for flag in requested {
+        if allowed.iter().any(|a| a == flag) {
+            kept.push(flag.clone());
+        } else {
+            tracing::debug!(
+                provider = provider_id,
+                flag = %flag,
+                "dropping beta flag not in operator-supplied [providers.X] allowed_betas"
+            );
+        }
+    }
+    kept
+}
+
+pub fn normalize(
+    id: &str,
+    req: &ChatRequest,
+    adaptive_thinking: bool,
+    allowed_betas: &[String],
+) -> Result<Value> {
     // Anthropic's wire requires (a) every Thinking block carry a
     // `signature` for multi-turn, (b) every tool_result carry the
     // `tool_use_id` of the tool_use it answers. Validate up front so
@@ -934,7 +985,7 @@ pub fn normalize(id: &str, req: &ChatRequest, adaptive_thinking: bool) -> Result
         tools,
         tool_choice: translate_tool_choice(req.tool_choice.as_ref(), has_tools),
         cache_control: req.cache_control.clone(),
-        anthropic_beta: req.anthropic_beta.clone(),
+        anthropic_beta: filter_anthropic_betas(id, &req.anthropic_beta, allowed_betas),
     };
 
     // Belt-and-braces: validate in release too. The Anthropic ingress
@@ -1018,6 +1069,82 @@ fn is_routectl_managed_key(key: &str) -> bool {
 }
 
 #[cfg(test)]
+mod allowlist_tests {
+    use super::*;
+    use routectl_core::{ChatRequest, Message, Role};
+    use serde_json::json;
+
+    fn req_with_betas(betas: Vec<String>) -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4-5".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            max_tokens: Some(64),
+            anthropic_beta: betas,
+            ..Default::default()
+        }
+    }
+
+    /// Pin: empty allowlist = pass-through. Default behavior, no
+    /// operator surprise on upgrade.
+    #[test]
+    fn empty_allowlist_passes_all_betas() {
+        let req = req_with_betas(vec![
+            "context-1m-2025-08-07".into(),
+            "prompt-caching-2024-07-31".into(),
+        ]);
+        let body = normalize("p", &req, false, &[]).unwrap();
+        assert_eq!(
+            body["anthropic_beta"],
+            json!(["context-1m-2025-08-07", "prompt-caching-2024-07-31"])
+        );
+    }
+
+    /// Pin: non-empty allowlist drops entries not in the list.
+    #[test]
+    fn non_empty_allowlist_drops_unknown() {
+        let req = req_with_betas(vec![
+            "context-1m-2025-08-07".into(),
+            "secret-experimental-flag".into(),
+            "prompt-caching-2024-07-31".into(),
+        ]);
+        let allowed = vec![
+            "context-1m-2025-08-07".to_string(),
+            "prompt-caching-2024-07-31".to_string(),
+        ];
+        let body = normalize("p", &req, false, &allowed).unwrap();
+        // Order preserved, unknown flag dropped.
+        assert_eq!(
+            body["anthropic_beta"],
+            json!(["context-1m-2025-08-07", "prompt-caching-2024-07-31"])
+        );
+    }
+
+    /// Pin: every requested beta is rejected when none are on the
+    /// allowlist. The wire field is either absent or an empty array;
+    /// both mean "no betas reach upstream" and either serialization
+    /// is acceptable.
+    #[test]
+    fn allowlist_can_drop_all_requested() {
+        let req = req_with_betas(vec!["totally-unknown".into()]);
+        let allowed = vec!["context-1m-2025-08-07".to_string()];
+        let body = normalize("p", &req, false, &allowed).unwrap();
+        let got = &body["anthropic_beta"];
+        assert!(
+            got.is_null() || got.as_array().map(|a| a.is_empty()).unwrap_or(false),
+            "expected absent or empty array, got: {got}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod multi_turn_tool_use_tests {
     use super::*;
     use routectl_core::{ChatRequest, Message, Role};
@@ -1076,7 +1203,7 @@ mod multi_turn_tool_use_tests {
             ..Default::default()
         };
 
-        let body = normalize("test-anthropic", &req, false).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         let assistant = messages
             .iter()
@@ -1117,7 +1244,7 @@ mod multi_turn_tool_use_tests {
             }],
             ..Default::default()
         };
-        let err = normalize("test-anthropic", &req, false).unwrap_err();
+        let err = normalize("test-anthropic", &req, false, &[]).unwrap_err();
         assert!(
             err.to_string().contains("tool_call_id"),
             "must mention tool_call_id; got: {err}"
@@ -1149,7 +1276,7 @@ mod multi_turn_tool_use_tests {
             }],
             ..Default::default()
         };
-        let err = normalize("test-anthropic", &req, false).unwrap_err();
+        let err = normalize("test-anthropic", &req, false, &[]).unwrap_err();
         assert!(
             err.to_string().contains("thinking block without signature"),
             "must mention signature; got: {err}"
@@ -1174,7 +1301,7 @@ mod multi_turn_tool_use_tests {
             )],
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         let assistant = messages
             .iter()
@@ -1207,7 +1334,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
 
         // thinking serializes to {"type":"adaptive"} -- no budget_tokens.
         let thinking = body.get("thinking").expect("thinking field present");
@@ -1245,7 +1372,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
 
         let thinking = body.get("thinking").expect("thinking field present");
         assert_eq!(thinking["type"], "enabled");
@@ -1282,7 +1409,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
         let thinking = body.get("thinking").unwrap();
         assert_eq!(thinking["type"], "enabled");
         // 1000 * 0.99 = 990
@@ -1307,7 +1434,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
         let thinking = body.get("thinking").unwrap();
         assert_eq!(thinking["type"], "disabled");
         assert!(body.get("output_config").is_none());
@@ -1334,7 +1461,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "medium");
     }
@@ -1362,7 +1489,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
         assert_eq!(body["thinking"]["type"], "adaptive");
         // budget_tokens MUST NOT leak into the adaptive shape.
         assert!(
@@ -1386,7 +1513,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(json!("auto")),
             ..Default::default()
         };
-        let body = normalize("test", &req, false).unwrap();
+        let body = normalize("test", &req, false, &[]).unwrap();
         assert_eq!(body["tool_choice"], json!({"type":"auto"}));
     }
 
@@ -1398,7 +1525,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(json!("required")),
             ..Default::default()
         };
-        let body = normalize("test", &req, false).unwrap();
+        let body = normalize("test", &req, false, &[]).unwrap();
         assert_eq!(body["tool_choice"], json!({"type":"any"}));
     }
 
@@ -1410,7 +1537,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(json!("none")),
             ..Default::default()
         };
-        let body = normalize("test", &req, false).unwrap();
+        let body = normalize("test", &req, false, &[]).unwrap();
         assert!(
             body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
             "expected tool_choice dropped, got: {body:?}"
@@ -1444,7 +1571,7 @@ mod multi_turn_tool_use_tests {
             )]),
             ..Default::default()
         };
-        let body = normalize("test", &req, false).unwrap();
+        let body = normalize("test", &req, false, &[]).unwrap();
         assert!(
             body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
             "expected tool_choice dropped, got: {body:?}"
@@ -1463,7 +1590,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(json!({"type":"function","function":{"name":"get_weather"}})),
             ..Default::default()
         };
-        let body = normalize("test", &req, false).unwrap();
+        let body = normalize("test", &req, false, &[]).unwrap();
         assert_eq!(
             body["tool_choice"],
             json!({"type":"tool","name":"get_weather"})
@@ -1488,7 +1615,7 @@ mod multi_turn_tool_use_tests {
                 tool_choice: Some(tc.clone()),
                 ..Default::default()
             };
-            let body = normalize("test", &req, false).unwrap();
+            let body = normalize("test", &req, false, &[]).unwrap();
             assert_eq!(body["tool_choice"], tc, "expected passthrough for {tc:?}");
         }
     }
@@ -1505,7 +1632,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(weird.clone()),
             ..Default::default()
         };
-        let body = normalize("test", &req, false).unwrap();
+        let body = normalize("test", &req, false, &[]).unwrap();
         assert_eq!(body["tool_choice"], weird);
     }
 
@@ -1530,7 +1657,7 @@ mod multi_turn_tool_use_tests {
             })),
             ..Default::default()
         };
-        let body = normalize("test", &req, false).unwrap();
+        let body = normalize("test", &req, false, &[]).unwrap();
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
     }

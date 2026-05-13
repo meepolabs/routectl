@@ -32,7 +32,15 @@ use crate::cache_control::CacheControl;
 /// Tool definition variants. See module docs.
 #[derive(Debug, Clone)]
 pub enum ToolDef {
+    /// Typed Anthropic-shape custom tool. The OpenAI `{type: "function",
+    /// function: {...}}` shape is lifted into this variant by the
+    /// OpenAI ingress so all egresses see a single representation.
     Custom(CustomTool),
+    /// Forward-compat catchall for any other tool kind (Anthropic
+    /// built-in tools, server-side tools, future wire shapes).
+    /// Preserved verbatim through Anthropic / Bedrock-Invoke egresses;
+    /// OpenAI-compat egresses drop with a warn (or reject under
+    /// `strict_translation`).
     Other(Value),
 }
 

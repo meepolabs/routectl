@@ -83,6 +83,7 @@ fn anthropic_proxy_config(
         port: 0,
         auth: auth_tokens.map(|tokens| ServerAuth { tokens }),
         strict_translation: false,
+        allow_disable_fallbacks: true,
     };
 
     let ingress = IngressConfig {
@@ -179,6 +180,54 @@ async fn cache_control_on_every_position_reaches_upstream() {
 // ---------------------------------------------------------------------------
 // Forward-compat: unknown block type passes through
 // ---------------------------------------------------------------------------
+
+/// Pin: `metadata` round-trips through the canonical seam to the
+/// Anthropic egress with all keys intact. Round-4 review HIGH:
+/// previously the ingress lifted `metadata.user_id` to `req.user` and
+/// dropped the rest of `metadata`, breaking request attribution.
+#[tokio::test]
+async fn metadata_round_trips_full_object_to_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    let body = json!({
+        "model": "heavy",
+        "max_tokens": 1024,
+        "metadata": {
+            "user_id": "u_42",
+            "session_id": "sess_xyz",
+            "custom_attribution": "shopping-cart-flow"
+        },
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    // Full metadata object reaches the upstream wire body.
+    assert_eq!(upstream_body["metadata"]["user_id"], "u_42");
+    assert_eq!(upstream_body["metadata"]["session_id"], "sess_xyz");
+    assert_eq!(
+        upstream_body["metadata"]["custom_attribution"],
+        "shopping-cart-flow"
+    );
+}
 
 #[tokio::test]
 async fn unknown_block_type_round_trips_to_upstream() {
@@ -1140,6 +1189,7 @@ fn openai_compat_proxy_config(upstream_base: &str) -> Arc<Config> {
         port: 0,
         auth: None,
         strict_translation: false,
+        allow_disable_fallbacks: true,
     };
     let ingress = IngressConfig {
         anthropic: IngressShape::default(),
@@ -1779,6 +1829,7 @@ fn deepseek_dialect_config(upstream_base: &str) -> Arc<Config> {
             port: 0,
             auth: None,
             strict_translation: false,
+            allow_disable_fallbacks: true,
         },
         providers,
         aliases,
@@ -1810,6 +1861,7 @@ fn vllm_dialect_config(upstream_base: &str) -> Arc<Config> {
             port: 0,
             auth: None,
             strict_translation: false,
+            allow_disable_fallbacks: true,
         },
         providers,
         aliases,
