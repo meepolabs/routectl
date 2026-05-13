@@ -463,6 +463,7 @@ pub(crate) struct AnthropicCacheCreation {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)] // index/text/thinking captured for forward-compat replay
 pub(crate) enum SseEvent {
     MessageStart {
         message: SseMessage,
@@ -498,6 +499,7 @@ pub(crate) struct SseMessage {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)] // text/thinking captured for forward-compat replay
 pub(crate) enum SseContentBlockStart {
     Text {
         text: String,
@@ -521,6 +523,7 @@ pub(crate) enum SseContentBlockStart {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)] // wire shape: Anthropic prefixes every delta with `*Delta`
 pub(crate) enum SseDelta {
     TextDelta { text: String },
     ThinkingDelta { thinking: String },

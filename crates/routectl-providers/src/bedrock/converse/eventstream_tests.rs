@@ -50,7 +50,11 @@ fn text_block_lifecycle_yields_text_deltas() {
     let mut state = ConverseStreamState::default();
 
     // Act
-    let _ = run("contentBlockStart", r#"{"contentBlockIndex":0}"#, &mut state);
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":0}"#,
+        &mut state,
+    );
     let c1 = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":0,"delta":{"text":"hello "}}"#,
@@ -113,7 +117,11 @@ fn reasoning_text_delta_emits_thinking_chunk() {
     let mut state = ConverseStreamState::default();
 
     // Act
-    let _ = run("contentBlockStart", r#"{"contentBlockIndex":0}"#, &mut state);
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":0}"#,
+        &mut state,
+    );
     let chunks = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":0,
@@ -138,7 +146,11 @@ fn reasoning_signature_after_text_uses_same_detail_index() {
     let mut state = ConverseStreamState::default();
 
     // Act
-    let _ = run("contentBlockStart", r#"{"contentBlockIndex":0}"#, &mut state);
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":0}"#,
+        &mut state,
+    );
     let text_chunks = run(
         "contentBlockDelta",
         r#"{"contentBlockIndex":0,
@@ -170,11 +182,7 @@ fn message_stop_capture_then_metadata_emits_closing_chunk_with_finish_and_usage(
 
     // Act: AWS event order is messageStop -> metadata. messageStop
     // alone shouldn't yield a chunk (we hold the stop_reason).
-    let mid = run(
-        "messageStop",
-        r#"{"stopReason":"end_turn"}"#,
-        &mut state,
-    );
+    let mid = run("messageStop", r#"{"stopReason":"end_turn"}"#, &mut state);
     assert!(mid.is_empty());
     let closing = run(
         "metadata",
@@ -346,7 +354,10 @@ async fn stream_eof_after_message_stop_without_metadata_emits_closing_chunk() {
     // and clients saw a stream that just stopped.
     let frames: Vec<std::result::Result<Bytes, reqwest::Error>> = vec![
         Ok(encode_frame("messageStart", r#"{"role":"assistant"}"#)),
-        Ok(encode_frame("contentBlockStart", r#"{"contentBlockIndex":0}"#)),
+        Ok(encode_frame(
+            "contentBlockStart",
+            r#"{"contentBlockIndex":0}"#,
+        )),
         Ok(encode_frame(
             "contentBlockDelta",
             r#"{"contentBlockIndex":0,"delta":{"text":"hello"}}"#,
@@ -355,10 +366,7 @@ async fn stream_eof_after_message_stop_without_metadata_emits_closing_chunk() {
             "contentBlockStop",
             r#"{"contentBlockIndex":0}"#,
         )),
-        Ok(encode_frame(
-            "messageStop",
-            r#"{"stopReason":"end_turn"}"#,
-        )),
+        Ok(encode_frame("messageStop", r#"{"stopReason":"end_turn"}"#)),
         // No metadata frame -- EOF here.
     ];
     let byte_stream = fstream::iter(frames);

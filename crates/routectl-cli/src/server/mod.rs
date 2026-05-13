@@ -54,33 +54,6 @@ fn is_loopback(host: &str) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_loopback;
-
-    #[test]
-    fn is_loopback_covers_full_127_range() {
-        // Arrange + Act + Assert
-        assert!(is_loopback("127.0.0.1"));
-        assert!(is_loopback("127.0.0.2"));
-        assert!(is_loopback("127.255.255.254"));
-        assert!(is_loopback("::1"));
-        assert!(is_loopback("localhost"));
-        assert!(!is_loopback("0.0.0.0"));
-        assert!(!is_loopback("192.168.1.1"));
-        assert!(!is_loopback("not-an-address"));
-    }
-
-    #[test]
-    fn is_loopback_handles_ipv4_mapped_ipv6() {
-        // Arrange + Act + Assert: IPv4-mapped IPv6 addresses
-        // (::ffff:127.x.x.x) must be treated as loopback; non-loopback
-        // IPv4-mapped addresses must not be.
-        assert!(is_loopback("::ffff:127.0.0.1"));
-        assert!(!is_loopback("::ffff:192.168.1.1"));
-    }
-}
-
 /// Bind a TCP listener, then serve. Exposes the bound address for tests.
 pub async fn serve(config: Arc<Config>, host: &str, port: u16, unsafe_public: bool) -> Result<()> {
     check_bind_safety(host, unsafe_public)?;
@@ -179,7 +152,9 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
 
     let mut failed: Vec<(String, String)> = Vec::new();
     for (name, entry) in &config.providers {
-        match routectl_router::build_provider_with_options(name, entry, &secrets, opts.clone()).await {
+        match routectl_router::build_provider_with_options(name, entry, &secrets, opts.clone())
+            .await
+        {
             Ok(provider) => {
                 router.register(name.clone(), provider);
             }
@@ -278,4 +253,31 @@ fn build_axum_router(state: Arc<AppState>, token_set: Arc<TokenSet>) -> AxumRout
         .merge(authed)
         .layer(axum::middleware::from_fn(request_id::middleware))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback;
+
+    #[test]
+    fn is_loopback_covers_full_127_range() {
+        // Arrange + Act + Assert
+        assert!(is_loopback("127.0.0.1"));
+        assert!(is_loopback("127.0.0.2"));
+        assert!(is_loopback("127.255.255.254"));
+        assert!(is_loopback("::1"));
+        assert!(is_loopback("localhost"));
+        assert!(!is_loopback("0.0.0.0"));
+        assert!(!is_loopback("192.168.1.1"));
+        assert!(!is_loopback("not-an-address"));
+    }
+
+    #[test]
+    fn is_loopback_handles_ipv4_mapped_ipv6() {
+        // Arrange + Act + Assert: IPv4-mapped IPv6 addresses
+        // (::ffff:127.x.x.x) must be treated as loopback; non-loopback
+        // IPv4-mapped addresses must not be.
+        assert!(is_loopback("::ffff:127.0.0.1"));
+        assert!(!is_loopback("::ffff:192.168.1.1"));
+    }
 }
