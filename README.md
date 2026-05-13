@@ -4,7 +4,7 @@ A local LLM router. One Rust binary, listening on `127.0.0.1`, that proxies Open
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
-[![Workspace tests](https://img.shields.io/badge/tests-313%2B%20passing-brightgreen.svg)](#testing)
+[![Workspace tests](https://img.shields.io/badge/tests-700%2B%20passing-brightgreen.svg)](#testing)
 
 ## Features
 
@@ -12,7 +12,7 @@ A local LLM router. One Rust binary, listening on `127.0.0.1`, that proxies Open
 - **Three egress provider classes**:
   - `openai-compat` -- any host that speaks the OpenAI body shape (OpenAI, DeepSeek, OpenRouter, Groq, NIM, vLLM, llama.cpp, etc.).
   - `anthropic-api` -- native Anthropic Messages API with `x-api-key` or `Authorization: Bearer` auth.
-  - `bedrock` -- native AWS Bedrock with SigV4 signing, full credential chain (env / static / profile / SSO / IRSA / IMDS) or short-term bearer keys, InvokeModel body shape today.
+  - `bedrock` -- native AWS Bedrock with SigV4 signing, full credential chain (env / static / profile / SSO / IRSA / IMDS) or short-term bearer keys; both InvokeModel and Converse body shapes for Anthropic models.
 - **Unified reasoning surface** -- OpenRouter-shape `reasoning_details[]` with provider-tagged `format`. Six dialects on the openai-compat side; Anthropic thinking blocks (with `signature`) preserved across multi-turn tool use.
 - **Cache control round-trip** -- Anthropic prompt-caching `cache_control` and `anthropic_beta` flags pass through losslessly on Anthropic-in -> Anthropic-out and Anthropic-in -> Bedrock-Invoke-out paths. Verified live: cache miss writes N tokens, cache hit reads the same N back.
 - **Reliability** -- per-error-class retry caps (429 / 5xx / network), per-attempt timeouts, jittered backoff, RPM token bucket per provider, passive circuit breaker with single-probe half-open.
@@ -219,13 +219,23 @@ creds = { kind = "profile", name = "my-bedrock-profile" }
 creds = { kind = "default-chain" }
 ```
 
-`api_shape = "invoke"` (default) sends the per-vendor body shape -- Anthropic Messages JSON for Claude. `api_shape = "converse"` for the AWS vendor-neutral envelope is wired (auth, transport, eventstream framing) but body translation is staged for v0.5.
+`api_shape = "invoke"` (default) sends the per-vendor body shape -- Anthropic Messages JSON for Claude. `api_shape = "converse"` uses the AWS vendor-neutral envelope; both are wired and live-tested for Anthropic models. Converse for non-Anthropic vendors (Mistral, Llama, Cohere) is staged.
 
 Bedrock-specific knobs:
 
 - `user_agent` -- per-provider UA override. Required when an IAM policy gates access via the `aws:UserAgent` condition key.
-- `anthropic_beta` -- list of beta flags merged into the request body's top-level `anthropic_beta` array (Invoke).
+- `anthropic_beta` -- list of beta flags always sent on requests from this provider (operator-asserted floor; bypasses the global allowlist filter below).
 - `additional_model_request_fields` -- free-form JSON merged into the request body for vendor-specific knobs.
+
+**`[bedrock]` allowlists (optional, recommended in production).** AWS strict-schema validation 400s any unrecognized `anthropic_beta` flag or top-level body field. routectl ships no built-in default; populate operator-supplied lists in TOML to gate which entries reach AWS:
+
+```toml
+[bedrock]
+allowed_betas       = ["context-1m-2025-08-07", "claude-code-20250219", ...]
+allowed_body_fields = ["anthropic_version", "messages", "max_tokens", ...]
+```
+
+Empty lists (or omitted `[bedrock]` section) = pass-through (no filter applied) -- the discovery default. Run with `ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture sent flags/fields, then populate the lists. See `examples/bedrock.toml` for the empirical 2026-05-12 baseline.
 
 `BedrockCreds` redacts secret material in `Debug` output (no leaks via panic messages or `tracing` events).
 

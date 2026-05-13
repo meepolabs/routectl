@@ -434,30 +434,44 @@ Refer back when a similar failure mode shows up.
   order) so the egress emits them in the upstream body.
   Anthropic accepts either surface.
 
-- **Bedrock-Invoke rejects unsupported `anthropic_beta` values.**
-  Bedrock validates each entry of `anthropic_beta` independently and
-  400s the entire request on the first unsupported value -- there is
-  no per-flag fallback. claude-code's TS SDK ships up to ten betas
-  via the `anthropic-beta` HTTP header, only ten of which Bedrock
-  has gated for distribution (one global allowlist; verified
-  identical across haiku-4-5 / sonnet-4-6 / opus-4-7). The
-  `BEDROCK_INVOKE_ACCEPTED_BETAS` const in
-  `crates/routectl-providers/src/bedrock/invoke.rs` is the empirical
-  set as of 2026-05-10; `filter_bedrock_invoke_betas` drops unknowns
-  at DEBUG (not WARN -- the TS SDK reliably sends ~5 unsupported
-  flags every request and WARN would flood `routectl-warn.log`).
-  Two complementary operator escape hatches:
-  - **Global override** -- `[bedrock] anthropic_beta = [...]` at the
-    top level of TOML REPLACES the const allowlist for every Bedrock
-    provider in the config. Use this to add flags AWS gated after
-    your routectl release, or to remove flags AWS deprecated. The
-    const is the default when this field is unset.
-  - **Per-provider floor** -- `[providers.X] anthropic_beta = [...]`
-    is unchanged: those flags are always sent and bypass the filter
-    (operator-asserted), independent of the global allowlist.
+- **Bedrock rejects unsupported `anthropic_beta` values + unknown
+  body fields.** Bedrock validates each entry of `anthropic_beta`
+  independently and 400s the entire request on the first unsupported
+  value -- there is no per-flag fallback. The same strict-schema
+  validator also rejects any unrecognized top-level body field (or
+  Converse `additionalModelRequestFields` key) with `"Extra inputs
+  are not permitted"`. claude-code's TS SDK ships ~10 betas via the
+  `anthropic-beta` HTTP header and the Anthropic ingress's
+  forward-compat sweep forwards quarterly-added Anthropic body fields
+  (`mcp_servers`, `diagnostics`, `context_hint`, ...), only a subset
+  of which AWS gates for distribution.
 
-  When the Bedrock Converse adapter (M2.7) lands, the analogous
-  filter belongs there too -- see the `TODO(M5)` in `invoke.rs`.
+  routectl ships NO const default for either surface -- AWS schema
+  drift is operator-tracked, not release-bound. Both surfaces are
+  filtered against operator-supplied TOML lists:
+
+  ```toml
+  [bedrock]
+  allowed_betas       = [...]   # filters body's anthropic_beta array
+  allowed_body_fields = [...]   # filters top-level body keys
+  ```
+
+  See `examples/bedrock.toml` for the empirical 2026-05-12 baseline
+  (16 betas + 16 body fields). Empty list (or omitted [bedrock]
+  section) = pass-through (no filter applied) -- the discovery
+  default for bringing routectl up against a fresh AWS account; use
+  `ROUTECTL_LOG=routectl_providers::bedrock=trace` to capture sent
+  fields/flags, then populate the lists.
+
+  Filters live in `bedrock/{betas,body_fields}.rs` and apply on both
+  Invoke (top-level Anthropic body) and Converse
+  (`additionalModelRequestFields` bag). Drops log at DEBUG (not WARN
+  -- the SDK reliably sends a handful of unsupported entries per
+  request and WARN would flood `routectl-warn.log`).
+
+  Per-provider escape hatch -- `[providers.X] anthropic_beta = [...]`
+  is unchanged: those flags are always sent and bypass the filter
+  (operator-asserted), independent of the global allowlist.
 
 - **Response `stop_reason` round-trip was lossy for Anthropic-only
   values.** The Anthropic egress maps `stop_reason -> finish_reason`
