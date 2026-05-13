@@ -105,6 +105,7 @@ pub async fn build_provider_with_options(
             user_agent,
             runtime: _,
         } => {
+            validate_base_url_scheme(name, base_url)?;
             let api_key = resolve(secrets, api_key_ref).await?;
             let cfg = OpenAiCompatConfig {
                 id: format!("openai-compat:{name}"),
@@ -130,8 +131,10 @@ pub async fn build_provider_with_options(
             extra_headers,
             user_agent,
             adaptive_thinking,
+            allowed_betas,
             runtime: _,
         } => {
+            validate_base_url_scheme(name, base_url)?;
             let api_key = resolve(secrets, api_key_ref).await?;
             let cfg = AnthropicApiConfig {
                 id: format!("anthropic-api:{name}"),
@@ -145,6 +148,7 @@ pub async fn build_provider_with_options(
                     .collect(),
                 user_agent: user_agent.clone(),
                 adaptive_thinking: *adaptive_thinking,
+                allowed_betas: allowed_betas.clone(),
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }
@@ -168,6 +172,7 @@ pub async fn build_provider_with_options(
             let resolved_base_url = base_url
                 .clone()
                 .unwrap_or_else(|| default_responses_base(*auth_kind));
+            validate_base_url_scheme(name, &resolved_base_url)?;
             let cfg = OpenAiResponsesConfig {
                 id: format!("openai-responses:{name}"),
                 api_key,
@@ -270,6 +275,60 @@ async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
     tracing::debug!(secret_scheme = scheme_of(uri), "resolving secret ref");
     let secret_ref = SecretRef::parse(uri)?;
     secrets.get(&secret_ref).await
+}
+
+/// Reject `http://` (cleartext) base_urls at build time so an
+/// operator typo doesn't silently exfiltrate API keys + prompts in
+/// the clear. Loopback URLs (127.x, ::1, localhost) are exempt
+/// because the local-dev workflow and integration tests rely on
+/// `http://127.0.0.1:N` mock servers.
+fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let url = match url::Url::parse(trimmed) {
+        Ok(u) => u,
+        Err(e) => {
+            return Err(routectl_core::Error::Config(format!(
+                "provider `{provider_name}`: base_url `{trimmed}` is not a valid URL: {e}"
+            )));
+        }
+    };
+    let scheme = url.scheme();
+    if scheme == "https" {
+        return Ok(());
+    }
+    if scheme != "http" {
+        return Err(routectl_core::Error::Config(format!(
+            "provider `{provider_name}`: base_url scheme `{scheme}` is not allowed; \
+             use https:// (or http:// for loopback only)"
+        )));
+    }
+    // http:// is permitted only for loopback hosts so local-dev and
+    // integration tests work.
+    let host = url.host_str().unwrap_or("");
+    let is_loopback = host == "localhost"
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || host == "::1"
+        || host.starts_with("127.")
+        || url
+            .host()
+            .and_then(|h| match h {
+                url::Host::Ipv4(ip) => Some(ip.is_loopback()),
+                url::Host::Ipv6(ip) => Some(ip.is_loopback()),
+                url::Host::Domain(_) => None,
+            })
+            .unwrap_or(false);
+    if is_loopback {
+        return Ok(());
+    }
+    Err(routectl_core::Error::Config(format!(
+        "provider `{provider_name}`: base_url `{trimmed}` uses cleartext http:// for \
+         non-loopback host `{host}` -- API keys and prompt content would be sent in \
+         the clear. Use https:// (or bind a local proxy on 127.0.0.1)"
+    )))
 }
 
 /// Returns the URI scheme of a SecretRef literal (`env://`, `file://`,
@@ -472,6 +531,56 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
         &config.bedrock.allowed_betas,
         &config.bedrock.allowed_body_fields,
     )
+}
+
+#[cfg(test)]
+mod base_url_validation_tests {
+    use super::validate_base_url_scheme;
+
+    #[test]
+    fn https_passes() {
+        assert!(validate_base_url_scheme("p", "https://api.openai.com").is_ok());
+        assert!(validate_base_url_scheme("p", "https://api.anthropic.com").is_ok());
+    }
+
+    #[test]
+    fn http_loopback_passes() {
+        assert!(validate_base_url_scheme("p", "http://127.0.0.1:8080").is_ok());
+        assert!(validate_base_url_scheme("p", "http://localhost:8080").is_ok());
+        assert!(validate_base_url_scheme("p", "http://[::1]:8080").is_ok());
+        // 127.x range covers any IPv4 loopback alias.
+        assert!(validate_base_url_scheme("p", "http://127.0.0.5:8080").is_ok());
+    }
+
+    #[test]
+    fn http_public_host_rejected() {
+        let err = validate_base_url_scheme("acme", "http://api.openai.com").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("acme"), "got: {msg}");
+        assert!(msg.contains("cleartext"), "got: {msg}");
+        assert!(msg.contains("api.openai.com"), "got: {msg}");
+    }
+
+    #[test]
+    fn unknown_scheme_rejected() {
+        let err = validate_base_url_scheme("p", "ftp://example.com").unwrap_err();
+        assert!(err.to_string().contains("not allowed"));
+    }
+
+    #[test]
+    fn empty_passes() {
+        // Some providers have an unset base_url that the factory fills
+        // in later (e.g. openai-responses computes a default per
+        // auth_kind). The validator MUST NOT reject empty strings.
+        assert!(validate_base_url_scheme("p", "").is_ok());
+        assert!(validate_base_url_scheme("p", "   ").is_ok());
+    }
+
+    #[test]
+    fn unparseable_url_rejected() {
+        let err = validate_base_url_scheme("p", "not a url at all").unwrap_err();
+        assert!(err.to_string().contains("not a valid URL"));
+    }
 }
 
 #[cfg(test)]

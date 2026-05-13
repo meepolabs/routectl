@@ -670,3 +670,41 @@ async fn malformed_json_returns_400() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["type"], "bad_request");
 }
+
+/// Pin the serde_json default 128-deep recursion limit at the ingress
+/// boundary. A maliciously deep JSON body must produce a 400, NOT
+/// stack-overflow the tokio worker. Regression guard for the
+/// security-review observation that axum::Json -> serde_json::from_slice
+/// has no explicit depth cap on routectl's side; if a future change
+/// switches to a custom `Deserializer` config, this test fires.
+#[tokio::test]
+async fn deeply_nested_json_returns_400_not_panic() {
+    let config = openai_compat_config("http://127.0.0.1:1", "p", "fast");
+    let base = helpers::spawn_test_server(config).await;
+
+    // 1000 nested arrays, well past serde_json's 128-deep default.
+    let depth = 1000;
+    let mut body = String::with_capacity(depth * 2 + 4);
+    for _ in 0..depth {
+        body.push('[');
+    }
+    body.push('1');
+    for _ in 0..depth {
+        body.push(']');
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("request did not panic the worker -- depth limit honored");
+
+    // serde_json's recursion limit returns a parse error; axum wraps
+    // that as 400.
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "bad_request");
+}

@@ -34,6 +34,7 @@ mod tests {
             extra_headers: Vec::new(),
             user_agent: None,
             adaptive_thinking: None,
+            allowed_betas: Vec::new(),
         };
         AnthropicApiProvider::new(cfg)
     }
@@ -749,6 +750,11 @@ mod tests {
     // SSE state machine tests
     // -----------------------------------------------------------------------
 
+    /// Strategy A: streaming thinking deltas carry the live `reasoning`
+    /// string (no structured detail); the structured `ReasoningDetail`
+    /// is aggregated and emitted exactly once per thinking block at
+    /// `content_block_stop` with both `text` and `signature`. This is
+    /// what the replay path on the next-turn request expects.
     #[test]
     fn sse_full_stream_sequence() {
         use routectl_providers::anthropic_api::sse::SseState;
@@ -776,58 +782,105 @@ mod tests {
             }
         }
 
-        // Should have: thinking_delta chunk, signature chunk, text_delta chunk, finish_reason chunk
+        // Live thinking-string chunk: carries `reasoning` only. NO
+        // structured ReasoningDetail (deferred to terminal chunk).
+        let live = &chunks[0];
+        let live_delta = &live.choices[0].delta;
+        assert_eq!(live_delta.reasoning.as_deref(), Some("Let me think..."));
         assert!(
-            chunks.len() >= 4,
-            "expected at least 4 chunks, got {}",
-            chunks.len()
+            live_delta.reasoning_details.is_empty(),
+            "live thinking chunk must carry only the string; structured detail is deferred"
         );
 
-        // First chunk: thinking_delta with reasoning and reasoning_details
-        let thinking_chunk = &chunks[0];
-        let delta = &thinking_chunk.choices[0].delta;
-        assert!(delta.reasoning.is_some());
-        assert!(!delta.reasoning_details.is_empty());
-        assert_eq!(
-            delta.reasoning_details[0].payload["text"],
-            "Let me think..."
-        );
-        // No signature yet in thinking_delta
-        assert!(delta.reasoning_details[0]
-            .payload
-            .get("signature")
-            .is_none());
-
-        // Second chunk: signature_delta with only signature in reasoning_details
-        let sig_chunk = &chunks[1];
-        let sig_delta = &sig_chunk.choices[0].delta;
+        // Terminal aggregated detail at content_block_stop: ONE entry
+        // with BOTH text and signature.
+        let terminal = &chunks[1];
+        let terminal_delta = &terminal.choices[0].delta;
         assert!(
-            sig_delta.reasoning.is_none(),
-            "signature chunk should have no reasoning text"
+            terminal_delta.reasoning.is_none(),
+            "terminal chunk has only the structured detail, not the string"
         );
-        assert!(!sig_delta.reasoning_details.is_empty());
-        assert_eq!(
-            sig_delta.reasoning_details[0].payload["signature"],
-            "sig_xyz789"
-        );
+        assert_eq!(terminal_delta.reasoning_details.len(), 1);
+        let detail = &terminal_delta.reasoning_details[0];
+        assert_eq!(detail.payload["text"], "Let me think...");
+        assert_eq!(detail.payload["signature"], "sig_xyz789");
 
-        // Third chunk: text_delta
+        // Text content chunk follows.
         let text_chunk = &chunks[2];
         assert_eq!(
             text_chunk.choices[0].delta.content.as_deref(),
             Some("Hello world!")
         );
 
-        // Last chunk: finish_reason
+        // Last chunk carries finish_reason.
         let finish_chunk = chunks.last().unwrap();
         assert_eq!(
             finish_chunk.choices[0].finish_reason.as_deref(),
             Some("stop")
         );
 
-        // State captures id and model from message_start
+        // State captures id and model from message_start.
         assert_eq!(state.id, "msg_sse01");
         assert_eq!(state.model, "claude-3-opus");
+    }
+
+    /// Edge case: missing signature_delta (Anthropic 4.5 sometimes omits
+    /// on tool-only thinking turns). Terminal aggregated detail still
+    /// emits with an empty signature; replay code skips the entry at
+    /// DEBUG instead of erroring.
+    #[test]
+    fn sse_thinking_block_without_signature_emits_empty_signature() {
+        use routectl_providers::anthropic_api::sse::SseState;
+
+        let mut state = SseState::default();
+        let mut chunks = Vec::new();
+        let events = vec![
+            r#"{"type":"message_start","message":{"id":"m","model":"claude-haiku-4-5","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thoughts"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        for ev in &events {
+            if let Some(c) = state.parse_event("test", ev).unwrap() {
+                chunks.push(c);
+            }
+        }
+        // [0] live string chunk
+        // [1] terminal aggregated detail
+        let terminal = &chunks[1];
+        let detail = &terminal.choices[0].delta.reasoning_details[0];
+        assert_eq!(detail.payload["text"], "thoughts");
+        assert_eq!(detail.payload["signature"], "");
+    }
+
+    /// Edge case: empty thinking block (no deltas at all). Skip
+    /// terminal-chunk emission so replay doesn't push a doomed empty
+    /// Thinking block.
+    #[test]
+    fn sse_empty_thinking_block_emits_no_terminal_chunk() {
+        use routectl_providers::anthropic_api::sse::SseState;
+
+        let mut state = SseState::default();
+        let mut chunks = Vec::new();
+        let events = vec![
+            r#"{"type":"message_start","message":{"id":"m","model":"claude-haiku-4-5","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        for ev in &events {
+            if let Some(c) = state.parse_event("test", ev).unwrap() {
+                chunks.push(c);
+            }
+        }
+        // No terminal chunk for the empty block.
+        assert!(
+            chunks
+                .iter()
+                .all(|c| c.choices[0].delta.reasoning_details.is_empty()),
+            "empty thinking block must not produce a structured detail"
+        );
     }
 
     #[test]
@@ -1050,6 +1103,7 @@ mod tests {
             extra_headers: vec![("anthropic-beta".into(), "context-1m-2025-08-07".into())],
             user_agent: None,
             adaptive_thinking: None,
+            allowed_betas: Vec::new(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1083,6 +1137,7 @@ mod tests {
             extra_headers: vec![("anthropic-beta".into(), expected_beta.into())],
             user_agent: None,
             adaptive_thinking: None,
+            allowed_betas: Vec::new(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1109,6 +1164,7 @@ mod tests {
             extra_headers: Vec::new(),
             user_agent: Some("claude-code/1.2.3".into()),
             adaptive_thinking: None,
+            allowed_betas: Vec::new(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);

@@ -187,11 +187,24 @@ fn translate_request(
         req.reasoning = Some(translate_thinking(&t));
     }
 
-    // Translate metadata.user_id.
-    if let Some(m) = metadata.as_ref().and_then(|m| m.as_object()) {
-        if let Some(uid) = m.get("user_id").and_then(|v| v.as_str()) {
+    // Translate metadata.user_id AND preserve the full metadata
+    // object so it round-trips to Anthropic-shape egresses verbatim.
+    // Without the round-trip preservation, request attribution
+    // (`metadata.session_id`, custom keys some operators set) is
+    // silently dropped at the canonical seam. Bedrock-Invoke and
+    // anthropic-api both honor `metadata` when present in the
+    // provider_extras-merged body. `metadata` is in the
+    // pass-through key list (`is_canonical_request_key` returns false
+    // for it), so the egress's `merge_provider_extras` lets it through.
+    if let Some(m) = metadata {
+        if let Some(uid) = m
+            .as_object()
+            .and_then(|o| o.get("user_id"))
+            .and_then(|v| v.as_str())
+        {
             req.user = Some(uid.to_string());
         }
+        extras.insert("metadata".into(), m);
     }
 
     if !extras.is_empty() {
@@ -1001,15 +1014,10 @@ impl IngressAdapter for AnthropicIngress {
     }
 
     fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
-        // PR C / FR-1: trace-level ingress body for triage. Same
-        // gating + sensitivity story as the openai ingress.
-        if tracing::event_enabled!(tracing::Level::TRACE) {
-            tracing::trace!(
-                ingress = "anthropic",
-                body = %serde_json::to_string(&body).unwrap_or_default(),
-                "anthropic ingress body"
-            );
-        }
+        // FR-1: trace-level ingress body for triage. Same gating +
+        // sensitivity story as the openai ingress. Honors
+        // ROUTECTL_LOG_REDACT_PROMPTS=1.
+        routectl_core::trace_ingress_body("anthropic", &body);
         translate_request(&self.aliases, headers, body)
     }
 

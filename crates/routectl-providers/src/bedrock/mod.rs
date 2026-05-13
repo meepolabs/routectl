@@ -83,6 +83,20 @@ pub enum BedrockApiShape {
     Converse,
 }
 
+impl BedrockApiShape {
+    /// Provider-kind string used in tracing fields so operators can
+    /// grep `provider_kind=bedrock-invoke` vs `bedrock-converse`
+    /// independently. Single source of truth -- both `complete()` and
+    /// `stream()` derive their kind via this method instead of
+    /// duplicating the match arm.
+    pub fn provider_kind_str(self) -> &'static str {
+        match self {
+            Self::Invoke => "bedrock-invoke",
+            Self::Converse => "bedrock-converse",
+        }
+    }
+}
+
 /// Resolved AWS credentials for a Bedrock provider. The TOML-level
 /// `BedrockCreds` (in `routectl-router/src/config.rs`) carries
 /// `SecretRef` URIs; the factory resolves them through the workspace
@@ -260,7 +274,11 @@ impl Provider for BedrockProvider {
         // PR C / FR-1: trace-level outgoing body for triage. Same
         // gating + sensitivity story as the other two providers --
         // see `routectl_core::log_safe::trace_outgoing_body`.
-        routectl_core::trace_outgoing_body("bedrock", &self.cfg.id, &body);
+        routectl_core::trace_outgoing_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
 
         let url = match self.cfg.api_shape {
             BedrockApiShape::Invoke => {
@@ -314,7 +332,12 @@ impl Provider for BedrockProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let msg = parse_upstream_error_body(&self.cfg.id, resp).await;
+            let msg = parse_upstream_error_body(
+                self.cfg.api_shape.provider_kind_str(),
+                &self.cfg.id,
+                resp,
+            )
+            .await;
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
@@ -322,6 +345,14 @@ impl Provider for BedrockProvider {
             .json()
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        // FR-2: trace upstream success body pre-normalize. Distinct
+        // provider_kind per shape so operators can grep
+        // `provider_kind=bedrock-invoke` vs `bedrock-converse`.
+        routectl_core::trace_upstream_success_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &raw_body,
+        );
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         Ok(chat_resp)
@@ -331,7 +362,11 @@ impl Provider for BedrockProvider {
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let body = self.normalize_request(&req)?;
 
-        routectl_core::trace_outgoing_body("bedrock", &self.cfg.id, &body);
+        routectl_core::trace_outgoing_body(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
 
         let url = match self.cfg.api_shape {
             BedrockApiShape::Invoke => {
@@ -388,17 +423,29 @@ impl Provider for BedrockProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let msg = parse_upstream_error_body(&self.cfg.id, resp).await;
+            let msg = parse_upstream_error_body(
+                self.cfg.api_shape.provider_kind_str(),
+                &self.cfg.id,
+                resp,
+            )
+            .await;
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
         let provider_id = self.cfg.id.clone();
         let byte_stream = resp.bytes_stream();
         let stream = match self.cfg.api_shape {
-            BedrockApiShape::Invoke => eventstream::invoke_stream(provider_id, byte_stream),
-            BedrockApiShape::Converse => eventstream::converse_stream(provider_id, byte_stream),
+            BedrockApiShape::Invoke => eventstream::invoke_stream(provider_id.clone(), byte_stream),
+            BedrockApiShape::Converse => {
+                eventstream::converse_stream(provider_id.clone(), byte_stream)
+            }
         };
-        Ok(stream)
+        Ok(routectl_core::wrap_stream_with_summary(
+            stream,
+            "upstream",
+            self.cfg.api_shape.provider_kind_str(),
+            provider_id,
+        ))
     }
 }
 
@@ -413,7 +460,11 @@ impl Provider for BedrockProvider {
 /// extract the IAM action from the AWS-formatted "User: ... is not
 /// authorized to perform: <action>" body and surfaces it. 400 ->
 /// "validation error" with body excerpt. 5xx -> "upstream 5xx".
-async fn parse_upstream_error_body(provider: &str, resp: reqwest::Response) -> String {
+async fn parse_upstream_error_body(
+    provider_kind: &str,
+    provider: &str,
+    resp: reqwest::Response,
+) -> String {
     let status = resp.status().as_u16();
     let body_text = resp.text().await.unwrap_or_default();
     log_bedrock_upstream_error(provider, status, &body_text);
@@ -423,7 +474,7 @@ async fn parse_upstream_error_body(provider: &str, resp: reqwest::Response) -> S
     // operators the field-level detail when they flip log level
     // during triage. INV-4 (Haiku 4.5 generic 400) becomes diagnosable
     // from a single log capture instead of having to reproduce.
-    routectl_core::debug_upstream_error_body("bedrock", provider, status, &body_text);
+    routectl_core::debug_upstream_error_body(provider_kind, provider, status, &body_text);
 
     serde_json::from_str::<Value>(&body_text)
         .ok()
