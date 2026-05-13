@@ -54,31 +54,52 @@ pub struct Config {
     pub ingress: IngressConfig,
 
     /// Bedrock-wide settings that apply to every Bedrock provider.
-    /// Currently carries the global `anthropic_beta` allowlist; future
+    /// Carries the operator-supplied `allowed_betas` and
+    /// `allowed_body_fields` lists -- routectl ships no defaults so
+    /// AWS schema drift does not require a routectl release. See
+    /// `examples/bedrock.toml` for the empirical baseline. Future
     /// shared knobs (e.g. region-default, retry-default) land here too.
     #[serde(default)]
     pub bedrock: BedrockGlobalConfig,
 }
 
-/// Bedrock-wide configuration shared by every `[providers.X]` entry
-/// of `kind = "bedrock"`. Bedrock's accepted `anthropic_beta` set is
-/// model-independent (verified identical across haiku-4-5,
-/// sonnet-4-6, opus-4-7), so the allowlist belongs here rather than
-/// duplicated per-provider.
+/// Bedrock-wide configuration shared by every `[providers.X]` entry of
+/// `kind = "bedrock"`. Both allowlists below are operator-owned; the
+/// routectl binary ships no defaults so AWS schema drift (Anthropic
+/// adds a beta, Bedrock gates a body field) does not require a
+/// routectl release. See `examples/bedrock.toml` for the empirical
+/// 2026-05-12 baseline; copy and tune as your account's gating
+/// evolves.
+///
+/// Startup validation rejects an empty list when any `[providers.X]`
+/// has `kind = "bedrock"`, and rejects an `allowed_body_fields` list
+/// missing the routectl-mandatory keys (see
+/// `crate::factory::validate_bedrock_global_config`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BedrockGlobalConfig {
-    /// Override the routectl-shipped `BEDROCK_INVOKE_ACCEPTED_BETAS`
-    /// const. When `None` (the default), the const is the allowlist.
-    /// When `Some(list)`, `list` REPLACES the const entirely -- this
-    /// is the FULL allowlist for every Bedrock-Invoke provider in the
-    /// config, not an extension. Use this to add flags AWS gated
-    /// after the routectl release, or to remove flags AWS deprecated.
+    /// Bedrock-accepted `anthropic_beta` flags. AWS validates each
+    /// entry independently and 400s the request on the first
+    /// unsupported flag, so a stale list breaks every claude-code
+    /// request. Empty default; populate via TOML to enable Bedrock
+    /// providers. `examples/bedrock.toml` ships the empirical
+    /// 2026-05-12 baseline.
     ///
     /// Per-provider `[providers.X] anthropic_beta` is unrelated and
     /// keeps its existing semantics (operator-asserted floor that is
-    /// always sent and bypasses the allowlist filter).
+    /// always sent and bypasses this filter).
     #[serde(default)]
-    pub anthropic_beta: Option<Vec<String>>,
+    pub allowed_betas: Vec<String>,
+
+    /// Bedrock-accepted top-level body fields (Invoke) /
+    /// `additionalModelRequestFields` keys (Converse). Bedrock 400s
+    /// any unrecognized field with `"Extra inputs are not permitted"`,
+    /// so the Anthropic ingress's forward-compat sweep needs filtering
+    /// on the Bedrock egress. Must include the routectl-mandatory
+    /// keys (`messages`, `anthropic_version`, `max_tokens`) for
+    /// requests to construct successfully -- startup validation
+    /// rejects an incomplete list with a copy-paste hint.
+    #[serde(default)]
+    pub allowed_body_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

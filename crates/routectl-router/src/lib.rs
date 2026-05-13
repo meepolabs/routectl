@@ -15,5 +15,7 @@ pub use config::{
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig};
+#[cfg(feature = "bedrock")]
+pub use factory::validate_bedrock_global_config;
 pub use factory::{build_provider, build_provider_with_options, BuildOptions};
 pub use router::{Router, RouterOptions};
