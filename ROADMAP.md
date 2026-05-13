@@ -69,10 +69,10 @@ wire format:
    / IRSA / IMDS), plus a `bearer-key` flavor for the AWS console's
    short-term token. `InvokeModel` body shape (Anthropic Messages
    today; per-vendor as new vendors are added) and `Converse`
-   transport are wired; `Converse` body translation deferred.
-   Streaming responses decoded from the AWS eventstream binary frame
-   format. Gated behind a default-on `bedrock` Cargo feature so
-   library consumers can opt out of the AWS dep tree with
+   transport are wired; v0.5.x adds full Anthropic-on-Converse body
+   translation. Streaming responses decoded from the AWS eventstream
+   binary frame format. Gated behind a default-on `bedrock` Cargo
+   feature so library consumers can opt out of the AWS dep tree with
    `--no-default-features`.
 2. **Anthropic header polish** -- `extra_headers` and `user_agent`
    on `[providers.X]` of type `anthropic-api`, mirroring the
@@ -159,11 +159,20 @@ fit every host.
      rows, troubleshooting matrix, alias > provider > global
      resolution explained.
 
+4. **Operator-owned Bedrock allowlists** -- `[bedrock] allowed_betas`
+   and `[bedrock] allowed_body_fields`. routectl ships no built-in
+   default; AWS schema drift is operator-tracked, not release-bound.
+   Empty list = pass-through (discovery default).
+   `examples/bedrock.toml` ships the empirical baseline. Replaces
+   the prior hardcoded `BEDROCK_ACCEPTED_BETAS` const (BREAKING
+   rename: `[bedrock] anthropic_beta` -> `allowed_betas`).
+
 Deferred (not in this milestone):
 
 - `routectl doctor` subcommand (active credential probe + IAM action
   surfacing for Bedrock).
-- `Converse` body translation for non-Anthropic Bedrock vendors.
+- `Converse` body translation for non-Anthropic Bedrock vendors
+  (Mistral, Llama, Cohere). Anthropic-on-Converse landed in v0.5.x.
 - WARN on `default_model` fallthrough (currently DEBUG; visibility
   feature request).
 

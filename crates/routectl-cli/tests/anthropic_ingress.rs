@@ -1630,11 +1630,13 @@ async fn cross_response_openai_tool_calls_become_anthropic_tool_use_blocks() {
 //
 // claude-code's TS SDK ships up to ten anthropic-beta flags via the HTTP
 // header on every /v1/messages request. The Anthropic ingress lifts the
-// header into canonical req.anthropic_beta; the Bedrock-Invoke egress's
-// filter_bedrock_invoke_betas drops values Bedrock has not gated. The
-// combined behavior must (a) preserve flags Bedrock accepts, (b) drop
-// flags Bedrock rejects, (c) dedup duplicates introduced by either
-// surface, (d) preserve operator-asserted flags from cfg.anthropic_beta.
+// header into canonical req.anthropic_beta; the Bedrock egress's
+// `filter_bedrock_betas` (in `bedrock::betas`) drops values not on the
+// operator-supplied `[bedrock] allowed_betas` list. The combined
+// behavior must (a) preserve flags the operator allows, (b) drop
+// flags the operator excludes, (c) dedup duplicates introduced by
+// either surface, (d) preserve operator-asserted flags from
+// cfg.anthropic_beta.
 //
 // Wiremock against the actual Bedrock SigV4 path is deferred to a
 // future live-matrix expansion (no AWS creds in the test env). This

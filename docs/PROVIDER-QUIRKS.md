@@ -146,11 +146,28 @@ routectl no longer auto-injects beta gates -- declare the ones you need.
 
 ### Bedrock (any region)
 
-Default works for `invoke` shape (Anthropic Messages body) on Sonnet/Haiku/Opus. Same notes apply for Opus 4.7+ -- set `adaptive_thinking = true` on the provider.
+Both `api_shape = "invoke"` (Anthropic Messages body) and
+`api_shape = "converse"` (AWS Converse) are wired for Anthropic
+models on Sonnet/Haiku/Opus. Set `adaptive_thinking = true` on Opus
+4.7+ providers regardless of api_shape.
 
-The **`converse` api_shape** is accepted in TOML but the body translator is stubbed (M2.7). Use `api_shape = "invoke"` until the adapter ships.
+**Bedrock allowlist (optional, recommended in production).** AWS
+strict-schema validation 400s any unrecognized `anthropic_beta` flag
+or top-level body field. routectl ships no built-in default; populate
+the operator-supplied lists in TOML to gate which entries reach AWS:
 
-**Example:**
+```toml
+[bedrock]
+allowed_betas       = ["context-1m-2025-08-07", ...]
+allowed_body_fields = ["anthropic_version", "messages", ...]
+```
+
+Empty lists (or omitted `[bedrock]` section) = pass-through (no
+filter applied). Use `ROUTECTL_LOG=routectl_providers::bedrock=trace`
+to capture sent flags/fields when building the lists. See
+`examples/bedrock.toml` for the empirical 2026-05-12 baseline.
+
+**Example provider:**
 
 ```toml
 [providers.bedrock-opus47]

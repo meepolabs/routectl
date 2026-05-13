@@ -21,8 +21,8 @@
 //!
 //! AWS-shaped event types (`messageStart`, `contentBlockStart`,
 //! `contentBlockDelta`, `contentBlockStop`, `messageStop`, `metadata`).
-//! Translation to ChatChunk is in `converse.rs` (M2.7); this module
-//! handles only the framing layer for both shapes.
+//! Translation to ChatChunk lives in `converse::eventstream`; this
+//! module handles only the framing layer shared by both shapes.
 
 use aws_smithy_eventstream::frame::{DecodedFrame, MessageFrameDecoder};
 use aws_smithy_types::event_stream::Message;
