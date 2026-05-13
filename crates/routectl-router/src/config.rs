@@ -71,18 +71,26 @@ pub struct Config {
 /// 2026-05-12 baseline; copy and tune as your account's gating
 /// evolves.
 ///
-/// Startup validation rejects an empty list when any `[providers.X]`
-/// has `kind = "bedrock"`, and rejects an `allowed_body_fields` list
-/// missing the routectl-mandatory keys (see
-/// `crate::factory::validate_bedrock_global_config`).
+/// **Empty list = pass-through.** Either field, when empty (or the
+/// entire `[bedrock]` section omitted), disables that filter -- the
+/// upstream sees the assembled value unchanged. This is the
+/// discovery-mode default: bring up routectl, observe actual traffic
+/// via `ROUTECTL_LOG=routectl_providers::bedrock=trace`, then
+/// populate the list with what you observe.
+///
+/// Startup validation in `crate::factory::validate_bedrock_global_config`
+/// kicks in only when `allowed_body_fields` is non-empty, and rejects
+/// a list missing routectl-mandatory keys (`messages`,
+/// `anthropic_version`, `max_tokens`) or missing `anthropic_beta`
+/// when a `[providers.X] anthropic_beta` floor is set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BedrockGlobalConfig {
     /// Bedrock-accepted `anthropic_beta` flags. AWS validates each
     /// entry independently and 400s the request on the first
-    /// unsupported flag, so a stale list breaks every claude-code
-    /// request. Empty default; populate via TOML to enable Bedrock
-    /// providers. `examples/bedrock.toml` ships the empirical
-    /// 2026-05-12 baseline.
+    /// unsupported flag. **Empty list = pass-through** (no filtering;
+    /// every flag the ingress lifts in is forwarded). Populate via
+    /// TOML to enable filtering. `examples/bedrock.toml` ships the
+    /// empirical 2026-05-12 baseline.
     ///
     /// Per-provider `[providers.X] anthropic_beta` is unrelated and
     /// keeps its existing semantics (operator-asserted floor that is
@@ -94,10 +102,14 @@ pub struct BedrockGlobalConfig {
     /// `additionalModelRequestFields` keys (Converse). Bedrock 400s
     /// any unrecognized field with `"Extra inputs are not permitted"`,
     /// so the Anthropic ingress's forward-compat sweep needs filtering
-    /// on the Bedrock egress. Must include the routectl-mandatory
-    /// keys (`messages`, `anthropic_version`, `max_tokens`) for
-    /// requests to construct successfully -- startup validation
-    /// rejects an incomplete list with a copy-paste hint.
+    /// on the Bedrock egress when this list is non-empty. **Empty
+    /// list = pass-through** (no filtering; every key in the assembled
+    /// body / bag is forwarded).
+    ///
+    /// When non-empty, must include the routectl-mandatory keys
+    /// (`messages`, `anthropic_version`, `max_tokens`) for requests
+    /// to construct successfully -- startup validation rejects an
+    /// incomplete list with a copy-paste hint.
     #[serde(default)]
     pub allowed_body_fields: Vec<String>,
 }

@@ -12,19 +12,22 @@
 //! Shape contract identical for both adapters:
 //!
 //! - The effective allowlist is the operator-supplied `allowed_betas`
-//!   list from `[bedrock]` TOML. routectl ships no const default --
-//!   AWS schema drift on the gated set is tracked by the operator,
-//!   not by routectl releases. Startup validation in
-//!   `routectl-router::factory` rejects an empty list when any
-//!   provider has `kind = "bedrock"`, so the empty branch is
-//!   unreachable in practice; the empty-fallback exists for defense
-//!   in depth.
+//!   list from `[bedrock]` TOML. routectl ships no const default.
+//!   Empty list (the default when `[bedrock]` is absent or
+//!   `allowed_betas = []`) puts the filter in PASS-THROUGH mode -- no
+//!   flags are dropped, the upstream sees what the ingress sent. This
+//!   is the discovery-mode default: operators bring up routectl,
+//!   observe which betas the SDK ships via
+//!   `ROUTECTL_LOG=routectl_providers::bedrock=trace`, and populate
+//!   `allowed_betas` with what they want to allow. See
+//!   `examples/bedrock.toml` for the empirical 2026-05-12 baseline.
 //! - Operator-supplied flags from `cfg.anthropic_beta`
 //!   (`[providers.X] anthropic_beta`) pass through unconditionally
 //!   because the operator typed them into TOML.
-//! - Unknown values drop at `tracing::debug!` (not WARN) -- claude-code
-//!   reliably ships a handful of unsupported flags per request, WARN
-//!   would flood `routectl-warn.log`.
+//! - When the allowlist is non-empty and a flag is dropped, the drop
+//!   logs at `tracing::debug!` (not WARN) -- claude-code reliably ships
+//!   a handful of unsupported flags per request, WARN would flood
+//!   `routectl-warn.log`.
 //! - When the filtered array is empty, the field is removed entirely
 //!   so we don't send `anthropic_beta: []`.
 
@@ -39,14 +42,24 @@ use serde_json::{Map, Value};
 /// - For Converse: the `additionalModelRequestFields` map.
 ///
 /// `allowed_betas` is sourced from `[bedrock] allowed_betas` TOML.
-/// routectl ships no const default -- the empirical 2026-05-12
-/// baseline lives in `examples/bedrock.toml` for operators to copy.
+/// **Empty list = pass-through** (no filtering); the entire array is
+/// forwarded to AWS as-is. routectl ships no const default -- the
+/// empirical 2026-05-12 baseline lives in `examples/bedrock.toml` for
+/// operators to copy after observing their actual traffic.
 pub(super) fn filter_bedrock_betas(
     provider_id: &str,
     bag: &mut Map<String, Value>,
     cfg_betas: &[String],
     allowed_betas: &[String],
 ) {
+    // Pass-through mode: empty operator allowlist means routectl is
+    // not gating betas. The operator is in discovery mode (capturing
+    // observed flags via trace logs) or has explicitly opted out of
+    // routectl-side filtering. Either way, no flags drop here.
+    if allowed_betas.is_empty() {
+        return;
+    }
+
     let Some(arr) = bag
         .get("anthropic_beta")
         .and_then(|v| v.as_array())
