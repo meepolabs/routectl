@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use routectl_core::{
     debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
 };
 
 pub(crate) mod parts;
@@ -27,6 +27,10 @@ pub mod request;
 pub mod response;
 pub mod sse;
 pub(crate) mod types;
+
+/// Provider-kind discriminator string used in tracing fields. See
+/// the openai_compat module for the rationale.
+const PROVIDER_KIND: &str = "anthropic";
 
 use sse::SseState;
 
@@ -71,6 +75,15 @@ pub struct AnthropicApiConfig {
     /// gradually and there is no clean naming pattern to gate on.
     /// `None` and `Some(false)` both mean "legacy shape".
     pub adaptive_thinking: Option<bool>,
+    /// Operator-supplied allowlist for `anthropic_beta` flags.
+    /// Empty (default) is pass-through: every beta the client
+    /// requests via the `anthropic-beta` HTTP header or body field
+    /// reaches api.anthropic.com unchanged. When non-empty, ingress-
+    /// lifted values not in the list are dropped at DEBUG level.
+    /// Mirrors the Bedrock-egress `[bedrock] allowed_betas` shape so
+    /// multi-tenant or API-gateway deployments can constrain which
+    /// betas authenticated clients can opt into.
+    pub allowed_betas: Vec<String>,
 }
 
 impl AnthropicApiConfig {
@@ -84,6 +97,7 @@ impl AnthropicApiConfig {
             extra_headers: Vec::new(),
             user_agent: None,
             adaptive_thinking: None,
+            allowed_betas: Vec::new(),
         }
     }
 }
@@ -141,6 +155,7 @@ impl Provider for AnthropicApiProvider {
             &self.cfg.id,
             req,
             self.cfg.adaptive_thinking.unwrap_or(false),
+            &self.cfg.allowed_betas,
         )
     }
 
@@ -166,7 +181,7 @@ impl Provider for AnthropicApiProvider {
         // response in one pass during triage. Gated by the
         // `tracing::Level::TRACE` filter -- production with default
         // info level pays nothing.
-        trace_outgoing_body("anthropic", &self.cfg.id, &body);
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
             .build_headers(self.client.post(self.messages_url()))
@@ -193,7 +208,7 @@ impl Provider for AnthropicApiProvider {
             // level so triage doesn't have to reproduce. The 200B
             // WARN excerpt below stays unchanged for `routectl-warn.log`
             // scannability.
-            debug_upstream_error_body("anthropic", &self.cfg.id, status, &body_text);
+            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let msg = serde_json::from_str::<Value>(&body_text)
                 .ok()
                 .as_ref()
@@ -229,6 +244,8 @@ impl Provider for AnthropicApiProvider {
             .json()
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        // FR-2: trace upstream success body pre-normalize.
+        trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         Ok(chat_resp)
@@ -241,7 +258,7 @@ impl Provider for AnthropicApiProvider {
             obj.insert("stream".into(), serde_json::Value::Bool(true));
         }
 
-        trace_outgoing_body("anthropic", &self.cfg.id, &body);
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
             .build_headers(self.client.post(self.messages_url()))
@@ -256,7 +273,7 @@ impl Provider for AnthropicApiProvider {
             // Same text-first-then-opportunistic-JSON pattern as
             // `complete()` -- see comment there.
             let body_text = resp.text().await.unwrap_or_default();
-            debug_upstream_error_body("anthropic", &self.cfg.id, status, &body_text);
+            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let msg = serde_json::from_str::<Value>(&body_text)
                 .ok()
                 .as_ref()
@@ -311,6 +328,11 @@ impl Provider for AnthropicApiProvider {
             }
         };
 
-        Ok(Box::pin(stream))
+        Ok(routectl_core::wrap_stream_with_summary(
+            stream,
+            "upstream",
+            PROVIDER_KIND,
+            self.cfg.id.clone(),
+        ))
     }
 }

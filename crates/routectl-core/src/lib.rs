@@ -18,8 +18,11 @@ pub use cache_control::{Breakpoint, BreakpointPosition, CacheControl};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};
 pub use log_safe::{
-    debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body,
-    sanitize_upstream_body_with_cap, trace_outgoing_body,
+    debug_upstream_error_body, extract_upstream_message, log_redaction_status, redact_prompts_in,
+    redact_prompts_with_flag, sanitize_for_log, sanitize_upstream_body,
+    sanitize_upstream_body_with_cap, trace_egress_body, trace_ingress_body, trace_outgoing_body,
+    trace_stream_summary, trace_upstream_success_body, wrap_stream_with_summary,
+    MAX_TRACE_BODY_BYTES,
 };
 pub use provider::Provider;
 pub use reserved::is_canonical_request_key;

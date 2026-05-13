@@ -70,7 +70,20 @@ enum BlockState {
     /// Reasoning block. Index in the reasoning_details array assigned
     /// at start time so all deltas for this block carry the same
     /// `reasoning_details[].index`.
-    Reasoning { detail_index: u32 },
+    ///
+    /// Strategy A (matches anthropic_api/sse.rs): `accumulated` buffers
+    /// thinking text deltas; `signature` is filled by signature_delta;
+    /// `detail_id` is minted at first delta. The structured
+    /// `ReasoningDetail` is deferred to `contentBlockStop` so the
+    /// terminal entry carries BOTH text and signature -- the shape
+    /// Anthropic's replay path requires for multi-turn echo through
+    /// Bedrock-Invoke or anthropic-api egresses.
+    Reasoning {
+        detail_index: u32,
+        accumulated: String,
+        signature: Option<String>,
+        detail_id: String,
+    },
 }
 
 /// Persistent state across all frames in one ConverseStream response.
@@ -266,8 +279,32 @@ fn handle_converse_frame(
         "contentBlockStop" => {
             let ev: StreamContentBlockStop =
                 parse_payload(provider_id, payload, "contentBlockStop")?;
-            state.blocks.remove(&ev.content_block_index);
-            Ok(vec![])
+            // Strategy A: on a Reasoning block, emit the aggregated
+            // structured detail carrying both text + signature.
+            let removed = state.blocks.remove(&ev.content_block_index);
+            let chunks = if let Some(BlockState::Reasoning {
+                detail_index,
+                accumulated,
+                signature,
+                detail_id,
+            }) = removed
+            {
+                if accumulated.is_empty() && signature.is_none() {
+                    // Empty thinking block -- skip emission so replay
+                    // doesn't push a doomed empty Thinking block.
+                    vec![]
+                } else {
+                    vec![reasoning_terminal_chunk(
+                        detail_index,
+                        detail_id,
+                        accumulated,
+                        signature,
+                    )]
+                }
+            } else {
+                vec![]
+            };
+            Ok(chunks)
         }
         "messageStop" => {
             let ev: StreamMessageStop = parse_payload(provider_id, payload, "messageStop")?;
@@ -357,26 +394,49 @@ fn handle_block_delta(
         StreamDelta::ReasoningContent { reasoning_content } => {
             // Upgrade the block kind to Reasoning lazily so the index
             // is allocated on first reasoning delta only.
-            let detail_index = match state.blocks.get(&ev.content_block_index) {
-                Some(BlockState::Reasoning { detail_index }) => *detail_index,
+            let _detail_index = match state.blocks.get(&ev.content_block_index) {
+                Some(BlockState::Reasoning { detail_index, .. }) => *detail_index,
                 _ => {
                     let di = state.next_detail_index;
                     state.next_detail_index += 1;
                     state.blocks.insert(
                         ev.content_block_index,
-                        BlockState::Reasoning { detail_index: di },
+                        BlockState::Reasoning {
+                            detail_index: di,
+                            accumulated: String::new(),
+                            signature: None,
+                            detail_id: uuid::Uuid::new_v4().to_string(),
+                        },
                     );
                     di
                 }
             };
             let mut chunks = Vec::new();
+            // Strategy A: accumulate text + signature on the open
+            // block; emit only the LIVE `reasoning` string per delta.
+            // The structured `ReasoningDetail` lands at
+            // contentBlockStop with both fields paired, matching the
+            // anthropic_api streaming path so replay round-trips.
             if let Some(text) = reasoning_content.text {
-                chunks.push(reasoning_text_chunk(detail_index, text));
+                if let Some(BlockState::Reasoning { accumulated, .. }) =
+                    state.blocks.get_mut(&ev.content_block_index)
+                {
+                    accumulated.push_str(&text);
+                }
+                chunks.push(reasoning_text_chunk(text));
             }
             if let Some(sig) = reasoning_content.signature {
-                chunks.push(reasoning_signature_chunk(detail_index, sig));
+                if let Some(BlockState::Reasoning { signature, .. }) =
+                    state.blocks.get_mut(&ev.content_block_index)
+                {
+                    *signature = Some(sig);
+                }
+                // No per-event chunk for signature -- the terminal
+                // detail at contentBlockStop carries it.
             }
             if let Some(redacted) = reasoning_content.redacted_content {
+                // Redacted reasoning has no text/signature pair; emit
+                // immediately as today.
                 chunks.push(reasoning_redacted_chunk(redacted));
             }
             chunks
@@ -468,14 +528,10 @@ fn tool_delta_chunk(id: String, name: String, call_index: u32, partial_json: Str
     }
 }
 
-fn reasoning_text_chunk(detail_index: u32, thinking: String) -> ChatChunk {
-    let detail = ReasoningDetail {
-        kind: ReasoningDetailKind::Text,
-        id: Some(Uuid::new_v4().to_string()),
-        format: Some(ANTHROPIC_FORMAT.to_string()),
-        index: Some(detail_index),
-        payload: json!({"text": thinking.clone()}),
-    };
+/// Strategy A live thinking-string chunk: carries only the plain
+/// `reasoning` string. The structured `ReasoningDetail` is deferred
+/// to `reasoning_terminal_chunk` at `contentBlockStop`.
+fn reasoning_text_chunk(thinking: String) -> ChatChunk {
     ChatChunk {
         id: String::new(),
         model: String::new(),
@@ -483,7 +539,6 @@ fn reasoning_text_chunk(detail_index: u32, thinking: String) -> ChatChunk {
             index: 0,
             delta: ChunkDelta {
                 reasoning: Some(thinking),
-                reasoning_details: vec![detail],
                 ..Default::default()
             },
             finish_reason: None,
@@ -492,13 +547,26 @@ fn reasoning_text_chunk(detail_index: u32, thinking: String) -> ChatChunk {
     }
 }
 
-fn reasoning_signature_chunk(detail_index: u32, signature: String) -> ChatChunk {
+/// Strategy A terminal chunk: emits ONE aggregated `ReasoningDetail`
+/// per thinking block carrying both `text` and `signature`. Mirrors
+/// `anthropic_api::sse::make_thinking_terminal_chunk` so replay
+/// across either egress (Bedrock-Invoke or anthropic-api) sees the
+/// same byte-shape.
+fn reasoning_terminal_chunk(
+    detail_index: u32,
+    detail_id: String,
+    accumulated: String,
+    signature: Option<String>,
+) -> ChatChunk {
     let detail = ReasoningDetail {
         kind: ReasoningDetailKind::Text,
-        id: Some(Uuid::new_v4().to_string()),
+        id: Some(detail_id),
         format: Some(ANTHROPIC_FORMAT.to_string()),
         index: Some(detail_index),
-        payload: json!({"signature": signature}),
+        payload: json!({
+            "text": accumulated,
+            "signature": signature.unwrap_or_default(),
+        }),
     };
     ChatChunk {
         id: String::new(),
