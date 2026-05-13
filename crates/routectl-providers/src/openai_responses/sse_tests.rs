@@ -67,7 +67,10 @@ fn sse_output_item_added_opens_text_block_state() {
         }),
     );
     assert_eq!(delta_chunks.len(), 1);
-    assert_eq!(delta_chunks[0].choices[0].delta.content.as_deref(), Some("hi"));
+    assert_eq!(
+        delta_chunks[0].choices[0].delta.content.as_deref(),
+        Some("hi")
+    );
 }
 
 #[test]
@@ -132,7 +135,11 @@ fn sse_output_item_added_opens_tool_use_block_state() {
         }),
     );
     assert_eq!(delta_chunks.len(), 1);
-    let tcs = delta_chunks[0].choices[0].delta.tool_calls.as_ref().unwrap();
+    let tcs = delta_chunks[0].choices[0]
+        .delta
+        .tool_calls
+        .as_ref()
+        .unwrap();
     assert_eq!(tcs[0]["id"], "call_xy");
     assert_eq!(tcs[0]["function"]["name"], "calc");
     assert_eq!(tcs[0]["function"]["arguments"], "{\"a\":1}");
@@ -399,7 +406,10 @@ fn sse_interleaved_output_index_routes_to_correct_block_state() {
             "delta": "ans"
         }),
     );
-    assert_eq!(chunks_text[0].choices[0].delta.content.as_deref(), Some("ans"));
+    assert_eq!(
+        chunks_text[0].choices[0].delta.content.as_deref(),
+        Some("ans")
+    );
 
     let chunks_reason = drive(
         &mut state,
@@ -728,7 +738,13 @@ fn sse_interleaved_two_text_blocks_route_to_correct_block() {
 
     // Assert: each Text delta routed to its own block.
     assert_eq!(chunks_0.len(), 1);
-    assert_eq!(chunks_0[0].choices[0].delta.content.as_deref(), Some("first"));
+    assert_eq!(
+        chunks_0[0].choices[0].delta.content.as_deref(),
+        Some("first")
+    );
     assert_eq!(chunks_2.len(), 1);
-    assert_eq!(chunks_2[0].choices[0].delta.content.as_deref(), Some("second"));
+    assert_eq!(
+        chunks_2[0].choices[0].delta.content.as_deref(),
+        Some("second")
+    );
 }

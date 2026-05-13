@@ -108,7 +108,10 @@ mod tests {
         }
     }
 
-    fn run(tools: Option<Vec<ToolDef>>, strict: bool) -> (serde_json::Map<String, Value>, Result<()>) {
+    fn run(
+        tools: Option<Vec<ToolDef>>,
+        strict: bool,
+    ) -> (serde_json::Map<String, Value>, Result<()>) {
         let req = make_req(tools);
         let mut obj = serde_json::Map::new();
         let result = lift("test", &mut obj, &req, strict);
@@ -138,8 +141,14 @@ mod tests {
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "calculator");
         assert_eq!(tools[0]["function"]["description"], "do math");
-        assert_eq!(tools[0]["function"]["parameters"]["properties"]["expr"]["type"], "string");
-        assert!(tools[0].get("input_schema").is_none(), "Anthropic input_schema must not leak");
+        assert_eq!(
+            tools[0]["function"]["parameters"]["properties"]["expr"]["type"],
+            "string"
+        );
+        assert!(
+            tools[0].get("input_schema").is_none(),
+            "Anthropic input_schema must not leak"
+        );
     }
 
     #[test]
@@ -208,7 +217,10 @@ mod tests {
         // Assert
         assert!(res.is_err(), "strict mode must reject builtin tools");
         let msg = format!("{}", res.unwrap_err());
-        assert!(msg.contains("strict_translation"), "error must mention strict_translation");
+        assert!(
+            msg.contains("strict_translation"),
+            "error must mention strict_translation"
+        );
     }
 
     #[test]

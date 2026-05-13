@@ -99,11 +99,7 @@ fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) {
     flush_user_chunk(&msg, &mut pending_user_chunk, out);
 }
 
-fn flush_user_chunk(
-    template: &Value,
-    pending: &mut Vec<Value>,
-    out: &mut Vec<Value>,
-) {
+fn flush_user_chunk(template: &Value, pending: &mut Vec<Value>, out: &mut Vec<Value>) {
     if pending.is_empty() {
         return;
     }

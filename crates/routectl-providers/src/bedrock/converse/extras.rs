@@ -72,11 +72,7 @@ pub(super) fn build_additional_fields(cfg: &BedrockConfig, req: &ChatRequest) ->
 /// caller-supplied keys win EXCEPT for routectl-managed Converse keys
 /// (`is_converse_managed_key`), which drop with a WARN.
 fn insert_provider_extras(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
-    let Some(extras) = req
-        .provider_extras
-        .as_ref()
-        .and_then(|v| v.as_object())
-    else {
+    let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
         return;
     };
     for (k, v) in extras {

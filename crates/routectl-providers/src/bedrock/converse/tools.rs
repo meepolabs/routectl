@@ -63,9 +63,7 @@ pub(super) fn build_tool_config(_id: &str, req: &ChatRequest) -> Result<Option<T
 fn is_tool_choice_none(tc: Option<&Value>) -> bool {
     match tc {
         Some(Value::String(s)) => s == "none",
-        Some(Value::Object(map)) => {
-            map.get("type").and_then(|v| v.as_str()) == Some("none")
-        }
+        Some(Value::Object(map)) => map.get("type").and_then(|v| v.as_str()) == Some("none"),
         _ => false,
     }
 }
@@ -153,7 +151,9 @@ fn translate_tool_choice_string(id: &str, s: &str) -> Option<ConverseToolChoice>
         "auto" => Some(ConverseToolChoice::Auto {
             auto: EmptyObject {},
         }),
-        "required" => Some(ConverseToolChoice::Any { any: EmptyObject {} }),
+        "required" => Some(ConverseToolChoice::Any {
+            any: EmptyObject {},
+        }),
         "none" => None, // handled at the build_tool_config level
         other => {
             tracing::warn!(
@@ -189,14 +189,19 @@ fn passthrough_converse_tool_choice(
         });
     }
     if map.contains_key("any") {
-        return Some(ConverseToolChoice::Any { any: EmptyObject {} });
+        return Some(ConverseToolChoice::Any {
+            any: EmptyObject {},
+        });
     }
     let tool = map.get("tool").and_then(|v| v.as_object())?;
     let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
     if name.is_empty() {
         tracing::warn!(
             provider = id,
-            shape_type = map.get("type").and_then(|v| v.as_str()).unwrap_or("unknown"),
+            shape_type = map
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
             "tool_choice missing or invalid name; dropping field"
         );
         return None;
@@ -218,9 +223,9 @@ fn translate_typed_tool_choice(
         Some("auto") => Some(ConverseToolChoice::Auto {
             auto: EmptyObject {},
         }),
-        Some("any") | Some("required") => {
-            Some(ConverseToolChoice::Any { any: EmptyObject {} })
-        }
+        Some("any") | Some("required") => Some(ConverseToolChoice::Any {
+            any: EmptyObject {},
+        }),
         Some("tool") => {
             let name = map.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {

@@ -463,7 +463,10 @@ mod e2e_tests {
             other => panic!("expected Text, got {other:?}"),
         }
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
-        assert_eq!(resp.routectl_provider.as_deref(), Some("openai-responses:test"));
+        assert_eq!(
+            resp.routectl_provider.as_deref(),
+            Some("openai-responses:test")
+        );
     }
 
     #[tokio::test]
@@ -473,15 +476,17 @@ mod e2e_tests {
         Mock::given(method("POST"))
             .and(path("/responses"))
             .respond_with(
-                ResponseTemplate::new(500)
-                    .set_body_string("{\"error\":{\"message\":\"oops\"}}"),
+                ResponseTemplate::new(500).set_body_string("{\"error\":{\"message\":\"oops\"}}"),
             )
             .mount(&server)
             .await;
         let provider = make_provider(&server.uri());
 
         // Act
-        let err = provider.complete(base_req()).await.expect_err("expected upstream err");
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("expected upstream err");
 
         // Assert
         match err {
@@ -547,7 +552,7 @@ mod e2e_tests {
         // Arrange
         let server = MockServer::start().await;
         // Construct an SSE body with `data: <json>\n\n` framing.
-        let events = vec![
+        let events = [
             serde_json::json!({"type": "response.created", "response": {"id":"r","model":"m"}}),
             serde_json::json!({
                 "type": "response.output_item.added", "output_index": 0,
@@ -564,10 +569,7 @@ mod e2e_tests {
                 }
             }),
         ];
-        let sse_body: String = events
-            .iter()
-            .map(|e| format!("data: {}\n\n", e))
-            .collect();
+        let sse_body: String = events.iter().map(|e| format!("data: {}\n\n", e)).collect();
         Mock::given(method("POST"))
             .and(path("/responses"))
             .respond_with(

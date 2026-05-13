@@ -113,8 +113,8 @@ mod tests {
     use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
 
     use super::super::super::dialect::ReasoningDialect;
-    use super::super::super::HistoryReasoning;
     use super::super::super::request::normalize;
+    use super::super::super::HistoryReasoning;
 
     fn user_req(model: &str) -> ChatRequest {
         ChatRequest {

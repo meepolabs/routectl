@@ -98,10 +98,16 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
 /// caller-side `select_message_content` collapses to flat Text when the
 /// only Parts entries are Text-typed and emits Parts otherwise so
 /// multimodal/forward-compat content survives end-to-end.
+#[allow(clippy::type_complexity)] // multi-tuple return matches the wire walk; alias would obscure intent
 fn walk_content_blocks(
     provider_id: &str,
     blocks: &[ConverseResponseContentBlock],
-) -> Result<(String, Vec<ReasoningDetail>, Option<Vec<Value>>, Vec<ContentPart>)> {
+) -> Result<(
+    String,
+    Vec<ReasoningDetail>,
+    Option<Vec<Value>>,
+    Vec<ContentPart>,
+)> {
     let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_details: Vec<ReasoningDetail> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
@@ -186,9 +192,7 @@ fn walk_content_blocks(
 /// `extras` map so a forward-compat ContentPart::Other carries the
 /// original payload through the canonical schema -- the egress sees the
 /// same shape the upstream produced.
-fn extract_other_tag_and_extras(
-    v: &Value,
-) -> (String, serde_json::Map<String, Value>) {
+fn extract_other_tag_and_extras(v: &Value) -> (String, serde_json::Map<String, Value>) {
     let obj = match v.as_object() {
         Some(o) => o,
         None => return ("unknown".to_string(), serde_json::Map::new()),
@@ -217,9 +221,9 @@ fn extract_other_tag_and_extras(
 // is byte-identical. M12 (managed-key dedup wave) is the natural
 // landing for this.
 fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageContent {
-    let only_text = parts.iter().all(|p| {
-        matches!(p, ContentPart::Known(KnownContentPart::Text { .. }))
-    });
+    let only_text = parts
+        .iter()
+        .all(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })));
     if only_text {
         MessageContent::Text(text)
     } else {
@@ -249,9 +253,9 @@ pub(crate) fn map_stop_reason(reason: Option<&str>) -> Option<String> {
 
 /// Translate Converse `usage` into the canonical `Usage`. Mirrors
 /// `anthropic_api::response::translate_usage` so an OpenAI client
-/// reading `prompt_tokens` sees the cumulative context size (raw input
-/// + cache_creation + cache_read), not just the new-tokens count AWS
-/// reports in `inputTokens`.
+/// reading `prompt_tokens` sees the cumulative context size
+/// (raw input plus cache_creation plus cache_read), not just the
+/// new-tokens count AWS reports in `inputTokens`.
 fn translate_usage(u: &ConverseUsage) -> Usage {
     let cache_write = u.cache_write_input_tokens.unwrap_or(0);
     let cache_read = u.cache_read_input_tokens.unwrap_or(0);
@@ -272,10 +276,7 @@ fn translate_usage(u: &ConverseUsage) -> Usage {
         reasoning_tokens: None,
         cache_creation_input_tokens: u.cache_write_input_tokens,
         cache_read_input_tokens: u.cache_read_input_tokens,
-        cache_creation: u
-            .cache_details
-            .as_deref()
-            .map(translate_cache_details),
+        cache_creation: u.cache_details.as_deref().map(translate_cache_details),
     }
 }
 
@@ -371,10 +372,7 @@ mod tests {
         let resp = translate("test", &raw).unwrap();
 
         // Assert
-        assert_eq!(
-            resp.choices[0].finish_reason.as_deref(),
-            Some("tool_calls")
-        );
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("tool_calls"));
         let tcs = resp.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tcs.len(), 1);
         assert_eq!(tcs[0]["id"], "tu_42");
@@ -495,12 +493,11 @@ mod tests {
             MessageContent::Parts(parts) => {
                 assert_eq!(parts.len(), 2);
                 match &parts[0] {
-                    ContentPart::Other { type_tag, extras, .. } => {
+                    ContentPart::Other {
+                        type_tag, extras, ..
+                    } => {
                         assert_eq!(type_tag, "futureBlock");
-                        assert_eq!(
-                            extras.get("x").and_then(|v| v.as_i64()),
-                            Some(1)
-                        );
+                        assert_eq!(extras.get("x").and_then(|v| v.as_i64()), Some(1));
                     }
                     other => panic!("expected Other, got {other:?}"),
                 }

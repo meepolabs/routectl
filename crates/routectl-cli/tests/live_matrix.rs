@@ -994,7 +994,10 @@ async fn bedrock_converse_complete_matrix() {
         return;
     };
 
-    let targets: Vec<String> = BEDROCK_CONVERSE_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = BEDROCK_CONVERSE_MODELS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let total = targets.len();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -1018,7 +1021,10 @@ async fn bedrock_converse_stream_matrix() {
         return;
     };
 
-    let targets: Vec<String> = BEDROCK_CONVERSE_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = BEDROCK_CONVERSE_MODELS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
         let r = r.clone();
@@ -1054,11 +1060,7 @@ const OPENAI_RESPONSES_BASE: &str = "https://chatgpt.com/backend-api/codex";
 // gpt-5.3-codex is the default for the codex CLI; others are available
 // to ChatGPT Plus subscribers.
 #[cfg(feature = "openai-responses")]
-const OPENAI_RESPONSES_MODELS: &[&str] = &[
-    "gpt-5.3-codex",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-];
+const OPENAI_RESPONSES_MODELS: &[&str] = &["gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini"];
 
 #[cfg(feature = "openai-responses")]
 async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Router>> {
@@ -1130,7 +1132,10 @@ async fn openai_responses_complete_matrix() {
         return;
     };
 
-    let targets: Vec<String> = OPENAI_RESPONSES_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = OPENAI_RESPONSES_MODELS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let total = targets.len();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -1155,7 +1160,10 @@ async fn openai_responses_stream_matrix() {
         return;
     };
 
-    let targets: Vec<String> = OPENAI_RESPONSES_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = OPENAI_RESPONSES_MODELS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
         let r = r.clone();

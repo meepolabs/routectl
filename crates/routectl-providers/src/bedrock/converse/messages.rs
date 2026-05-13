@@ -13,9 +13,7 @@
 
 use serde_json::Value;
 
-use routectl_core::{
-    ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role,
-};
+use routectl_core::{ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role};
 
 use crate::anthropic_api::parts::strip_text_after_tool_use;
 
@@ -109,7 +107,10 @@ fn ensure_document_has_text_sibling(blocks: &mut Vec<ConverseContentBlock>) {
 /// rejects `[]` so the caller will skip the message if necessary, but
 /// most user turns carry text); typed parts -> per-block translation
 /// with cache_point interleave.
-fn build_user_content_blocks(id: &str, content: &MessageContent) -> Result<Vec<ConverseContentBlock>> {
+fn build_user_content_blocks(
+    id: &str,
+    content: &MessageContent,
+) -> Result<Vec<ConverseContentBlock>> {
     content_blocks_with_cache_control(id, content)
 }
 
@@ -153,9 +154,7 @@ fn content_blocks_from_parts(id: &str, parts: &[ContentPart]) -> Result<Vec<Conv
             out.push(block);
             if let Some(cc) = cc {
                 out.push(ConverseContentBlock::CachePoint {
-                    cache_point: CachePoint::default_with_ttl(Some(
-                        cc.effective_ttl().to_string(),
-                    )),
+                    cache_point: CachePoint::default_with_ttl(Some(cc.effective_ttl().to_string())),
                 });
             }
         }
@@ -172,10 +171,7 @@ fn content_blocks_from_parts(id: &str, parts: &[ContentPart]) -> Result<Vec<Conv
 /// dropped (with a tracing diagnostic). Returns Err only on hard
 /// translation failures (e.g. thinking block without a signature, which
 /// would 400 AWS on multi-turn replay).
-fn translate_content_part(
-    id: &str,
-    p: &ContentPart,
-) -> Result<Option<ConverseContentBlock>> {
+fn translate_content_part(id: &str, p: &ContentPart) -> Result<Option<ConverseContentBlock>> {
     match p {
         ContentPart::Known(k) => translate_known_part(id, k),
         ContentPart::Other { type_tag, .. } => {
@@ -190,21 +186,16 @@ fn translate_content_part(
     }
 }
 
-fn translate_known_part(
-    id: &str,
-    k: &KnownContentPart,
-) -> Result<Option<ConverseContentBlock>> {
+fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<ConverseContentBlock>> {
     match k {
-        KnownContentPart::Text { text, .. } => Ok(Some(ConverseContentBlock::Text {
-            text: text.clone(),
-        })),
+        KnownContentPart::Text { text, .. } => {
+            Ok(Some(ConverseContentBlock::Text { text: text.clone() }))
+        }
         KnownContentPart::Image { source, .. } => Ok(translate_image_source(id, source)),
         KnownContentPart::ImageUrl { image_url, .. } => Ok(translate_image_url(id, image_url)),
-        KnownContentPart::Document {
-            source,
-            title,
-            ..
-        } => Ok(translate_document(id, source, title.as_deref())),
+        KnownContentPart::Document { source, title, .. } => {
+            Ok(translate_document(id, source, title.as_deref()))
+        }
         KnownContentPart::ToolUse {
             id: tu_id,
             name,
@@ -229,7 +220,10 @@ fn translate_known_part(
                 status: is_error.map(|e| if e { "error".into() } else { "success".into() }),
             },
         })),
-        KnownContentPart::Thinking { thinking, signature } => {
+        KnownContentPart::Thinking {
+            thinking,
+            signature,
+        } => {
             // Multi-turn replay against thinking-enabled Claude on
             // Converse REQUIRES the signature -- AWS validates that
             // each `reasoningText` block carries the upstream-supplied
@@ -342,7 +336,11 @@ fn media_type_to_image_format(mt: &str) -> Option<String> {
 /// Returns None when the source shape is unrecognized (URL refs aren't
 /// supported on the JSON Converse wire) or the media type doesn't map
 /// to an AWS-validated `format` value.
-fn translate_document(id: &str, source: &Value, title: Option<&str>) -> Option<ConverseContentBlock> {
+fn translate_document(
+    id: &str,
+    source: &Value,
+    title: Option<&str>,
+) -> Option<ConverseContentBlock> {
     let obj = source.as_object()?;
     let kind = obj.get("type").and_then(|v| v.as_str())?;
     if kind != "base64" {
@@ -403,9 +401,7 @@ fn sanitize_document_name(title: Option<&str>) -> String {
     let cleaned: String = raw
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric()
-                || matches!(c, '-' | '(' | ')' | '[' | ']' | '_' | ' ')
-            {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '(' | ')' | '[' | ']' | '_' | ' ') {
                 c
             } else {
                 '_'
@@ -527,10 +523,7 @@ fn build_tool_message(msg: &Message) -> Result<ConverseMessage> {
     };
     let content = match &msg.content {
         MessageContent::Text(t) => vec![ConverseToolResultContent::Text { text: t.clone() }],
-        MessageContent::Parts(parts) => parts
-            .iter()
-            .map(translate_part_for_tool_result)
-            .collect(),
+        MessageContent::Parts(parts) => parts.iter().map(translate_part_for_tool_result).collect(),
         MessageContent::Null => Vec::new(),
     };
     Ok(ConverseMessage {
@@ -557,15 +550,12 @@ fn translate_part_for_tool_result(p: &ContentPart) -> ConverseToolResultContent 
             ConverseToolResultContent::Text { text: text.clone() }
         }
         ContentPart::Known(KnownContentPart::Image { source, .. }) => {
-            image_source_to_tool_result(source)
+            image_source_to_tool_result(source).unwrap_or_else(|| content_part_to_json_fallback(p))
+        }
+        ContentPart::Known(KnownContentPart::Document { source, title, .. }) => {
+            document_to_tool_result(source, title.as_deref())
                 .unwrap_or_else(|| content_part_to_json_fallback(p))
         }
-        ContentPart::Known(KnownContentPart::Document {
-            source,
-            title,
-            ..
-        }) => document_to_tool_result(source, title.as_deref())
-            .unwrap_or_else(|| content_part_to_json_fallback(p)),
         _ => {
             tracing::debug!(
                 "tool_result Parts element falls back to Json wrap; \
