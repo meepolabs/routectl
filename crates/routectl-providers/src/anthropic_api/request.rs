@@ -1005,8 +1005,8 @@ fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
 /// shared canonical list and adds Anthropic-API-specific keys that are
 /// not on `ChatRequest` but are written by this egress from canonical
 /// fields:
-///   - `thinking`  -- translated from `req.reasoning` by `build_thinking`;
-///                    not a raw ChatRequest field but routectl writes it.
+/// - `thinking`  -- translated from `req.reasoning` by `build_thinking`;
+///   not a raw ChatRequest field but routectl writes it.
 fn is_routectl_managed_key(key: &str) -> bool {
     is_canonical_request_key(key)
         || matches!(

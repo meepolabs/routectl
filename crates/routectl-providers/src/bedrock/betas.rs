@@ -64,7 +64,11 @@ pub(super) fn filter_bedrock_betas(
     cfg_betas: &[String],
     allowlist_override: Option<&[String]>,
 ) {
-    let Some(arr) = bag.get("anthropic_beta").and_then(|v| v.as_array()).cloned() else {
+    let Some(arr) = bag
+        .get("anthropic_beta")
+        .and_then(|v| v.as_array())
+        .cloned()
+    else {
         return;
     };
     let in_allowlist = |flag: &str| -> bool {

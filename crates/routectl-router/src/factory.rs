@@ -146,8 +146,9 @@ pub async fn build_provider_with_options(
                 Some(uri) => Some(resolve(secrets, uri).await?),
                 None => None,
             };
-            let resolved_base_url =
-                base_url.clone().unwrap_or_else(|| default_responses_base(*auth_kind));
+            let resolved_base_url = base_url
+                .clone()
+                .unwrap_or_else(|| default_responses_base(*auth_kind));
             let cfg = OpenAiResponsesConfig {
                 id: format!("openai-responses:{name}"),
                 api_key,

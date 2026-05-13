@@ -560,18 +560,16 @@ fn document_content_block_translates_to_aws_document_block() {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![Message {
             role: Role::User,
-            content: MessageContent::Parts(vec![ContentPart::Known(
-                KnownContentPart::Document {
-                    source: json!({
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": "JVBERi0xLjQK",
-                    }),
-                    title: Some("report.pdf".into()),
-                    citations: None,
-                    cache_control: None,
-                },
-            )]),
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Document {
+                source: json!({
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "JVBERi0xLjQK",
+                }),
+                title: Some("report.pdf".into()),
+                citations: None,
+                cache_control: None,
+            })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
