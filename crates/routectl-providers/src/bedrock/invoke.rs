@@ -85,12 +85,9 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // gates for distribution. Shared with the Converse adapter via
     // `super::betas`.
     //
-    // Startup validation in `routectl-router::factory` rejects an
-    // empty `cfg.allowed_betas` when any provider has
-    // `kind = "bedrock"`, so the empty branch is unreachable in
-    // practice. Defense in depth: if we ever get here with an empty
-    // list, every flag drops, which fails-closed (no flags survive)
-    // rather than silently accepting unknown values.
+    // Empty `cfg.allowed_betas` puts the filter in pass-through mode
+    // (every flag survives) -- the discovery default for operators
+    // bringing up routectl against a fresh AWS account.
     filter_bedrock_betas(&cfg.id, obj, &cfg.anthropic_beta, &cfg.allowed_betas);
 
     // Merge any additional model request fields at the top level
