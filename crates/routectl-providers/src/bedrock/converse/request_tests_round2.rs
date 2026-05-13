@@ -34,7 +34,36 @@ fn fake_cfg() -> BedrockConfig {
         user_agent: None,
         extra_headers: Vec::new(),
         anthropic_beta: Vec::new(),
-        anthropic_beta_allowlist: None,
+        allowed_betas: vec![
+            "context-1m-2025-08-07".into(),
+            "claude-code-20250219".into(),
+            "interleaved-thinking-2025-05-14".into(),
+            "context-management-2025-06-27".into(),
+            "effort-2025-11-24".into(),
+            "fine-grained-tool-streaming-2025-05-14".into(),
+            "computer-use-2025-01-24".into(),
+            "computer-use-2024-10-22".into(),
+            "mcp-client-2025-04-04".into(),
+            "search-results-2025-06-09".into(),
+        ],
+        allowed_body_fields: vec![
+            "anthropic_version".into(),
+            "anthropic_beta".into(),
+            "max_tokens".into(),
+            "messages".into(),
+            "system".into(),
+            "temperature".into(),
+            "top_p".into(),
+            "top_k".into(),
+            "tools".into(),
+            "tool_choice".into(),
+            "stop_sequences".into(),
+            "thinking".into(),
+            "output_config".into(),
+            "cache_control".into(),
+            "metadata".into(),
+            "context_management".into(),
+        ],
         additional_model_request_fields: None,
         adaptive_thinking: None,
     }
@@ -97,18 +126,22 @@ fn anthropic_object_none_tool_choice_suppresses_tool_config_entirely() {
 fn provider_extras_merge_into_additional_model_request_fields() {
     // Arrange: a custom forward-compat field (the Anthropic ingress
     // sweeps unknown top-level keys into provider_extras) must
-    // survive to additionalModelRequestFields verbatim. Without
-    // this, fields like `context_management`, `mcp_servers`,
-    // `container`, and the legacy-merged `output_config.format`
-    // disappear silently between ingress and Converse egress.
+    // survive to additionalModelRequestFields verbatim PROVIDED the
+    // operator has the field on `[bedrock] allowed_body_fields`.
+    // Without this merge, fields like `context_management`,
+    // `output_config.format`, and `metadata` disappear silently
+    // between ingress and Converse egress. Fields NOT on the operator
+    // list (e.g. `mcp_servers`, `container`) are dropped per INV-7;
+    // see `body_fields_filter_drops_disallowed_keys_on_converse` for
+    // that contract.
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")],
         provider_extras: Some(json!({
             "context_management": {"strategy": "summarize"},
-            "mcp_servers": [{"url": "https://example.com"}],
-            "container": "my-container",
+            "metadata": {"user_id": "u-1"},
+            "top_k": 40,
         })),
         ..Default::default()
     };
@@ -122,11 +155,50 @@ fn provider_extras_merge_into_additional_model_request_fields() {
         bag["context_management"]["strategy"], "summarize",
         "got {body}"
     );
-    assert_eq!(
-        bag["mcp_servers"][0]["url"], "https://example.com",
-        "got {body}"
+    assert_eq!(bag["metadata"]["user_id"], "u-1", "got {body}");
+    assert_eq!(bag["top_k"], 40, "got {body}");
+}
+
+#[test]
+fn body_fields_filter_drops_disallowed_keys_on_converse() {
+    // Arrange (INV-7): the Anthropic ingress's forward-compat sweep
+    // forwards unknown top-level keys (e.g. `mcp_servers`,
+    // `container`, `diagnostics`) into provider_extras. The Converse
+    // egress must DROP any key not on `[bedrock] allowed_body_fields`
+    // before sending; AWS forwards the bag verbatim to Anthropic
+    // which 400s the request on the first unrecognized field.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hi")],
+        provider_extras: Some(json!({
+            "context_management": {"strategy": "summarize"},  // allowed
+            "mcp_servers": [{"url": "https://example.com"}],  // disallowed
+            "container": "my-container",                       // disallowed
+            "diagnostics": {"trace_id": "abc"},                // disallowed
+        })),
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+    let bag = body["additionalModelRequestFields"]
+        .as_object()
+        .expect("expected bag");
+
+    // Assert: only the allowed key survives.
+    assert!(bag.contains_key("context_management"), "got {body}");
+    assert!(
+        !bag.contains_key("mcp_servers"),
+        "mcp_servers leaked through: {body}"
     );
-    assert_eq!(bag["container"], "my-container", "got {body}");
+    assert!(
+        !bag.contains_key("container"),
+        "container leaked through: {body}"
+    );
+    assert!(
+        !bag.contains_key("diagnostics"),
+        "diagnostics leaked through: {body}"
+    );
 }
 
 #[test]
@@ -412,20 +484,20 @@ fn anthropic_beta_provider_config_floor_bypasses_filter_on_converse() {
 }
 
 #[test]
-fn anthropic_beta_global_allowlist_override_replaces_const_on_converse() {
-    // Arrange: `cfg.anthropic_beta_allowlist` (sourced from
-    // `[bedrock] anthropic_beta` global TOML) REPLACES the
-    // routectl-shipped const allowlist. Same hook, same precedence
-    // as Invoke.
+fn anthropic_beta_global_allowed_betas_filters_against_operator_list_on_converse() {
+    // Arrange: `cfg.allowed_betas` (sourced from
+    // `[bedrock] allowed_betas` global TOML) is the FULL operator-
+    // supplied allowlist -- routectl ships no const default. Same
+    // hook, same precedence as Invoke.
     let mut cfg = fake_cfg();
-    cfg.anthropic_beta_allowlist = Some(vec!["my-override".into()]);
+    cfg.allowed_betas = vec!["my-override".into()];
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")],
         anthropic_beta: vec![
-            // In const, NOT in override: drops.
+            // NOT in operator list: drops.
             "context-1m-2025-08-07".into(),
-            // NOT in const, in override: survives.
+            // In operator list: survives.
             "my-override".into(),
         ],
         ..Default::default()

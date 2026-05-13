@@ -146,9 +146,16 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
+    // Reject configs that wire `kind = "bedrock"` without populating
+    // the operator-supplied `[bedrock]` allowlists. routectl ships no
+    // const defaults for AWS schema drift; an empty list at request
+    // time would 400 every Bedrock request with a confusing AWS error.
+    routectl_router::validate_bedrock_global_config(&config)?;
+
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
-        .with_bedrock_anthropic_beta_allowlist(config.bedrock.anthropic_beta.clone());
+        .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
+        .with_bedrock_allowed_body_fields(config.bedrock.allowed_body_fields.clone());
 
     let mut failed: Vec<(String, String)> = Vec::new();
     for (name, entry) in &config.providers {
