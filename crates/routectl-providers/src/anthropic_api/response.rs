@@ -47,10 +47,16 @@ pub fn map_stop_reason(stop_reason: Option<&str>) -> Option<String> {
 /// because reasoning_details is the canonical surface for them; the
 /// Anthropic ingress reconstructs `thinking` blocks from
 /// reasoning_details on egress.
+#[allow(clippy::type_complexity)] // 5-tuple matches the wire shape; alias would obscure intent
 pub(crate) fn walk_content_blocks(
     id: &str,
     blocks: &[ContentBlock],
-) -> Result<(String, Vec<ReasoningDetail>, Option<Vec<Value>>, Vec<ContentPart>)> {
+) -> Result<(
+    String,
+    Vec<ReasoningDetail>,
+    Option<Vec<Value>>,
+    Vec<ContentPart>,
+)> {
     let mut text_parts: Vec<String> = Vec::new();
     let mut reasoning_details: Vec<ReasoningDetail> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
@@ -141,7 +147,9 @@ pub(crate) fn walk_content_blocks(
                     cache_control: None,
                 }));
             }
-            ContentBlock::Other { type_tag, extras, .. } => {
+            ContentBlock::Other {
+                type_tag, extras, ..
+            } => {
                 warn!(
                     provider = id,
                     block_type = %type_tag,
@@ -180,9 +188,9 @@ pub(crate) fn walk_content_blocks(
 // is byte-identical. M12 (managed-key dedup wave) is the natural
 // landing for this.
 fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageContent {
-    let only_text = parts.iter().all(|p| {
-        matches!(p, ContentPart::Known(KnownContentPart::Text { .. }))
-    });
+    let only_text = parts
+        .iter()
+        .all(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })));
     if only_text {
         MessageContent::Text(text)
     } else {
@@ -443,9 +451,14 @@ mod tests {
             MessageContent::Parts(parts) => {
                 assert_eq!(parts.len(), 3);
                 match &parts[1] {
-                    ContentPart::Other { type_tag, extras, .. } => {
+                    ContentPart::Other {
+                        type_tag, extras, ..
+                    } => {
                         assert_eq!(type_tag, "future_block_v2");
-                        assert_eq!(extras.get("custom_field").and_then(|v| v.as_str()), Some("x"));
+                        assert_eq!(
+                            extras.get("custom_field").and_then(|v| v.as_str()),
+                            Some("x")
+                        );
                     }
                     other => panic!("expected Other, got {other:?}"),
                 }

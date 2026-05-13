@@ -118,8 +118,14 @@ fn provider_extras_merge_into_additional_model_request_fields() {
     let bag = body["additionalModelRequestFields"]
         .as_object()
         .expect("expected bag with provider_extras");
-    assert_eq!(bag["context_management"]["strategy"], "summarize", "got {body}");
-    assert_eq!(bag["mcp_servers"][0]["url"], "https://example.com", "got {body}");
+    assert_eq!(
+        bag["context_management"]["strategy"], "summarize",
+        "got {body}"
+    );
+    assert_eq!(
+        bag["mcp_servers"][0]["url"], "https://example.com",
+        "got {body}"
+    );
     assert_eq!(bag["container"], "my-container", "got {body}");
 }
 
@@ -149,7 +155,9 @@ fn provider_extras_cannot_override_managed_keys_on_converse() {
         .and_then(|v| v.as_object());
     if let Some(b) = bag {
         assert!(
-            b.get("thinking").map(|v| v["type"] != "evil").unwrap_or(true),
+            b.get("thinking")
+                .map(|v| v["type"] != "evil")
+                .unwrap_or(true),
             "thinking override leaked: {body}"
         );
         // Long-tail extras DO land.
@@ -344,8 +352,8 @@ fn anthropic_beta_filtered_against_bedrock_allowlist_in_additional_fields() {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")],
         anthropic_beta: vec![
-            "context-1m-2025-08-07".into(),       // accepted
-            "made-up-flag".into(),                // not in allowlist
+            "context-1m-2025-08-07".into(),           // accepted
+            "made-up-flag".into(),                    // not in allowlist
             "interleaved-thinking-2025-05-14".into(), // accepted
         ],
         ..Default::default()
@@ -626,7 +634,10 @@ fn redacted_thinking_translates_to_converse_redacted_content() {
         .find(|m| m["role"] == "assistant")
         .unwrap();
     let content = assistant["content"].as_array().unwrap();
-    assert_eq!(content[0]["reasoningContent"]["redactedContent"], "AAECAwQF");
+    assert_eq!(
+        content[0]["reasoningContent"]["redactedContent"],
+        "AAECAwQF"
+    );
     // No reasoningText sibling on the redacted variant.
     assert!(content[0]["reasoningContent"]
         .get("reasoningText")
@@ -707,10 +718,7 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
     assert_eq!(assistant_content[2]["toolUse"]["toolUseId"], "tu_1");
     // Tool message becomes a synthesized user-role toolResult.
     assert_eq!(messages[2]["role"], "user");
-    assert_eq!(
-        messages[2]["content"][0]["toolResult"]["toolUseId"],
-        "tu_1"
-    );
+    assert_eq!(messages[2]["content"][0]["toolResult"]["toolUseId"], "tu_1");
 }
 
 // ---------------------------------------------------------------------------
@@ -775,14 +783,16 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
         }
         MessageContent::Text(t) => {
             // Pure-text response (shouldn't happen here, but be safe).
-            vec![ContentPart::Known(KnownContentPart::Thinking {
-                thinking: rd[0].payload["text"].as_str().unwrap_or("").to_string(),
-                signature: Some(sig_from_resp.to_string()),
-            }),
-            ContentPart::Known(KnownContentPart::Text {
-                text: t.clone(),
-                cache_control: None,
-            })]
+            vec![
+                ContentPart::Known(KnownContentPart::Thinking {
+                    thinking: rd[0].payload["text"].as_str().unwrap_or("").to_string(),
+                    signature: Some(sig_from_resp.to_string()),
+                }),
+                ContentPart::Known(KnownContentPart::Text {
+                    text: t.clone(),
+                    cache_control: None,
+                }),
+            ]
         }
         MessageContent::Null => vec![],
     };
@@ -830,8 +840,7 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
     let content = assistant["content"].as_array().unwrap();
 
     assert_eq!(
-        content[0]["reasoningContent"]["reasoningText"]["signature"],
-        "rt_sig_roundtrip_abc123",
+        content[0]["reasoningContent"]["reasoningText"]["signature"], "rt_sig_roundtrip_abc123",
         "signature must survive response -> canonical -> request round-trip"
     );
     assert_eq!(

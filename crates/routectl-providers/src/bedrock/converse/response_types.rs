@@ -13,6 +13,12 @@
 //! a future AWS block type ships without a rebuild on the
 //! all-passthrough path.
 
+// Forward-compat fields (`metrics`, `additional_model_response_fields`,
+// `latency_ms`, `role`, tuple-struct payloads) are deserialized so the
+// shape round-trips cleanly; nothing reads them yet, but dropping them
+// would make a future field addition silently lossy on the wire.
+#![allow(dead_code)]
+
 use serde::Deserialize;
 use serde_json::Value;
 

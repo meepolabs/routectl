@@ -9,10 +9,10 @@
 //! keyed on `output_index` so deltas route to the correct block.
 //!
 //! Block states (mirrors codex's per-item dispatch):
-//!   - `Text`     -- assistant message item; text deltas flow through
-//!   - `Reasoning` -- chain-of-thought item; summary + content deltas
-//!                    accumulate, encrypted_content flushes on item.done
-//!   - `ToolUse`  -- function_call item; argument deltas accumulate
+//! - `Text`     -- assistant message item; text deltas flow through
+//! - `Reasoning` -- chain-of-thought item; summary + content deltas
+//!   accumulate, encrypted_content flushes on item.done
+//! - `ToolUse`  -- function_call item; argument deltas accumulate
 //!
 //! Indices (`call_index`, `detail_index`) are assigned dense (0, 1, 2,
 //! ...) per stream via `next_call_index` / `next_detail_index`
@@ -136,9 +136,7 @@ impl ResponsesStreamState {
             }
             "response.reasoning_text.delta" => Ok(self.handle_reasoning_text_delta(&event)),
             "response.reasoning_summary_part.added" => Ok(Vec::new()),
-            "response.function_call_arguments.delta" => {
-                Ok(self.handle_function_call_delta(&event))
-            }
+            "response.function_call_arguments.delta" => Ok(self.handle_function_call_delta(&event)),
             "response.function_call_arguments.done" => Ok(Vec::new()),
             "response.output_item.done" => Ok(self.handle_item_done(&event)),
             "response.completed" => Ok(self.handle_completed(&event)),
@@ -425,10 +423,12 @@ impl ResponsesStreamState {
         let resp_value = event.response.clone().unwrap_or(Value::Null);
         let resp: ResponsesResponse = serde_json::from_value(resp_value).unwrap_or_default_resp();
 
-        let has_function_call = resp
-            .output
-            .iter()
-            .any(|i| matches!(i, super::response_types::ResponseOutputItem::FunctionCall { .. }));
+        let has_function_call = resp.output.iter().any(|i| {
+            matches!(
+                i,
+                super::response_types::ResponseOutputItem::FunctionCall { .. }
+            )
+        });
         let incomplete_reason = resp
             .incomplete_details
             .as_ref()
@@ -491,7 +491,11 @@ impl ResponsesStreamState {
                 return upstream_error_from_failed(provider_id, &resp);
             }
         }
-        Error::upstream(provider_id, 0, "openai-responses: response.failed".to_string())
+        Error::upstream(
+            provider_id,
+            0,
+            "openai-responses: response.failed".to_string(),
+        )
     }
 
     fn handle_cancelled(&mut self, event: &ResponsesStreamEvent) -> Vec<ChatChunk> {
@@ -550,12 +554,7 @@ impl ResponsesStreamState {
         }
     }
 
-    fn reasoning_text_chunk(
-        &self,
-        detail_id: &str,
-        detail_index: u32,
-        text: String,
-    ) -> ChatChunk {
+    fn reasoning_text_chunk(&self, detail_id: &str, detail_index: u32, text: String) -> ChatChunk {
         let detail = ReasoningDetail {
             kind: ReasoningDetailKind::Text,
             id: Some(stable_or_minted_id(detail_id)),

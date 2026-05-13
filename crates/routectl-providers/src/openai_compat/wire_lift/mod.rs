@@ -39,12 +39,7 @@ use routectl_core::{ChatRequest, Result};
 
 /// Uniform lift-function pointer type. Every sub-module's `lift` must
 /// match this shape so it can be stored in `LIFT_STEPS`.
-type LiftFn = fn(
-    &str,
-    &mut Map<String, serde_json::Value>,
-    &ChatRequest,
-    bool,
-) -> Result<()>;
+type LiftFn = fn(&str, &mut Map<String, serde_json::Value>, &ChatRequest, bool) -> Result<()>;
 
 /// Single source of truth for dispatch order. `lift_all` iterates this
 /// slice; the order test introspects the same slice so a reorder in
@@ -157,7 +152,11 @@ mod order_test {
         let result = lift_all("test", &mut obj, &req, false);
 
         // Assert
-        assert!(result.is_ok(), "lift_all failed on minimal req: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "lift_all failed on minimal req: {:?}",
+            result
+        );
     }
 
     /// Verifies the dependency-critical ordering: content lift must run
@@ -179,12 +178,12 @@ mod order_test {
         // become a top-level `tool_calls` array on the assistant message.
         let assistant_msg = Message {
             role: Role::Assistant,
-            content: MessageContent::Parts(vec![
-                ContentPart::Known(routectl_core::KnownContentPart::Text {
+            content: MessageContent::Parts(vec![ContentPart::Known(
+                routectl_core::KnownContentPart::Text {
                     text: "here".into(),
                     cache_control: None,
-                }),
-            ]),
+                },
+            )]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
@@ -212,15 +211,21 @@ mod order_test {
             ..Default::default()
         };
 
-        let mut obj: Map<String, Value> =
-            serde_json::to_value(&req).unwrap().as_object().unwrap().clone();
+        let mut obj: Map<String, Value> = serde_json::to_value(&req)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .clone();
 
         // Act
         lift_all("test", &mut obj, &req, false).unwrap();
 
         // Assert: messages array is present and has two entries.
         let msgs = obj["messages"].as_array().expect("messages must be array");
-        assert_eq!(msgs.len(), 2, "message count must be preserved after lift_all");
+        assert_eq!(
+            msgs.len(),
+            2,
+            "message count must be preserved after lift_all"
+        );
     }
 }
-

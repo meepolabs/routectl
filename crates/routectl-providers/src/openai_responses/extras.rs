@@ -2,12 +2,12 @@
 //! API egress.
 //!
 //! Reasoning translation:
-//!   - `req.reasoning.effort` -> `reasoning.{effort, summary: "auto"}`
-//!     ("auto" matches codex's default summary mode so the server emits
-//!      reasoning_summary deltas back on stream).
-//!   - `req.reasoning.max_tokens` -> WARN + drop. The Responses
-//!     reasoning surface has no budget knob; the model picks its own
-//!     from `effort`.
+//! - `req.reasoning.effort` -> `reasoning.{effort, summary: "auto"}`
+//!   ("auto" matches codex's default summary mode so the server emits
+//!   reasoning_summary deltas back on stream).
+//! - `req.reasoning.max_tokens` -> WARN + drop. The Responses
+//!   reasoning surface has no budget knob; the model picks its own
+//!   from `effort`.
 //!
 //! provider_extras allowlist (6 keys): `prompt_cache_key`,
 //! `service_tier`, `text`, `include`, `store`, `client_metadata`.
@@ -78,11 +78,7 @@ pub(super) fn merge_provider_extras(
     req: &ChatRequest,
     auth_kind: AuthKind,
 ) {
-    let Some(extras) = req
-        .provider_extras
-        .as_ref()
-        .and_then(|v| v.as_object())
-    else {
+    let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
         return;
     };
 

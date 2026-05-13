@@ -53,35 +53,28 @@ pub fn lift(
     Ok(())
 }
 
-fn rewrite_parts(
-    id: &str,
-    msg_idx: usize,
-    parts: &mut Vec<Value>,
-    strict: bool,
-) -> Result<()> {
+fn rewrite_parts(id: &str, msg_idx: usize, parts: &mut Vec<Value>, strict: bool) -> Result<()> {
     // Build a new vec; drop document blocks; rewrite image blocks.
     let original = std::mem::take(parts);
     for part in original {
         match part_kind(&part) {
-            PartKind::AnthropicImage => {
-                match rewrite_image_part(&part) {
-                    Some(rewritten) => parts.push(rewritten),
-                    None => {
-                        if strict {
-                            return Err(Error::Validation(format!(
-                                "strict_translation: provider `{id}`: message {msg_idx} \
+            PartKind::AnthropicImage => match rewrite_image_part(&part) {
+                Some(rewritten) => parts.push(rewritten),
+                None => {
+                    if strict {
+                        return Err(Error::Validation(format!(
+                            "strict_translation: provider `{id}`: message {msg_idx} \
                                  image block has unsupported source shape \
                                  (expected base64 or url): {part}"
-                            )));
-                        }
-                        warn!(
-                            provider = id,
-                            message_index = msg_idx,
-                            "openai-compat egress: dropping image block with unsupported source shape"
-                        );
+                        )));
                     }
+                    warn!(
+                        provider = id,
+                        message_index = msg_idx,
+                        "openai-compat egress: dropping image block with unsupported source shape"
+                    );
                 }
-            }
+            },
             PartKind::Document => {
                 if strict {
                     return Err(Error::Validation(format!(
@@ -136,10 +129,7 @@ fn rewrite_image_part(part: &Value) -> Option<Value> {
             let data = source.get("data").and_then(|v| v.as_str())?;
             format!("data:{media_type};base64,{data}")
         }
-        "url" => source
-            .get("url")
-            .and_then(|v| v.as_str())?
-            .to_string(),
+        "url" => source.get("url").and_then(|v| v.as_str())?.to_string(),
         _ => return None,
     };
     Some(serde_json::json!({
