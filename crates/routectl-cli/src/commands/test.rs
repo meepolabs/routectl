@@ -5,12 +5,21 @@ use std::sync::Arc;
 
 use routectl_auth::MemoryStore;
 use routectl_core::{schema::MessageContent, ChatRequest, Error, Message, Result, Role};
-use routectl_router::{build_provider_with_options, BuildOptions, Config, Router};
+use routectl_router::{
+    build_provider_with_options, validate_bedrock_global_config, BuildOptions, Config, Router,
+};
 
 pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     let config = Arc::new(config);
     let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
+
+    // Reject configs that use `kind = "bedrock"` without populating
+    // the operator-supplied `[bedrock]` allowlists. Mirrors the same
+    // check in `server::build_router_from_config` so `routectl test`
+    // surfaces the misconfiguration instead of producing a confusing
+    // 400 from AWS at request time.
+    validate_bedrock_global_config(&config)?;
 
     // Same BuildOptions path as `serve` so a `routectl test` run
     // exercises exactly the production translation contract. Without
@@ -20,7 +29,8 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     // pre-production validation.
     let opts = BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
-        .with_bedrock_anthropic_beta_allowlist(config.bedrock.anthropic_beta.clone());
+        .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
+        .with_bedrock_allowed_body_fields(config.bedrock.allowed_body_fields.clone());
 
     let mut failed: Vec<(String, String)> = Vec::new();
     for (name, entry) in &config.providers {

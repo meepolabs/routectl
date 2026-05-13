@@ -74,27 +74,24 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         obj.insert("anthropic_beta".into(), Value::Array(combined));
     }
 
-    // Filter the merged anthropic_beta against the Bedrock accepted
-    // set (issues.md::INV-6). Operator-supplied flags from
-    // cfg.anthropic_beta pass through unconditionally; flags lifted
-    // from the inbound `anthropic-beta` HTTP header that Bedrock has
-    // not gated for distribution get dropped at DEBUG. Without this
-    // filter, claude-code's TS SDK 400s every Bedrock request
-    // because it ships up to ten betas, only a subset of which Bedrock
-    // accepts. Shared with the Converse adapter via `super::betas`.
+    // Filter the merged anthropic_beta against the operator-supplied
+    // `[bedrock] allowed_betas` list (routectl ships no const default).
+    // Operator-supplied flags from `cfg.anthropic_beta`
+    // (`[providers.X] anthropic_beta`) pass through unconditionally;
+    // flags lifted from the inbound `anthropic-beta` HTTP header that
+    // are not on the operator's accepted list drop at DEBUG. Without
+    // this filter, claude-code's TS SDK 400s every Bedrock request
+    // because it ships up to ten betas, only a subset of which AWS
+    // gates for distribution. Shared with the Converse adapter via
+    // `super::betas`.
     //
-    // The allowlist itself is `cfg.anthropic_beta_allowlist` when
-    // set (sourced from the global `[bedrock] anthropic_beta` TOML
-    // field), otherwise the routectl-shipped const
-    // `BEDROCK_ACCEPTED_BETAS` (in `super::betas`). The TOML override
-    // is the operator's escape hatch for AWS allowlist drift between
-    // routectl releases.
-    filter_bedrock_betas(
-        &cfg.id,
-        obj,
-        &cfg.anthropic_beta,
-        cfg.anthropic_beta_allowlist.as_deref(),
-    );
+    // Startup validation in `routectl-router::factory` rejects an
+    // empty `cfg.allowed_betas` when any provider has
+    // `kind = "bedrock"`, so the empty branch is unreachable in
+    // practice. Defense in depth: if we ever get here with an empty
+    // list, every flag drops, which fails-closed (no flags survive)
+    // rather than silently accepting unknown values.
+    filter_bedrock_betas(&cfg.id, obj, &cfg.anthropic_beta, &cfg.allowed_betas);
 
     // Merge any additional model request fields at the top level
     // with the same routectl-managed-keys allow-list as the Anthropic
@@ -133,6 +130,20 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // rejects a body-side `model` with "Extra inputs are not
     // permitted". Strip it here on the Bedrock-Invoke seam.
     obj.remove("model");
+
+    // Filter the assembled body against `[bedrock] allowed_body_fields`
+    // so Anthropic-ingress forward-compat sweeps (`mcp_servers`,
+    // `diagnostics`, `context_hint`, `speed`, ...) drop on the egress
+    // before the request hits AWS. Without this filter, every
+    // claude-code request 400s on the first unrecognized field --
+    // Bedrock validates with strict-schema "Extra inputs are not
+    // permitted". See `super::body_fields` for the full contract.
+    super::body_fields::filter_bedrock_body_fields(
+        &cfg.id,
+        obj,
+        &cfg.allowed_body_fields,
+        super::body_fields::FilterContext::InvokeBody,
+    );
 
     Ok(body)
 }
@@ -191,13 +202,49 @@ mod tests {
             user_agent: None,
             extra_headers: Vec::new(),
             anthropic_beta: vec!["context-1m-2025-08-07".into()],
-            anthropic_beta_allowlist: None,
+            allowed_betas: vec![
+                "context-1m-2025-08-07".into(),
+                "claude-code-20250219".into(),
+                "interleaved-thinking-2025-05-14".into(),
+                "context-management-2025-06-27".into(),
+                "effort-2025-11-24".into(),
+                "fine-grained-tool-streaming-2025-05-14".into(),
+                "computer-use-2025-01-24".into(),
+                "computer-use-2024-10-22".into(),
+                "mcp-client-2025-04-04".into(),
+                "search-results-2025-06-09".into(),
+            ],
+            allowed_body_fields: full_body_fields(),
             // `top_p` is canonical and would now be filtered out;
             // use `top_k` here as a real long-tail Anthropic-only
             // knob the allow-list lets through.
             additional_model_request_fields: Some(json!({"top_k": 40})),
             adaptive_thinking: None,
         }
+    }
+
+    /// Empirical 2026-05-12 Bedrock body-field allowlist + `top_k`,
+    /// reused across the Invoke test fixtures so a request lifted from
+    /// the Anthropic ingress survives the body-field filter.
+    fn full_body_fields() -> Vec<String> {
+        vec![
+            "anthropic_version".into(),
+            "anthropic_beta".into(),
+            "max_tokens".into(),
+            "messages".into(),
+            "system".into(),
+            "temperature".into(),
+            "top_p".into(),
+            "top_k".into(),
+            "tools".into(),
+            "tool_choice".into(),
+            "stop_sequences".into(),
+            "thinking".into(),
+            "output_config".into(),
+            "cache_control".into(),
+            "metadata".into(),
+            "context_management".into(),
+        ]
     }
 
     fn user_req() -> ChatRequest {
@@ -380,15 +427,28 @@ mod tests {
             user_agent: None,
             extra_headers: Vec::new(),
             anthropic_beta: vec![],
-            anthropic_beta_allowlist: None,
+            allowed_betas: vec![
+                "context-1m-2025-08-07".into(),
+                "claude-code-20250219".into(),
+                "interleaved-thinking-2025-05-14".into(),
+                "context-management-2025-06-27".into(),
+                "effort-2025-11-24".into(),
+                "fine-grained-tool-streaming-2025-05-14".into(),
+                "computer-use-2025-01-24".into(),
+                "computer-use-2024-10-22".into(),
+                "mcp-client-2025-04-04".into(),
+                "search-results-2025-06-09".into(),
+            ],
+            allowed_body_fields: full_body_fields(),
             additional_model_request_fields: None,
             adaptive_thinking: None,
         }
     }
 
     /// Pre-canned request whose canonical anthropic_beta has 4 flags,
-    /// 2 in `super::betas::BEDROCK_ACCEPTED_BETAS` and 2 not. After
-    /// normalize_request, only the two accepted survive in the body.
+    /// 2 in the operator-supplied `allowed_betas` (from
+    /// `fake_cfg_no_betas()`) and 2 not. After normalize_request, only
+    /// the two accepted survive in the body.
     #[test]
     fn invoke_filters_unsupported_anthropic_beta_against_accepted_set() {
         // Arrange
@@ -434,10 +494,11 @@ mod tests {
         // Arrange
         let mut cfg = fake_cfg_no_betas();
         cfg.anthropic_beta = vec![
-            // A flag NOT in `super::betas::BEDROCK_ACCEPTED_BETAS`, but the
-            // operator typed it -- they assert it is safe (e.g. AWS
-            // gated it for their account before the next routectl
-            // release).
+            // A flag NOT in the operator-supplied `allowed_betas`
+            // list, but the operator typed it into
+            // `[providers.X] anthropic_beta` -- they assert it is
+            // safe (e.g. AWS gated it for their account before the
+            // next routectl release).
             "future-flag-2026-12-31".into(),
         ];
         let req = user_req();
@@ -507,24 +568,21 @@ mod tests {
         assert!(strs.contains(&"claude-code-20250219"), "missing: {strs:?}");
     }
 
-    /// `cfg.anthropic_beta_allowlist = Some(list)` REPLACES the
-    /// routectl-shipped const allowlist entirely. Sourced from the
-    /// global `[bedrock] anthropic_beta` TOML field. Lets operators
-    /// add flags AWS gated post-release, or remove flags AWS
-    /// deprecated, without a routectl rebuild.
+    /// `cfg.allowed_betas` is sourced from the global
+    /// `[bedrock] allowed_betas` TOML field. Lets operators add flags
+    /// AWS gated post-release, or remove flags AWS deprecated, without
+    /// a routectl rebuild.
     #[test]
-    fn invoke_anthropic_beta_allowlist_overrides_the_const() {
-        // Arrange: a request with two flags. One is in the const
-        // allowlist (would normally pass) but NOT in the operator's
-        // override (so it gets dropped). The other is in the override
-        // but not the const (so it gets accepted thanks to the override).
+    fn invoke_allowed_betas_filters_against_operator_list() {
+        // Arrange: a request with two flags. One is in the operator's
+        // list (kept), the other is not (dropped).
         let mut cfg = fake_cfg_no_betas();
-        cfg.anthropic_beta_allowlist = Some(vec!["future-flag-2026-12-31".into()]);
+        cfg.allowed_betas = vec!["future-flag-2026-12-31".into()];
         let mut req = user_req();
         req.anthropic_beta = vec![
-            // Was in const, NOT in override: should be DROPPED.
+            // NOT in operator list: should be DROPPED.
             "context-1m-2025-08-07".into(),
-            // NOT in const, in override: should be ACCEPTED.
+            // In operator list: should be ACCEPTED.
             "future-flag-2026-12-31".into(),
         ];
 
@@ -537,7 +595,7 @@ mod tests {
         assert_eq!(
             strs,
             vec!["future-flag-2026-12-31"],
-            "override allowlist did not replace const: {strs:?}"
+            "allowed_betas filter did not match operator list: {strs:?}"
         );
     }
 }

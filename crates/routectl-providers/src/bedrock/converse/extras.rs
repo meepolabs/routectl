@@ -38,19 +38,30 @@ pub(super) fn build_additional_fields(cfg: &BedrockConfig, req: &ChatRequest) ->
     insert_provider_extras(cfg, req, &mut bag);
     insert_operator_extras(cfg, &mut bag);
 
-    // Filter anthropic_beta against the Bedrock allowlist BEFORE
-    // returning. Operator-supplied flags from cfg.anthropic_beta pass
-    // through unconditionally; flags lifted from the inbound
-    // `anthropic-beta` HTTP header that Bedrock has not gated for
-    // distribution drop at DEBUG. The override hooks (`[bedrock]
-    // anthropic_beta` global, `[providers.X] anthropic_beta`
-    // per-provider floor) apply identically to both Invoke and
-    // Converse paths.
-    filter_bedrock_betas(
+    // Filter anthropic_beta against the operator-supplied
+    // `[bedrock] allowed_betas` list (routectl ships no const default).
+    // Operator-supplied flags from cfg.anthropic_beta pass through
+    // unconditionally; flags lifted from the inbound `anthropic-beta`
+    // HTTP header that are not on the operator's accepted list drop
+    // at DEBUG. The override hooks (`[bedrock] allowed_betas` global,
+    // `[providers.X] anthropic_beta` per-provider floor) apply
+    // identically to both Invoke and Converse paths. See
+    // `super::super::betas` for the full contract.
+    filter_bedrock_betas(&cfg.id, &mut bag, &cfg.anthropic_beta, &cfg.allowed_betas);
+
+    // Filter the bag itself against `[bedrock] allowed_body_fields`.
+    // Anthropic-on-Bedrock rejects unknown body fields with HTTP 400
+    // ("Extra inputs are not permitted"); for Converse those fields
+    // ride in `additionalModelRequestFields` and AWS forwards them
+    // verbatim to Anthropic which performs the schema check. Without
+    // this filter, an Anthropic-ingress forward-compat sweep entry
+    // like `mcp_servers` or `diagnostics` lands in the bag and 400s
+    // every claude-code request to Converse.
+    super::super::body_fields::filter_bedrock_body_fields(
         &cfg.id,
         &mut bag,
-        &cfg.anthropic_beta,
-        cfg.anthropic_beta_allowlist.as_deref(),
+        &cfg.allowed_body_fields,
+        super::super::body_fields::FilterContext::ConverseAdditionalFields,
     );
 
     if bag.is_empty() {
