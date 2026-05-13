@@ -146,10 +146,10 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     let secrets = MemoryStore::new();
     let mut router = Router::new(config.clone());
 
-    // Reject configs that wire `kind = "bedrock"` without populating
-    // the operator-supplied `[bedrock]` allowlists. routectl ships no
-    // const defaults for AWS schema drift; an empty list at request
-    // time would 400 every Bedrock request with a confusing AWS error.
+    // Surface incoherent `[bedrock]` config (e.g. populated
+    // `allowed_body_fields` missing routectl-mandatory keys) at
+    // startup instead of at first-request 400. Empty lists are
+    // pass-through and accepted; see `validate_bedrock_global_config`.
     routectl_router::validate_bedrock_global_config(&config)?;
 
     let opts = routectl_router::BuildOptions::new()

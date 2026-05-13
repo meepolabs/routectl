@@ -8,6 +8,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator-owned Bedrock allowlists** -- `[bedrock] allowed_betas`
+  and `[bedrock] allowed_body_fields` in TOML. Filters the body's
+  `anthropic_beta` array (Invoke and Converse) and any forward-compat
+  body fields the Anthropic ingress sweeps in (`mcp_servers`,
+  `diagnostics`, `context_hint`, `speed`, ...). routectl ships no
+  built-in default; AWS schema drift is operator-tracked. Empty list
+  (or omitted `[bedrock]` section) puts the corresponding filter in
+  pass-through mode for discovery -- bring up routectl, observe sent
+  fields/flags via `ROUTECTL_LOG=routectl_providers::bedrock=trace`,
+  populate the lists. `examples/bedrock.toml` ships the empirical
+  2026-05-12 baseline (16 betas + 16 body fields). Closes
+  `issues.md::INV-6` and `INV-7`.
+
+  BREAKING: `[bedrock] anthropic_beta` is renamed to
+  `[bedrock] allowed_betas`. Configs using the old name need a rename.
+
 - **`history_reasoning` per-provider TOML knob** on `[providers.X]` of
   type `openai-compat`. Three values: `auto` (default; defer to the
   reasoning dialect's strip vs preserve default), `strip` (always
@@ -115,9 +131,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `additional_model_request_fields` is a free-form merge point for
   vendor-specific knobs.
 
-  Note: Converse adapter is wired but body translation for non-Anthropic
-  vendors is staged for a later cut; using `api_shape = "converse"`
-  today returns a clear "not implemented" error.
+  Note: For Anthropic models, both `Invoke` and `Converse` adapters
+  are wired and live-tested. Converse for non-Anthropic Bedrock
+  vendors (Mistral, Llama, Cohere) is staged for a later cut.
 
 - **`POST /v1/messages` Anthropic ingress**, full tool-call
   round-trip, thinking blocks + signature preservation, typed SSE
