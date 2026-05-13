@@ -82,6 +82,13 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
         "routectl listening on http://{bound}"
     );
 
+    // Resolve the redaction env var once at server boot so the
+    // `info`-level confirmation lands in the log before any TRACE
+    // request fires. Without this, the OnceLock initializes at the
+    // first traced body, which means an operator who set the var
+    // after launching routectl would silently get unredacted traces.
+    routectl_core::log_redaction_status();
+
     let token_set = resolve_listener_tokens(&config).await?;
 
     // Cross-check: a public bind (post-`--unsafe-public`) without

@@ -41,7 +41,7 @@ use serde_json::Value;
 
 use routectl_core::{
     debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
 };
 
 pub(crate) mod auth;
@@ -62,6 +62,10 @@ pub(crate) mod types;
 /// Anthropic shape (Anthropic carries `signature`, Responses carries
 /// `encrypted_content`).
 pub(crate) const OPENAI_RESPONSES_FORMAT: &str = "openai-responses-v1";
+
+/// Provider-kind discriminator string used in tracing fields. See
+/// the openai_compat module for the rationale.
+const PROVIDER_KIND: &str = "openai-responses";
 
 /// How the provider authenticates to the Responses API.
 ///
@@ -205,7 +209,7 @@ impl Provider for OpenAiResponsesProvider {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
         }
-        trace_outgoing_body("openai-responses", &self.cfg.id, &body);
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
         let rb = self.build_headers(self.client.post(self.responses_url()))?;
         let resp = rb
@@ -219,7 +223,7 @@ impl Provider for OpenAiResponsesProvider {
         let status = resp.status().as_u16();
         if status >= 400 {
             let body_text = resp.text().await.unwrap_or_default();
-            debug_upstream_error_body("openai-responses", &self.cfg.id, status, &body_text);
+            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let msg = serde_json::from_str::<Value>(&body_text)
                 .ok()
                 .as_ref()
@@ -246,12 +250,18 @@ impl Provider for OpenAiResponsesProvider {
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
-        // Drain the SSE stream until `response.completed` (or `response.failed`).
-        // The completed event's `response` field is the full ResponsesResponse body.
+        // Drain the SSE stream until a terminal event lands. Three
+        // terminal events to distinguish:
+        //   response.completed -> success: extract `response`, return Ok.
+        //   response.failed    -> Err::upstream from the response.error.
+        //   response.cancelled -> Err::upstream (cancellation surfaces
+        //                         as an explicit error, not silent
+        //                         success; clients can retry).
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
         futures::pin_mut!(event_stream);
         let mut completed_body: Option<Value> = None;
+        let mut terminal_kind: Option<String> = None;
         while let Some(result) = event_stream.next().await {
             let event = result.map_err(|e| Error::Streaming(e.to_string()))?;
             if event.data.is_empty() {
@@ -265,6 +275,7 @@ impl Provider for OpenAiResponsesProvider {
                     if let Some(r) = parsed.get("response") {
                         completed_body = Some(r.clone());
                     }
+                    terminal_kind = Some(kind.to_string());
                     break;
                 }
                 _ => {}
@@ -272,12 +283,65 @@ impl Provider for OpenAiResponsesProvider {
         }
 
         let raw_body = completed_body.ok_or_else(|| {
-            Error::upstream(
-                &self.cfg.id,
-                0,
-                "openai-responses: stream ended without response.completed event".to_string(),
-            )
+            // Two distinct cases land here:
+            //   - terminal_kind = None: the stream exhausted without
+            //     ever firing a terminal event (truncation, premature
+            //     close, network drop).
+            //   - terminal_kind = Some(failed|cancelled|completed): the
+            //     terminal event fired but did NOT carry a `response`
+            //     field (malformed upstream payload).
+            // Surface the actual cause so operators don't chase a
+            // ghost stream-truncation when the real issue is a
+            // missing response field on a known-terminal event.
+            let msg = match terminal_kind.as_deref() {
+                None => "openai-responses: stream ended without a terminal event".to_string(),
+                Some(kind) => format!(
+                    "openai-responses: terminal {kind:?} event arrived without a `response` field"
+                ),
+            };
+            Error::upstream(&self.cfg.id, 0, msg)
         })?;
+        // FR-2: trace upstream success body pre-normalize. The
+        // chatgpt-oauth endpoint is stream-only; this body is the
+        // `response` field extracted from the terminal SSE event, not
+        // raw SSE frames. Trace fires for failed/cancelled too so
+        // operators can see the body shape that drove the error.
+        trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
+
+        match terminal_kind.as_deref() {
+            Some("response.failed") | Some("response.cancelled") => {
+                // Deserialize so we can use the typed error helper that
+                // pulls error.message out of the body. Falls back to a
+                // synthetic message when the body doesn't deserialize
+                // (matches the stream() path's behavior).
+                let typed: Result<crate::openai_responses::response_types::ResponsesResponse> =
+                    serde_json::from_value(raw_body.clone()).map_err(|e| {
+                        Error::upstream(
+                            &self.cfg.id,
+                            0,
+                            format!(
+                                "openai-responses: terminal {terminal:?} parse failed: {e}",
+                                terminal = terminal_kind
+                            ),
+                        )
+                    });
+                let err = match typed {
+                    Ok(body) => crate::openai_responses::response::upstream_error_from_failed(
+                        &self.cfg.id,
+                        &body,
+                    ),
+                    Err(e) => e,
+                };
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    terminal = %terminal_kind.as_deref().unwrap_or("?"),
+                    "openai-responses non-success terminal event",
+                );
+                return Err(err);
+            }
+            _ => {}
+        }
+
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         Ok(chat_resp)
@@ -289,7 +353,7 @@ impl Provider for OpenAiResponsesProvider {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(true));
         }
-        trace_outgoing_body("openai-responses", &self.cfg.id, &body);
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
         let rb = self.build_headers(self.client.post(self.responses_url()))?;
         let resp = rb
@@ -303,7 +367,7 @@ impl Provider for OpenAiResponsesProvider {
         let status = resp.status().as_u16();
         if status >= 400 {
             let body_text = resp.text().await.unwrap_or_default();
-            debug_upstream_error_body("openai-responses", &self.cfg.id, status, &body_text);
+            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let msg = serde_json::from_str::<Value>(&body_text)
                 .ok()
                 .as_ref()
@@ -371,7 +435,12 @@ impl Provider for OpenAiResponsesProvider {
             }
         };
 
-        Ok(Box::pin(stream))
+        Ok(routectl_core::wrap_stream_with_summary(
+            stream,
+            "upstream",
+            PROVIDER_KIND,
+            self.cfg.id.clone(),
+        ))
     }
 }
 
@@ -467,6 +536,83 @@ mod e2e_tests {
             resp.routectl_provider.as_deref(),
             Some("openai-responses:test")
         );
+    }
+
+    /// Pin: when the SSE stream's terminal event is `response.failed`,
+    /// `complete()` must return `Err::Upstream` with the body's
+    /// `error.message` -- NOT a 200 ChatResponse with finish_reason="error".
+    /// Regression guard for the round-4 review HIGH finding.
+    #[tokio::test]
+    async fn complete_response_failed_returns_upstream_error() {
+        let server = MockServer::start().await;
+        let failed_body = serde_json::json!({
+            "id": "resp_failed",
+            "object": "response",
+            "status": "failed",
+            "model": "gpt-5-codex",
+            "error": {"code": "rate_limited", "message": "rate limit exceeded"},
+            "output": []
+        });
+        let event_body = format!(
+            "data: {{\"type\":\"response.failed\",\"response\":{}}}\n\n",
+            serde_json::to_string(&failed_body).unwrap()
+        );
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(event_body),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let err = provider.complete(base_req()).await.unwrap_err();
+        match err {
+            Error::Upstream { body, .. } => {
+                assert!(
+                    body.contains("rate limit exceeded"),
+                    "expected error.message, got body: {body}"
+                );
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// Pin: `response.cancelled` also surfaces as Err::Upstream so
+    /// callers can distinguish from a clean completion (and route
+    /// retries appropriately).
+    #[tokio::test]
+    async fn complete_response_cancelled_returns_upstream_error() {
+        let server = MockServer::start().await;
+        let cancelled_body = serde_json::json!({
+            "id": "resp_cancelled",
+            "object": "response",
+            "status": "cancelled",
+            "model": "gpt-5-codex",
+            "output": []
+        });
+        let event_body = format!(
+            "data: {{\"type\":\"response.cancelled\",\"response\":{}}}\n\n",
+            serde_json::to_string(&cancelled_body).unwrap()
+        );
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(event_body),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let err = provider.complete(base_req()).await.unwrap_err();
+        match err {
+            Error::Upstream { .. } => {}
+            other => panic!("expected Upstream, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -50,18 +50,12 @@ impl IngressAdapter for OpenAiIngress {
     }
 
     fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
-        // PR C / FR-1: trace-level ingress body for triage. Inherits
-        // the parent span's `request_id` so a `grep request_id=<id>`
-        // shows ingress -> outgoing -> upstream response in one
+        // FR-1: trace-level ingress body for triage. Inherits the
+        // parent span's `request_id` so a `grep request_id=<id>`
+        // shows ingress -> outgoing -> upstream -> egress in one
         // pass. Gated by `tracing::Level::TRACE`; default `info`
-        // level pays nothing.
-        if tracing::event_enabled!(tracing::Level::TRACE) {
-            tracing::trace!(
-                ingress = "openai",
-                body = %serde_json::to_string(&body).unwrap_or_default(),
-                "openai ingress body"
-            );
-        }
+        // level pays nothing. Honors ROUTECTL_LOG_REDACT_PROMPTS=1.
+        routectl_core::trace_ingress_body("openai", &body);
         let mut body = body;
         // Coalesce DeepSeek/vLLM-shape `reasoning_content` into
         // canonical `reasoning` on each message BEFORE serde

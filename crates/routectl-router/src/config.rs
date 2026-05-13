@@ -136,6 +136,19 @@ pub struct ServerConfig {
     /// preserves dev ergonomics; flip to true for production CI.
     #[serde(default)]
     pub strict_translation: bool,
+
+    /// When true (default), the `x-routectl-disable-fallbacks` request
+    /// header lets a client pin a request to a single provider with
+    /// no fallback chain. Useful for tests, dev probing, and
+    /// per-request triage. Set to `false` for hardened multi-tenant
+    /// deployments where authenticated clients should not be able to
+    /// disable the gateway's HA story or probe per-provider health.
+    #[serde(default = "default_allow_disable_fallbacks")]
+    pub allow_disable_fallbacks: bool,
+}
+
+fn default_allow_disable_fallbacks() -> bool {
+    true
 }
 
 impl Default for ServerConfig {
@@ -145,6 +158,7 @@ impl Default for ServerConfig {
             port: default_port(),
             auth: None,
             strict_translation: false,
+            allow_disable_fallbacks: default_allow_disable_fallbacks(),
         }
     }
 }
@@ -256,6 +270,16 @@ pub enum ProviderEntry {
         /// rather than a compiled model-name match. Default: `false`.
         #[serde(default)]
         adaptive_thinking: Option<bool>,
+        /// Optional operator-supplied allowlist for `anthropic_beta`
+        /// flags forwarded to api.anthropic.com. Default (empty) is
+        /// pass-through: every beta the client requests goes upstream
+        /// verbatim. When non-empty, ingress-lifted values not in the
+        /// list are dropped at DEBUG level. Mirrors the Bedrock-egress
+        /// `[bedrock] allowed_betas` shape so multi-tenant / API-gateway
+        /// deployments can constrain which betas authenticated clients
+        /// can opt into (e.g. billing-gated features).
+        #[serde(default)]
+        allowed_betas: Vec<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -425,6 +449,7 @@ impl ProviderEntry {
             extra_headers: BTreeMap::new(),
             user_agent: None,
             adaptive_thinking: None,
+            allowed_betas: Vec::new(),
             runtime: ProviderRuntimePolicy::default(),
         }
     }

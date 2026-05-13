@@ -26,8 +26,27 @@ const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 pub enum OpenBlockKind {
     Text,
     Thinking {
-        /// Accumulated text so we can emit a signature-only delta.
+        /// Accumulated thinking text from `thinking_delta` events.
+        /// Aggregated into ONE structured `ReasoningDetail` emitted at
+        /// `content_block_stop` so the final assistant message has a
+        /// reasoning_details entry whose payload carries BOTH `text`
+        /// and `signature` -- the shape Anthropic's replay path
+        /// requires on multi-turn follow-ups. The intermediate
+        /// `thinking_delta` chunks still carry the live `reasoning`
+        /// string for streaming UI; only the structured detail is
+        /// deferred.
         accumulated: String,
+        /// Signature from a `signature_delta` event, if any. Anthropic
+        /// 4.5 sometimes omits this on tool-only thinking turns; left
+        /// `None` means the terminal detail emits with an empty
+        /// signature (and replay tolerates this with a debug skip --
+        /// see `request.rs::emit_reasoning_blocks`).
+        signature: Option<String>,
+        /// Stable detail id minted at `content_block_start`. The same
+        /// id rides on the terminal aggregated detail so a client
+        /// replaying or coalescing by id sees one logical entry per
+        /// thinking block.
+        detail_id: String,
         /// Block index in reasoning_details array.
         detail_index: u32,
     },
@@ -79,7 +98,7 @@ impl CapturedInputUsage {
 impl SseState {
     /// Parse one raw SSE data line (the JSON string after "data: ").
     /// Returns Ok(None) for housekeeping events, Ok(Some(chunk)) for content.
-    pub fn parse_event(&mut self, provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
+    pub fn parse_event(&mut self, _provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
         let event: SseEvent = serde_json::from_str(data)
             .map_err(|e| Error::Streaming(format!("bad sse json: {e}")))?;
 
@@ -115,6 +134,8 @@ impl SseState {
                         self.next_detail_index += 1;
                         self.open_block = Some(OpenBlockKind::Thinking {
                             accumulated: String::new(),
+                            signature: None,
+                            detail_id: Uuid::new_v4().to_string(),
                             detail_index: di,
                         });
                     }
@@ -164,16 +185,28 @@ impl SseState {
                 match delta {
                     SseDelta::TextDelta { text } => Ok(Some(self.make_text_chunk(text))),
                     SseDelta::ThinkingDelta { thinking } => {
-                        // Accumulate for later signature association.
+                        // Strategy A: accumulate text on the open block;
+                        // emit a chunk carrying the live `reasoning`
+                        // string ONLY (no structured ReasoningDetail).
+                        // The aggregated detail with both text and
+                        // signature lands at content_block_stop.
                         if let Some(OpenBlockKind::Thinking { accumulated, .. }) =
                             &mut self.open_block
                         {
                             accumulated.push_str(&thinking);
                         }
-                        Ok(Some(self.make_thinking_delta_chunk(provider_id, thinking)?))
+                        Ok(Some(self.make_thinking_string_chunk(thinking)))
                     }
                     SseDelta::SignatureDelta { signature } => {
-                        Ok(Some(self.make_signature_chunk(signature)))
+                        // Strategy A: stash on the open block; do NOT
+                        // emit a per-event chunk (the signature lands
+                        // on the aggregated detail at content_block_stop).
+                        if let Some(OpenBlockKind::Thinking { signature: sig, .. }) =
+                            &mut self.open_block
+                        {
+                            *sig = Some(signature);
+                        }
+                        Ok(None)
                     }
                     SseDelta::InputJsonDelta { partial_json } => {
                         Ok(Some(self.make_tool_delta_chunk(partial_json)))
@@ -182,8 +215,35 @@ impl SseState {
             }
 
             SseEvent::ContentBlockStop { .. } => {
-                self.open_block = None;
-                Ok(None)
+                // Strategy A terminal: emit ONE aggregated structured
+                // detail per thinking block carrying both text and
+                // signature, matching the non-streaming
+                // `walk_content_blocks` shape so replay round-trips.
+                let terminal_chunk = match self.open_block.take() {
+                    Some(OpenBlockKind::Thinking {
+                        accumulated,
+                        signature,
+                        detail_id,
+                        detail_index,
+                    }) => {
+                        // Edge case: empty thinking block (no text AND
+                        // no signature). Skip emission so replay does
+                        // not push an empty Thinking block that
+                        // Anthropic would 400 on.
+                        if accumulated.is_empty() && signature.is_none() {
+                            None
+                        } else {
+                            Some(self.make_thinking_terminal_chunk(
+                                accumulated,
+                                signature,
+                                detail_id,
+                                detail_index,
+                            ))
+                        }
+                    }
+                    _ => None,
+                };
+                Ok(terminal_chunk)
             }
 
             SseEvent::MessageDelta { delta, usage } => {
@@ -333,51 +393,54 @@ impl SseState {
         }
     }
 
-    fn make_thinking_delta_chunk(&self, _provider_id: &str, thinking: String) -> Result<ChatChunk> {
-        let detail_index = match &self.open_block {
-            Some(OpenBlockKind::Thinking { detail_index, .. }) => *detail_index,
-            _ => 0,
-        };
-
-        let detail = ReasoningDetail {
-            kind: ReasoningDetailKind::Text,
-            id: Some(Uuid::new_v4().to_string()),
-            format: Some(ANTHROPIC_FORMAT.to_string()),
-            index: Some(detail_index),
-            // No signature yet -- will arrive via SignatureDelta.
-            payload: json!({"text": thinking}),
-        };
-
-        Ok(ChatChunk {
+    /// Live thinking-string chunk for Strategy A. Carries only the
+    /// plain `reasoning` string; the structured `ReasoningDetail` is
+    /// deferred to `make_thinking_terminal_chunk` at
+    /// `content_block_stop`. Streaming UIs reading `delta.reasoning`
+    /// see thinking text incrementally; replay code reading
+    /// `delta.reasoning_details` sees one fully-paired entry per
+    /// block.
+    fn make_thinking_string_chunk(&self, thinking: String) -> ChatChunk {
+        ChatChunk {
             id: self.id.clone(),
             model: self.model.clone(),
             choices: vec![ChunkChoice {
                 index: 0,
                 delta: ChunkDelta {
                     reasoning: Some(thinking),
-                    reasoning_details: vec![detail],
                     ..Default::default()
                 },
                 finish_reason: None,
             }],
             usage: None,
-        })
+        }
     }
 
-    fn make_signature_chunk(&self, signature: String) -> ChatChunk {
-        let detail_index = match &self.open_block {
-            Some(OpenBlockKind::Thinking { detail_index, .. }) => *detail_index,
-            _ => 0,
-        };
-
-        // Emit a reasoning_details entry that carries ONLY the signature so
-        // clients can attach it to the accumulated thinking block.
+    /// Terminal chunk for one thinking block: emits ONE aggregated
+    /// `ReasoningDetail` carrying both `text` and `signature`. Mirrors
+    /// the non-streaming `response::walk_content_blocks` shape so
+    /// replay code at `request.rs::emit_reasoning_blocks` sees the
+    /// pair it expects.
+    fn make_thinking_terminal_chunk(
+        &self,
+        accumulated: String,
+        signature: Option<String>,
+        detail_id: String,
+        detail_index: u32,
+    ) -> ChatChunk {
+        // Build payload byte-shape-identical to the non-streaming
+        // aggregator. `signature` defaults to "" when missing so
+        // serde always serializes the field; replay tolerates an
+        // empty signature with a debug skip rather than erroring.
         let detail = ReasoningDetail {
             kind: ReasoningDetailKind::Text,
-            id: Some(Uuid::new_v4().to_string()),
+            id: Some(detail_id),
             format: Some(ANTHROPIC_FORMAT.to_string()),
             index: Some(detail_index),
-            payload: json!({"signature": signature}),
+            payload: json!({
+                "text": accumulated,
+                "signature": signature.unwrap_or_default(),
+            }),
         };
 
         ChatChunk {

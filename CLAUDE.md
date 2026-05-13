@@ -104,7 +104,12 @@ contract:
      through but doesn't (custom Deserialize edge case).
    - thinking signature missing on a multi-turn assistant message
      (callers must echo `reasoning_details` with the
-     `anthropic-claude-v1` format tag verbatim).
+     `anthropic-claude-v1` format tag verbatim). When the original
+     stream had a thinking block whose `signature_delta` Anthropic
+     omitted (Claude 4.5 occasionally does this on tool-only thinking
+     turns), routectl logs a WARN and skips that detail on replay
+     -- partial echo is better than a hard 400, but is a known
+     residual seam. See "Anthropic streaming reasoning replay" below.
 
 3. **Pick the right fix site**:
    - Body translation issue (Anthropic Messages -> canonical):
@@ -247,17 +252,88 @@ What you get at debug:
 - New `body=...` DEBUG with the full upstream error body (4 KB cap,
   HTML-collapsed)
 
-What you get at trace, additionally:
-- `body=...` TRACE with the JSON body routectl sent to the upstream
-  (16 KB cap)
-- `body=...` TRACE with the body the client sent on
-  `/v1/chat/completions` or `/v1/messages` (no cap; the canonical
-  schema bounds it via `MAX_INGRESS_BODY_BYTES`)
+What you get at trace, additionally (full 4-direction visibility):
+- `body=...` TRACE `"ingress request body"` -- the body the client
+  sent on `/v1/chat/completions` or `/v1/messages` (16 KB cap, fields
+  `ingress=openai|anthropic`).
+- `body=...` TRACE `"outgoing request body"` -- the JSON body routectl
+  sent to the upstream (16 KB cap, fields
+  `provider_kind=openai-compat|anthropic|bedrock-invoke|bedrock-converse|openai-responses`,
+  `provider=<id>`).
+- `body=...` TRACE `"upstream success body"` -- the deserialized 2xx
+  body the upstream returned, traced BEFORE routectl's normalization
+  rewrites it (16 KB cap; same `provider_kind` / `provider` fields).
+  4xx/5xx error bodies stay on the existing DEBUG path.
+- `body=...` TRACE `"egress response body"` -- what the client
+  actually receives, traced AFTER canonical -> wire serialization
+  (16 KB cap, field `ingress=openai|anthropic`). Single call site in
+  `routectl-cli/src/handlers/ingress_handle.rs` covers both ingresses.
+- TRACE `"stream summary"` lines on streaming completion: one per
+  direction (`direction=upstream` from the provider-side wrapper,
+  `direction=egress` from the ingress-side render loop). Carries
+  `chunks=<N>`, `finish_reason=<...>`, `prompt_tokens`,
+  `completion_tokens`, `total_tokens`. Streams DO NOT emit per-chunk
+  body traces -- the per-chunk firehose floods the log without adding
+  signal beyond the summary.
 
-Sensitivity caveat: bodies contain user prompts. Leave `ROUTECTL_LOG`
-at the default `info` level in production. Only flip to debug/trace
-during active triage and prefer redirecting the output to a file
-(`./routectl serve 2>/tmp/triage.log`) rather than tailing live.
+Sensitivity caveat: bodies contain user prompts AND assistant outputs
+at TRACE. Leave `ROUTECTL_LOG` at the default `info` level in
+production. Only flip to debug/trace during active triage and prefer
+redirecting the output to a file (`./routectl serve 2>/tmp/triage.log`)
+rather than tailing live.
+
+For sensitive environments where TRACE is needed but raw prompts are
+not OK to disk, set `ROUTECTL_LOG_REDACT_PROMPTS=1` BEFORE launching
+routectl. The redactor walks every traced body and replaces known
+prompt-bearing fields (text blocks, system, instructions, tool_use
+input, function_call arguments, refusal blocks, image source data,
+image_url data URIs, Bedrock Converse `toolUse.input` and
+`toolResult.content[*].json`) with `<redacted len=N>` placeholders
+while preserving structural fields (model, tools, sampling params,
+finish_reason, usage). Best-effort: unknown wire shapes (a new
+Anthropic content-block type, a new OpenAI Responses output kind)
+can still leak. The env var is read once on first traced body --
+flipping it after the first trace fires has no effect; the server
+emits a one-shot `info` line at boot reporting the resolved value
+(`redact_prompts=true|false`) so operators can confirm the setting
+took effect.
+
+Two known residual leaks even with the knob ON:
+- `<redacted len=N>` reveals the char count of the original content.
+  Short fixed-vocabulary prompts (e.g. "yes" / "no" tool confirms)
+  are disambiguable by length alone. Treat redacted traces as a
+  length-leaking side channel.
+- The 4xx/5xx upstream error body (`debug_upstream_error_body` at
+  DEBUG level) is NOT redacted -- error bodies are raw strings, not
+  JSON values; they may echo back portions of the request. Operators
+  flipping DEBUG (not TRACE) for triage on a sensitive environment
+  should be aware.
+
+```bash
+# Redacted triage. All four trace directions still fire; user content
+# replaced with `<redacted len=N>` markers; model/tools/usage/
+# finish_reason intact for diagnosis.
+ROUTECTL_LOG=routectl=trace ROUTECTL_LOG_REDACT_PROMPTS=1 \
+  ./routectl serve 2>/tmp/triage.log
+```
+
+### Triage trace-level surfaces (operator grep cheat sheet)
+
+| Surface | Direction | Filter |
+|---|---|---|
+| `"ingress request body"`           | 1 client -> routectl     | `tag:ingress request_id=<id>` |
+| `"outgoing request body"`          | 2 routectl -> upstream   | `provider_kind=<kind>` |
+| `"upstream success body"`          | 3 upstream -> routectl   | `provider_kind=<kind>` |
+| `"egress response body"`           | 4 routectl -> client     | `ingress=<openai\|anthropic>` |
+| `"stream summary"` `direction=upstream` | provider-side stream end | `chunks=`, `finish_reason=` |
+| `"stream summary"` `direction=egress`   | ingress-side stream end  | `chunks=`, `finish_reason=` |
+
+Old log message names retired in favor of the table above:
+- `"openai ingress body"`    -> `"ingress request body"` `ingress=openai`
+- `"anthropic ingress body"` -> `"ingress request body"` `ingress=anthropic`
+- (Both ingresses now share one log message; they differ only in the
+  `ingress=` field. Operators with grep rules matching the old
+  per-dialect messages must update them.)
 
 ### Auth-failure log shapes (no secret values, ever)
 
@@ -514,6 +590,33 @@ Refer back when a similar failure mode shows up.
   The field on `ResponsesRequest` does NOT carry
   `#[serde(skip_serializing_if = "String::is_empty")]` -- it is always
   emitted (possibly as `""`) so the server never sees the field missing.
+
+- **Anthropic streaming reasoning replay residual.** Strategy A
+  buffers `thinking_delta` text and `signature_delta` on the open
+  block, then emits one aggregated `ReasoningDetail` at
+  `content_block_stop` carrying both. When Anthropic 4.5 omits the
+  `signature_delta` event on a tool-only thinking turn, the terminal
+  detail emits with `signature: ""`. The replay path
+  (`anthropic_api/request.rs::emit_reasoning_blocks`) WARNs and
+  skips any detail with an empty signature -- because Anthropic 400s
+  on a `Thinking` block missing the field, and a partial echo is
+  better than a hard rejection that breaks every Claude 4.5
+  multi-turn after a tool-only thinking turn.
+
+  Residual seam: when an assistant message has MULTIPLE thinking
+  blocks where some have signatures and some don't, the replayed
+  history loses the unsigned blocks. Anthropic upstream sees a
+  shorter block sequence than it generated, which can cause cache
+  misses or quality drift on the follow-up turn. There is no clean
+  fix without one of:
+  (a) a synthetic signature (Anthropic would reject it),
+  (b) a hard error on every Claude 4.5 multi-turn (regressing usability),
+  (c) a canonical-schema change to track per-block "unsigned" sentinels.
+
+  Operators triaging "why is the model losing context?" should grep
+  for the WARN line `skipping Thinking block on replay: signature
+  missing or empty` to correlate. Mirrored in
+  `bedrock/converse/eventstream.rs` for the Converse stream path.
 
 ## Adding a new model to the matrix
 
