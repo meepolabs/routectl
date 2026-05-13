@@ -19,20 +19,23 @@
 //!
 //! - `allowed_body_fields` is operator-supplied via
 //!   `[bedrock] allowed_body_fields` TOML. routectl ships no const
-//!   default; the empirical 2026-05-12 baseline is in
+//!   default. **Empty list = pass-through** (no filtering); the
+//!   assembled body / bag is forwarded as-is. This is the discovery-
+//!   mode default: operators bring up routectl, observe what fields
+//!   are sent via `ROUTECTL_LOG=routectl_providers::bedrock=trace`,
+//!   then populate `allowed_body_fields` with what they want to
+//!   allow. The empirical 2026-05-12 baseline is in
 //!   `examples/bedrock.toml`.
-//! - Startup validation in `routectl-router::factory` rejects an
-//!   empty list when any `[providers.X]` has `kind = "bedrock"` and
-//!   rejects a list missing the routectl-mandatory keys
-//!   (`messages`, `anthropic_version`, `max_tokens`).
-//! - Unknown keys drop at `tracing::debug!` (not WARN) -- the
-//!   forward-compat sweep produces forwarded keys on every request,
-//!   WARN would flood `routectl-warn.log`.
+//! - When the allowlist is non-empty, unknown keys drop at
+//!   `tracing::debug!` (not WARN) -- the forward-compat sweep
+//!   produces forwarded keys on every request, WARN would flood
+//!   `routectl-warn.log`.
 //! - On Invoke, structural keys routectl writes from canonical
-//!   (`messages`, `system`, `tools`, ...) are kept by the allowlist;
-//!   on Converse, those same keys must NEVER appear in the bag (they
-//!   live in the AWS top-level Converse schema instead). The filter
-//!   surface differs per `FilterContext`.
+//!   (`messages`, `system`, `tools`, ...) must be on the allowlist
+//!   when filtering is active or the assembled body is malformed; on
+//!   Converse those keys live at the AWS top level instead and never
+//!   appear in the bag. The filter surface differs per
+//!   `FilterContext`.
 
 use serde_json::{Map, Value};
 
@@ -61,15 +64,24 @@ impl FilterContext {
 /// Converse extras bag.
 ///
 /// `allowed` is sourced from `[bedrock] allowed_body_fields` TOML.
-/// routectl ships no const default; an empty list drops everything
-/// (defense in depth -- startup validation rejects this state when
-/// any provider has `kind = "bedrock"`).
+/// **Empty list = pass-through**: no filtering, the bag is forwarded
+/// as-is. routectl ships no const default; operators populate the
+/// list after observing their actual traffic via trace logs.
 pub(super) fn filter_bedrock_body_fields(
     provider_id: &str,
     bag: &mut Map<String, Value>,
     allowed: &[String],
     surface: FilterContext,
 ) {
+    // Pass-through mode: empty operator allowlist means routectl is
+    // not gating body fields on this surface. The operator is in
+    // discovery mode (capturing observed keys via trace logs) or has
+    // explicitly opted out of routectl-side filtering. Either way,
+    // no keys drop here.
+    if allowed.is_empty() {
+        return;
+    }
+
     // Avoid an O(n*m) scan against `allowed.iter().any(...)` when the
     // list grows. The empirical baseline is ~16 entries today, but the
     // TOML side is operator-tunable so guard for larger lists too.
@@ -138,20 +150,27 @@ mod tests {
     }
 
     #[test]
-    fn empty_allowlist_drops_everything() {
-        // Defense in depth: if startup validation is somehow bypassed
-        // and the list is empty at request time, EVERY field drops
-        // (fails closed). The AWS upstream then returns a clear schema
-        // error rather than silently forwarding unknown values.
+    fn empty_allowlist_is_pass_through() {
+        // Discovery mode: with no operator-supplied list, routectl
+        // forwards every field as-is so the operator can observe
+        // actual traffic via trace logs and build the allowlist
+        // from what they see.
         let mut body = json!({
             "anthropic_version": "bedrock-2023-05-31",
             "messages": [],
+            "diagnostics": {"trace_id": "abc"},
+            "mcp_servers": [],
         });
         let bag = body.as_object_mut().unwrap();
+        let original_keys: Vec<String> = bag.keys().cloned().collect();
 
         filter_bedrock_body_fields("bedrock:test", bag, &[], FilterContext::InvokeBody);
 
-        assert!(bag.is_empty(), "expected all fields dropped, got {bag:?}");
+        let after_keys: Vec<String> = bag.keys().cloned().collect();
+        assert_eq!(
+            after_keys, original_keys,
+            "expected pass-through, got {bag:?}"
+        );
     }
 
     #[test]
