@@ -14,7 +14,7 @@ pub use config::{
     ProviderRuntimePolicy, ReasoningDialect, RetryPolicy, ServerAuth, ServerConfig,
 };
 #[cfg(feature = "bedrock")]
-pub use config::{BedrockApiShapeConfig, BedrockCredsConfig};
+pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
 pub use factory::{build_provider, build_provider_with_options, BuildOptions};
