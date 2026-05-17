@@ -197,8 +197,8 @@ impl Provider for OpenAiCompatProvider {
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions");
 
-        // PR C / FR-1: trace-level outgoing body for triage. Gated
-        // by `tracing::Level::TRACE`; default `info` filter pays
+        // Trace-level outgoing body for triage. Gated by
+        // `tracing::Level::TRACE`; default `info` filter pays
         // nothing.
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
@@ -214,13 +214,12 @@ impl Provider for OpenAiCompatProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body_text = resp.text().await.unwrap_or_default();
-            // PR C / FR-1: full upstream error body at debug level.
-            // The truncated WARN excerpt below stays for warn-log
-            // scannability.
+            // Full upstream error body at debug level. The truncated
+            // WARN excerpt below stays for warn-log scannability.
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let sanitized = extract_upstream_message(&body_text);
-            // PR C / FR-1: extend the auth-only WARN to all 4xx/5xx
-            // so an operator never has to guess WHY a request failed.
+            // Extend the auth-only WARN to all 4xx/5xx so an operator
+            // never has to guess WHY a request failed.
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
@@ -244,7 +243,7 @@ impl Provider for OpenAiCompatProvider {
             .await
             .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
 
-        // FR-2: trace the raw upstream body BEFORE normalization
+        // Trace the raw upstream body BEFORE normalization
         // mutates it (`coalesce_reasoning_content_in_response`
         // rewrites `reasoning_content` -> `reasoning` in place).
         // Operators triaging "what did the upstream return" want
