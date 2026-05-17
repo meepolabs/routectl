@@ -614,9 +614,11 @@ Refer back when a similar failure mode shows up.
   (c) a canonical-schema change to track per-block "unsigned" sentinels.
 
   Operators triaging "why is the model losing context?" should grep
-  for the WARN line `skipping Thinking block on replay: signature
-  missing or empty` to correlate. Mirrored in
-  `bedrock/converse/eventstream.rs` for the Converse stream path.
+  for the WARN line `skipping Thinking blocks on replay: signature
+  missing or empty` to correlate (one WARN per request with
+  `skipped_count=N` and `skipped_indices=[...]`, NOT one per detail).
+  Mirrored in `bedrock/converse/eventstream.rs` for the Converse
+  stream path.
 
 ## Adding a new model to the matrix
 

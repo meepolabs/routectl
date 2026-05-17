@@ -514,10 +514,14 @@ async fn parse_upstream_error_body(
 /// Body excerpt is bounded to keep log lines scannable. Never logs
 /// credential material because Bedrock error bodies don't contain any.
 fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
-    let excerpt: String = body
-        .chars()
-        .take(routectl_core::MAX_LOG_BODY_EXCERPT)
-        .collect();
+    // Sanitize: a Bedrock upstream error body that contains \n, \r, or
+    // ANSI escape sequences (a CDN-injected error page, a compromised
+    // upstream, a mocked test fixture) would otherwise forge fake log
+    // lines or scramble operator terminals. Mirror the openai_compat
+    // and anthropic_api providers which both run upstream excerpts
+    // through `sanitize_upstream_body_with_cap` before logging.
+    let excerpt =
+        routectl_core::sanitize_upstream_body_with_cap(body, routectl_core::MAX_LOG_BODY_EXCERPT);
     match status {
         401 => {
             tracing::warn!(
@@ -528,7 +532,11 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
             );
         }
         403 => {
-            let action = extract_iam_action(body);
+            // Sanitize the extracted action since it's a substring of
+            // an upstream-controlled body. AWS error messages are
+            // machine-generated today, but a compromised endpoint
+            // could embed control chars; defense-in-depth.
+            let action = extract_iam_action(body).map(|s| sanitize_for_log(&s));
             let principal_present = body.contains("User:") || body.contains("Principal:");
             tracing::warn!(
                 provider = %provider,

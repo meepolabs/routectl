@@ -277,12 +277,20 @@ fn error_response(status: StatusCode, err_type: &str, message: &str, code: &str)
 }
 
 /// RAII guard that emits a single `direction=egress` stream summary on
-/// drop. Mirrors the upstream-side `routectl_core::StreamWithSummary`
-/// RAII guard that emits a single `direction=egress` stream summary on
-/// drop. Mirrors the upstream-side `routectl_core::StreamWithSummary`
-/// drop semantics: every exit path of the spawned SSE-render task
-/// emits a summary so operators see a matching `direction=egress`
-/// line for every `direction=upstream` line.
+/// drop. Complements the upstream-side
+/// `routectl_core::StreamWithSummary` RAII guarantee: every exit path
+/// of the spawned SSE-render task emits a summary so operators see a
+/// matching `direction=egress` line for every `direction=upstream`
+/// line.
+///
+/// Note the deliberate divergence from `StreamWithSummary`: the
+/// upstream guard preserves the observed `last_finish` on cancellation
+/// (it reports what the provider sent before drop). This guard
+/// OVERRIDES `last_finish` with `"truncated"` whenever
+/// `clean_close == false` so the egress side authoritatively reports
+/// whether the client received a complete stream. Operators
+/// correlating an egress `truncated` line with the upstream summary
+/// see the actual upstream finish_reason on the upstream side.
 ///
 /// Truncation detection uses an inverse-flag pattern: the guard
 /// starts with `clean_close = false`, and `mark_clean_close()` is
@@ -293,6 +301,14 @@ fn error_response(status: StatusCode, err_type: &str, message: &str, code: &str)
 /// runtime task cancellation, where the future is dropped without
 /// running any of our code paths first). Explicit error paths can
 /// still call no special method; Drop alone handles them.
+///
+/// `chunks` semantics: counted on `observe()` BEFORE the chunk is
+/// rendered to SSE events and sent to the client. On a disconnect
+/// during `tx.send()`, `chunks` includes the unsent final chunk --
+/// it measures upstream chunks the egress task processed, NOT
+/// chunks the client successfully received. Operators reading the
+/// summary should treat `chunks` as a work-done counter, not a
+/// delivery counter.
 struct EgressStreamSummary {
     ingress_id: String,
     chunks: u64,
@@ -360,11 +376,17 @@ impl Drop for EgressStreamSummary {
         // Inverse-flag truncation detection: any drop without a
         // matching `mark_clean_close()` is a non-clean exit. Covers
         // explicit error returns AND task cancellation (where Drop
-        // runs without our code path running first).
+        // runs without our code path running first). The egress
+        // summary is authoritative on egress-side completion --
+        // override any observed `last_finish` with `"truncated"`
+        // when `clean_close == false` so operators can grep
+        // `direction=egress finish_reason=truncated` to enumerate
+        // cuts. The upstream-side summary still carries the
+        // observed upstream finish_reason for correlation.
         let finish_reason = if self.clean_close {
             self.last_finish.as_deref()
         } else {
-            self.last_finish.as_deref().or(Some("truncated"))
+            Some("truncated")
         };
         routectl_core::trace_stream_summary(
             "egress",
