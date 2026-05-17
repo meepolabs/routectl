@@ -24,6 +24,12 @@ pub use log_safe::{
     trace_stream_summary, trace_upstream_success_body, wrap_stream_with_summary,
     MAX_TRACE_BODY_BYTES,
 };
+// Re-export the deprecated alias from the crate root so downstream
+// consumers that imported the old name from `routectl_core::*` get a
+// `#[deprecated]` warning instead of a compile error. Kept until the
+// next breaking release.
+#[allow(deprecated)]
+pub use log_safe::MAX_TRACE_OUTGOING_BODY_BYTES;
 pub use provider::Provider;
 pub use reserved::is_canonical_request_key;
 pub use schema::{
