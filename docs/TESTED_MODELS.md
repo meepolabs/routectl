@@ -145,8 +145,8 @@ OpenAI Codex CLI.
 
 Required env vars for the live matrix:
 ```bash
-export OPENAI_BEARER_KEY="$(jq -r '.openai.access' ~/.local/share/opencode/auth.json)"
-export OPENAI_ACCOUNT_ID="$(jq -r '.openai.accountId' ~/.local/share/opencode/auth.json)"
+export OPENAI_BEARER_KEY="$(jq -r '.openai.access' <your-codex-CLI-auth-store>)"
+export OPENAI_ACCOUNT_ID="$(jq -r '.openai.accountId' <your-codex-CLI-auth-store>)"
 ```
 
 Run the openai-responses matrix:

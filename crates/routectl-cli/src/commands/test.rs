@@ -6,7 +6,8 @@ use std::sync::Arc;
 use routectl_auth::MemoryStore;
 use routectl_core::{schema::MessageContent, ChatRequest, Error, Message, Result, Role};
 use routectl_router::{
-    build_provider_with_options, validate_bedrock_global_config, BuildOptions, Config, Router,
+    build_provider_with_options, validate_bedrock_global_config, validate_reasoning_defaults,
+    BuildOptions, Config, Router,
 };
 
 pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
@@ -19,6 +20,11 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     // instead of at first-request 400. Empty lists are pass-through
     // and accepted; see `validate_bedrock_global_config`.
     validate_bedrock_global_config(&config)?;
+
+    // Reject empty-string `thinking = ""` on any provider before
+    // dispatch, so the operator gets a clean error rather than silently
+    // emitting `effort: ""` on the routed request.
+    validate_reasoning_defaults(&config)?;
 
     // Same BuildOptions path as `serve` so a `routectl test` run
     // exercises exactly the production translation contract. Without

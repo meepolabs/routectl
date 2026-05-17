@@ -159,6 +159,11 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     // pass-through and accepted; see `validate_bedrock_global_config`.
     routectl_router::validate_bedrock_global_config(&config)?;
 
+    // Reject empty-string `thinking = ""` on any provider before
+    // building, so the operator gets a clean error rather than
+    // silently emitting `effort: ""` on every routed request.
+    routectl_router::validate_reasoning_defaults(&config)?;
+
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
         .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
