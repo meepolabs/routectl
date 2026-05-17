@@ -2,7 +2,9 @@
 
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
-use routectl_router::{Config, ProviderEntry};
+use routectl_router::{
+    validate_bedrock_global_config, validate_reasoning_defaults, Config, ProviderEntry,
+};
 
 /// Validate the loaded config: parse syntax (already done by main.rs), resolve
 /// every secret reference (env / file / literal), and report any aliases that
@@ -75,6 +77,19 @@ pub async fn check(config: &Config) -> Result<()> {
                 "default_model `{default}` is neither an [aliases] key nor a provider:model literal"
             ));
         }
+    }
+
+    // Run the same startup validators that `serve` and `test` invoke
+    // before building providers. Without this, an operator running
+    // `routectl config check` against a TOML carrying `thinking = ""`
+    // or an incoherent `[bedrock] allowed_body_fields` would see "ok"
+    // and only discover the failure when starting the server. Surface
+    // the same errors here.
+    if let Err(e) = validate_reasoning_defaults(config) {
+        errors.push(e.to_string());
+    }
+    if let Err(e) = validate_bedrock_global_config(config) {
+        errors.push(e.to_string());
     }
 
     println!("config check:");

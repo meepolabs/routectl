@@ -1078,6 +1078,113 @@ thinking = "ultra"
     }
 
     #[test]
+    fn thinking_whitespace_only_rejected() {
+        // Arrange: a thinking value that's only whitespace would parse
+        // upstream as "no effort" but with all the wire overhead of
+        // emitting the field. Caught at startup with a precise error
+        // pointing the operator at the offending provider.
+        let toml_text = r#"
+[providers.spacey]
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = "   "
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("toml parse");
+
+        // Act
+        let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
+
+        // Assert
+        let msg = err.to_string();
+        assert!(msg.contains("spacey"), "msg should name provider: {msg}");
+        assert!(
+            msg.contains("whitespace-only"),
+            "msg should explain rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn thinking_with_control_characters_rejected() {
+        // Arrange: a tab character (ASCII 0x09) in the thinking value.
+        // Effort strings must be printable ASCII -- control characters
+        // would corrupt log lines and wire bodies.
+        let toml_text = "\
+[providers.tabby]\n\
+type = \"anthropic-api\"\n\
+api_key_ref = \"literal:k\"\n\
+thinking = \"hi\\tgh\"\n\
+";
+        let cfg: Config = toml::from_str(toml_text).expect("toml parse");
+
+        // Act
+        let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
+
+        // Assert
+        let msg = err.to_string();
+        assert!(msg.contains("tabby"), "msg should name provider: {msg}");
+        assert!(
+            msg.contains("control"),
+            "msg should explain rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn thinking_exceeding_64_bytes_rejected() {
+        // Arrange: a 65-character effort string. Real effort tokens
+        // are short ("minimal", "low", "medium", "high", "xhigh",
+        // "max", "none"); 64 bytes is well above any realistic value
+        // and catches accidental paste of a full prompt or path.
+        let long_value = "a".repeat(65);
+        let toml_text = format!(
+            r#"
+[providers.verbose]
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = "{long_value}"
+"#
+        );
+        let cfg: Config = toml::from_str(&toml_text).expect("toml parse");
+
+        // Act
+        let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
+
+        // Assert
+        let msg = err.to_string();
+        assert!(msg.contains("verbose"), "msg should name provider: {msg}");
+        assert!(msg.contains("65 bytes"), "msg should report length: {msg}");
+        assert!(msg.contains("max 64"), "msg should report cap: {msg}");
+    }
+
+    #[test]
+    fn validate_reports_all_offending_providers() {
+        // Arrange: two providers with different validation failures.
+        // The validator must accumulate both errors instead of
+        // bailing on the first one -- otherwise the operator has to
+        // restart routectl once per offending provider to see them
+        // all.
+        let toml_text = r#"
+[providers.empty_p]
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = ""
+
+[providers.spacey_p]
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = "   "
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("toml parse");
+
+        // Act
+        let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
+
+        // Assert: BOTH provider names appear in the consolidated error.
+        let msg = err.to_string();
+        assert!(msg.contains("empty_p"), "msg should name empty_p: {msg}");
+        assert!(msg.contains("spacey_p"), "msg should name spacey_p: {msg}");
+    }
+
+    #[test]
     fn parse_openai_compat_variant_carries_defaults() {
         let toml_text = r#"
 type = "openai-compat"

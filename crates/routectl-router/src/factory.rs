@@ -586,37 +586,71 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
 }
 
 /// Validate the `[providers.X] thinking` knob across every configured
-/// provider. Reject the empty string explicitly so an operator who
-/// types `thinking = ""` gets a clean startup error rather than
-/// silently emitting `effort: ""` on every request (which most
-/// upstream egresses then 400 on).
+/// provider. The validator accumulates errors so an operator with
+/// multiple offending providers gets one consolidated startup error
+/// rather than fixing them one at a time.
 ///
-/// Unknown values like `thinking = "ultra"` pass through verbatim --
-/// the provider-side translation tables are forward-compatible by
-/// design, and pinning the validator to a closed enum here would
-/// require a routectl release every time a vendor adds a new effort
-/// level.
+/// Rejected shapes:
+///   - empty string `""` -- without this the egress emits `effort: ""`
+///     on every routed request, which most upstreams 400 on.
+///   - whitespace-only (e.g. `"  "`) -- same failure mode as empty,
+///     just less obvious.
+///   - control characters -- ASCII control bytes have no place in an
+///     effort string and would corrupt log lines / wire bodies.
+///   - longer than 64 bytes -- effort strings are short tokens by
+///     design ("minimal", "low", "medium", "high", "xhigh", "max",
+///     "none", or a vendor-specific extension). 64 bytes is well
+///     above any realistic value and catches accidental paste of a
+///     full prompt or path.
+///
+/// Otherwise unknown values pass through verbatim -- the provider-side
+/// translation tables are forward-compatible by design, and pinning
+/// the validator to a closed enum here would require a routectl
+/// release every time a vendor adds a new effort level.
 ///
 /// Call once per process startup BEFORE building any providers.
 pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()> {
     use routectl_core::Error;
 
+    const MAX_THINKING_BYTES: usize = 64;
+    let mut errors: Vec<String> = Vec::new();
     for (name, entry) in &config.providers {
         let Some(defaults) = entry.reasoning_defaults() else {
             continue;
         };
-        if let Some(thinking) = &defaults.thinking {
-            if thinking.is_empty() {
-                return Err(Error::Config(format!(
-                    "provider `{name}`: `thinking` must be a non-empty string \
-                     (e.g. \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \
-                     \"max\", \"none\"); remove the field to leave reasoning \
-                     effort unset"
-                )));
-            }
+        let Some(thinking) = defaults.thinking.as_deref() else {
+            continue;
+        };
+        if thinking.is_empty() {
+            errors.push(format!(
+                "provider `{name}`: `thinking` must be a non-empty string \
+                 (e.g. \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \
+                 \"max\", \"none\"); remove the field to leave reasoning \
+                 effort unset"
+            ));
+        } else if thinking.trim().is_empty() {
+            errors.push(format!(
+                "provider `{name}`: `thinking` value `{thinking}` is whitespace-only; \
+                 remove the field or set a real value (e.g. \"low\")"
+            ));
+        } else if thinking.chars().any(|c| c.is_ascii_control()) {
+            errors.push(format!(
+                "provider `{name}`: `thinking` value contains ASCII control \
+                 characters; effort strings must be printable ASCII"
+            ));
+        } else if thinking.len() > MAX_THINKING_BYTES {
+            errors.push(format!(
+                "provider `{name}`: `thinking` value is {} bytes; max {MAX_THINKING_BYTES} \
+                 (effort strings should be short tokens like \"high\")",
+                thinking.len()
+            ));
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Config(errors.join("\n")))
+    }
 }
 
 #[cfg(test)]
