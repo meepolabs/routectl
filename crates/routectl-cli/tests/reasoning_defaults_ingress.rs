@@ -492,3 +492,135 @@ async fn caller_reasoning_overrides_provider_default_high() {
         "caller's budget_tokens=256 must win over operator default thinking=high"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Case (f): fallback chain applies per-hop reasoning defaults
+// ---------------------------------------------------------------------------
+
+/// Pin: a fallback chain with two providers carrying different
+/// `[providers.X] thinking` defaults applies the SECOND provider's
+/// default on the second hop. The merge happens per-attempt inside
+/// the router, AFTER `attempt_req = req.clone()`, so the first
+/// provider's mutation cannot bleed into the second provider's body.
+///
+/// Setup: provider A returns 500 with `thinking = "low"`, provider B
+/// returns 200 with `thinking = "high"`. The client sends one request
+/// with `max_tokens = 1024`. Assert:
+///   - Upstream A received `budget_tokens = 204` (1024 * 0.20).
+///   - Upstream B received `budget_tokens = 819` (1024 * 0.80).
+#[tokio::test]
+async fn fallback_chain_applies_per_hop_reasoning_defaults() {
+    // Arrange: two upstream wiremocks, A 500 / B 200.
+    let upstream_a = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream A failure"))
+        .mount(&upstream_a)
+        .await;
+
+    let upstream_b = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream_b)
+        .await;
+
+    // Build two anthropic-api providers with different reasoning
+    // defaults. provider-a -> "low", provider-b -> "high".
+    let mut providers = BTreeMap::new();
+
+    let mut entry_a =
+        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_a.uri());
+    if let ProviderEntry::AnthropicApi {
+        reasoning_defaults, ..
+    } = &mut entry_a
+    {
+        *reasoning_defaults = ReasoningDefaults::new().with_thinking("low");
+    }
+    providers.insert("provider-a".to_string(), entry_a);
+
+    let mut entry_b =
+        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_b.uri());
+    if let ProviderEntry::AnthropicApi {
+        reasoning_defaults, ..
+    } = &mut entry_b
+    {
+        *reasoning_defaults = ReasoningDefaults::new().with_thinking("high");
+    }
+    providers.insert("provider-b".to_string(), entry_b);
+
+    // Alias chain: A first (returns 500 -> fallback), then B (returns 200).
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "heavy".to_string(),
+        AliasEntry::new(vec![
+            "provider-a:claude-haiku-4-5".to_string(),
+            "provider-b:claude-haiku-4-5".to_string(),
+        ]),
+    );
+
+    // Tighten the retry policy so A only sees one attempt before the
+    // router walks to B. Default `max_attempts = 2` would otherwise
+    // make A receive two requests before fallback, doubling the
+    // received-request count without changing the assertion.
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+
+    let config = Arc::new(Config {
+        server: empty_server(),
+        providers,
+        aliases,
+        default_model: None,
+        retry,
+        legacy_compat: routectl_router::LegacyCompat::Openrouter,
+        ingress: empty_ingress(),
+        ..Default::default()
+    });
+    let base = helpers::spawn(config).await;
+
+    let body = json!({
+        "model": "heavy",
+        "max_tokens": 1024,
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        }],
+    });
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "fallback should succeed via provider-b");
+
+    // Assert: A received the "low"-derived budget, B received the
+    // "high"-derived budget. If the merge were aliasing across hops,
+    // both upstreams would see the same value.
+    let received_a = upstream_a.received_requests().await.unwrap();
+    assert_eq!(
+        received_a.len(),
+        1,
+        "provider-a should receive exactly one attempt before fallback"
+    );
+    let body_a: Value = serde_json::from_slice(&received_a[0].body).unwrap();
+    assert_eq!(
+        body_a["thinking"]["budget_tokens"], 204,
+        "provider-a's `thinking = low` must derive budget_tokens=204; got body: {body_a}"
+    );
+
+    let received_b = upstream_b.received_requests().await.unwrap();
+    assert_eq!(
+        received_b.len(),
+        1,
+        "provider-b should receive the fallback attempt"
+    );
+    let body_b: Value = serde_json::from_slice(&received_b[0].body).unwrap();
+    assert_eq!(
+        body_b["thinking"]["budget_tokens"], 819,
+        "provider-b's `thinking = high` must derive budget_tokens=819 \
+         (no bleed-through from provider-a); got body: {body_b}"
+    );
+}
