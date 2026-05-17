@@ -595,8 +595,11 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
 ///     on every routed request, which most upstreams 400 on.
 ///   - whitespace-only (e.g. `"  "`) -- same failure mode as empty,
 ///     just less obvious.
-///   - control characters -- ASCII control bytes have no place in an
-///     effort string and would corrupt log lines / wire bodies.
+///   - ASCII control characters (0x00-0x1F, 0x7F) -- they would
+///     corrupt log lines / wire bodies. Non-ASCII characters
+///     (printable Unicode) ARE accepted; future vendor vocabularies
+///     may include extended characters and the validator stays out
+///     of the way.
 ///   - longer than 64 bytes -- effort strings are short tokens by
 ///     design ("minimal", "low", "medium", "high", "xhigh", "max",
 ///     "none", or a vendor-specific extension). 64 bytes is well
@@ -636,7 +639,7 @@ pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()>
         } else if thinking.chars().any(|c| c.is_ascii_control()) {
             errors.push(format!(
                 "provider `{name}`: `thinking` value contains ASCII control \
-                 characters; effort strings must be printable ASCII"
+                 characters; effort strings must not contain control characters"
             ));
         } else if thinking.len() > MAX_THINKING_BYTES {
             errors.push(format!(
