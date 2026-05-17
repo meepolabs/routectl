@@ -1317,7 +1317,7 @@ mod multi_turn_tool_use_tests {
         assert_eq!(tool_use["input"], json!({"_arguments": "this is not json"}));
     }
 
-    /// FX-1: with `adaptive_thinking = true`, the wire shape is the
+    /// With `adaptive_thinking = true`, the wire shape is the
     /// Opus 4.7+ form -- `thinking: {type:"adaptive"}` (no
     /// `budget_tokens`) plus a top-level `output_config: {effort:...}`
     /// carrying the canonical `reasoning.effort` string verbatim.
@@ -1355,7 +1355,7 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["temperature"], 1.0);
     }
 
-    /// FX-1: with `adaptive_thinking = false` (or absent), the wire
+    /// With `adaptive_thinking = false` (or absent), the wire
     /// shape is the legacy `Enabled { budget_tokens }` form. Older
     /// Claude models (4.5/4.6 family) still want this shape and would
     /// 400 on the adaptive form.
@@ -1390,7 +1390,7 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["temperature"], 1.0);
     }
 
-    /// FX-1: `effort = "max"` on the legacy path maps to a near-total
+    /// `effort = "max"` on the legacy path maps to a near-total
     /// budget (max_tokens * 0.99). Adaptive path passes "max"
     /// verbatim into `output_config.effort` and never calls
     /// `effort_ratio`. This test pins the legacy mapping so a
@@ -1418,7 +1418,7 @@ mod multi_turn_tool_use_tests {
         assert_eq!(thinking["budget_tokens"], 990);
     }
 
-    /// FX-1: `reasoning.effort = "none"` produces `Disabled` on both
+    /// `reasoning.effort = "none"` produces `Disabled` on both
     /// paths. The adaptive flag does not coerce a Disabled into an
     /// Adaptive -- if the caller said no thinking, we honor it.
     #[test]
@@ -1442,7 +1442,7 @@ mod multi_turn_tool_use_tests {
         assert!(body.get("output_config").is_none());
     }
 
-    /// FX-1: the barefoot adaptive case -- `reasoning.enabled = true`
+    /// The barefoot adaptive case -- `reasoning.enabled = true`
     /// with no effort and no budget. Adaptive shape applies; effort
     /// defaults to "medium". This is the only path where
     /// `derive_effort` returns the fallback string, so we pin it
@@ -1468,7 +1468,7 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["output_config"]["effort"], "medium");
     }
 
-    /// FX-1: when `adaptive_thinking = true` AND the caller sets an
+    /// When `adaptive_thinking = true` AND the caller sets an
     /// explicit `reasoning.max_tokens`, the budget is dropped (the
     /// adaptive wire shape has no field for it) and a tracing::warn
     /// fires at normalize time. We can't easily assert the warn in a
