@@ -624,3 +624,94 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
          (no bleed-through from provider-a); got body: {body_b}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Case (g): streaming path applies operator reasoning defaults
+// ---------------------------------------------------------------------------
+
+/// Pin: the merge fires on the streaming path too, not just the
+/// non-streaming complete path. Same shape as case (a) but with
+/// `stream: true` on the request and an SSE response body. The
+/// reasoning-defaults merge happens in `stream_with_options` after
+/// `attempt_req = req.clone()`, so the upstream-captured body must
+/// carry the operator's `thinking = "high"` (legacy budget_tokens=819
+/// for max_tokens=1024).
+#[tokio::test]
+async fn streaming_default_thinking_high_reaches_upstream() {
+    // Arrange: Anthropic-shape SSE response. message_start +
+    // content_block_start/delta/stop + message_delta + message_stop is
+    // the minimum frame sequence the SseState machine needs to drive
+    // a clean stream end-to-end. Each `data:` line is its own JSON
+    // payload (no `event:` line needed; the eventsource decoder pulls
+    // event_type out of the JSON body).
+    let upstream = MockServer::start().await;
+    let sse_body = "\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-haiku-4-5\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n\
+data: {\"type\":\"message_stop\"}\n\n";
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_config_with_defaults(&upstream.uri(), "high", false);
+    let base = helpers::spawn(config).await;
+
+    let body = json!({
+        "model": "heavy",
+        "max_tokens": 1024,
+        "stream": true,
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        }],
+    });
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "streaming ingress rejected; body: {}",
+        resp.text().await.unwrap_or_default(),
+    );
+    // Drain the SSE response so the stream completes cleanly before
+    // the wiremock assertion below. Without this, the request future
+    // can be dropped before the upstream sees its body in some racy
+    // builds.
+    let _ = resp.bytes().await.unwrap();
+
+    // Assert: upstream-captured body has the operator's thinking
+    // applied via the streaming path. Same numeric pin as case (a):
+    // 1024 * 0.80 -> 819.
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        upstream_body["stream"],
+        json!(true),
+        "egress must propagate stream=true to the upstream; got body: {upstream_body}"
+    );
+    assert_eq!(
+        upstream_body["thinking"]["type"], "enabled",
+        "expected legacy thinking shape on streaming path; got body: {upstream_body}"
+    );
+    assert_eq!(
+        upstream_body["thinking"]["budget_tokens"], 819,
+        "operator default thinking=high must reach upstream on streaming path \
+         (1024 * 0.80 -> 819); got body: {upstream_body}"
+    );
+}
