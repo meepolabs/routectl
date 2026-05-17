@@ -136,6 +136,7 @@ fn ok_response(id: &str, model: &str) -> ChatResponse {
         }],
         usage: Some(Usage::default()),
         routectl_provider: None,
+        extras: Default::default(),
     }
 }
 

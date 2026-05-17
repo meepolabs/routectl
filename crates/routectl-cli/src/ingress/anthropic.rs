@@ -492,7 +492,7 @@ fn render_messages_response(resp: ChatResponse) -> Value {
             .prompt_tokens
             .saturating_sub(u.cache_creation_input_tokens.unwrap_or(0))
             .saturating_sub(u.cache_read_input_tokens.unwrap_or(0));
-        json!({
+        let mut usage_obj = json!({
             "input_tokens": raw_input,
             "output_tokens": u.completion_tokens,
             "cache_creation_input_tokens": u.cache_creation_input_tokens,
@@ -501,10 +501,35 @@ fn render_messages_response(resp: ChatResponse) -> Value {
                 "ephemeral_5m_input_tokens": c.ephemeral_5m_input_tokens,
                 "ephemeral_1h_input_tokens": c.ephemeral_1h_input_tokens,
             })),
-        })
+        });
+        // INV-10 fix: emit unknown usage sub-fields (e.g.
+        // `service_tier`) that flowed into `extras` from upstream.
+        // Typed fields above win on key conflict; extras only fills
+        // gaps so a future canonical-typed field doesn't double-emit.
+        if let Some(map) = usage_obj.as_object_mut() {
+            for (k, v) in &u.extras {
+                map.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        usage_obj
     });
     if let Some(u) = usage {
         body.insert("usage".into(), u);
+    }
+
+    // INV-9 fix: emit unknown response top-level fields (e.g.
+    // `context_management` from the `context-management-2025-06-27`
+    // beta) that flowed into `ChatResponse.extras` from upstream.
+    // Typed fields above win on key conflict; extras only fills
+    // gaps. The drop-list (Bedrock-only `stop_details`, ...) belongs
+    // here -- routectl owns the egress wire policy.
+    for (k, v) in &resp.extras {
+        // Skip Bedrock-only Anthropic-API extensions that aren't in
+        // the public Anthropic Messages baseline.
+        if k == "stop_details" {
+            continue;
+        }
+        body.entry(k.clone()).or_insert_with(|| v.clone());
     }
 
     Value::Object(body)
@@ -1254,6 +1279,7 @@ mod tests {
                 ..Default::default()
             }),
             routectl_provider: None,
+            extras: Default::default(),
         };
         let v = AnthropicIngress::default().render_response(resp).unwrap();
         assert_eq!(v["id"], "msg_01");
