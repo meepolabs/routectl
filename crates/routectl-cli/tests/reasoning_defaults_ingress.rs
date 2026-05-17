@@ -116,7 +116,7 @@ fn anthropic_config_with_defaults(
     } = &mut entry
     {
         *adaptive_thinking = Some(adaptive);
-        *reasoning_defaults = ReasoningDefaults::new(Some(thinking.to_string()), None);
+        *reasoning_defaults = ReasoningDefaults::new().with_thinking(thinking.to_string());
     }
     providers.insert("anthropic-mock".to_string(), entry);
 
@@ -148,7 +148,7 @@ fn vllm_config_with_enabled(upstream_base: &str, enabled: bool) -> Arc<Config> {
         reasoning_defaults, ..
     } = &mut entry
     {
-        *reasoning_defaults = ReasoningDefaults::new(None, Some(enabled));
+        *reasoning_defaults = ReasoningDefaults::new().with_enabled(enabled);
     }
     providers.insert("vllm-mock".to_string(), entry);
 
