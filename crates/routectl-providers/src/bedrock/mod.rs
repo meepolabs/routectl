@@ -271,9 +271,9 @@ impl Provider for BedrockProvider {
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let body = self.normalize_request(&req)?;
 
-        // PR C / FR-1: trace-level outgoing body for triage. Same
-        // gating + sensitivity story as the other two providers --
-        // see `routectl_core::log_safe::trace_outgoing_body`.
+        // Trace-level outgoing body for triage. Same gating +
+        // sensitivity story as the other two providers -- see
+        // `routectl_core::log_safe::trace_outgoing_body`.
         routectl_core::trace_outgoing_body(
             self.cfg.api_shape.provider_kind_str(),
             &self.cfg.id,
@@ -345,7 +345,7 @@ impl Provider for BedrockProvider {
             .json()
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
-        // FR-2: trace upstream success body pre-normalize. Distinct
+        // Trace upstream success body pre-normalize. Distinct
         // provider_kind per shape so operators can grep
         // `provider_kind=bedrock-invoke` vs `bedrock-converse`.
         routectl_core::trace_upstream_success_body(
@@ -468,12 +468,10 @@ async fn parse_upstream_error_body(
     let status = resp.status().as_u16();
     let body_text = resp.text().await.unwrap_or_default();
     log_bedrock_upstream_error(provider, status, &body_text);
-    // PR C / FR-1: emit the FULL upstream error body at debug level
-    // alongside the status-specific WARN above. The WARN excerpt
-    // (200B) keeps `routectl-warn.log` scannable; the DEBUG line gives
-    // operators the field-level detail when they flip log level
-    // during triage. INV-4 (Haiku 4.5 generic 400) becomes diagnosable
-    // from a single log capture instead of having to reproduce.
+    // Emit the full upstream error body at debug level alongside the
+    // status-specific WARN above. The WARN excerpt (200B) keeps
+    // `routectl-warn.log` scannable; DEBUG gives operators field-level
+    // detail when they flip log level during triage.
     routectl_core::debug_upstream_error_body(provider_kind, provider, status, &body_text);
 
     serde_json::from_str::<Value>(&body_text)

@@ -502,10 +502,9 @@ fn render_messages_response(resp: ChatResponse) -> Value {
                 "ephemeral_1h_input_tokens": c.ephemeral_1h_input_tokens,
             })),
         });
-        // INV-10 fix: emit unknown usage sub-fields (e.g.
+        // Forward-compat: emit unknown usage sub-fields (e.g.
         // `service_tier`) that flowed into `extras` from upstream.
-        // Typed fields above win on key conflict; extras only fills
-        // gaps so a future canonical-typed field doesn't double-emit.
+        // Typed fields above win on key conflict.
         if let Some(map) = usage_obj.as_object_mut() {
             for (k, v) in &u.extras {
                 map.entry(k.clone()).or_insert_with(|| v.clone());
@@ -517,15 +516,13 @@ fn render_messages_response(resp: ChatResponse) -> Value {
         body.insert("usage".into(), u);
     }
 
-    // INV-9 fix: emit unknown response top-level fields (e.g.
-    // `context_management` from the `context-management-2025-06-27`
-    // beta) that flowed into `ChatResponse.extras` from upstream.
-    // Typed fields above win on key conflict; extras only fills
-    // gaps. The drop-list (Bedrock-only `stop_details`, ...) belongs
-    // here -- routectl owns the egress wire policy.
+    // Forward-compat: emit unknown response top-level fields (e.g.
+    // `context_management`) that flowed into `ChatResponse.extras`
+    // from upstream. Typed fields above win on key conflict. The
+    // drop-list belongs here -- routectl owns the egress wire policy.
     for (k, v) in &resp.extras {
-        // Skip Bedrock-only Anthropic-API extensions that aren't in
-        // the public Anthropic Messages baseline.
+        // `stop_details` is a Bedrock-only Anthropic-API extension
+        // not in the public Anthropic Messages baseline.
         if k == "stop_details" {
             continue;
         }
@@ -1039,7 +1036,7 @@ impl IngressAdapter for AnthropicIngress {
     }
 
     fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
-        // FR-1: trace-level ingress body for triage. Same gating +
+        // Trace-level ingress body for triage. Same gating +
         // sensitivity story as the openai ingress. Honors
         // ROUTECTL_LOG_REDACT_PROMPTS=1.
         routectl_core::trace_ingress_body("anthropic", &body);
@@ -1356,8 +1353,7 @@ mod tests {
 
     #[test]
     fn stream_two_concurrent_tool_calls_each_get_their_own_block() {
-        // M4 (code-reviewer): multi-tool-call streaming was not
-        // covered. Verify both tool calls open their own blocks
+        // Verify both tool calls open their own blocks
         // and arguments-deltas land on the right block index.
         use routectl_core::{ChunkChoice, ChunkDelta};
         let chunk = ChatChunk {

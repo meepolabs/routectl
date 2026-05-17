@@ -182,9 +182,9 @@ async fn cache_control_on_every_position_reaches_upstream() {
 // ---------------------------------------------------------------------------
 
 /// Pin: `metadata` round-trips through the canonical seam to the
-/// Anthropic egress with all keys intact. internal review:
-/// previously the ingress lifted `metadata.user_id` to `req.user` and
-/// dropped the rest of `metadata`, breaking request attribution.
+/// Anthropic egress with all keys intact. Lifting `metadata.user_id`
+/// to `req.user` and dropping the rest of `metadata` would break
+/// request attribution.
 #[tokio::test]
 async fn metadata_round_trips_full_object_to_upstream() {
     let upstream = MockServer::start().await;
@@ -229,8 +229,8 @@ async fn metadata_round_trips_full_object_to_upstream() {
     );
 }
 
-/// INV-9 + INV-10 end-to-end pin: `context_management` (top-level)
-/// and `usage.service_tier` (nested) round-trip from upstream
+/// End-to-end pin: `context_management` (top-level) and
+/// `usage.service_tier` (nested) round-trip from upstream
 /// response through ChatResponse.extras / Usage.extras to the
 /// client wire body. Forward-compat: any new Anthropic spec field
 /// rides this same path with no routectl release.
@@ -277,16 +277,14 @@ async fn response_extras_round_trip_to_client() {
     assert_eq!(resp.status(), 200);
 
     let client_body: Value = resp.json().await.unwrap();
-    // INV-9: context_management surfaces on the client wire body.
     assert_eq!(
         client_body["context_management"],
         json!({"applied_edits": []}),
-        "context_management dropped on egress; INV-9 regression"
+        "context_management dropped on egress"
     );
-    // INV-10: usage.service_tier surfaces on the client wire body.
     assert_eq!(
         client_body["usage"]["service_tier"], "standard",
-        "usage.service_tier dropped on egress; INV-10 regression"
+        "usage.service_tier dropped on egress"
     );
 }
 
@@ -1736,7 +1734,7 @@ async fn cross_response_openai_tool_calls_become_anthropic_tool_use_blocks() {
 }
 
 // ---------------------------------------------------------------------------
-// INV-6 cross-crate regression: Anthropic ingress -> Bedrock-Invoke egress
+// Cross-crate regression: Anthropic ingress -> Bedrock-Invoke egress
 // ---------------------------------------------------------------------------
 //
 // claude-code's TS SDK ships up to ten anthropic-beta flags via the HTTP
@@ -1859,7 +1857,7 @@ async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
 }
 
 // ---------------------------------------------------------------------------
-// M1.B: DeepSeek + vLLM reasoning_effort fallback from budget_tokens
+// DeepSeek + vLLM reasoning_effort fallback from budget_tokens
 // ---------------------------------------------------------------------------
 //
 // When claude-code sends Anthropic-shape `thinking: {type:"enabled",
@@ -2108,7 +2106,7 @@ async fn cross_anthropic_explicit_effort_wins_over_derived_on_deepseek() {
 }
 
 // ---------------------------------------------------------------------------
-// M5.C: Bedrock Converse adapter -- ingress-to-egress round-trip
+// Bedrock Converse adapter -- ingress-to-egress round-trip
 // ---------------------------------------------------------------------------
 //
 // Tests the full Anthropic ingress -> canonical -> Bedrock Converse request
@@ -2118,8 +2116,8 @@ async fn cross_anthropic_explicit_effort_wins_over_derived_on_deepseek() {
 // Why no HTTP wiremock here: the BedrockProvider derives its endpoint URL
 // from `cfg.region` via `bedrock::endpoint::converse_url` and there is no
 // configurable base_url. A pure wiremock-over-HTTP fixture would require
-// either adding an endpoint-override field to BedrockConfig (not in scope
-// for M5.C) or a custom DNS shim. The existing INV-6 test (above) uses the
+// either adding an endpoint-override field to BedrockConfig or a custom
+// DNS shim. The existing cross-crate regression test (above) uses the
 // same normalize_request / normalize_response call-site pattern and has
 // proven sufficient for catching wire-shape regressions. The Converse live
 // matrix (`bedrock_converse_complete_matrix` in live_matrix.rs) provides

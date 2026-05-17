@@ -183,10 +183,6 @@ pub(crate) fn walk_content_blocks(
 /// surface via reasoning_details -- so a response with only text +
 /// thinking still collapses cleanly to Text here, while text + image
 /// emits Parts.
-// TODO(M12): extract to a providers-internal shared module; the
-// twin in crates/routectl-providers/src/bedrock/converse/response.rs
-// is byte-identical. M12 (managed-key dedup wave) is the natural
-// landing for this.
 fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageContent {
     let only_text = parts
         .iter()
@@ -226,10 +222,6 @@ fn translate_usage(u: &AnthropicUsage) -> Usage {
             ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
             ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
         }),
-        // Carry unknown wire fields (e.g. `service_tier`) verbatim
-        // so the Anthropic egress emits them on the response wire.
-        // INV-10 fix: the canonical Usage was previously a closed
-        // shape that silently dropped fields like `service_tier`.
         extras: u.extras.clone(),
     }
 }
@@ -264,12 +256,6 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
         }],
         usage,
         routectl_provider: None,
-        // INV-9 fix: carry unknown wire fields (e.g. Anthropic's
-        // `context_management` from the `context-management-2025-06-27`
-        // beta) verbatim so the egress emits them on the response
-        // wire. Without this, anything not in the canonical
-        // `ChatResponse` shape gets silently dropped at serde
-        // deserialization.
         extras: resp.extras,
     })
 }
@@ -479,12 +465,6 @@ mod tests {
         }
     }
 
-    /// INV-9 round-trip pin: `context_management` returned by Bedrock
-    /// (or Anthropic-API direct, when the `context-management-2025-06-27`
-    /// beta is on) must survive the response-side translation into
-    /// `ChatResponse.extras` so the egress wire-render can emit it.
-    /// Previously dropped because canonical `ChatResponse` had no
-    /// matching field.
     #[test]
     fn context_management_round_trips_into_extras() {
         let raw = json!({
@@ -503,10 +483,6 @@ mod tests {
         );
     }
 
-    /// INV-10 round-trip pin: `usage.service_tier` returned by every
-    /// Bedrock + Anthropic-API response must survive into
-    /// `Usage.extras`. The canonical `Usage` was previously a closed
-    /// shape that silently dropped this field.
     #[test]
     fn usage_service_tier_round_trips_into_extras() {
         let raw = json!({

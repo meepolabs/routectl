@@ -176,8 +176,8 @@ impl Provider for AnthropicApiProvider {
             obj.remove("stream");
         }
 
-        // PR C / FR-1: emit the outgoing body at trace level so a
-        // grep by request_id correlates ingress -> egress -> upstream
+        // Emit the outgoing body at trace level so a grep by
+        // request_id correlates ingress -> egress -> upstream
         // response in one pass during triage. Gated by the
         // `tracing::Level::TRACE` filter -- production with default
         // info level pays nothing.
@@ -204,9 +204,9 @@ impl Provider for AnthropicApiProvider {
         // providers.
         if status >= 400 {
             let body_text = resp.text().await.unwrap_or_default();
-            // PR C / FR-1: emit the FULL upstream error body at debug
-            // level so triage doesn't have to reproduce. The 200B
-            // WARN excerpt below stays unchanged for `routectl-warn.log`
+            // Emit the FULL upstream error body at debug level so
+            // triage doesn't have to reproduce. The 200B WARN
+            // excerpt below stays unchanged for `routectl-warn.log`
             // scannability.
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let msg = serde_json::from_str::<Value>(&body_text)
@@ -216,11 +216,11 @@ impl Provider for AnthropicApiProvider {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| sanitize_upstream_body(&body_text));
-            // PR C / FR-1: extend the auth-only WARN to all 4xx/5xx
-            // so an operator never has to guess WHY a request failed.
-            // Auth failures keep the auth_kind field for parity with
-            // the documented log shape; other errors get a generic
-            // "anthropic upstream error" tag.
+            // Extend the auth-only WARN to all 4xx/5xx so an operator
+            // never has to guess WHY a request failed. Auth failures
+            // keep the auth_kind field for parity with the documented
+            // log shape; other errors get a generic "anthropic
+            // upstream error" tag.
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
@@ -244,7 +244,7 @@ impl Provider for AnthropicApiProvider {
             .json()
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
-        // FR-2: trace upstream success body pre-normalize.
+        // Trace upstream success body pre-normalize.
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());

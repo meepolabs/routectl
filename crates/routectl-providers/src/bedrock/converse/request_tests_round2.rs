@@ -1,17 +1,17 @@
-//! internal review tests for `super::request::translate`.
+//! Additional review-finding tests for `super::request::translate`.
 //!
 //! Lives in a sibling file so `request_tests.rs` stays under the
 //! project's 800-line ceiling. Imported via `#[path =
 //! "request_tests_round2.rs"] mod tests_round2;` from `request.rs`.
 //!
 //! Coverage:
-//!   - HIGH 1: `{"type":"none"}` Anthropic-object tool_choice suppresses
+//!   - `{"type":"none"}` Anthropic-object tool_choice suppresses
 //!     the entire toolConfig (not just toolChoice).
-//!   - HIGH 2: `req.provider_extras` merges into
+//!   - `req.provider_extras` merges into
 //!     additionalModelRequestFields, with managed-key shielding.
-//!   - HIGH 3: A canonical Document content block prepends an empty
+//!   - A canonical Document content block prepends an empty
 //!     {text} sibling when no Text exists in the same message.
-//!   - HIGH 4: Role::Tool Parts of type Image / Document dispatch
+//!   - Role::Tool Parts of type Image / Document dispatch
 //!     through the typed translator (no opaque Json wrap).
 //!   - HIGH 6: anthropic_beta filter applies on the Converse path
 //!     identically to Invoke (allowlist + per-provider floor +
@@ -131,8 +131,8 @@ fn provider_extras_merge_into_additional_model_request_fields() {
     // Without this merge, fields like `context_management`,
     // `output_config.format`, and `metadata` disappear silently
     // between ingress and Converse egress. Fields NOT on the operator
-    // list (e.g. `mcp_servers`, `container`) are dropped per INV-7;
-    // see `body_fields_filter_drops_disallowed_keys_on_converse` for
+    // list (e.g. `mcp_servers`, `container`) are dropped; see
+    // `body_fields_filter_drops_disallowed_keys_on_converse` for
     // that contract.
     let cfg = fake_cfg();
     let req = ChatRequest {
@@ -161,7 +161,7 @@ fn provider_extras_merge_into_additional_model_request_fields() {
 
 #[test]
 fn body_fields_filter_drops_disallowed_keys_on_converse() {
-    // Arrange (INV-7): the Anthropic ingress's forward-compat sweep
+    // Arrange: the Anthropic ingress's forward-compat sweep
     // forwards unknown top-level keys (e.g. `mcp_servers`,
     // `container`, `diagnostics`) into provider_extras. The Converse
     // egress must DROP any key not on `[bedrock] allowed_body_fields`
@@ -415,8 +415,8 @@ fn anthropic_beta_filtered_against_bedrock_allowlist_in_additional_fields() {
     // Arrange: a request whose canonical anthropic_beta carries
     // both an officially-accepted Bedrock flag and one routectl's
     // shared filter would drop. Converse re-applies the same
-    // allowlist as Invoke (issues.md::INV-6) -- AWS validates
-    // anthropic_beta whether it sits on the body (Invoke) or in
+    // allowlist as Invoke -- AWS validates anthropic_beta whether
+    // it sits on the body (Invoke) or in
     // additionalModelRequestFields (Converse), so the filter
     // applies on both paths.
     let cfg = fake_cfg();

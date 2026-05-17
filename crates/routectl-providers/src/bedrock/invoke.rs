@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn additional_model_request_fields_cannot_override_managed_keys() {
-        // Regression for the round 6 finding: a misconfigured
+        // A misconfigured
         // `additional_model_request_fields = { "messages" = [...] }`
         // would silently replace the assembled history. Now blocked
         // with a WARN, matching the openai-compat / anthropic_api
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
     }
 
-    /// FX-1: `BedrockConfig::adaptive_thinking = Some(true)` propagates
+    /// `BedrockConfig::adaptive_thinking = Some(true)` propagates
     /// through `normalize_request` -> `anthropic_api::request::normalize`
     /// and produces the Opus 4.7+ wire shape (no `budget_tokens`,
     /// top-level `output_config.effort`). This is the integration
@@ -416,7 +416,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // INV-6: anthropic_beta filter against Bedrock-accepted set
+    // anthropic_beta filter against Bedrock-accepted set
     // -----------------------------------------------------------------
 
     fn fake_cfg_no_betas() -> BedrockConfig {
@@ -489,8 +489,7 @@ mod tests {
 
     /// Provider-config anthropic_beta survives the filter even when its
     /// contents are not in the routectl-shipped accepted set. This is
-    /// the documented operator escape hatch for AWS allowlist drift
-    /// (see CLAUDE.md gotcha + issues.md::INV-6).
+    /// the documented operator escape hatch for AWS allowlist drift.
     #[test]
     fn invoke_provider_config_betas_bypass_filter() {
         // Arrange
@@ -537,12 +536,12 @@ mod tests {
         );
     }
 
-    /// issues.md::INV-6 dedup-vs-allowlist edge case.
-    /// The Anthropic ingress's `merge_inbound_anthropic_beta_header`
-    /// dedupes header-vs-body, but a direct caller (e.g. a library
-    /// user constructing ChatRequest by hand) could supply duplicates.
-    /// The filter must also dedup so a flag appearing twice in the
-    /// canonical does not appear twice in the upstream body.
+    /// Dedup-vs-allowlist edge case. The Anthropic ingress's
+    /// `merge_inbound_anthropic_beta_header` dedupes header-vs-body,
+    /// but a direct caller (e.g. a library user constructing
+    /// ChatRequest by hand) could supply duplicates. The filter must
+    /// also dedup so a flag appearing twice in the canonical does not
+    /// appear twice in the upstream body.
     #[test]
     fn invoke_preserves_dedup_when_header_and_body_share_flag() {
         // Arrange

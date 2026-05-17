@@ -32,9 +32,6 @@
 //! before serialization, mirroring the Anthropic egress so a
 //! mis-shaped cache prefix surfaces as a clean 400 locally rather than
 //! a vague AWS error.
-//!
-//! M5.A scope: this module covers translate(); response decode and
-//! eventstream framing land in M5.B.
 
 use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
 use routectl_core::{ChatRequest, MessageContent, Result};
