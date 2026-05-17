@@ -513,6 +513,7 @@ mod tests {
             choices: vec![],
             usage: None,
             routectl_provider: Some("test".into()),
+            extras: Default::default(),
         };
         let v = OpenAiIngress::default().render_response(resp).unwrap();
         assert_eq!(v["id"], "chatcmpl-1");

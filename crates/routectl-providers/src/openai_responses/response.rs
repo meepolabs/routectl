@@ -87,6 +87,7 @@ pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<Ch
         }],
         usage,
         routectl_provider: None,
+        extras: Default::default(),
     })
 }
 
@@ -365,6 +366,7 @@ fn translate_usage(u: &ResponsesUsage) -> Usage {
         cache_creation_input_tokens: None,
         cache_read_input_tokens: cache_read,
         cache_creation: None,
+        extras: Default::default(),
     }
 }
 
