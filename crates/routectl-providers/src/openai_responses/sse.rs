@@ -39,11 +39,12 @@ const BLOCK_TAG_TOOL_USE: &str = "tool_use";
 
 /// Cap on the number of distinct `output_index` entries the per-stream
 /// `ResponsesStreamState::blocks` map will hold. Legitimate Responses
-/// streams emit a small handful of output items per turn (reasoning
-/// + message + N tool calls). An adversarial or compromised upstream
-/// could stream thousands of distinct indices to drive the map
-/// toward OOM. 512 is comfortably above any practical request and
-/// well below memory-pressure territory for the per-task heap.
+/// streams emit a small handful of output items per turn (typically
+/// reasoning, message, and a few tool calls). An adversarial or
+/// compromised upstream could stream thousands of distinct indices
+/// to drive the map toward OOM. 512 is comfortably above any
+/// practical request and well below memory-pressure territory for
+/// the per-task heap.
 const MAX_OUTPUT_BLOCKS: usize = 512;
 
 use super::response::{map_finish_reason, upstream_error_from_failed};
