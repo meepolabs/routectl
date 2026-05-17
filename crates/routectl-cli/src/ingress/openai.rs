@@ -51,7 +51,7 @@ impl IngressAdapter for OpenAiIngress {
     }
 
     fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
-        // FR-1: trace-level ingress body for triage. Inherits the
+        // Trace-level ingress body for triage. Inherits the
         // parent span's `request_id` so a `grep request_id=<id>`
         // shows ingress -> outgoing -> upstream -> egress in one
         // pass. Gated by `tracing::Level::TRACE`; default `info`
@@ -411,13 +411,13 @@ mod tests {
     fn openai_ingress_passes_function_tools_through_as_other_verbatim() {
         // OpenAI function tool wire shape `{type: "function", function:
         // {...}}` must pass through canonical as `ToolDef::Other` with
-        // the original Value preserved verbatim. Round-1 of the
-        // dogfood fix had the ingress lift this to `ToolDef::Custom`,
-        // which broke the openai-compat egress path: `Custom`
-        // serializes flat (no `type:"function"` wrapper) so DeepSeek
-        // 400'd. The Anthropic egress's `translate_tool` already
-        // converts function-shape `Other` to `AnthropicTool::Custom`,
-        // so dropping the ingress lift loses nothing on that path.
+        // the original Value preserved verbatim. Lifting to
+        // `ToolDef::Custom` breaks the openai-compat egress path:
+        // `Custom` serializes flat (no `type:"function"` wrapper) so
+        // DeepSeek 400's. The Anthropic egress's `translate_tool`
+        // already converts function-shape `Other` to
+        // `AnthropicTool::Custom`, so the lift would lose nothing on
+        // that path.
         let body = json!({
             "model": "gpt-4o",
             "messages": [{"role": "user", "content": "hi"}],
@@ -477,9 +477,9 @@ mod tests {
         // upstreams want different shapes -- openai-compat wants the
         // OpenAI shape unchanged, Anthropic wants {"type":"auto"}, etc).
         // The ingress is shape-agnostic and passes whatever the wire
-        // carried. Round-1 of the dogfood fix mistakenly translated
-        // here, breaking openai-compat egresses (DeepSeek 400'd on
-        // an Anthropic-shape tool_choice). Pin the contract.
+        // carried. Translating here breaks openai-compat egresses
+        // (DeepSeek 400's on an Anthropic-shape tool_choice). Pin the
+        // contract.
         for tc in [
             json!("auto"),
             json!("required"),

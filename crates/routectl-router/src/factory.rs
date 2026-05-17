@@ -202,6 +202,7 @@ pub async fn build_provider_with_options(
             runtime: _,
         } => {
             validate_bedrock_allowlists(
+                matches!(api_shape, BedrockApiShapeConfig::Invoke),
                 !anthropic_beta.is_empty(),
                 &opts.bedrock_allowed_betas,
                 &opts.bedrock_allowed_body_fields,
@@ -470,13 +471,19 @@ const BEDROCK_REQUIRED_BODY_FIELDS: &[&str] = &["anthropic_version", "max_tokens
 ///
 /// When `allowed_body_fields` is non-empty, validate:
 ///   - Routectl-mandatory keys (`messages`, `anthropic_version`,
-///     `max_tokens`) are present -- otherwise the egress drops a key
-///     routectl just wrote and the upstream 400s.
+///     `max_tokens`) are present -- but only when at least one provider
+///     uses `api_shape = "invoke"`. Those keys live at the AWS top
+///     level on Converse and never appear in
+///     `additionalModelRequestFields`, so a Converse-only deployment
+///     is unaffected by their absence from the allowlist.
 ///   - If any provider has a `[providers.X] anthropic_beta` floor,
 ///     `anthropic_beta` is on the list -- otherwise the filter
-///     silently drops the operator-asserted always-send array.
+///     silently drops the operator-asserted always-send array. Applies
+///     to both Invoke (top-level body) and Converse
+///     (`additionalModelRequestFields` bag).
 #[cfg(feature = "bedrock")]
 fn validate_bedrock_allowlists(
+    has_invoke_provider: bool,
     has_provider_beta_floor: bool,
     _allowed_betas: &[String],
     allowed_body_fields: &[String],
@@ -488,19 +495,21 @@ fn validate_bedrock_allowlists(
         return Ok(());
     }
 
-    let missing: Vec<&str> = BEDROCK_REQUIRED_BODY_FIELDS
-        .iter()
-        .copied()
-        .filter(|required| !allowed_body_fields.iter().any(|s| s == required))
-        .collect();
-    if !missing.is_empty() {
-        return Err(Error::Config(format!(
-            "[bedrock] allowed_body_fields is missing routectl-mandatory keys \
-             {missing:?}. Without these, every Bedrock request 400s on the \
-             egress. See examples/bedrock.toml for the full baseline; or \
-             remove `[bedrock] allowed_body_fields` entirely to disable \
-             filtering and run in discovery mode."
-        )));
+    if has_invoke_provider {
+        let missing: Vec<&str> = BEDROCK_REQUIRED_BODY_FIELDS
+            .iter()
+            .copied()
+            .filter(|required| !allowed_body_fields.iter().any(|s| s == required))
+            .collect();
+        if !missing.is_empty() {
+            return Err(Error::Config(format!(
+                "[bedrock] allowed_body_fields is missing routectl-mandatory keys \
+                 {missing:?}. Without these, every Bedrock Invoke request 400s on \
+                 the egress. See examples/bedrock.toml for the full baseline; or \
+                 remove `[bedrock] allowed_body_fields` entirely to disable \
+                 filtering and run in discovery mode."
+            )));
+        }
     }
 
     if has_provider_beta_floor && !allowed_body_fields.iter().any(|s| s == "anthropic_beta") {
@@ -545,10 +554,18 @@ fn validate_bedrock_allowlists(
 #[cfg(feature = "bedrock")]
 pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<()> {
     let mut bedrock_in_use = false;
+    let mut has_invoke_provider = false;
     let mut has_provider_beta_floor = false;
     for entry in config.providers.values() {
-        if let crate::config::ProviderEntry::Bedrock { anthropic_beta, .. } = entry {
+        if let crate::config::ProviderEntry::Bedrock {
+            api_shape,
+            anthropic_beta,
+            ..
+        } = entry
+        {
             bedrock_in_use = true;
+            has_invoke_provider |=
+                matches!(api_shape, crate::config::BedrockApiShapeConfig::Invoke);
             has_provider_beta_floor |= !anthropic_beta.is_empty();
         }
     }
@@ -557,6 +574,7 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
     }
 
     validate_bedrock_allowlists(
+        has_invoke_provider,
         has_provider_beta_floor,
         &config.bedrock.allowed_betas,
         &config.bedrock.allowed_body_fields,
@@ -592,9 +610,9 @@ mod base_url_validation_tests {
     }
 
     /// Pin: AWS / Azure / GCP cloud-instance metadata IP must be
-    /// rejected even with https. Round-7 security review HIGH:
-    /// link-local egress would leak SigV4 + API keys to whatever
-    /// service the operator was tricked into pointing at.
+    /// rejected even with https. Link-local egress would leak SigV4
+    /// and API keys to whatever service the operator was tricked
+    /// into pointing at.
     #[test]
     fn https_aws_imds_rejected() {
         let err =
@@ -820,6 +838,41 @@ mod bedrock_validation_tests {
         let msg = err.to_string();
         assert!(msg.contains("messages"), "msg: {msg}");
         assert!(msg.contains("routectl-mandatory"), "msg: {msg}");
+        assert!(msg.contains("Invoke"), "msg: {msg}");
+    }
+
+    #[test]
+    fn converse_only_deployment_skips_required_body_field_check() {
+        // Arrange: a Converse-only deployment with `allowed_body_fields`
+        // that omits `messages`/`anthropic_version`/`max_tokens`. Those
+        // keys live at the AWS top level on Converse and never reach
+        // `additionalModelRequestFields`, so the missing-required check
+        // must NOT fire.
+        let cfg = config_with_entry(
+            ProviderEntry::Bedrock {
+                region: "us-west-2".into(),
+                model_id: "anthropic.claude-haiku-4-5".into(),
+                api_shape: BedrockApiShapeConfig::Converse,
+                creds: BedrockCredsConfig::DefaultChain,
+                user_agent: None,
+                extra_headers: BTreeMap::new(),
+                anthropic_beta: Vec::new(),
+                additional_model_request_fields: None,
+                adaptive_thinking: None,
+                runtime: Default::default(),
+            },
+            BedrockGlobalConfig {
+                allowed_betas: baseline_betas(),
+                allowed_body_fields: vec!["thinking".into(), "anthropic_beta".into()],
+            },
+        );
+
+        let result = validate_bedrock_global_config(&cfg);
+
+        assert!(
+            result.is_ok(),
+            "Converse-only deployment should not require Invoke-specific body keys; got {result:?}"
+        );
     }
 
     #[test]

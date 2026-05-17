@@ -37,10 +37,6 @@
 //! Forward-compat catchalls in `ContentPart::Other` and `ToolDef::Other`
 //! are handled with the same warn-or-error policy as the openai-compat
 //! egress.
-//!
-//! Scope: M5.A built request + types; M5.B (this module's `response.rs`
-//! and `eventstream.rs`) covers the response side. M5.C (dispatch
-//! wiring + drop-three-startup-guards + live matrix row) follows.
 
 mod eventstream;
 mod extras;

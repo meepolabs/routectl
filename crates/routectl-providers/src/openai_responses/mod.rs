@@ -301,7 +301,7 @@ impl Provider for OpenAiResponsesProvider {
             };
             Error::upstream(&self.cfg.id, 0, msg)
         })?;
-        // FR-2: trace upstream success body pre-normalize. The
+        // Trace upstream success body pre-normalize. The
         // chatgpt-oauth endpoint is stream-only; this body is the
         // `response` field extracted from the terminal SSE event, not
         // raw SSE frames. Trace fires for failed/cancelled too so
@@ -541,7 +541,6 @@ mod e2e_tests {
     /// Pin: when the SSE stream's terminal event is `response.failed`,
     /// `complete()` must return `Err::Upstream` with the body's
     /// `error.message` -- NOT a 200 ChatResponse with finish_reason="error".
-    /// Regression guard for the round-4 review HIGH finding.
     #[tokio::test]
     async fn complete_response_failed_returns_upstream_error() {
         let server = MockServer::start().await;

@@ -464,12 +464,12 @@ mod tests {
         assert_eq!(c3.choices[0].delta.content.as_deref(), Some("after"));
     }
 
-    /// Pin: open `<think>` tag SPLIT across chunk boundaries. Round-7
-    /// review HIGH: previously the partial `<thi` in chunk 1 was
-    /// emitted as visible content, then chunk 2 (`nk>secret</think>`)
-    /// also didn't match `<think>` and went to visible content,
-    /// LEAKING the reasoning text. The fix buffers the partial-tag
-    /// suffix and prepends it on the next call.
+    /// Pin: open `<think>` tag SPLIT across chunk boundaries.
+    /// Without buffering, the partial `<thi` in chunk 1 emits as
+    /// visible content; chunk 2 (`nk>secret</think>`) also fails to
+    /// match `<think>` and goes to visible content, LEAKING the
+    /// reasoning text. The accumulator buffers the partial-tag suffix
+    /// and prepends it on the next call.
     #[test]
     fn think_open_tag_split_across_chunks_does_not_leak() {
         let mut acc = ThinkTagAccumulator::new();

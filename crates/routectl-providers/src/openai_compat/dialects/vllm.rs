@@ -3,7 +3,7 @@
 //! `reasoning_content` field on response is lifted same as DeepSeek;
 //! echoed history `reasoning_content` is stripped before sending.
 //!
-//! Reasoning effort derivation (M1.B):
+//! Reasoning effort derivation:
 //! When the canonical request has `reasoning.effort` set, it is forwarded
 //! verbatim as `reasoning_effort`. When only `reasoning.max_tokens` is
 //! present, an effort string is derived from the budget:
