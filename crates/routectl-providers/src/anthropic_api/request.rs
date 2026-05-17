@@ -622,13 +622,17 @@ fn emit_tool_use_blocks_from_calls(
 /// a `Thinking` block on echo without the `signature` field; when a
 /// detail's signature is missing or empty (Anthropic 4.5 occasionally
 /// omits `signature_delta` on tool-only thinking turns), the detail
-/// is logged at DEBUG and skipped so replay doesn't 400 on a
-/// guaranteed-malformed echo.
+/// is logged at WARN and skipped so replay doesn't 400 on a
+/// guaranteed-malformed echo. WARN level (not DEBUG) so operators
+/// see the partial echo and can correlate with upstream cache misses
+/// or quality drift -- mixed signed/unsigned histories lose ordering
+/// fidelity. See CLAUDE.md "Anthropic streaming reasoning replay".
 fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<ContentBlock>> {
     let mut sorted = details.to_vec();
     sorted.sort_by_key(|d| d.index.unwrap_or(0));
 
     let mut blocks: Vec<ContentBlock> = Vec::with_capacity(sorted.len());
+    let mut skipped_unsigned: Vec<Option<u32>> = Vec::new();
     for detail in &sorted {
         match detail.kind {
             ReasoningDetailKind::Text => {
@@ -648,23 +652,11 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
                     .unwrap_or("");
                 if signature.is_empty() {
                     // Anthropic 400s on a Thinking block without a
-                    // signature, so passing it through would fail the
-                    // request entirely. Skipping the block is better
-                    // than that, but it IS a lossy round-trip when
-                    // some blocks have signatures and others don't
-                    // (Claude 4.5 occasionally omits signature_delta
-                    // on tool-only thinking turns) -- the replayed
-                    // history loses ordering/cache fidelity for the
-                    // unsigned blocks. Logged at WARN so operators
-                    // can see this happened and correlate with any
-                    // upstream cache misses or quality drift.
-                    tracing::warn!(
-                        provider = id,
-                        detail_index = ?detail.index,
-                        "skipping Thinking block on replay: signature missing or empty \
-                         (multi-block thinking history is now partially echoed; \
-                         see CLAUDE.md \"Anthropic streaming reasoning replay\" residual)"
-                    );
+                    // signature; skipping is better than a hard fail.
+                    // Aggregate the WARN per-call (Claude 4.5 multi-
+                    // block thinking turns can pile up several skipped
+                    // entries and per-detail WARN would flood the log).
+                    skipped_unsigned.push(detail.index);
                     continue;
                 }
                 blocks.push(ContentBlock::Thinking {
@@ -692,6 +684,16 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
                 // Not an Anthropic block; skip.
             }
         }
+    }
+    if !skipped_unsigned.is_empty() {
+        tracing::warn!(
+            provider = id,
+            skipped_count = skipped_unsigned.len(),
+            skipped_indices = ?skipped_unsigned,
+            "skipping Thinking blocks on replay: signature missing or empty \
+             (multi-block thinking history is now partially echoed; \
+             see CLAUDE.md \"Anthropic streaming reasoning replay\" residual)"
+        );
     }
     Ok(blocks)
 }
