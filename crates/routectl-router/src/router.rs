@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
-    sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReasoningConfig,
+    Result,
 };
 
 use crate::config::{Config, RetryPolicy};
@@ -139,6 +140,7 @@ impl Router {
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
+            self.merge_reasoning_defaults(&mut attempt_req, provider_name);
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
@@ -282,6 +284,7 @@ impl Router {
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
+            self.merge_reasoning_defaults(&mut attempt_req, provider_name);
 
             let attempt_policy = self.compose_attempt_policy(&policy, provider_name);
             match try_stream_with_first_chunk(provider_name, provider, attempt_req, &attempt_policy)
@@ -485,6 +488,46 @@ impl Router {
                 provider_runtime.and_then(|p| p.stream_first_byte_timeout_ms);
         }
         out
+    }
+
+    /// Merge `[providers.X] thinking` / `enabled` operator defaults
+    /// into the per-attempt request's `reasoning` field. Caller's
+    /// non-None values always win -- this only fills in fields the
+    /// caller left unset. No-op when the provider has no defaults
+    /// configured (the common case).
+    ///
+    /// Precedence per field: caller (wire) > operator (TOML) > internal
+    /// default. Composed orthogonally: if the caller supplied
+    /// `effort` and the operator configured `enabled`, the resulting
+    /// request carries both.
+    fn merge_reasoning_defaults(&self, req: &mut ChatRequest, provider_name: &str) {
+        let Some(entry) = self.config.providers.get(provider_name) else {
+            return;
+        };
+        let Some(defaults) = entry.reasoning_defaults() else {
+            return;
+        };
+
+        let caller_had_reasoning = req.reasoning.is_some();
+        let cfg = req.reasoning.get_or_insert_with(ReasoningConfig::default);
+        if cfg.effort.is_none() {
+            if let Some(t) = &defaults.thinking {
+                cfg.effort = Some(t.clone());
+            }
+        }
+        if cfg.enabled.is_none() {
+            if let Some(b) = defaults.enabled {
+                cfg.enabled = Some(b);
+            }
+        }
+
+        tracing::debug!(
+            provider = provider_name,
+            caller_had_reasoning,
+            merged_effort = ?cfg.effort,
+            merged_enabled = ?cfg.enabled,
+            "merged operator reasoning defaults",
+        );
     }
 }
 
@@ -804,5 +847,185 @@ mod tests {
         let composed = router.compose_attempt_policy(&base, "p1");
         assert!(composed.request_timeout_ms.is_none());
         assert!(composed.stream_first_byte_timeout_ms.is_none());
+    }
+}
+
+#[cfg(test)]
+mod merge_reasoning_defaults_tests {
+    use super::*;
+    use crate::config::{AliasEntry, ProviderEntry, ReasoningDefaults, RetryPolicy};
+    use std::collections::BTreeMap;
+
+    /// Build a one-provider Router whose AnthropicApi entry carries
+    /// the supplied `ReasoningDefaults`. The provider name is `p1`.
+    fn router_with_defaults(defaults: ReasoningDefaults) -> Router {
+        let mut providers = BTreeMap::new();
+        let mut entry = ProviderEntry::anthropic_api("literal:k");
+        if let ProviderEntry::AnthropicApi {
+            reasoning_defaults, ..
+        } = &mut entry
+        {
+            *reasoning_defaults = defaults;
+        }
+        providers.insert("p1".to_string(), entry);
+
+        let mut aliases = BTreeMap::new();
+        aliases.insert("a".to_string(), AliasEntry::new(vec!["p1:m".to_string()]));
+
+        let cfg = Config {
+            providers,
+            aliases,
+            retry: RetryPolicy::default(),
+            ..Default::default()
+        };
+        Router::new(Arc::new(cfg))
+    }
+
+    fn req_with_reasoning(reasoning: Option<ReasoningConfig>) -> ChatRequest {
+        ChatRequest {
+            model: "a".into(),
+            messages: vec![],
+            reasoning,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn merge_no_caller_no_defaults_leaves_none() {
+        // Arrange: provider has no defaults; caller didn't supply
+        // `reasoning`. Result must remain None -- the merge step must
+        // not synthesize an empty ReasoningConfig.
+        let router = router_with_defaults(ReasoningDefaults::default());
+        let mut req = req_with_reasoning(None);
+
+        // Act
+        router.merge_reasoning_defaults(&mut req, "p1");
+
+        // Assert
+        assert!(req.reasoning.is_none());
+    }
+
+    #[test]
+    fn merge_no_caller_with_defaults_inserts_full_config() {
+        // Arrange: operator pinned both fields; caller supplied nothing.
+        let defaults = ReasoningDefaults {
+            thinking: Some("high".into()),
+            enabled: Some(true),
+        };
+        let router = router_with_defaults(defaults);
+        let mut req = req_with_reasoning(None);
+
+        // Act
+        router.merge_reasoning_defaults(&mut req, "p1");
+
+        // Assert: ReasoningConfig was created and both fields filled.
+        let cfg = req.reasoning.expect("reasoning was inserted");
+        assert_eq!(cfg.effort.as_deref(), Some("high"));
+        assert_eq!(cfg.enabled, Some(true));
+    }
+
+    #[test]
+    fn merge_caller_effort_minimal_beats_defaults_high() {
+        // Arrange: caller supplied effort="minimal"; operator default
+        // is "high". Caller wins.
+        let defaults = ReasoningDefaults {
+            thinking: Some("high".into()),
+            enabled: None,
+        };
+        let router = router_with_defaults(defaults);
+        let mut req = req_with_reasoning(Some(ReasoningConfig {
+            effort: Some("minimal".into()),
+            ..ReasoningConfig::default()
+        }));
+
+        // Act
+        router.merge_reasoning_defaults(&mut req, "p1");
+
+        // Assert
+        let cfg = req.reasoning.expect("reasoning preserved");
+        assert_eq!(cfg.effort.as_deref(), Some("minimal"));
+    }
+
+    #[test]
+    fn merge_caller_enabled_false_beats_defaults_true() {
+        // Caller pinned `enabled = false`; operator default is true.
+        // Caller wins. Some(false) must NOT collapse to None on the
+        // merge path.
+        let defaults = ReasoningDefaults {
+            thinking: None,
+            enabled: Some(true),
+        };
+        let router = router_with_defaults(defaults);
+        let mut req = req_with_reasoning(Some(ReasoningConfig {
+            enabled: Some(false),
+            ..ReasoningConfig::default()
+        }));
+
+        router.merge_reasoning_defaults(&mut req, "p1");
+
+        let cfg = req.reasoning.expect("reasoning preserved");
+        assert_eq!(cfg.enabled, Some(false));
+    }
+
+    #[test]
+    fn merge_fills_both_when_caller_has_neither() {
+        // Caller carries an empty ReasoningConfig (e.g. the wire body
+        // had `reasoning: {}`); operator defaults supply both.
+        let defaults = ReasoningDefaults {
+            thinking: Some("medium".into()),
+            enabled: Some(true),
+        };
+        let router = router_with_defaults(defaults);
+        let mut req = req_with_reasoning(Some(ReasoningConfig::default()));
+
+        router.merge_reasoning_defaults(&mut req, "p1");
+
+        let cfg = req.reasoning.expect("reasoning present");
+        assert_eq!(cfg.effort.as_deref(), Some("medium"));
+        assert_eq!(cfg.enabled, Some(true));
+    }
+
+    #[test]
+    fn merge_composes_orthogonal_fields() {
+        // Caller supplied `effort` only; operator configured `enabled`
+        // only. Result has both -- merge is per-field, not
+        // all-or-nothing.
+        let defaults = ReasoningDefaults {
+            thinking: None,
+            enabled: Some(true),
+        };
+        let router = router_with_defaults(defaults);
+        let mut req = req_with_reasoning(Some(ReasoningConfig {
+            effort: Some("low".into()),
+            ..ReasoningConfig::default()
+        }));
+
+        router.merge_reasoning_defaults(&mut req, "p1");
+
+        let cfg = req.reasoning.expect("reasoning present");
+        assert_eq!(cfg.effort.as_deref(), Some("low"));
+        assert_eq!(cfg.enabled, Some(true));
+    }
+
+    #[test]
+    fn merge_all_none_defaults_leaves_caller_unchanged() {
+        // Provider has no defaults configured. Caller supplied a fully
+        // populated ReasoningConfig. Merge must be a no-op.
+        let router = router_with_defaults(ReasoningDefaults::default());
+        let initial = ReasoningConfig {
+            effort: Some("medium".into()),
+            enabled: Some(true),
+            max_tokens: Some(2048),
+            exclude: Some(false),
+        };
+        let mut req = req_with_reasoning(Some(initial.clone()));
+
+        router.merge_reasoning_defaults(&mut req, "p1");
+
+        let cfg = req.reasoning.expect("reasoning preserved");
+        assert_eq!(cfg.effort, initial.effort);
+        assert_eq!(cfg.enabled, initial.enabled);
+        assert_eq!(cfg.max_tokens, initial.max_tokens);
+        assert_eq!(cfg.exclude, initial.exclude);
     }
 }
