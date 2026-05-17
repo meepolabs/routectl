@@ -114,6 +114,41 @@ pub struct BedrockGlobalConfig {
     pub allowed_body_fields: Vec<String>,
 }
 
+/// Operator-side reasoning defaults. Folds into ChatRequest.reasoning
+/// per-attempt at the router; caller's non-None values always win.
+///
+/// Both fields are optional and default to None. Setting either populates
+/// the corresponding `ChatRequest.reasoning.{effort,enabled}` field on
+/// requests routing through this provider, but only when the caller did
+/// not already supply that field on the wire. The router never
+/// overwrites a caller-supplied value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ReasoningDefaults {
+    /// Maps to ChatRequest.reasoning.effort. Vocabulary is passthrough
+    /// (egresses interpret); empty string rejected at startup. Common
+    /// values: "minimal", "low", "medium", "high", "xhigh", "max",
+    /// "none". Unknown values pass through verbatim for forward
+    /// compatibility with vendor-specific levels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// Maps to ChatRequest.reasoning.enabled. `Some(true)` opts into
+    /// reasoning by default for this provider; `Some(false)` pins it
+    /// off; `None` defers to whatever the caller and provider's own
+    /// defaults decide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl ReasoningDefaults {
+    /// True when neither `thinking` nor `enabled` is set. Used by the
+    /// router to skip the merge step entirely on providers without
+    /// configured defaults.
+    pub fn is_empty(&self) -> bool {
+        self.thinking.is_none() && self.enabled.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// Bind host. Defaults to localhost. Refuses non-loopback unless
@@ -240,6 +275,8 @@ pub enum ProviderEntry {
         user_agent: Option<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
+        #[serde(default, flatten)]
+        reasoning_defaults: ReasoningDefaults,
     },
     #[non_exhaustive]
     AnthropicApi {
@@ -282,6 +319,8 @@ pub enum ProviderEntry {
         allowed_betas: Vec<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
+        #[serde(default, flatten)]
+        reasoning_defaults: ReasoningDefaults,
     },
     /// OpenAI Responses API provider. Three auth surfaces (the relevant stage wires
     /// the first; the relevant stage/E land the others):
@@ -323,6 +362,8 @@ pub enum ProviderEntry {
         originator: Option<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
+        #[serde(default, flatten)]
+        reasoning_defaults: ReasoningDefaults,
     },
     /// Native AWS Bedrock provider. Speaks SigV4 directly to
     /// `bedrock-runtime.<region>.amazonaws.com`. Pick `api_shape` to
@@ -353,6 +394,8 @@ pub enum ProviderEntry {
         adaptive_thinking: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
+        #[serde(default, flatten)]
+        reasoning_defaults: ReasoningDefaults,
     },
 }
 
@@ -427,6 +470,33 @@ impl ProviderEntry {
         }
     }
 
+    /// Get the operator-side reasoning defaults attached to this entry.
+    /// Returns `None` when both fields on the underlying struct are
+    /// unset, so the router's merge step can short-circuit cheaply.
+    pub fn reasoning_defaults(&self) -> Option<&ReasoningDefaults> {
+        let rd = match self {
+            Self::OpenaiCompat {
+                reasoning_defaults, ..
+            }
+            | Self::AnthropicApi {
+                reasoning_defaults, ..
+            } => reasoning_defaults,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock {
+                reasoning_defaults, ..
+            } => reasoning_defaults,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                reasoning_defaults, ..
+            } => reasoning_defaults,
+        };
+        if rd.is_empty() {
+            None
+        } else {
+            Some(rd)
+        }
+    }
+
     pub fn openai_compat(base_url: impl Into<String>, api_key_ref: impl Into<String>) -> Self {
         Self::OpenaiCompat {
             base_url: base_url.into(),
@@ -437,6 +507,7 @@ impl ProviderEntry {
             history_reasoning: HistoryReasoning::default(),
             user_agent: None,
             runtime: ProviderRuntimePolicy::default(),
+            reasoning_defaults: ReasoningDefaults::default(),
         }
     }
 
@@ -451,6 +522,7 @@ impl ProviderEntry {
             adaptive_thinking: None,
             allowed_betas: Vec::new(),
             runtime: ProviderRuntimePolicy::default(),
+            reasoning_defaults: ReasoningDefaults::default(),
         }
     }
 
@@ -817,6 +889,230 @@ mod tests {
             .with_reasoning_dialect(ReasoningDialect::Openai);
         entry.redact_secrets();
         assert_eq!(entry.secret_uris(), vec!["literal:[REDACTED]"]);
+    }
+}
+
+#[cfg(test)]
+mod reasoning_defaults_tests {
+    use super::{Config, ProviderEntry};
+    use crate::factory::validate_reasoning_defaults;
+
+    fn parse_entry(toml_text: &str) -> ProviderEntry {
+        toml::from_str::<ProviderEntry>(toml_text).expect("toml parse")
+    }
+
+    #[test]
+    fn thinking_high_alone_populates_effort() {
+        // Arrange
+        let toml_text = r#"
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = "high"
+"#;
+
+        // Act
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        // Assert
+        assert_eq!(defaults.thinking.as_deref(), Some("high"));
+        assert!(defaults.enabled.is_none());
+    }
+
+    #[test]
+    fn enabled_true_alone_populates_enabled() {
+        let toml_text = r#"
+type = "anthropic-api"
+api_key_ref = "literal:k"
+enabled = true
+"#;
+
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        assert!(defaults.thinking.is_none());
+        assert_eq!(defaults.enabled, Some(true));
+    }
+
+    #[test]
+    fn enabled_false_alone_populates_enabled() {
+        // Pin: `enabled = false` must round-trip as Some(false), NOT
+        // collapse to None. The router merge layer treats None as "no
+        // operator opinion" and Some(false) as "pin reasoning off".
+        let toml_text = r#"
+type = "anthropic-api"
+api_key_ref = "literal:k"
+enabled = false
+"#;
+
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        assert!(defaults.thinking.is_none());
+        assert_eq!(defaults.enabled, Some(false));
+    }
+
+    #[test]
+    fn both_fields_set_populate_both() {
+        let toml_text = r#"
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = "medium"
+enabled = true
+"#;
+
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        assert_eq!(defaults.thinking.as_deref(), Some("medium"));
+        assert_eq!(defaults.enabled, Some(true));
+    }
+
+    #[test]
+    fn neither_field_yields_all_none_defaults() {
+        let toml_text = r#"
+type = "anthropic-api"
+api_key_ref = "literal:k"
+"#;
+
+        let entry = parse_entry(toml_text);
+
+        // is_empty() -> reasoning_defaults() returns None.
+        assert!(entry.reasoning_defaults().is_none());
+    }
+
+    #[test]
+    fn thinking_none_maps_to_effort_none() {
+        // The vendor-side string "none" is a valid effort level (it
+        // tells the egress to disable reasoning). It must not collide
+        // with absence-of-the-field semantics.
+        let toml_text = r#"
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = "none"
+"#;
+
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        assert_eq!(defaults.thinking.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn thinking_empty_string_rejected_at_startup() {
+        // Arrange: build a Config with one provider whose `thinking =
+        // ""`.
+        let toml_text = r#"
+[providers.bad]
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = ""
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("toml parse");
+
+        // Act
+        let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
+
+        // Assert
+        let msg = err.to_string();
+        assert!(msg.contains("bad"), "msg should name provider: {msg}");
+        assert!(
+            msg.contains("non-empty"),
+            "msg should explain rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn thinking_unknown_value_passthrough() {
+        // Forward-compat: vendors add new effort levels without a
+        // routectl release. Validator must not gate on a closed enum.
+        let toml_text = r#"
+[providers.future]
+type = "anthropic-api"
+api_key_ref = "literal:k"
+thinking = "ultra"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("toml parse");
+
+        let result = validate_reasoning_defaults(&cfg);
+
+        assert!(result.is_ok(), "expected pass-through Ok, got {result:?}");
+        let entry = cfg.providers.get("future").expect("provider parsed");
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+        assert_eq!(defaults.thinking.as_deref(), Some("ultra"));
+    }
+
+    #[test]
+    fn parse_openai_compat_variant_carries_defaults() {
+        let toml_text = r#"
+type = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+reasoning_dialect = "vllm"
+thinking = "low"
+enabled = true
+"#;
+
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        assert_eq!(defaults.thinking.as_deref(), Some("low"));
+        assert_eq!(defaults.enabled, Some(true));
+        assert!(matches!(entry, ProviderEntry::OpenaiCompat { .. }));
+    }
+
+    #[test]
+    fn parse_anthropic_api_variant_carries_defaults() {
+        let toml_text = r#"
+type = "anthropic-api"
+api_key_ref = "literal:k"
+adaptive_thinking = true
+thinking = "xhigh"
+"#;
+
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        assert_eq!(defaults.thinking.as_deref(), Some("xhigh"));
+        assert!(matches!(entry, ProviderEntry::AnthropicApi { .. }));
+    }
+
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn parse_openai_responses_variant_carries_defaults() {
+        let toml_text = r#"
+type = "openai-responses"
+api_key_ref = "literal:k"
+account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
+auth_kind = "chatgpt-oauth"
+thinking = "high"
+"#;
+
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        assert_eq!(defaults.thinking.as_deref(), Some("high"));
+        assert!(matches!(entry, ProviderEntry::OpenaiResponses { .. }));
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn parse_bedrock_variant_carries_defaults() {
+        let toml_text = r#"
+type = "bedrock"
+region = "us-east-1"
+model_id = "anthropic.claude-haiku-4-5"
+creds = { kind = "default-chain" }
+thinking = "minimal"
+enabled = true
+"#;
+
+        let entry = parse_entry(toml_text);
+        let defaults = entry.reasoning_defaults().expect("defaults present");
+
+        assert_eq!(defaults.thinking.as_deref(), Some("minimal"));
+        assert_eq!(defaults.enabled, Some(true));
+        assert!(matches!(entry, ProviderEntry::Bedrock { .. }));
     }
 }
 

@@ -353,7 +353,7 @@ async fn opencode_go_complete_matrix() {
     let mut headers = BTreeMap::new();
     headers.insert("X-Title".into(), "routectl-live-test".into());
     let Some(router) = build_test_router(
-        "opencode-go",
+        "example-deepseek-host",
         OPENCODE_GO_BASE,
         "OPENCODE_GO_API_KEY",
         ReasoningDialect::Deepseek,
@@ -458,7 +458,7 @@ async fn nim_complete_matrix() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opencode_go_stream_subset() {
     let Some(router) = build_test_router(
-        "opencode-go",
+        "example-deepseek-host",
         OPENCODE_GO_BASE,
         "OPENCODE_GO_API_KEY",
         ReasoningDialect::Deepseek,
@@ -1098,12 +1098,12 @@ async fn bedrock_converse_stream_matrix() {
 // ChatGPT Codex endpoint using a ChatGPT subscription bearer JWT.
 //
 // Required env vars:
-//   OPENAI_BEARER_KEY   -- ChatGPT subscription JWT (from ~/.local/share/opencode/auth.json)
+//   OPENAI_BEARER_KEY   -- ChatGPT subscription JWT (from <your-codex-CLI-auth-store>)
 //   OPENAI_ACCOUNT_ID   -- ChatGPT account UUID (same file, $.openai.accountId)
 //
 // Run:
-//   OPENAI_BEARER_KEY="$(jq -r '.openai.access' ~/.local/share/opencode/auth.json)" \
-//   OPENAI_ACCOUNT_ID="$(jq -r '.openai.accountId' ~/.local/share/opencode/auth.json)" \
+//   OPENAI_BEARER_KEY="$(jq -r '.openai.access' <your-codex-CLI-auth-store>)" \
+//   OPENAI_ACCOUNT_ID="$(jq -r '.openai.accountId' <your-codex-CLI-auth-store>)" \
 //   cargo test -p routectl-cli --features live-integration --release \
 //     --test live_matrix openai_responses -- --nocapture --test-threads=1
 //

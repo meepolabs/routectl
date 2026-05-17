@@ -113,14 +113,14 @@ api_key_ref = "env://ANTHROPIC_API_KEY"
 #[test]
 fn openai_compat_custom_base_url_round_trips_through_toml() {
     let toml_src = r#"
-[providers.opencode-go]
+[providers.example-deepseek-host]
 type = "openai-compat"
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_ref = "env://OPENCODE_GO_API_KEY"
 reasoning_dialect = "deepseek"
 "#;
     let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
-    let entry = cfg.providers.get("opencode-go").expect("opencode entry");
+    let entry = cfg.providers.get("example-deepseek-host").expect("opencode entry");
     match entry {
         ProviderEntry::OpenaiCompat {
             base_url,

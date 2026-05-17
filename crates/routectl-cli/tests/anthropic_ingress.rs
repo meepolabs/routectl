@@ -914,7 +914,7 @@ async fn both_legacy_and_nested_present_drops_legacy_with_warn() {
 // ---------------------------------------------------------------------------
 //
 // Fields lifted from the disassembled claude-code binary at
-// `<local-path>`. The main-loop body
+// `~/.local/share/claude/versions/<N>`. The main-loop body
 // builder (function `rH` in the binary) emits this exact set when the
 // relevant beta + flag combinations are active. routectl's Anthropic
 // ingress must forward each one verbatim to the upstream so the
@@ -1205,12 +1205,12 @@ async fn stop_reason_tool_use_round_trips() {
 
 // ---------------------------------------------------------------------------
 // Cross-translation audit: Anthropic-in / OpenAI-out (claude-code -> DeepSeek
-// / Qwen on llama.cpp / opencode-go / any OpenAI-compat upstream)
+// / Qwen on llama.cpp / example-deepseek-host / any OpenAI-compat upstream)
 // ---------------------------------------------------------------------------
 //
 // claude-code's primary surface is the Anthropic Messages dialect, but the
 // most common deployments route to OpenAI-compat upstreams (DeepSeek v4
-// flash/pro, Qwen on llama.cpp, opencode-go DeepSeek host). routectl is the
+// flash/pro, Qwen on llama.cpp, example-deepseek-host DeepSeek host). routectl is the
 // translation pipe, so the canonical -> OpenAI-compat egress must turn
 // Anthropic-shape inputs into a body the upstream actually accepts.
 //
@@ -1525,7 +1525,7 @@ async fn cross_anthropic_tool_result_translated_to_openai_tool_role_message() {
 async fn cross_anthropic_thinking_translates_to_openai_reasoning() {
     // claude-code sends Anthropic `thinking: {type:"enabled", budget_tokens}`.
     // For OpenAI-compat hosts (DeepSeek v4 reasoner, vLLM-served reasoning
-    // models, opencode-go DeepSeek), routectl should translate this into
+    // models, example-deepseek-host DeepSeek), routectl should translate this into
     // the upstream's reasoning knob. DeepSeek dialect: drops sampling
     // params, expects `reasoning_effort` from the canonical
     // `req.reasoning.effort`. Anthropic-shape `budget_tokens` should at
