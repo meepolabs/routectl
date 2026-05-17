@@ -1106,8 +1106,10 @@ thinking = "   "
     #[test]
     fn thinking_with_control_characters_rejected() {
         // Arrange: a tab character (ASCII 0x09) in the thinking value.
-        // Effort strings must be printable ASCII -- control characters
-        // would corrupt log lines and wire bodies.
+        // Effort strings must not contain ASCII control characters --
+        // they would corrupt log lines and wire bodies. Non-ASCII
+        // (printable Unicode) is fine and stays out of the validator's
+        // way for forward-compat with future vendor vocabularies.
         let toml_text = "\
 [providers.tabby]\n\
 type = \"anthropic-api\"\n\

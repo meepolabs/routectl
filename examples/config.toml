@@ -34,12 +34,21 @@ port = 8787
 #   thinking = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "none"
 #   enabled  = true | false
 #
+# The `thinking` values above are the COMMON tokens; the validator
+# accepts any non-empty short string so vendor-specific levels (e.g.
+# a future "ultra") pass through verbatim without a routectl release.
+#
+# Note: the TOML key `thinking` maps to the canonical `effort` field
+# on the routed request (visible in trace logs as `merged_effort=...`).
+#
 # Both fold into ChatRequest.reasoning at the router BEFORE the egress
 # translation runs. Caller-supplied wire fields always win. Precedence:
-# caller > operator > internal default. See routectl_core::ReasoningConfig
-# for the canonical semantics; each egress (Anthropic legacy/adaptive,
-# Bedrock Invoke/Converse, vLLM/DeepSeek/OpenAI dialects, OpenAI Responses)
-# interprets `effort` and `enabled` according to its own wire shape.
+# caller > operator > internal default. `enabled = false` here is a
+# default the caller can still override -- not a hard ceiling. See
+# routectl_core::ReasoningConfig for the canonical semantics; each
+# egress (Anthropic legacy/adaptive, Bedrock Invoke/Converse, vLLM/
+# DeepSeek/OpenAI dialects, OpenAI Responses) interprets `effort` and
+# `enabled` according to its own wire shape.
 
 [providers.deepseek]
 type = "openai-compat"
