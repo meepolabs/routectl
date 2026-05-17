@@ -29,12 +29,24 @@ port = 8787
 #   rpm_limit              max requests per minute; over-limit falls through
 #   circuit_failures       trip breaker after N consecutive failures
 #   circuit_cooldown_ms    keep breaker open this long (default 30000)
+#
+# Per-provider reasoning defaults (all optional, default off):
+#   thinking = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "none"
+#   enabled  = true | false
+#
+# Both fold into ChatRequest.reasoning at the router BEFORE the egress
+# translation runs. Caller-supplied wire fields always win. Precedence:
+# caller > operator > internal default. See routectl_core::ReasoningConfig
+# for the canonical semantics; each egress (Anthropic legacy/adaptive,
+# Bedrock Invoke/Converse, vLLM/DeepSeek/OpenAI dialects, OpenAI Responses)
+# interprets `effort` and `enabled` according to its own wire shape.
 
 [providers.deepseek]
 type = "openai-compat"
 base_url = "https://api.deepseek.com/v1"
 api_key_ref = "env://DEEPSEEK_API_KEY"
 reasoning_dialect = "deepseek"
+thinking = "medium"  # default reasoning effort for this provider
 
 [providers.openrouter]
 type = "openai-compat"
@@ -45,6 +57,8 @@ extra_headers = { "HTTP-Referer" = "https://github.com/meepolabs/routectl", "X-T
 # Trip the breaker if openrouter hiccups three times in a row, cool for 60s.
 circuit_failures = 3
 circuit_cooldown_ms = 60000
+thinking = "high"   # default reasoning effort for this provider
+enabled = true      # default-on reasoning for capable models on this route
 
 [providers.groq]
 type = "openai-compat"
@@ -130,6 +144,7 @@ type = "openai-responses"
 api_key_ref = "file:///abs/path/to/chatgpt-oauth-jwt"
 account_id_ref = "literal:00000000-0000-0000-0000-000000000000"  # your ChatGPT account UUID
 auth_kind = "chatgpt-oauth"
+thinking = "xhigh"  # default reasoning effort lifted into reasoning.effort
 # originator = "codex_cli_rs"        # default; override only if needed
 # user_agent = "my-cli/1.0"
 #
@@ -199,6 +214,7 @@ type = "bedrock"
 region = "us-east-1"
 model_id = "us.anthropic.claude-opus-4-20250514-v1:0"
 creds = { kind = "default-chain" }
+enabled = true   # default-on reasoning; pairs with adaptive_thinking on Opus 4.7+
 
 # Raw access key + secret key (+ optional session token). Each value
 # resolves through a routectl SecretRef URI. Sub-table form because TOML
