@@ -63,21 +63,21 @@ where
         let mut buffer = BytesMut::new();
         let mut decoder = MessageFrameDecoder::new();
         let mut sse_state = SseState::default();
-        // FX-8 supporting state: tracks whether smithy has already
-        // consumed the 12-byte prelude into its internal buffer but
-        // has not yet returned Complete. The advertised-length DoS
-        // guard reads `buffer[0..4]` as the next frame's
-        // `total_length` -- but that's only valid when no prelude has
-        // been previously consumed. Once smithy has the prelude
-        // buffered (after an Incomplete return), `buffer[0..4]` is
-        // the START OF THE HEADERS section, not a length, and the cap
-        // check would spuriously fire on header bytes that look like
-        // a giant little-endian integer (e.g. `0x0b3a6576` from
-        // `\x0b:ev` = the `:event-type` length-prefix + colon + start
-        // of the header name). Set to true when we drain the
-        // prelude on Incomplete; cleared back to false when smithy
-        // returns Complete (which internally calls `self.reset()` so
-        // its `prelude_read` flag goes back to false).
+        // Tracks whether smithy has already consumed the 12-byte
+        // prelude into its internal buffer but has not yet returned
+        // Complete. The advertised-length DoS guard reads
+        // `buffer[0..4]` as the next frame's `total_length` -- but
+        // that's only valid when no prelude has been previously
+        // consumed. Once smithy has the prelude buffered (after an
+        // Incomplete return), `buffer[0..4]` is the START OF THE
+        // HEADERS section, not a length, and the cap check would
+        // spuriously fire on header bytes that look like a giant
+        // little-endian integer (e.g. `0x0b3a6576` from `\x0b:ev` =
+        // the `:event-type` length-prefix + colon + start of the
+        // header name). Set to true when we drain the prelude on
+        // Incomplete; cleared back to false when smithy returns
+        // Complete (which internally calls `self.reset()` so its
+        // `prelude_read` flag goes back to false).
         let mut smithy_has_prelude_buffered = false;
 
         let mut byte_stream = Box::pin(byte_stream);
@@ -131,10 +131,10 @@ where
                         }
                     }
                     Ok(DecodedFrame::Incomplete) => {
-                        // FX-8: drain whatever bytes smithy consumed
+                        // Drain whatever bytes smithy consumed
                         // before returning Incomplete.
                         //
-                        // Bug: `MessageFrameDecoder::decode_frame` reads
+                        // `MessageFrameDecoder::decode_frame` reads
                         // the 12-byte prelude into its internal state on
                         // first call and sets `prelude_read = true`.
                         // It returns Incomplete because the rest of the
@@ -171,17 +171,17 @@ where
                         break;
                     }
                     Err(e) => {
-                        // FX-4 + FX-5/7: skip the failed frame instead
-                        // of killing the stream.
+                        // Skip the failed frame instead of killing
+                        // the stream.
                         //
-                        // Pre-fix, any decode error propagated as
-                        // stream-fatal `Err(Streaming)`. That conflated
-                        // a single transient bad frame with a stream-
-                        // wide failure -- forcing claude-code to
-                        // restart the entire response over for what
-                        // could have been a 1-frame glitch.
+                        // If a decode error propagates as stream-fatal
+                        // `Err(Streaming)`, that conflates a single
+                        // transient bad frame with a stream-wide
+                        // failure -- forcing claude-code to restart
+                        // the entire response over for what could
+                        // have been a 1-frame glitch.
                         //
-                        // FX-4: read the advertised `total_length`
+                        // Recovery: read the advertised `total_length`
                         // from `buffer[0..4]` (already DoS-capped at
                         // the top of the loop), drain that many bytes
                         // (or clear the whole buffer if it's smaller
@@ -190,11 +190,11 @@ where
                         // state machine inside `sse_state` is
                         // tolerant to one missing event.
                         //
-                        // FX-5/7: dump the failed frame's prelude +
-                        // first 256 bytes as hex at WARN so a future
-                        // framing bug is diagnosable from a single
-                        // log capture instead of an ad-hoc tcpdump
-                        // session.
+                        // Diagnosability: dump the failed frame's
+                        // prelude + first 256 bytes as hex at WARN so
+                        // a future framing bug is diagnosable from a
+                        // single log capture instead of an ad-hoc
+                        // tcpdump session.
                         let advertised = if buffer.len() >= 4 {
                             u32::from_be_bytes([
                                 buffer[0], buffer[1], buffer[2], buffer[3],
@@ -317,11 +317,11 @@ fn handle_invoke_frame(
             // Payload is JSON: { "bytes": "<base64>" } where the
             // base64-decoded bytes is an Anthropic Messages SSE event.
             //
-            // FX-3: a malformed chunk's outer JSON used to be
-            // stream-fatal. Demote to `Ok(None)` + WARN so a single
-            // bad frame doesn't kill an in-flight response. The
-            // failed frame's bytes never reach the SSE state machine,
-            // and `sse_state` is tolerant to one missing event.
+            // A malformed chunk's outer JSON would be stream-fatal.
+            // Demote to `Ok(None)` + WARN so a single bad frame
+            // doesn't kill an in-flight response. The failed frame's
+            // bytes never reach the SSE state machine, and `sse_state`
+            // is tolerant to one missing event.
             let outer: Value = match serde_json::from_slice(payload_bytes) {
                 Ok(v) => v,
                 Err(e) => {
@@ -340,13 +340,13 @@ fn handle_invoke_frame(
             let decoded = B64_STANDARD.decode(b64).map_err(|e| {
                 Error::Streaming(format!("bedrock chunk bytes not valid base64: {e}"))
             })?;
-            // FX-2: use `from_utf8_lossy` rather than strict
-            // `from_utf8`. A multi-byte char (emoji, CJK character)
-            // split exactly across two SSE chunk boundaries used to
-            // surface as `Streaming("not valid utf-8")` and kill the
-            // stream. Replacement with U+FFFD lets the response
-            // finish; the model rarely emits a single replacement
-            // char where text was intended.
+            // Use `from_utf8_lossy` rather than strict `from_utf8`.
+            // A multi-byte char (emoji, CJK character) split exactly
+            // across two SSE chunk boundaries would surface as
+            // `Streaming("not valid utf-8")` and kill the stream.
+            // Replacement with U+FFFD lets the response finish; the
+            // model rarely emits a single replacement char where
+            // text was intended.
             let inner_owned = String::from_utf8_lossy(&decoded).into_owned();
             let inner = inner_owned.as_str();
             // Detect Anthropic-shape `error` events injected into an
@@ -579,9 +579,9 @@ mod tests {
     // below 1 MB or above 64 MB, code review (or this comment) is
     // the place to catch that.
 
-    /// FX-8 regression: a Bedrock eventstream frame split exactly at
+    /// Regression: a Bedrock eventstream frame split exactly at
     /// the 12-byte prelude boundary across two HTTP body chunks must
-    /// still decode cleanly. Pre-fix this surfaced as an
+    /// still decode cleanly. Without the drain this surfaces as an
     /// `InvalidUtf8String` error inside smithy because the cursor
     /// position wasn't drained from our buffer when the decoder
     /// returned `Incomplete` -- the second iteration's fresh cursor
@@ -612,10 +612,10 @@ mod tests {
         assert!(buf.len() > 12, "frame must be larger than its 12B prelude");
 
         // Split at exactly byte 12 -- the prelude boundary. This is
-        // the worst case for FX-8 because smithy reads the prelude
-        // into its internal state on the first decode call and
-        // returns Incomplete; without our drain, the next call
-        // reads the prelude bytes again as headers.
+        // the worst case because smithy reads the prelude into its
+        // internal state on the first decode call and returns
+        // Incomplete; without our drain, the next call reads the
+        // prelude bytes again as headers.
         let (head, tail) = buf.split_at(12);
         let head = Bytes::copy_from_slice(head);
         let tail = Bytes::copy_from_slice(tail);
@@ -624,24 +624,24 @@ mod tests {
         let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
 
         // The `ping` event maps to no ChatChunk (sse_state returns
-        // None) but it MUST NOT fail the stream. Pre-fix this would
-        // yield an Err via the InvalidUtf8String path; with FX-8 but
-        // without the cap-check skip, it would fire the
-        // `advertised ... exceeds cap` error.
+        // None) but it MUST NOT fail the stream. Without the drain
+        // this would yield an Err via the InvalidUtf8String path;
+        // with the drain but without the cap-check skip, it would
+        // fire the `advertised ... exceeds cap` error.
         while let Some(item) = chunks.next().await {
             match item {
                 Ok(_) => {}
-                Err(e) => panic!("FX-8 regression: stream errored on prelude-split frame: {e:?}"),
+                Err(e) => panic!("regression: stream errored on prelude-split frame: {e:?}"),
             }
         }
     }
 
-    /// FX-8 second-order test: when an upstream sends just a 12-byte
+    /// Second-order test: when an upstream sends just a 12-byte
     /// prelude and then closes the connection, we drain the prelude
     /// (so `buffer.is_empty()` is true) but smithy still has a
-    /// partial frame staged. Pre-second-fix the EOF check returned
-    /// `Ok(())` to the caller, hiding the truncation. Now the
-    /// `smithy_has_prelude_buffered` half of the EOF check fires.
+    /// partial frame staged. Without the second-fix the EOF check
+    /// returned `Ok(())` to the caller, hiding the truncation. Now
+    /// the `smithy_has_prelude_buffered` half of the EOF check fires.
     #[tokio::test]
     async fn eof_after_prelude_only_yields_truncation_error() {
         // Build a real frame, then take only its 12-byte prelude.
@@ -677,7 +677,7 @@ mod tests {
         );
     }
 
-    /// FX-8 multi-frame test: two consecutive frames where frame 1 is
+    /// Multi-frame test: two consecutive frames where frame 1 is
     /// split at byte 12 and frame 2 arrives intact. Verifies the
     /// `smithy_has_prelude_buffered` flag transitions correctly:
     /// false -> true (after frame 1 Incomplete + drain) -> false
@@ -718,12 +718,12 @@ mod tests {
         }
     }
 
-    /// FX-2: a multi-byte UTF-8 sequence in a chunk payload that
-    /// happens to be invalid (split across frames in real life, or
-    /// just a bad byte) must NOT kill the stream. Pre-fix the strict
+    /// A multi-byte UTF-8 sequence in a chunk payload that happens
+    /// to be invalid (split across frames in real life, or just a
+    /// bad byte) must NOT kill the stream. Strict
     /// `std::str::from_utf8` would surface as `Streaming("not valid
-    /// utf-8")` and terminate. After FX-2, lossy decoding inserts
-    /// U+FFFD and the chunk continues.
+    /// utf-8")` and terminate. Lossy decoding inserts U+FFFD and
+    /// the chunk continues.
     #[tokio::test]
     async fn lossy_utf8_in_chunk_payload_does_not_fail_stream() {
         // Build inner SSE event with a bare 0xFE byte (invalid UTF-8
@@ -748,18 +748,18 @@ mod tests {
         while let Some(item) = chunks.next().await {
             match item {
                 Ok(_) => {}
-                Err(e) => panic!("FX-2 regression: stream errored on lossy-utf8 payload: {e:?}"),
+                Err(e) => panic!("regression: stream errored on lossy-utf8 payload: {e:?}"),
             }
         }
     }
 
-    /// FX-3: a chunk frame whose payload is malformed JSON used to be
+    /// A chunk frame whose payload is malformed JSON would be
     /// stream-fatal. Now it emits a per-frame WARN and skips the
     /// frame, returning `Ok(None)` from `handle_invoke_frame`.
     #[test]
     fn malformed_chunk_json_skips_via_handle_invoke_frame() {
-        // Direct unit test of handle_invoke_frame -- the chunk arm
-        // is what we changed in FX-3.
+        // Direct unit test of handle_invoke_frame -- exercising the
+        // chunk arm's skip path.
         let mut sse_state = SseState::default();
         // Payload that's not a JSON object at all.
         let res = handle_invoke_frame(
@@ -769,16 +769,16 @@ mod tests {
         );
         match res {
             Ok(None) => {} // expected
-            Ok(Some(_)) => panic!("FX-3: malformed chunk should skip, not yield"),
-            Err(e) => panic!(
-                "FX-3 regression: malformed chunk JSON returned Err instead of Ok(None): {e:?}"
-            ),
+            Ok(Some(_)) => panic!("malformed chunk should skip, not yield"),
+            Err(e) => {
+                panic!("regression: malformed chunk JSON returned Err instead of Ok(None): {e:?}")
+            }
         }
     }
 
-    /// FX-4 + FX-5/7: a frame with a corrupted `total_length` causes
-    /// smithy to return Err. Pre-fix this killed the stream. After
-    /// FX-4 we emit a WARN with hex dump, skip exactly the
+    /// A frame with a corrupted `total_length` causes smithy to
+    /// return Err. Without the recovery this would kill the stream.
+    /// Instead, we emit a WARN with hex dump, skip exactly the
     /// advertised length (or clear buffer if smaller), reset the
     /// decoder, and continue. The next valid frame yields normally.
     #[tokio::test]
@@ -795,7 +795,7 @@ mod tests {
         // Corrupt frame: same total_length, but flip the message CRC
         // bytes (last 4 bytes of the frame). Smithy's frame decoder
         // reads the message-CRC at the end and Errors on mismatch,
-        // which exercises the FX-4 skip path.
+        // exercising the skip path.
         let mut buf_bad = buf_good.clone();
         let n = buf_bad.len();
         buf_bad[n - 4] ^= 0xFF;
@@ -809,11 +809,11 @@ mod tests {
 
         // We should NOT see an Err from the stream -- the bad frame
         // is skipped (with a WARN) and the good frame's `ping`
-        // produces no chunks but doesn't fail. Pre-FX-4 this would
-        // yield an Err on the bad frame's CRC mismatch.
+        // produces no chunks but doesn't fail. Without the recovery
+        // this would yield an Err on the bad frame's CRC mismatch.
         while let Some(item) = chunks.next().await {
             if let Err(e) = item {
-                panic!("FX-4 regression: stream errored instead of skipping: {e:?}");
+                panic!("regression: stream errored instead of skipping: {e:?}");
             }
         }
     }

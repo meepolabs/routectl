@@ -110,10 +110,10 @@ where
         let mut buffer = BytesMut::new();
         let mut decoder = MessageFrameDecoder::new();
         let mut state = ConverseStreamState::default();
-        // FX-8 supporting state -- see invoke_stream for the full
-        // story. False until the smithy decoder buffers a prelude
-        // internally on Incomplete; flipped back to false when smithy
-        // returns Complete (which calls `self.reset()`).
+        // Smithy-prelude tracking state -- see invoke_stream for
+        // the full story. False until the smithy decoder buffers a
+        // prelude internally on Incomplete; flipped back to false
+        // when smithy returns Complete (which calls `self.reset()`).
         let mut smithy_has_prelude_buffered = false;
 
         let mut byte_stream = Box::pin(byte_stream);
@@ -164,9 +164,9 @@ where
                         break;
                     }
                     Err(e) => {
-                        // FX-4 + FX-5/7: skip-and-continue, mirroring
-                        // invoke_stream so a single bad frame doesn't
-                        // kill an in-flight stream.
+                        // Skip-and-continue, mirroring invoke_stream
+                        // so a single bad frame doesn't kill an
+                        // in-flight stream.
                         let advertised = if buffer.len() >= 4 {
                             u32::from_be_bytes([
                                 buffer[0], buffer[1], buffer[2], buffer[3],

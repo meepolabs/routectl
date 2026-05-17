@@ -89,9 +89,9 @@ fn upstream_body_long_truncated_with_marker() {
     );
 }
 
-/// PR C / FR-1: the cap-aware variant lets callers pick a larger
-/// limit (4 KB for the debug-level full-body log) while reusing
-/// the same HTML collapse + trim logic. Pin the cap behavior so
+/// The cap-aware variant lets callers pick a larger limit
+/// (4 KB for the debug-level full-body log) while reusing the
+/// same HTML collapse + trim logic. Pin the cap behavior so
 /// debug_upstream_error_body's 4 KB ceiling can't silently drift.
 #[test]
 fn upstream_body_with_cap_respects_explicit_limit() {
@@ -119,7 +119,7 @@ fn upstream_body_with_cap_respects_explicit_limit() {
 }
 
 // -----------------------------------------------------------------
-// Redaction tests (FR-2: ROUTECTL_LOG_REDACT_PROMPTS=1)
+// Redaction tests (ROUTECTL_LOG_REDACT_PROMPTS=1)
 // -----------------------------------------------------------------
 
 #[test]

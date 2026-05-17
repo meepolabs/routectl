@@ -221,10 +221,6 @@ fn extract_other_tag_and_extras(v: &Value) -> (String, serde_json::Map<String, V
 /// reasoning markers) by emitting Parts. Reasoning blocks aren't in
 /// parts -- they ride on reasoning_details -- so a text + reasoning
 /// response still collapses to Text here.
-// TODO(M12): extract to a providers-internal shared module; the
-// twin in crates/routectl-providers/src/anthropic_api/response.rs
-// is byte-identical. M12 (managed-key dedup wave) is the natural
-// landing for this.
 fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageContent {
     let only_text = parts
         .iter()
