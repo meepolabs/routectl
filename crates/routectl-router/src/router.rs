@@ -500,6 +500,16 @@ impl Router {
     /// default. Composed orthogonally: if the caller supplied
     /// `effort` and the operator configured `enabled`, the resulting
     /// request carries both.
+    ///
+    /// Edge case: when the caller has explicitly set
+    /// `req.reasoning.enabled == Some(false)`, the operator's
+    /// `thinking` (effort) injection is suppressed. Without this
+    /// short-circuit the merged result would be
+    /// `{effort: Some("..."), enabled: Some(false)}`, which different
+    /// egresses interpret inconsistently (some honor `enabled=false`
+    /// only when `effort` is also unset, others forward `effort`
+    /// regardless). Suppressing the effort fill keeps "caller pinned
+    /// reasoning off" working uniformly across all egresses.
     fn merge_reasoning_defaults(&self, req: &mut ChatRequest, provider_name: &str) {
         let Some(entry) = self.config.providers.get(provider_name) else {
             return;
@@ -509,25 +519,33 @@ impl Router {
         };
 
         let caller_had_reasoning = req.reasoning.is_some();
+        let caller_disabled = req.reasoning.as_ref().and_then(|r| r.enabled) == Some(false);
+
         let cfg = req.reasoning.get_or_insert_with(ReasoningConfig::default);
-        if cfg.effort.is_none() {
+
+        let mut wrote_anything = false;
+        if cfg.effort.is_none() && !caller_disabled {
             if let Some(t) = &defaults.thinking {
                 cfg.effort = Some(t.clone());
+                wrote_anything = true;
             }
         }
         if cfg.enabled.is_none() {
             if let Some(b) = defaults.enabled {
                 cfg.enabled = Some(b);
+                wrote_anything = true;
             }
         }
 
-        tracing::debug!(
-            provider = provider_name,
-            caller_had_reasoning,
-            merged_effort = ?cfg.effort,
-            merged_enabled = ?cfg.enabled,
-            "merged operator reasoning defaults",
-        );
+        if wrote_anything {
+            tracing::debug!(
+                provider = provider_name,
+                caller_had_reasoning,
+                merged_effort = ?cfg.effort,
+                merged_enabled = ?cfg.enabled,
+                "applied operator reasoning defaults",
+            );
+        }
     }
 }
 
@@ -908,10 +926,9 @@ mod merge_reasoning_defaults_tests {
     #[test]
     fn merge_no_caller_with_defaults_inserts_full_config() {
         // Arrange: operator pinned both fields; caller supplied nothing.
-        let defaults = ReasoningDefaults {
-            thinking: Some("high".into()),
-            enabled: Some(true),
-        };
+        let defaults = ReasoningDefaults::new()
+            .with_thinking("high")
+            .with_enabled(true);
         let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(None);
 
@@ -928,10 +945,7 @@ mod merge_reasoning_defaults_tests {
     fn merge_caller_effort_minimal_beats_defaults_high() {
         // Arrange: caller supplied effort="minimal"; operator default
         // is "high". Caller wins.
-        let defaults = ReasoningDefaults {
-            thinking: Some("high".into()),
-            enabled: None,
-        };
+        let defaults = ReasoningDefaults::new().with_thinking("high");
         let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig {
             effort: Some("minimal".into()),
@@ -951,10 +965,7 @@ mod merge_reasoning_defaults_tests {
         // Caller pinned `enabled = false`; operator default is true.
         // Caller wins. Some(false) must NOT collapse to None on the
         // merge path.
-        let defaults = ReasoningDefaults {
-            thinking: None,
-            enabled: Some(true),
-        };
+        let defaults = ReasoningDefaults::new().with_enabled(true);
         let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig {
             enabled: Some(false),
@@ -968,13 +979,39 @@ mod merge_reasoning_defaults_tests {
     }
 
     #[test]
+    fn merge_caller_enabled_false_blocks_operator_thinking_fill() {
+        // Pin: when the caller has explicitly disabled reasoning via
+        // `enabled = false`, the operator's `thinking` (effort) must
+        // NOT be injected. Otherwise the merged request becomes
+        // `{effort: Some("high"), enabled: Some(false)}` which
+        // different egresses interpret inconsistently. Suppressing the
+        // effort fill keeps "caller pinned reasoning off" uniform
+        // across every egress.
+        let defaults = ReasoningDefaults::new().with_thinking("high");
+        let router = router_with_defaults(defaults);
+        let mut req = req_with_reasoning(Some(ReasoningConfig {
+            enabled: Some(false),
+            ..ReasoningConfig::default()
+        }));
+
+        router.merge_reasoning_defaults(&mut req, "p1");
+
+        let cfg = req.reasoning.expect("reasoning preserved");
+        assert!(
+            cfg.effort.is_none(),
+            "operator thinking must NOT be injected when caller disabled reasoning; got effort={:?}",
+            cfg.effort,
+        );
+        assert_eq!(cfg.enabled, Some(false));
+    }
+
+    #[test]
     fn merge_fills_both_when_caller_has_neither() {
         // Caller carries an empty ReasoningConfig (e.g. the wire body
         // had `reasoning: {}`); operator defaults supply both.
-        let defaults = ReasoningDefaults {
-            thinking: Some("medium".into()),
-            enabled: Some(true),
-        };
+        let defaults = ReasoningDefaults::new()
+            .with_thinking("medium")
+            .with_enabled(true);
         let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig::default()));
 
@@ -990,10 +1027,7 @@ mod merge_reasoning_defaults_tests {
         // Caller supplied `effort` only; operator configured `enabled`
         // only. Result has both -- merge is per-field, not
         // all-or-nothing.
-        let defaults = ReasoningDefaults {
-            thinking: None,
-            enabled: Some(true),
-        };
+        let defaults = ReasoningDefaults::new().with_enabled(true);
         let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig {
             effort: Some("low".into()),
