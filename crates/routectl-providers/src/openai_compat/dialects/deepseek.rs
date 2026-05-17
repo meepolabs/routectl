@@ -3,7 +3,7 @@
 //! `reasoning_content` in history triggers 400 (stripped on outgoing).
 //! Reasoner variants drop sampling params (per `ModelProfile`).
 //!
-//! Reasoning effort derivation (M1.B):
+//! Reasoning effort derivation:
 //! When the canonical request has `reasoning.effort` set, it is forwarded
 //! verbatim as `reasoning_effort`. When only `reasoning.max_tokens` is
 //! present, an effort string is derived from the budget:

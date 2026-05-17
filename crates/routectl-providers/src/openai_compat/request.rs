@@ -571,12 +571,12 @@ mod tests {
 
     #[test]
     fn provider_extras_cannot_override_routectl_managed_keys() {
-        // Regression for the round 5 finding: a malicious or
-        // careless `provider_extras = {"messages": [...], "model":
-        // "..."}` could replace the assembled messages or model
-        // before the body went upstream. The Anthropic egress had
-        // an allow-list; the openai-compat egress did not. Verify
-        // routectl-managed keys are dropped here, while long-tail
+        // A malicious or careless
+        // `provider_extras = {"messages": [...], "model": "..."}`
+        // could replace the assembled messages or model before the
+        // body went upstream. The Anthropic egress had an allow-list;
+        // the openai-compat egress did not. Verify routectl-managed
+        // keys are dropped here, while long-tail
         // provider knobs (`top_k`, `seed`, dialect-specific) still
         // pass through.
         let mut req = simple_req("gpt-4o");

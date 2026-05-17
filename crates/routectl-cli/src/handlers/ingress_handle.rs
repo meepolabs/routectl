@@ -93,7 +93,7 @@ async fn complete_response<A: IngressAdapter>(
     match state.router.complete_with_options(req, opts).await {
         Ok(resp) => match adapter.render_response(resp) {
             Ok(body) => {
-                // FR-2: trace-level egress body for triage. Single
+                // Trace-level egress body for triage. Single
                 // call site covers both ingresses (openai/anthropic)
                 // because every non-streaming response funnels through
                 // here after canonical -> wire serialization.
@@ -134,7 +134,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
         async move {
             let mut upstream = upstream;
             let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state();
-            // FR-2: stream summary state. RAII guard so the summary
+            // Stream summary state. RAII guard so the summary
             // fires on EVERY exit path (clean close, render error,
             // upstream mid-stream error, client disconnect, runtime
             // task cancellation). Truncation detection uses an
