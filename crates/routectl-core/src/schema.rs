@@ -185,7 +185,7 @@ pub struct ReasoningConfig {
 /// `id`/`model` may be absent on minimal responses. Empty strings and a
 /// zero timestamp serialize back out, which is acceptable for OpenAI-style
 /// clients that treat these fields as informational.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatResponse {
     #[serde(default)]
     pub id: String,
@@ -199,6 +199,17 @@ pub struct ChatResponse {
     /// Which configured provider answered (routectl-specific extension; clients ignore).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routectl_provider: Option<String>,
+    /// Forward-compat catchall for response top-level fields that
+    /// canonical doesn't model. Mirrors the request-side
+    /// `provider_extras` pattern: when an upstream returns a field
+    /// routectl doesn't have a typed slot for (e.g. Anthropic's
+    /// `context_management` from the `context-management-2025-06-27`
+    /// beta, or any future spec field), it deserializes into
+    /// `extras` and serializes back out alongside the typed fields.
+    /// New Anthropic response fields ship through routectl with zero
+    /// code edits.
+    #[serde(default, flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extras: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +240,13 @@ pub struct Usage {
     /// Per-TTL breakdown of cache creations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation: Option<CacheCreation>,
+    /// Forward-compat catchall for usage sub-fields canonical doesn't
+    /// model. Anthropic's `service_tier` (returned on every response)
+    /// and any future spec additions deserialize here and serialize
+    /// back out alongside the typed fields. Same shape as
+    /// `ChatResponse.extras`.
+    #[serde(default, flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extras: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Per-TTL breakdown of cache writes for one request.

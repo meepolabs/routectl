@@ -87,6 +87,11 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         }],
         usage,
         routectl_provider: None,
+        // Forward-compat: carry AWS-Converse top-level extras
+        // verbatim. The Anthropic egress's wire-render iterates
+        // these out, so any new Converse top-level field flows
+        // through to the client without a routectl release.
+        extras: resp.extras,
     })
 }
 
@@ -277,6 +282,7 @@ fn translate_usage(u: &ConverseUsage) -> Usage {
         cache_creation_input_tokens: u.cache_write_input_tokens,
         cache_read_input_tokens: u.cache_read_input_tokens,
         cache_creation: u.cache_details.as_deref().map(translate_cache_details),
+        extras: Default::default(),
     }
 }
 

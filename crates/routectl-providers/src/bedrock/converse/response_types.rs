@@ -51,6 +51,14 @@ pub(crate) struct ConverseResponse {
     /// doesn't surface it on canonical `ChatResponse`.
     #[serde(default)]
     pub(crate) additional_model_response_fields: Option<Value>,
+    /// Forward-compat catchall for any other top-level field AWS
+    /// adds. Mirrors `AnthropicResponse::extras`. Captured for
+    /// future round-trip; today the Converse egress doesn't emit
+    /// these (Converse responses translate to canonical, not back to
+    /// AWS-Converse wire shape, since clients only see the
+    /// translated egress).
+    #[serde(flatten)]
+    pub(crate) extras: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
