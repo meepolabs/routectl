@@ -229,6 +229,67 @@ async fn metadata_round_trips_full_object_to_upstream() {
     );
 }
 
+/// INV-9 + INV-10 end-to-end pin: `context_management` (top-level)
+/// and `usage.service_tier` (nested) round-trip from upstream
+/// response through ChatResponse.extras / Usage.extras to the
+/// client wire body. Forward-compat: any new Anthropic spec field
+/// rides this same path with no routectl release.
+#[tokio::test]
+async fn response_extras_round_trip_to_client() {
+    let upstream = MockServer::start().await;
+    let upstream_resp = json!({
+        "id": "msg_01",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-haiku-4-5",
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "service_tier": "standard"
+        },
+        "context_management": {"applied_edits": []}
+    });
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(upstream_resp))
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    let body = json!({
+        "model": "heavy",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let client_body: Value = resp.json().await.unwrap();
+    // INV-9: context_management surfaces on the client wire body.
+    assert_eq!(
+        client_body["context_management"],
+        json!({"applied_edits": []}),
+        "context_management dropped on egress; INV-9 regression"
+    );
+    // INV-10: usage.service_tier surfaces on the client wire body.
+    assert_eq!(
+        client_body["usage"]["service_tier"], "standard",
+        "usage.service_tier dropped on egress; INV-10 regression"
+    );
+}
+
 #[tokio::test]
 async fn unknown_block_type_round_trips_to_upstream() {
     let upstream = MockServer::start().await;
