@@ -122,7 +122,7 @@ pub struct BedrockGlobalConfig {
 /// requests routing through this provider, but only when the caller did
 /// not already supply that field on the wire. The router never
 /// overwrites a caller-supplied value.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ReasoningDefaults {
     /// Maps to ChatRequest.reasoning.effort. Vocabulary is passthrough
@@ -141,11 +141,27 @@ pub struct ReasoningDefaults {
 }
 
 impl ReasoningDefaults {
-    /// Construct a `ReasoningDefaults` from the two operator-side
-    /// fields. External callers must use this rather than struct
-    /// literal syntax because the type is `#[non_exhaustive]`.
-    pub fn new(thinking: Option<String>, enabled: Option<bool>) -> Self {
-        Self { thinking, enabled }
+    /// Construct an empty `ReasoningDefaults`. Use the `with_thinking`
+    /// / `with_enabled` builders to populate fields. Builder pattern
+    /// matches the rest of the config surface (`ProviderEntry::with_*`,
+    /// `AliasEntry::with_*`) and keeps external callers compatible
+    /// across `#[non_exhaustive]` field additions.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the operator-side `thinking` (effort) value. Replaces any
+    /// previously-set value.
+    pub fn with_thinking(mut self, thinking: impl Into<String>) -> Self {
+        self.thinking = Some(thinking.into());
+        self
+    }
+
+    /// Set the operator-side `enabled` flag. Replaces any
+    /// previously-set value.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
     }
 
     /// True when neither `thinking` nor `enabled` is set. Used by the
