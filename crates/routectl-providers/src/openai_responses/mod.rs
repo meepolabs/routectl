@@ -257,11 +257,20 @@ impl Provider for OpenAiResponsesProvider {
         //   response.cancelled -> Err::upstream (cancellation surfaces
         //                         as an explicit error, not silent
         //                         success; clients can retry).
+        //
+        // The chatgpt-oauth backend ships the actual model output via
+        // `response.output_item.done` events and ships
+        // `response.completed` with `response.output: []`. Accumulate
+        // the items as they fly past so we can backfill the response
+        // body when the terminal event omits them. Streaming clients
+        // never hit this seam because the SseState machine consumes
+        // the deltas directly.
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
         futures::pin_mut!(event_stream);
         let mut completed_body: Option<Value> = None;
         let mut terminal_kind: Option<String> = None;
+        let mut accumulated_items: Vec<Value> = Vec::new();
         while let Some(result) = event_stream.next().await {
             let event = result.map_err(|e| Error::Streaming(e.to_string()))?;
             if event.data.is_empty() {
@@ -271,6 +280,11 @@ impl Provider for OpenAiResponsesProvider {
                 .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
             let kind = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match kind {
+                "response.output_item.done" => {
+                    if let Some(item) = parsed.get("item") {
+                        accumulated_items.push(item.clone());
+                    }
+                }
                 "response.completed" | "response.failed" | "response.cancelled" => {
                     if let Some(r) = parsed.get("response") {
                         completed_body = Some(r.clone());
@@ -282,7 +296,7 @@ impl Provider for OpenAiResponsesProvider {
             }
         }
 
-        let raw_body = completed_body.ok_or_else(|| {
+        let mut raw_body = completed_body.ok_or_else(|| {
             // Two distinct cases land here:
             //   - terminal_kind = None: the stream exhausted without
             //     ever firing a terminal event (truncation, premature
@@ -301,6 +315,24 @@ impl Provider for OpenAiResponsesProvider {
             };
             Error::upstream(&self.cfg.id, 0, msg)
         })?;
+
+        // Backfill `response.output` from accumulated `output_item.done`
+        // events when the terminal body left it empty. The
+        // chatgpt-oauth backend ships an empty array on
+        // `response.completed` even when output_tokens > 0; the actual
+        // items only appear in the per-item done events.
+        if terminal_kind.as_deref() == Some("response.completed") && !accumulated_items.is_empty() {
+            let needs_backfill = raw_body
+                .get("output")
+                .and_then(Value::as_array)
+                .map(Vec::is_empty)
+                .unwrap_or(true);
+            if needs_backfill {
+                if let Some(obj) = raw_body.as_object_mut() {
+                    obj.insert("output".into(), Value::Array(accumulated_items));
+                }
+            }
+        }
         // Trace upstream success body pre-normalize. The
         // chatgpt-oauth endpoint is stream-only; this body is the
         // `response` field extracted from the terminal SSE event, not
