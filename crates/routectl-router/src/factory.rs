@@ -104,6 +104,7 @@ pub async fn build_provider_with_options(
             history_reasoning,
             user_agent,
             runtime: _,
+            reasoning_defaults: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
             let api_key = resolve(secrets, api_key_ref).await?;
@@ -133,6 +134,7 @@ pub async fn build_provider_with_options(
             adaptive_thinking,
             allowed_betas,
             runtime: _,
+            reasoning_defaults: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
             let api_key = resolve(secrets, api_key_ref).await?;
@@ -162,6 +164,7 @@ pub async fn build_provider_with_options(
             user_agent,
             originator,
             runtime: _,
+            reasoning_defaults: _,
         } => {
             validate_openai_responses_account_id(name, *auth_kind, account_id_ref)?;
             let api_key = resolve(secrets, api_key_ref).await?;
@@ -200,6 +203,7 @@ pub async fn build_provider_with_options(
             additional_model_request_fields,
             adaptive_thinking,
             runtime: _,
+            reasoning_defaults: _,
         } => {
             validate_bedrock_allowlists(
                 matches!(api_shape, BedrockApiShapeConfig::Invoke),
@@ -581,6 +585,40 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
     )
 }
 
+/// Validate the `[providers.X] thinking` knob across every configured
+/// provider. Reject the empty string explicitly so an operator who
+/// types `thinking = ""` gets a clean startup error rather than
+/// silently emitting `effort: ""` on every request (which most
+/// upstream egresses then 400 on).
+///
+/// Unknown values like `thinking = "ultra"` pass through verbatim --
+/// the provider-side translation tables are forward-compatible by
+/// design, and pinning the validator to a closed enum here would
+/// require a routectl release every time a vendor adds a new effort
+/// level.
+///
+/// Call once per process startup BEFORE building any providers.
+pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()> {
+    use routectl_core::Error;
+
+    for (name, entry) in &config.providers {
+        let Some(defaults) = entry.reasoning_defaults() else {
+            continue;
+        };
+        if let Some(thinking) = &defaults.thinking {
+            if thinking.is_empty() {
+                return Err(Error::Config(format!(
+                    "provider `{name}`: `thinking` must be a non-empty string \
+                     (e.g. \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \
+                     \"max\", \"none\"); remove the field to leave reasoning \
+                     effort unset"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod base_url_validation_tests {
     use super::validate_base_url_scheme;
@@ -712,6 +750,7 @@ mod bedrock_validation_tests {
             additional_model_request_fields: None,
             adaptive_thinking: None,
             runtime: Default::default(),
+            reasoning_defaults: Default::default(),
         }
     }
 
@@ -726,6 +765,7 @@ mod bedrock_validation_tests {
             additional_model_request_fields,
             adaptive_thinking,
             runtime,
+            reasoning_defaults,
             ..
         } = bedrock_provider_entry()
         else {
@@ -742,6 +782,7 @@ mod bedrock_validation_tests {
             additional_model_request_fields,
             adaptive_thinking,
             runtime,
+            reasoning_defaults,
         }
     }
 
@@ -860,6 +901,7 @@ mod bedrock_validation_tests {
                 additional_model_request_fields: None,
                 adaptive_thinking: None,
                 runtime: Default::default(),
+                reasoning_defaults: Default::default(),
             },
             BedrockGlobalConfig {
                 allowed_betas: baseline_betas(),

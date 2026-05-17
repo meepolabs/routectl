@@ -56,14 +56,14 @@ Resolution priority: `alias.retry.X` > `provider.X` > top-level `[retry].X` > un
 
 **Why opt-in per provider, not auto-detect by name:** Anthropic is rolling adaptive thinking out gradually with no clean naming pattern. `opus-4-7` matches today's model but misses `opus-5` / `sonnet-4-7`; `opus-4-` catches the still-legacy `4-5`/`4-6`. TOML opt-in lets you flip the day a new model lands.
 
-### DeepSeek v4 / v4.1 (api.deepseek.com, opencode-go, NIM, vLLM-hosted, anywhere)
+### DeepSeek v4 / v4.1 (api.deepseek.com, example-deepseek-host, NIM, vLLM-hosted, anywhere)
 
 DeepSeek v4 inverted v3's contract on multi-turn echo-back. v3: 400 if you echo `reasoning_content` in assistant history. v4: `400 reasoning_content in the thinking mode must be passed back to the API` if you don't.
 
 **Required:**
 
 ```toml
-[providers.opencode-go]
+[providers.example-deepseek-host]
 type = "openai-compat"
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_ref = "env://OPENCODE_GO_API_KEY"
@@ -248,8 +248,8 @@ When you want a model with multiple hosts as fallback, put them in chain order:
 ```toml
 [aliases.deepseek-flash]
 chain = [
-  "opencode-go:deepseek-v4-flash",                     # cheapest, primary
-  "openrouter:deepseek/deepseek-v4-flash",             # if opencode-go down
+  "example-deepseek-host:deepseek-v4-flash",                     # cheapest, primary
+  "openrouter:deepseek/deepseek-v4-flash",             # if example-deepseek-host down
   "nim:deepseek-ai/deepseek-v4-flash",                 # third-party fallback
 ]
 ```
