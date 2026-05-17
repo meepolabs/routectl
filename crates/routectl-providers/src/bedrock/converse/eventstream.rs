@@ -372,7 +372,21 @@ fn handle_block_delta(
         return vec![];
     };
     match delta {
-        StreamDelta::Text { text } => vec![text_chunk(text)],
+        StreamDelta::Text { text } => {
+            // Symmetric with tool-use: require a prior contentBlockStart
+            // (AWS emits one for every block, even text). A delta on
+            // an unknown block is an out-of-band event -- skip rather
+            // than synthesize a chunk that would corrupt the canonical
+            // stream. Mirrors the ToolUse arm's defensive-skip below.
+            if !state.blocks.contains_key(&ev.content_block_index) {
+                tracing::debug!(
+                    content_block_index = ev.content_block_index,
+                    "skipping text delta on unknown block (no prior contentBlockStart)"
+                );
+                return vec![];
+            }
+            vec![text_chunk(text)]
+        }
         StreamDelta::ToolUse { tool_use } => {
             let block = state.blocks.get(&ev.content_block_index);
             let (id, name, call_index) = match block {
@@ -392,11 +406,15 @@ fn handle_block_delta(
             vec![tool_delta_chunk(id, name, call_index, tool_use.input)]
         }
         StreamDelta::ReasoningContent { reasoning_content } => {
-            // Upgrade the block kind to Reasoning lazily so the index
-            // is allocated on first reasoning delta only.
-            let _detail_index = match state.blocks.get(&ev.content_block_index) {
-                Some(BlockState::Reasoning { detail_index, .. }) => *detail_index,
-                _ => {
+            // Upgrade the placeholder `Text` state (inserted on
+            // `contentBlockStart` for no-payload blocks) to
+            // `Reasoning` on the first reasoningContent delta. If
+            // there's NO prior state at this index, that means
+            // contentBlockStart was missed -- skip rather than
+            // synthesize. Symmetric with the text + tool-use arms.
+            match state.blocks.get(&ev.content_block_index) {
+                Some(BlockState::Reasoning { .. }) => {}
+                Some(BlockState::Text) => {
                     let di = state.next_detail_index;
                     state.next_detail_index += 1;
                     state.blocks.insert(
@@ -408,9 +426,16 @@ fn handle_block_delta(
                             detail_id: uuid::Uuid::new_v4().to_string(),
                         },
                     );
-                    di
                 }
-            };
+                _ => {
+                    tracing::debug!(
+                        content_block_index = ev.content_block_index,
+                        "skipping reasoning delta on unknown or non-text block \
+                         (no prior contentBlockStart, or block is tool_use)"
+                    );
+                    return vec![];
+                }
+            }
             let mut chunks = Vec::new();
             // Strategy A: accumulate text + signature on the open
             // block; emit only the LIVE `reasoning` string per delta.

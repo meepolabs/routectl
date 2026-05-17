@@ -79,9 +79,21 @@ enum ThinkState {
 /// Cross-chunk state machine for stripping `<think>...</think>` from a
 /// streaming content delta. Each call to `process` consumes one SSE data
 /// line and returns a `ChatChunk` with the content/reasoning fields separated.
+///
+/// The accumulator is correct across chunk boundaries that fall INSIDE
+/// a tag: e.g. one chunk delivers `"<thi"` and the next delivers
+/// `"nk>secret</think>"`. Without buffering, the partial `"<thi"` would
+/// be emitted as visible content because `find("<think>")` would not
+/// match. The accumulator holds back the longest suffix of the
+/// pending output that could be a partial `<think>` (Outside) or
+/// `</think>` (Inside) tag, and prepends it on the next call.
 pub struct ThinkTagAccumulator {
     state: ThinkState,
     chunk_index: u32,
+    /// Bytes held back from the previous chunk because they could be
+    /// a partial tag. Bounded by the longer tag length (8 bytes for
+    /// `</think>`) so this never grows beyond a handful of chars.
+    pending: String,
 }
 
 impl Default for ThinkTagAccumulator {
@@ -95,6 +107,7 @@ impl ThinkTagAccumulator {
         Self {
             state: ThinkState::default(),
             chunk_index: 0,
+            pending: String::new(),
         }
     }
 
@@ -200,10 +213,25 @@ impl ThinkTagAccumulator {
     ///   1. Tag boundary falls mid-chunk (e.g. only `<think>` arrives with no `</think>`).
     ///   2. Full `<think>...</think>` inside one chunk.
     ///   3. Mixed: text before tag + tag content + text after tag.
+    ///
+    /// Cross-chunk safety: a partial tag at the END of `text` (e.g.
+    /// `"...prefix <thi"`) is held back in `self.pending` and
+    /// prepended on the next call so a `</thi` + `nk>secret</think>`
+    /// split is still detected and the secret stays in `inside`.
     fn split_think_tags(&mut self, text: &str) -> (String, String) {
+        // Prepend any held-back partial tag from the previous chunk.
+        let pending = std::mem::take(&mut self.pending);
+        let combined: String;
+        let combined_ref: &str = if pending.is_empty() {
+            text
+        } else {
+            combined = format!("{pending}{text}");
+            &combined
+        };
+
         let mut outside = String::new();
         let mut inside = String::new();
-        let mut remaining = text;
+        let mut remaining = combined_ref;
 
         loop {
             match self.state {
@@ -231,8 +259,50 @@ impl ThinkTagAccumulator {
             }
         }
 
+        // Hold back any trailing partial-tag prefix so a tag straddling
+        // a chunk boundary isn't missed. The candidate buffer is whichever
+        // string we just appended into based on terminal state.
+        match self.state {
+            ThinkState::Outside => {
+                let cut = longest_partial_tag_suffix(&outside, "<think>");
+                if cut > 0 {
+                    self.pending = outside[outside.len() - cut..].to_string();
+                    outside.truncate(outside.len() - cut);
+                }
+            }
+            ThinkState::Inside => {
+                let cut = longest_partial_tag_suffix(&inside, "</think>");
+                if cut > 0 {
+                    self.pending = inside[inside.len() - cut..].to_string();
+                    inside.truncate(inside.len() - cut);
+                }
+            }
+        }
+
         (outside, inside)
     }
+}
+
+/// Return the byte length of the longest suffix of `s` that is a
+/// non-empty prefix of `tag`. O(tag.len()^2), bounded by the tag
+/// length (max 8 for `</think>`) so cost is constant per call.
+fn longest_partial_tag_suffix(s: &str, tag: &str) -> usize {
+    let max_len = tag.len().min(s.len());
+    for take in (1..=max_len).rev() {
+        let start = s.len() - take;
+        if !s.is_char_boundary(start) {
+            continue;
+        }
+        let suffix = &s[start..];
+        // A full tag match (suffix == tag) means the tag's already
+        // been processed by the main loop; we should never reach
+        // here with a complete tag, but guard against it just in
+        // case to avoid holding back a complete tag forever.
+        if suffix.len() < tag.len() && tag.starts_with(suffix) {
+            return take;
+        }
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -392,5 +462,103 @@ mod tests {
         // Empty reasoning (closing tag with no content before it)
         assert!(c3.choices[0].delta.reasoning.is_none());
         assert_eq!(c3.choices[0].delta.content.as_deref(), Some("after"));
+    }
+
+    /// Pin: open `<think>` tag SPLIT across chunk boundaries. Round-7
+    /// review HIGH: previously the partial `<thi` in chunk 1 was
+    /// emitted as visible content, then chunk 2 (`nk>secret</think>`)
+    /// also didn't match `<think>` and went to visible content,
+    /// LEAKING the reasoning text. The fix buffers the partial-tag
+    /// suffix and prepends it on the next call.
+    #[test]
+    fn think_open_tag_split_across_chunks_does_not_leak() {
+        let mut acc = ThinkTagAccumulator::new();
+
+        // Chunk 1: only the first 4 bytes of `<think>` arrive.
+        let c1 = acc
+            .process("t", &delta_chunk(Some("<thi"), None))
+            .unwrap()
+            .unwrap();
+        // The partial `<thi` is held back -- nothing visible yet.
+        assert!(c1.choices[0].delta.content.is_none());
+        assert!(c1.choices[0].delta.reasoning.is_none());
+
+        // Chunk 2: rest of the open tag + secret + close + visible.
+        let c2 = acc
+            .process("t", &delta_chunk(Some("nk>secret</think>visible"), None))
+            .unwrap()
+            .unwrap();
+        // `secret` MUST be in reasoning, NOT visible content.
+        assert_eq!(c2.choices[0].delta.reasoning.as_deref(), Some("secret"));
+        assert_eq!(c2.choices[0].delta.content.as_deref(), Some("visible"));
+    }
+
+    /// Pin: close `</think>` tag SPLIT across chunk boundaries. The
+    /// reasoning text up to the partial close must not flow back as
+    /// visible content; the close tag must be detected on the next
+    /// chunk.
+    #[test]
+    fn think_close_tag_split_across_chunks() {
+        let mut acc = ThinkTagAccumulator::new();
+
+        // Chunk 1: open tag + reasoning + first few bytes of close tag.
+        let c1 = acc
+            .process("t", &delta_chunk(Some("<think>reason</thi"), None))
+            .unwrap()
+            .unwrap();
+        // `reason` is reasoning. The `</thi` is held back, so reasoning
+        // emitted on this chunk is just `reason` (no extra suffix).
+        assert_eq!(c1.choices[0].delta.reasoning.as_deref(), Some("reason"));
+        assert!(c1.choices[0].delta.content.is_none());
+
+        // Chunk 2: rest of close tag + visible.
+        let c2 = acc
+            .process("t", &delta_chunk(Some("nk>after"), None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c2.choices[0].delta.content.as_deref(), Some("after"));
+        assert!(c2.choices[0].delta.reasoning.is_none());
+    }
+
+    /// Pin: a one-character chunk that happens to be `<` does not
+    /// flood `pending` with arbitrary content -- the buffer is
+    /// bounded by the tag length.
+    #[test]
+    fn think_tag_lone_lt_holds_back_at_most_tag_length() {
+        let mut acc = ThinkTagAccumulator::new();
+        let _ = acc
+            .process("t", &delta_chunk(Some("<"), None))
+            .unwrap()
+            .unwrap();
+        // Now follow with content that is NOT a think tag.
+        let c = acc
+            .process("t", &delta_chunk(Some("not a think tag"), None))
+            .unwrap()
+            .unwrap();
+        // The held-back `<` flows through with the next chunk.
+        assert_eq!(
+            c.choices[0].delta.content.as_deref(),
+            Some("<not a think tag")
+        );
+    }
+
+    /// Pin: innocent content that ends with a partial-tag-looking
+    /// suffix gets delayed by exactly one chunk (no leak, no loss).
+    #[test]
+    fn think_tag_innocent_partial_suffix_delayed_one_chunk() {
+        let mut acc = ThinkTagAccumulator::new();
+        let c1 = acc
+            .process("t", &delta_chunk(Some("say <th"), None))
+            .unwrap()
+            .unwrap();
+        // `<th` looks like a partial open tag; held back. `say ` flows.
+        assert_eq!(c1.choices[0].delta.content.as_deref(), Some("say "));
+
+        let c2 = acc
+            .process("t", &delta_chunk(Some("anks!"), None))
+            .unwrap()
+            .unwrap();
+        // Combined `<thanks!` is not a tag; whole thing flows visibly.
+        assert_eq!(c2.choices[0].delta.content.as_deref(), Some("<thanks!"));
     }
 }

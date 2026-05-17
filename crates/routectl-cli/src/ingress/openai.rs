@@ -13,9 +13,10 @@ use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, MessageContent, Result, Role, SystemContent,
+    is_canonical_request_key, ChatChunk, ChatRequest, ChatResponse, Error, MessageContent, Result,
+    Role, SystemContent,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{resolve_alias, IngressAdapter, IngressStreamState, SseEvent};
 
@@ -69,11 +70,28 @@ impl IngressAdapter for OpenAiIngress {
         // `openai_compat::response.rs` -- same prefer-non-null
         // semantics applied at parse time.
         coalesce_message_reasoning_keys(&mut body);
+
+        // Forward-compat sweep: pull every top-level key NOT on
+        // `ChatRequest` into `provider_extras` so OpenAI clients
+        // sending long-tail knobs (`service_tier`, `parallel_tool_calls`,
+        // `prediction`, `audio`, `metadata`, future fields) don't lose
+        // them at the ingress boundary. Mirrors the Anthropic ingress
+        // sweep so both dialects forward unknown body fields verbatim
+        // to the egress (which merges via `merge_provider_extras`).
+        let extras = sweep_unknown_top_level_fields(&mut body);
+
         let mut req: ChatRequest = serde_json::from_value(body).map_err(|e| {
             Error::Validation(format!(
                 "openai ingress: invalid /v1/chat/completions body: {e}"
             ))
         })?;
+        // Merge swept extras into req.provider_extras (the body may
+        // have already carried an explicit `provider_extras` object;
+        // sweep keeps both -- the swept ones win on conflict because
+        // they were the unknown fields that needed preservation).
+        if !extras.is_empty() {
+            merge_into_provider_extras(&mut req, extras);
+        }
         req.model = resolve_alias(&self.aliases, headers, &req.model);
         // Honor the canonical contract: `req.system` is the source of
         // truth at egress time. Lift any Role::System messages into
@@ -115,6 +133,50 @@ impl IngressAdapter for OpenAiIngress {
     fn render_eos(&self, _state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
         vec![SseEvent::unnamed(DONE_SENTINEL)]
     }
+}
+
+/// Pull every top-level body key NOT recognized as a canonical
+/// `ChatRequest` field into a separate `Map` so the caller can stash
+/// it in `provider_extras`. Mirrors `sweep_anthropic_extras` so the
+/// two ingresses share the forward-compat property: a new OpenAI
+/// top-level field (e.g. `service_tier`, `parallel_tool_calls`,
+/// `prediction`, `audio`, future additions) reaches the egress
+/// without a code edit and is forwarded verbatim by
+/// `merge_provider_extras`.
+fn sweep_unknown_top_level_fields(body: &mut Value) -> Map<String, Value> {
+    let Some(obj) = body.as_object_mut() else {
+        return Map::new();
+    };
+    let unknown_keys: Vec<String> = obj
+        .keys()
+        .filter(|k| !is_canonical_request_key(k))
+        .cloned()
+        .collect();
+    let mut extras = Map::new();
+    for k in unknown_keys {
+        if let Some(v) = obj.remove(&k) {
+            extras.insert(k, v);
+        }
+    }
+    extras
+}
+
+/// Merge swept extras into `req.provider_extras`. Preserves any
+/// existing `provider_extras` object the caller sent explicitly;
+/// swept-unknown fields take precedence on key conflict because
+/// they're the ones a future serde update would otherwise drop.
+fn merge_into_provider_extras(req: &mut ChatRequest, swept: Map<String, Value>) {
+    if swept.is_empty() {
+        return;
+    }
+    let mut combined = match req.provider_extras.take() {
+        Some(Value::Object(existing)) => existing,
+        _ => Map::new(),
+    };
+    for (k, v) in swept {
+        combined.insert(k, v);
+    }
+    req.provider_extras = Some(Value::Object(combined));
 }
 
 /// Coalesce `reasoning_content` into `reasoning` on each message

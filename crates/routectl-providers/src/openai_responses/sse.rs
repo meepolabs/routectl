@@ -37,6 +37,15 @@ const BLOCK_TAG_TEXT: &str = "text";
 const BLOCK_TAG_REASONING: &str = "reasoning";
 const BLOCK_TAG_TOOL_USE: &str = "tool_use";
 
+/// Cap on the number of distinct `output_index` entries the per-stream
+/// `ResponsesStreamState::blocks` map will hold. Legitimate Responses
+/// streams emit a small handful of output items per turn (reasoning
+/// + message + N tool calls). An adversarial or compromised upstream
+/// could stream thousands of distinct indices to drive the map
+/// toward OOM. 512 is comfortably above any practical request and
+/// well below memory-pressure territory for the per-task heap.
+const MAX_OUTPUT_BLOCKS: usize = 512;
+
 use super::response::{map_finish_reason, upstream_error_from_failed};
 use super::response_types::{ResponsesResponse, ResponsesStreamEvent};
 use super::OPENAI_RESPONSES_FORMAT;
@@ -204,6 +213,22 @@ impl ResponsesStreamState {
             );
             return Vec::new();
         };
+        // Bounded-growth guard: AWS / OpenAI legitimate responses
+        // emit a small handful of output items per turn (typically
+        // 1-5: optional reasoning + message + N tool calls). An
+        // adversarial upstream could stream thousands of distinct
+        // `output_index` values to grow the blocks map unboundedly.
+        // Skip past the cap with a debug log; the stream remains
+        // usable for items below the cap.
+        if !self.blocks.contains_key(&idx) && self.blocks.len() >= MAX_OUTPUT_BLOCKS {
+            tracing::debug!(
+                provider = provider_id,
+                output_index = idx,
+                cap = MAX_OUTPUT_BLOCKS,
+                "openai-responses: output_item.added beyond cap; skipping"
+            );
+            return Vec::new();
+        }
         let Some(item) = event.item.as_ref() else {
             return Vec::new();
         };

@@ -282,6 +282,15 @@ async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
 /// the clear. Loopback URLs (127.x, ::1, localhost) are exempt
 /// because the local-dev workflow and integration tests rely on
 /// `http://127.0.0.1:N` mock servers.
+///
+/// Also rejects link-local hosts (IPv4 `169.254.0.0/16`, IPv6
+/// `fe80::/10`) regardless of scheme. The IPv4 link-local range
+/// covers cloud-instance-metadata services (AWS / Azure / GCP all
+/// use `169.254.169.254`) -- an operator who accidentally pastes
+/// the metadata URL or is socially engineered into doing so would
+/// otherwise leak SigV4-signed requests + API keys to a service
+/// that exposes IAM credentials. Defense-in-depth: routectl is a
+/// gateway, not a privileged client of the metadata service.
 fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -296,14 +305,35 @@ fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
         }
     };
     let scheme = url.scheme();
-    if scheme == "https" {
-        return Ok(());
-    }
-    if scheme != "http" {
+    if scheme != "http" && scheme != "https" {
         return Err(routectl_core::Error::Config(format!(
             "provider `{provider_name}`: base_url scheme `{scheme}` is not allowed; \
              use https:// (or http:// for loopback only)"
         )));
+    }
+
+    // Link-local rejection (regardless of scheme). Covers cloud
+    // metadata services. `Ipv4Addr::is_link_local` is stable since
+    // 1.0 (covers 169.254.0.0/16). For IPv6 we check the fe80::/10
+    // prefix manually since `is_unicast_link_local` was only
+    // stabilized recently and we want to keep MSRV low.
+    if let Some(host) = url.host() {
+        let link_local = match host {
+            url::Host::Ipv4(ip) => ip.is_link_local(),
+            url::Host::Ipv6(ip) => (ip.segments()[0] & 0xffc0) == 0xfe80,
+            url::Host::Domain(_) => false,
+        };
+        if link_local {
+            return Err(routectl_core::Error::Config(format!(
+                "provider `{provider_name}`: base_url `{trimmed}` targets a link-local \
+                 address; cloud-metadata IPs (169.254.169.254 etc.) and IPv6 fe80::/10 \
+                 are blocked at build time to prevent SSRF / credential leak"
+            )));
+        }
+    }
+
+    if scheme == "https" {
+        return Ok(());
     }
     // http:// is permitted only for loopback hosts so local-dev and
     // integration tests work.
@@ -559,6 +589,55 @@ mod base_url_validation_tests {
         assert!(msg.contains("acme"), "got: {msg}");
         assert!(msg.contains("cleartext"), "got: {msg}");
         assert!(msg.contains("api.openai.com"), "got: {msg}");
+    }
+
+    /// Pin: AWS / Azure / GCP cloud-instance metadata IP must be
+    /// rejected even with https. Round-7 security review HIGH:
+    /// link-local egress would leak SigV4 + API keys to whatever
+    /// service the operator was tricked into pointing at.
+    #[test]
+    fn https_aws_imds_rejected() {
+        let err =
+            validate_base_url_scheme("p", "https://169.254.169.254/latest/meta-data/").unwrap_err();
+        assert!(err.to_string().contains("link-local"));
+    }
+
+    /// Pin: 169.254/16 link-local range rejected wholesale (the IMDS
+    /// IP is the obvious target but the whole prefix is unsafe).
+    #[test]
+    fn https_link_local_ipv4_range_rejected() {
+        for host in ["169.254.0.1", "169.254.42.42", "169.254.255.255"] {
+            let url = format!("https://{host}/");
+            let err = validate_base_url_scheme("p", &url).unwrap_err();
+            assert!(
+                err.to_string().contains("link-local"),
+                "expected link-local rejection for {host}; got: {err}"
+            );
+        }
+    }
+
+    /// Pin: IPv6 fe80::/10 unicast link-local rejected.
+    #[test]
+    fn https_link_local_ipv6_rejected() {
+        for url in [
+            "https://[fe80::1]/",
+            "https://[febf::1]/",
+            "https://[fea0:abcd::1]/",
+        ] {
+            let err = validate_base_url_scheme("p", url).unwrap_err();
+            assert!(
+                err.to_string().contains("link-local"),
+                "expected link-local rejection for {url}; got: {err}"
+            );
+        }
+    }
+
+    /// Pin: IPv6 addresses just outside the fe80::/10 prefix still pass.
+    /// fec0:: is site-local (deprecated but not link-local).
+    #[test]
+    fn https_non_link_local_ipv6_passes() {
+        assert!(validate_base_url_scheme("p", "https://[fec0::1]/").is_ok());
+        assert!(validate_base_url_scheme("p", "https://[2001:db8::1]/").is_ok());
     }
 
     #[test]
