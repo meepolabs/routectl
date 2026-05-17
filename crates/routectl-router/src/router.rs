@@ -501,6 +501,11 @@ impl Router {
     /// `effort` and the operator configured `enabled`, the resulting
     /// request carries both.
     ///
+    /// `enabled = false` in the TOML is a DEFAULT the caller can still
+    /// override by sending `reasoning.enabled = true` on the wire. It
+    /// is not a hard ceiling on reasoning use; operators wanting to
+    /// pin reasoning off cannot rely on this knob alone.
+    ///
     /// Edge case: when the caller has explicitly set
     /// `req.reasoning.enabled == Some(false)`, the operator's
     /// `thinking` (effort) injection is suppressed. Without this
@@ -510,6 +515,19 @@ impl Router {
     /// only when `effort` is also unset, others forward `effort`
     /// regardless). Suppressing the effort fill keeps "caller pinned
     /// reasoning off" working uniformly across all egresses.
+    ///
+    /// Why `effort` has an explicit `caller_disabled` guard but
+    /// `enabled` doesn't: `enabled` injection is naturally guarded by
+    /// the per-field `cfg.enabled.is_none()` check (a caller-set
+    /// `enabled = Some(false)` short-circuits the fill on its own).
+    /// The explicit `caller_disabled` check is needed only on `effort`
+    /// because the per-field check (`cfg.effort.is_none()`) would
+    /// otherwise allow operator's `thinking` to inject when the caller
+    /// left `effort` unset, producing the inconsistent
+    /// `{effort: Some(...), enabled: Some(false)}` state above. A
+    /// future operator-side field that should respect the same
+    /// "caller turned reasoning off" semantics needs the same explicit
+    /// guard; per-field `is_none()` alone is not sufficient.
     fn merge_reasoning_defaults(&self, req: &mut ChatRequest, provider_name: &str) {
         let Some(entry) = self.config.providers.get(provider_name) else {
             return;
