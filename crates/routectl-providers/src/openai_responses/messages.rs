@@ -18,6 +18,8 @@
 //! (first-turn requests, or providers that didn't surface one) flow
 //! through cleanly as empty-string `encrypted_content`.
 
+use serde_json::Value;
+
 use routectl_core::{ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role};
 
 use super::types::{
@@ -53,6 +55,15 @@ pub(super) fn build_input(id: &str, messages: &[Message]) -> Result<Vec<Response
 // ---------------------------------------------------------------------------
 
 fn translate_user_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputItem>) -> Result<()> {
+    // Lift any `tool_result` parts into FunctionCallOutput input items.
+    // The Anthropic ingress emits tool outputs as
+    // `ContentPart::ToolResult` on a user-role message (the Anthropic
+    // wire shape); the Responses API needs them as separate
+    // `function_call_output` input items keyed by call_id. Without
+    // this lift, the upstream 400s with "No tool output found for
+    // function call <id>".
+    extract_tool_results(id, &msg.content, out);
+
     let content = build_user_content(id, &msg.content)?;
     if content.is_empty() {
         tracing::debug!(
@@ -67,6 +78,85 @@ fn translate_user_message(id: &str, msg: &Message, out: &mut Vec<ResponseInputIt
         content,
     });
     Ok(())
+}
+
+/// Walk a user-message content and emit one FunctionCallOutput input
+/// item per `tool_result` part. The Anthropic Messages wire shape ships
+/// tool outputs as user-turn content blocks; the Responses API wants
+/// them as sibling input items, so we lift them out before
+/// `build_user_content` walks the remaining parts.
+fn extract_tool_results(id: &str, content: &MessageContent, out: &mut Vec<ResponseInputItem>) {
+    let MessageContent::Parts(parts) = content else {
+        return;
+    };
+    for p in parts {
+        let ContentPart::Known(KnownContentPart::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        }) = p
+        else {
+            continue;
+        };
+        if tool_use_id.is_empty() {
+            tracing::warn!(
+                provider = id,
+                "dropping tool_result with empty tool_use_id on Responses egress"
+            );
+            continue;
+        }
+        let output = tool_result_to_output_body(id, content);
+        out.push(ResponseInputItem::FunctionCallOutput {
+            call_id: tool_use_id.clone(),
+            output,
+        });
+    }
+}
+
+/// Translate the Anthropic-shape `tool_result.content` value into a
+/// FunctionCallOutputBody. Anthropic's content slot is permissive: a
+/// flat string, an array of blocks, or any JSON value. Codex parity
+/// prefers a flat string when possible.
+fn tool_result_to_output_body(id: &str, content: &Value) -> FunctionCallOutputBody {
+    if let Some(s) = content.as_str() {
+        return FunctionCallOutputBody::Text(s.to_string());
+    }
+    if let Some(arr) = content.as_array() {
+        // Walk the array as if it were canonical parts. If every entry
+        // is a `{type: "text", text: "..."}` block, collapse to a
+        // flat string. Otherwise fall back to a JSON-encoded text body
+        // so the upstream still sees the structured payload.
+        let mut buf = String::new();
+        let mut all_text = true;
+        for v in arr {
+            if let (Some("text"), Some(text)) = (
+                v.get("type").and_then(Value::as_str),
+                v.get("text").and_then(Value::as_str),
+            ) {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(text);
+            } else {
+                all_text = false;
+                break;
+            }
+        }
+        if all_text {
+            return FunctionCallOutputBody::Text(buf);
+        }
+    }
+    // Anything else: serialize the value so the model gets the raw
+    // structured output. Better than dropping the payload.
+    let serialized = serde_json::to_string(content).unwrap_or_else(|e| {
+        tracing::warn!(
+            provider = id,
+            error = %e,
+            "tool_result content failed to serialize; emitting empty output"
+        );
+        String::new()
+    });
+    FunctionCallOutputBody::Text(serialized)
 }
 
 /// Assistant turn translation. Walks each part, splitting into a
@@ -275,6 +365,10 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
                                 "dropping image_url part with missing url field on Responses egress"
                             );
                         }
+                    }
+                    ContentPart::Known(KnownContentPart::ToolResult { .. }) => {
+                        // Lifted to FunctionCallOutput in
+                        // `extract_tool_results`; skip silently here.
                     }
                     ContentPart::Known(other) => {
                         tracing::warn!(
