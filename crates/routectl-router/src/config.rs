@@ -141,6 +141,13 @@ pub struct ReasoningDefaults {
 }
 
 impl ReasoningDefaults {
+    /// Construct a `ReasoningDefaults` from the two operator-side
+    /// fields. External callers must use this rather than struct
+    /// literal syntax because the type is `#[non_exhaustive]`.
+    pub fn new(thinking: Option<String>, enabled: Option<bool>) -> Self {
+        Self { thinking, enabled }
+    }
+
     /// True when neither `thinking` nor `enabled` is set. Used by the
     /// router to skip the merge step entirely on providers without
     /// configured defaults.
@@ -275,6 +282,9 @@ pub enum ProviderEntry {
         user_agent: Option<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
+        /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
+        /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
+        /// `reasoning.enabled`. Caller-supplied values always win.
         #[serde(default, flatten)]
         reasoning_defaults: ReasoningDefaults,
     },
@@ -319,6 +329,9 @@ pub enum ProviderEntry {
         allowed_betas: Vec<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
+        /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
+        /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
+        /// `reasoning.enabled`. Caller-supplied values always win.
         #[serde(default, flatten)]
         reasoning_defaults: ReasoningDefaults,
     },
@@ -362,6 +375,9 @@ pub enum ProviderEntry {
         originator: Option<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
+        /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
+        /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
+        /// `reasoning.enabled`. Caller-supplied values always win.
         #[serde(default, flatten)]
         reasoning_defaults: ReasoningDefaults,
     },
@@ -394,6 +410,9 @@ pub enum ProviderEntry {
         adaptive_thinking: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
+        /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
+        /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
+        /// `reasoning.enabled`. Caller-supplied values always win.
         #[serde(default, flatten)]
         reasoning_defaults: ReasoningDefaults,
     },
