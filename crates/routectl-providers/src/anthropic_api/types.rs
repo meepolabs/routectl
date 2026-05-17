@@ -433,6 +433,17 @@ pub(crate) struct AnthropicResponse {
     pub(crate) content: Vec<ContentBlock>,
     pub(crate) stop_reason: Option<String>,
     pub(crate) usage: Option<AnthropicUsage>,
+    /// Forward-compat catchall for any top-level field not in the
+    /// canonical Anthropic Messages baseline. Captures recently-added
+    /// spec fields like `context_management` (from the
+    /// `context-management-2025-06-27` beta) and Bedrock-specific
+    /// extensions, so the egress can round-trip them verbatim.
+    /// Drop-list of egress-time strips (e.g. `stop_details` on the
+    /// Bedrock-only path) lives in the Anthropic ingress's
+    /// `render_messages_response`, NOT here -- this struct is the
+    /// deserialization seam, not the policy seam.
+    #[serde(flatten)]
+    pub(crate) extras: Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -447,6 +458,12 @@ pub(crate) struct AnthropicUsage {
     pub(crate) cache_creation: Option<AnthropicCacheCreation>,
     #[serde(default)]
     pub(crate) reasoning_tokens: Option<u32>,
+    /// Forward-compat catchall for `usage` sub-fields routectl
+    /// doesn't yet have a typed slot for. Captures `service_tier`
+    /// (returned by every Anthropic / Bedrock-Invoke response) and
+    /// any future spec additions.
+    #[serde(flatten)]
+    pub(crate) extras: Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
