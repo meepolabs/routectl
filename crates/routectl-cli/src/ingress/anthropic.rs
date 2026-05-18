@@ -610,10 +610,45 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
         }
     }
 
-    // Tool-use blocks from tool_calls (OpenAI shape).
+    // Pre-scan `msg.content` for ToolUse parts and collect their ids.
+    // Some egresses populate BOTH the OpenAI-shape `msg.tool_calls`
+    // AND the typed `ContentPart::ToolUse` part for the same upstream
+    // function_call (openai-responses, anthropic-api response paths).
+    // Without dedup, the renderer below would emit the same tool_use
+    // block twice in the Anthropic `content` array -- once from the
+    // tool_calls loop, once from the parts iteration. cc and the
+    // Anthropic SDK tolerate the dupes during streaming (where the
+    // dedup runs on chunk-state) but they break the non-streaming
+    // path with two identical blocks back-to-back. Source of truth on
+    // dedup: parts wins -- it carries the Anthropic-native shape and
+    // any cache_control on the tool_use block, whereas the
+    // tool_calls loop synthesizes a fresh block without those
+    // sub-fields. Bug D (cc-via-* 2026-05-18).
+    let parts_tool_use_ids: std::collections::HashSet<String> = match &msg.content {
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Known(routectl_core::KnownContentPart::ToolUse { id, .. }) => {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => std::collections::HashSet::new(),
+    };
+
+    // Tool-use blocks from tool_calls (OpenAI shape). Skip any whose
+    // id already appears as a ContentPart::ToolUse in `msg.content`
+    // (the parts iteration below will emit those in Anthropic-native
+    // shape).
     if let Some(tcs) = msg.tool_calls.as_ref() {
         for tc in tcs {
-            let id = tc.get("id").cloned().unwrap_or(Value::Null);
+            let id_value = tc.get("id").cloned().unwrap_or(Value::Null);
+            if let Some(id_str) = id_value.as_str() {
+                if parts_tool_use_ids.contains(id_str) {
+                    continue;
+                }
+            }
             let func = tc.get("function").and_then(|v| v.as_object());
             let name = func
                 .and_then(|f| f.get("name"))
@@ -626,7 +661,7 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
                 .unwrap_or(Value::Null);
             blocks.push(json!({
                 "type": "tool_use",
-                "id": id,
+                "id": id_value,
                 "name": name,
                 "input": args,
             }));
@@ -1370,6 +1405,136 @@ mod tests {
         assert_eq!(v["stop_reason"], "end_turn");
         assert_eq!(v["usage"]["input_tokens"], 10);
         assert_eq!(v["usage"]["output_tokens"], 5);
+    }
+
+    /// Bug D (cc-via-* 2026-05-18): openai-responses and anthropic-api
+    /// non-streaming responses populate BOTH `msg.tool_calls`
+    /// (OpenAI shape) AND a typed `ContentPart::ToolUse` on
+    /// `msg.content` for the same upstream function_call. Without
+    /// dedup, the renderer emits two identical tool_use blocks
+    /// back-to-back in the Anthropic `content` array. Pin: only ONE
+    /// tool_use block per call_id, with the parts-native shape
+    /// preserved.
+    #[test]
+    fn render_response_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
+        use routectl_core::{
+            schema::Choice, ContentPart, KnownContentPart, Message, MessageContent, Role, Usage,
+        };
+        let resp = ChatResponse {
+            id: "msg_dup".into(),
+            model: "gpt-5".into(),
+            created: 0,
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Known(KnownContentPart::Text {
+                            text: "I'll compute that".into(),
+                            cache_control: None,
+                        }),
+                        ContentPart::Known(KnownContentPart::ToolUse {
+                            id: "call_dup".into(),
+                            name: "calculator".into(),
+                            input: json!({"x": 1, "y": 2}),
+                            cache_control: None,
+                        }),
+                    ]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Some(vec![json!({
+                        "id": "call_dup",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"x\":1,\"y\":2}"
+                        }
+                    })]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 5,
+                completion_tokens: 10,
+                total_tokens: 15,
+                ..Default::default()
+            }),
+            routectl_provider: None,
+            extras: Default::default(),
+        };
+        let v = AnthropicIngress.render_response(resp).unwrap();
+        let content = v["content"].as_array().expect("content is array");
+        // Count tool_use blocks for the dup id.
+        let tool_uses_for_id: Vec<&Value> = content
+            .iter()
+            .filter(|b| b["type"] == "tool_use" && b["id"] == "call_dup")
+            .collect();
+        assert_eq!(
+            tool_uses_for_id.len(),
+            1,
+            "expected exactly one tool_use block for call_dup, got content: {content:?}",
+        );
+        // The surviving block carries Anthropic-native shape (parts source).
+        assert_eq!(tool_uses_for_id[0]["name"], "calculator");
+        assert_eq!(tool_uses_for_id[0]["input"]["x"], 1);
+        assert_eq!(tool_uses_for_id[0]["input"]["y"], 2);
+        // Text block also rendered.
+        let text_blocks: Vec<&Value> = content.iter().filter(|b| b["type"] == "text").collect();
+        assert_eq!(text_blocks.len(), 1);
+        assert_eq!(text_blocks[0]["text"], "I'll compute that");
+    }
+
+    /// Counterpart: openai-compat populates ONLY `msg.tool_calls`
+    /// (parts is empty / Text). The renderer must still emit one
+    /// tool_use block per call so this code path doesn't regress
+    /// when the dedup set is empty.
+    #[test]
+    fn render_response_emits_tool_use_from_tool_calls_when_parts_has_no_tool_use() {
+        use routectl_core::{schema::Choice, Message, MessageContent, Role, Usage};
+        let resp = ChatResponse {
+            id: "msg_oc".into(),
+            model: "qwen-3-coder".into(),
+            created: 0,
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    // openai-compat doesn't populate parts.ToolUse; content
+                    // is the model's plain text reply.
+                    content: MessageContent::Text("running tool now".into()),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Some(vec![json!({
+                        "id": "call_oc",
+                        "type": "function",
+                        "function": {
+                            "name": "ls",
+                            "arguments": "{\"path\":\"/tmp\"}"
+                        }
+                    })]),
+                },
+                finish_reason: Some("tool_calls".into()),
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 5,
+                completion_tokens: 10,
+                total_tokens: 15,
+                ..Default::default()
+            }),
+            routectl_provider: None,
+            extras: Default::default(),
+        };
+        let v = AnthropicIngress.render_response(resp).unwrap();
+        let content = v["content"].as_array().expect("content is array");
+        let tool_uses: Vec<&Value> = content.iter().filter(|b| b["type"] == "tool_use").collect();
+        assert_eq!(tool_uses.len(), 1);
+        assert_eq!(tool_uses[0]["id"], "call_oc");
+        assert_eq!(tool_uses[0]["name"], "ls");
+        assert_eq!(tool_uses[0]["input"]["path"], "/tmp");
     }
 
     // -------- streaming --------
