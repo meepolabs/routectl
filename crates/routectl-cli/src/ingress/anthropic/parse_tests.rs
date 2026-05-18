@@ -1,8 +1,8 @@
 use serde_json::json;
 
+use crate::ingress::anthropic::AnthropicIngress;
 use crate::ingress::IngressAdapter;
 
-use super::super::AnthropicIngress;
 use super::*;
 
 #[test]
@@ -202,16 +202,14 @@ fn merge_inbound_anthropic_beta_header_filters_crlf_in_values() {
     // The headers-side values flow through cleanly.
     assert!(req.anthropic_beta.contains(&"good-beta".to_string()));
     assert!(req.anthropic_beta.contains(&"benign".to_string()));
-    // Demonstrate the filter on the comma-split path: a header
-    // value that "would" contain CRLF after split would be
-    // dropped. We can't synthesize one via HeaderValue, but we
-    // can exercise the same code path via the split-and-filter
-    // sub-routine by direct call below. For the seeded entry,
-    // it persists (the filter only fires on freshly-parsed
-    // header pieces; pre-existing req.anthropic_beta entries
-    // are operator-supplied and not subject to this filter,
-    // intentionally -- if the operator wants CRLF in a body
-    // field, that's their call).
+    // The pre-existing seeded entry persists: the filter only fires
+    // on freshly-parsed header pieces; pre-existing
+    // req.anthropic_beta entries are operator-supplied and not
+    // subject to this filter intentionally -- if the operator wants
+    // CRLF in a body field, that's their call. Direct coverage of
+    // the actual CR/LF-drop branch lives in
+    // `is_safe_beta_value_rejects_crlf_strings` below, which drives
+    // the helper with strings that no HeaderValue could ever carry.
     assert!(req
         .anthropic_beta
         .iter()

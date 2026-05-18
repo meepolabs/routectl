@@ -1,8 +1,8 @@
 use serde_json::json;
 
+use crate::ingress::anthropic::AnthropicIngress;
 use crate::ingress::IngressAdapter;
 
-use super::super::AnthropicIngress;
 use super::*;
 
 #[test]
