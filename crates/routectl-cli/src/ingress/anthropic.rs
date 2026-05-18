@@ -26,6 +26,14 @@ use serde_json::{json, Map, Value};
 
 use super::{read_alias_header, IngressAdapter, IngressStreamState, SseEvent};
 
+/// The format tag the canonical layer uses for Anthropic-shape
+/// reasoning details (from the Anthropic-API egress on the upstream
+/// side). The Anthropic ingress renderer no longer filters by format
+/// when emitting thinking blocks (every dialect's reasoning_details
+/// surface to cc), but this constant is still used in tests that build
+/// canonical responses with Anthropic-format details to assert renderer
+/// behavior.
+#[cfg(test)]
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 #[derive(Debug, Default)]
@@ -66,6 +74,15 @@ pub struct AnthropicStreamState {
     /// sequentially at the end of the stream so OpenAI-style interleaved
     /// tool call chunks still produce valid Anthropic block ordering.
     tool_blocks: Vec<ToolBlockState>,
+    /// Finish reason seen on a chunk that arrived WITHOUT usage. Many
+    /// openai-compat hosts (OpenAI, OpenRouter, vLLM when
+    /// `stream_options.include_usage=true`) emit the finish_reason on
+    /// one chunk and a final usage-only chunk after it. The Anthropic
+    /// streaming spec emits one `message_delta` carrying BOTH stop_reason
+    /// and usage, then `message_stop`. We buffer the fr until the usage
+    /// chunk arrives (or `render_eos` runs) so we emit the combined
+    /// message_delta + message_stop in the correct order.
+    pending_finish_reason: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -526,12 +543,19 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
     let mut blocks: Vec<Value> = Vec::new();
 
     // Thinking + redacted_thinking blocks from reasoning_details.
+    // We emit for ALL dialect formats (anthropic-claude-v1,
+    // deepseek-v1, vllm-reasoning-v1, openai-responses-v1,
+    // openrouter, raw-think-tag-v1, ...). Anthropic's wire spec
+    // doesn't carry a format tag -- only the canonical kind + payload
+    // are needed. For Anthropic-sourced details, the upstream
+    // signature passes through. For non-Anthropic, signature is
+    // null/empty; cc + Anthropic SDK accept this. The openai-compat
+    // egress's wire_lift/thinking extraction picks the blocks back
+    // up on multi-turn echo so deepseek-v4-pro and vLLM (which
+    // require reasoning_content echo-back) get a clean round-trip.
     let mut details = msg.reasoning_details.clone();
     details.sort_by_key(|d| d.index.unwrap_or(0));
     for d in &details {
-        if d.format.as_deref() != Some(ANTHROPIC_FORMAT) {
-            continue;
-        }
         match &d.kind {
             routectl_core::ReasoningDetailKind::Text => {
                 let text = d
@@ -547,17 +571,42 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
                 }));
             }
             routectl_core::ReasoningDetailKind::Encrypted => {
+                // Encrypted detail; field name on the wire differs by
+                // dialect:
+                //   - Anthropic: `data` (opaque encrypted payload)
+                //   - OpenAI Responses: `encrypted_content`
+                //   - OpenRouter passthrough: `data`
+                // Read whichever is populated.
                 let data = d
                     .payload
                     .get("data")
                     .and_then(|v| v.as_str())
+                    .or_else(|| d.payload.get("encrypted_content").and_then(|v| v.as_str()))
                     .unwrap_or_default();
                 blocks.push(json!({
                     "type": "redacted_thinking",
                     "data": data,
                 }));
             }
-            routectl_core::ReasoningDetailKind::Summary => {}
+            routectl_core::ReasoningDetailKind::Summary => {
+                // OpenAI Responses emits per-step reasoning summaries
+                // as Summary-kind details. Surface them as thinking
+                // blocks so cc displays them (and so they round-trip
+                // on multi-turn echo if the upstream uses summaries
+                // as its reasoning carrier).
+                let text = d
+                    .payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    blocks.push(json!({
+                        "type": "thinking",
+                        "thinking": text,
+                        "signature": Value::Null,
+                    }));
+                }
+            }
         }
     }
 
@@ -676,12 +725,31 @@ fn render_chunk_internal(
         if let Some(fr) = choice.finish_reason.as_deref() {
             flush_tool_blocks(state, &mut events);
             close_open_block(state, &mut events);
-            emit_message_delta(Some(fr), chunk.usage.as_ref(), &mut events);
-            emit_message_stop(state, &mut events);
+            if chunk.usage.is_some() {
+                // Inline usage: emit combined delta + stop now.
+                emit_message_delta(Some(fr), chunk.usage.as_ref(), &mut events);
+                emit_message_stop(state, &mut events);
+            } else {
+                // Defer message_delta + message_stop until the usage
+                // chunk arrives (or render_eos runs). OpenAI / OpenRouter
+                // emit usage in a separate trailing chunk; emitting the
+                // delta without usage now and a second delta after
+                // message_stop is a protocol violation (the trailing
+                // delta arrives post-stop).
+                state.pending_finish_reason = Some(fr.to_string());
+            }
         }
-    } else if chunk.usage.is_some() {
-        // Usage-only chunk (Anthropic emits these in message_delta).
-        emit_message_delta(None, chunk.usage.as_ref(), &mut events);
+    } else if let Some(usage) = chunk.usage.as_ref() {
+        if let Some(fr) = state.pending_finish_reason.take() {
+            // Finalize the buffered finish_reason now that we have usage.
+            emit_message_delta(Some(&fr), Some(usage), &mut events);
+            emit_message_stop(state, &mut events);
+        } else if !state.finished {
+            // Mid-stream usage update (rare; some hosts emit interim
+            // usage). Forward as a usage-only message_delta without
+            // terminating the stream.
+            emit_message_delta(None, Some(usage), &mut events);
+        }
     }
 
     Ok(events)
@@ -720,11 +788,17 @@ fn emit_delta_events(
         }
     }
 
-    // Reasoning details -> thinking_delta or signature_delta.
+    // Reasoning details -> thinking_delta / signature_delta /
+    // redacted_thinking blocks. Emits for ALL dialect formats
+    // (deepseek-v1, vllm-reasoning-v1, openai-responses-v1,
+    // openrouter, raw-think-tag-v1, anthropic-claude-v1). Anthropic
+    // wire spec carries no format tag, just kind + payload. For
+    // non-Anthropic formats the signature is null/empty; the
+    // openai-compat egress's wire_lift/thinking extraction picks
+    // these blocks back up on multi-turn echo so providers requiring
+    // reasoning_content echo-back (DeepSeek-v4+, recent vLLM) get
+    // a clean round-trip.
     for d in &delta.reasoning_details {
-        if d.format.as_deref() != Some(ANTHROPIC_FORMAT) {
-            continue;
-        }
         match d.kind {
             routectl_core::ReasoningDetailKind::Text => {
                 // Pass the upstream detail index so two distinct
@@ -759,10 +833,13 @@ fn emit_delta_events(
                 close_open_block(state, events);
                 let idx = state.next_index;
                 state.next_index += 1;
+                // `data` (Anthropic / OpenRouter passthrough) or
+                // `encrypted_content` (OpenAI Responses).
                 let data = d
                     .payload
                     .get("data")
                     .and_then(|v| v.as_str())
+                    .or_else(|| d.payload.get("encrypted_content").and_then(|v| v.as_str()))
                     .unwrap_or_default();
                 events.push(SseEvent::named(
                     "content_block_start",
@@ -782,7 +859,22 @@ fn emit_delta_events(
                     .unwrap_or_default(),
                 ));
             }
-            routectl_core::ReasoningDetailKind::Summary => {}
+            routectl_core::ReasoningDetailKind::Summary => {
+                // OpenAI Responses summary text -> thinking_delta.
+                // Lets cc display the summary AND keeps the text in
+                // the round-trip history for any preserve-mode echo.
+                let detail_index = d.index.unwrap_or(0);
+                let idx = ensure_block(state, OpenBlockKind::Thinking { detail_index }, events);
+                if let Some(text) = d.payload.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        push_block_delta(
+                            events,
+                            idx,
+                            json!({"type": "thinking_delta", "thinking": text}),
+                        );
+                    }
+                }
+            }
         }
         // Suppress unused warning when ReasoningDetail comes in handy
         // for downstream readers.
@@ -1052,6 +1144,10 @@ impl IngressAdapter for AnthropicIngress {
         if !s.finished {
             flush_tool_blocks(s, &mut events);
             close_open_block(s, &mut events);
+            // Flush a deferred finish_reason (no usage chunk arrived).
+            if let Some(fr) = s.pending_finish_reason.take() {
+                emit_message_delta(Some(&fr), None, &mut events);
+            }
             emit_message_stop(s, &mut events);
         }
         events
@@ -1314,16 +1410,109 @@ mod tests {
         );
     }
 
+    /// Finish_reason WITHOUT usage on the same chunk: the renderer must
+    /// buffer the finish_reason and emit `message_delta + message_stop`
+    /// either on the next usage chunk OR at `render_eos`. Emitting
+    /// `message_delta(fr, None)` immediately and then a SECOND
+    /// `message_delta` after `message_stop` when a trailing usage
+    /// chunk arrives is a protocol violation -- the trailing delta
+    /// arrives post-stop.
     #[test]
-    fn stream_finish_emits_close_delta_and_stop() {
+    fn stream_finish_without_usage_defers_until_eos() {
+        let mut state = ingress().new_stream_state();
+        let _ = ingress()
+            .render_chunk(text_chunk("hello", None), state.as_mut())
+            .unwrap();
+        let finish_events = ingress()
+            .render_chunk(text_chunk("", Some("stop")), state.as_mut())
+            .unwrap();
+        let finish_names: Vec<&str> = finish_events
+            .iter()
+            .filter_map(|e| e.event.as_deref())
+            .collect();
+        // Without usage, the finish chunk only closes the open block.
+        assert_eq!(finish_names, vec!["content_block_stop"]);
+        // Stream ends with no usage chunk: render_eos flushes the
+        // buffered finish_reason as a delta (no usage) + stop.
+        let eos_events = ingress().render_eos(state.as_mut());
+        let eos_names: Vec<&str> = eos_events
+            .iter()
+            .filter_map(|e| e.event.as_deref())
+            .collect();
+        assert_eq!(eos_names, vec!["message_delta", "message_stop"]);
+    }
+
+    /// Finish_reason WITH inline usage: emit `message_delta(fr, usage)`
+    /// + `message_stop` immediately on the same chunk. No deferral.
+    #[test]
+    fn stream_finish_with_inline_usage_emits_immediately() {
+        use routectl_core::{ChunkChoice, ChunkDelta, UsageDelta};
         let mut s = fresh_state();
         let _ = render_chunk_internal(text_chunk("hello", None), &mut s).unwrap();
-        let events = render_chunk_internal(text_chunk("", Some("stop")), &mut s).unwrap();
+        let closing = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta::default(),
+                finish_reason: Some("stop".into()),
+            }],
+            usage: Some(UsageDelta {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(5),
+                total_tokens: Some(15),
+                ..Default::default()
+            }),
+        };
+        let events = render_chunk_internal(closing, &mut s).unwrap();
         let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
         assert_eq!(
             names,
             vec!["content_block_stop", "message_delta", "message_stop"]
         );
+    }
+
+    /// OpenRouter / OpenAI pattern: finish_reason on one chunk, usage
+    /// on the next. The renderer must hold message_delta + message_stop
+    /// until the usage chunk arrives, then emit ONE message_delta
+    /// carrying BOTH stop_reason and usage, followed by message_stop.
+    /// Two message_deltas wrapping message_stop is a protocol violation.
+    #[test]
+    fn stream_finish_then_separate_usage_chunk_emits_single_delta() {
+        use routectl_core::UsageDelta;
+        let mut s = fresh_state();
+        // Body text.
+        let _ = render_chunk_internal(text_chunk("hello", None), &mut s).unwrap();
+        // Finish chunk with no usage -- buffered, only close fires.
+        let finish_events = render_chunk_internal(text_chunk("", Some("stop")), &mut s).unwrap();
+        let finish_names: Vec<&str> = finish_events
+            .iter()
+            .filter_map(|e| e.event.as_deref())
+            .collect();
+        assert_eq!(finish_names, vec!["content_block_stop"]);
+        // Trailing usage-only chunk -- emits combined delta + stop.
+        let usage_chunk = ChatChunk {
+            id: "msg_01".into(),
+            model: "claude-opus-4-7".into(),
+            choices: vec![],
+            usage: Some(UsageDelta {
+                prompt_tokens: Some(100),
+                completion_tokens: Some(50),
+                total_tokens: Some(150),
+                ..Default::default()
+            }),
+        };
+        let usage_events = render_chunk_internal(usage_chunk, &mut s).unwrap();
+        let usage_names: Vec<&str> = usage_events
+            .iter()
+            .filter_map(|e| e.event.as_deref())
+            .collect();
+        assert_eq!(usage_names, vec!["message_delta", "message_stop"]);
+        // The single message_delta carries both stop_reason AND usage.
+        let payload: Value = serde_json::from_str(&usage_events[0].data).unwrap();
+        assert_eq!(payload["delta"]["stop_reason"], "end_turn");
+        assert_eq!(payload["usage"]["input_tokens"], 100);
+        assert_eq!(payload["usage"]["output_tokens"], 50);
     }
 
     #[test]
@@ -1408,6 +1597,10 @@ mod tests {
             }],
             usage: None,
         };
+        // Second chunk carries inline usage so the renderer emits
+        // message_delta + message_stop immediately. Hosts that split
+        // finish_reason and usage across two chunks are covered by
+        // `stream_finish_then_separate_usage_chunk_emits_single_delta`.
         let second = ChatChunk {
             id: "msg_01".into(),
             model: "claude-opus-4-7".into(),
@@ -1428,7 +1621,12 @@ mod tests {
                 },
                 finish_reason: Some("tool_calls".into()),
             }],
-            usage: None,
+            usage: Some(routectl_core::UsageDelta {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(5),
+                total_tokens: Some(15),
+                ..Default::default()
+            }),
         };
 
         let _ = render_chunk_internal(first, &mut s).unwrap();
