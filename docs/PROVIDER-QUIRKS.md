@@ -183,6 +183,18 @@ filter applied). Use `ROUTECTL_LOG=routectl_providers::bedrock=trace`
 to capture sent flags/fields when building the lists. See
 `examples/bedrock.toml` for the empirical 2026-05-12 baseline.
 
+**RPM bucket semantics for shared Bedrock providers.** v0.6.0 keys the
+runtime state (circuit breaker + RPM token bucket) by `[models.X]`
+nickname, not by `[providers.X]` name. This is the right semantic for
+breakers (a flaky model on one Bedrock provider should not trip the
+breaker for siblings), but it means `rpm_limit` is now per-model:
+`rpm_limit = 60` on a provider serving 3 `[models.X]` rows admits up
+to 180 RPM in aggregate to the underlying Bedrock account. Operators
+with tight Bedrock service quotas should size `rpm_limit` per the
+per-model budget, or split sensitive models across multiple
+`[providers.X]` blocks (e.g. distinct `[providers.bedrock-sonnet]` /
+`[providers.bedrock-haiku]` entries) to keep buckets isolated.
+
 **Example provider + model:**
 
 ```toml
