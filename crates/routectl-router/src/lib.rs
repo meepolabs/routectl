@@ -7,6 +7,7 @@
 pub mod config;
 pub mod factory;
 pub mod glob;
+pub mod resolved;
 pub mod router;
 pub mod runtime_state;
 
@@ -20,7 +21,9 @@ pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig}
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
-    build_provider, build_provider_with_options, validate_reasoning_defaults, BuildOptions,
+    build_provider, build_provider_with_options, build_resolved_models,
+    validate_reasoning_defaults, BuildOptions,
 };
 pub use glob::{AliasPattern, PrefixIndex};
+pub use resolved::ResolvedModel;
 pub use router::{Router, RouterOptions};
