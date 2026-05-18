@@ -230,6 +230,19 @@ impl Router {
             }
         }
         if chain.is_empty() {
+            // Alias key matched but every target was disabled or
+            // unresolvable. Without this WARN the request silently
+            // falls through to the `default` catch-all and the
+            // operator gets no breadcrumb back to the misconfigured
+            // alias. (Startup validation in
+            // `validate_alias_chain_targets` catches the static
+            // case; this WARN handles the dynamic case where a
+            // ResolvedModel was dropped after install.)
+            tracing::warn!(
+                wire_model = %wire_model,
+                "alias resolved to empty chain (all targets disabled or unresolvable); \
+                 falling back to default",
+            );
             None
         } else {
             Some(chain)
@@ -272,6 +285,14 @@ impl Router {
     ///   3. Direct nickname (the wire `model` IS a `[models]` key).
     ///   4. `default` key in `[aliases]` -- catch-all chain.
     ///   5. Otherwise `Error::UnknownAlias`.
+    ///
+    /// Shadowing rule: when the same string is both an `[aliases]` key
+    /// AND a `[models.X]` nickname, the alias wins. This is intentional
+    /// so an operator can shadow a model nickname with a multi-target
+    /// fallback chain (e.g. `[aliases] foo = ["foo", "backup"]` to add
+    /// a backup behind an existing direct nickname). Glob keys also win
+    /// over direct nicknames -- e.g. `"claude-*" = "fallback"` shadows
+    /// any nickname starting with `claude-`.
     fn dispatch_chain(&self, model: &str) -> Result<Vec<DispatchTarget>> {
         if let Some(chain) = self.resolve_v6_alias(model) {
             return Ok(into_dispatch_targets(chain));
@@ -552,7 +573,15 @@ impl Router {
 
     /// Resolve the retry policy for the wire `model` field. v0.6.0
     /// removed per-alias retry overrides; the only retry policy is
-    /// the top-level `[retry]` table.
+    /// the top-level `[retry]` table. Pre-v0.6.0 each `[aliases.X]`
+    /// could carry a `[aliases.X.retry]` sub-table; that surface was
+    /// dropped when `[aliases]` collapsed into a flat
+    /// wire-string -> nickname-or-chain map. Operators wanting
+    /// different retry behavior per target can split routes into
+    /// distinct `[providers.X]` entries (timeouts) or use
+    /// per-error-class caps in `[retry]`. The `model` argument is
+    /// retained for forward-compat: a future per-model retry surface
+    /// would key off this value.
     fn policy_for(&self, _model: &str) -> RetryPolicy {
         self.config.retry.clone()
     }
@@ -1328,5 +1357,60 @@ mod resolved_models_tests {
         let router = router_with_resolved(vec![("haiku", "anthropic", "u", p)]);
         let res = router.dispatch_chain("does-not-exist");
         assert!(matches!(res, Err(Error::UnknownAlias(_))));
+    }
+
+    #[tokio::test]
+    async fn alias_entry_shadows_direct_model_nickname() {
+        // Pin: when the same string is both a `[models.X]` nickname
+        // AND an `[aliases]` key, the alias wins. Operators rely on
+        // this to prepend a fallback chain to an existing model
+        // without renaming the nickname.
+        let p_direct: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "direct-p".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let p_via_alias: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "alias-p".into(),
+            calls: AtomicUsize::new(0),
+        });
+        // Build a config where "foo" is both a nickname AND an alias
+        // pointing at a different nickname. Dispatch must hit the
+        // alias's target, not the direct nickname.
+        let mut config = Config::default();
+        config
+            .aliases
+            .insert("foo".into(), AliasValue::Single("backup".into()));
+        let mut router = Router::new(Arc::new(config));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "foo".into(),
+            Arc::new(ResolvedModel::new(
+                "foo",
+                "p-direct",
+                p_direct.clone(),
+                "u-direct",
+            )),
+        );
+        models.insert(
+            "backup".into(),
+            Arc::new(ResolvedModel::new(
+                "backup",
+                "p-alias",
+                p_via_alias.clone(),
+                "u-alias",
+            )),
+        );
+        router.install_resolved_models(models);
+
+        let req = ChatRequest {
+            model: "foo".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        // Alias wins: dispatch landed on the `backup` model's
+        // provider, not the direct `foo` model's provider.
+        assert_eq!(resp.routectl_provider.as_deref(), Some("p-alias"));
+        assert_eq!(resp.model, "u-alias");
     }
 }

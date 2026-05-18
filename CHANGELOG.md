@@ -47,6 +47,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on/off). Operators wanting per-model reasoning-off semantics now
   write `enabled = false` (the more common intent) and `selectable =
   false` is the routing-disable knob.
+- `[aliases.X.retry]` per-alias retry overrides -- removed when
+  `[aliases]` collapsed into a flat wire-string -> nickname-or-chain
+  map. Use the global `[retry]` table; per-error-class caps
+  (`retry_on_429`, `retry_on_5xx`, `retry_on_network`) cover the
+  knobs operators previously set per alias. Per-target timeout
+  variation can be expressed via separate `[providers.X]` entries.
 - `type` field on `[providers.X]` -- renamed to `kind` to disambiguate
   from the `type` Rust keyword and match `BedrockCredsConfig.kind`.
 - `model_id` on `[providers.bedrock-X]` -- moves to
