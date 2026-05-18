@@ -40,7 +40,13 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<Value> {
         }
         emit(alias, &mut entries, &mut seen);
     }
-    for nickname in config.models.keys() {
+    // Skip `selectable = false` model nicknames -- they exist in the
+    // config (operator may be staging an entry) but the router refuses
+    // to route to them.
+    for (nickname, model) in &config.models {
+        if !model.selectable {
+            continue;
+        }
         emit(nickname, &mut entries, &mut seen);
     }
 
