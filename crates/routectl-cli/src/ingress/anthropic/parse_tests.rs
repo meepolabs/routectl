@@ -213,3 +213,28 @@ fn merge_inbound_anthropic_beta_header_filters_crlf_in_values() {
         .iter()
         .any(|b| b.contains("pre-existing")));
 }
+
+/// Review follow-up: the CR/LF defense-in-depth filter lives in a
+/// helper that can be unit-tested in isolation, sidestepping
+/// `HeaderValue::from_str`'s own rejection of control bytes. Pin the
+/// contract: benign strings pass, CR or LF anywhere causes rejection.
+/// Without this, the security-relevant branch of
+/// `merge_inbound_anthropic_beta_header` was not actually exercised
+/// (the outer test could only synthesize benign HeaderValues).
+#[test]
+fn is_safe_beta_value_rejects_crlf_strings() {
+    // Benign cases pass.
+    assert!(is_safe_beta_value("legit-beta"));
+    assert!(is_safe_beta_value("context-management-2025-06-27"));
+    assert!(is_safe_beta_value("")); // empty is structurally safe
+    assert!(is_safe_beta_value("with spaces"));
+    assert!(is_safe_beta_value("with-special!@#$%^&*()chars"));
+    // CR or LF anywhere in the value rejects.
+    assert!(!is_safe_beta_value("evil\r\nX-Injected: bad"));
+    assert!(!is_safe_beta_value("evil\rmid"));
+    assert!(!is_safe_beta_value("evil\nmid"));
+    assert!(!is_safe_beta_value("\revil-leading-cr"));
+    assert!(!is_safe_beta_value("\nevil-leading-lf"));
+    assert!(!is_safe_beta_value("evil-trailing\r"));
+    assert!(!is_safe_beta_value("evil-trailing\n"));
+}
