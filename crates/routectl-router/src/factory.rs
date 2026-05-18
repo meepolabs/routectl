@@ -98,7 +98,7 @@ pub async fn build_provider_with_options(
 ) -> Result<Arc<dyn Provider>> {
     #[cfg(feature = "bedrock")]
     {
-        build_provider_inner(name, entry, secrets, opts, None, None).await
+        build_provider_inner(name, entry, secrets, opts, None, None, None).await
     }
     #[cfg(not(feature = "bedrock"))]
     {
@@ -116,6 +116,18 @@ pub(crate) struct BedrockModelOverrides {
     pub model_id: String,
     pub adaptive_thinking: Option<bool>,
     pub additional_model_request_fields: Option<serde_json::Value>,
+}
+
+/// Pre-resolved Bedrock credentials. Cached per `[providers.X]` entry
+/// in `build_resolved_models` so multiple models on the same Bedrock
+/// provider share one SSO probe / one `aws-config` chain construction.
+/// Without this, building 5 Bedrock models on the same provider would
+/// hit the credential chain 5 times (5x cold-start latency on SSO).
+#[cfg(feature = "bedrock")]
+#[derive(Clone)]
+pub(crate) struct CachedBedrockAuth {
+    pub creds: routectl_providers::bedrock::BedrockCreds,
+    pub resolved: routectl_providers::bedrock::auth::ResolvedCreds,
 }
 
 /// Per-model overrides applied to a non-Bedrock provider build that
@@ -137,6 +149,11 @@ pub(crate) struct AnthropicModelOverrides {
 /// entry needs its own provider instance with those values. Other
 /// provider kinds ignore the override; one cached `Arc<dyn Provider>`
 /// per `[providers.X]` is shared across all `[models]` referencing it.
+///
+/// `cached_auth` lets the caller skip the per-model SSO probe by
+/// reusing creds resolved once at the parent provider level. When
+/// `None`, the factory resolves creds from the `BedrockCredsConfig`
+/// in `entry` (the legacy path; one resolve per call).
 #[cfg(feature = "bedrock")]
 pub(crate) async fn build_provider_with_bedrock_model_override(
     name: &str,
@@ -144,8 +161,18 @@ pub(crate) async fn build_provider_with_bedrock_model_override(
     secrets: &dyn SecretStore,
     opts: BuildOptions,
     bedrock_overrides: Option<BedrockModelOverrides>,
+    cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    build_provider_inner(name, entry, secrets, opts, bedrock_overrides, None).await
+    build_provider_inner(
+        name,
+        entry,
+        secrets,
+        opts,
+        bedrock_overrides,
+        None,
+        cached_auth,
+    )
+    .await
 }
 
 /// Variant that lets the caller override AnthropicApi model-specific
@@ -162,7 +189,7 @@ pub(crate) async fn build_provider_with_anthropic_model_override(
 ) -> Result<Arc<dyn Provider>> {
     #[cfg(feature = "bedrock")]
     {
-        build_provider_inner(name, entry, secrets, opts, None, anthropic_overrides).await
+        build_provider_inner(name, entry, secrets, opts, None, anthropic_overrides, None).await
     }
     #[cfg(not(feature = "bedrock"))]
     {
@@ -178,6 +205,7 @@ async fn build_provider_inner(
     opts: BuildOptions,
     #[cfg(feature = "bedrock")] bedrock_overrides: Option<BedrockModelOverrides>,
     anthropic_overrides: Option<AnthropicModelOverrides>,
+    #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
     match entry {
         ProviderEntry::OpenaiCompat {
@@ -289,9 +317,18 @@ async fn build_provider_inner(
                 &opts.bedrock_allowed_betas,
                 &opts.bedrock_allowed_body_fields,
             )?;
-            let bedrock_creds = resolve_bedrock_creds(secrets, creds).await?;
-            let resolved =
-                routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
+            // Reuse already-resolved creds when the caller provided
+            // them (per-provider cache in `build_resolved_models`).
+            // Otherwise resolve fresh -- the legacy single-provider
+            // path still works.
+            let (bedrock_creds, resolved) = if let Some(c) = cached_auth {
+                (c.creds, c.resolved)
+            } else {
+                let bedrock_creds = resolve_bedrock_creds(secrets, creds).await?;
+                let resolved =
+                    routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
+                (bedrock_creds, resolved)
+            };
             // v0.6.0: model_id, adaptive_thinking, and
             // additional_model_request_fields all come from the model
             // entry override. The factory pumps them in via
@@ -351,6 +388,29 @@ async fn resolve_bedrock_creds(
     })
 }
 
+/// Resolve a Bedrock provider's creds + AWS auth handle once. Used by
+/// `build_resolved_models` to prime the per-provider auth cache before
+/// dispatching N model builds against it. Bypasses credential
+/// resolution for non-Bedrock entries (returns an error so the caller
+/// only invokes this on Bedrock-confirmed entries).
+#[cfg(feature = "bedrock")]
+async fn resolve_bedrock_auth_for_entry(
+    entry: &ProviderEntry,
+    secrets: &dyn SecretStore,
+) -> Result<CachedBedrockAuth> {
+    let ProviderEntry::Bedrock { creds, region, .. } = entry else {
+        return Err(routectl_core::Error::Config(
+            "resolve_bedrock_auth_for_entry called on non-Bedrock provider entry".into(),
+        ));
+    };
+    let bedrock_creds = resolve_bedrock_creds(secrets, creds).await?;
+    let resolved = routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
+    Ok(CachedBedrockAuth {
+        creds: bedrock_creds,
+        resolved,
+    })
+}
+
 #[cfg(feature = "bedrock")]
 fn map_bedrock_api_shape(s: BedrockApiShapeConfig) -> BedrockApiShape {
     match s {
@@ -391,6 +451,15 @@ pub async fn build_resolved_models(
     // Per-provider failed flag so we don't try to rebuild on every
     // model that references it.
     let mut provider_failed: BTreeMap<String, String> = BTreeMap::new();
+    // Cache resolved Bedrock creds per provider name. The first model
+    // referencing a Bedrock provider triggers `auth::resolve` (which
+    // probes the credential chain / SSO); subsequent models on the
+    // same provider reuse the resolved handle, sparing the SSO probe
+    // round-trip. Each per-model BedrockProvider still gets its own
+    // Arc (because `BedrockConfig.model_id` and other overrides
+    // differ), but the credential layer is shared.
+    #[cfg(feature = "bedrock")]
+    let mut bedrock_auth_cache: BTreeMap<String, CachedBedrockAuth> = BTreeMap::new();
 
     for (nickname, entry) in &config.models {
         if !entry.selectable {
@@ -426,6 +495,37 @@ pub async fn build_resolved_models(
         let provider = if is_bedrock {
             #[cfg(feature = "bedrock")]
             {
+                // Cache the resolved creds per provider name so the
+                // SSO probe / aws-config chain build only fires once
+                // per [providers.X] entry, regardless of how many
+                // [models.X] reference it.
+                let cached = match bedrock_auth_cache.get(&entry.provider) {
+                    Some(c) => Some(c.clone()),
+                    None => match resolve_bedrock_auth_for_entry(provider_entry, secrets).await {
+                        Ok(c) => {
+                            bedrock_auth_cache.insert(entry.provider.clone(), c.clone());
+                            Some(c)
+                        }
+                        Err(e) => {
+                            // Bedrock cred resolution failed: the
+                            // provider is unusable, so flag this
+                            // model as failed (and skip every other
+                            // model on the same provider via
+                            // `provider_failed`).
+                            let msg = e.to_string();
+                            tracing::warn!(
+                                provider = %entry.provider,
+                                model = %nickname,
+                                error = %msg,
+                                "skipping Bedrock model (creds resolution failed)",
+                            );
+                            provider_failed.insert(entry.provider.clone(), msg.clone());
+                            failed.push((nickname.clone(), msg));
+                            continue;
+                        }
+                    },
+                };
+
                 let overrides = BedrockModelOverrides {
                     model_id: entry.upstream.clone(),
                     adaptive_thinking: entry.adaptive_thinking,
@@ -437,6 +537,7 @@ pub async fn build_resolved_models(
                     secrets,
                     opts.clone(),
                     Some(overrides),
+                    cached,
                 )
                 .await
                 {
