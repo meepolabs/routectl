@@ -161,7 +161,7 @@ heavy = ["heavy-bedrock", "heavy-anthropic"]   # fallback chain
 default = "fast"
 ```
 
-See [`examples/config.toml`](examples/config.toml) for the full surface, including per-alias retry overrides, RPM limits, and circuit breakers.
+See [`examples/config.toml`](examples/config.toml) for the full surface, including the global `[retry]` table, per-provider RPM limits, and circuit breakers. v0.6 collapsed per-alias retry overrides into the workspace-global `[retry]` -- per-error-class caps (`retry_on_429`, `retry_on_5xx`, `retry_on_network`) cover the same operator knobs.
 
 ### Secret references
 

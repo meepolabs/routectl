@@ -61,8 +61,10 @@ when a model fails the live matrix.
     validation up front, renders Anthropic SSE events
     (`message_start`, `content_block_*`, `message_delta`,
     `message_stop`) through a stateful block-index machine.
-  - `mod.rs` -- `IngressAdapter` trait, `SseEvent`,
-    `resolve_alias` (header > config map > literal model passthrough).
+  - `mod.rs` -- `IngressAdapter` trait, `SseEvent`, and
+    `read_alias_header` (the `x-routectl-alias` override surface; the
+    v0.6.0 alias resolver lives on the router as
+    `Router::resolve_v6_alias`, not the ingress).
 
 ## Ingress runbook (v0.4.0)
 
