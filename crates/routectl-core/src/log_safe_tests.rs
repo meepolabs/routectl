@@ -580,13 +580,17 @@ fn truncate_handles_utf8_char_boundary_safely() {
 
 #[test]
 fn truncate_caps_at_max_with_marker() {
-    // 32 KB string serialized into a JSON value; truncator caps at
-    // MAX_TRACE_BODY_BYTES (16 KB) and appends a marker.
-    let big = "x".repeat(32 * 1024);
+    // Body bigger than cap; truncator caps at MAX_TRACE_BODY_BYTES
+    // and appends the configured marker. Use a fixed 12 KB cap so the
+    // test stays deterministic and survives any operator bump to
+    // MAX_TRACE_BODY_BYTES (campaigns occasionally raise the default
+    // for full-body debugging).
+    let cap = 12 * 1024;
+    let big = "x".repeat(2 * cap);
     let body = json!({"messages": [{"role": "user", "content": big}]});
-    let got = super::truncate_json_for_log(&body, super::MAX_TRACE_BODY_BYTES);
-    assert!(got.len() <= super::MAX_TRACE_BODY_BYTES + 64);
-    assert!(got.contains("[truncated at 16384 bytes]"));
+    let got = super::truncate_json_for_log(&body, cap);
+    assert!(got.len() <= cap + 64);
+    assert!(got.contains(&format!("[truncated at {cap} bytes]")));
 }
 
 #[test]
