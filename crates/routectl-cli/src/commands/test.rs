@@ -1,13 +1,13 @@
 //! `routectl test <target> [--prompt ...]` -- one-shot completion against
-//! a configured alias or `provider:model` direct target.
+//! a configured alias or `[models.X]` nickname.
 
 use std::sync::Arc;
 
 use routectl_auth::MemoryStore;
 use routectl_core::{schema::MessageContent, ChatRequest, Error, Message, Result, Role};
 use routectl_router::{
-    build_resolved_models, validate_bedrock_global_config, validate_reasoning_defaults,
-    BuildOptions, Config, Router,
+    build_resolved_models, validate_alias_chain_targets, validate_bedrock_global_config,
+    validate_reasoning_defaults, BuildOptions, Config, Router,
 };
 
 pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
@@ -25,6 +25,12 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     // dispatch, so the operator gets a clean error rather than silently
     // emitting `effort: ""` on the routed request.
     validate_reasoning_defaults(&config)?;
+
+    // Reject `[aliases]` chains pointing at unknown/disabled models.
+    // Mirrors the serve-side guard so `routectl test` against a
+    // misconfigured alias produces the same precise startup error
+    // instead of an UnknownAlias at dispatch time.
+    validate_alias_chain_targets(&config)?;
 
     // Same BuildOptions path as `serve` so a `routectl test` run
     // exercises exactly the production translation contract. Without
