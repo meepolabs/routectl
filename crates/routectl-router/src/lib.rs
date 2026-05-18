@@ -6,13 +6,14 @@
 
 pub mod config;
 pub mod factory;
+pub mod glob;
 pub mod router;
 pub mod runtime_state;
 
 pub use config::{
-    AliasEntry, Config, IngressConfig, IngressShape, LegacyCompat, ProviderEntry, ProviderKind,
-    ProviderRuntimePolicy, ReasoningDefaults, ReasoningDialect, RetryPolicy, ServerAuth,
-    ServerConfig,
+    AliasEntry, AliasValue, Config, IngressConfig, IngressShape, LegacyCompat, ModelEntry,
+    ProviderEntry, ProviderKind, ProviderRuntimePolicy, ReasoningDefaults, ReasoningDialect,
+    RetryPolicy, ServerAuth, ServerConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
@@ -21,4 +22,5 @@ pub use factory::validate_bedrock_global_config;
 pub use factory::{
     build_provider, build_provider_with_options, validate_reasoning_defaults, BuildOptions,
 };
+pub use glob::{AliasPattern, PrefixIndex};
 pub use router::{Router, RouterOptions};

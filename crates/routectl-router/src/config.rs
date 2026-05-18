@@ -61,6 +61,153 @@ pub struct Config {
     /// shared knobs (e.g. region-default, retry-default) land here too.
     #[serde(default)]
     pub bedrock: BedrockGlobalConfig,
+
+    /// v0.6.0 model directory. Each entry binds a logical nickname
+    /// (the table key) to a transport (`provider`), an upstream model
+    /// id (`upstream`), and per-model knobs. The `[aliases]` table
+    /// references entries by nickname. v0.6.0 is the first release
+    /// that consumes this table; see the v0.6.0-rc.1 changelog.
+    #[serde(default)]
+    pub models: BTreeMap<String, ModelEntry>,
+}
+
+/// One row in the `[models]` table. Carries the nickname-to-upstream
+/// binding plus per-model knobs that used to live on `[providers.X]`
+/// (`thinking`, `enabled`, `adaptive_thinking`,
+/// `additional_request_fields`, `chat_template_kwargs`,
+/// `default_extras`).
+///
+/// Fields that vary per-model belong here. Fields that vary per-
+/// transport (auth, base URL, headers, runtime gates) stay on
+/// `[providers.X]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ModelEntry {
+    /// Provider name (a key in the `[providers]` table). The router
+    /// validates at startup that every model entry references a known
+    /// provider.
+    pub provider: String,
+
+    /// Upstream model id. Forwarded to the provider verbatim. For
+    /// Bedrock this becomes the `BedrockConfig.model_id` value (the
+    /// AWS inference profile id, e.g.
+    /// `us.anthropic.claude-haiku-4-5-20251001-v1:0`). For OpenAI-
+    /// compatible egresses it is the wire `model` field.
+    pub upstream: String,
+
+    /// Whether this model is selectable from the `[aliases]` table.
+    /// Defaults to `true`; flip to `false` to keep an entry around
+    /// while wiring without making it servable. Disabled entries
+    /// still load but `Router::new` errors when an alias chain
+    /// references one.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
+    /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
+    /// `reasoning.enabled`. Caller-supplied values always win.
+    #[serde(default, flatten)]
+    pub reasoning_defaults: ReasoningDefaults,
+
+    /// Use the Opus 4.7+ adaptive thinking wire shape on this model.
+    /// When `true` (and the route lands on an Anthropic-shape egress),
+    /// routectl rewrites `thinking: {type:"enabled", budget_tokens:N}`
+    /// to `thinking: {type:"adaptive"}` and lifts `reasoning.effort`
+    /// into `output_config.effort`. Older Claude families still accept
+    /// the legacy shape, so this is opt-in per model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_thinking: Option<bool>,
+
+    /// Bedrock Converse `additionalModelRequestFields` -- vendor-
+    /// specific knobs that don't have a top-level Converse slot. The
+    /// Bedrock Invoke egress also reads this map for non-routectl-
+    /// managed body fields. Other egresses ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_request_fields: Option<serde_json::Value>,
+
+    /// vLLM / DeepSeek `chat_template_kwargs` passthrough. Lifted into
+    /// the upstream body verbatim by openai-compat egresses. Other
+    /// egresses ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<serde_json::Value>,
+
+    /// Default `provider_extras` merged into every routed request
+    /// when the caller didn't already supply them. Used by openai-
+    /// compat egresses for vendor-specific extras (e.g. an
+    /// OpenRouter `provider` block, a vLLM `guided_choice`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_extras: Option<serde_json::Value>,
+}
+
+impl ModelEntry {
+    pub fn new(provider: impl Into<String>, upstream: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            upstream: upstream.into(),
+            enabled: true,
+            reasoning_defaults: ReasoningDefaults::default(),
+            adaptive_thinking: None,
+            additional_request_fields: None,
+            chat_template_kwargs: None,
+            default_extras: None,
+        }
+    }
+
+    pub fn with_reasoning_defaults(mut self, defaults: ReasoningDefaults) -> Self {
+        self.reasoning_defaults = defaults;
+        self
+    }
+
+    pub fn with_adaptive_thinking(mut self, b: bool) -> Self {
+        self.adaptive_thinking = Some(b);
+        self
+    }
+
+    pub fn with_enabled(mut self, b: bool) -> Self {
+        self.enabled = b;
+        self
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Value of one entry in the `[aliases]` table. Either a single model
+/// nickname (the most common shape) or a fallback chain of nicknames.
+/// Untagged so the operator-facing TOML stays terse:
+///
+/// ```toml
+/// [aliases]
+/// "claude-opus-4-7-20251022" = "heavy"      # single
+/// "fast"                     = ["small", "smaller"]  # chain
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AliasValue {
+    Single(String),
+    Chain(Vec<String>),
+}
+
+impl AliasValue {
+    /// Iterate over the model nicknames in this alias entry. A
+    /// `Single` yields one name; a `Chain` yields each entry in
+    /// order. Lifetimes here mean "the names live as long as the
+    /// `AliasValue`."
+    pub fn nicknames(&self) -> impl Iterator<Item = &str> {
+        let v: Box<dyn Iterator<Item = &str>> = match self {
+            AliasValue::Single(s) => Box::new(std::iter::once(s.as_str())),
+            AliasValue::Chain(v) => Box::new(v.iter().map(|s| s.as_str())),
+        };
+        v
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            AliasValue::Single(_) => false,
+            AliasValue::Chain(v) => v.is_empty(),
+        }
+    }
 }
 
 /// Bedrock-wide configuration shared by every `[providers.X]` entry of
@@ -924,6 +1071,197 @@ mod tests {
             .with_reasoning_dialect(ReasoningDialect::Openai);
         entry.redact_secrets();
         assert_eq!(entry.secret_uris(), vec!["literal:[REDACTED]"]);
+    }
+}
+
+#[cfg(test)]
+mod v0_6_config_tests {
+    //! Tests for the v0.6.0 config shapes: `[models]` table and the
+    //! untagged `AliasValue` enum. The `[providers]` table itself
+    //! still uses the legacy shape during C1 (these tests pin the
+    //! additive surface only).
+
+    use super::{AliasValue, Config, ModelEntry};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn model_entry_required_fields_only() {
+        // Minimum-viable model entry: just provider + upstream.
+        let toml_text = r#"
+[models.haiku]
+provider = "anthropic"
+upstream = "claude-haiku-4-5-20251001"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let m = cfg.models.get("haiku").expect("haiku entry");
+        assert_eq!(m.provider, "anthropic");
+        assert_eq!(m.upstream, "claude-haiku-4-5-20251001");
+        assert!(m.enabled, "default enabled = true");
+        assert!(m.adaptive_thinking.is_none());
+        assert!(m.reasoning_defaults.is_empty());
+    }
+
+    #[test]
+    fn model_entry_all_fields() {
+        let toml_text = r#"
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-7-20251022"
+enabled = true
+thinking = "high"
+adaptive_thinking = true
+default_extras = { provider = { order = ["A", "B"] } }
+chat_template_kwargs = { enable_thinking = false }
+additional_request_fields = { reasoning_config = { type = "enabled" } }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let m = cfg.models.get("opus").expect("opus entry");
+        assert_eq!(m.provider, "anthropic");
+        assert_eq!(m.upstream, "claude-opus-4-7-20251022");
+        assert!(m.enabled);
+        assert_eq!(m.reasoning_defaults.thinking.as_deref(), Some("high"));
+        assert_eq!(m.adaptive_thinking, Some(true));
+        assert!(m.default_extras.is_some());
+        assert!(m.chat_template_kwargs.is_some());
+        assert!(m.additional_request_fields.is_some());
+    }
+
+    #[test]
+    fn alias_value_parses_single_string() {
+        let toml_text = r#"
+"claude-opus-4-7-20251022" = "heavy"
+"#;
+        let v: BTreeMap<String, AliasValue> = toml::from_str(toml_text).expect("parse");
+        let entry = v.get("claude-opus-4-7-20251022").expect("entry");
+        match entry {
+            AliasValue::Single(s) => assert_eq!(s, "heavy"),
+            other => panic!("expected Single, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alias_value_parses_chain_list() {
+        let toml_text = r#"
+"fast" = ["nano", "mini"]
+"#;
+        let v: BTreeMap<String, AliasValue> = toml::from_str(toml_text).expect("parse");
+        let entry = v.get("fast").expect("entry");
+        match entry {
+            AliasValue::Chain(c) => assert_eq!(c, &vec!["nano".to_string(), "mini".to_string()]),
+            other => panic!("expected Chain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alias_value_default_special_key() {
+        // `default = "..."` lives inside the [aliases] table as a
+        // top-level key alongside the wire-string entries. v0.6.0
+        // reading the table looks up `"default"` explicitly to get
+        // the catch-all destination.
+        let toml_text = r#"
+default = "small"
+"claude-opus-4-7-20251022" = "heavy"
+"#;
+        let v: BTreeMap<String, AliasValue> = toml::from_str(toml_text).expect("parse");
+        let default_entry = v.get("default").expect("default entry");
+        match default_entry {
+            AliasValue::Single(s) => assert_eq!(s, "small"),
+            other => panic!("expected Single, got {other:?}"),
+        }
+        // Other entries are unaffected.
+        assert!(v.contains_key("claude-opus-4-7-20251022"));
+    }
+
+    #[test]
+    fn alias_value_suffix_glob_parses() {
+        // Glob patterns are operator-supplied keys. The config layer
+        // accepts them verbatim; semantic validation (rejecting bare
+        // `*`, embedded `*`, etc.) happens via `crate::glob` when
+        // Router::new builds the lookup index. Here we only assert
+        // that the TOML parses.
+        let toml_text = r#"
+"claude-opus-*" = "opus"
+"claude-*" = "fallback"
+"#;
+        let v: BTreeMap<String, AliasValue> = toml::from_str(toml_text).expect("parse");
+        assert!(v.contains_key("claude-opus-*"));
+        assert!(v.contains_key("claude-*"));
+    }
+
+    #[test]
+    fn provider_kind_field_is_alias_for_type_in_c4() {
+        // C1: the providers shape still uses `type` (legacy). C4
+        // renames to `kind`. This test pins the legacy shape so the
+        // C4 commit can mechanically flip the discriminator without
+        // unrelated breakage.
+        let toml_text = r#"
+[providers.deepseek]
+type = "openai-compat"
+base_url = "https://api.deepseek.com/v1"
+api_key_ref = "literal:k"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert!(cfg.providers.contains_key("deepseek"));
+    }
+
+    #[test]
+    fn alias_chain_referencing_unknown_nicknames_is_a_router_concern() {
+        // The config layer accepts any alias chain shape; nickname
+        // resolution happens at Router::new (C2) which validates that
+        // every chain entry resolves to a known [models] entry. C1
+        // verifies the parse surface only.
+        let toml_text = r#"
+[models.alpha]
+provider = "p"
+upstream = "u"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert!(cfg.models.contains_key("alpha"));
+        // Separately confirm the chain shape parses.
+        let aliases_text = r#"
+"x" = ["alpha", "beta"]
+"#;
+        let v: BTreeMap<String, AliasValue> = toml::from_str(aliases_text).expect("aliases parse");
+        match v.get("x").unwrap() {
+            AliasValue::Chain(c) => assert_eq!(c.len(), 2),
+            other => panic!("expected Chain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_entry_disabled_field() {
+        let toml_text = r#"
+[models.shelved]
+provider = "p"
+upstream = "u"
+enabled = false
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let m = cfg.models.get("shelved").expect("entry");
+        assert!(!m.enabled);
+    }
+
+    #[test]
+    fn model_entry_builder_helper_matches_required_only_parse() {
+        // Builder + TOML parse must agree on the default-true `enabled`.
+        let m = ModelEntry::new("p", "u");
+        assert_eq!(m.provider, "p");
+        assert_eq!(m.upstream, "u");
+        assert!(m.enabled);
+    }
+
+    #[test]
+    fn alias_value_chain_iter_yields_in_order() {
+        let v = AliasValue::Chain(vec!["a".into(), "b".into(), "c".into()]);
+        let names: Vec<&str> = v.nicknames().collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn alias_value_single_iter_yields_one() {
+        let v = AliasValue::Single("solo".into());
+        let names: Vec<&str> = v.nicknames().collect();
+        assert_eq!(names, vec!["solo"]);
     }
 }
 
