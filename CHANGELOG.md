@@ -23,6 +23,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cache is a follow-up (currently each per-model BedrockProvider
   builds its own client; the connection-pool fan-out is per-model).
 
+- Alias chain validation at startup. `serve` and `routectl test`
+  reject `[aliases]` chains pointing at unknown OR `selectable =
+  false` `[models.X]` nicknames before the server binds, instead of
+  silently returning `UnknownAlias` at first request time. Validator
+  accumulates every offending alias/nickname pair into one
+  consolidated error so an operator with multiple typos sees them
+  all at once. `routectl config check` shares the same validator.
+
+- Alias glob double-parse. `Router::new` parsed each `*`-bearing
+  alias key twice (once to dispatch, once to insert). Pattern is
+  now reused via let-binding.
+
+- `routectl test` help text and module docstring referenced the
+  removed `provider:model` direct-target form. Now references the
+  alias key / model nickname inputs that the v0.6.0 router actually
+  accepts.
+
 ### Removed (BREAKING)
 
 - `enabled` on `[models.X]` -- renamed to `selectable` to free the

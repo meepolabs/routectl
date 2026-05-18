@@ -22,7 +22,7 @@ pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig}
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
     build_provider, build_provider_with_options, build_resolved_models,
-    validate_reasoning_defaults, BuildOptions,
+    validate_alias_chain_targets, validate_reasoning_defaults, BuildOptions,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use resolved::ResolvedModel;

@@ -3,7 +3,7 @@
 //! Subcommands:
 //!   serve   Start the local OpenAI-compatible HTTP server.
 //!   login   Capture a consumer-session cookie (claude.ai, chatgpt.com).
-//!   test    One-shot completion against a configured provider/alias.
+//!   test    One-shot completion against an alias or model nickname.
 //!   config  Validate or print the resolved config.
 
 use std::path::PathBuf;
@@ -48,9 +48,9 @@ enum Cmd {
         #[arg(value_parser = ["claude", "chatgpt"])]
         provider: String,
     },
-    /// One-shot completion against an alias or `provider:model`.
+    /// One-shot completion against an alias key or model nickname.
     Test {
-        /// Alias or `provider:model` target.
+        /// Alias key (`[aliases]` entry) or model nickname (`[models.X]` table key).
         target: String,
         /// User prompt. Defaults to a small smoke prompt.
         #[arg(short, long, default_value = "Say hi in exactly five words.")]

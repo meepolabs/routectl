@@ -141,8 +141,7 @@ impl Router {
                 continue;
             }
             match crate::glob::AliasPattern::parse(key) {
-                Ok(crate::glob::AliasPattern::Prefix(_)) => {
-                    let pattern = crate::glob::AliasPattern::parse(key).unwrap();
+                Ok(pattern @ crate::glob::AliasPattern::Prefix(_)) => {
                     alias_glob_index.insert(pattern, value.clone());
                 }
                 Ok(crate::glob::AliasPattern::Exact(_)) => {
