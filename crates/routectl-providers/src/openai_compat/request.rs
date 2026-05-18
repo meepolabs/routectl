@@ -91,6 +91,26 @@ pub fn normalize(
              echo-back (DeepSeek v4+, recent vLLM)."
         );
     }
+
+    dyn_dialect.apply_request(id, obj, req)?;
+
+    // Lift Anthropic-shape request fields to OpenAI-wire shape. Runs
+    // after dialect apply so dialect shaping is visible, and before
+    // extras merge so operator-supplied provider_extras cannot clobber
+    // the lift (managed-key allow-list already blocks "tools" et al,
+    // but belt-and-suspenders ordering matters for clarity).
+    //
+    // history_reasoning processing MUST run AFTER wire_lift, not
+    // before. The `thinking` step of wire_lift extracts Anthropic
+    // `thinking` / `redacted_thinking` content blocks from assistant
+    // messages into the message-envelope `reasoning_details` array.
+    // The strip path needs to see those extracted entries to remove
+    // them; the preserve path needs them to lower into
+    // `reasoning_content` (deepseek/vllm) or keep as typed details
+    // (openrouter). Running history_reasoning before wire_lift would
+    // make both modes blind to anything cc echoed as content blocks.
+    super::wire_lift::lift_all(id, obj, req, strict_translation)?;
+
     match history_reasoning {
         HistoryReasoning::Auto => {
             if dialect_strips {
@@ -104,15 +124,6 @@ pub fn normalize(
             dyn_dialect.preserve_history_reasoning(id, obj)?;
         }
     }
-
-    dyn_dialect.apply_request(id, obj, req)?;
-
-    // Lift Anthropic-shape request fields to OpenAI-wire shape. Runs
-    // after dialect apply so dialect shaping is visible, and before
-    // extras merge so operator-supplied provider_extras cannot clobber
-    // the lift (managed-key allow-list already blocks "tools" et al,
-    // but belt-and-suspenders ordering matters for clarity).
-    super::wire_lift::lift_all(id, obj, req, strict_translation)?;
 
     // default_extras then provider_extras (caller wins). Both gated
     // by the managed-key allow-list -- without this, a request body
@@ -167,12 +178,32 @@ fn merge_extras(
 ///     hosts that don't understand it, so it is blocked here. (The
 ///     Anthropic-API egress lets `output_config` through from provider_extras
 ///     because that is the intended forwarding path for Anthropic upstreams.)
+///   - Anthropic-only beta fields swept into `provider_extras` by the
+///     Anthropic ingress's forward-compat sweep
+///     (`crates/routectl-cli/src/ingress/anthropic.rs::translate_request`).
+///     These must NOT reach openai-compat upstreams: lenient hosts
+///     (OpenRouter) silently ignore them; strict hosts (NIM, DeepSeek
+///     API direct, vLLM with strict schema) 400 with `Unsupported
+///     parameter(s): <field>`. Bug I (2026-05-18, NIM 400 on cc's
+///     `context_management`) is the canonical case. Add new entries
+///     here when a new Anthropic-only top-level beta field ships.
+///     (Anthropic-API egress correctly forwards these via its own
+///     `merge_provider_extras` path, untouched by this block-list.)
 fn is_routectl_managed_key(key: &str) -> bool {
     is_canonical_request_key(key)
         || matches!(
             key,
             // Anthropic-only nested output config; not valid on OpenAI wire.
             "output_config"
+            // Anthropic-only quarterly-cadence beta fields. Forwarding
+            // these to strict openai-compat upstreams 400s the request.
+            | "context_management"
+            | "context_hint"
+            | "mcp_servers"
+            | "container"
+            | "inference_geo"
+            | "speed"
+            | "diagnostics"
         )
 }
 

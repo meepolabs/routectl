@@ -152,9 +152,10 @@ pub const MAX_DEBUG_BODY_BYTES: usize = 4096;
 
 /// Cap on the serialized body emitted at TRACE level by all four body
 /// trace helpers (`trace_ingress_body`, `trace_outgoing_body`,
-/// `trace_upstream_success_body`, `trace_egress_body`). 16 KB is a
-/// generous excerpt for diagnosis without flooding logs when a debug
-/// session gets left on by accident.
+/// `trace_upstream_success_body`, `trace_egress_body`). 16 KB is
+/// generous for diagnosis without flooding logs when a debug session
+/// gets left on by accident. Operators can bump this locally for
+/// full-body debugging during a campaign.
 pub const MAX_TRACE_BODY_BYTES: usize = 16 * 1024;
 
 /// Backward-compatible alias for the old name. Prefer
