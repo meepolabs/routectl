@@ -31,7 +31,8 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use routectl_auth::MemoryStore;
 use routectl_core::{ChatRequest, Message, MessageContent, Role};
 use routectl_router::{
-    build_provider, AliasEntry, Config, ProviderEntry, ReasoningDialect, Router,
+    build_resolved_models, AliasValue, BuildOptions, Config, ModelEntry, ProviderEntry,
+    ReasoningDialect, Router,
 };
 
 const SHORT_PROMPT: &str = "Reply with just the word: pong";
@@ -319,32 +320,37 @@ async fn build_test_router(
             .with_reasoning_dialect(dialect),
     );
 
+    // v0.6.0: each target becomes one [models.X] entry (nickname == wire
+    // model id) and one [aliases] entry pointing the wire model at its
+    // own nickname. This mirrors how the matrix tests dispatch against
+    // exactly the wire id the client sent.
+    let mut models = BTreeMap::new();
     let mut aliases = BTreeMap::new();
     for t in targets {
-        aliases.insert(
-            (*t).to_string(),
-            AliasEntry::new(vec![format!("{provider_name}:{t}")]),
+        let nickname = sanitize_provider_name(t);
+        models.insert(
+            nickname.clone(),
+            ModelEntry::new(provider_name.to_string(), (*t).to_string()),
         );
+        aliases.insert((*t).to_string(), AliasValue::Single(nickname));
     }
 
     let cfg = Arc::new(Config {
         server: Default::default(),
         providers,
         aliases,
-        default_model: None,
+        models,
         retry: Default::default(),
         legacy_compat: Default::default(),
-        ingress: Default::default(),
         ..Default::default()
     });
 
     let mut router = Router::new(cfg.clone());
-    for (name, entry) in &cfg.providers {
-        let provider = build_provider(name, entry, &store)
-            .await
-            .expect("build provider");
-        router.register(name.clone(), provider);
-    }
+    let (resolved_models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+        .await
+        .expect("build resolved models");
+    assert!(failed.is_empty(), "unexpected build failures: {failed:?}");
+    router.install_resolved_models(resolved_models);
     Some(Arc::new(router))
 }
 
@@ -560,9 +566,20 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "us-east-1".into());
 
+    // v0.6.0 wiring detour: the live Bedrock tests bypass
+    // `build_resolved_models` because they need to construct
+    // `BedrockProvider` directly (with a custom `allowed_*` allowlist)
+    // before handing it to the router. We build one provider per
+    // target -- mirroring the per-model Arc fan-out that v0.6's
+    // factory produces -- then install a synthetic `ResolvedModel`
+    // table so dispatch walks the per-nickname Arc.
+    use routectl_router::ResolvedModel;
+    use std::sync::Arc as ArcAlias;
+
     let mut providers = BTreeMap::new();
     let mut aliases = BTreeMap::new();
-    let mut router_providers: Vec<(String, Arc<dyn routectl_core::Provider>)> = Vec::new();
+    let mut models = BTreeMap::new();
+    let mut resolved_models: BTreeMap<String, ArcAlias<ResolvedModel>> = BTreeMap::new();
 
     for model_id in targets {
         let provider_name = format!("bedrock-{}", sanitize_provider_name(model_id));
@@ -612,39 +629,49 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
-        let provider: Arc<dyn routectl_core::Provider> =
-            Arc::new(BedrockProvider::new(cfg, resolved));
+        let provider: ArcAlias<dyn routectl_core::Provider> =
+            ArcAlias::new(BedrockProvider::new(cfg, resolved));
 
-        // The router config still needs an entry per provider; its
-        // contents don't matter for the in-memory `register` path
-        // because we replace the runtime via `register()` below. Use
-        // a placeholder OpenAiCompat entry to satisfy the schema.
+        // Placeholder provider entry so Router::new sees the provider
+        // name in its config (used for runtime-state lookups). The
+        // actual provider Arc is installed via the resolved-models
+        // table below.
         providers.insert(
             provider_name.clone(),
             ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:placeholder"),
         );
+        let nickname = sanitize_provider_name(model_id);
+        models.insert(
+            nickname.clone(),
+            ModelEntry::new(provider_name.clone(), (*model_id).to_string()),
+        );
         aliases.insert(
             (*model_id).to_string(),
-            AliasEntry::new(vec![format!("{provider_name}:{model_id}")]),
+            AliasValue::Single(nickname.clone()),
         );
-        router_providers.push((provider_name, provider));
+        resolved_models.insert(
+            nickname.clone(),
+            ArcAlias::new(ResolvedModel::new(
+                nickname,
+                provider_name,
+                provider,
+                (*model_id).to_string(),
+            )),
+        );
     }
 
     let cfg = Arc::new(Config {
         server: Default::default(),
         providers,
         aliases,
-        default_model: None,
+        models,
         retry: Default::default(),
         legacy_compat: Default::default(),
-        ingress: Default::default(),
         ..Default::default()
     });
 
     let mut router = Router::new(cfg);
-    for (name, provider) in router_providers {
-        router.register(name, provider);
-    }
+    router.install_resolved_models(resolved_models);
     Some(Arc::new(router))
 }
 
@@ -951,6 +978,8 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
     use routectl_providers::bedrock::{
         auth as bedrock_auth, BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider,
     };
+    use routectl_router::ResolvedModel;
+    use std::sync::Arc as ArcAlias;
 
     let key = std::env::var("AWS_BEARER_TOKEN_BEDROCK").ok()?;
     if key.trim().is_empty() {
@@ -963,7 +992,8 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
 
     let mut providers = BTreeMap::new();
     let mut aliases = BTreeMap::new();
-    let mut router_providers: Vec<(String, Arc<dyn routectl_core::Provider>)> = Vec::new();
+    let mut models = BTreeMap::new();
+    let mut resolved_models: BTreeMap<String, ArcAlias<ResolvedModel>> = BTreeMap::new();
 
     for model_id in targets {
         let provider_name = format!("bedrock-converse-{}", sanitize_provider_name(model_id));
@@ -1013,35 +1043,45 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
             additional_model_request_fields: None,
             adaptive_thinking: None,
         };
-        let provider: Arc<dyn routectl_core::Provider> =
-            Arc::new(BedrockProvider::new(cfg, resolved));
+        let provider: ArcAlias<dyn routectl_core::Provider> =
+            ArcAlias::new(BedrockProvider::new(cfg, resolved));
 
         providers.insert(
             provider_name.clone(),
             ProviderEntry::openai_compat("https://placeholder.invalid/v1", "literal:placeholder"),
         );
+        let nickname = sanitize_provider_name(model_id);
+        models.insert(
+            nickname.clone(),
+            ModelEntry::new(provider_name.clone(), (*model_id).to_string()),
+        );
         aliases.insert(
             (*model_id).to_string(),
-            AliasEntry::new(vec![format!("{provider_name}:{model_id}")]),
+            AliasValue::Single(nickname.clone()),
         );
-        router_providers.push((provider_name, provider));
+        resolved_models.insert(
+            nickname.clone(),
+            ArcAlias::new(ResolvedModel::new(
+                nickname,
+                provider_name,
+                provider,
+                (*model_id).to_string(),
+            )),
+        );
     }
 
     let cfg = Arc::new(Config {
         server: Default::default(),
         providers,
         aliases,
-        default_model: None,
+        models,
         retry: Default::default(),
         legacy_compat: Default::default(),
-        ingress: Default::default(),
         ..Default::default()
     });
 
     let mut router = Router::new(cfg);
-    for (name, provider) in router_providers {
-        router.register(name, provider);
-    }
+    router.install_resolved_models(resolved_models);
     Some(Arc::new(router))
 }
 
@@ -1139,6 +1179,7 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
 
     let mut providers = BTreeMap::new();
     let mut aliases = BTreeMap::new();
+    let mut models = BTreeMap::new();
 
     for model_id in targets {
         let provider_name = format!("gpt-{}", sanitize_provider_name(model_id));
@@ -1155,30 +1196,30 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
                 runtime: Default::default(),
             },
         );
-        aliases.insert(
-            (*model_id).to_string(),
-            AliasEntry::new(vec![format!("{provider_name}:{model_id}")]),
+        let nickname = sanitize_provider_name(model_id);
+        models.insert(
+            nickname.clone(),
+            ModelEntry::new(provider_name, (*model_id).to_string()),
         );
+        aliases.insert((*model_id).to_string(), AliasValue::Single(nickname));
     }
 
     let cfg = Arc::new(Config {
         server: Default::default(),
         providers,
         aliases,
-        default_model: None,
+        models,
         retry: Default::default(),
         legacy_compat: Default::default(),
-        ingress: Default::default(),
         ..Default::default()
     });
 
     let mut router = Router::new(cfg.clone());
-    for (name, entry) in &cfg.providers {
-        let provider = build_provider(name, entry, &store)
-            .await
-            .expect("build openai-responses provider");
-        router.register(name.clone(), provider);
-    }
+    let (resolved_models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+        .await
+        .expect("build resolved openai-responses models");
+    assert!(failed.is_empty(), "unexpected build failures: {failed:?}");
+    router.install_resolved_models(resolved_models);
     Some(Arc::new(router))
 }
 
