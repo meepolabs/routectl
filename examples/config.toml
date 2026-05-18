@@ -1,346 +1,179 @@
-# Example routectl config. Copy to ~/.config/routectl/config.toml and edit.
-# Validate with: routectl config check
+# Example routectl config (v0.6+ schema). Copy to
+# ~/.config/routectl/config.toml and edit. Validate with:
+#   routectl config check
+
+# routectl config has three first-class tables:
+#
+# [providers.X]   Transport + auth ONLY. How to reach an upstream.
+#                 (kind, api_key_ref, base_url, region/creds for
+#                 Bedrock, extra_headers, runtime gates, ...)
+#
+# [models.X]      A model declaration. Points at one provider, names
+#                 the upstream model id, owns its reasoning defaults
+#                 (thinking, enabled, adaptive_thinking, ...).
+#
+# [aliases]       Wire-string -> model nickname routing. One flat
+#                 table, single value or list (chain) per key.
+#                 `default = "..."` is a special key for the catch-all.
+#                 Keys ending in `*` are suffix globs, e.g.
+#                 `"claude-opus-*" = "opus-heavy"`.
+#
+# Caller request shape > model defaults > provider/internal defaults.
+# An incoming `reasoning.effort = "minimal"` always wins over an
+# operator-configured `[models.X] thinking = "high"`. Use models'
+# defaults to set a floor when the caller is silent.
 
 [server]
 host = "127.0.0.1"
 port = 8787
+# strict_translation = true     # production CI: 400 on lossy seams.
+# unsafe_public via CLI flag    # bind non-loopback only with --unsafe-public.
 
-# ---- Providers ----
-# Each provider gets a user-facing name (the table key). Add as many as you want.
-# Reference secrets via one of:
-#   env://VAR_NAME                  process env var; silent on every platform.
-#                                   Visible to anything reading process env.
-#   file:///abs/path/to/key         file contents; trimmed. On Unix,
-#                                   refused if group or other have any
-#                                   permissions (chmod 600 or 400
-#                                   recommended). Windows skips the
-#                                   permission-bit check (NTFS ACLs are
-#                                   not portably enforced); secure the
-#                                   file via filesystem ACLs there.
-#                                   Compatible with sops, age,
-#                                   doppler-cli, vault-agent, etc.
-#   literal:hunter2                 inline plaintext; only for placeholders
-#                                   like `literal:not-needed`. Avoid for
-#                                   real secrets.
-#
-# Routectl never auto-discovers credentials from other tools.
-#
-# Per-provider runtime gates (all optional, default off):
-#   rpm_limit              max requests per minute; over-limit falls through
-#   circuit_failures       trip breaker after N consecutive failures
-#   circuit_cooldown_ms    keep breaker open this long (default 30000)
-#
-# Per-provider reasoning defaults (all optional, default off):
-#   thinking = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "none"
-#   enabled  = true | false
-#
-# The `thinking` values above are the COMMON tokens; the validator
-# accepts any non-empty short string so vendor-specific levels (e.g.
-# a future "ultra") pass through verbatim without a routectl release.
-#
-# Note: the TOML key `thinking` maps to the canonical `effort` field
-# on the routed request (visible in trace logs as `merged_effort=...`).
-#
-# Both fold into ChatRequest.reasoning at the router BEFORE the egress
-# translation runs. Caller-supplied wire fields always win. Precedence:
-# caller > operator > internal default. `enabled = false` here is a
-# default the caller can still override -- not a hard ceiling. See
-# routectl_core::ReasoningConfig for the canonical semantics; each
-# egress (Anthropic legacy/adaptive, Bedrock Invoke/Converse, vLLM/
-# DeepSeek/OpenAI dialects, OpenAI Responses) interprets `effort` and
-# `enabled` according to its own wire shape.
+# Listener auth -- enable when binding non-loopback. Tokens are
+# secret-refs (env://, file://, literal:) and resolve at startup.
+# [server.auth]
+# tokens = ["env://ROUTECTL_LISTENER_TOKEN"]
+
+# ---- Providers (transport + auth) ----
+
+# OpenAI-compatible host. Use this kind for OpenAI direct, OpenRouter,
+# DeepSeek, Groq, NIM, vLLM, llama.cpp, and any host that speaks the
+# OpenAI Chat Completions wire shape.
+[providers.openrouter]
+kind        = "openai-compat"
+base_url    = "https://openrouter.ai/api/v1"
+api_key_ref = "env://OPENROUTER_API_KEY"
 
 [providers.deepseek]
-type = "openai-compat"
-base_url = "https://api.deepseek.com/v1"
-api_key_ref = "env://DEEPSEEK_API_KEY"
+kind              = "openai-compat"
+base_url          = "https://api.deepseek.com/v1"
+api_key_ref       = "env://DEEPSEEK_API_KEY"
 reasoning_dialect = "deepseek"
-thinking = "medium"  # default reasoning effort for this provider
+history_reasoning = "preserve"     # deepseek v4+ requires reasoning echo-back.
 
-[providers.openrouter]
-type = "openai-compat"
-base_url = "https://openrouter.ai/api/v1"
-api_key_ref = "env://OPENROUTER_API_KEY"
-reasoning_dialect = "openrouter"
-extra_headers = { "HTTP-Referer" = "https://github.com/meepolabs/routectl", "X-Title" = "routectl" }
-# Trip the breaker if openrouter hiccups three times in a row, cool for 60s.
-circuit_failures = 3
-circuit_cooldown_ms = 60000
-thinking = "high"   # default reasoning effort for this provider
-enabled = true      # default-on reasoning for capable models on this route
-
-[providers.groq]
-type = "openai-compat"
-base_url = "https://api.groq.com/openai/v1"
-api_key_ref = "env://GROQ_API_KEY"
-reasoning_dialect = "openai"
-
-[providers.nim]
-type = "openai-compat"
-base_url = "https://integrate.api.nvidia.com/v1"
-api_key_ref = "env://NIM_API_KEY"
-reasoning_dialect = "openai"
-
-[providers.openai]
-# file:// example: read the key from a chmod-600 file managed by your secret
-# tool of choice (sops, age, doppler --no-cache > file, etc.).
-type = "openai-compat"
-base_url = "https://api.openai.com/v1"
-api_key_ref = "file:///abs/path/to/openai-key"
-reasoning_dialect = "openai"
-
-[providers.llama-local]
-type = "openai-compat"
-base_url = "http://127.0.0.1:8080/v1"  # llama.cpp server
-api_key_ref = "literal:not-needed"
-reasoning_dialect = "raw-think-tag"
-
+# Anthropic Messages API direct.
 [providers.anthropic]
-type = "anthropic-api"
+kind        = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
-# auth_kind = "api-key"  # default. Standard sk-ant-api03-... key in
-                         # the x-api-key header.
 
-# Same /v1/messages endpoint, but authenticated with an OAuth bearer
-# access token instead of an API key. routectl sends
-#   Authorization: Bearer <token>
-# Beta gates (e.g. anthropic-beta: oauth-2025-04-20, prompt-caching,
-# 1M context) are NOT auto-injected -- declare them yourself via
-# extra_headers so any auth method can use them.
-#
-# chmod 600 the token file. The token is resolved once at startup;
-# restart routectl to pick up a rotated token. Live OAuth refresh
-# (re-read on rotation, full refresh-token round-trip) is on the
-# v0.4.0 roadmap.
-#
-# OAuth access tokens may carry usage restrictions imposed by their
-# issuer. routectl just speaks the wire protocol; check the upstream
-# provider's terms before pointing it at production traffic.
+# Anthropic via OAuth bearer (Claude Pro/Max subscription).
+# api_key_ref resolves to a `sk-ant-oat01-...` access token.
 [providers.anthropic-oauth]
-type = "anthropic-api"
-api_key_ref = "file:///abs/path/to/anthropic-oauth-token"
-auth_kind = "oauth-bearer"
-extra_headers = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
+kind        = "anthropic-api"
+api_key_ref = "file://<local-path>"
+auth_kind   = "oauth-bearer"
+extra_headers = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
 
-# ---- OpenAI Responses API provider (default-on; built behind the
-# `openai-responses` Cargo feature). Talks the OpenAI Responses wire
-# shape. Three auth surfaces:
+# OpenAI Responses API via ChatGPT subscription bearer JWT (Codex).
+[providers.codex]
+kind           = "openai-responses"
+auth_kind      = "chatgpt-oauth"
+api_key_ref    = "file://<local-path>"
+account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
+
+# AWS Bedrock with the default credential chain (env -> profile ->
+# SSO -> IRSA -> IMDS). Region applies to every model on this provider.
+[providers.bedrock]
+kind   = "bedrock"
+region = "us-west-2"
+creds  = { kind = "default-chain" }
+# api_shape = "invoke"            # default; use "converse" for vendor-neutral.
+# anthropic_beta = ["context-1m-2025-08-07"]   # account-scoped beta floor.
+
+# ---- Models (provider + upstream + reasoning) ----
+# Each model picks its provider, names the upstream wire model id,
+# and owns its reasoning defaults. Two models may share a provider;
+# Bedrock builds a separate provider instance per model so each gets
+# its own circuit breaker.
+
+# Heavy-tier reasoning on Codex.
+[models.codex-deep]
+provider = "codex"
+upstream = "gpt-5.4"
+thinking = "high"
+
+# Cost-tier reasoning on Codex (same provider, different effort).
+[models.codex-fast]
+provider = "codex"
+upstream = "gpt-5.4"
+thinking = "low"
+
+# Anthropic direct, Opus 4.7 with adaptive thinking + max effort.
+[models.opus-direct]
+provider          = "anthropic-oauth"
+upstream          = "claude-opus-4-7-20260301"
+thinking          = "xhigh"
+adaptive_thinking = true
+
+# Bedrock-hosted Sonnet 4.5 (legacy thinking shape, no adaptive).
+[models.sonnet-bedrock]
+provider = "bedrock"
+upstream = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+thinking = "medium"
+
+# Bedrock-hosted Haiku 4.5 with reasoning pinned off (cost ceiling).
+[models.haiku-bedrock-cheap]
+provider = "bedrock"
+upstream = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+thinking = "none"
+
+# Reasoning-tier model on DeepSeek.
+[models.deepseek-reasoner]
+provider = "deepseek"
+upstream = "deepseek-reasoner"
+thinking = "high"
+
+# OpenRouter passthrough -- specific Anthropic build, no reasoning floor.
+[models.opus-or]
+provider = "openrouter"
+upstream = "anthropic/claude-opus-4-7-20260301"
+
+# ---- Aliases (wire-string -> model nickname) ----
+# A single key with a string value resolves to one model. A list value
+# is a fallback chain -- earlier entries try first.
 #
-#   chatgpt-oauth (the relevant stage, wired today):
-#     ChatGPT subscription JWT. Targets the codex backend at
-#     https://chatgpt.com/backend-api/codex. Sends:
-#         Authorization: Bearer <jwt>
-#         ChatGPT-Account-Id: <uuid>
-#         originator: codex_cli_rs   (overridable via `originator`)
-#         User-Agent:  routectl/<ver> codex-cli (override via `user_agent`)
-#     `account_id_ref` is REQUIRED for this auth_kind; the factory
-#     errors at startup if it's absent.
-#
-#   api-key (the relevant stage, wired today): standard OpenAI key at
-#     https://api.openai.com/v1. Sends only `Authorization: Bearer
-#     <api_key>`. account_id_ref must be omitted for this surface.
-#     Set OpenAI-Organization / OpenAI-Project via `extra_headers`.
-#
-#   bedrock-mantle (the relevant stage, deferred): AWS Mantle proxy at
-#     https://bedrock-mantle.<region>.api.aws/openai/v1. SigV4-signed.
-#     Routectl returns NotImplemented today.
-#
-# base_url is optional: when unset, the factory picks an auth_kind-
-# appropriate default at provider build time. Pin a value here to
-# point at a staging shard / localhost mock.
-[providers.gpt]
-type = "openai-responses"
-api_key_ref = "file:///abs/path/to/chatgpt-oauth-jwt"
-account_id_ref = "literal:00000000-0000-0000-0000-000000000000"  # your ChatGPT account UUID
-auth_kind = "chatgpt-oauth"
-thinking = "xhigh"  # default reasoning effort lifted into reasoning.effort
-# originator = "codex_cli_rs"        # default; override only if needed
-# user_agent = "my-cli/1.0"
-#
-# Model slugs accepted by the chatgpt-oauth endpoint (as of 2026-05-12):
-#   gpt-5.3-codex   -- default for the codex CLI; code-focused
-#   gpt-5.4         -- general-purpose flagship
-#   gpt-5.4-mini    -- faster / lower-cost variant
-#   gpt-5.5         -- next-generation (when available to your subscription)
-#   gpt-5.2         -- previous-generation; still accepts requests
-#   codex-auto-review  -- automated review surface
-# Use in [aliases] as: "gpt:gpt-5.3-codex"
+# `default = "..."` is the catch-all when no other entry matches.
+# Keys ending in `*` are suffix globs; longest matching prefix wins.
 
-# Commented-out preview of the api-key auth path. Standard OpenAI
-# Responses API at api.openai.com -- no ChatGPT subscription needed.
-# [providers.gpt-api]
-# type = "openai-responses"
-# api_key_ref = "env://OPENAI_API_KEY"
-# auth_kind = "api-key"
-# # account_id_ref MUST be omitted for api-key (factory rejects it).
-# # extra_headers = { "OpenAI-Organization" = "org-...", "OpenAI-Project" = "proj_..." }
+[aliases]
+# Fallback chain: try Anthropic OAuth first, fall back to Bedrock if
+# the subscription rate-limits or returns 5xx.
+heavy = ["opus-direct", "sonnet-bedrock"]
 
-# Commented-out preview of the bedrock-mantle auth path. Wire shape is
-# OpenAI Responses, but the request is SigV4-signed against AWS's
-# Mantle proxy instead of going to ChatGPT's backend. Lands in the relevant stage.
-# [providers.gpt-bedrock]
-# type = "openai-responses"
-# api_key_ref = "literal:unused"     # ignored; Mantle uses AWS creds
-# auth_kind = "bedrock-mantle"
-# base_url = "https://bedrock-mantle.us-east-1.api.aws/openai/v1"
+# Glob: every claude-opus release routes to opus-direct.
+"claude-opus-*" = "opus-direct"
 
-# ---- Bedrock provider (default-on; built behind the `bedrock` Cargo
-# feature). Talks to bedrock-runtime.<region>.amazonaws.com directly,
-# no gateway. Pick ONE creds shape per provider entry.
-#
-# api_shape:
-#   "invoke"   default; per-vendor body shape (Anthropic Messages today)
-#   "converse" AWS vendor-neutral envelope; body translation lands v0.4.0
-#
-# user_agent: required when an IAM policy gates access via the
-# aws:UserAgent condition key.
-#
-# anthropic_beta: list merged into the request body's anthropic_beta
-# array (Invoke) or additionalModelRequestFields.anthropic_beta
-# (Converse). Independent of extra_headers.
+# Glob: claude-sonnet releases prefer Bedrock.
+"claude-sonnet-*" = "sonnet-bedrock"
 
-# Short-term Bedrock API key from the AWS console. Skips SigV4 entirely
-# and sends Authorization: Bearer <key>. Useful for quick demos.
-[providers.bedrock-bearer]
-type = "bedrock"
-region = "us-east-1"
-model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
-anthropic_beta = ["context-1m-2025-08-07"]
+# Glob: claude-haiku releases hit the cheap-tier model.
+"claude-haiku-*" = "haiku-bedrock-cheap"
 
-# Named profile from ~/.aws/credentials / ~/.aws/config. SSO sessions
-# auto-refresh via aws-config; routectl never sees the refresh.
-[providers.bedrock-profile]
-type = "bedrock"
-region = "us-east-1"
-model_id = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-creds = { kind = "profile", name = "my-bedrock-profile" }
+# Specific exact match -- wins over any glob that also matches.
+"deepseek-reasoner" = "deepseek-reasoner"
 
-# Standard AWS credential chain: env -> profile -> SSO -> web identity
-# / IRSA -> EC2/ECS metadata. Picks whichever first resolves.
-[providers.bedrock-default]
-type = "bedrock"
-region = "us-east-1"
-model_id = "us.anthropic.claude-opus-4-20250514-v1:0"
-creds = { kind = "default-chain" }
-enabled = true   # default-on reasoning; pairs with adaptive_thinking on Opus 4.7+
+# Default: any wire model that doesn't match exact or glob lands here.
+default = "codex-deep"
 
-# Raw access key + secret key (+ optional session token). Each value
-# resolves through a routectl SecretRef URI. Sub-table form because TOML
-# inline tables must be single-line.
-[providers.bedrock-static]
-type = "bedrock"
-region = "us-east-1"
-model_id = "us.anthropic.claude-sonnet-4-20250514-v1:0"
-
-[providers.bedrock-static.creds]
-kind = "static"
-access_key_ref = "env://AWS_ACCESS_KEY_ID"
-secret_key_ref = "env://AWS_SECRET_ACCESS_KEY"
-session_token_ref = "env://AWS_SESSION_TOKEN"  # optional
-
-# ---- Aliases (model groups) ----
-# Logical tiers that resolve to a fallback chain. Each tier is just a
-# named alias; nothing special syntactically. Pick your defaults below
-# and remove the providers you don't have keys for.
-#
-# Recommended pattern: one alias per cost/capability tier so callers
-# pick "heavy" or "cheap" without knowing which model is current.
-
-# ---- Default model (catch-all for unmapped requests) ----
-# When a request's `model` field doesn't match any [aliases] key AND
-# isn't a `provider:model` literal, fall back to this destination.
-# Useful for clients like Claude Code that send specific Anthropic
-# API model names: any release the operator hasn't mapped in
-# [ingress.anthropic.aliases] yet routes here instead of erroring.
-#
-# Accepts the same shapes the wire `model` field accepts:
-#   - an alias name from the [aliases] table  (e.g. "med")
-#   - a `provider:model` literal             (e.g. "bedrock-default:us.anthropic.claude-sonnet-4-5-20250929-v1:0")
-#
-# When unset (the default), unknown models error with `UnknownAlias`.
-default_model = "med"
-
-[aliases.heavy]
-# Top-shelf reasoning, with fallback across providers.
-chain = [
-  "bedrock-default:us.anthropic.claude-opus-4-20250514-v1:0",  # Bedrock first if you have it
-  "anthropic:claude-opus-4-20250514",
-  "openai:gpt-5",
-  "openrouter:anthropic/claude-opus-4-20250514",
-]
-
-[aliases.med]
-# Balanced quality/latency for everyday work.
-chain = [
-  "anthropic:claude-sonnet-4-5-20250929",
-  "groq:llama-3.3-70b-versatile",
-  "nim:meta/llama-3.3-70b-instruct",
-  "openrouter:meta-llama/llama-3.3-70b-instruct",
-]
-
-[aliases.cheap]
-# Cheapest acceptable; good for bulk classification, summarization, etc.
-chain = [
-  "deepseek:deepseek-chat",
-  "openrouter:deepseek/deepseek-v4-flash",
-  "llama-local:qwen3.6",
-]
-
-[aliases.local]
-# Privacy-only path; no remote calls.
-chain = ["llama-local:qwen3.6"]
-
-[aliases.reasoning]
-# Explicitly pick a reasoning model with chain-of-thought surfaced in
-# `reasoning_details[]`.
-chain = [
-  "deepseek:deepseek-reasoner",
-  "openrouter:deepseek/deepseek-r1",
-  "openrouter:openai/o3-mini",
-]
-
-# Per-alias retry override -- example: cheap tier should retry
-# rate-limits aggressively (free models 429 a lot) but give up on 5xx
-# faster so we move on to the next provider.
-[aliases.cheap.retry]
-max_attempts = 2
-initial_backoff_ms = 200
-backoff_multiplier = 2.0
-jitter_ms = 100              # spread retries; avoid herding
-fallback_on_status = [408, 429, 500, 502, 503, 504]
-retry_on_429 = 4             # try harder on rate limits
-retry_on_5xx = 1             # fall through faster on flaky upstream
-request_timeout_ms = 30000   # cap per-attempt time
-stream_first_byte_timeout_ms = 10000
-# IMPORTANT: bump `stream_first_byte_timeout_ms` for any alias that
-# routes to a thinking model with high effort. Opus 4.7 + adaptive
-# thinking + `effort = "xhigh"` regularly takes 60-90 seconds before
-# the first SSE byte; the 10s above will fire spuriously and Claude
-# Code will see the request as failed. For long-thinking aliases:
-#   stream_first_byte_timeout_ms = 300000   # 5 min
-
-# ---- Default retry policy (used by aliases without their own block) ----
+# ---- Retry policy (server-wide) ----
 
 [retry]
-max_attempts = 2
-initial_backoff_ms = 250
-backoff_multiplier = 2.0
-jitter_ms = 50
-fallback_on_status = [408, 429, 500, 502, 503, 504]
-# Per-error-class overrides (all optional). When unset, max_attempts applies.
-# retry_on_429 = 3
-# retry_on_5xx = 2
+max_attempts                  = 2
+initial_backoff_ms            = 250
+backoff_multiplier            = 2.0
+jitter_ms                     = 50
+fallback_on_status            = [408, 429, 500, 502, 503, 504]
+request_timeout_ms            = 300000        # 5 min per attempt
+stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
+# retry_on_429 = 1
 # retry_on_network = 2
-# Per-attempt timeouts (optional).
-# request_timeout_ms = 60000
-# stream_first_byte_timeout_ms = 15000
 
-# ---- Schema ----
-# legacy_compat = "openrouter"   # default, full reasoning_details surface
-# legacy_compat = "openai"       # strip extensions for clients that gag on extras
+# ---- Bedrock global filters (operator-owned allowlists) ----
+# Empty list (or section omitted) = pass-through. See
+# examples/bedrock.toml for the empirical baseline (16 betas + 16
+# body fields). Populate via TRACE-log discovery against your AWS
+# account, then tune.
 
-# ---- Per-request switches ----
-# Send `x-routectl-disable-fallbacks: 1` on the HTTP request to skip
-# the chain walk -- useful when comparing model outputs side-by-side
-# and you need to know which exact provider answered.
+# [bedrock]
+# allowed_betas = []
+# allowed_body_fields = []
