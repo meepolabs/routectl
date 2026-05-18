@@ -224,6 +224,28 @@ impl ResponsesStreamState {
             );
             return Vec::new();
         };
+        let Some(item) = event.item.as_ref() else {
+            return Vec::new();
+        };
+        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let item_id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Set the sticky `saw_function_call` flag BEFORE the
+        // bounded-growth cap check below. If the cap-skip fires on
+        // a function_call item we still must remember the fact so
+        // `handle_completed` maps the terminal status to
+        // `tool_calls` (Bug F). Without this ordering, an
+        // adversarial-or-extreme stream that pushes >512 reasoning
+        // items before a function_call would silently report
+        // `finish_reason="stop"`.
+        if item_type == "function_call" {
+            self.saw_function_call = true;
+        }
+
         // Bounded-growth guard: AWS / OpenAI legitimate responses
         // emit a small handful of output items per turn (typically
         // 1-5: optional reasoning + message + N tool calls). An
@@ -240,15 +262,6 @@ impl ResponsesStreamState {
             );
             return Vec::new();
         }
-        let Some(item) = event.item.as_ref() else {
-            return Vec::new();
-        };
-        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let item_id = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
 
         match item_type {
             "message" => {
@@ -296,10 +309,8 @@ impl ResponsesStreamState {
                         arguments: String::new(),
                     },
                 );
-                // Sticky flag: handle_item_done reaps the BlockState
-                // entry, so handle_completed cannot recover this fact
-                // from self.blocks. See Bug F note on the field.
-                self.saw_function_call = true;
+                // The sticky `saw_function_call` flag was already set
+                // above (pre-cap) so this branch does not duplicate it.
             }
             _ => {
                 tracing::debug!(

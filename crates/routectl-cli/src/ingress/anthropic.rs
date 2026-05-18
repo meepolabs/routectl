@@ -784,7 +784,7 @@ fn render_chunk_internal(
             "anthropic ingress: dropping chunk arriving after message_stop \
              (chunk_id={}, has_delta={}, has_finish={}, has_usage={})",
             chunk.id,
-            chunk.choices.first().is_some(),
+            !chunk.choices.is_empty(),
             chunk
                 .choices
                 .first()
@@ -1758,11 +1758,13 @@ mod tests {
             HeaderName::from_static("anthropic-beta"),
             "good-beta,benign".parse().unwrap(),
         );
-        let mut req = ChatRequest::default();
         // Seed an already-bad entry to exercise the filter on the
         // existing-vec path too. (We can put CR/LF in a plain
         // String -- only HeaderValue rejects them.)
-        req.anthropic_beta = vec!["pre-existing\r\nX-Inject: evil".into()];
+        let mut req = ChatRequest {
+            anthropic_beta: vec!["pre-existing\r\nX-Inject: evil".into()],
+            ..Default::default()
+        };
         merge_inbound_anthropic_beta_header(&headers, &mut req);
         // The headers-side values flow through cleanly.
         assert!(req.anthropic_beta.contains(&"good-beta".to_string()));
@@ -1806,7 +1808,7 @@ mod tests {
             .filter_map(|e| e.event.as_deref())
             .collect();
         assert!(
-            !dup_names.iter().any(|n| *n == "message_delta"),
+            !dup_names.contains(&"message_delta"),
             "second finish_reason must not produce a message_delta: {dup_names:?}",
         );
         assert_eq!(
