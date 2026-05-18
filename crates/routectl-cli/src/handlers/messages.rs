@@ -1,7 +1,9 @@
 //! `POST /v1/messages` handler. Thin wrapper around the generic
-//! ingress driver with `AnthropicIngress`. The ingress's alias map
-//! comes from `AppState::anthropic_aliases` (loaded from
-//! `[ingress.anthropic].aliases` in TOML).
+//! ingress driver with `AnthropicIngress`.
+//!
+//! v0.6.0 collapsed per-ingress alias maps into the top-level
+//! `[aliases]` table, so the ingress is alias-agnostic and stateless;
+//! the router does all the alias resolution.
 //!
 //! See `crate::ingress::anthropic` for the body translation,
 //! response rendering, and SSE state machine.
@@ -23,6 +25,6 @@ pub async fn messages(
     headers: HeaderMap,
     body: Result<axum::Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    let ingress = AnthropicIngress::new(state.anthropic_aliases.clone());
+    let ingress = AnthropicIngress;
     ingress_handle(state, headers, body, ingress).await
 }
