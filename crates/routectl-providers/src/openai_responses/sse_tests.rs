@@ -634,6 +634,124 @@ fn sse_full_session_reasoning_then_tool_call_round_trip() {
     assert_eq!(concat, "{\"x\":1}");
 }
 
+/// Bug F (cc-via-* campaign): when `response.completed` carries an
+/// empty / missing `response.output` field (chatgpt-oauth backend
+/// pattern observed in live cc sessions), the terminal chunk used to
+/// report `finish_reason="stop"` even though a `function_call` item
+/// had been observed during the stream. Cosmetic from cc's
+/// perspective (cc dispatches on content blocks, not stop_reason)
+/// but strict clients gating tool-result follow-ups on
+/// `stop_reason="tool_calls"` would stall.
+///
+/// Fix: `handle_completed` now consults `state.blocks` for any
+/// `BlockState::ToolUse` in addition to walking the response body.
+/// Pin the contract by driving a stream whose `response.completed`
+/// event carries `output: []` (empty), and asserting the terminal
+/// finish_reason is still `tool_calls`.
+#[test]
+fn sse_response_completed_with_empty_output_still_emits_tool_calls_when_function_call_seen() {
+    let mut state = ResponsesStreamState::default();
+    let mut all_chunks: Vec<ChatChunk> = Vec::new();
+    let events = vec![
+        json!({"type": "response.created", "response": {"id": "r", "model": "m"}}),
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_oauth",
+                "call_id": "call_99",
+                "name": "ls",
+                "arguments": ""
+            }
+        }),
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "delta": "{}"
+        }),
+        json!({
+            "type": "response.function_call_arguments.done",
+            "output_index": 0
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_oauth",
+                "call_id": "call_99",
+                "name": "ls",
+                "arguments": "{}"
+            }
+        }),
+        // Chatgpt-oauth pattern: response.completed body carries an
+        // empty `output` array (the stream events already published
+        // every item; the terminal snapshot is bare).
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "r",
+                "status": "completed",
+                "model": "m",
+                "output": []
+            }
+        }),
+    ];
+    for ev in events {
+        all_chunks.extend(drive(&mut state, ev));
+    }
+    let final_c = all_chunks.last().unwrap();
+    assert_eq!(
+        final_c.choices[0].finish_reason.as_deref(),
+        Some("tool_calls"),
+        "function_call observed via state must override an empty response.output"
+    );
+}
+
+/// Counterpart: when no function_call ever appeared (text-only turn)
+/// and `response.completed` reports `output: []`, the terminal
+/// finish_reason stays `stop`. Guards against a regression where the
+/// state-side check overreaches and reports `tool_calls` on a pure-
+/// text turn.
+#[test]
+fn sse_response_completed_with_empty_output_stays_stop_when_no_function_call_seen() {
+    let mut state = ResponsesStreamState::default();
+    let mut all_chunks: Vec<ChatChunk> = Vec::new();
+    let events = vec![
+        json!({"type": "response.created", "response": {"id": "r", "model": "m"}}),
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "id": "m_1", "content": []}
+        }),
+        json!({
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "delta": "hi"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "message", "id": "m_1", "content": []}
+        }),
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "r",
+                "status": "completed",
+                "model": "m",
+                "output": []
+            }
+        }),
+    ];
+    for ev in events {
+        all_chunks.extend(drive(&mut state, ev));
+    }
+    let final_c = all_chunks.last().unwrap();
+    assert_eq!(final_c.choices[0].finish_reason.as_deref(), Some("stop"));
+}
+
 #[test]
 fn sse_text_delta_for_unknown_block_is_dropped() {
     // Arrange: drive a created event, then send a text delta for an
