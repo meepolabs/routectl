@@ -4,29 +4,30 @@ Per-model config tips for routectl operators. Most upstream LLMs work out of
 the box with default routectl config -- the entries below cover the cases
 where you need to flip a knob.
 
-> **v0.6 schema:** the snippets below show provider blocks with `kind = "..."`.
-> Per-model knobs (`upstream`, `thinking`, `adaptive_thinking`,
-> `additional_request_fields`, `chat_template_kwargs`) live on `[models.X]` --
-> see `examples/config.toml` for the canonical shape. Some snippets here still
-> show `model_id`/`adaptive_thinking` on the provider block; treat those as
-> per-model knobs and split them out into a `[models.X]` row that sets
-> `provider = "<provider-name>"`.
+> **v0.6 schema:** snippets below split provider transport (`kind`, `base_url`,
+> `creds`, `extra_headers`, runtime gates) onto `[providers.X]` blocks and
+> per-model knobs (`upstream`, `thinking`, `adaptive_thinking`,
+> `additional_request_fields`) onto `[models.X]` blocks. Aliases live in a
+> single flat `[aliases]` table where each value is a model nickname or a
+> fallback chain. Per-alias retry overrides were removed in v0.6 -- the
+> global `[retry]` table is the only retry surface. See `examples/config.toml`
+> for the canonical shape.
 
 If your model isn't listed and works fine, you don't need anything from this
 doc. If it 4xxs or behaves weirdly, find the matching row.
 
 ## Quick reference
 
-| If you're using... | Set on `[providers.X]` | Set on `[aliases.X.retry]` |
-|---|---|---|
-| **Claude Opus 4.7+ / Sonnet 4.7+** | `adaptive_thinking = true` | -- |
-| **Any thinking model + high-effort latency** | `stream_first_byte_timeout_ms = 300000` (provider-level applies to every alias hitting it) | -- |
-| **DeepSeek v4 / v4.1 (any host)** | `history_reasoning = "preserve"` | -- |
-| **DeepSeek v3 / older vLLM** | -- (default `history_reasoning = "auto"` strips for you) | -- |
-| **NVIDIA NIM hosting DeepSeek** | `default_extras = { reasoning_effort = "high" }` (only if you want thinking on by default) | -- |
-| **NIM cold-start streaming** | `stream_first_byte_timeout_ms = 180000` (3 min) | -- |
-| **Anthropic + 1M-context beta** | `extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }` | -- |
-| **OAuth bearer to Anthropic** | `auth_kind = "oauth-bearer"` + the matching beta header | -- |
+| If you're using... | Set on... |
+|---|---|
+| **Claude Opus 4.7+ / Sonnet 4.7+** | `[models.X] adaptive_thinking = true` |
+| **Any thinking model + high-effort latency** | `[providers.X] stream_first_byte_timeout_ms = 300000` (every alias hitting this provider inherits) |
+| **DeepSeek v4 / v4.1 (any host)** | `[providers.X] history_reasoning = "preserve"` |
+| **DeepSeek v3 / older vLLM** | (default `history_reasoning = "auto"` strips for you) |
+| **NVIDIA NIM hosting DeepSeek** | callers must send `reasoning_effort = "high"` per request (the operator-side `default_extras` knob is deferred -- callers can still set effort via wire `reasoning.effort`) |
+| **NIM cold-start streaming** | `[providers.X] stream_first_byte_timeout_ms = 180000` (3 min) |
+| **Anthropic + 1M-context beta** | `[providers.X] extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }` |
+| **OAuth bearer to Anthropic** | `[providers.X] auth_kind = "oauth-bearer"` + the matching beta header |
 
 ## Per-model config
 
@@ -37,32 +38,32 @@ The 4.7+ generation rejects the legacy `thinking: {type: "enabled", budget_token
 **Required:**
 
 ```toml
-[providers.bedrock-opus47]
-kind = "bedrock"
-model_id = "us.anthropic.claude-opus-4-7-v1:0"
+[providers.bedrock]
+kind   = "bedrock"
+region = "us-east-1"
+creds  = { kind = "default-chain" }
+
+[models.opus47]
+provider          = "bedrock"
+upstream          = "us.anthropic.claude-opus-4-7-v1:0"
 adaptive_thinking = true        # rewrites to {type:"adaptive"} + output_config.effort
+thinking          = "high"
 ```
 
-**Recommended when using `reasoning.effort = "high"` / `"xhigh"` / `"max"`:** Opus 4.7 + max-effort regularly takes 60-90 seconds before first SSE byte. Bump the timeouts -- prefer the provider-level fields when many aliases share this upstream:
+**Recommended when using `reasoning.effort = "high"` / `"xhigh"` / `"max"`:** Opus 4.7 + max-effort regularly takes 60-90 seconds before first SSE byte. Bump the timeouts on the parent provider so every model routing through it inherits:
 
 ```toml
-[providers.bedrock-opus47]
+[providers.bedrock]
 # ...the fields above, plus:
-stream_first_byte_timeout_ms = 300000   # 5 min, applies to every alias
-request_timeout_ms = 600000             # 10 min, applies to every alias
+stream_first_byte_timeout_ms = 300000   # 5 min, applies to every model
+request_timeout_ms           = 600000   # 10 min, applies to every model
 ```
 
-Or if only one alias needs the bump:
+Need different timeouts for different models on the same upstream? Split into separate `[providers.X]` entries (e.g. `bedrock-fast`, `bedrock-heavy`) with their own runtime knobs and route each `[models.X]` at the right one.
 
-```toml
-[aliases.heavy.retry]
-stream_first_byte_timeout_ms = 300000
-request_timeout_ms = 600000
-```
+Resolution priority: `[providers.X].X` > `[retry].X` > unset (no cap). Per-alias retry was removed in v0.6.
 
-Resolution priority: `alias.retry.X` > `provider.X` > top-level `[retry].X` > unset (no cap).
-
-**Why opt-in per provider, not auto-detect by name:** Anthropic is rolling adaptive thinking out gradually with no clean naming pattern. `opus-4-7` matches today's model but misses `opus-5` / `sonnet-4-7`; `opus-4-` catches the still-legacy `4-5`/`4-6`. TOML opt-in lets you flip the day a new model lands.
+**Why opt-in per model, not auto-detect by name:** Anthropic is rolling adaptive thinking out gradually with no clean naming pattern. `opus-4-7` matches today's model but misses `opus-5` / `sonnet-4-7`; `opus-4-` catches the still-legacy `4-5`/`4-6`. TOML opt-in lets you flip the day a new model lands.
 
 ### DeepSeek v4 / v4.1 (api.deepseek.com, example-deepseek-host, NIM, vLLM-hosted, anywhere)
 
@@ -104,28 +105,35 @@ For older vLLM (≤ 0.6) leave `history_reasoning` unset (defaults to strip).
 
 ### NVIDIA NIM (integrate.api.nvidia.com)
 
-NIM's DeepSeek v4 Flash / Pro defaults to **non-thinking mode**. Thinking is enabled per request via top-level `reasoning_effort: "none" | "high" | "max"`. routectl's OpenAI dialect already maps canonical `reasoning.effort` -> `reasoning_effort`, but most clients (e.g. opencode) don't send `reasoning.effort` so you land on NIM's default `none`.
+NIM's DeepSeek v4 Flash / Pro defaults to **non-thinking mode**. Thinking is enabled per request via top-level `reasoning_effort: "none" | "high" | "max"`. routectl's OpenAI dialect already maps canonical `reasoning.effort` -> `reasoning_effort`; clients that send `reasoning.effort` land thinking on the request.
 
-**To enable thinking on every NIM request:**
+**To enable thinking on every NIM request:** the operator-side
+`default_extras` knob (which would unconditionally inject
+`reasoning_effort` into the body) is deferred for v0.6.0-rc.2 -- the
+field shipped briefly on `[models.X]` but never reached the egress
+and was withdrawn so the TOML surface didn't lie. For now, callers
+must send `reasoning.effort = "high"` (or set the equivalent on the
+client side); the OpenAI-dialect translator forwards it as
+`reasoning_effort` to NIM. The default-injection knob will return in
+a later release once the wiring lands.
 
 ```toml
 [providers.nim]
-kind = "openai-compat"
-base_url = "https://integrate.api.nvidia.com/v1"
-api_key_ref = "env://NIM_API_KEY"
+kind              = "openai-compat"
+base_url          = "https://integrate.api.nvidia.com/v1"
+api_key_ref       = "env://NIM_API_KEY"
 reasoning_dialect = "openai"
-default_extras = { reasoning_effort = "high" }   # always-on thinking
 ```
 
-**Heads-up: NIM cold-start latency on streaming.** First-byte timeouts of 60s+ are common on NIM. Set the bump on the provider so every alias hitting it inherits:
+**Heads-up: NIM cold-start latency on streaming.** First-byte timeouts of 60s+ are common on NIM. Set the bump on the provider so every model hitting it inherits:
 
 ```toml
 [providers.nim]
 # ...the fields above, plus:
-stream_first_byte_timeout_ms = 180000   # 3 min, all NIM-routed aliases benefit
+stream_first_byte_timeout_ms = 180000   # 3 min, all NIM-routed models benefit
 ```
 
-Or per-alias if only a single alias needs it.
+Need different timeouts on different routes? Split into separate `[providers.X]` entries.
 
 ### Anthropic (api.anthropic.com)
 
@@ -157,7 +165,7 @@ routectl no longer auto-injects beta gates -- declare the ones you need.
 Both `api_shape = "invoke"` (Anthropic Messages body) and
 `api_shape = "converse"` (AWS Converse) are wired for Anthropic
 models on Sonnet/Haiku/Opus. Set `adaptive_thinking = true` on Opus
-4.7+ providers regardless of api_shape.
+4.7+ models regardless of api_shape.
 
 **Bedrock allowlist (optional, recommended in production).** AWS
 strict-schema validation 400s any unrecognized `anthropic_beta` flag
@@ -175,16 +183,20 @@ filter applied). Use `ROUTECTL_LOG=routectl_providers::bedrock=trace`
 to capture sent flags/fields when building the lists. See
 `examples/bedrock.toml` for the empirical 2026-05-12 baseline.
 
-**Example provider:**
+**Example provider + model:**
 
 ```toml
-[providers.bedrock-opus47]
-kind = "bedrock"
-region = "us-east-1"
-model_id = "us.anthropic.claude-opus-4-7-v1:0"
+[providers.bedrock]
+kind      = "bedrock"
+region    = "us-east-1"
 api_shape = "invoke"
+creds     = { kind = "default-chain" }
+
+[models.opus47]
+provider          = "bedrock"
+upstream          = "us.anthropic.claude-opus-4-7-v1:0"
 adaptive_thinking = true
-creds = { kind = "default-chain" }
+thinking          = "high"
 ```
 
 ### OpenRouter
@@ -231,35 +243,58 @@ Default is 10s (set in `[retry]`). Fine for most non-thinking models, too aggres
 | Thinking-capable, max effort | 300000-600000 |
 | NIM cold-start (any model) | 180000+ |
 
-**Resolution priority** (alias > provider > global):
+**Resolution priority** (provider > global):
 
-1. `[aliases.X.retry] stream_first_byte_timeout_ms` -- per-alias override (use when one alias needs different timing than its peers)
-2. `[providers.Y] stream_first_byte_timeout_ms` -- per-provider default (use when an upstream is uniformly slow; every alias routing through it inherits)
-3. `[retry] stream_first_byte_timeout_ms` -- workspace default (keep tight to surface real timeouts on routine calls)
+1. `[providers.Y] stream_first_byte_timeout_ms` -- per-provider default (use when an upstream is uniformly slow; every model routing through it inherits)
+2. `[retry] stream_first_byte_timeout_ms` -- workspace default (keep tight to surface real timeouts on routine calls)
 
-Provider-level is usually what you want for "this upstream is slow." Alias-level is for "this routing decision is latency-sensitive."
+Per-alias retry was removed in v0.6 -- when different routes need different timeouts, split into separate `[providers.X]` entries with their own runtime knobs and route each `[models.X]` accordingly.
 
 ### `request_timeout_ms`
 
-Default is unset (no cap; relies on reqwest's default). Same alias > provider > global resolution as the first-byte timeout. Bump alongside the first-byte timeout for long-thinking responses:
+Default is unset (no cap; relies on reqwest's default). Same provider > global resolution as the first-byte timeout. Bump alongside the first-byte timeout for long-thinking responses:
 
 ```toml
-[providers.bedrock-opus47]
+[providers.bedrock]
 stream_first_byte_timeout_ms = 300000   # 5 min until first byte
-request_timeout_ms = 600000             # 10 min full request
+request_timeout_ms           = 600000   # 10 min full request
 ```
 
 ## Multi-host fallback chains
 
-When you want a model with multiple hosts as fallback, put them in chain order:
+When you want a model with multiple hosts as fallback, declare each host as
+its own `[models.X]` row and chain the nicknames in `[aliases]`:
 
 ```toml
-[aliases.deepseek-flash]
-chain = [
-  "example-deepseek-host:deepseek-v4-flash",                     # cheapest, primary
-  "openrouter:deepseek/deepseek-v4-flash",             # if example-deepseek-host down
-  "nim:deepseek-ai/deepseek-v4-flash",                 # third-party fallback
-]
+[providers.example-deepseek-host]
+kind        = "openai-compat"
+base_url    = "https://opencode.ai/zen/go/v1"
+api_key_ref = "env://OPENCODE_GO_API_KEY"
+
+[providers.openrouter]
+kind        = "openai-compat"
+base_url    = "https://openrouter.ai/api/v1"
+api_key_ref = "env://OPENROUTER_API_KEY"
+
+[providers.nim]
+kind        = "openai-compat"
+base_url    = "https://integrate.api.nvidia.com/v1"
+api_key_ref = "env://NIM_API_KEY"
+
+[models.ds-go]
+provider = "example-deepseek-host"
+upstream = "deepseek-v4-flash"
+
+[models.ds-or]
+provider = "openrouter"
+upstream = "deepseek/deepseek-v4-flash"
+
+[models.ds-nim]
+provider = "nim"
+upstream = "deepseek-ai/deepseek-v4-flash"
+
+[aliases]
+deepseek-flash = ["ds-go", "ds-or", "ds-nim"]   # primary -> fallback -> fallback
 ```
 
 Each provider's `history_reasoning` config applies independently -- the chain just picks who answers. The `routectl_provider` field on every response tells you which one actually answered.
@@ -270,8 +305,8 @@ When a request fails, the upstream's error body is the truth source. routectl lo
 
 | Symptom | Likely cause |
 |---|---|
-| `400 thinking.type.enabled is not supported` | Need `adaptive_thinking = true` on provider (Opus 4.7+) |
-| `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on provider (DeepSeek v4) |
+| `400 thinking.type.enabled is not supported` | Need `adaptive_thinking = true` on `[models.X]` (Opus 4.7+) |
+| `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on `[providers.X]` (DeepSeek v4) |
 | `400 unknown variant 'auto', expected 'function'` | Old routectl version -- upgrade to one with the `tool_choice` egress translator |
 | `stream first-byte timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
 | Empty `content` + non-zero `reasoning_tokens` | Model used full `max_tokens` budget on reasoning. Increase `max_tokens` |
