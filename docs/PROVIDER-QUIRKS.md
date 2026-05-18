@@ -4,6 +4,14 @@ Per-model config tips for routectl operators. Most upstream LLMs work out of
 the box with default routectl config -- the entries below cover the cases
 where you need to flip a knob.
 
+> **v0.6 schema:** the snippets below show provider blocks with `kind = "..."`.
+> Per-model knobs (`upstream`, `thinking`, `adaptive_thinking`,
+> `additional_request_fields`, `chat_template_kwargs`) live on `[models.X]` --
+> see `examples/config.toml` for the canonical shape. Some snippets here still
+> show `model_id`/`adaptive_thinking` on the provider block; treat those as
+> per-model knobs and split them out into a `[models.X]` row that sets
+> `provider = "<provider-name>"`.
+
 If your model isn't listed and works fine, you don't need anything from this
 doc. If it 4xxs or behaves weirdly, find the matching row.
 
@@ -30,7 +38,7 @@ The 4.7+ generation rejects the legacy `thinking: {type: "enabled", budget_token
 
 ```toml
 [providers.bedrock-opus47]
-type = "bedrock"
+kind = "bedrock"
 model_id = "us.anthropic.claude-opus-4-7-v1:0"
 adaptive_thinking = true        # rewrites to {type:"adaptive"} + output_config.effort
 ```
@@ -64,7 +72,7 @@ DeepSeek v4 inverted v3's contract on multi-turn echo-back. v3: 400 if you echo 
 
 ```toml
 [providers.example-deepseek-host]
-type = "openai-compat"
+kind = "openai-compat"
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_ref = "env://OPENCODE_GO_API_KEY"
 reasoning_dialect = "deepseek"          # so response reasoning lifts correctly
@@ -85,7 +93,7 @@ vLLM 0.7+ matches DeepSeek v4's echo-back contract. Same fix:
 
 ```toml
 [providers.my-vllm]
-type = "openai-compat"
+kind = "openai-compat"
 base_url = "http://localhost:8000/v1"
 api_key_ref = "literal:not-needed"
 reasoning_dialect = "vllm"
@@ -102,7 +110,7 @@ NIM's DeepSeek v4 Flash / Pro defaults to **non-thinking mode**. Thinking is ena
 
 ```toml
 [providers.nim]
-type = "openai-compat"
+kind = "openai-compat"
 base_url = "https://integrate.api.nvidia.com/v1"
 api_key_ref = "env://NIM_API_KEY"
 reasoning_dialect = "openai"
@@ -127,7 +135,7 @@ Default config works for Claude 4.5/4.6 / Haiku 4.5. The two times you need extr
 
 ```toml
 [providers.anthropic]
-type = "anthropic-api"
+kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }
 ```
@@ -136,7 +144,7 @@ extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }
 
 ```toml
 [providers.anthropic-oauth]
-type = "anthropic-api"
+kind = "anthropic-api"
 api_key_ref = "file:///path/to/oauth-token"
 auth_kind = "oauth-bearer"
 extra_headers = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
@@ -171,7 +179,7 @@ to capture sent flags/fields when building the lists. See
 
 ```toml
 [providers.bedrock-opus47]
-type = "bedrock"
+kind = "bedrock"
 region = "us-east-1"
 model_id = "us.anthropic.claude-opus-4-7-v1:0"
 api_shape = "invoke"
@@ -185,7 +193,7 @@ Default works. Two niceties to set:
 
 ```toml
 [providers.openrouter]
-type = "openai-compat"
+kind = "openai-compat"
 base_url = "https://openrouter.ai/api/v1"
 api_key_ref = "env://OPENROUTER_API_KEY"
 reasoning_dialect = "openrouter"
@@ -203,7 +211,7 @@ Default works. The OpenAI dialect maps canonical `reasoning.effort` -> wire `rea
 
 ```toml
 [providers.openai]
-type = "openai-compat"
+kind = "openai-compat"
 base_url = "https://api.openai.com/v1"
 api_key_ref = "env://OPENAI_API_KEY"
 reasoning_dialect = "openai"

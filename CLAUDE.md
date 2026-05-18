@@ -129,7 +129,7 @@ contract:
    server with the failing body and asserts on the upstream-side
    wiremock body. Re-run the live matrix.
 
-### Configuring listener auth + ingress aliases
+### Configuring listener auth + routing (v0.6+ schema)
 
 ```toml
 [server]
@@ -140,13 +140,15 @@ strict_translation = false   # set true for production CI
 [server.auth]
 tokens = ["env://ROUTECTL_LISTENER_TOKEN", "literal:sk-routectl-dev"]
 
-# Map upstream model IDs to routectl aliases. Useful when a client
-# can't override the `model` field directly, so the mapping happens
-# server-side.
-[ingress.anthropic.aliases]
-"claude-opus-4-20250514"      = "heavy"
-"claude-sonnet-4-5-20250929"  = "default"
-"claude-haiku-4-5-20251001"   = "fast"
+# v0.6 unified [aliases] table: wire-string -> model nickname.
+# Suffix-globs (`*`) collapse per-version sprawl. Single-string
+# values are one-entry chains; list values are fallback chains.
+# `default = "..."` is a special key for the catch-all.
+[aliases]
+"claude-opus-*"   = "heavy"
+"claude-sonnet-*" = "default"
+"claude-haiku-*"  = "fast"
+default           = "default"
 
 # Alternative: client sets `x-routectl-alias: heavy` and the model
 # field is ignored. Header always wins over the aliases map.
