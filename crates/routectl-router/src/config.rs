@@ -17,8 +17,7 @@ pub struct Config {
     /// Provider definitions keyed by operator-facing name. Carries
     /// transport-side knobs only (auth, base URL, headers, runtime
     /// gates). Per-model knobs (`thinking`, `enabled`,
-    /// `adaptive_thinking`, `additional_request_fields`,
-    /// `chat_template_kwargs`, `default_extras`) live on
+    /// `adaptive_thinking`, `additional_request_fields`) live on
     /// `[models.X]` in v0.6.0.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderEntry>,
@@ -69,12 +68,18 @@ pub struct Config {
 /// One row in the `[models]` table. Carries the nickname-to-upstream
 /// binding plus per-model knobs that used to live on `[providers.X]`
 /// (`thinking`, `enabled`, `adaptive_thinking`,
-/// `additional_request_fields`, `chat_template_kwargs`,
-/// `default_extras`).
+/// `additional_request_fields`).
 ///
 /// Fields that vary per-model belong here. Fields that vary per-
 /// transport (auth, base URL, headers, runtime gates) stay on
 /// `[providers.X]`.
+///
+/// Note: `default_extras` and `chat_template_kwargs` are deferred --
+/// they shipped briefly on `ModelEntry` in earlier rc builds but the
+/// egress side never read them, so keeping them on the public TOML
+/// surface would be operator-deceptive. They will return as
+/// `[models.X]` fields in a future release once the egress wiring
+/// lands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelEntry {
@@ -119,19 +124,6 @@ pub struct ModelEntry {
     /// managed body fields. Other egresses ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_request_fields: Option<serde_json::Value>,
-
-    /// vLLM / DeepSeek `chat_template_kwargs` passthrough. Lifted into
-    /// the upstream body verbatim by openai-compat egresses. Other
-    /// egresses ignore it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chat_template_kwargs: Option<serde_json::Value>,
-
-    /// Default `provider_extras` merged into every routed request
-    /// when the caller didn't already supply them. Used by openai-
-    /// compat egresses for vendor-specific extras (e.g. an
-    /// OpenRouter `provider` block, a vLLM `guided_choice`, ...).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_extras: Option<serde_json::Value>,
 }
 
 impl ModelEntry {
@@ -143,8 +135,6 @@ impl ModelEntry {
             reasoning_defaults: ReasoningDefaults::default(),
             adaptive_thinking: None,
             additional_request_fields: None,
-            chat_template_kwargs: None,
-            default_extras: None,
         }
     }
 
@@ -991,8 +981,6 @@ upstream = "claude-opus-4-7-20251022"
 enabled = true
 thinking = "high"
 adaptive_thinking = true
-default_extras = { provider = { order = ["A", "B"] } }
-chat_template_kwargs = { enable_thinking = false }
 additional_request_fields = { reasoning_config = { type = "enabled" } }
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("parse");
@@ -1002,8 +990,6 @@ additional_request_fields = { reasoning_config = { type = "enabled" } }
         assert!(m.enabled);
         assert_eq!(m.reasoning_defaults.thinking.as_deref(), Some("high"));
         assert_eq!(m.adaptive_thinking, Some(true));
-        assert!(m.default_extras.is_some());
-        assert!(m.chat_template_kwargs.is_some());
         assert!(m.additional_request_fields.is_some());
     }
 
