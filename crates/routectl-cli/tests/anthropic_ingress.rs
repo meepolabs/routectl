@@ -494,18 +494,23 @@ async fn x_routectl_alias_header_overrides_aliases_map() {
         .mount(&upstream)
         .await;
 
-    // Alias map has a different mapping; the header should win.
-    // Both targets must validate (alias chain validator runs at
-    // startup), so we point the wire model at the same valid
-    // nickname `haiku` -- the test still exercises the override
-    // path because the request would succeed via either the body's
-    // wire model OR the header alias `heavy`. To make the override
-    // observable, future versions could mock differently per route;
-    // here the green-path proves the validator + header both work.
+    // Two models on the same wiremock, distinguished by `upstream`
+    // wire model id. The wire-string alias maps to `opus` (a no-op
+    // upstream fallback that the header should bypass); the header
+    // points at `heavy` which resolves to `haiku`. After the request,
+    // wiremock captures the body and we assert the upstream `model`
+    // field reflects haiku's upstream id, proving the header's lookup
+    // won over the wire-string alias.
     let mut alias_map = BTreeMap::new();
-    alias_map.insert("claude-opus-4-7-20251022".into(), "haiku".into());
+    alias_map.insert("claude-opus-4-7-20251022".into(), "opus".into());
 
-    let config = anthropic_proxy_config(&upstream.uri(), None, alias_map);
+    let mut config_owned = (*anthropic_proxy_config(&upstream.uri(), None, alias_map)).clone();
+    config_owned.models.insert(
+        "opus".to_string(),
+        ModelEntry::new("anthropic-mock", "claude-opus-NEVER-CALLED"),
+    );
+    let config = Arc::new(config_owned);
+
     let base = helpers::spawn(config).await;
 
     let resp = reqwest::Client::new()
@@ -519,11 +524,21 @@ async fn x_routectl_alias_header_overrides_aliases_map() {
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Assert the upstream-side body shows haiku's wire model id,
+    // proving the header path won over `claude-opus-4-7-20251022`'s
+    // wire-string alias mapping (which would have hit `opus` ->
+    // `claude-opus-NEVER-CALLED`).
+    let received = upstream.received_requests().await.expect("requests");
+    let body: Value =
+        serde_json::from_slice(&received[0].body).expect("upstream body parses as JSON");
     assert_eq!(
-        resp.status(),
-        200,
-        "header should have overridden the alias map; got status {}",
-        resp.status()
+        body["model"].as_str(),
+        Some("claude-haiku-4-5"),
+        "header alias `heavy` -> `haiku` should have set the upstream model id; \
+         got {:?}",
+        body["model"],
     );
 }
 
