@@ -394,6 +394,13 @@ impl Provider for AnthropicApiProvider {
                         // finish_reason instead of synthesizing
                         // `truncated`. Mirrors `openai_compat::stream`.
                         if trimmed == "[DONE]" {
+                            tracing::debug!(
+                                provider = %provider_id,
+                                "anthropic-api stream: received OpenAI-style \
+                                 [DONE] sentinel after message_stop (typical of \
+                                 OpenRouter's /v1/messages passthrough); \
+                                 closing stream cleanly"
+                            );
                             return;
                         }
                         // Keepalive comment line or empty data field.
