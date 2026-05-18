@@ -81,6 +81,7 @@ pub struct Config {
 /// `[models.X]` fields in a future release once the egress wiring
 /// lands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ModelEntry {
     /// Provider name (a key in the `[providers]` table). The router
@@ -834,19 +835,19 @@ pub struct ProviderRuntimePolicy {
     /// `[aliases.X.retry] request_timeout_ms` is unset; the alias-level
     /// override always wins.
     ///
-    /// Resolution order (alias > provider > global):
-    ///   alias.retry.request_timeout_ms
-    ///     -> provider.request_timeout_ms (this field)
-    ///       -> [retry] request_timeout_ms (workspace global)
-    ///         -> None (no cap, reqwest's default)
+    /// Resolution order (provider > global):
+    ///   provider.request_timeout_ms (this field)
+    ///     -> [retry] request_timeout_ms (workspace global)
+    ///       -> None (no cap, reqwest's default)
     ///
-    /// Use this when many aliases share the same upstream and the
+    /// Use this when many models share the same upstream and the
     /// timeout is an upstream characteristic (e.g., NIM cold-start),
-    /// not a routing decision (e.g., "heavy alias retries less").
+    /// not a routing decision. v0.6 removed per-alias retry overrides;
+    /// only the two tiers above remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
     /// Per-attempt first-byte timeout for streaming responses through
-    /// this provider. Same alias > provider > global resolution as
+    /// this provider. Same provider > global resolution as
     /// `request_timeout_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
@@ -1027,6 +1028,44 @@ additional_request_fields = { reasoning_config = { type = "enabled" } }
         assert_eq!(m.reasoning_defaults.thinking.as_deref(), Some("high"));
         assert_eq!(m.adaptive_thinking, Some(true));
         assert!(m.additional_request_fields.is_some());
+    }
+
+    #[test]
+    fn model_entry_rejects_removed_default_extras_field() {
+        // v0.6.0-rc.1 dropped `default_extras` and `chat_template_kwargs`
+        // from `ModelEntry` -- they shipped briefly on earlier rc builds
+        // but never reached the egress. With `#[serde(deny_unknown_fields)]`
+        // an upgrading operator who keeps the old keys gets a parse-time
+        // error pointing at the offending field, instead of a silent
+        // no-op that leaves their reasoning floor unwired.
+        let toml_text = r#"
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-7-20251022"
+default_extras = { foo = "bar" }
+"#;
+        let err = toml::from_str::<Config>(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("default_extras"),
+            "expected error to name the removed field; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn model_entry_rejects_removed_chat_template_kwargs_field() {
+        let toml_text = r#"
+[models.qwen]
+provider = "vllm"
+upstream = "qwen3-32b"
+chat_template_kwargs = { enable_thinking = true }
+"#;
+        let err = toml::from_str::<Config>(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("chat_template_kwargs"),
+            "expected error to name the removed field; got: {msg}"
+        );
     }
 
     #[test]
