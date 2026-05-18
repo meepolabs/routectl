@@ -381,6 +381,25 @@ impl Provider for AnthropicApiProvider {
                         return;
                     }
                     Ok(event) => {
+                        let trimmed = event.data.trim();
+                        // OpenRouter's `/v1/messages` endpoint appends
+                        // an OpenAI-style `data: [DONE]` sentinel after
+                        // `message_stop`. Real api.anthropic.com does
+                        // not emit it. Treat it as a clean EOS: skip
+                        // it (parse_event would fail with
+                        // `bad sse json: expected value at line 1
+                        // column 2`) and return so the outer stream
+                        // ends naturally, letting the egress wrapper
+                        // mark_clean_close and report the actual
+                        // finish_reason instead of synthesizing
+                        // `truncated`. Mirrors `openai_compat::stream`.
+                        if trimmed == "[DONE]" {
+                            return;
+                        }
+                        // Keepalive comment line or empty data field.
+                        if trimmed.is_empty() {
+                            continue;
+                        }
                         match state.parse_event(&provider_id, &event.data) {
                             Err(e) => {
                                 yield Err(e);
