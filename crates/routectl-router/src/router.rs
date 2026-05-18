@@ -28,12 +28,18 @@ pub struct Router {
     /// A direct insert here would silently disable runtime gating for
     /// that provider -- see `gate_check`.
     providers: BTreeMap<String, Arc<dyn Provider>>,
-    /// Per-provider runtime gates. Eagerly populated from
-    /// `config.providers[name].runtime()` in `Router::new` for every
-    /// configured provider, plus an on-demand zero-policy entry
-    /// inserted on first dispatch for any provider registered after
-    /// construction. Kept under a parking_lot Mutex (no poisoning) for
-    /// the lifetime of the router.
+    /// Per-model runtime gates keyed by `[models.X]` nickname. Two
+    /// models on the same provider get independent breakers + RPM
+    /// buckets so a flaky upstream-model combination quarantines
+    /// itself without taking healthy siblings on the same transport
+    /// down with it. Key fallback in legacy / test paths is the
+    /// provider name (matches what the old per-provider design did).
+    /// Both lookups are eager: every `[models.X]` entry installed via
+    /// `install_resolved_models` gets a state slot; every
+    /// `[providers.X]` entry installed via `Router::new` also gets a
+    /// state slot keyed by the provider name (preserved so legacy
+    /// dispatch paths and test fixtures using `register()` still find
+    /// a gate).
     state: BTreeMap<String, Arc<Mutex<ProviderState>>>,
     /// v0.6.0 pre-resolved model table. Populated when an external
     /// caller built it via `factory::build_resolved_models`. When
@@ -85,8 +91,14 @@ impl RouterOptions {
 #[derive(Clone)]
 struct DispatchTarget {
     /// Operator-facing provider name (a key in `[providers]`). Used
-    /// for runtime-gate map lookups and in tracing/log fields.
+    /// for tracing/log fields and `compose_attempt_policy` (provider-
+    /// level timeouts live on `[providers.X]`, not `[models.X]`).
     provider_name: String,
+    /// Key into `Router.state` for the per-attempt rate-limit + circuit-
+    /// breaker check. v0.6.0 mode uses the model nickname so two
+    /// models on the same provider quarantine independently. Legacy /
+    /// test mode (no nickname) falls back to the provider name.
+    state_key: String,
     /// Wire model id sent to the provider (e.g. an Anthropic
     /// `claude-haiku-4-5-20251001` or a Bedrock inference profile id).
     upstream: String,
@@ -159,18 +171,39 @@ impl Router {
     /// Install the v0.6.0 pre-resolved model table. Called after
     /// `factory::build_resolved_models` returns. The dispatch path
     /// walks `Arc<ResolvedModel>` chains keyed by nickname.
+    ///
+    /// Per-model state slot: each nickname gets its OWN
+    /// `ProviderState` entry (RPM bucket + circuit breaker). Two
+    /// models on the same `[providers.X]` therefore have independent
+    /// gates so a flaky model-on-provider combination quarantines
+    /// itself without taking healthy siblings down. Each per-model
+    /// state is initialized from the parent provider's
+    /// `ProviderRuntimePolicy` (rpm_limit, circuit_failures, etc.) so
+    /// the operator's TOML knobs apply per model out of the box.
     pub fn install_resolved_models(&mut self, models: BTreeMap<String, Arc<ResolvedModel>>) {
         self.resolved_models = models;
         // Mirror the per-model providers into the `providers` map
-        // and `state` map so the dispatch path (which looks up by
-        // provider name) finds the runtime gate.
-        for (_, m) in self.resolved_models.iter() {
+        // (keyed by provider name) so legacy lookups still work, and
+        // populate the state map with one entry per nickname so
+        // dispatch's gate check is per-model.
+        for (nickname, m) in self.resolved_models.iter() {
             self.providers
                 .entry(m.provider_name.clone())
                 .or_insert_with(|| m.provider.clone());
+            // Per-model state: clone the parent provider's runtime
+            // policy (timeouts, RPM, circuit). Each model gets a
+            // FRESH state instance even when the policy is identical
+            // -- the breaker counters and RPM tokens must not be
+            // shared across models on one transport.
+            let policy = self
+                .config
+                .providers
+                .get(&m.provider_name)
+                .map(|e| e.runtime().clone())
+                .unwrap_or_default();
             self.state
-                .entry(m.provider_name.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&Default::default()))));
+                .entry(nickname.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&policy))));
         }
     }
 
@@ -275,6 +308,7 @@ impl Router {
 
         'chain: for target in chain.iter() {
             let provider_name = target.provider_name.as_str();
+            let state_key = target.state_key.as_str();
             let model = target.upstream.as_str();
             let Some(provider) = target.provider.clone() else {
                 last_err = Some(Error::UnknownProvider(provider_name.to_string()));
@@ -307,7 +341,7 @@ impl Router {
                 // event for THIS provider and move to the next chain
                 // entry -- retrying the same provider would just hit
                 // the gate again.
-                if let Some((gate_kind, gate_err)) = self.gate_check(provider_name) {
+                if let Some((gate_kind, gate_err)) = self.gate_check(state_key, provider_name) {
                     tracing::warn!(
                         provider = provider_name,
                         model = %target.nickname.as_deref().unwrap_or(""),
@@ -340,14 +374,14 @@ impl Router {
 
                 match result {
                     Ok(mut resp) => {
-                        self.record_success(provider_name);
+                        self.record_success(state_key);
                         resp.routectl_provider = Some(provider_name.to_string());
                         return Ok(resp);
                     }
                     Err(e) => {
                         let do_fallback = should_fallback(&e, &policy);
                         if do_fallback {
-                            self.record_failure(provider_name);
+                            self.record_failure(state_key);
                         }
                         if opts.disable_fallbacks {
                             return Err(e);
@@ -400,6 +434,7 @@ impl Router {
 
         'chain: for target in chain.iter() {
             let provider_name = target.provider_name.as_str();
+            let state_key = target.state_key.as_str();
             let model = target.upstream.as_str();
             let Some(provider) = target.provider.clone() else {
                 last_err = Some(Error::UnknownProvider(provider_name.to_string()));
@@ -411,7 +446,7 @@ impl Router {
 
             // Per-attempt gate: streams don't retry against the same
             // provider, so this is also the "single attempt" gate.
-            if let Some((gate_kind, gate_err)) = self.gate_check(provider_name) {
+            if let Some((gate_kind, gate_err)) = self.gate_check(state_key, provider_name) {
                 tracing::warn!(
                     provider = provider_name,
                     model = %target.nickname.as_deref().unwrap_or(""),
@@ -437,7 +472,7 @@ impl Router {
                 .await
             {
                 Ok(stream) => {
-                    let state = self.state.get(provider_name).cloned();
+                    let state = self.state.get(state_key).cloned();
                     let cancel_is_failure = state
                         .as_ref()
                         .is_some_and(|st| st.lock().half_open_probe_in_flight());
@@ -450,7 +485,7 @@ impl Router {
                 Err(e) => {
                     let do_fallback = should_fallback(&e, &policy);
                     if do_fallback {
-                        self.record_failure(provider_name);
+                        self.record_failure(state_key);
                     }
                     if opts.disable_fallbacks {
                         return Err(e);
@@ -478,30 +513,40 @@ impl Router {
     /// status-0 upstream error). The `kind` tag is a stable string
     /// (`"rate_limit"` or `"circuit_breaker"`) used as a `gate_kind`
     /// field on the gate-blocked log so operators can filter by reason.
-    fn gate_check(&self, provider_name: &str) -> Option<(&'static str, Error)> {
-        let state = self.state.get(provider_name)?.clone();
+    ///
+    /// `state_key` is the per-model nickname (v0.6.0) or the provider
+    /// name (legacy / test path); `provider_name_for_err` is always
+    /// the operator-facing provider name and lands in the resulting
+    /// error so callers see WHICH provider was gate-blocked, not the
+    /// internal nickname.
+    fn gate_check(
+        &self,
+        state_key: &str,
+        provider_name_for_err: &str,
+    ) -> Option<(&'static str, Error)> {
+        let state = self.state.get(state_key)?.clone();
         let mut s = state.lock();
         match s.try_dispatch(Instant::now()) {
             GateDecision::Allow => None,
             GateDecision::RateLimited => Some((
                 "rate_limit",
-                Error::upstream(provider_name, 0, "local rpm_limit exceeded"),
+                Error::upstream(provider_name_for_err, 0, "local rpm_limit exceeded"),
             )),
             GateDecision::CircuitOpen => Some((
                 "circuit_breaker",
-                Error::upstream(provider_name, 0, "circuit breaker open"),
+                Error::upstream(provider_name_for_err, 0, "circuit breaker open"),
             )),
         }
     }
 
-    fn record_success(&self, provider_name: &str) {
-        if let Some(state) = self.state.get(provider_name) {
+    fn record_success(&self, state_key: &str) {
+        if let Some(state) = self.state.get(state_key) {
             state.lock().record_success();
         }
     }
 
-    fn record_failure(&self, provider_name: &str) {
-        if let Some(state) = self.state.get(provider_name) {
+    fn record_failure(&self, state_key: &str) {
+        if let Some(state) = self.state.get(state_key) {
             state.lock().record_failure(Instant::now());
         }
     }
@@ -545,6 +590,9 @@ fn into_dispatch_targets(chain: Vec<Arc<ResolvedModel>>) -> Vec<DispatchTarget> 
 fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
     DispatchTarget {
         provider_name: m.provider_name.clone(),
+        // v0.6.0 dispatch keys the breaker by nickname so two models
+        // on one provider quarantine independently.
+        state_key: m.nickname.clone(),
         upstream: m.upstream.clone(),
         provider: Some(m.provider.clone()),
         reasoning: if m.reasoning.is_empty() {
@@ -1070,6 +1118,7 @@ mod resolved_models_tests {
     //! an unknown nickname" startup-validation path (the latter
     //! enforced at `install_resolved_models` callers in C4).
     use super::*;
+    use crate::config::{ProviderEntry, ProviderRuntimePolicy};
     use crate::resolved::ResolvedModel;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -1158,7 +1207,7 @@ mod resolved_models_tests {
     }
 
     #[tokio::test]
-    async fn install_resolved_models_creates_runtime_state_per_provider() {
+    async fn install_resolved_models_creates_runtime_state_per_nickname() {
         let p: Arc<dyn Provider> = Arc::new(CountedProvider {
             id: "p-test".into(),
             calls: AtomicUsize::new(0),
@@ -1170,9 +1219,103 @@ mod resolved_models_tests {
         // Both nicknames present in the resolved table.
         assert!(router.resolved_models.contains_key("alpha"));
         assert!(router.resolved_models.contains_key("beta"));
-        // The shared provider has exactly one runtime state entry,
-        // not duplicated per nickname.
-        assert!(router.state.contains_key("p-shared"));
+        // v0.6.0 keys runtime state by nickname so two models on one
+        // provider quarantine independently. Both nicknames must own
+        // their own slot.
+        assert!(router.state.contains_key("alpha"));
+        assert!(router.state.contains_key("beta"));
+    }
+
+    #[tokio::test]
+    async fn per_model_breaker_isolates_failures() {
+        // Pin: when two models share one provider entry, tripping
+        // model A's breaker does NOT block model B from dispatching.
+        // Pre-rc.2 this regressed because state was keyed by provider
+        // name (one breaker shared across all models on that provider).
+        struct AlwaysFailing {
+            id: String,
+        }
+        #[async_trait]
+        impl Provider for AlwaysFailing {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+            fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+                Err(Error::normalize_response(&self.id, "unused"))
+            }
+            fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+                Ok(None)
+            }
+            async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Err(Error::upstream(&self.id, 0, "always fails"))
+            }
+            async fn stream(
+                &self,
+                _: ChatRequest,
+            ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+                unreachable!()
+            }
+        }
+
+        // Provider with a 1-failure breaker. Both models share it.
+        let mut config = Config::default();
+        config.providers.insert(
+            "p-shared".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                extra_headers: BTreeMap::new(),
+                reasoning_dialect: crate::config::ReasoningDialect::Openai,
+                history_reasoning: crate::config::HistoryReasoning::default(),
+                user_agent: None,
+                runtime: ProviderRuntimePolicy {
+                    circuit_failures: Some(1),
+                    circuit_cooldown_ms: Some(60_000),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let mut router = Router::new(Arc::new(config));
+        let p_a: Arc<dyn Provider> = Arc::new(AlwaysFailing { id: "a".into() });
+        let p_b: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "b".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "alpha".into(),
+            Arc::new(ResolvedModel::new("alpha", "p-shared", p_a, "u1")),
+        );
+        models.insert(
+            "beta".into(),
+            Arc::new(ResolvedModel::new("beta", "p-shared", p_b, "u2")),
+        );
+        router.install_resolved_models(models);
+
+        // Trip alpha's breaker: one failed dispatch puts it Open.
+        let req_a = ChatRequest {
+            model: "alpha".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let _ = router.complete(req_a).await; // failure, breaker trips
+
+        // Beta MUST still be routable. Pre-fix (state keyed by
+        // provider) this returned a circuit_breaker gate-block error.
+        let req_b = ChatRequest {
+            model: "beta".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req_b).await.expect(
+            "beta dispatch must succeed even though alpha's breaker is tripped; \
+             same-provider models must not share a breaker",
+        );
+        assert_eq!(resp.routectl_provider.as_deref(), Some("p-shared"));
     }
 
     #[test]
