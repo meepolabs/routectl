@@ -370,7 +370,21 @@ fn redact_value(v: &mut serde_json::Value) {
                     // parts. Redact at leaf when string; recurse when
                     // structured (covers Anthropic system blocks +
                     // OpenAI Chat Completions message-content arrays).
-                    "system" | "content" => {
+                    //
+                    // `output` covers the OpenAI Responses
+                    // `function_call_output.output` field on outgoing
+                    // request items: it's either a flat tool-result
+                    // string (leaf -- without this arm, the generic
+                    // `_` fell into `redact_value` which is a no-op
+                    // on Strings, and the tool-result content leaked
+                    // verbatim into the trace log) or an array of
+                    // typed parts whose inner `text` leaves are
+                    // caught by the `text` arm on recursion. Also
+                    // covers the Responses RESPONSE body's top-level
+                    // `output: [...]` array and Bedrock Converse
+                    // `output: {message: ...}` object -- both
+                    // structured shapes recurse cleanly.
+                    "system" | "content" | "output" => {
                         redact_string_or_recurse(entry);
                     }
                     // Image / document source data (base64). Only
