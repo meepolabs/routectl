@@ -1151,16 +1151,14 @@ async fn bedrock_converse_stream_matrix() {
 // The chatgpt-oauth Responses endpoint is stream-only: complete() internally
 // forces stream=true and collects to a single ChatResponse (the relevant stage fix).
 
-#[cfg(feature = "openai-responses")]
 const OPENAI_RESPONSES_BASE: &str = "https://chatgpt.com/backend-api/codex";
 
 // Models available on the ChatGPT Codex endpoint as of 2026-05-12.
 // gpt-5.3-codex is the default for the codex CLI; others are available
 // to ChatGPT Plus subscribers.
-#[cfg(feature = "openai-responses")]
+
 const OPENAI_RESPONSES_MODELS: &[&str] = &["gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini"];
 
-#[cfg(feature = "openai-responses")]
 async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Router>> {
     use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 
@@ -1223,7 +1221,6 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
     Some(Arc::new(router))
 }
 
-#[cfg(feature = "openai-responses")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openai_responses_complete_matrix() {
     let Some(router) = build_openai_responses_test_router(OPENAI_RESPONSES_MODELS).await else {
@@ -1251,7 +1248,6 @@ async fn openai_responses_complete_matrix() {
     );
 }
 
-#[cfg(feature = "openai-responses")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openai_responses_stream_matrix() {
     let Some(router) = build_openai_responses_test_router(OPENAI_RESPONSES_MODELS).await else {
