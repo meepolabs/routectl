@@ -1061,6 +1061,91 @@ mod tests {
         );
     }
 
+    /// OpenRouter's `/v1/messages` endpoint appends an OpenAI-style
+    /// `data: [DONE]` sentinel after the Anthropic `message_stop`
+    /// event. Real api.anthropic.com does not emit this. Pre-fix
+    /// (Bug G), the SSE parser would try to JSON-decode `[DONE]`
+    /// and fail with `bad sse json: expected value at line 1
+    /// column 2`, yielding an `Err(Streaming(..))` chunk and
+    /// causing the egress wrapper to synthesize
+    /// `finish_reason="truncated"`. Pin that the stream now ends
+    /// cleanly: no error yielded, observed finish_reason still
+    /// `"stop"`.
+    #[tokio::test]
+    async fn integration_stream_handles_trailing_done_sentinel() {
+        let mock_server = MockServer::start().await;
+
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_st02\",\"model\":\"claude-3-opus\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi!\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+            // OpenRouter trailer -- not a valid Anthropic event.
+            "event: data\n",
+            "data: [DONE]\n\n",
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .append_header("content-type", "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let provider = make_provider(&mock_server.uri());
+        let mut req = base_req("claude-3-opus", vec![user_msg("stream test")]);
+        req.stream = Some(true);
+
+        use futures::StreamExt;
+        let mut stream = provider.stream(req).await.unwrap();
+        let mut text_chunks: Vec<String> = Vec::new();
+        let mut finish_reasons: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(chunk) => {
+                    for choice in &chunk.choices {
+                        if let Some(ref text) = choice.delta.content {
+                            text_chunks.push(text.clone());
+                        }
+                        if let Some(ref fr) = choice.finish_reason {
+                            finish_reasons.push(fr.clone());
+                        }
+                    }
+                }
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+
+        assert!(
+            errors.is_empty(),
+            "trailing [DONE] must not produce stream errors: {:?}",
+            errors
+        );
+        assert!(
+            text_chunks.contains(&"Hi!".to_string()),
+            "expected 'Hi!' in {:?}",
+            text_chunks
+        );
+        assert!(
+            finish_reasons.contains(&"stop".to_string()),
+            "expected 'stop' in {:?}",
+            finish_reasons
+        );
+    }
+
     // -----------------------------------------------------------------------
     // M1.2: decoupled anthropic-beta from auth_kind
     // -----------------------------------------------------------------------
