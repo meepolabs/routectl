@@ -94,7 +94,7 @@ and architectures. Lots of NIM models are guarded behind feature
 endpoints that 410 ("end of life") -- the matrix avoids those by using
 freshly-validated names.
 
-## Anthropic API direct (`type = "anthropic-api"`)
+## Anthropic API direct (`kind = "anthropic-api"`)
 
 Hits `https://api.anthropic.com` with `x-api-key` (or
 `Authorization: Bearer` for OAuth-bearer auth) and
@@ -103,7 +103,7 @@ blocks, signature preservation, system-message lift, tools shape,
 cache_control round-trip -- has 20+ unit tests. Live verification
 runs when `ANTHROPIC_API_KEY` is set.
 
-## AWS Bedrock (`type = "bedrock"`, InvokeModel + Anthropic body)
+## AWS Bedrock (`kind = "bedrock"`, InvokeModel + Anthropic body)
 
 Hits `bedrock-runtime.<region>.amazonaws.com` directly with SigV4
 signing or a short-term bearer key
@@ -136,7 +136,7 @@ hub-and-spoke seam end-to-end:
   frames, asserts the rendered SSE event sequence
   (`message_start` -> `content_block_*` -> `message_stop`).
 
-## OpenAI Responses API (`type = "openai-responses"`, chatgpt-oauth surface)
+## OpenAI Responses API (`kind = "openai-responses"`, chatgpt-oauth surface)
 
 Hits `https://chatgpt.com/backend-api/codex/responses` with a ChatGPT
 subscription bearer JWT (`Authorization: Bearer <jwt>`) and

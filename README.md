@@ -126,32 +126,42 @@ host = "127.0.0.1"
 port = 8787
 
 [providers.deepseek]
-type = "openai-compat"
+kind = "openai-compat"
 base_url = "https://api.deepseek.com/v1"
 api_key_ref = "env://DEEPSEEK_API_KEY"
 reasoning_dialect = "deepseek"
 
 [providers.anthropic]
-type = "anthropic-api"
+kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 
 [providers.bedrock]
-type = "bedrock"
+kind = "bedrock"
 region = "us-east-1"
-model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 creds = { kind = "bearer-key", key_ref = "env://AWS_BEARER_TOKEN_BEDROCK" }
 
-[aliases.fast]
-chain = ["deepseek:deepseek-chat"]
+[models.fast]
+provider = "deepseek"
+upstream = "deepseek-chat"
 
-[aliases.heavy]
-chain = [
-  "bedrock:us.anthropic.claude-opus-4-20250514-v1:0",
-  "anthropic:claude-opus-4-20250514",
-]
+[models.heavy-bedrock]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-20250514-v1:0"
+thinking = "high"
+
+[models.heavy-anthropic]
+provider = "anthropic"
+upstream = "claude-opus-4-20250514"
+thinking = "high"
+
+[aliases]
+fast  = "fast"
+heavy = ["heavy-bedrock", "heavy-anthropic"]   # fallback chain
+"claude-opus-*" = "heavy"                       # suffix-glob routing
+default = "fast"
 ```
 
-See [`examples/config.toml`](examples/config.toml) for the full surface, including per-alias retry overrides, RPM limits, circuit breakers, and ingress alias maps.
+See [`examples/config.toml`](examples/config.toml) for the full surface, including per-alias retry overrides, RPM limits, and circuit breakers.
 
 ### Secret references
 
@@ -241,17 +251,25 @@ Empty lists (or omitted `[bedrock]` section) = pass-through (no filter applied) 
 
 ## Routing
 
-Aliases map a name to a fallback chain. When the primary fails (rate limit, 5xx, network error), the router falls through to the next entry.
+`[aliases]` maps incoming wire model strings to model nicknames declared in `[models.X]`. List values are fallback chains -- when the primary model's provider fails (rate limit, 5xx, network error), the router falls through to the next entry. Per-alias retry overrides live alongside in the top-level `[retry]` section.
 
 ```toml
-[aliases.heavy]
-chain = [
-  "bedrock:us.anthropic.claude-opus-4-20250514-v1:0",
-  "anthropic:claude-opus-4-20250514",
-  "openrouter:anthropic/claude-opus-4-20250514",
-]
+[models.opus-bedrock]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-20250514-v1:0"
 
-[aliases.heavy.retry]
+[models.opus-anthropic]
+provider = "anthropic"
+upstream = "claude-opus-4-20250514"
+
+[models.opus-or]
+provider = "openrouter"
+upstream = "anthropic/claude-opus-4-20250514"
+
+[aliases]
+heavy = ["opus-bedrock", "opus-anthropic", "opus-or"]
+
+[retry]
 max_attempts = 2
 initial_backoff_ms = 250
 backoff_multiplier = 2.0
@@ -273,19 +291,17 @@ Per-provider runtime gates (set inline on the provider definition):
 
 Per-request: `x-routectl-disable-fallbacks: 1` skips the chain walk; the first failure propagates verbatim.
 
-### Ingress alias maps
+### Routing wire models
 
-When a client can't override the `model` field directly, map model IDs to routectl aliases server-side:
+The unified `[aliases]` table maps incoming wire `model` strings to model nicknames declared in `[models.X]`. Single string = one entry; list = fallback chain. Suffix-globs collapse per-version sprawl. `default = "..."` is the catch-all.
 
 ```toml
-[ingress.anthropic.aliases]
-"claude-opus-4-20250514"      = "heavy"
-"claude-sonnet-4-5-20250929"  = "default"
-"claude-haiku-4-5-20251001"   = "fast"
-
-[ingress.openai.aliases]
-"gpt-5"        = "heavy"
-"gpt-4o-mini"  = "fast"
+[aliases]
+"claude-opus-*"   = "heavy"
+"claude-sonnet-*" = "default"
+"claude-haiku-*"  = "fast"
+"gpt-5*"          = ["heavy", "default"]   # OpenAI-side fallback
+default           = "default"
 ```
 
 Or send `x-routectl-alias: heavy` -- the header always wins.
