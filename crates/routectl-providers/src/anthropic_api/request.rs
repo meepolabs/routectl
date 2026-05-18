@@ -1000,6 +1000,7 @@ pub fn normalize(
         serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
     merge_provider_extras(id, &mut body, req.provider_extras.as_ref());
+    strip_unsupported_output_effort(&mut body, adaptive_thinking);
     Ok(body)
 }
 
@@ -1060,6 +1061,13 @@ fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
 /// fields:
 /// - `thinking`  -- translated from `req.reasoning` by `build_thinking`;
 ///   not a raw ChatRequest field but routectl writes it.
+///
+/// `output_config` is intentionally NOT here -- the full object is
+/// allowed through `provider_extras` for legitimate sub-fields like
+/// `output_config.format` (structured-output). The `output_config.effort`
+/// sub-field is stripped post-merge in `strip_unsupported_output_effort`
+/// when the provider lacks `adaptive_thinking=true` (Haiku, Sonnet --
+/// Anthropic 400s on `effort` for them).
 fn is_routectl_managed_key(key: &str) -> bool {
     is_canonical_request_key(key)
         || matches!(
@@ -1068,6 +1076,36 @@ fn is_routectl_managed_key(key: &str) -> bool {
             // `thinking` is built from req.reasoning by this egress.
             "thinking"
         )
+}
+
+/// Post-merge sub-key strip: when the provider does NOT have
+/// `adaptive_thinking=true`, remove `body.output_config.effort` so
+/// non-Opus models (Sonnet 4.5, Haiku 4.5) don't 400 with
+/// `This model does not support the effort parameter.` cc emits
+/// `output_config: {effort: "high"}` on every request regardless of
+/// the routed model, and the forward-compat sweep through
+/// `provider_extras` puts it back in the outgoing body verbatim.
+/// This strip is the symmetric counterpart to `build_output_config`,
+/// which only emits the effort sub-key when adaptive is on.
+///
+/// `output_config.format` (structured-output) and other sub-fields
+/// are preserved -- they're orthogonal to the effort beta and
+/// supported across the model family. If `effort` was the only
+/// sub-key, the now-empty `output_config` object is also removed
+/// so the wire body stays clean.
+fn strip_unsupported_output_effort(body: &mut Value, adaptive_thinking: bool) {
+    if adaptive_thinking {
+        return;
+    }
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let Some(oc) = obj.get_mut("output_config").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    if oc.remove("effort").is_some() && oc.is_empty() {
+        obj.remove("output_config");
+    }
 }
 
 #[cfg(test)]
