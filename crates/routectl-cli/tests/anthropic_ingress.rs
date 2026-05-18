@@ -166,9 +166,21 @@ async fn cache_control_on_every_position_reaches_upstream() {
     assert_eq!(received.len(), 1);
     let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
 
-    assert_eq!(
-        upstream_body["anthropic_beta"],
-        json!(["context-1m-2025-08-07"])
+    // anthropic_beta now travels on the HTTP header, not the body.
+    assert!(
+        upstream_body.get("anthropic_beta").is_none(),
+        "anthropic_beta must not appear in body any more"
+    );
+    let beta_header = received[0]
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
+    assert!(
+        names.contains(&"context-1m-2025-08-07"),
+        "context-1m-2025-08-07 not in anthropic-beta header: {beta_header}"
     );
     assert_eq!(upstream_body["system"][0]["cache_control"]["ttl"], "1h");
     assert_eq!(upstream_body["tools"][0]["cache_control"]["ttl"], "1h");
@@ -819,7 +831,11 @@ async fn output_config_format_passes_through_unchanged() {
 #[tokio::test]
 async fn legacy_output_format_preserves_existing_output_config_effort() {
     // The legacy field must merge into a pre-existing `output_config`
-    // (with `effort`) rather than overwriting it.
+    // (with `effort`) rather than overwriting it. Note: this test
+    // exercises the INGRESS merge (output_format -> output_config.format)
+    // -- the EGRESS for a non-adaptive provider (haiku here) strips
+    // `output_config.effort` because Anthropic 400s on it. The
+    // structured-output `format` sub-field passes through unchanged.
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -854,7 +870,15 @@ async fn legacy_output_format_preserves_existing_output_config_effort() {
         "legacy field leaked: {up}"
     );
     let oc = up.get("output_config").expect("output_config present");
-    assert_eq!(oc["effort"], "high");
+    // `effort` is stripped on non-adaptive providers (haiku) -- the
+    // anthropic-api egress's `strip_unsupported_output_effort` keeps
+    // the wire clean of a field Anthropic 400s on. The structured-
+    // output `format` survives because it's orthogonal to the effort
+    // beta and supported across the model family.
+    assert!(
+        oc.get("effort").is_none(),
+        "effort must be stripped for non-adaptive providers: {oc}"
+    );
     assert_eq!(oc["format"]["type"], "json_schema");
 }
 
@@ -1033,9 +1057,12 @@ async fn anthropic_beta_http_header_forwarded_to_upstream() {
     // to the upstream or those betas silently no-op.
     //
     // routectl normalizes the inbound header into canonical
-    // `req.anthropic_beta` and emits it on the upstream body
-    // (Anthropic accepts either surface). This test pins that
-    // round-trip end-to-end.
+    // `req.anthropic_beta` and emits it as the upstream HTTP
+    // `anthropic-beta` header. Real api.anthropic.com (OAuth-Bearer
+    // flavor especially) rejects `anthropic_beta` as a body field
+    // with `Extra inputs are not permitted`, so the body emission
+    // was removed in favor of the header surface. This test pins
+    // that the inbound header round-trips to the upstream header.
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -1062,19 +1089,27 @@ async fn anthropic_beta_http_header_forwarded_to_upstream() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let received = upstream.received_requests().await.unwrap();
+    // anthropic_beta must NOT be a body field (api.anthropic.com rejects it).
     let up: Value = serde_json::from_slice(&received[0].body).unwrap();
-    let betas = up
-        .get("anthropic_beta")
-        .and_then(|v| v.as_array())
-        .expect("inbound anthropic-beta header was not lifted to upstream body");
-    let names: Vec<&str> = betas.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        up.get("anthropic_beta").is_none(),
+        "anthropic_beta must NOT appear in the upstream body: {up:?}",
+    );
+    // anthropic_beta MUST be on the outgoing HTTP header.
+    let header = received[0]
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing from upstream request")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = header.split(',').map(str::trim).collect();
     assert!(
         names.contains(&"context-management-2025-06-27"),
-        "missing context-management beta: {names:?}"
+        "missing context-management beta in header: {header}"
     );
     assert!(
         names.contains(&"prompt-caching-2024-07-31"),
-        "missing prompt-caching beta: {names:?}"
+        "missing prompt-caching beta in header: {header}"
     );
 }
 
@@ -1108,18 +1143,23 @@ async fn anthropic_beta_header_merges_with_body_anthropic_beta_dedup() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let received = upstream.received_requests().await.unwrap();
+    // Body must NOT carry anthropic_beta any more.
     let up: Value = serde_json::from_slice(&received[0].body).unwrap();
-    let betas: Vec<String> = up
-        .get("anthropic_beta")
-        .and_then(|v| v.as_array())
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
-    // Body-first ordering, header-second, dedup'd.
+    assert!(up.get("anthropic_beta").is_none());
+    // Header carries the merged + deduped value. Order: body-first,
+    // then header values not already present (ingress merge), then
+    // any provider-config extra_headers["anthropic-beta"] (none here).
+    let header = received[0]
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = header.split(',').map(str::trim).collect();
     assert_eq!(
-        betas,
-        vec!["beta-a", "context-management-2025-06-27", "beta-c"]
+        names,
+        vec!["beta-a", "context-management-2025-06-27", "beta-c"],
+        "merged anthropic-beta header order/dedup wrong: got {header}",
     );
 }
 

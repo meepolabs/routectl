@@ -117,7 +117,11 @@ impl AnthropicApiProvider {
         format!("{}/v1/messages", self.cfg.base_url.trim_end_matches('/'))
     }
 
-    fn build_headers(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn build_headers(
+        &self,
+        rb: reqwest::RequestBuilder,
+        anthropic_beta: &[String],
+    ) -> reqwest::RequestBuilder {
         let mut rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
         rb = match self.cfg.auth_kind {
             AuthKind::ApiKey => rb.header("x-api-key", &self.cfg.api_key),
@@ -125,6 +129,49 @@ impl AnthropicApiProvider {
                 rb.header("authorization", format!("Bearer {}", self.cfg.api_key))
             }
         };
+
+        // Compose the `anthropic-beta` HTTP header from two sources:
+        //   1. The static `extra_headers["anthropic-beta"]` value
+        //      from the provider config (operator-supplied,
+        //      typically the cc-spoof flag set).
+        //   2. The request's `anthropic_beta` array, which was lifted
+        //      from the inbound HTTP header at the ingress (cc sends
+        //      its session-specific flags this way).
+        // Merge deduplicated, preserving order: config first, then
+        // request additions. Real Anthropic's OAuth endpoint
+        // recognizes betas ONLY when they arrive on the HTTP header,
+        // not when they appear in the request BODY's `anthropic_beta`
+        // array -- this is the difference between the api-key and
+        // OAuth-Bearer authorization flavors. Emitting both keeps
+        // anthropic-api egresses working against direct
+        // `api.anthropic.com` access (header path) AND against
+        // upstreams that read from the body shape (passthrough
+        // routectl -> Bedrock, etc.).
+        let mut beta_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut merged_betas: Vec<String> = Vec::new();
+        let config_betas = self
+            .cfg
+            .extra_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        for entry in config_betas.split(',') {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() && beta_seen.insert(trimmed.to_string()) {
+                merged_betas.push(trimmed.to_string());
+            }
+        }
+        for entry in anthropic_beta {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() && beta_seen.insert(trimmed.to_string()) {
+                merged_betas.push(trimmed.to_string());
+            }
+        }
+        if !merged_betas.is_empty() {
+            rb = rb.header("anthropic-beta", merged_betas.join(","));
+        }
+
         for (k, v) in &self.cfg.extra_headers {
             // Defense-in-depth: refuse to let a TOML-supplied
             // `extra_headers` entry stomp on the auth header we just
@@ -136,6 +183,12 @@ impl AnthropicApiProvider {
                     header = %k,
                     "ignoring reserved header from extra_headers (would bypass provider auth)"
                 );
+                continue;
+            }
+            // `anthropic-beta` is handled above (merged with the
+            // request's anthropic_beta). Skip duplicate emission
+            // here so we don't append the static value a second time.
+            if k.eq_ignore_ascii_case("anthropic-beta") {
                 continue;
             }
             rb = rb.header(k.as_str(), v.as_str());
@@ -174,6 +227,15 @@ impl Provider for AnthropicApiProvider {
         // Ensure stream is absent / false for the non-streaming path.
         if let Some(obj) = body.as_object_mut() {
             obj.remove("stream");
+            // `api.anthropic.com` (especially the OAuth-Bearer
+            // flavor) rejects `anthropic_beta` as a top-level body
+            // field with `Extra inputs are not permitted`. Betas
+            // travel on the `anthropic-beta` HTTP header
+            // (build_headers emits the merged value). Bedrock's
+            // body-shape egress keeps the field via its own assembly
+            // path, so this strip is scoped to the api.anthropic.com
+            // egress.
+            obj.remove("anthropic_beta");
         }
 
         // Emit the outgoing body at trace level so a grep by
@@ -184,7 +246,7 @@ impl Provider for AnthropicApiProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
-            .build_headers(self.client.post(self.messages_url()))
+            .build_headers(self.client.post(self.messages_url()), &req.anthropic_beta)
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -256,12 +318,16 @@ impl Provider for AnthropicApiProvider {
         let mut body = self.normalize_request(&req)?;
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), serde_json::Value::Bool(true));
+            // See note on the complete() path: api.anthropic.com
+            // rejects `anthropic_beta` as a body field; the HTTP
+            // header carries them via build_headers.
+            obj.remove("anthropic_beta");
         }
 
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
-            .build_headers(self.client.post(self.messages_url()))
+            .build_headers(self.client.post(self.messages_url()), &req.anthropic_beta)
             .header("content-type", "application/json")
             .json(&body)
             .send()
