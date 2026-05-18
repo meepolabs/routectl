@@ -15,8 +15,6 @@ use auth::TokenSet;
 
 pub struct AppState {
     pub router: Arc<Router>,
-    pub openai_aliases: std::collections::BTreeMap<String, String>,
-    pub anthropic_aliases: std::collections::BTreeMap<String, String>,
     pub strict_translation: bool,
 }
 
@@ -109,8 +107,6 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
 
     let state = Arc::new(AppState {
         router: Arc::new(router),
-        openai_aliases: config.ingress.openai.aliases.clone(),
-        anthropic_aliases: config.ingress.anthropic.aliases.clone(),
         strict_translation: config.server.strict_translation,
     });
 

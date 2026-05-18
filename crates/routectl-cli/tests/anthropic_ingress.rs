@@ -476,38 +476,8 @@ async fn auth_rejects_missing_credentials_when_required() {
 }
 
 // ---------------------------------------------------------------------------
-// Ingress aliases
+// Ingress alias header (per-dialect alias map removed in v0.6.0)
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn ingress_aliases_resolve_wire_model_to_alias() {
-    let upstream = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
-        .mount(&upstream)
-        .await;
-
-    let mut alias_map = BTreeMap::new();
-    alias_map.insert("claude-opus-4-7-20251022".into(), "heavy".into());
-
-    let config = anthropic_proxy_config(&upstream.uri(), None, alias_map);
-    let base = helpers::spawn(config).await;
-
-    let resp = reqwest::Client::new()
-        .post(format!("{base}/v1/messages"))
-        .json(&json!({
-            "model": "claude-opus-4-7-20251022",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "hi"}]
-        }))
-        .send()
-        .await
-        .unwrap();
-    // 200 means the alias resolved + provider was hit successfully.
-    // (If the alias had not resolved we'd get an UnknownAlias 404.)
-    assert_eq!(resp.status(), 200);
-}
 
 #[tokio::test]
 async fn x_routectl_alias_header_overrides_aliases_map() {
@@ -1763,7 +1733,7 @@ async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
     };
 
     // Arrange: simulate the inbound HTTP shape claude-code sends.
-    let ingress = AnthropicIngress::new(BTreeMap::new());
+    let ingress = AnthropicIngress;
     let mut headers = HeaderMap::new();
     headers.insert(
         "anthropic-beta",
@@ -2138,7 +2108,7 @@ async fn converse_request_body_has_camel_case_inference_config() {
     use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
 
     // Arrange: a simple Anthropic Messages body from the ingress.
-    let ingress = AnthropicIngress::new(BTreeMap::new());
+    let ingress = AnthropicIngress;
     let inbound = json!({
         "model": "claude-haiku-4-5",
         "max_tokens": 64,
@@ -2243,7 +2213,7 @@ async fn converse_request_includes_tool_config_for_tool_defs() {
     use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
 
     // Arrange: request with one tool definition.
-    let ingress = AnthropicIngress::new(BTreeMap::new());
+    let ingress = AnthropicIngress;
     let inbound = json!({
         "model": "claude-haiku-4-5",
         "max_tokens": 32,
@@ -2430,7 +2400,7 @@ async fn converse_request_system_with_cache_control_emits_cache_point_block() {
     use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
 
     // Arrange: system block carrying cache_control.
-    let ingress = AnthropicIngress::new(BTreeMap::new());
+    let ingress = AnthropicIngress;
     let inbound = json!({
         "model": "claude-haiku-4-5",
         "max_tokens": 32,
