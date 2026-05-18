@@ -1,4 +1,3 @@
-use super::render::openai_finish_to_anthropic_stop;
 use super::*;
 
 pub(super) fn anthropic_state_mut(s: &mut dyn IngressStreamState) -> &mut AnthropicStreamState {
