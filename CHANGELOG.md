@@ -4,6 +4,55 @@ All notable changes to routectl. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-rc.1]
+
+### Removed (BREAKING)
+
+- `type` field on `[providers.X]` -- renamed to `kind` to disambiguate
+  from the `type` Rust keyword and match `BedrockCredsConfig.kind`.
+- `model_id` on `[providers.bedrock-X]` -- moves to
+  `[models.X].upstream`. Bedrock providers are no longer 1:1 with a
+  model; the factory builds one provider instance per `[models.X]`
+  row that points at a Bedrock provider, so each model gets its own
+  circuit breaker.
+- `thinking`, `enabled`, `adaptive_thinking` on `[providers.X]` --
+  move to `[models.X]`. Per-provider was the wrong granularity; two
+  models on one provider can now carry different reasoning floors.
+- `additional_model_request_fields` on `[providers.bedrock-X]` --
+  renamed to `additional_request_fields` and moved to `[models.X]`.
+- `default_extras` on `[providers.X]` -- moves to `[models.X]`.
+- `[ingress.X.aliases]` per-ingress alias maps -- collapsed into the
+  unified top-level `[aliases]` table. The wire-string keyspaces
+  don't collide in practice (claude-* vs gpt-* vs deepseek-*).
+- `[aliases.X] chain = [...]` sub-tables -- chains live as list
+  values directly in `[aliases]`: `heavy = ["opus", "sonnet"]`.
+- top-level `default_model = "..."` -- replaced by `default = "..."`
+  inside `[aliases]`.
+
+### Added
+
+- `[models.X]` first-class TOML table. Required fields: `provider`
+  (key in `[providers.X]`), `upstream` (wire model id). Optional:
+  `thinking`, `enabled`, `adaptive_thinking`, `additional_request_fields`,
+  `chat_template_kwargs`, `default_extras`.
+- Suffix-glob alias keys: `"claude-opus-*" = "opus-heavy"` matches
+  any wire model starting with `claude-opus-`. Lookup precedence
+  is exact match > longest matching prefix > `default`.
+- Alias values are `String | Vec<String>` (untagged enum). Single
+  string is a one-entry chain; list is a fallback chain.
+- `Router::new` precomputes a `BTreeMap<String, Arc<ResolvedModel>>`
+  from the `[models]` table, so dispatch is one O(1) lookup per
+  hop and unknown nicknames in alias chains fail at startup, not
+  at first request.
+- Tracing dispatch events now carry `model = <nickname>` alongside
+  `provider = <provider_name>` for per-model triage.
+
+### Migration
+
+No automated migration tool; old configs hit raw serde errors at
+startup. Hand-edit your TOML against the new shape -- see
+`examples/config.toml` for a complete reference.
+
 ## [Unreleased]
 
 ### Added
