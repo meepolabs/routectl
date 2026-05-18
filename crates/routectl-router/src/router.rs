@@ -241,7 +241,7 @@ impl Router {
             tracing::warn!(
                 wire_model = %wire_model,
                 "alias resolved to empty chain (all targets disabled or unresolvable); \
-                 falling back to default",
+                 falling through to direct nickname lookup or `default`",
             );
             None
         } else {
