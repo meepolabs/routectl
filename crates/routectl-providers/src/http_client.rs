@@ -60,6 +60,16 @@ const RESERVED_EXTRA_HEADERS: &[&str] = &[
     "host",
     "content-type",
     "content-length",
+    // `anthropic-beta` is now constructed dynamically per request by
+    // `anthropic_api::AnthropicApiProvider::build_headers` from the
+    // merged set of static `extra_headers["anthropic-beta"]` config and
+    // request-time `req.anthropic_beta`. An operator setting it via
+    // `extra_headers` directly would be silently overridden (or worse,
+    // emitted twice on the wire if a future code change uses raw
+    // header_mut). Reserve the name so the canonical management site
+    // is unambiguous; the per-egress builder reads from extra_headers
+    // separately, bypassing this guard intentionally.
+    "anthropic-beta",
 ];
 
 /// True if the given header name is reserved for routectl's own
