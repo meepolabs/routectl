@@ -120,7 +120,10 @@ api_key_ref = "env://OPENCODE_GO_API_KEY"
 reasoning_dialect = "deepseek"
 "#;
     let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
-    let entry = cfg.providers.get("example-deepseek-host").expect("opencode entry");
+    let entry = cfg
+        .providers
+        .get("example-deepseek-host")
+        .expect("opencode entry");
     match entry {
         ProviderEntry::OpenaiCompat {
             base_url,
