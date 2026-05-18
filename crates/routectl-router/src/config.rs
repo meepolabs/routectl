@@ -189,18 +189,44 @@ impl AliasValue {
     /// `Single` yields one name; a `Chain` yields each entry in
     /// order. Lifetimes here mean "the names live as long as the
     /// `AliasValue`."
-    pub fn nicknames(&self) -> impl Iterator<Item = &str> {
-        let v: Box<dyn Iterator<Item = &str>> = match self {
-            AliasValue::Single(s) => Box::new(std::iter::once(s.as_str())),
-            AliasValue::Chain(v) => Box::new(v.iter().map(|s| s.as_str())),
-        };
-        v
+    ///
+    /// Implementation: a hand-rolled two-state iterator avoids the
+    /// `Box<dyn Iterator>` heap allocation per call. Dispatch fires
+    /// this on every alias-chain walk so the difference matters at
+    /// scale.
+    pub fn nicknames(&self) -> NicknameIter<'_> {
+        match self {
+            AliasValue::Single(s) => NicknameIter::Single(Some(s.as_str())),
+            AliasValue::Chain(v) => NicknameIter::Chain(v.iter()),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
         match self {
             AliasValue::Single(_) => false,
             AliasValue::Chain(v) => v.is_empty(),
+        }
+    }
+}
+
+/// Zero-allocation iterator returned by `AliasValue::nicknames`.
+/// Two states: the single-string variant yields its name once; the
+/// chain variant wraps a slice iterator and yields each entry in
+/// order. No heap allocation in either path -- contrast with the
+/// previous `Box<dyn Iterator>` implementation that allocated per
+/// call.
+pub enum NicknameIter<'a> {
+    Single(Option<&'a str>),
+    Chain(std::slice::Iter<'a, String>),
+}
+
+impl<'a> Iterator for NicknameIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            NicknameIter::Single(opt) => opt.take(),
+            NicknameIter::Chain(iter) => iter.next().map(|s| s.as_str()),
         }
     }
 }
