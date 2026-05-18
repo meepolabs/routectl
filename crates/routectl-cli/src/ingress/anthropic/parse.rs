@@ -166,19 +166,7 @@ fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatReques
             if trimmed.is_empty() {
                 continue;
             }
-            // Defense-in-depth: reject pieces containing CR or LF.
-            // `HeaderValue::to_str` already rejects control bytes
-            // (so this branch would not currently fire on inbound
-            // axum-decoded headers), but a future refactor that
-            // switches to a byte-level decode -- or a test that
-            // synthesizes the value through a different path --
-            // would otherwise allow `legit-beta\r\nX-Injected:
-            // evil` to flow through into our outbound
-            // `anthropic-beta` HTTP header on the egress side.
-            // Drop with a WARN; the http crate would reject these
-            // on the egress build, but failing here keeps the wire
-            // surface explicit.
-            if trimmed.contains(['\r', '\n']) {
+            if !is_safe_beta_value(trimmed) {
                 tracing::warn!(
                     "anthropic ingress: anthropic-beta value contains CR/LF; \
                      dropping (possible header-injection attempt) value_len={}",
@@ -192,6 +180,23 @@ fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatReques
         }
     }
     req.anthropic_beta = all;
+}
+
+/// Defense-in-depth filter for inbound `anthropic-beta` header values:
+/// reject pieces containing CR or LF.
+///
+/// `HeaderValue::to_str` already rejects control bytes (so this filter
+/// would not currently fire on inbound axum-decoded headers), but a
+/// future refactor that switches to a byte-level decode -- or any code
+/// path that synthesizes a `Vec<String>` of betas through a different
+/// route -- could otherwise allow `legit-beta\r\nX-Injected: evil` to
+/// flow through into the outbound `anthropic-beta` HTTP header on the
+/// egress side. The http crate would reject the egress emission, but
+/// failing here keeps the wire surface explicit and unit-testable in
+/// isolation (we can drive the filter directly with CR/LF-bearing
+/// strings, bypassing `HeaderValue`'s defense).
+fn is_safe_beta_value(s: &str) -> bool {
+    !s.contains(['\r', '\n'])
 }
 
 /// Fold legacy top-level `output_format` into `output_config.format`.
