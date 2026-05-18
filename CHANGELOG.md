@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.6.0-rc.1]
 
+### Fixed
+
+- Per-model circuit breaker isolation. Two `[models.X]` rows pointing
+  at the same `[providers.X]` now have independent breaker counters
+  and RPM buckets. Pre-rc.2 the router keyed runtime state by provider
+  name -- which contradicted the rc.1 CHANGELOG claim that "each
+  model gets its own circuit breaker" for Bedrock fan-out -- so a
+  single flaky model could trip the breaker for every healthy sibling
+  on the same transport. State is now keyed by `[models.X]` nickname.
+
+- Bedrock SSO probe deduplication across models on one
+  `[providers.X]`. The factory now caches resolved AWS credentials
+  per provider name; building 5 Bedrock models on one provider hits
+  the credential chain once instead of 5x. The `reqwest::Client`
+  cache is a follow-up (currently each per-model BedrockProvider
+  builds its own client; the connection-pool fan-out is per-model).
+
 ### Removed (BREAKING)
 
 - `enabled` on `[models.X]` -- renamed to `selectable` to free the
