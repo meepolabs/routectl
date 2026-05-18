@@ -501,20 +501,6 @@ pub async fn build_resolved_models(
             .await
             {
                 Ok(p) => {
-                    // For openai-compat models, pump per-model
-                    // `default_extras` and `chat_template_kwargs` into
-                    // the cached config. v0.6.0 moved these to
-                    // [models.X]; the provider used to read them off
-                    // [providers.X]. We apply them post-build so the
-                    // cached `Arc<dyn Provider>` per-provider design
-                    // still works -- different models pointing at the
-                    // same openai-compat provider can carry different
-                    // per-model knobs by virtue of the model's own
-                    // ResolvedModel data, NOT the provider config.
-                    // (The openai-compat provider currently doesn't
-                    // support multi-model fan-out; a future commit
-                    // will plumb these through ResolvedModel into the
-                    // request normalizer.)
                     provider_cache.insert(entry.provider.clone(), p.clone());
                     p
                 }
