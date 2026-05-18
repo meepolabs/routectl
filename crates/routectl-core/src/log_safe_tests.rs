@@ -375,6 +375,117 @@ fn redact_function_call_arguments_string_redacted() {
 }
 
 #[test]
+fn redact_openai_responses_function_call_output_string_form_redacted() {
+    // OpenAI Responses outgoing body carries prior turns'
+    // function_call_output items in `input`. The `output` field is the
+    // tool result -- either a flat string (most common; codex parity)
+    // or an array of typed parts. The flat-string form previously fell
+    // into the generic `_` arm of the per-key sweep, which is a no-op
+    // on Strings, so the tool result leaked verbatim into the trace
+    // log even with ROUTECTL_LOG_REDACT_PROMPTS=1.
+    let body = json!({
+        "model": "gpt-5",
+        "input": [
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "list files"}
+            ]},
+            {"type": "function_call", "call_id": "call_1",
+             "name": "ls", "arguments": "{\"path\":\"/etc\"}"},
+            {"type": "function_call_output", "call_id": "call_1",
+             "output": "passwd shadow group hosts"},
+        ],
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    // Structural fields preserved.
+    assert_eq!(got["model"], "gpt-5");
+    assert_eq!(got["input"][2]["type"], "function_call_output");
+    assert_eq!(got["input"][2]["call_id"], "call_1");
+    // The tool-result string is redacted.
+    assert!(got["input"][2]["output"]
+        .as_str()
+        .expect("output string redacted")
+        .starts_with("<redacted len="));
+    // Sanity: sibling redactions still fire.
+    assert!(got["input"][0]["content"][0]["text"]
+        .as_str()
+        .expect("input_text redacted")
+        .starts_with("<redacted len="));
+    assert!(got["input"][1]["arguments"]
+        .as_str()
+        .expect("function_call.arguments redacted")
+        .starts_with("<redacted len="));
+}
+
+#[test]
+fn redact_openai_responses_function_call_output_items_form_recurses() {
+    // When the tool returned mixed content (e.g. an image + text), the
+    // body becomes an array of typed input_text items. Each item's
+    // inner `text` leaf must still be redacted via recursion -- the
+    // new "output" arm calls redact_string_or_recurse, which recurses
+    // when the value is structured rather than redacting the array
+    // wholesale.
+    let body = json!({
+        "input": [
+            {"type": "function_call_output", "call_id": "call_2",
+             "output": [
+                 {"type": "input_text", "text": "tool result chunk 1"},
+                 {"type": "input_text", "text": "tool result chunk 2"},
+             ]},
+        ],
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    let output_items = got["input"][0]["output"]
+        .as_array()
+        .expect("output stays an array, not redacted wholesale");
+    assert_eq!(output_items.len(), 2);
+    assert_eq!(output_items[0]["type"], "input_text");
+    assert!(output_items[0]["text"]
+        .as_str()
+        .expect("first item text redacted")
+        .starts_with("<redacted len="));
+    assert!(output_items[1]["text"]
+        .as_str()
+        .expect("second item text redacted")
+        .starts_with("<redacted len="));
+}
+
+#[test]
+fn redact_openai_responses_response_body_output_array_recurses() {
+    // The Responses RESPONSE body's top-level `output` is always an
+    // array of items. Adding `output` to the redact_string_or_recurse
+    // arm must not collapse this structured array into a `<redacted>`
+    // string; it must recurse so existing per-key arms (text,
+    // arguments) still fire on the inner items.
+    let body = json!({
+        "id": "resp_abc",
+        "model": "gpt-5",
+        "output": [
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "answer"}
+            ]},
+            {"type": "function_call", "call_id": "c1",
+             "name": "f", "arguments": "{\"x\":\"secret\"}"},
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15},
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    // Structural top-level + usage intact.
+    assert_eq!(got["id"], "resp_abc");
+    assert_eq!(got["usage"]["total_tokens"], 15);
+    // output stays an array (NOT collapsed to a redacted string).
+    let output = got["output"]
+        .as_array()
+        .expect("output stays an array on response bodies");
+    assert_eq!(output.len(), 2);
+    // Inner redactions fire as before.
+    assert_eq!(output[0]["content"][0]["text"], "<redacted len=6>");
+    assert!(output[1]["arguments"]
+        .as_str()
+        .expect("arguments redacted")
+        .starts_with("<redacted len="));
+}
+
+#[test]
 fn redact_unknown_shape_passes_through_unchanged() {
     // Unrelated JSON: nothing to redact, structure intact.
     let body = json!({"foo": 1, "bar": ["a", "b"], "baz": {"q": true}});
