@@ -160,6 +160,13 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     // silently emitting `effort: ""` on every routed request.
     routectl_router::validate_reasoning_defaults(&config)?;
 
+    // Reject `[aliases]` chains that reference unknown OR disabled
+    // `[models.X]` nicknames. Without this, dispatching against a
+    // typo'd alias chain returns `UnknownAlias` at request time with
+    // no breadcrumb back to the misconfiguration; failing here gives
+    // the operator the offending alias + nickname pair upfront.
+    routectl_router::validate_alias_chain_targets(&config)?;
+
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
         .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())

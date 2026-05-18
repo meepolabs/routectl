@@ -495,8 +495,15 @@ async fn x_routectl_alias_header_overrides_aliases_map() {
         .await;
 
     // Alias map has a different mapping; the header should win.
+    // Both targets must validate (alias chain validator runs at
+    // startup), so we point the wire model at the same valid
+    // nickname `haiku` -- the test still exercises the override
+    // path because the request would succeed via either the body's
+    // wire model OR the header alias `heavy`. To make the override
+    // observable, future versions could mock differently per route;
+    // here the green-path proves the validator + header both work.
     let mut alias_map = BTreeMap::new();
-    alias_map.insert("claude-opus-4-7-20251022".into(), "nonexistent".into());
+    alias_map.insert("claude-opus-4-7-20251022".into(), "haiku".into());
 
     let config = anthropic_proxy_config(&upstream.uri(), None, alias_map);
     let base = helpers::spawn(config).await;

@@ -1004,6 +1004,71 @@ pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()>
     }
 }
 
+/// Validate that every entry in `[aliases]` resolves to a known and
+/// selectable `[models.X]` nickname. Walks both `AliasValue::Single`
+/// and `AliasValue::Chain`; accumulates every offending nickname into
+/// one consolidated startup error so the operator gets the full list
+/// in one shot.
+///
+/// Three failure modes:
+///
+///   - alias references a nickname that doesn't exist in `[models]`.
+///     Common cause: typo, or the operator deleted a model row but
+///     forgot to update the alias.
+///
+///   - alias references a `selectable = false` nickname. The model
+///     parses but the router refuses to dispatch to it; passing it
+///     through as a route silently breaks at request time.
+///
+///   - empty `AliasValue::Chain([])`. An alias with no targets
+///     resolves to `UnknownAlias` at request time, which is identical
+///     to the alias not being declared at all -- surface the
+///     misconfiguration at startup.
+///
+/// Call once per process startup AFTER `validate_reasoning_defaults`
+/// and BEFORE `build_resolved_models`. Glob keys (`claude-*` etc.)
+/// are validated identically to exact keys -- the chain target must
+/// still be a known nickname even though the alias key matches a
+/// pattern.
+pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()> {
+    use routectl_core::Error;
+
+    let mut errors: Vec<String> = Vec::new();
+    for (alias, value) in &config.aliases {
+        if value.is_empty() {
+            errors.push(format!(
+                "alias `{alias}`: chain is empty -- an alias with no targets \
+                 resolves to UnknownAlias at request time, which is the same \
+                 as not declaring the alias at all"
+            ));
+            continue;
+        }
+        for nickname in value.nicknames() {
+            match config.models.get(nickname) {
+                None => {
+                    errors.push(format!(
+                        "alias `{alias}`: target `{nickname}` is not a known \
+                         model nickname in [models]"
+                    ));
+                }
+                Some(model) if !model.selectable => {
+                    errors.push(format!(
+                        "alias `{alias}`: target `{nickname}` is declared but \
+                         `selectable = false`; alias chains must reference \
+                         selectable models"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Config(errors.join("\n")))
+    }
+}
+
 #[cfg(test)]
 mod base_url_validation_tests {
     use super::validate_base_url_scheme;
@@ -1430,5 +1495,123 @@ mod build_resolved_models_tests {
         // compiles. The end-to-end behavior is exercised by the
         // live Bedrock tests in routectl-cli.
         let _f = build_provider_with_bedrock_model_override;
+    }
+}
+
+#[cfg(test)]
+mod validate_alias_chain_targets_tests {
+    //! Tests for the v0.6.0 alias-chain validator. Each test pins
+    //! one validator branch (clean pass, unknown nickname, disabled
+    //! nickname, multi-error accumulation) so a regression in any
+    //! one branch shows up as a precise test failure.
+
+    use super::validate_alias_chain_targets;
+    use crate::config::{AliasValue, Config, ModelEntry};
+    use std::collections::BTreeMap;
+
+    fn config_with(models: Vec<(&str, ModelEntry)>, aliases: Vec<(&str, AliasValue)>) -> Config {
+        let mut m = BTreeMap::new();
+        for (name, e) in models {
+            m.insert(name.to_string(), e);
+        }
+        let mut a = BTreeMap::new();
+        for (name, v) in aliases {
+            a.insert(name.to_string(), v);
+        }
+        Config {
+            models: m,
+            aliases: a,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn validate_alias_chain_targets_passes_clean_config() {
+        let cfg = config_with(
+            vec![
+                ("haiku", ModelEntry::new("anthropic", "claude-haiku")),
+                ("sonnet", ModelEntry::new("anthropic", "claude-sonnet")),
+            ],
+            vec![
+                ("fast", AliasValue::Single("haiku".into())),
+                (
+                    "heavy",
+                    AliasValue::Chain(vec!["sonnet".into(), "haiku".into()]),
+                ),
+            ],
+        );
+        validate_alias_chain_targets(&cfg).expect("clean config must validate");
+    }
+
+    #[test]
+    fn validate_alias_chain_targets_rejects_unknown_nickname() {
+        let cfg = config_with(
+            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku"))],
+            vec![("fast", AliasValue::Single("missing".into()))],
+        );
+        let err = validate_alias_chain_targets(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("alias `fast`"), "msg: {msg}");
+        assert!(msg.contains("missing"), "msg: {msg}");
+        assert!(msg.contains("not a known model nickname"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_alias_chain_targets_rejects_disabled_nickname() {
+        let cfg = config_with(
+            vec![(
+                "shelved",
+                ModelEntry::new("anthropic", "claude-shelved").with_selectable(false),
+            )],
+            vec![("fast", AliasValue::Single("shelved".into()))],
+        );
+        let err = validate_alias_chain_targets(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("alias `fast`"), "msg: {msg}");
+        assert!(msg.contains("shelved"), "msg: {msg}");
+        assert!(msg.contains("selectable = false"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_alias_chain_targets_rejects_empty_chain() {
+        let cfg = config_with(
+            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku"))],
+            vec![("fast", AliasValue::Chain(vec![]))],
+        );
+        let err = validate_alias_chain_targets(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("alias `fast`"), "msg: {msg}");
+        assert!(msg.contains("empty"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_alias_chain_targets_accumulates_multiple_errors() {
+        // Two unrelated misconfigurations -- one alias references an
+        // unknown nickname, another references a disabled one. The
+        // validator must surface BOTH in a single error so the
+        // operator doesn't fix one and discover the other on the
+        // next run.
+        let cfg = config_with(
+            vec![
+                ("haiku", ModelEntry::new("anthropic", "claude-haiku")),
+                (
+                    "shelved",
+                    ModelEntry::new("anthropic", "claude-shelved").with_selectable(false),
+                ),
+            ],
+            vec![
+                ("alpha", AliasValue::Single("missing-1".into())),
+                ("beta", AliasValue::Single("shelved".into())),
+                (
+                    "gamma",
+                    AliasValue::Chain(vec!["haiku".into(), "missing-2".into()]),
+                ),
+            ],
+        );
+        let err = validate_alias_chain_targets(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing-1"), "msg: {msg}");
+        assert!(msg.contains("missing-2"), "msg: {msg}");
+        assert!(msg.contains("shelved"), "msg: {msg}");
     }
 }
