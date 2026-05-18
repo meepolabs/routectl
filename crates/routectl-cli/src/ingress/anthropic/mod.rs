@@ -17,14 +17,11 @@
 use std::any::Any;
 
 use axum::http::HeaderMap;
-use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
-use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, Message, MessageContent,
-    ReasoningConfig, ReasoningDetail, Result,
-};
-use serde_json::{json, Map, Value};
+use serde_json::Value;
 
-use super::{read_alias_header, IngressAdapter, IngressStreamState, SseEvent};
+use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
+
+use super::{IngressAdapter, IngressStreamState, SseEvent};
 
 /// The format tag the canonical layer uses for Anthropic-shape
 /// reasoning details (from the Anthropic-API egress on the upstream
