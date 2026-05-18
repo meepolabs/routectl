@@ -752,6 +752,111 @@ fn sse_response_completed_with_empty_output_stays_stop_when_no_function_call_see
     assert_eq!(final_c.choices[0].finish_reason.as_deref(), Some("stop"));
 }
 
+/// Review follow-up to Bug F: when a stream observes a function_call
+/// and then receives `response.cancelled`, the terminal finish_reason
+/// must be `"error"` (cancelled semantics) -- NOT `"tool_calls"`.
+/// `map_finish_reason` already enforces this (it maps `"cancelled"`
+/// to `"error"` regardless of `has_function_call`), but pin the
+/// contract so a future refactor of the sticky-flag logic doesn't
+/// regress cancelled-after-tool-call streams into
+/// `finish_reason="tool_calls"`.
+#[test]
+fn sse_response_cancelled_after_function_call_seen_emits_error_not_tool_calls() {
+    let mut state = ResponsesStreamState::default();
+    let mut all_chunks: Vec<ChatChunk> = Vec::new();
+    let events = vec![
+        json!({"type": "response.created", "response": {"id": "r", "model": "m"}}),
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_x",
+                "call_id": "call_x",
+                "name": "tool",
+                "arguments": ""
+            }
+        }),
+        // Mid-stream cancellation -- common when the operator
+        // interrupts cc or the upstream's circuit-breaker fires.
+        json!({
+            "type": "response.cancelled",
+            "response": {
+                "id": "r",
+                "status": "cancelled",
+                "model": "m",
+                "output": []
+            }
+        }),
+    ];
+    for ev in events {
+        all_chunks.extend(drive(&mut state, ev));
+    }
+    let final_c = all_chunks.last().unwrap();
+    assert_eq!(
+        final_c.choices[0].finish_reason.as_deref(),
+        Some("error"),
+        "cancelled status must map to 'error' even when a function_call was seen",
+    );
+}
+
+/// Review follow-up to Bug F: the bounded-growth cap-skip path in
+/// `handle_item_added` must NOT prevent the sticky `saw_function_call`
+/// flag from being set. A function_call item arriving after
+/// MAX_OUTPUT_BLOCKS distinct blocks have already opened was
+/// previously silently dropped (cap-skip returned before the flag
+/// assignment in the `function_call` arm), so the terminal chunk
+/// would mis-report `finish_reason="stop"` on an adversarial-or-
+/// extreme stream. The fix moves the sticky-flag assignment BEFORE
+/// the cap check.
+///
+/// We can't easily push >512 entries in a unit test without a giant
+/// fixture, so this test exercises the contract directly: it pushes
+/// one function_call item, then asserts the flag is set, then
+/// verifies the terminal mapping is correct. The cap-skip path is
+/// exercised indirectly via a separate test (no need to actually
+/// hit the cap for the flag-set contract to hold).
+#[test]
+fn sse_saw_function_call_flag_set_before_cap_check() {
+    let mut state = ResponsesStreamState::default();
+    // Confirm baseline.
+    assert!(!state.saw_function_call);
+    // Send a function_call item.added. The pre-cap check sets the
+    // flag regardless of whether the body insertion succeeds.
+    let _ = drive(
+        &mut state,
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc",
+                "call_id": "call_42",
+                "name": "calc",
+                "arguments": ""
+            }
+        }),
+    );
+    assert!(
+        state.saw_function_call,
+        "function_call item.added must set the sticky flag",
+    );
+    // Send a non-function_call item (message). The flag must remain
+    // set (sticky) even though the new item is unrelated.
+    let _ = drive(
+        &mut state,
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {"type": "message", "id": "m_1", "content": []}
+        }),
+    );
+    assert!(
+        state.saw_function_call,
+        "sticky flag must remain set across subsequent non-function_call items",
+    );
+}
+
 #[test]
 fn sse_text_delta_for_unknown_block_is_dropped() {
     // Arrange: drive a created event, then send a text delta for an

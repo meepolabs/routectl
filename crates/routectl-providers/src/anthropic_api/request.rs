@@ -1701,4 +1701,78 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
     }
+
+    /// Review follow-up to Bug K: when the provider is NOT adaptive
+    /// (Sonnet, Haiku -- no `adaptive_thinking` capability), the
+    /// `output_config.effort` field set by cc must be stripped from
+    /// the outgoing body. Anthropic 400s with "This model does not
+    /// support the effort parameter" otherwise.
+    #[test]
+    fn output_config_effort_stripped_on_non_adaptive_provider() {
+        let req = ChatRequest {
+            model: "claude-haiku-4-5".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            provider_extras: Some(json!({
+                "output_config": {"effort": "high"}
+            })),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, /* adaptive_thinking= */ false, &[]).unwrap();
+        // effort stripped; output_config now empty, so the whole
+        // object is removed for wire cleanliness.
+        assert!(
+            body.get("output_config").is_none(),
+            "non-adaptive provider must have output_config removed when effort \
+             was the only sub-key, got body: {body}",
+        );
+    }
+
+    /// Companion to the above: when output_config carries BOTH effort
+    /// and a structured-output `format` field, the strip removes only
+    /// effort; `format` is preserved (orthogonal to the effort beta
+    /// and supported across the model family).
+    #[test]
+    fn output_config_effort_stripped_preserves_sibling_format_on_non_adaptive() {
+        let req = ChatRequest {
+            model: "claude-haiku-4-5".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            provider_extras: Some(json!({
+                "output_config": {
+                    "effort": "high",
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {"type": "object", "required": ["x"]}
+                    }
+                }
+            })),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, /* adaptive_thinking= */ false, &[]).unwrap();
+        let oc = body.get("output_config").expect("output_config preserved");
+        assert!(oc.get("effort").is_none(), "effort stripped: {oc}");
+        assert_eq!(oc["format"]["type"], "json_schema");
+        assert_eq!(oc["format"]["schema"]["required"][0], "x");
+    }
+
+    /// Adaptive providers (Opus 4.7 with adaptive_thinking=true) must
+    /// preserve `output_config.effort` -- the model accepts it. Pin
+    /// this so a future refactor doesn't accidentally strip on the
+    /// adaptive path too.
+    #[test]
+    fn output_config_effort_preserved_on_adaptive_provider() {
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            provider_extras: Some(json!({
+                "output_config": {"effort": "high"}
+            })),
+            ..Default::default()
+        };
+        let body = normalize("test", &req, /* adaptive_thinking= */ true, &[]).unwrap();
+        let oc = body.get("output_config").expect("output_config preserved");
+        assert_eq!(oc["effort"], "high");
+    }
 }
