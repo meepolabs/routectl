@@ -377,8 +377,8 @@ async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
 /// provider is referenced by an alias chain (mirrors the existing
 /// `serve` / `test` "fail loudly when route is broken" guard).
 ///
-/// `[models.X].enabled = false` entries are skipped; the returned map
-/// does not contain them.
+/// `[models.X].selectable = false` entries are skipped; the returned
+/// map does not contain them.
 pub async fn build_resolved_models(
     config: &Config,
     secrets: &dyn SecretStore,
@@ -393,7 +393,7 @@ pub async fn build_resolved_models(
     let mut provider_failed: BTreeMap<String, String> = BTreeMap::new();
 
     for (nickname, entry) in &config.models {
-        if !entry.enabled {
+        if !entry.selectable {
             continue;
         }
         let Some(provider_entry) = config.providers.get(&entry.provider) else {
@@ -1229,7 +1229,7 @@ mod build_resolved_models_tests {
     //!     share one cached `Arc<dyn Provider>`.
     //!   - Bedrock models each get a distinct `Arc<dyn Provider>` with
     //!     `BedrockConfig.model_id` set from the model's `upstream`.
-    //!   - Disabled `[models.X] enabled = false` entries are skipped.
+    //!   - Disabled `[models.X] selectable = false` entries are skipped.
     //!   - Models referencing an unknown provider are reported in the
     //!     `failed` return.
 
@@ -1290,7 +1290,7 @@ mod build_resolved_models_tests {
                 ("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5")),
                 (
                     "shelved",
-                    ModelEntry::new("anthropic", "claude-shelved").with_enabled(false),
+                    ModelEntry::new("anthropic", "claude-shelved").with_selectable(false),
                 ),
             ],
         );

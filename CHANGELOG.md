@@ -8,6 +8,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed (BREAKING)
 
+- `enabled` on `[models.X]` -- renamed to `selectable` to free the
+  TOML key for the flattened `ReasoningDefaults::enabled` (reasoning
+  on/off). Operators wanting per-model reasoning-off semantics now
+  write `enabled = false` (the more common intent) and `selectable =
+  false` is the routing-disable knob.
 - `type` field on `[providers.X]` -- renamed to `kind` to disambiguate
   from the `type` Rust keyword and match `BedrockCredsConfig.kind`.
 - `model_id` on `[providers.bedrock-X]` -- moves to
