@@ -409,7 +409,13 @@ impl Router {
                         let can_retry_here = attempts_made < hard_cap
                             && should_retry_same_provider(&e, &policy, attempts_made);
                         if can_retry_here {
-                            tracing::debug!(attempt = attempts_made, error = ?e, "retrying same provider");
+                            tracing::debug!(
+                                provider = provider_name,
+                                model = %target.nickname.as_deref().unwrap_or(""),
+                                attempt = attempts_made,
+                                error = ?e,
+                                "retrying same provider",
+                            );
                             let _ = e;
                             continue;
                         }
