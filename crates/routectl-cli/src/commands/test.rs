@@ -6,7 +6,7 @@ use std::sync::Arc;
 use routectl_auth::MemoryStore;
 use routectl_core::{schema::MessageContent, ChatRequest, Error, Message, Result, Role};
 use routectl_router::{
-    build_provider_with_options, validate_bedrock_global_config, validate_reasoning_defaults,
+    build_resolved_models, validate_bedrock_global_config, validate_reasoning_defaults,
     BuildOptions, Config, Router,
 };
 
@@ -37,34 +37,23 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
         .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
         .with_bedrock_allowed_body_fields(config.bedrock.allowed_body_fields.clone());
 
-    let mut failed: Vec<(String, String)> = Vec::new();
-    for (name, entry) in &config.providers {
-        match build_provider_with_options(name, entry, &secrets, opts.clone()).await {
-            Ok(p) => router.register(name, p),
-            Err(e) => {
-                tracing::warn!(provider = name, error = ?e, "skipping provider that failed to build");
-                failed.push((name.clone(), e.to_string()));
-            }
-        }
-    }
+    // v0.6.0: build per-model resolved providers from the `[models]`
+    // table once. Failures only become fatal when the requested
+    // `target` references a model whose provider couldn't build.
+    let (resolved_models, failed) = build_resolved_models(&config, &secrets, opts).await?;
+    router.install_resolved_models(resolved_models);
 
-    // Mirror serve's "fail loudly when a referenced provider can't
+    // Mirror serve's "fail loudly when a referenced model can't
     // build" guard so `routectl test heavy` against a broken
     // `[aliases.heavy]` chain produces a precise startup error
-    // instead of an `UnknownProvider` at dispatch.
+    // instead of an `UnknownAlias` at dispatch.
     if !failed.is_empty() {
-        let failed_names: std::collections::HashSet<&str> =
+        let failed_models: std::collections::HashSet<&str> =
             failed.iter().map(|(n, _)| n.as_str()).collect();
         let referenced = if let Some(alias) = config.aliases.get(target) {
-            alias.chain.iter().any(|t| {
-                let p = t.split_once(':').map(|(p, _)| p).unwrap_or(t);
-                failed_names.contains(p)
-            })
+            alias.nicknames().any(|nick| failed_models.contains(nick))
         } else {
-            target
-                .split_once(':')
-                .map(|(p, _)| failed_names.contains(p))
-                .unwrap_or(false)
+            failed_models.contains(target)
         };
         if referenced {
             let detail = failed
@@ -73,7 +62,7 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join("\n");
             return Err(Error::Config(format!(
-                "target `{target}` references provider(s) that failed to build:\n{detail}"
+                "target `{target}` references model(s) that failed to build:\n{detail}"
             )));
         }
     }

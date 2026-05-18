@@ -115,23 +115,35 @@ impl Router {
             );
         }
 
-        // Heuristic startup warning: if default_model is a
-        // `provider:model` literal AND the operator has [aliases.*]
-        // entries with their own [aliases.<name>.retry] tables, the
-        // literal-form default bypasses alias-attached retry. Operators
-        // who care about retry-per-alias should use the alias name as
-        // the default. The warning fires once at startup; it doesn't
-        // change behavior.
-        if let Some(default) = config.default_model.as_deref() {
-            let is_literal = default.contains(':') && !config.aliases.contains_key(default);
-            let any_alias_has_retry = config.aliases.values().any(|a| a.retry.is_some());
-            if is_literal && any_alias_has_retry {
-                tracing::warn!(
-                    default_model = %default,
-                    "default_model is a `provider:model` literal but the [aliases] table has per-alias [retry] overrides; \
-                     literal defaults inherit the top-level [retry] only. \
-                     Set default_model to an alias name to attach a per-alias retry policy.",
-                );
+        // Build the suffix-glob index from the configured `[aliases]`
+        // table. Patterns containing a `*` (e.g. `claude-opus-*`) are
+        // routed through `PrefixIndex::longest_match` on lookup miss;
+        // exact-match keys stay in the BTreeMap and short-circuit
+        // ahead of the glob walk. Bare `*`, embedded `*` (e.g.
+        // `foo*bar`), and other invalid patterns are rejected at
+        // index-build time so a typo'd glob fails loudly at startup
+        // rather than silently mismatching wire models.
+        let mut alias_glob_index = PrefixIndex::new();
+        for (key, value) in &config.aliases {
+            if !key.contains('*') {
+                continue;
+            }
+            match crate::glob::AliasPattern::parse(key) {
+                Ok(crate::glob::AliasPattern::Prefix(_)) => {
+                    let pattern = crate::glob::AliasPattern::parse(key).unwrap();
+                    alias_glob_index.insert(pattern, value.clone());
+                }
+                Ok(crate::glob::AliasPattern::Exact(_)) => {
+                    // Pattern parsed as Exact even with a `*` -- this
+                    // shouldn't happen, but treat as exact-only.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        pattern = %key,
+                        error = %e,
+                        "rejecting invalid alias glob pattern; entry ignored",
+                    );
+                }
             }
         }
 
@@ -140,22 +152,18 @@ impl Router {
             providers: Default::default(),
             state,
             resolved_models: BTreeMap::new(),
-            alias_glob_index: PrefixIndex::new(),
+            alias_glob_index,
         }
     }
 
     /// Install the v0.6.0 pre-resolved model table. Called after
-    /// `factory::build_resolved_models` returns. When non-empty the
-    /// dispatch path walks `Arc<ResolvedModel>` chains keyed by
-    /// nickname; when empty (the C1-C3 legacy path) `resolve_chain`
-    /// falls back to the `[aliases.X].chain` form.
+    /// `factory::build_resolved_models` returns. The dispatch path
+    /// walks `Arc<ResolvedModel>` chains keyed by nickname.
     pub fn install_resolved_models(&mut self, models: BTreeMap<String, Arc<ResolvedModel>>) {
         self.resolved_models = models;
-        // Mirror the per-model providers into the legacy `providers`
-        // map and `state` map so the existing dispatch path (which
-        // looks up by provider name) finds the runtime gate. v0.6.0
-        // ResolvedModel + this mirror together eliminate the need for
-        // the legacy `register` API once C4 lands.
+        // Mirror the per-model providers into the `providers` map
+        // and `state` map so the dispatch path (which looks up by
+        // provider name) finds the runtime gate.
         for (_, m) in self.resolved_models.iter() {
             self.providers
                 .entry(m.provider_name.clone())
@@ -166,33 +174,23 @@ impl Router {
         }
     }
 
-    /// True when `install_resolved_models` was called with a non-empty
-    /// table (v0.6.0 mode).
-    fn has_resolved_models(&self) -> bool {
-        !self.resolved_models.is_empty()
-    }
-
-    /// Look up a model nickname in the resolved table. Returns `None`
-    /// in legacy mode (no resolved table installed).
+    /// Look up a model nickname in the resolved table.
     fn resolve_nickname(&self, nickname: &str) -> Option<Arc<ResolvedModel>> {
         self.resolved_models.get(nickname).cloned()
     }
 
     /// v0.6.0 alias-table lookup. Precedence: exact match -> longest
-    /// prefix glob -> default key. Returns the resolved chain of
-    /// `Arc<ResolvedModel>` entries on hit, `None` when the table is
-    /// empty or the wire string didn't resolve. Legacy chain
-    /// resolution (`config.aliases[X].chain`) lives on `resolve_chain`.
+    /// prefix glob (no default fallback). Returns the resolved chain
+    /// of `Arc<ResolvedModel>` entries on hit, `None` when neither
+    /// shape matches. The `default` catch-all is consulted later in
+    /// `dispatch_chain` so a wire model that's a known nickname wins
+    /// over the default fallback.
     fn resolve_v6_alias(&self, wire_model: &str) -> Option<Vec<Arc<ResolvedModel>>> {
-        let aliases_v6 = self.aliases_v6_or_empty();
-        if aliases_v6.is_empty() {
-            return None;
-        }
-        let value = aliases_v6
+        let aliases = &self.config.aliases;
+        let value = aliases
             .get(wire_model)
             .cloned()
-            .or_else(|| self.alias_glob_index.longest_match(wire_model))
-            .or_else(|| aliases_v6.get("default").cloned())?;
+            .or_else(|| self.alias_glob_index.longest_match(wire_model))?;
         let mut chain: Vec<Arc<ResolvedModel>> = Vec::new();
         for nickname in value.nicknames() {
             if let Some(m) = self.resolve_nickname(nickname) {
@@ -206,18 +204,21 @@ impl Router {
         }
     }
 
-    /// Stub returning the v0.6.0 alias table. Until C4 swaps
-    /// `Config::aliases` to the v6 shape, the live config holds the
-    /// legacy `BTreeMap<String, AliasEntry>` and this returns an
-    /// empty map. C2 plumbs the type; C4 wires the live map.
-    fn aliases_v6_or_empty(&self) -> &BTreeMap<String, AliasValue> {
-        // Placeholder for C2-C3. Returns an empty map so
-        // `resolve_v6_alias` always falls through to the legacy
-        // chain-resolution path. C4 swaps this for a direct field
-        // reference.
-        static EMPTY: std::sync::OnceLock<BTreeMap<String, AliasValue>> =
-            std::sync::OnceLock::new();
-        EMPTY.get_or_init(BTreeMap::new)
+    /// Consult the catch-all `default` alias. Returns the resolved
+    /// chain, or `None` if no `default` key is configured.
+    fn resolve_default_alias(&self) -> Option<Vec<Arc<ResolvedModel>>> {
+        let value = self.config.aliases.get("default").cloned()?;
+        let mut chain: Vec<Arc<ResolvedModel>> = Vec::new();
+        for nickname in value.nicknames() {
+            if let Some(m) = self.resolve_nickname(nickname) {
+                chain.push(m);
+            }
+        }
+        if chain.is_empty() {
+            None
+        } else {
+            Some(chain)
+        }
     }
 
     pub fn register(&mut self, name: impl Into<String>, provider: Arc<dyn Provider>) {
@@ -233,72 +234,27 @@ impl Router {
     /// Resolve the wire `model` value into a chain of `DispatchTarget`s
     /// the dispatch loop can walk.
     ///
-    /// In v0.6.0 mode (`install_resolved_models` was called with a
-    /// non-empty table), every alias chain entry must already resolve
-    /// to a known nickname -- the resolver was built at startup.
-    ///
-    /// In legacy mode, the chain is the `[aliases.X].chain` of
-    /// `provider:model` literals; each is parsed and looked up
-    /// against the legacy `providers` map. Unknown providers along
-    /// the chain map to a target with `provider = None` which the
-    /// dispatch loop turns into an `UnknownProvider` fallback event
-    /// (preserves the pre-v0.6.0 contract).
+    /// v0.6.0 resolution order:
+    ///   1. Exact alias match in `[aliases]` -- chain of nicknames.
+    ///   2. Longest suffix-glob match in `[aliases]`.
+    ///   3. Direct nickname (the wire `model` IS a `[models]` key).
+    ///   4. `default` key in `[aliases]` -- catch-all chain.
+    ///   5. Otherwise `Error::UnknownAlias`.
     fn dispatch_chain(&self, model: &str) -> Result<Vec<DispatchTarget>> {
-        // v0.6.0 path: try the resolved-models table first.
-        if self.has_resolved_models() {
-            if let Some(chain) = self.resolve_v6_alias(model) {
-                return Ok(chain
-                    .into_iter()
-                    .map(|m| DispatchTarget {
-                        provider_name: m.provider_name.clone(),
-                        upstream: m.upstream.clone(),
-                        provider: Some(m.provider.clone()),
-                        reasoning: if m.reasoning.is_empty() {
-                            None
-                        } else {
-                            Some(m.reasoning.clone())
-                        },
-                        nickname: Some(m.nickname.clone()),
-                    })
-                    .collect());
-            }
-            // wire model could ALSO be a direct nickname.
-            if let Some(m) = self.resolve_nickname(model) {
-                return Ok(vec![DispatchTarget {
-                    provider_name: m.provider_name.clone(),
-                    upstream: m.upstream.clone(),
-                    provider: Some(m.provider.clone()),
-                    reasoning: if m.reasoning.is_empty() {
-                        None
-                    } else {
-                        Some(m.reasoning.clone())
-                    },
-                    nickname: Some(m.nickname.clone()),
-                }]);
-            }
-            // v0.6.0 mode: fall through to the legacy resolver below
-            // for `provider:model` literals + legacy aliases that
-            // haven't been migrated to the v6 table yet. C4 removes
-            // the legacy fallback entirely.
+        if let Some(chain) = self.resolve_v6_alias(model) {
+            return Ok(into_dispatch_targets(chain));
         }
-
-        // Legacy path: walk the `provider:model` chain.
-        let chain_strings = self.resolve_chain(model)?;
-        let mut targets: Vec<DispatchTarget> = Vec::new();
-        for target_str in chain_strings {
-            let (provider_name, upstream) = parse_target(&target_str);
-            let provider_name = provider_name.to_string();
-            let upstream = upstream.to_string();
-            let provider = self.providers.get(&provider_name).cloned();
-            targets.push(DispatchTarget {
-                provider_name,
-                upstream,
-                provider,
-                reasoning: None,
-                nickname: None,
-            });
+        // Wire model could ALSO be a direct nickname.
+        if let Some(m) = self.resolve_nickname(model) {
+            return Ok(vec![into_one_dispatch_target(m)]);
         }
-        Ok(targets)
+        // Catch-all: only consulted after exact alias / glob / direct
+        // nickname all miss. This ordering means a wire model that's
+        // a known nickname always wins over a configured default.
+        if let Some(chain) = self.resolve_default_alias() {
+            return Ok(into_dispatch_targets(chain));
+        }
+        Err(Error::UnknownAlias(model.to_string()))
     }
 
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
@@ -330,9 +286,8 @@ impl Router {
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
-            // v0.6.0 mode: use the resolved-model defaults; legacy
-            // mode: read from the [providers.X] reasoning_defaults
-            // (kept for the C2-C3 transition, removed in C4).
+            // v0.6.0: per-model reasoning defaults come from the
+            // resolved table (`[models.X] thinking`/`enabled`).
             if let Some(defaults) = target.reasoning.as_ref() {
                 merge_reasoning_defaults_into(&mut attempt_req, defaults);
                 tracing::debug!(
@@ -340,8 +295,6 @@ impl Router {
                     model = %target.nickname.as_deref().unwrap_or(""),
                     "applied resolved-model reasoning defaults",
                 );
-            } else {
-                self.merge_reasoning_defaults_legacy(&mut attempt_req, provider_name);
             }
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
@@ -477,8 +430,6 @@ impl Router {
             attempt_req.model = model.to_string();
             if let Some(defaults) = target.reasoning.as_ref() {
                 merge_reasoning_defaults_into(&mut attempt_req, defaults);
-            } else {
-                self.merge_reasoning_defaults_legacy(&mut attempt_req, provider_name);
             }
 
             let attempt_policy = self.compose_attempt_policy(&policy, provider_name);
@@ -555,109 +506,17 @@ impl Router {
         }
     }
 
-    fn resolve_chain(&self, model: &str) -> Result<Vec<String>> {
-        if let Some(alias) = self.config.aliases.get(model) {
-            return Ok(alias.chain.clone());
-        }
-        if model.contains(':') {
-            return Ok(vec![model.to_string()]);
-        }
-        // Fallback to the configured default model when the request's
-        // `model` field doesn't match any configured alias and isn't a
-        // `provider:model` literal. Lets new client-side model names
-        // route to a sensible destination without requiring an operator
-        // to update [ingress.<dialect>.aliases] for every release. The
-        // default value can be either an alias key from [aliases] OR a
-        // `provider:model` literal -- the same shapes the wire `model`
-        // field accepts. If the value is neither, log a WARN and fall
-        // through to UnknownAlias for the ORIGINAL request model so
-        // the offending name still appears in the error.
-        if let Some(default) = self.config.default_model.as_deref() {
-            if let Some(alias) = self.config.aliases.get(default) {
-                // DEBUG (not INFO): when default_model is configured
-                // wide-open as a catch-all, this fires on every request
-                // whose model didn't otherwise match. INFO would bury
-                // unrelated lines in production.
-                tracing::debug!(
-                    requested_model = %sanitize_for_log(model),
-                    default_model = %default,
-                    "resolved unknown model to default_model (alias)",
-                );
-                return Ok(alias.chain.clone());
-            }
-            if default.contains(':') {
-                tracing::debug!(
-                    requested_model = %sanitize_for_log(model),
-                    default_model = %default,
-                    "resolved unknown model to default_model (provider:model literal)",
-                );
-                return Ok(vec![default.to_string()]);
-            }
-            tracing::warn!(
-                requested_model = %sanitize_for_log(model),
-                default_model = %default,
-                "default_model is configured but is neither an alias key nor a provider:model literal; falling through to UnknownAlias",
-            );
-        }
-        Err(Error::UnknownAlias(model.to_string()))
-    }
-
-    fn policy_for(&self, model: &str) -> RetryPolicy {
-        // Branches mirror `resolve_chain` exactly to keep
-        // policy-resolution and chain-resolution in lockstep:
-        //
-        //   1. Known alias: use its [aliases.<name>.retry] override if
-        //      set, else fall through to top-level [retry]. The
-        //      default_model retry is NOT consulted -- a known alias
-        //      whose retry is None means "no override, use the
-        //      global", not "borrow from default_model". This matches
-        //      `resolve_chain`'s shape: a known alias never falls
-        //      through to default_model.
-        //
-        //   2. `provider:model` literal: no per-alias retry to
-        //      inherit; use top-level [retry].
-        //
-        //   3. Unknown model with default_model configured: inherit
-        //      the default's per-alias retry override if it has one,
-        //      else top-level [retry]. This is the path
-        //      `resolve_chain` takes when defaulting.
-        //
-        // Invariant: callers only invoke `policy_for` AFTER
-        // `resolve_chain` has succeeded, so the "unknown model with
-        // a misconfigured default_model" path is unreachable in
-        // practice -- `resolve_chain` would have errored. The
-        // `debug_assert!` pins this for debug builds; in release we
-        // fall through to the global retry rather than panicking.
-        debug_assert!(
-            self.resolve_chain(model).is_ok(),
-            "policy_for invoked for `{model}` whose chain doesn't resolve; call resolve_chain first",
-        );
-        if let Some(alias) = self.config.aliases.get(model) {
-            return alias
-                .retry
-                .clone()
-                .unwrap_or_else(|| self.config.retry.clone());
-        }
-        if model.contains(':') {
-            return self.config.retry.clone();
-        }
-        if let Some(default) = self.config.default_model.as_deref() {
-            if let Some(retry) = self
-                .config
-                .aliases
-                .get(default)
-                .and_then(|a| a.retry.clone())
-            {
-                return retry;
-            }
-        }
+    /// Resolve the retry policy for the wire `model` field. v0.6.0
+    /// removed per-alias retry overrides; the only retry policy is
+    /// the top-level `[retry]` table.
+    fn policy_for(&self, _model: &str) -> RetryPolicy {
         self.config.retry.clone()
     }
 
-    /// Overlay the target provider's timeout config onto the alias-
-    /// resolved `RetryPolicy`. Alias-level fields in `base` always
-    /// win; provider-level fills in only when the alias left the
-    /// field None. Both None falls through to reqwest's default.
+    /// Overlay the target provider's timeout config onto the
+    /// resolved `RetryPolicy`. Provider-level fills in only when the
+    /// base left the field None. Both None falls through to reqwest's
+    /// default.
     fn compose_attempt_policy(&self, base: &RetryPolicy, provider_name: &str) -> RetryPolicy {
         let provider_runtime = self
             .config
@@ -674,67 +533,26 @@ impl Router {
         }
         out
     }
+}
 
-    /// Merge `[providers.X] thinking` / `enabled` operator defaults
-    /// into the per-attempt request's `reasoning` field. Caller's
-    /// non-None values always win -- this only fills in fields the
-    /// caller left unset. No-op when the provider has no defaults
-    /// configured (the common case).
-    ///
-    /// Precedence per field: caller (wire) > operator (TOML) > internal
-    /// default. Composed orthogonally: if the caller supplied
-    /// `effort` and the operator configured `enabled`, the resulting
-    /// request carries both.
-    ///
-    /// `enabled = false` in the TOML is a DEFAULT the caller can still
-    /// override by sending `reasoning.enabled = true` on the wire. It
-    /// is not a hard ceiling on reasoning use; operators wanting to
-    /// pin reasoning off cannot rely on this knob alone.
-    ///
-    /// Edge case: when the caller has explicitly set
-    /// `req.reasoning.enabled == Some(false)`, the operator's
-    /// `thinking` (effort) injection is suppressed. Without this
-    /// short-circuit the merged result would be
-    /// `{effort: Some("..."), enabled: Some(false)}`, which different
-    /// egresses interpret inconsistently (some honor `enabled=false`
-    /// only when `effort` is also unset, others forward `effort`
-    /// regardless). Suppressing the effort fill keeps "caller pinned
-    /// reasoning off" working uniformly across all egresses.
-    ///
-    /// Why `effort` has an explicit `caller_disabled` guard but
-    /// `enabled` doesn't: `enabled` injection is naturally guarded by
-    /// the per-field `cfg.enabled.is_none()` check (a caller-set
-    /// `enabled = Some(false)` short-circuits the fill on its own).
-    /// The explicit `caller_disabled` check is needed only on `effort`
-    /// because the per-field check (`cfg.effort.is_none()`) would
-    /// otherwise allow operator's `thinking` to inject when the caller
-    /// left `effort` unset, producing the inconsistent
-    /// `{effort: Some(...), enabled: Some(false)}` state above. A
-    /// future operator-side field that should respect the same
-    /// "caller turned reasoning off" semantics needs the same explicit
-    /// guard; per-field `is_none()` alone is not sufficient.
-    /// Legacy merge path. Reads the operator's `[providers.X]
-    /// reasoning_defaults` and applies the same per-field precedence
-    /// described on `merge_reasoning_defaults_into`. Used during the
-    /// C2-C3 transition for routes whose target was assembled from
-    /// the legacy `[aliases.X].chain` form (no `ResolvedModel`
-    /// available). C4 deletes this path.
-    fn merge_reasoning_defaults_legacy(&self, req: &mut ChatRequest, provider_name: &str) {
-        let Some(entry) = self.config.providers.get(provider_name) else {
-            return;
-        };
-        let Some(defaults) = entry.reasoning_defaults() else {
-            return;
-        };
-        merge_reasoning_defaults_into(req, defaults);
-        if req.reasoning.is_some() {
-            tracing::debug!(
-                provider = provider_name,
-                merged_effort = ?req.reasoning.as_ref().and_then(|r| r.effort.clone()),
-                merged_enabled = ?req.reasoning.as_ref().and_then(|r| r.enabled),
-                "applied operator reasoning defaults (legacy)",
-            );
-        }
+/// Convert a chain of `Arc<ResolvedModel>` into the `DispatchTarget`
+/// shape the dispatch loop walks. Hoisted out of `dispatch_chain`
+/// so the three resolution branches share one builder.
+fn into_dispatch_targets(chain: Vec<Arc<ResolvedModel>>) -> Vec<DispatchTarget> {
+    chain.into_iter().map(into_one_dispatch_target).collect()
+}
+
+fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
+    DispatchTarget {
+        provider_name: m.provider_name.clone(),
+        upstream: m.upstream.clone(),
+        provider: Some(m.provider.clone()),
+        reasoning: if m.reasoning.is_empty() {
+            None
+        } else {
+            Some(m.reasoning.clone())
+        },
+        nickname: Some(m.nickname.clone()),
     }
 }
 
@@ -957,10 +775,6 @@ async fn try_stream_with_first_chunk(
     }
 }
 
-fn parse_target(target: &str) -> (&str, &str) {
-    target.split_once(':').unwrap_or((target, ""))
-}
-
 fn should_fallback(err: &Error, policy: &RetryPolicy) -> bool {
     match err {
         // status 0 means we never reached the upstream HTTP layer
@@ -1009,7 +823,7 @@ fn mul_duration(d: Duration, factor: f64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AliasEntry, ProviderEntry, RetryPolicy};
+    use crate::config::{ProviderEntry, RetryPolicy};
     use std::collections::BTreeMap;
 
     /// Build a Router with one openai-compat provider that has the given
@@ -1028,17 +842,8 @@ mod tests {
         }
         providers.insert("p1".to_string(), entry);
 
-        let mut aliases = BTreeMap::new();
-        aliases.insert("a".to_string(), AliasEntry::new(vec!["p1:m".to_string()]));
-
         let cfg = Config {
-            server: Default::default(),
             providers,
-            aliases,
-            default_model: None,
-            retry: RetryPolicy::default(),
-            legacy_compat: Default::default(),
-            ingress: Default::default(),
             ..Default::default()
         };
         Router::new(Arc::new(cfg))
@@ -1117,34 +922,12 @@ mod tests {
 
 #[cfg(test)]
 mod merge_reasoning_defaults_tests {
+    //! Tests for the per-attempt reasoning-defaults merge. v0.6.0
+    //! drives this from the resolved-model table; the merge logic
+    //! itself lives in the free `merge_reasoning_defaults_into`
+    //! function.
     use super::*;
-    use crate::config::{AliasEntry, ProviderEntry, ReasoningDefaults, RetryPolicy};
-    use std::collections::BTreeMap;
-
-    /// Build a one-provider Router whose AnthropicApi entry carries
-    /// the supplied `ReasoningDefaults`. The provider name is `p1`.
-    fn router_with_defaults(defaults: ReasoningDefaults) -> Router {
-        let mut providers = BTreeMap::new();
-        let mut entry = ProviderEntry::anthropic_api("literal:k");
-        if let ProviderEntry::AnthropicApi {
-            reasoning_defaults, ..
-        } = &mut entry
-        {
-            *reasoning_defaults = defaults;
-        }
-        providers.insert("p1".to_string(), entry);
-
-        let mut aliases = BTreeMap::new();
-        aliases.insert("a".to_string(), AliasEntry::new(vec!["p1:m".to_string()]));
-
-        let cfg = Config {
-            providers,
-            aliases,
-            retry: RetryPolicy::default(),
-            ..Default::default()
-        };
-        Router::new(Arc::new(cfg))
-    }
+    use crate::config::ReasoningDefaults;
 
     fn req_with_reasoning(reasoning: Option<ReasoningConfig>) -> ChatRequest {
         ChatRequest {
@@ -1157,32 +940,21 @@ mod merge_reasoning_defaults_tests {
 
     #[test]
     fn merge_no_caller_no_defaults_leaves_none() {
-        // Arrange: provider has no defaults; caller didn't supply
-        // `reasoning`. Result must remain None -- the merge step must
-        // not synthesize an empty ReasoningConfig.
-        let router = router_with_defaults(ReasoningDefaults::default());
+        // Provider has no defaults; caller didn't supply `reasoning`.
+        // Result must remain None -- the merge step must not synthesize
+        // an empty ReasoningConfig.
         let mut req = req_with_reasoning(None);
-
-        // Act
-        router.merge_reasoning_defaults_legacy(&mut req, "p1");
-
-        // Assert
+        merge_reasoning_defaults_into(&mut req, &ReasoningDefaults::default());
         assert!(req.reasoning.is_none());
     }
 
     #[test]
     fn merge_no_caller_with_defaults_inserts_full_config() {
-        // Arrange: operator pinned both fields; caller supplied nothing.
         let defaults = ReasoningDefaults::new()
             .with_thinking("high")
             .with_enabled(true);
-        let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(None);
-
-        // Act
-        router.merge_reasoning_defaults_legacy(&mut req, "p1");
-
-        // Assert: ReasoningConfig was created and both fields filled.
+        merge_reasoning_defaults_into(&mut req, &defaults);
         let cfg = req.reasoning.expect("reasoning was inserted");
         assert_eq!(cfg.effort.as_deref(), Some("high"));
         assert_eq!(cfg.enabled, Some(true));
@@ -1190,19 +962,12 @@ mod merge_reasoning_defaults_tests {
 
     #[test]
     fn merge_caller_effort_minimal_beats_defaults_high() {
-        // Arrange: caller supplied effort="minimal"; operator default
-        // is "high". Caller wins.
         let defaults = ReasoningDefaults::new().with_thinking("high");
-        let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig {
             effort: Some("minimal".into()),
             ..ReasoningConfig::default()
         }));
-
-        // Act
-        router.merge_reasoning_defaults_legacy(&mut req, "p1");
-
-        // Assert
+        merge_reasoning_defaults_into(&mut req, &defaults);
         let cfg = req.reasoning.expect("reasoning preserved");
         assert_eq!(cfg.effort.as_deref(), Some("minimal"));
     }
@@ -1213,14 +978,11 @@ mod merge_reasoning_defaults_tests {
         // Caller wins. Some(false) must NOT collapse to None on the
         // merge path.
         let defaults = ReasoningDefaults::new().with_enabled(true);
-        let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig {
             enabled: Some(false),
             ..ReasoningConfig::default()
         }));
-
-        router.merge_reasoning_defaults_legacy(&mut req, "p1");
-
+        merge_reasoning_defaults_into(&mut req, &defaults);
         let cfg = req.reasoning.expect("reasoning preserved");
         assert_eq!(cfg.enabled, Some(false));
     }
@@ -1235,14 +997,11 @@ mod merge_reasoning_defaults_tests {
         // effort fill keeps "caller pinned reasoning off" uniform
         // across every egress.
         let defaults = ReasoningDefaults::new().with_thinking("high");
-        let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig {
             enabled: Some(false),
             ..ReasoningConfig::default()
         }));
-
-        router.merge_reasoning_defaults_legacy(&mut req, "p1");
-
+        merge_reasoning_defaults_into(&mut req, &defaults);
         let cfg = req.reasoning.expect("reasoning preserved");
         assert!(
             cfg.effort.is_none(),
@@ -1259,11 +1018,8 @@ mod merge_reasoning_defaults_tests {
         let defaults = ReasoningDefaults::new()
             .with_thinking("medium")
             .with_enabled(true);
-        let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig::default()));
-
-        router.merge_reasoning_defaults_legacy(&mut req, "p1");
-
+        merge_reasoning_defaults_into(&mut req, &defaults);
         let cfg = req.reasoning.expect("reasoning present");
         assert_eq!(cfg.effort.as_deref(), Some("medium"));
         assert_eq!(cfg.enabled, Some(true));
@@ -1275,14 +1031,11 @@ mod merge_reasoning_defaults_tests {
         // only. Result has both -- merge is per-field, not
         // all-or-nothing.
         let defaults = ReasoningDefaults::new().with_enabled(true);
-        let router = router_with_defaults(defaults);
         let mut req = req_with_reasoning(Some(ReasoningConfig {
             effort: Some("low".into()),
             ..ReasoningConfig::default()
         }));
-
-        router.merge_reasoning_defaults_legacy(&mut req, "p1");
-
+        merge_reasoning_defaults_into(&mut req, &defaults);
         let cfg = req.reasoning.expect("reasoning present");
         assert_eq!(cfg.effort.as_deref(), Some("low"));
         assert_eq!(cfg.enabled, Some(true));
@@ -1292,7 +1045,6 @@ mod merge_reasoning_defaults_tests {
     fn merge_all_none_defaults_leaves_caller_unchanged() {
         // Provider has no defaults configured. Caller supplied a fully
         // populated ReasoningConfig. Merge must be a no-op.
-        let router = router_with_defaults(ReasoningDefaults::default());
         let initial = ReasoningConfig {
             effort: Some("medium".into()),
             enabled: Some(true),
@@ -1300,9 +1052,7 @@ mod merge_reasoning_defaults_tests {
             exclude: Some(false),
         };
         let mut req = req_with_reasoning(Some(initial.clone()));
-
-        router.merge_reasoning_defaults_legacy(&mut req, "p1");
-
+        merge_reasoning_defaults_into(&mut req, &ReasoningDefaults::default());
         let cfg = req.reasoning.expect("reasoning preserved");
         assert_eq!(cfg.effort, initial.effort);
         assert_eq!(cfg.enabled, initial.enabled);
@@ -1426,18 +1176,15 @@ mod resolved_models_tests {
     }
 
     #[test]
-    fn dispatch_chain_unknown_nickname_in_v6_falls_through_to_legacy_path() {
+    fn dispatch_chain_unknown_nickname_returns_unknown_alias() {
         // When the wire model isn't a known nickname AND has no
-        // alias-table hit AND isn't a `provider:model` literal, the
-        // legacy path returns UnknownAlias.
+        // alias-table hit, dispatch_chain returns UnknownAlias.
         let p: Arc<dyn Provider> = Arc::new(CountedProvider {
             id: "p".into(),
             calls: AtomicUsize::new(0),
         });
         let router = router_with_resolved(vec![("haiku", "anthropic", "u", p)]);
         let res = router.dispatch_chain("does-not-exist");
-        // Legacy resolve_chain errors with UnknownAlias since the
-        // legacy aliases map is empty.
         assert!(matches!(res, Err(Error::UnknownAlias(_))));
     }
 }

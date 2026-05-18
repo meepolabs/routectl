@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 
 use routectl_cli::commands;
 use routectl_router::{
-    AliasEntry, Config, LegacyCompat, ProviderEntry, ReasoningDialect, RetryPolicy, ServerConfig,
+    AliasValue, Config, LegacyCompat, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy,
+    ServerConfig,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -17,11 +18,10 @@ fn config_with(server_url: &str) -> Config {
         ProviderEntry::openai_compat(format!("{server_url}/v1"), "literal:test-key")
             .with_reasoning_dialect(ReasoningDialect::Openai),
     );
+    let mut models = BTreeMap::new();
+    models.insert("fast-mini".into(), ModelEntry::new("mock", "gpt-4o-mini"));
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "fast".into(),
-        AliasEntry::new(vec!["mock:gpt-4o-mini".to_string()]),
-    );
+    aliases.insert("fast".into(), AliasValue::Single("fast-mini".into()));
     Config {
         server: ServerConfig {
             host: "127.0.0.1".into(),
@@ -32,10 +32,9 @@ fn config_with(server_url: &str) -> Config {
         },
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
-        ingress: Default::default(),
+        models,
         ..Default::default()
     }
 }
@@ -58,10 +57,8 @@ async fn config_check_passes_for_valid_config() {
         server: ServerConfig::default(),
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
-        ingress: Default::default(),
         ..Default::default()
     };
     config.providers.insert(
@@ -69,10 +66,12 @@ async fn config_check_passes_for_valid_config() {
         ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc")
             .with_reasoning_dialect(ReasoningDialect::Openai),
     );
-    config.aliases.insert(
-        "fast".into(),
-        AliasEntry::new(vec!["mock:gpt-4o".to_string()]),
-    );
+    config
+        .models
+        .insert("fast-model".into(), ModelEntry::new("mock", "gpt-4o"));
+    config
+        .aliases
+        .insert("fast".into(), AliasValue::Single("fast-model".into()));
 
     commands::config::check(&config)
         .await
@@ -80,20 +79,18 @@ async fn config_check_passes_for_valid_config() {
 }
 
 #[tokio::test]
-async fn config_check_fails_for_alias_pointing_at_unknown_provider() {
+async fn config_check_fails_for_alias_pointing_at_unknown_nickname() {
     let mut config = Config {
         server: ServerConfig::default(),
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
-        ingress: Default::default(),
         ..Default::default()
     };
     config
         .aliases
-        .insert("fast".into(), AliasEntry::new(vec!["ghost:m".to_string()]));
+        .insert("fast".into(), AliasValue::Single("ghost".into()));
 
     match commands::config::check(&config).await {
         Err(routectl_core::Error::Config(msg)) => {
@@ -104,20 +101,16 @@ async fn config_check_fails_for_alias_pointing_at_unknown_provider() {
     }
 }
 
-/// Bare Config with empty providers/aliases plus a `default_model`
-/// override. Five default_model tests share this skeleton; the only
-/// per-test variation is which provider/alias entries get pushed in
-/// after construction. Cuts ~35 lines of repetition vs. inline
-/// `Config { ... }` literals.
-fn bare_config(default_model: Option<String>) -> Config {
+/// Bare Config with empty providers/aliases/models. Five tests share
+/// this skeleton; the only per-test variation is which provider/alias/
+/// model entries get pushed in after construction.
+fn bare_config() -> Config {
     Config {
         server: ServerConfig::default(),
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
-        default_model,
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
-        ingress: Default::default(),
         ..Default::default()
     }
 }
@@ -131,67 +124,68 @@ fn add_mock_provider(config: &mut Config) {
 }
 
 #[tokio::test]
-async fn config_check_fails_when_default_model_alias_does_not_exist() {
-    // Typo'd alias name in default_model would otherwise survive
-    // `routectl config check` and only fire as a runtime WARN at
-    // first request-time. Reject it at startup.
-    let mut config = bare_config(Some("nonexistent-alias".into()));
-    add_mock_provider(&mut config);
-
-    match commands::config::check(&config).await {
-        Err(routectl_core::Error::Config(_)) => {}
-        Ok(_) => panic!("expected config error for unknown default_model alias"),
-        Err(other) => panic!("expected Config error, got: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn config_check_fails_when_default_model_literal_provider_unknown() {
-    let mut config = bare_config(Some("ghost-provider:some-model".into()));
-    add_mock_provider(&mut config);
-
-    match commands::config::check(&config).await {
-        Err(routectl_core::Error::Config(_)) => {}
-        Ok(_) => panic!("expected config error for unknown provider in default_model literal"),
-        Err(other) => panic!("expected Config error, got: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn config_check_fails_when_default_model_is_empty_string() {
-    let config = bare_config(Some(String::new()));
-
-    match commands::config::check(&config).await {
-        Err(routectl_core::Error::Config(_)) => {}
-        Ok(_) => panic!("expected config error for empty default_model"),
-        Err(other) => panic!("expected Config error, got: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn config_check_passes_when_default_model_is_valid_alias() {
-    let mut config = bare_config(Some("fast".into()));
+async fn config_check_fails_when_default_alias_points_to_unknown_nickname() {
+    // `default = "..."` is just a regular alias key in v0.6.0. The
+    // existing alias-target validator catches the unknown-nickname
+    // case for any key, including "default".
+    let mut config = bare_config();
     add_mock_provider(&mut config);
     config.aliases.insert(
-        "fast".into(),
-        AliasEntry::new(vec!["mock:gpt-4o".to_string()]),
+        "default".into(),
+        AliasValue::Single("nonexistent-nickname".into()),
     );
+
+    match commands::config::check(&config).await {
+        Err(routectl_core::Error::Config(_)) => {}
+        Ok(_) => panic!("expected config error for unknown default-alias target"),
+        Err(other) => panic!("expected Config error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn config_check_fails_when_model_references_unknown_provider() {
+    let mut config = bare_config();
+    add_mock_provider(&mut config);
+    config
+        .models
+        .insert("orphan".into(), ModelEntry::new("ghost-provider", "gpt-x"));
+    config
+        .aliases
+        .insert("default".into(), AliasValue::Single("orphan".into()));
+
+    match commands::config::check(&config).await {
+        Err(routectl_core::Error::Config(_)) => {}
+        Ok(_) => panic!("expected config error for unknown provider reference"),
+        Err(other) => panic!("expected Config error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn config_check_passes_when_default_alias_is_valid() {
+    let mut config = bare_config();
+    add_mock_provider(&mut config);
+    config
+        .models
+        .insert("fast-model".into(), ModelEntry::new("mock", "gpt-4o"));
+    config
+        .aliases
+        .insert("default".into(), AliasValue::Single("fast-model".into()));
 
     commands::config::check(&config)
         .await
-        .expect("default_model = existing alias must check ok");
+        .expect("default = existing nickname must check ok");
 }
 
 #[tokio::test]
 async fn config_check_fails_for_empty_alias_chain() {
-    // An alias whose `chain = []` resolves to UnknownAlias at
+    // An alias whose chain is empty resolves to UnknownAlias at
     // request time, which is the same as not declaring the alias
     // at all -- a configuration mistake. Reject at startup.
-    let mut config = bare_config(None);
+    let mut config = bare_config();
     add_mock_provider(&mut config);
     config
         .aliases
-        .insert("empty".into(), AliasEntry::new(Vec::new()));
+        .insert("empty".into(), AliasValue::Chain(Vec::new()));
 
     match commands::config::check(&config).await {
         Err(routectl_core::Error::Config(_)) => {}
@@ -200,26 +194,14 @@ async fn config_check_fails_for_empty_alias_chain() {
     }
 }
 
-#[tokio::test]
-async fn config_check_passes_when_default_model_is_valid_literal() {
-    let mut config = bare_config(Some("mock:gpt-4o".into()));
-    add_mock_provider(&mut config);
-
-    commands::config::check(&config)
-        .await
-        .expect("default_model = provider:model literal with known provider must check ok");
-}
-
 #[test]
 fn config_show_redacts_literal_secrets() {
     let mut config = Config {
         server: ServerConfig::default(),
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
-        ingress: Default::default(),
         ..Default::default()
     };
     config.providers.insert(
@@ -255,10 +237,8 @@ fn config_show_keeps_env_uris_intact() {
         server: ServerConfig::default(),
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
-        ingress: Default::default(),
         ..Default::default()
     };
     config.providers.insert(

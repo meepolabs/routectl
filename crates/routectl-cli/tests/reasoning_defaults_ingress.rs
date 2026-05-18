@@ -1,4 +1,4 @@
-//! Integration tests for the per-provider `[providers.X] thinking` /
+//! Integration tests for the per-model `[models.X] thinking` /
 //! `enabled` operator-side reasoning defaults. End-to-end through the
 //! axum server + a wiremock upstream that captures the routed request
 //! body so we can verify what reaches each provider's wire shape.
@@ -23,8 +23,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use routectl_router::{
-    AliasEntry, Config, IngressConfig, IngressShape, ProviderEntry, ReasoningDefaults,
-    ReasoningDialect, RetryPolicy, ServerConfig,
+    AliasValue, Config, ModelEntry, ProviderEntry, ReasoningDefaults, ReasoningDialect,
+    RetryPolicy, ServerConfig,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
@@ -92,80 +92,68 @@ fn empty_server() -> ServerConfig {
     }
 }
 
-fn empty_ingress() -> IngressConfig {
-    IngressConfig {
-        anthropic: IngressShape::default(),
-        openai: IngressShape::default(),
-    }
-}
-
-/// Build a config with one Anthropic-API provider whose `[providers.X]
-/// thinking` is set. `adaptive` toggles the Opus 4.7+ wire shape.
+/// Build a config with one Anthropic-API provider and one model whose
+/// `[models.X]` carries the operator-side reasoning defaults.
+/// `adaptive` toggles the Opus 4.7+ wire shape on the model.
 fn anthropic_config_with_defaults(
     upstream_base: &str,
     thinking: &str,
     adaptive: bool,
 ) -> Arc<Config> {
     let mut providers = BTreeMap::new();
-    let mut entry =
+    let entry =
         ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_base.to_string());
-    if let ProviderEntry::AnthropicApi {
-        adaptive_thinking,
-        reasoning_defaults,
-        ..
-    } = &mut entry
-    {
-        *adaptive_thinking = Some(adaptive);
-        *reasoning_defaults = ReasoningDefaults::new().with_thinking(thinking.to_string());
-    }
     providers.insert("anthropic-mock".to_string(), entry);
 
+    let mut model = ModelEntry::new("anthropic-mock", "claude-haiku-4-5")
+        .with_reasoning_defaults(ReasoningDefaults::new().with_thinking(thinking.to_string()));
+    if adaptive {
+        model = model.with_adaptive_thinking(true);
+    }
+    let mut models = BTreeMap::new();
+    models.insert("haiku".to_string(), model);
+
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "heavy".to_string(),
-        AliasEntry::new(vec!["anthropic-mock:claude-haiku-4-5".to_string()]),
-    );
+    aliases.insert("heavy".to_string(), AliasValue::Single("haiku".into()));
 
     Arc::new(Config {
         server: empty_server(),
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
-        ingress: empty_ingress(),
+        models,
         ..Default::default()
     })
 }
 
 /// Build a config with one openai-compat provider on the vllm dialect
-/// whose `[providers.X] enabled` is set.
+/// and one model whose `[models.X] enabled` (reasoning) is set.
+/// Note: `[models.X].enabled` (selectability) shadows the
+/// `ReasoningDefaults.enabled` field in TOML because of the
+/// `#[serde(flatten)]`. To set reasoning's `enabled = true` we use
+/// the builder API directly here -- no TOML parse involved.
 fn vllm_config_with_enabled(upstream_base: &str, enabled: bool) -> Arc<Config> {
     let mut providers = BTreeMap::new();
-    let mut entry = ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key")
+    let entry = ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key")
         .with_reasoning_dialect(ReasoningDialect::Vllm);
-    if let ProviderEntry::OpenaiCompat {
-        reasoning_defaults, ..
-    } = &mut entry
-    {
-        *reasoning_defaults = ReasoningDefaults::new().with_enabled(enabled);
-    }
     providers.insert("vllm-mock".to_string(), entry);
 
+    let mut model = ModelEntry::new("vllm-mock", "qwen3-30b");
+    model.reasoning_defaults.enabled = Some(enabled);
+    let mut models = BTreeMap::new();
+    models.insert("qwen".to_string(), model);
+
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "heavy".to_string(),
-        AliasEntry::new(vec!["vllm-mock:qwen3-30b".to_string()]),
-    );
+    aliases.insert("heavy".to_string(), AliasValue::Single("qwen".into()));
 
     Arc::new(Config {
         server: empty_server(),
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
-        ingress: empty_ingress(),
+        models,
         ..Default::default()
     })
 }
@@ -174,8 +162,8 @@ fn vllm_config_with_enabled(upstream_base: &str, enabled: bool) -> Arc<Config> {
 // Case (a): Anthropic legacy thinking shape derives budget from default
 // ---------------------------------------------------------------------------
 
-/// Pin: `[providers.X] thinking = "high"` on a non-adaptive Anthropic
-/// provider produces the legacy wire shape `thinking.type = "enabled"`
+/// Pin: `[models.X] thinking = "high"` on a non-adaptive Anthropic
+/// model produces the legacy wire shape `thinking.type = "enabled"`
 /// with `budget_tokens = floor(max_tokens * 0.80)`. Caller sent no
 /// reasoning fields at all.
 #[tokio::test]
@@ -228,7 +216,7 @@ async fn anthropic_default_thinking_high_reaches_upstream_legacy_shape() {
 // Case (b): Anthropic adaptive thinking shape lifts effort to output_config
 // ---------------------------------------------------------------------------
 
-/// Pin: `[providers.X] thinking = "xhigh"` on an adaptive provider
+/// Pin: `[models.X] thinking = "xhigh"` on an adaptive model
 /// (Opus 4.7+) produces the adaptive wire shape (`thinking.type =
 /// "adaptive"` with no budget field) AND lifts the effort string into
 /// top-level `output_config.effort`.
@@ -283,15 +271,10 @@ async fn anthropic_adaptive_default_thinking_xhigh_emits_output_config() {
 // Case (c): OpenAI Responses default thinking emits reasoning block
 // ---------------------------------------------------------------------------
 
-/// Pin: `[providers.X] thinking = "high"` on an OpenAI Responses
-/// provider emits `reasoning = {effort: "high", summary: "auto"}` on
-/// the upstream body. The chatgpt-oauth endpoint is stream-only so the
-/// mock returns an SSE `response.completed` event.
-///
-/// Note: routectl-cli's dependency on `routectl-providers` enables the
-/// `openai-responses` feature unconditionally, so this test is not
-/// cfg-gated. The unit test in `routectl-router::config` IS cfg-gated
-/// because that crate's openai-responses feature is optional.
+/// Pin: `[models.X] thinking = "high"` on a model bound to an OpenAI
+/// Responses provider emits `reasoning = {effort: "high", summary:
+/// "auto"}` on the upstream body. The chatgpt-oauth endpoint is
+/// stream-only so the mock returns an SSE `response.completed` event.
 #[tokio::test]
 async fn openai_responses_default_thinking_high_emits_reasoning_block() {
     let upstream = MockServer::start().await;
@@ -329,12 +312,11 @@ async fn openai_responses_default_thinking_high_emits_reasoning_block() {
     // for `auth_kind = "chatgpt-oauth"`, so supply a placeholder UUID.
     let toml_text = format!(
         r#"
-type = "openai-responses"
+kind = "openai-responses"
 api_key_ref = "literal:test-jwt"
 account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
 base_url = "{upstream_uri}"
 auth_kind = "chatgpt-oauth"
-thinking = "high"
 "#,
         upstream_uri = upstream.uri()
     );
@@ -344,20 +326,22 @@ thinking = "high"
     let mut providers = BTreeMap::new();
     providers.insert("gpt-mock".to_string(), entry);
 
+    let mut model = ModelEntry::new("gpt-mock", "gpt-5.3-codex")
+        .with_reasoning_defaults(ReasoningDefaults::new().with_thinking("high"));
+    let mut models = BTreeMap::new();
+    models.insert("codex".to_string(), model.clone());
+    let _ = &mut model;
+
     let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "heavy".to_string(),
-        AliasEntry::new(vec!["gpt-mock:gpt-5.3-codex".to_string()]),
-    );
+    aliases.insert("heavy".to_string(), AliasValue::Single("codex".into()));
 
     let config = Arc::new(Config {
         server: empty_server(),
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
-        ingress: empty_ingress(),
+        models,
         ..Default::default()
     });
 
@@ -403,8 +387,8 @@ thinking = "high"
 // Case (d): vLLM default enabled=true emits chat_template_kwargs
 // ---------------------------------------------------------------------------
 
-/// Pin: `[providers.X] enabled = true` on a vLLM-dialect openai-compat
-/// provider injects `chat_template_kwargs.enable_thinking = true` on
+/// Pin: `[models.X] enabled = true` on a vLLM-dialect openai-compat
+/// model injects `chat_template_kwargs.enable_thinking = true` on
 /// the upstream body. Caller sent no reasoning fields.
 #[tokio::test]
 async fn vllm_default_enabled_true_emits_chat_template_kwargs() {
@@ -497,13 +481,13 @@ async fn caller_reasoning_overrides_provider_default_high() {
 // Case (f): fallback chain applies per-hop reasoning defaults
 // ---------------------------------------------------------------------------
 
-/// Pin: a fallback chain with two providers carrying different
-/// `[providers.X] thinking` defaults applies the SECOND provider's
-/// default on the second hop. The merge happens per-attempt inside
-/// the router, AFTER `attempt_req = req.clone()`, so the first
-/// provider's mutation cannot bleed into the second provider's body.
+/// Pin: a fallback chain with two models carrying different
+/// `[models.X] thinking` defaults applies the SECOND model's default
+/// on the second hop. The merge happens per-attempt inside the
+/// router, AFTER `attempt_req = req.clone()`, so the first model's
+/// mutation cannot bleed into the second model's body.
 ///
-/// Setup: provider A returns 500 with `thinking = "low"`, provider B
+/// Setup: model-a returns 500 with `thinking = "low"`, model-b
 /// returns 200 with `thinking = "high"`. The client sends one request
 /// with `max_tokens = 1024`. Assert:
 ///   - Upstream A received `budget_tokens = 204` (1024 * 0.20).
@@ -525,38 +509,35 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
         .mount(&upstream_b)
         .await;
 
-    // Build two anthropic-api providers with different reasoning
-    // defaults. provider-a -> "low", provider-b -> "high".
+    // Build two anthropic-api providers + two models with different
+    // reasoning defaults. model-a -> "low", model-b -> "high".
     let mut providers = BTreeMap::new();
+    providers.insert(
+        "provider-a".to_string(),
+        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_a.uri()),
+    );
+    providers.insert(
+        "provider-b".to_string(),
+        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_b.uri()),
+    );
 
-    let mut entry_a =
-        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_a.uri());
-    if let ProviderEntry::AnthropicApi {
-        reasoning_defaults, ..
-    } = &mut entry_a
-    {
-        *reasoning_defaults = ReasoningDefaults::new().with_thinking("low");
-    }
-    providers.insert("provider-a".to_string(), entry_a);
+    let mut models = BTreeMap::new();
+    models.insert(
+        "model-a".to_string(),
+        ModelEntry::new("provider-a", "claude-haiku-4-5")
+            .with_reasoning_defaults(ReasoningDefaults::new().with_thinking("low")),
+    );
+    models.insert(
+        "model-b".to_string(),
+        ModelEntry::new("provider-b", "claude-haiku-4-5")
+            .with_reasoning_defaults(ReasoningDefaults::new().with_thinking("high")),
+    );
 
-    let mut entry_b =
-        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_b.uri());
-    if let ProviderEntry::AnthropicApi {
-        reasoning_defaults, ..
-    } = &mut entry_b
-    {
-        *reasoning_defaults = ReasoningDefaults::new().with_thinking("high");
-    }
-    providers.insert("provider-b".to_string(), entry_b);
-
-    // Alias chain: A first (returns 500 -> fallback), then B (returns 200).
+    // Alias chain: model-a first (returns 500 -> fallback), then model-b (200).
     let mut aliases = BTreeMap::new();
     aliases.insert(
         "heavy".to_string(),
-        AliasEntry::new(vec![
-            "provider-a:claude-haiku-4-5".to_string(),
-            "provider-b:claude-haiku-4-5".to_string(),
-        ]),
+        AliasValue::Chain(vec!["model-a".into(), "model-b".into()]),
     );
 
     // Tighten the retry policy so A only sees one attempt before the
@@ -570,10 +551,9 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
         server: empty_server(),
         providers,
         aliases,
-        default_model: None,
         retry,
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
-        ingress: empty_ingress(),
+        models,
         ..Default::default()
     });
     let base = helpers::spawn(config).await;
@@ -603,25 +583,25 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
     assert_eq!(
         received_a.len(),
         1,
-        "provider-a should receive exactly one attempt before fallback"
+        "model-a should receive exactly one attempt before fallback"
     );
     let body_a: Value = serde_json::from_slice(&received_a[0].body).unwrap();
     assert_eq!(
         body_a["thinking"]["budget_tokens"], 204,
-        "provider-a's `thinking = low` must derive budget_tokens=204; got body: {body_a}"
+        "model-a's `thinking = low` must derive budget_tokens=204; got body: {body_a}"
     );
 
     let received_b = upstream_b.received_requests().await.unwrap();
     assert_eq!(
         received_b.len(),
         1,
-        "provider-b should receive the fallback attempt"
+        "model-b should receive the fallback attempt"
     );
     let body_b: Value = serde_json::from_slice(&received_b[0].body).unwrap();
     assert_eq!(
         body_b["thinking"]["budget_tokens"], 819,
-        "provider-b's `thinking = high` must derive budget_tokens=819 \
-         (no bleed-through from provider-a); got body: {body_b}"
+        "model-b's `thinking = high` must derive budget_tokens=819 \
+         (no bleed-through from model-a); got body: {body_b}"
     );
 }
 
