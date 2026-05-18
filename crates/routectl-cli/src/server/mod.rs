@@ -165,46 +165,32 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
         .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
         .with_bedrock_allowed_body_fields(config.bedrock.allowed_body_fields.clone());
 
-    let mut failed: Vec<(String, String)> = Vec::new();
-    for (name, entry) in &config.providers {
-        match routectl_router::build_provider_with_options(name, entry, &secrets, opts.clone())
-            .await
-        {
-            Ok(provider) => {
-                router.register(name.clone(), provider);
-            }
-            Err(e) => {
-                tracing::warn!(provider = %name, error = ?e, "skipping provider (build failed)");
-                failed.push((name.clone(), e.to_string()));
-            }
-        }
-    }
+    // v0.6.0: walk `[models]` once, building one provider per unique
+    // non-Bedrock provider entry (cached) and one provider per Bedrock
+    // model. Failures are collected and only fatal when an `[aliases]`
+    // chain references a model whose provider failed to build.
+    let (resolved_models, failed) =
+        routectl_router::build_resolved_models(&config, &secrets, opts).await?;
+    router.install_resolved_models(resolved_models);
 
     // Provider build failures are normally non-fatal (an operator
-    // may have an unused-but-declared provider whose creds aren't
-    // set in the current environment). But a failed provider that
-    // any [aliases.*].chain entry OR `default_model` actually
-    // references is a real misconfiguration -- without this guard,
-    // the server starts "healthy" and the first real request hits
-    // `Error::UnknownProvider` at dispatch time, with no
-    // configuration-error breadcrumb to follow. Fail loudly here so
-    // operators see the issue at startup, not at first traffic.
+    // may have an unused-but-declared model whose provider creds
+    // aren't set in the current environment). But a failed model
+    // that an `[aliases.*]` entry actually references is a real
+    // misconfiguration -- without this guard, the server starts
+    // "healthy" and the first real request hits `Error::UnknownAlias`
+    // at dispatch time, with no configuration-error breadcrumb to
+    // follow. Fail loudly here so operators see the issue at startup,
+    // not at first traffic.
     if !failed.is_empty() {
-        let failed_names: std::collections::HashSet<&str> =
+        let failed_models: std::collections::HashSet<&str> =
             failed.iter().map(|(n, _)| n.as_str()).collect();
         let mut blocking: Vec<String> = Vec::new();
         for (alias, entry) in &config.aliases {
-            for target in &entry.chain {
-                let provider = target.split_once(':').map(|(p, _)| p).unwrap_or(target);
-                if failed_names.contains(provider) {
-                    blocking.push(format!("alias `{alias}` -> `{target}`"));
+            for nick in entry.nicknames() {
+                if failed_models.contains(nick) {
+                    blocking.push(format!("alias `{alias}` -> model `{nick}`"));
                 }
-            }
-        }
-        if let Some(default) = config.default_model.as_deref() {
-            let provider = default.split_once(':').map(|(p, _)| p).unwrap_or(default);
-            if failed_names.contains(provider) {
-                blocking.push(format!("default_model `{default}`"));
             }
         }
         if !blocking.is_empty() {
@@ -214,7 +200,7 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
                 .collect::<Vec<_>>()
                 .join("\n");
             return Err(Error::Config(format!(
-                "{} provider(s) failed to build AND are referenced by routes:\n{}\n\
+                "{} model(s) failed to build AND are referenced by routes:\n{}\n\
                  affected routes:\n  {}",
                 failed.len(),
                 detail,

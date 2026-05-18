@@ -39,8 +39,8 @@ pub async fn check(config: &Config) -> Result<()> {
         }
     }
 
-    for (alias, entry) in &config.aliases {
-        if entry.chain.is_empty() {
+    for (alias, value) in &config.aliases {
+        if value.is_empty() {
             errors.push(format!(
                 "alias `{alias}`: chain is empty -- an alias with no targets resolves \
                  to UnknownAlias at request time, which is the same as not declaring \
@@ -48,33 +48,24 @@ pub async fn check(config: &Config) -> Result<()> {
             ));
             continue;
         }
-        for target in &entry.chain {
-            let provider_name = target.split_once(':').map(|(p, _)| p).unwrap_or(target);
-            if !config.providers.contains_key(provider_name) {
+        for nickname in value.nicknames() {
+            if !config.models.contains_key(nickname) {
                 errors.push(format!(
-                    "alias `{alias}`: target `{target}` references unknown provider `{provider_name}`"
+                    "alias `{alias}`: target `{nickname}` is not a known model nickname \
+                     in [models]"
                 ));
             }
         }
     }
 
-    // default_model accepts either an alias key OR a `provider:model`
-    // literal (mirrors the wire `model` field). Reject any other
-    // shape at startup -- otherwise the misconfiguration only surfaces
-    // at first request-time as a runtime WARN + UnknownAlias, which
-    // is the wrong place to find out about a typo'd alias name.
-    if let Some(default) = config.default_model.as_deref() {
-        if default.is_empty() {
-            errors.push("default_model is set but empty; remove the field or set a valid alias / provider:model literal".into());
-        } else if let Some((provider_name, _)) = default.split_once(':') {
-            if !config.providers.contains_key(provider_name) {
-                errors.push(format!(
-                    "default_model `{default}` is a provider:model literal but provider `{provider_name}` is not in [providers]"
-                ));
-            }
-        } else if !config.aliases.contains_key(default) {
+    // v0.6.0: every [models.X].provider must reference a known
+    // [providers] entry. Surfaces typos at startup instead of as a
+    // confusing UnknownProvider at first dispatch.
+    for (nickname, model) in &config.models {
+        if !config.providers.contains_key(&model.provider) {
             errors.push(format!(
-                "default_model `{default}` is neither an [aliases] key nor a provider:model literal"
+                "model `{nickname}` references unknown provider `{}` (not in [providers])",
+                model.provider,
             ));
         }
     }
