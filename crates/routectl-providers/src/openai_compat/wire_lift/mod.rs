@@ -18,6 +18,15 @@
 //!   - `content` runs BEFORE `tool_use` so image rewriting sees the
 //!     original assistant content array. `tool_use` may strip blocks
 //!     and collapse `content` to a string or null after the lift.
+//!   - `thinking` runs BEFORE `tool_use`: pulls Anthropic-shape
+//!     `thinking` / `redacted_thinking` content blocks out of
+//!     assistant content into the message-envelope `reasoning_details`
+//!     field. The dialect's `preserve_history_reasoning` runtime
+//!     (deepseek + vllm: lower to `reasoning_content`; openrouter:
+//!     pass through typed) reads `reasoning_details` later, after
+//!     `lift_all` returns. Running before `tool_use` means
+//!     `tool_use`'s content-collapse logic sees the surviving blocks
+//!     (text + tool_use) without confusion from leftover thinking.
 //!   - `response_format` rewrites top-level keys only; runs after
 //!     content/tool steps so none of them can clobber its output.
 //!   - `tool_use` runs before `tool_result` because tool_use lifts
@@ -28,6 +37,7 @@
 
 mod content;
 mod response_format;
+mod thinking;
 mod tool_choice;
 mod tool_result;
 mod tool_use;
@@ -51,6 +61,7 @@ const LIFT_STEPS: &[(&str, LiftFn)] = &[
     ("tools", tools::lift),
     ("tool_choice", tool_choice::lift),
     ("content", content::lift),
+    ("thinking", thinking::lift),
     ("response_format", response_format::lift),
     ("tool_use", tool_use::lift),
     ("tool_result", tool_result::lift),
@@ -66,6 +77,7 @@ pub(crate) const DOCUMENTED_DISPATCH_ORDER: &[&str] = &[
     "tools",
     "tool_choice",
     "content",
+    "thinking",
     "response_format",
     "tool_use",
     "tool_result",
