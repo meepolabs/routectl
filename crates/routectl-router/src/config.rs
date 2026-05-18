@@ -100,8 +100,15 @@ pub struct ModelEntry {
     /// while wiring without making it servable. Disabled entries
     /// still load but `Router::new` errors when an alias chain
     /// references one.
+    ///
+    /// Note: this used to be `enabled`, but that key collides with
+    /// the flattened `ReasoningDefaults::enabled` (reasoning on/off).
+    /// Renamed to `selectable` so an operator writing
+    /// `enabled = false` on a `[models.X]` block disables reasoning
+    /// (the more common intent) rather than removing the model from
+    /// routing.
     #[serde(default = "default_true")]
-    pub enabled: bool,
+    pub selectable: bool,
 
     /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
     /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
@@ -131,7 +138,7 @@ impl ModelEntry {
         Self {
             provider: provider.into(),
             upstream: upstream.into(),
-            enabled: true,
+            selectable: true,
             reasoning_defaults: ReasoningDefaults::default(),
             adaptive_thinking: None,
             additional_request_fields: None,
@@ -148,8 +155,11 @@ impl ModelEntry {
         self
     }
 
-    pub fn with_enabled(mut self, b: bool) -> Self {
-        self.enabled = b;
+    /// Set the model's selectability flag. Was `with_enabled` before
+    /// v0.6.0-rc.2; renamed alongside the underlying field to avoid
+    /// the TOML key collision with reasoning's `enabled`.
+    pub fn with_selectable(mut self, b: bool) -> Self {
+        self.selectable = b;
         self
     }
 }
@@ -967,7 +977,7 @@ upstream = "claude-haiku-4-5-20251001"
         let m = cfg.models.get("haiku").expect("haiku entry");
         assert_eq!(m.provider, "anthropic");
         assert_eq!(m.upstream, "claude-haiku-4-5-20251001");
-        assert!(m.enabled, "default enabled = true");
+        assert!(m.selectable, "default selectable = true");
         assert!(m.adaptive_thinking.is_none());
         assert!(m.reasoning_defaults.is_empty());
     }
@@ -978,7 +988,7 @@ upstream = "claude-haiku-4-5-20251001"
 [models.opus]
 provider = "anthropic"
 upstream = "claude-opus-4-7-20251022"
-enabled = true
+selectable = true
 thinking = "high"
 adaptive_thinking = true
 additional_request_fields = { reasoning_config = { type = "enabled" } }
@@ -987,7 +997,7 @@ additional_request_fields = { reasoning_config = { type = "enabled" } }
         let m = cfg.models.get("opus").expect("opus entry");
         assert_eq!(m.provider, "anthropic");
         assert_eq!(m.upstream, "claude-opus-4-7-20251022");
-        assert!(m.enabled);
+        assert!(m.selectable);
         assert_eq!(m.reasoning_defaults.thinking.as_deref(), Some("high"));
         assert_eq!(m.adaptive_thinking, Some(true));
         assert!(m.additional_request_fields.is_some());
@@ -1100,20 +1110,20 @@ upstream = "u"
 [models.shelved]
 provider = "p"
 upstream = "u"
-enabled = false
+selectable = false
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         let m = cfg.models.get("shelved").expect("entry");
-        assert!(!m.enabled);
+        assert!(!m.selectable);
     }
 
     #[test]
     fn model_entry_builder_helper_matches_required_only_parse() {
-        // Builder + TOML parse must agree on the default-true `enabled`.
+        // Builder + TOML parse must agree on the default-true `selectable`.
         let m = ModelEntry::new("p", "u");
         assert_eq!(m.provider, "p");
         assert_eq!(m.upstream, "u");
-        assert!(m.enabled);
+        assert!(m.selectable);
     }
 
     #[test]
@@ -1157,23 +1167,22 @@ thinking = "high"
     }
 
     #[test]
-    fn enabled_true_alone_populates_model_selectability() {
-        // ModelEntry.enabled (selectability) and
-        // ReasoningDefaults.enabled (reasoning on/off) share the
-        // TOML key `enabled` because of the `#[serde(flatten)]` on
-        // `reasoning_defaults`. The selectability field is declared
-        // first on the struct and wins; setting reasoning's
-        // `enabled = false` from a [models.X] entry isn't reachable
-        // through TOML in v0.6.0. Operators wanting per-model
-        // reasoning-off behavior set `thinking = "none"` instead.
+    fn enabled_true_alone_populates_reasoning_enabled() {
+        // Pre-rc.2 the outer ModelEntry.enabled and the flattened
+        // ReasoningDefaults.enabled shared the TOML key `enabled`,
+        // which made reasoning's enabled unreachable from TOML. The
+        // rename to `selectable` frees the key, so `enabled = true`
+        // on a [models.X] block now lands on
+        // ReasoningDefaults::enabled (the reasoning toggle, the
+        // operator's expected meaning).
         let toml_text = r#"
 provider = "p"
 upstream = "u"
 enabled = true
 "#;
         let entry = parse_model(toml_text);
-        assert!(entry.enabled, "ModelEntry.enabled should be true");
-        assert!(entry.reasoning_defaults.enabled.is_none());
+        assert!(entry.selectable, "default selectable = true");
+        assert_eq!(entry.reasoning_defaults.enabled, Some(true));
     }
 
     #[test]
