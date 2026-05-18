@@ -121,6 +121,16 @@ pub(crate) struct ResponsesStreamState {
     /// the empty role chunk exactly once (parity with anthropic_api's
     /// message_start signal).
     created_emitted: bool,
+    /// Sticky flag: set to `true` the first time `handle_item_added`
+    /// sees a `function_call` item, and never reset for the lifetime
+    /// of the stream. Consulted by `handle_completed` so the terminal
+    /// `finish_reason` maps to `tool_calls` even if the
+    /// `response.completed` body's `output` array is empty (a wire
+    /// pattern the chatgpt-oauth backend has been observed emitting).
+    /// We can't read this off `self.blocks` because `handle_item_done`
+    /// reaps blocks per item-done event, so by `response.completed`
+    /// the map is empty. Bug F (cc-via-* 2026-05-18).
+    saw_function_call: bool,
 }
 
 impl ResponsesStreamState {
@@ -286,6 +296,10 @@ impl ResponsesStreamState {
                         arguments: String::new(),
                     },
                 );
+                // Sticky flag: handle_item_done reaps the BlockState
+                // entry, so handle_completed cannot recover this fact
+                // from self.blocks. See Bug F note on the field.
+                self.saw_function_call = true;
             }
             _ => {
                 tracing::debug!(
@@ -449,12 +463,29 @@ impl ResponsesStreamState {
         let resp_value = event.response.clone().unwrap_or(Value::Null);
         let resp: ResponsesResponse = serde_json::from_value(resp_value).unwrap_or_default_resp();
 
-        let has_function_call = resp.output.iter().any(|i| {
+        // `has_function_call` decides whether a `completed` status
+        // maps to `tool_calls` (when present) or `stop` (when absent).
+        // Two sources, logically OR'd:
+        //   (a) walk `resp.output` from the terminal `response.completed`
+        //       event body -- matches the non-streaming translator's
+        //       `walk_output` invariant.
+        //   (b) the `saw_function_call` sticky flag, set in
+        //       `handle_item_added` when a `function_call` item first
+        //       opens.
+        // (a) alone is not enough: the chatgpt-oauth backend has been
+        // seen to emit `response.completed` with an empty / missing
+        // `response.output` field on streaming responses, so a turn
+        // with N function_calls would report `finish_reason="stop"`.
+        // We can't consult `self.blocks` for the same fact -- the
+        // map is reaped per item-done event so by `response.completed`
+        // it is empty. Bug F (cc-via-* 2026-05-18).
+        let has_function_call_in_body = resp.output.iter().any(|i| {
             matches!(
                 i,
                 super::response_types::ResponseOutputItem::FunctionCall { .. }
             )
         });
+        let has_function_call = has_function_call_in_body || self.saw_function_call;
         let incomplete_reason = resp
             .incomplete_details
             .as_ref()
