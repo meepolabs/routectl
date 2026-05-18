@@ -3,7 +3,8 @@
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{
-    validate_bedrock_global_config, validate_reasoning_defaults, Config, ProviderEntry,
+    validate_alias_chain_targets, validate_bedrock_global_config, validate_reasoning_defaults,
+    Config, ProviderEntry,
 };
 
 /// Validate the loaded config: parse syntax (already done by main.rs), resolve
@@ -39,25 +40,6 @@ pub async fn check(config: &Config) -> Result<()> {
         }
     }
 
-    for (alias, value) in &config.aliases {
-        if value.is_empty() {
-            errors.push(format!(
-                "alias `{alias}`: chain is empty -- an alias with no targets resolves \
-                 to UnknownAlias at request time, which is the same as not declaring \
-                 the alias at all"
-            ));
-            continue;
-        }
-        for nickname in value.nicknames() {
-            if !config.models.contains_key(nickname) {
-                errors.push(format!(
-                    "alias `{alias}`: target `{nickname}` is not a known model nickname \
-                     in [models]"
-                ));
-            }
-        }
-    }
-
     // v0.6.0: every [models.X].provider must reference a known
     // [providers] entry. Surfaces typos at startup instead of as a
     // confusing UnknownProvider at first dispatch.
@@ -72,10 +54,13 @@ pub async fn check(config: &Config) -> Result<()> {
 
     // Run the same startup validators that `serve` and `test` invoke
     // before building providers. Without this, an operator running
-    // `routectl config check` against a TOML carrying `thinking = ""`
-    // or an incoherent `[bedrock] allowed_body_fields` would see "ok"
-    // and only discover the failure when starting the server. Surface
-    // the same errors here.
+    // `routectl config check` against a TOML carrying `thinking = ""`,
+    // a chain of unknown nicknames, or an incoherent
+    // `[bedrock] allowed_body_fields` would see "ok" and only discover
+    // the failure when starting the server. Surface the same errors here.
+    if let Err(e) = validate_alias_chain_targets(config) {
+        errors.push(e.to_string());
+    }
     if let Err(e) = validate_reasoning_defaults(config) {
         errors.push(e.to_string());
     }
