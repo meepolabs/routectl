@@ -650,6 +650,15 @@ pub async fn build_resolved_models(
 fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
+        // Operator-asserted "use the provider kind's default" -- the
+        // factory will substitute the auth_kind-appropriate default
+        // base_url when building the provider. Surface a TRACE so an
+        // operator wondering why their request landed on a vendor
+        // default can find it in the logs without flipping debug.
+        tracing::trace!(
+            provider = provider_name,
+            "base_url empty; provider will use its kind-default endpoint",
+        );
         return Ok(());
     }
     let url = match url::Url::parse(trimmed) {
