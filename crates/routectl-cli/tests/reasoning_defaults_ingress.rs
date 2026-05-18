@@ -129,10 +129,10 @@ fn anthropic_config_with_defaults(
 
 /// Build a config with one openai-compat provider on the vllm dialect
 /// and one model whose `[models.X] enabled` (reasoning) is set.
-/// Note: `[models.X].enabled` (selectability) shadows the
-/// `ReasoningDefaults.enabled` field in TOML because of the
-/// `#[serde(flatten)]`. To set reasoning's `enabled = true` we use
-/// the builder API directly here -- no TOML parse involved.
+/// Reasoning's `enabled` is now reachable from TOML in rc.2+ since
+/// the outer ModelEntry selectability flag was renamed to
+/// `selectable` to free the key. We still go through the builder
+/// API here for parity with the rest of the test fixture surface.
 fn vllm_config_with_enabled(upstream_base: &str, enabled: bool) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     let entry = ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key")
