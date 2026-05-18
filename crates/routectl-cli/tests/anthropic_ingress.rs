@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use routectl_router::{
-    AliasEntry, Config, IngressConfig, IngressShape, ProviderEntry, ReasoningDialect, RetryPolicy,
-    ServerAuth, ServerConfig,
+    AliasValue, Config, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy, ServerAuth,
+    ServerConfig,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path};
@@ -60,7 +60,8 @@ fn anthropic_response_body() -> Value {
 }
 
 /// Build a config that points an alias to an upstream wiremock acting
-/// as `api.anthropic.com`. Optional listener auth + ingress aliases.
+/// as `api.anthropic.com`. Optional listener auth + ingress wire-string
+/// aliases (v0.6.0 collapsed them into the unified `[aliases]` table).
 fn anthropic_proxy_config(
     upstream_base: &str,
     auth_tokens: Option<Vec<String>>,
@@ -72,11 +73,24 @@ fn anthropic_proxy_config(
         ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_base.to_string()),
     );
 
-    let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "heavy".to_string(),
-        AliasEntry::new(vec!["anthropic-mock:claude-haiku-4-5".to_string()]),
+    let mut models = BTreeMap::new();
+    models.insert(
+        "haiku".to_string(),
+        ModelEntry::new("anthropic-mock", "claude-haiku-4-5"),
     );
+
+    let mut aliases = BTreeMap::new();
+    aliases.insert("heavy".to_string(), AliasValue::Single("haiku".into()));
+    // v0.6.0: wire-string -> nickname mapping lives directly in
+    // `[aliases]`. The `anthropic_alias_map` argument's values used
+    // to be alias names (which themselves resolved via the alias
+    // table); we now require the map's values to also resolve to a
+    // valid nickname through the same `[aliases]` lookup, so we
+    // insert each wire-string -> alias-or-nickname pair as a
+    // single-entry alias.
+    for (wire_string, target) in anthropic_alias_map {
+        aliases.insert(wire_string, AliasValue::Single(target));
+    }
 
     let server = ServerConfig {
         host: "127.0.0.1".into(),
@@ -86,21 +100,13 @@ fn anthropic_proxy_config(
         allow_disable_fallbacks: true,
     };
 
-    let ingress = IngressConfig {
-        anthropic: IngressShape {
-            aliases: anthropic_alias_map,
-        },
-        openai: IngressShape::default(),
-    };
-
     Arc::new(Config {
         server,
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: routectl_router::LegacyCompat::Openrouter,
-        ingress,
+        models,
         ..Default::default()
     })
 }
@@ -1208,11 +1214,13 @@ fn openai_compat_proxy_config(upstream_base: &str) -> Arc<Config> {
         "deepseek-mock".to_string(),
         ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
     );
-    let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "heavy".to_string(),
-        AliasEntry::new(vec!["deepseek-mock:deepseek-chat".to_string()]),
+    let mut models = BTreeMap::new();
+    models.insert(
+        "ds-chat".to_string(),
+        ModelEntry::new("deepseek-mock", "deepseek-chat"),
     );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("heavy".to_string(), AliasValue::Single("ds-chat".into()));
     let server = ServerConfig {
         host: "127.0.0.1".into(),
         port: 0,
@@ -1220,17 +1228,12 @@ fn openai_compat_proxy_config(upstream_base: &str) -> Arc<Config> {
         strict_translation: false,
         allow_disable_fallbacks: true,
     };
-    let ingress = IngressConfig {
-        anthropic: IngressShape::default(),
-        openai: IngressShape::default(),
-    };
     Arc::new(Config {
         server,
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
-        ingress,
+        models,
         ..Default::default()
     })
 }
@@ -1847,11 +1850,13 @@ fn deepseek_dialect_config(upstream_base: &str) -> Arc<Config> {
         ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key")
             .with_reasoning_dialect(ReasoningDialect::Deepseek),
     );
-    let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "heavy".to_string(),
-        AliasEntry::new(vec!["deepseek-mock:deepseek-chat".to_string()]),
+    let mut models = BTreeMap::new();
+    models.insert(
+        "ds-chat".to_string(),
+        ModelEntry::new("deepseek-mock", "deepseek-chat"),
     );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("heavy".to_string(), AliasValue::Single("ds-chat".into()));
     Arc::new(Config {
         server: ServerConfig {
             host: "127.0.0.1".into(),
@@ -1862,12 +1867,8 @@ fn deepseek_dialect_config(upstream_base: &str) -> Arc<Config> {
         },
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
-        ingress: IngressConfig {
-            anthropic: IngressShape::default(),
-            openai: IngressShape::default(),
-        },
+        models,
         ..Default::default()
     })
 }
@@ -1879,11 +1880,13 @@ fn vllm_dialect_config(upstream_base: &str) -> Arc<Config> {
         ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key")
             .with_reasoning_dialect(ReasoningDialect::Vllm),
     );
-    let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "heavy".to_string(),
-        AliasEntry::new(vec!["vllm-mock:qwen3-30b".to_string()]),
+    let mut models = BTreeMap::new();
+    models.insert(
+        "qwen".to_string(),
+        ModelEntry::new("vllm-mock", "qwen3-30b"),
     );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("heavy".to_string(), AliasValue::Single("qwen".into()));
     Arc::new(Config {
         server: ServerConfig {
             host: "127.0.0.1".into(),
@@ -1894,12 +1897,8 @@ fn vllm_dialect_config(upstream_base: &str) -> Arc<Config> {
         },
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
-        ingress: IngressConfig {
-            anthropic: IngressShape::default(),
-            openai: IngressShape::default(),
-        },
+        models,
         ..Default::default()
     })
 }

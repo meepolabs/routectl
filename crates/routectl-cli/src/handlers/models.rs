@@ -12,16 +12,11 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<Value> {
     let config = &state.router.config;
 
     // Collect every routable identifier the server will accept on
-    // the `model` field, deduplicated. Sources, in priority order:
-    //   1. [aliases] keys                    (direct alias use)
-    //   2. ingress.<dialect>.aliases keys    (model-id rewrite at ingress)
-    //   3. default_model                     (catch-all destination)
-    //   4. provider:model literals           (any value with a ':')
-    //      that appear in alias chains
-    // Without (2) and (3), `/v1/models` misreports the server as
-    // unable to serve identifiers that routing actually accepts --
-    // operators run `curl /v1/models` to discover what works and
-    // were getting incomplete answers.
+    // the `model` field, deduplicated. v0.6.0 sources:
+    //   1. [aliases] keys      (wire model -> nickname/chain)
+    //   2. [models] keys       (wire model -> direct nickname)
+    // Without listing both, /v1/models would misreport the server as
+    // unable to serve identifiers that routing actually accepts.
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut entries: Vec<Value> = Vec::new();
     let emit =
@@ -38,23 +33,15 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<Value> {
         };
 
     for alias in config.aliases.keys() {
+        // Skip the `default` catch-all key; it isn't a routable
+        // identifier on its own.
+        if alias == "default" {
+            continue;
+        }
         emit(alias, &mut entries, &mut seen);
     }
-    for ingress_alias in config.ingress.openai.aliases.keys() {
-        emit(ingress_alias, &mut entries, &mut seen);
-    }
-    for ingress_alias in config.ingress.anthropic.aliases.keys() {
-        emit(ingress_alias, &mut entries, &mut seen);
-    }
-    if let Some(default) = config.default_model.as_deref() {
-        emit(default, &mut entries, &mut seen);
-    }
-    for alias_entry in config.aliases.values() {
-        for target in &alias_entry.chain {
-            if target.contains(':') {
-                emit(target, &mut entries, &mut seen);
-            }
-        }
+    for nickname in config.models.keys() {
+        emit(nickname, &mut entries, &mut seen);
     }
 
     Json(json!({

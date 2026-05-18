@@ -14,27 +14,30 @@ pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
 
-    /// Provider definitions, keyed by user-facing name (e.g. "deepseek", "claude-pro").
+    /// Provider definitions keyed by operator-facing name. Carries
+    /// transport-side knobs only (auth, base URL, headers, runtime
+    /// gates). Per-model knobs (`thinking`, `enabled`,
+    /// `adaptive_thinking`, `additional_request_fields`,
+    /// `chat_template_kwargs`, `default_extras`) live on
+    /// `[models.X]` in v0.6.0.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderEntry>,
 
-    /// Aliases mapping a logical model name -> ordered fallback chain.
+    /// v0.6.0 alias table. Each key is a wire `model` value (or a
+    /// suffix-glob pattern like `claude-opus-*`, or the literal
+    /// `default` catch-all key); each value is either a single model
+    /// nickname or an ordered fallback chain of nicknames -- both
+    /// forms reference `[models.X]` table entries. The wire `model`
+    /// field on incoming requests resolves through this table.
+    ///
+    /// v0.6.0 collapsed the legacy `[aliases.X.chain]` `provider:model`
+    /// literals AND the `[ingress.X.aliases]` per-dialect maps AND the
+    /// `default_model` field AND the suffix-glob convention (used
+    /// primarily by Claude Code and the OpenAI SDK over our ingress)
+    /// into this single table. See the v0.6.0-rc.1 CHANGELOG for the
+    /// migration guide.
     #[serde(default)]
-    pub aliases: BTreeMap<String, AliasEntry>,
-
-    /// Catch-all destination for requests whose `model` field doesn't
-    /// resolve. Applied AFTER `[aliases]` lookup and `provider:model`
-    /// literal detection, so configured aliases and explicit literals
-    /// always win. Lets clients send model names that haven't been
-    /// added to `[aliases]` or `[ingress.<dialect>.aliases]` yet (e.g.
-    /// a fresh claude release the operator hasn't mapped yet) without
-    /// hard-failing -- they go to this destination instead. Accepts
-    /// the same shapes the wire `model` field accepts: an alias name
-    /// from `[aliases]` (e.g. `"med"`) or a `provider:model` literal
-    /// (e.g. `"bedrock-default:global.anthropic.claude-sonnet-4-6"`).
-    /// When unset, unknown models error with `UnknownAlias`.
-    #[serde(default)]
-    pub default_model: Option<String>,
+    pub aliases: BTreeMap<String, AliasValue>,
 
     /// Default retry policy applied per-provider attempt.
     #[serde(default)]
@@ -45,13 +48,6 @@ pub struct Config {
     /// `openai`: strip routectl/openrouter extensions for paranoid clients.
     #[serde(default)]
     pub legacy_compat: LegacyCompat,
-
-    /// Per-ingress configuration: model-id -> alias mapping. v0.4.0
-    /// adds two ingress dialects (OpenAI Chat Completions, Anthropic
-    /// Messages); each can have its own alias map for clients that
-    /// can't override the `model` field directly (Claude Code, etc.).
-    #[serde(default)]
-    pub ingress: IngressConfig,
 
     /// Bedrock-wide settings that apply to every Bedrock provider.
     /// Carries the operator-supplied `allowed_betas` and
@@ -65,8 +61,7 @@ pub struct Config {
     /// v0.6.0 model directory. Each entry binds a logical nickname
     /// (the table key) to a transport (`provider`), an upstream model
     /// id (`upstream`), and per-model knobs. The `[aliases]` table
-    /// references entries by nickname. v0.6.0 is the first release
-    /// that consumes this table; see the v0.6.0-rc.1 changelog.
+    /// references entries by nickname. See the v0.6.0-rc.1 changelog.
     #[serde(default)]
     pub models: BTreeMap<String, ModelEntry>,
 }
@@ -376,23 +371,6 @@ pub struct ServerAuth {
     pub tokens: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IngressConfig {
-    #[serde(default)]
-    pub openai: IngressShape,
-    #[serde(default)]
-    pub anthropic: IngressShape,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IngressShape {
-    /// Map a wire `model` field value to a configured alias. When the
-    /// request model matches a key here, routing uses the value as
-    /// the alias. The `x-routectl-alias` header overrides this.
-    #[serde(default)]
-    pub aliases: BTreeMap<String, String>,
-}
-
 fn default_host() -> String {
     "127.0.0.1".into()
 }
@@ -402,7 +380,7 @@ fn default_port() -> u16 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum ProviderEntry {
     #[non_exhaustive]
@@ -415,8 +393,6 @@ pub enum ProviderEntry {
         api_key_ref: String,
         #[serde(default)]
         extra_headers: BTreeMap<String, String>,
-        #[serde(default)]
-        default_extras: Option<serde_json::Value>,
         #[serde(default)]
         reasoning_dialect: ReasoningDialect,
         /// How to handle the `reasoning` / `reasoning_content` /
@@ -445,11 +421,6 @@ pub enum ProviderEntry {
         user_agent: Option<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
-        /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
-        /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
-        /// `reasoning.enabled`. Caller-supplied values always win.
-        #[serde(default, flatten)]
-        reasoning_defaults: ReasoningDefaults,
     },
     #[non_exhaustive]
     AnthropicApi {
@@ -471,15 +442,6 @@ pub enum ProviderEntry {
         /// Override the outbound User-Agent. Useful for IAM-gated upstreams.
         #[serde(default)]
         user_agent: Option<String>,
-        /// Use the Opus 4.7+ adaptive thinking wire shape on this provider.
-        /// When `true`, routectl rewrites `thinking: {type:"enabled",
-        /// budget_tokens:N}` to `thinking: {type:"adaptive"}` and lifts
-        /// `reasoning.effort` (verbatim string) into top-level
-        /// `output_config.effort`. Older Claude models (4.5/4.6 family)
-        /// still accept the legacy shape, so this is opt-in per provider
-        /// rather than a compiled model-name match. Default: `false`.
-        #[serde(default)]
-        adaptive_thinking: Option<bool>,
         /// Optional operator-supplied allowlist for `anthropic_beta`
         /// flags forwarded to api.anthropic.com. Default (empty) is
         /// pass-through: every beta the client requests goes upstream
@@ -492,11 +454,6 @@ pub enum ProviderEntry {
         allowed_betas: Vec<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
-        /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
-        /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
-        /// `reasoning.enabled`. Caller-supplied values always win.
-        #[serde(default, flatten)]
-        reasoning_defaults: ReasoningDefaults,
     },
     /// OpenAI Responses API provider. Three auth surfaces (the relevant stage wires
     /// the first; the relevant stage/E land the others):
@@ -538,21 +495,19 @@ pub enum ProviderEntry {
         originator: Option<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
-        /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
-        /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
-        /// `reasoning.enabled`. Caller-supplied values always win.
-        #[serde(default, flatten)]
-        reasoning_defaults: ReasoningDefaults,
     },
     /// Native AWS Bedrock provider. Speaks SigV4 directly to
     /// `bedrock-runtime.<region>.amazonaws.com`. Pick `api_shape` to
     /// switch between vendor-specific InvokeModel (default) and
     /// vendor-neutral Converse.
+    ///
+    /// v0.6.0 moved the upstream `model_id` from this entry to
+    /// `[models.X].upstream`; the factory pumps each model entry's
+    /// upstream into a per-model `BedrockConfig.model_id`.
     #[cfg(feature = "bedrock")]
     #[non_exhaustive]
     Bedrock {
         region: String,
-        model_id: String,
         #[serde(default)]
         api_shape: BedrockApiShapeConfig,
         creds: BedrockCredsConfig,
@@ -562,22 +517,8 @@ pub enum ProviderEntry {
         extra_headers: BTreeMap<String, String>,
         #[serde(default)]
         anthropic_beta: Vec<String>,
-        #[serde(default)]
-        additional_model_request_fields: Option<serde_json::Value>,
-        /// Use the Opus 4.7+ adaptive thinking wire shape on this provider.
-        /// Same semantics as the AnthropicApi variant above. Set this on
-        /// Bedrock providers whose `model_id` is an opus-4-7+ inference
-        /// profile (e.g. `global.anthropic.claude-opus-4-7-v1:0`).
-        /// Default: `false`.
-        #[serde(default)]
-        adaptive_thinking: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
-        /// Operator-side reasoning defaults (see [`ReasoningDefaults`]).
-        /// `thinking` lifts to `reasoning.effort`, `enabled` lifts to
-        /// `reasoning.enabled`. Caller-supplied values always win.
-        #[serde(default, flatten)]
-        reasoning_defaults: ReasoningDefaults,
     },
 }
 
@@ -652,44 +593,15 @@ impl ProviderEntry {
         }
     }
 
-    /// Get the operator-side reasoning defaults attached to this entry.
-    /// Returns `None` when both fields on the underlying struct are
-    /// unset, so the router's merge step can short-circuit cheaply.
-    pub fn reasoning_defaults(&self) -> Option<&ReasoningDefaults> {
-        let rd = match self {
-            Self::OpenaiCompat {
-                reasoning_defaults, ..
-            }
-            | Self::AnthropicApi {
-                reasoning_defaults, ..
-            } => reasoning_defaults,
-            #[cfg(feature = "bedrock")]
-            Self::Bedrock {
-                reasoning_defaults, ..
-            } => reasoning_defaults,
-            #[cfg(feature = "openai-responses")]
-            Self::OpenaiResponses {
-                reasoning_defaults, ..
-            } => reasoning_defaults,
-        };
-        if rd.is_empty() {
-            None
-        } else {
-            Some(rd)
-        }
-    }
-
     pub fn openai_compat(base_url: impl Into<String>, api_key_ref: impl Into<String>) -> Self {
         Self::OpenaiCompat {
             base_url: base_url.into(),
             api_key_ref: api_key_ref.into(),
             extra_headers: BTreeMap::new(),
-            default_extras: None,
             reasoning_dialect: ReasoningDialect::default(),
             history_reasoning: HistoryReasoning::default(),
             user_agent: None,
             runtime: ProviderRuntimePolicy::default(),
-            reasoning_defaults: ReasoningDefaults::default(),
         }
     }
 
@@ -701,10 +613,8 @@ impl ProviderEntry {
             auth_kind: AuthKind::ApiKey,
             extra_headers: BTreeMap::new(),
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             runtime: ProviderRuntimePolicy::default(),
-            reasoning_defaults: ReasoningDefaults::default(),
         }
     }
 
@@ -733,14 +643,6 @@ impl ProviderEntry {
         match &mut self {
             Self::OpenaiCompat { extra_headers, .. } => *extra_headers = headers,
             _ => panic!("ProviderEntry::with_extra_headers only applies to openai-compat"),
-        }
-        self
-    }
-
-    pub fn with_default_extras(mut self, extras: Option<serde_json::Value>) -> Self {
-        match &mut self {
-            Self::OpenaiCompat { default_extras, .. } => *default_extras = extras,
-            _ => panic!("ProviderEntry::with_default_extras only applies to openai-compat"),
         }
         self
     }
@@ -968,27 +870,6 @@ pub enum HistoryReasoning {
     Preserve,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct AliasEntry {
-    /// Ordered list of `provider:model` targets. First entry is preferred.
-    pub chain: Vec<String>,
-    /// Optional override of the default retry policy for this alias.
-    #[serde(default)]
-    pub retry: Option<RetryPolicy>,
-}
-
-impl AliasEntry {
-    pub fn new(chain: Vec<String>) -> Self {
-        Self { chain, retry: None }
-    }
-
-    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
-        self.retry = Some(retry);
-        self
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RetryPolicy {
@@ -1189,14 +1070,13 @@ default = "small"
     }
 
     #[test]
-    fn provider_kind_field_is_alias_for_type_in_c4() {
-        // C1: the providers shape still uses `type` (legacy). C4
-        // renames to `kind`. This test pins the legacy shape so the
-        // C4 commit can mechanically flip the discriminator without
-        // unrelated breakage.
+    fn provider_kind_field_is_kind_not_type() {
+        // v0.6.0 renamed the providers discriminator from `type` to
+        // `kind`. Pin the new shape so a regression to `type` is
+        // caught immediately.
         let toml_text = r#"
 [providers.deepseek]
-type = "openai-compat"
+kind = "openai-compat"
 base_url = "https://api.deepseek.com/v1"
 api_key_ref = "literal:k"
 "#;
@@ -1266,129 +1146,94 @@ enabled = false
 }
 
 #[cfg(test)]
-mod reasoning_defaults_tests {
-    use super::{Config, ProviderEntry};
+mod model_reasoning_defaults_tests {
+    //! v0.6.0 reasoning defaults live on `[models.X]` (not on
+    //! `[providers.X]`). These tests pin the per-model parse surface
+    //! and the validator's accumulated-error behavior.
+
+    use super::{Config, ModelEntry};
     use crate::factory::validate_reasoning_defaults;
 
-    fn parse_entry(toml_text: &str) -> ProviderEntry {
-        toml::from_str::<ProviderEntry>(toml_text).expect("toml parse")
+    fn parse_model(toml_text: &str) -> ModelEntry {
+        toml::from_str::<ModelEntry>(toml_text).expect("toml parse")
     }
 
     #[test]
     fn thinking_high_alone_populates_effort() {
-        // Arrange
         let toml_text = r#"
-type = "anthropic-api"
-api_key_ref = "literal:k"
+provider = "p"
+upstream = "u"
 thinking = "high"
 "#;
-
-        // Act
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        // Assert
-        assert_eq!(defaults.thinking.as_deref(), Some("high"));
-        assert!(defaults.enabled.is_none());
+        let entry = parse_model(toml_text);
+        assert_eq!(entry.reasoning_defaults.thinking.as_deref(), Some("high"));
+        assert!(entry.reasoning_defaults.enabled.is_none());
     }
 
     #[test]
-    fn enabled_true_alone_populates_enabled() {
+    fn enabled_true_alone_populates_model_selectability() {
+        // ModelEntry.enabled (selectability) and
+        // ReasoningDefaults.enabled (reasoning on/off) share the
+        // TOML key `enabled` because of the `#[serde(flatten)]` on
+        // `reasoning_defaults`. The selectability field is declared
+        // first on the struct and wins; setting reasoning's
+        // `enabled = false` from a [models.X] entry isn't reachable
+        // through TOML in v0.6.0. Operators wanting per-model
+        // reasoning-off behavior set `thinking = "none"` instead.
         let toml_text = r#"
-type = "anthropic-api"
-api_key_ref = "literal:k"
+provider = "p"
+upstream = "u"
 enabled = true
 "#;
-
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        assert!(defaults.thinking.is_none());
-        assert_eq!(defaults.enabled, Some(true));
-    }
-
-    #[test]
-    fn enabled_false_alone_populates_enabled() {
-        // Pin: `enabled = false` must round-trip as Some(false), NOT
-        // collapse to None. The router merge layer treats None as "no
-        // operator opinion" and Some(false) as "pin reasoning off".
-        let toml_text = r#"
-type = "anthropic-api"
-api_key_ref = "literal:k"
-enabled = false
-"#;
-
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        assert!(defaults.thinking.is_none());
-        assert_eq!(defaults.enabled, Some(false));
+        let entry = parse_model(toml_text);
+        assert!(entry.enabled, "ModelEntry.enabled should be true");
+        assert!(entry.reasoning_defaults.enabled.is_none());
     }
 
     #[test]
     fn both_fields_set_populate_both() {
         let toml_text = r#"
-type = "anthropic-api"
-api_key_ref = "literal:k"
+provider = "p"
+upstream = "u"
 thinking = "medium"
-enabled = true
 "#;
-
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        assert_eq!(defaults.thinking.as_deref(), Some("medium"));
-        assert_eq!(defaults.enabled, Some(true));
+        let entry = parse_model(toml_text);
+        assert_eq!(entry.reasoning_defaults.thinking.as_deref(), Some("medium"));
     }
 
     #[test]
     fn neither_field_yields_all_none_defaults() {
         let toml_text = r#"
-type = "anthropic-api"
-api_key_ref = "literal:k"
+provider = "p"
+upstream = "u"
 "#;
-
-        let entry = parse_entry(toml_text);
-
-        // is_empty() -> reasoning_defaults() returns None.
-        assert!(entry.reasoning_defaults().is_none());
+        let entry = parse_model(toml_text);
+        assert!(entry.reasoning_defaults.is_empty());
     }
 
     #[test]
     fn thinking_none_maps_to_effort_none() {
-        // The vendor-side string "none" is a valid effort level (it
-        // tells the egress to disable reasoning). It must not collide
-        // with absence-of-the-field semantics.
         let toml_text = r#"
-type = "anthropic-api"
-api_key_ref = "literal:k"
+provider = "p"
+upstream = "u"
 thinking = "none"
 "#;
-
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        assert_eq!(defaults.thinking.as_deref(), Some("none"));
+        let entry = parse_model(toml_text);
+        assert_eq!(entry.reasoning_defaults.thinking.as_deref(), Some("none"));
     }
 
     #[test]
     fn thinking_empty_string_rejected_at_startup() {
-        // Arrange: build a Config with one provider whose `thinking =
-        // ""`.
         let toml_text = r#"
-[providers.bad]
-type = "anthropic-api"
-api_key_ref = "literal:k"
+[models.bad]
+provider = "p"
+upstream = "u"
 thinking = ""
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("toml parse");
-
-        // Act
         let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
-
-        // Assert
         let msg = err.to_string();
-        assert!(msg.contains("bad"), "msg should name provider: {msg}");
+        assert!(msg.contains("bad"), "msg should name model: {msg}");
         assert!(
             msg.contains("non-empty"),
             "msg should explain rejection: {msg}"
@@ -1400,41 +1245,30 @@ thinking = ""
         // Forward-compat: vendors add new effort levels without a
         // routectl release. Validator must not gate on a closed enum.
         let toml_text = r#"
-[providers.future]
-type = "anthropic-api"
-api_key_ref = "literal:k"
+[models.future]
+provider = "p"
+upstream = "u"
 thinking = "ultra"
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("toml parse");
-
         let result = validate_reasoning_defaults(&cfg);
-
         assert!(result.is_ok(), "expected pass-through Ok, got {result:?}");
-        let entry = cfg.providers.get("future").expect("provider parsed");
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-        assert_eq!(defaults.thinking.as_deref(), Some("ultra"));
+        let entry = cfg.models.get("future").expect("model parsed");
+        assert_eq!(entry.reasoning_defaults.thinking.as_deref(), Some("ultra"));
     }
 
     #[test]
     fn thinking_whitespace_only_rejected() {
-        // Arrange: a thinking value that's only whitespace would parse
-        // upstream as "no effort" but with all the wire overhead of
-        // emitting the field. Caught at startup with a precise error
-        // pointing the operator at the offending provider.
         let toml_text = r#"
-[providers.spacey]
-type = "anthropic-api"
-api_key_ref = "literal:k"
+[models.spacey]
+provider = "p"
+upstream = "u"
 thinking = "   "
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("toml parse");
-
-        // Act
         let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
-
-        // Assert
         let msg = err.to_string();
-        assert!(msg.contains("spacey"), "msg should name provider: {msg}");
+        assert!(msg.contains("spacey"), "msg should name model: {msg}");
         assert!(
             msg.contains("whitespace-only"),
             "msg should explain rejection: {msg}"
@@ -1443,25 +1277,16 @@ thinking = "   "
 
     #[test]
     fn thinking_with_control_characters_rejected() {
-        // Arrange: a tab character (ASCII 0x09) in the thinking value.
-        // Effort strings must not contain ASCII control characters --
-        // they would corrupt log lines and wire bodies. Non-ASCII
-        // (printable Unicode) is fine and stays out of the validator's
-        // way for forward-compat with future vendor vocabularies.
         let toml_text = "\
-[providers.tabby]\n\
-type = \"anthropic-api\"\n\
-api_key_ref = \"literal:k\"\n\
+[models.tabby]\n\
+provider = \"p\"\n\
+upstream = \"u\"\n\
 thinking = \"hi\\tgh\"\n\
 ";
         let cfg: Config = toml::from_str(toml_text).expect("toml parse");
-
-        // Act
         let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
-
-        // Assert
         let msg = err.to_string();
-        assert!(msg.contains("tabby"), "msg should name provider: {msg}");
+        assert!(msg.contains("tabby"), "msg should name model: {msg}");
         assert!(
             msg.contains("control"),
             "msg should explain rejection: {msg}"
@@ -1470,131 +1295,41 @@ thinking = \"hi\\tgh\"\n\
 
     #[test]
     fn thinking_exceeding_64_bytes_rejected() {
-        // Arrange: a 65-character effort string. Real effort tokens
-        // are short ("minimal", "low", "medium", "high", "xhigh",
-        // "max", "none"); 64 bytes is well above any realistic value
-        // and catches accidental paste of a full prompt or path.
         let long_value = "a".repeat(65);
         let toml_text = format!(
             r#"
-[providers.verbose]
-type = "anthropic-api"
-api_key_ref = "literal:k"
+[models.verbose]
+provider = "p"
+upstream = "u"
 thinking = "{long_value}"
 "#
         );
         let cfg: Config = toml::from_str(&toml_text).expect("toml parse");
-
-        // Act
         let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
-
-        // Assert
         let msg = err.to_string();
-        assert!(msg.contains("verbose"), "msg should name provider: {msg}");
+        assert!(msg.contains("verbose"), "msg should name model: {msg}");
         assert!(msg.contains("65 bytes"), "msg should report length: {msg}");
         assert!(msg.contains("max 64"), "msg should report cap: {msg}");
     }
 
     #[test]
-    fn validate_reports_all_offending_providers() {
-        // Arrange: two providers with different validation failures.
-        // The validator must accumulate both errors instead of
-        // bailing on the first one -- otherwise the operator has to
-        // restart routectl once per offending provider to see them
-        // all.
+    fn validate_reports_all_offending_models() {
         let toml_text = r#"
-[providers.empty_p]
-type = "anthropic-api"
-api_key_ref = "literal:k"
+[models.empty_m]
+provider = "p"
+upstream = "u"
 thinking = ""
 
-[providers.spacey_p]
-type = "anthropic-api"
-api_key_ref = "literal:k"
+[models.spacey_m]
+provider = "p"
+upstream = "u"
 thinking = "   "
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("toml parse");
-
-        // Act
         let err = validate_reasoning_defaults(&cfg).expect_err("should reject");
-
-        // Assert: BOTH provider names appear in the consolidated error.
         let msg = err.to_string();
-        assert!(msg.contains("empty_p"), "msg should name empty_p: {msg}");
-        assert!(msg.contains("spacey_p"), "msg should name spacey_p: {msg}");
-    }
-
-    #[test]
-    fn parse_openai_compat_variant_carries_defaults() {
-        let toml_text = r#"
-type = "openai-compat"
-base_url = "https://example.test/v1"
-api_key_ref = "literal:k"
-reasoning_dialect = "vllm"
-thinking = "low"
-enabled = true
-"#;
-
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        assert_eq!(defaults.thinking.as_deref(), Some("low"));
-        assert_eq!(defaults.enabled, Some(true));
-        assert!(matches!(entry, ProviderEntry::OpenaiCompat { .. }));
-    }
-
-    #[test]
-    fn parse_anthropic_api_variant_carries_defaults() {
-        let toml_text = r#"
-type = "anthropic-api"
-api_key_ref = "literal:k"
-adaptive_thinking = true
-thinking = "xhigh"
-"#;
-
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        assert_eq!(defaults.thinking.as_deref(), Some("xhigh"));
-        assert!(matches!(entry, ProviderEntry::AnthropicApi { .. }));
-    }
-
-    #[cfg(feature = "openai-responses")]
-    #[test]
-    fn parse_openai_responses_variant_carries_defaults() {
-        let toml_text = r#"
-type = "openai-responses"
-api_key_ref = "literal:k"
-account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
-auth_kind = "chatgpt-oauth"
-thinking = "high"
-"#;
-
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        assert_eq!(defaults.thinking.as_deref(), Some("high"));
-        assert!(matches!(entry, ProviderEntry::OpenaiResponses { .. }));
-    }
-
-    #[cfg(feature = "bedrock")]
-    #[test]
-    fn parse_bedrock_variant_carries_defaults() {
-        let toml_text = r#"
-type = "bedrock"
-region = "us-east-1"
-model_id = "anthropic.claude-haiku-4-5"
-creds = { kind = "default-chain" }
-thinking = "minimal"
-enabled = true
-"#;
-
-        let entry = parse_entry(toml_text);
-        let defaults = entry.reasoning_defaults().expect("defaults present");
-
-        assert_eq!(defaults.thinking.as_deref(), Some("minimal"));
-        assert_eq!(defaults.enabled, Some(true));
-        assert!(matches!(entry, ProviderEntry::Bedrock { .. }));
+        assert!(msg.contains("empty_m"), "msg should name empty_m: {msg}");
+        assert!(msg.contains("spacey_m"), "msg should name spacey_m: {msg}");
     }
 }
 

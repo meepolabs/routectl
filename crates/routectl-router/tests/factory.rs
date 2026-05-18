@@ -31,7 +31,7 @@ async fn build_anthropic_api_resolves_secret() {
 fn anthropic_custom_base_url_and_version_round_trip_through_toml() {
     let toml_src = r#"
 [providers.anthropic]
-type = "anthropic-api"
+kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 base_url = "https://api2.anthropic.com"
 anthropic_version = "2024-05-01"
@@ -68,12 +68,12 @@ fn anthropic_auth_kind_round_trips_through_toml() {
 
     let toml_src = r#"
 [providers.claude-code]
-type = "anthropic-api"
+kind = "anthropic-api"
 api_key_ref = "file://<local-path>"
 auth_kind = "oauth-bearer"
 
 [providers.anthropic-default]
-type = "anthropic-api"
+kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 "#;
     let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
@@ -114,7 +114,7 @@ api_key_ref = "env://ANTHROPIC_API_KEY"
 fn openai_compat_custom_base_url_round_trips_through_toml() {
     let toml_src = r#"
 [providers.example-deepseek-host]
-type = "openai-compat"
+kind = "openai-compat"
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_ref = "env://OPENCODE_GO_API_KEY"
 reasoning_dialect = "deepseek"
@@ -153,7 +153,7 @@ async fn build_with_missing_env_var_errors() {
 fn anthropic_extra_headers_and_user_agent_round_trip_through_toml() {
     let toml_src = r#"
 [providers.anthropic]
-type = "anthropic-api"
+kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 user_agent = "claude-code/1.2.3"
 
@@ -194,7 +194,7 @@ mod openai_responses_tests {
         // Arrange
         let toml_src = r#"
 [providers.gpt]
-type = "openai-responses"
+kind = "openai-responses"
 api_key_ref = "literal:test-jwt"
 account_id_ref = "literal:acct-uuid"
 auth_kind = "chatgpt-oauth"
@@ -215,7 +215,7 @@ auth_kind = "chatgpt-oauth"
         // Arrange
         let toml_src = r#"
 [providers.gpt]
-type = "openai-responses"
+kind = "openai-responses"
 api_key_ref = "literal:test-jwt"
 auth_kind = "chatgpt-oauth"
 "#;
@@ -242,7 +242,7 @@ auth_kind = "chatgpt-oauth"
         // Arrange: api-key surface, no account_id_ref, default base_url.
         let toml_src = r#"
 [providers.gpt-api]
-type = "openai-responses"
+kind = "openai-responses"
 api_key_ref = "literal:sk-test-123"
 auth_kind = "api-key"
 "#;
@@ -264,7 +264,7 @@ auth_kind = "api-key"
         // Arrange
         let toml_src = r#"
 [providers.gpt-api]
-type = "openai-responses"
+kind = "openai-responses"
 api_key_ref = "literal:sk-test"
 account_id_ref = "literal:acct-uuid"
 auth_kind = "api-key"
@@ -294,7 +294,7 @@ auth_kind = "api-key"
         // Arrange: auth_kind omitted -> default.
         let toml_src = r#"
 [providers.gpt]
-type = "openai-responses"
+kind = "openai-responses"
 api_key_ref = "literal:test-jwt"
 account_id_ref = "literal:acct-uuid"
 "#;
@@ -318,9 +318,8 @@ mod bedrock_tests {
     fn bedrock_invoke_with_bearer_key_round_trips() {
         let toml_src = r#"
 [providers.bedrock_anthropic]
-type = "bedrock"
+kind = "bedrock"
 region = "us-west-2"
-model_id = "us.anthropic.claude-opus-4-7"
 api_shape = "invoke"
 user_agent = "claude-code/1.2.3"
 anthropic_beta = ["context-1m-2025-08-07", "prompt-caching-2024-07-31"]
@@ -334,7 +333,6 @@ creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
         match entry {
             ProviderEntry::Bedrock {
                 region,
-                model_id,
                 api_shape,
                 user_agent,
                 anthropic_beta,
@@ -343,7 +341,6 @@ creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
                 ..
             } => {
                 assert_eq!(region, "us-west-2");
-                assert_eq!(model_id, "us.anthropic.claude-opus-4-7");
                 assert_eq!(*api_shape, BedrockApiShapeConfig::Invoke);
                 assert_eq!(user_agent.as_deref(), Some("claude-code/1.2.3"));
                 assert_eq!(
@@ -374,9 +371,8 @@ creds = { kind = "bearer-key", key_ref = "file://<local-path>" }
         // for `creds` here. Both syntaxes serialize to the same struct.
         let toml_src = r#"
 [providers.bedrock_static]
-type = "bedrock"
+kind = "bedrock"
 region = "us-west-2"
-model_id = "anthropic.claude-haiku-4-5"
 
 [providers.bedrock_static.creds]
 kind = "static"
@@ -415,9 +411,8 @@ session_token_ref = "env://AWS_SESSION_TOKEN"
     fn bedrock_profile_creds_round_trip() {
         let toml_src = r#"
 [providers.bedrock_profile]
-type = "bedrock"
+kind = "bedrock"
 region = "us-west-2"
-model_id = "us.anthropic.claude-opus-4-7"
 api_shape = "converse"
 creds = { kind = "profile", name = "bedrock-prod" }
 "#;
@@ -442,9 +437,8 @@ creds = { kind = "profile", name = "bedrock-prod" }
     fn bedrock_default_chain_round_trips() {
         let toml_src = r#"
 [providers.bedrock_chain]
-type = "bedrock"
+kind = "bedrock"
 region = "us-west-2"
-model_id = "us.anthropic.claude-opus-4-7"
 creds = { kind = "default-chain" }
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");

@@ -96,25 +96,78 @@ pub async fn build_provider_with_options(
     secrets: &dyn SecretStore,
     opts: BuildOptions,
 ) -> Result<Arc<dyn Provider>> {
-    build_provider_inner(name, entry, secrets, opts, None).await
+    #[cfg(feature = "bedrock")]
+    {
+        build_provider_inner(name, entry, secrets, opts, None, None).await
+    }
+    #[cfg(not(feature = "bedrock"))]
+    {
+        build_provider_inner(name, entry, secrets, opts, None).await
+    }
 }
 
-/// Variant that lets the caller override the Bedrock `model_id` field
-/// on `BedrockConfig`. v0.6.0 moves the upstream model id from the
-/// `[providers.X]` table to `[models.X].upstream`, so each Bedrock-
-/// targeting model entry needs its own provider instance with its own
-/// `model_id`. Other provider kinds ignore the override; one cached
-/// `Arc<dyn Provider>` per `[providers.X]` is shared across all
-/// `[models]` referencing it.
+/// Per-model overrides applied to a Bedrock provider build. These
+/// fields used to live on `[providers.X]` but moved to `[models.X]`
+/// in v0.6.0; the factory threads them through here so each Bedrock
+/// model gets a `BedrockConfig` with the right values.
+#[cfg(feature = "bedrock")]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BedrockModelOverrides {
+    pub model_id: String,
+    pub adaptive_thinking: Option<bool>,
+    pub additional_model_request_fields: Option<serde_json::Value>,
+}
+
+/// Per-model overrides applied to a non-Bedrock provider build that
+/// need to fan out one provider instance per model. v0.6.0 moved
+/// `adaptive_thinking` from `[providers.X]` to `[models.X]` so the
+/// AnthropicApi provider needs a per-model build when the flag is
+/// set. OpenaiCompat / OpenaiResponses don't read adaptive_thinking
+/// today so they still share one cached `Arc<dyn Provider>` per
+/// `[providers.X]`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AnthropicModelOverrides {
+    pub adaptive_thinking: Option<bool>,
+}
+
+/// Variant that lets the caller override Bedrock model-specific fields
+/// on `BedrockConfig`. v0.6.0 moves the upstream model id, adaptive
+/// thinking flag, and additional request fields from
+/// `[providers.X]` to `[models.X]`, so each Bedrock-targeting model
+/// entry needs its own provider instance with those values. Other
+/// provider kinds ignore the override; one cached `Arc<dyn Provider>`
+/// per `[providers.X]` is shared across all `[models]` referencing it.
 #[cfg(feature = "bedrock")]
 pub(crate) async fn build_provider_with_bedrock_model_override(
     name: &str,
     entry: &ProviderEntry,
     secrets: &dyn SecretStore,
     opts: BuildOptions,
-    bedrock_model_id_override: Option<String>,
+    bedrock_overrides: Option<BedrockModelOverrides>,
 ) -> Result<Arc<dyn Provider>> {
-    build_provider_inner(name, entry, secrets, opts, bedrock_model_id_override).await
+    build_provider_inner(name, entry, secrets, opts, bedrock_overrides, None).await
+}
+
+/// Variant that lets the caller override AnthropicApi model-specific
+/// fields. v0.6.0 moved `adaptive_thinking` to `[models.X]`, so each
+/// AnthropicApi model entry that opts into the adaptive shape needs
+/// its own `Arc<AnthropicApiProvider>` with `cfg.adaptive_thinking`
+/// set. The Bedrock override path is unaffected.
+pub(crate) async fn build_provider_with_anthropic_model_override(
+    name: &str,
+    entry: &ProviderEntry,
+    secrets: &dyn SecretStore,
+    opts: BuildOptions,
+    anthropic_overrides: Option<AnthropicModelOverrides>,
+) -> Result<Arc<dyn Provider>> {
+    #[cfg(feature = "bedrock")]
+    {
+        build_provider_inner(name, entry, secrets, opts, None, anthropic_overrides).await
+    }
+    #[cfg(not(feature = "bedrock"))]
+    {
+        build_provider_inner(name, entry, secrets, opts, anthropic_overrides).await
+    }
 }
 
 #[tracing::instrument(skip_all, fields(provider = %name))]
@@ -123,19 +176,18 @@ async fn build_provider_inner(
     entry: &ProviderEntry,
     secrets: &dyn SecretStore,
     opts: BuildOptions,
-    #[allow(unused_variables)] bedrock_model_id_override: Option<String>,
+    #[cfg(feature = "bedrock")] bedrock_overrides: Option<BedrockModelOverrides>,
+    anthropic_overrides: Option<AnthropicModelOverrides>,
 ) -> Result<Arc<dyn Provider>> {
     match entry {
         ProviderEntry::OpenaiCompat {
             base_url,
             api_key_ref,
             extra_headers,
-            default_extras,
             reasoning_dialect,
             history_reasoning,
             user_agent,
             runtime: _,
-            reasoning_defaults: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
             let api_key = resolve(secrets, api_key_ref).await?;
@@ -147,7 +199,7 @@ async fn build_provider_inner(
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
-                default_extras: default_extras.clone(),
+                default_extras: None,
                 reasoning_dialect: map_dialect(*reasoning_dialect),
                 history_reasoning: map_history_reasoning(*history_reasoning),
                 user_agent: user_agent.clone(),
@@ -162,10 +214,8 @@ async fn build_provider_inner(
             auth_kind,
             extra_headers,
             user_agent,
-            adaptive_thinking,
             allowed_betas,
             runtime: _,
-            reasoning_defaults: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
             let api_key = resolve(secrets, api_key_ref).await?;
@@ -180,7 +230,9 @@ async fn build_provider_inner(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
                 user_agent: user_agent.clone(),
-                adaptive_thinking: *adaptive_thinking,
+                adaptive_thinking: anthropic_overrides
+                    .as_ref()
+                    .and_then(|o| o.adaptive_thinking),
                 allowed_betas: allowed_betas.clone(),
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
@@ -195,7 +247,6 @@ async fn build_provider_inner(
             user_agent,
             originator,
             runtime: _,
-            reasoning_defaults: _,
         } => {
             validate_openai_responses_account_id(name, *auth_kind, account_id_ref)?;
             let api_key = resolve(secrets, api_key_ref).await?;
@@ -225,16 +276,12 @@ async fn build_provider_inner(
         #[cfg(feature = "bedrock")]
         ProviderEntry::Bedrock {
             region,
-            model_id,
             api_shape,
             creds,
             user_agent,
             extra_headers,
             anthropic_beta,
-            additional_model_request_fields,
-            adaptive_thinking,
             runtime: _,
-            reasoning_defaults: _,
         } => {
             validate_bedrock_allowlists(
                 matches!(api_shape, BedrockApiShapeConfig::Invoke),
@@ -245,13 +292,15 @@ async fn build_provider_inner(
             let bedrock_creds = resolve_bedrock_creds(secrets, creds).await?;
             let resolved =
                 routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
-            let effective_model_id = bedrock_model_id_override
-                .clone()
-                .unwrap_or_else(|| model_id.clone());
+            // v0.6.0: model_id, adaptive_thinking, and
+            // additional_model_request_fields all come from the model
+            // entry override. The factory pumps them in via
+            // `BedrockModelOverrides` from `build_resolved_models`.
+            let overrides = bedrock_overrides.unwrap_or_default();
             let cfg = BedrockConfig {
                 id: format!("bedrock:{name}"),
                 region: region.clone(),
-                model_id: effective_model_id,
+                model_id: overrides.model_id,
                 api_shape: map_bedrock_api_shape(*api_shape),
                 creds: bedrock_creds,
                 user_agent: user_agent.clone(),
@@ -262,8 +311,8 @@ async fn build_provider_inner(
                 anthropic_beta: anthropic_beta.clone(),
                 allowed_betas: opts.bedrock_allowed_betas.clone(),
                 allowed_body_fields: opts.bedrock_allowed_body_fields.clone(),
-                additional_model_request_fields: additional_model_request_fields.clone(),
-                adaptive_thinking: *adaptive_thinking,
+                additional_model_request_fields: overrides.additional_model_request_fields,
+                adaptive_thinking: overrides.adaptive_thinking,
             };
             Ok(Arc::new(BedrockProvider::new(cfg, resolved)))
         }
@@ -365,15 +414,29 @@ pub async fn build_resolved_models(
         #[cfg(not(feature = "bedrock"))]
         let is_bedrock = false;
 
+        // AnthropicApi with `[models.X] adaptive_thinking = true`:
+        // one Arc per model so each gets its own
+        // `AnthropicApiConfig::adaptive_thinking` value. v0.6.0 moved
+        // the flag from `[providers.X]` to `[models.X]`. AnthropicApi
+        // models that leave the flag at None still share one cached
+        // `Arc<dyn Provider>` per `[providers.X]`.
+        let is_anthropic_per_model = matches!(provider_entry, ProviderEntry::AnthropicApi { .. })
+            && entry.adaptive_thinking.is_some();
+
         let provider = if is_bedrock {
             #[cfg(feature = "bedrock")]
             {
+                let overrides = BedrockModelOverrides {
+                    model_id: entry.upstream.clone(),
+                    adaptive_thinking: entry.adaptive_thinking,
+                    additional_model_request_fields: entry.additional_request_fields.clone(),
+                };
                 match build_provider_with_bedrock_model_override(
                     &entry.provider,
                     provider_entry,
                     secrets,
                     opts.clone(),
-                    Some(entry.upstream.clone()),
+                    Some(overrides),
                 )
                 .await
                 {
@@ -395,6 +458,32 @@ pub async fn build_resolved_models(
             {
                 unreachable!("is_bedrock cannot be true without the bedrock feature");
             }
+        } else if is_anthropic_per_model {
+            let overrides = AnthropicModelOverrides {
+                adaptive_thinking: entry.adaptive_thinking,
+            };
+            match build_provider_with_anthropic_model_override(
+                &entry.provider,
+                provider_entry,
+                secrets,
+                opts.clone(),
+                Some(overrides),
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = e.to_string();
+                    tracing::warn!(
+                        provider = %entry.provider,
+                        model = %nickname,
+                        error = %msg,
+                        "skipping AnthropicApi model (build failed)",
+                    );
+                    failed.push((nickname.clone(), msg));
+                    continue;
+                }
+            }
         } else if let Some(cached) = provider_cache.get(&entry.provider) {
             cached.clone()
         } else if let Some(prior_err) = provider_failed.get(&entry.provider) {
@@ -412,6 +501,20 @@ pub async fn build_resolved_models(
             .await
             {
                 Ok(p) => {
+                    // For openai-compat models, pump per-model
+                    // `default_extras` and `chat_template_kwargs` into
+                    // the cached config. v0.6.0 moved these to
+                    // [models.X]; the provider used to read them off
+                    // [providers.X]. We apply them post-build so the
+                    // cached `Arc<dyn Provider>` per-provider design
+                    // still works -- different models pointing at the
+                    // same openai-compat provider can carry different
+                    // per-model knobs by virtue of the model's own
+                    // ResolvedModel data, NOT the provider config.
+                    // (The openai-compat provider currently doesn't
+                    // support multi-model fan-out; a future commit
+                    // will plumb these through ResolvedModel into the
+                    // request normalizer.)
                     provider_cache.insert(entry.provider.clone(), p.clone());
                     p
                 }
@@ -746,9 +849,9 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
     )
 }
 
-/// Validate the `[providers.X] thinking` knob across every configured
-/// provider. The validator accumulates errors so an operator with
-/// multiple offending providers gets one consolidated startup error
+/// Validate the `[models.X] thinking` knob across every configured
+/// model. The validator accumulates errors so an operator with
+/// multiple offending models gets one consolidated startup error
 /// rather than fixing them one at a time.
 ///
 /// Rejected shapes:
@@ -778,33 +881,30 @@ pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()>
 
     const MAX_THINKING_BYTES: usize = 64;
     let mut errors: Vec<String> = Vec::new();
-    for (name, entry) in &config.providers {
-        let Some(defaults) = entry.reasoning_defaults() else {
-            continue;
-        };
-        let Some(thinking) = defaults.thinking.as_deref() else {
+    for (name, entry) in &config.models {
+        let Some(thinking) = entry.reasoning_defaults.thinking.as_deref() else {
             continue;
         };
         if thinking.is_empty() {
             errors.push(format!(
-                "provider `{name}`: `thinking` must be a non-empty string \
+                "model `{name}`: `thinking` must be a non-empty string \
                  (e.g. \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \
                  \"max\", \"none\"); remove the field to leave reasoning \
                  effort unset"
             ));
         } else if thinking.trim().is_empty() {
             errors.push(format!(
-                "provider `{name}`: `thinking` value `{thinking}` is whitespace-only; \
+                "model `{name}`: `thinking` value `{thinking}` is whitespace-only; \
                  remove the field or set a real value (e.g. \"low\")"
             ));
         } else if thinking.chars().any(|c| c.is_ascii_control()) {
             errors.push(format!(
-                "provider `{name}`: `thinking` value contains ASCII control \
+                "model `{name}`: `thinking` value contains ASCII control \
                  characters; effort strings must not contain control characters"
             ));
         } else if thinking.len() > MAX_THINKING_BYTES {
             errors.push(format!(
-                "provider `{name}`: `thinking` value is {} bytes; max {MAX_THINKING_BYTES} \
+                "model `{name}`: `thinking` value is {} bytes; max {MAX_THINKING_BYTES} \
                  (effort strings should be short tokens like \"high\")",
                 thinking.len()
             ));
@@ -939,31 +1039,23 @@ mod bedrock_validation_tests {
     fn bedrock_provider_entry() -> ProviderEntry {
         ProviderEntry::Bedrock {
             region: "us-west-2".into(),
-            model_id: "anthropic.claude-haiku-4-5".into(),
             api_shape: BedrockApiShapeConfig::Invoke,
             creds: BedrockCredsConfig::DefaultChain,
             user_agent: None,
             extra_headers: BTreeMap::new(),
             anthropic_beta: Vec::new(),
-            additional_model_request_fields: None,
-            adaptive_thinking: None,
             runtime: Default::default(),
-            reasoning_defaults: Default::default(),
         }
     }
 
     fn bedrock_provider_entry_with_floor_beta() -> ProviderEntry {
         let ProviderEntry::Bedrock {
             region,
-            model_id,
             api_shape,
             creds,
             user_agent,
             extra_headers,
-            additional_model_request_fields,
-            adaptive_thinking,
             runtime,
-            reasoning_defaults,
             ..
         } = bedrock_provider_entry()
         else {
@@ -971,16 +1063,12 @@ mod bedrock_validation_tests {
         };
         ProviderEntry::Bedrock {
             region,
-            model_id,
             api_shape,
             creds,
             user_agent,
             extra_headers,
             anthropic_beta: vec!["future-flag-2026-12-31".into()],
-            additional_model_request_fields,
-            adaptive_thinking,
             runtime,
-            reasoning_defaults,
         }
     }
 
@@ -1090,16 +1178,12 @@ mod bedrock_validation_tests {
         let cfg = config_with_entry(
             ProviderEntry::Bedrock {
                 region: "us-west-2".into(),
-                model_id: "anthropic.claude-haiku-4-5".into(),
                 api_shape: BedrockApiShapeConfig::Converse,
                 creds: BedrockCredsConfig::DefaultChain,
                 user_agent: None,
                 extra_headers: BTreeMap::new(),
                 anthropic_beta: Vec::new(),
-                additional_model_request_fields: None,
-                adaptive_thinking: None,
                 runtime: Default::default(),
-                reasoning_defaults: Default::default(),
             },
             BedrockGlobalConfig {
                 allowed_betas: baseline_betas(),

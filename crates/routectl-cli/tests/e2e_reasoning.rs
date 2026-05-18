@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use routectl_router::{
-    AliasEntry, Config, LegacyCompat, ProviderEntry, ReasoningDialect, RetryPolicy, ServerConfig,
+    AliasValue, Config, LegacyCompat, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy,
+    ServerConfig,
 };
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -38,19 +39,20 @@ fn deepseek_alias_config(upstream_base: &str) -> Arc<Config> {
         ProviderEntry::openai_compat(format!("{upstream_base}/v1"), "literal:test")
             .with_reasoning_dialect(ReasoningDialect::Deepseek),
     );
-    let mut aliases = BTreeMap::new();
-    aliases.insert(
-        "reasoning".into(),
-        AliasEntry::new(vec!["deepseek:deepseek-reasoner".to_string()]),
+    let mut models = BTreeMap::new();
+    models.insert(
+        "ds-reasoner".into(),
+        ModelEntry::new("deepseek", "deepseek-reasoner"),
     );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("reasoning".into(), AliasValue::Single("ds-reasoner".into()));
     Arc::new(Config {
         server: ServerConfig::default(),
         providers,
         aliases,
-        default_model: None,
         retry: RetryPolicy::default(),
         legacy_compat: LegacyCompat::Openrouter,
-        ingress: Default::default(),
+        models,
         ..Default::default()
     })
 }
