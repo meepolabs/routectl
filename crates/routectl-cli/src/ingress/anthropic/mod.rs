@@ -137,6 +137,46 @@ use stream::{
     flush_tool_blocks, render_chunk_internal,
 };
 
+/// Reverse of `routectl_providers::anthropic_api::response::map_stop_reason`.
+///
+/// The egress maps Anthropic stop_reasons -> OpenAI finish_reasons:
+/// `end_turn` / `stop_sequence` -> `stop`, `max_tokens` -> `length`,
+/// `tool_use` -> `tool_calls`. Anything else (incl. forward-compat
+/// values like `pause_turn`, `refusal`,
+/// `model_context_window_exceeded`) passes through unchanged.
+///
+/// The ingress side here reverses the OpenAI overlap and PASSES
+/// THROUGH any value not in that set so future-proof Anthropic-only
+/// stop reasons don't get clobbered to `end_turn`. This had been
+/// silently rewriting `pause_turn`, `refusal`, and
+/// `model_context_window_exceeded` to `end_turn`, breaking
+/// claude-code's per-stop-reason error handling.
+///
+/// The `stop_sequence` -> `stop` -> `end_turn` ambiguity remains
+/// (information lost at the canonical layer); the more common
+/// `end_turn` wins on the reverse path. To preserve `stop_sequence`
+/// faithfully, the egress would need to set an additional native
+/// finish-reason field on the canonical Choice.
+///
+/// Lives in `mod.rs` (rather than `render.rs` where it was originally
+/// defined) because both the non-streaming `render::build_content_array`
+/// and the streaming `stream::emit_message_delta` consume it. Hoisting
+/// to the parent module avoids a cross-sibling `super::render::...`
+/// import in `stream.rs`.
+fn openai_finish_to_anthropic_stop(fr: &str) -> &str {
+    match fr {
+        "stop" => "end_turn",
+        "length" => "max_tokens",
+        "tool_calls" => "tool_use",
+        // Forward-compat: any value the egress passed through verbatim
+        // (i.e. an Anthropic stop_reason that doesn't have an OpenAI
+        // analogue) must survive the ingress reverse mapping or it
+        // gets squashed to "end_turn" and the caller's error handling
+        // breaks.
+        other => other,
+    }
+}
+
 impl IngressAdapter for AnthropicIngress {
     fn id(&self) -> &str {
         "anthropic"
