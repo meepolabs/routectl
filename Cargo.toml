@@ -74,5 +74,16 @@ tokio-test = "0.4"
 strip = true
 lto = "thin"
 codegen-units = 1
+# `opt-level = "z"` optimizes for binary size at the cost of runtime
+# speed (roughly 10-30% smaller binary, ~5-15% slower hot paths
+# depending on benchmark). routectl is a streaming-translation proxy
+# where per-request latency directly affects user-visible streaming
+# feel, so this trade is debatable. Kept at "z" because (a) the
+# default deploy target is a single-binary CLI where size matters,
+# (b) the dominant cost in practice is upstream provider latency
+# (~tens-of-ms to seconds per request), not routectl's own
+# translation overhead (~hundreds of us). Flip to "3" (max speed)
+# if benchmarking shows routectl's overhead becomes the bottleneck
+# or the deploy target stops caring about binary size.
 opt-level = "z"
 panic = "abort"
