@@ -15,7 +15,6 @@
 //! chunks arrive. See `AnthropicStreamState`.
 
 use std::any::Any;
-use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
@@ -25,23 +24,12 @@ use routectl_core::{
 };
 use serde_json::{json, Map, Value};
 
-use super::{resolve_alias, IngressAdapter, IngressStreamState, SseEvent};
+use super::{read_alias_header, IngressAdapter, IngressStreamState, SseEvent};
 
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 #[derive(Debug, Default)]
-pub struct AnthropicIngress {
-    /// Map from wire `model` field value (e.g. an Anthropic model id
-    /// like `claude-opus-4-7-20251022`) to a configured alias. The
-    /// `x-routectl-alias` header overrides this. Empty by default.
-    pub aliases: BTreeMap<String, String>,
-}
-
-impl AnthropicIngress {
-    pub fn new(aliases: BTreeMap<String, String>) -> Self {
-        Self { aliases }
-    }
-}
+pub struct AnthropicIngress;
 
 // ---------------------------------------------------------------------------
 // Streaming state
@@ -105,8 +93,10 @@ impl IngressStreamState for AnthropicStreamState {
 /// - `metadata.user_id` -> `user`.
 /// - `output_format` (legacy) -> `output_config.format` (current).
 /// - `stop_sequences` -> `stop` (canonical name).
-/// - `model` is rewritten through `resolve_alias` (`x-routectl-alias`
-///   header > configured `aliases` map > original wire model).
+/// - `model` is overridden by the `x-routectl-alias` request header
+///   when present; otherwise passes through verbatim. v0.6.0 moved
+///   alias resolution from per-ingress maps to the router (see
+///   `routectl_router::Router::resolve_v6_alias`).
 ///
 /// Any top-level field the canonical doesn't model -- for example
 /// Anthropic-only knobs `top_k`, `service_tier`, `output_config`,
@@ -119,11 +109,7 @@ impl IngressStreamState for AnthropicStreamState {
 /// without a code change. Without this sweep, serde's
 /// silently-drop-unknown behavior would lose the field at the ingress
 /// boundary (the original `output_format` bug).
-fn translate_request(
-    aliases: &BTreeMap<String, String>,
-    headers: &HeaderMap,
-    mut body: Value,
-) -> Result<ChatRequest> {
+fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<ChatRequest> {
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::Validation("anthropic ingress: request body is not an object".into())
     })?;
@@ -163,11 +149,12 @@ fn translate_request(
     let mut req: ChatRequest = serde_json::from_value(body)
         .map_err(|e| Error::Validation(format!("anthropic ingress: invalid body: {e}")))?;
 
-    // Rewrite the model field through alias resolution. Header overrides
-    // win; otherwise the configured map (e.g. claude-opus-4-7-20251022
-    // -> heavy) does the lookup. Falls through to the original wire
-    // model if neither matches.
-    req.model = resolve_alias(aliases, headers, &req.model);
+    // v0.6.0: alias resolution lives entirely in the router. The
+    // ingress only honors the `x-routectl-alias` header override
+    // (otherwise the wire `model` value passes through verbatim).
+    if let Some(alias) = read_alias_header(headers) {
+        req.model = alias;
+    }
 
     // Lift the inbound `anthropic-beta` HTTP header into canonical
     // `req.anthropic_beta`. The Anthropic TypeScript SDK translates
@@ -1040,7 +1027,7 @@ impl IngressAdapter for AnthropicIngress {
         // sensitivity story as the openai ingress. Honors
         // ROUTECTL_LOG_REDACT_PROMPTS=1.
         routectl_core::trace_ingress_body("anthropic", &body);
-        translate_request(&self.aliases, headers, body)
+        translate_request(headers, body)
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<Value> {
@@ -1103,7 +1090,7 @@ mod tests {
             }],
             "max_tokens": 1024
         });
-        let req = AnthropicIngress::default()
+        let req = AnthropicIngress
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.model, "claude-opus-4-7");
@@ -1121,7 +1108,7 @@ mod tests {
             "max_tokens": 1024,
             "thinking": {"type": "enabled", "budget_tokens": 5000}
         });
-        let req = AnthropicIngress::default()
+        let req = AnthropicIngress
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         let r = req.reasoning.unwrap();
@@ -1137,7 +1124,7 @@ mod tests {
             "max_tokens": 1024,
             "metadata": {"user_id": "abc-123"}
         });
-        let req = AnthropicIngress::default()
+        let req = AnthropicIngress
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.user.as_deref(), Some("abc-123"));
@@ -1153,7 +1140,7 @@ mod tests {
             "service_tier": "auto",
             "container": "ctr_01"
         });
-        let req = AnthropicIngress::default()
+        let req = AnthropicIngress
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         let extras = req.provider_extras.unwrap();
@@ -1170,7 +1157,7 @@ mod tests {
             "max_tokens": 1024,
             "anthropic_beta": ["context-1m-2025-08-07"]
         });
-        let req = AnthropicIngress::default()
+        let req = AnthropicIngress
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(
@@ -1195,7 +1182,7 @@ mod tests {
             }],
             "max_tokens": 1024
         });
-        let err = AnthropicIngress::default()
+        let err = AnthropicIngress
             .parse_request(&HeaderMap::new(), body)
             .unwrap_err();
         assert!(matches!(err, Error::Validation(_)));
@@ -1215,7 +1202,7 @@ mod tests {
             }],
             "max_tokens": 1024
         });
-        let err = AnthropicIngress::default()
+        let err = AnthropicIngress
             .parse_request(&HeaderMap::new(), body)
             .unwrap_err();
         assert!(matches!(err, Error::Validation(_)));
@@ -1237,7 +1224,7 @@ mod tests {
             }],
             "max_tokens": 1024
         });
-        let req = AnthropicIngress::default()
+        let req = AnthropicIngress
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         if let MessageContent::Parts(parts) = &req.messages[0].content {
@@ -1278,7 +1265,7 @@ mod tests {
             routectl_provider: None,
             extras: Default::default(),
         };
-        let v = AnthropicIngress::default().render_response(resp).unwrap();
+        let v = AnthropicIngress.render_response(resp).unwrap();
         assert_eq!(v["id"], "msg_01");
         assert_eq!(v["type"], "message");
         assert_eq!(v["role"], "assistant");
@@ -1292,7 +1279,7 @@ mod tests {
     // -------- streaming --------
 
     fn ingress() -> AnthropicIngress {
-        AnthropicIngress::default()
+        AnthropicIngress
     }
 
     fn text_chunk(text: &str, finish: Option<&str>) -> ChatChunk {
