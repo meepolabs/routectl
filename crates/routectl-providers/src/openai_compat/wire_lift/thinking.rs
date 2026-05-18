@@ -72,9 +72,27 @@ fn rewrite_assistant_thinking(msg: &mut Map<String, Value>) {
         return;
     };
 
+    // Offset the lifted index counter past any pre-existing
+    // reasoning_details entries' indexes. Without this, a message
+    // with one pre-existing entry at `index: 0` and one lifted
+    // thinking part would emit two entries both at `index: 0`,
+    // breaking downstream consumers that key on detail_index for
+    // block ordering / identity (notably the Anthropic ingress
+    // renderer's per-detail_index thinking-block emission).
+    let starting_index: u32 = msg
+        .get("reasoning_details")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| d.get("index").and_then(|v| v.as_u64()))
+                .max()
+                .map(|m| (m as u32).saturating_add(1))
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
     let mut surviving: Vec<Value> = Vec::with_capacity(parts.len());
     let mut details: Vec<Value> = Vec::new();
-    let mut detail_index: u32 = 0;
+    let mut detail_index: u32 = starting_index;
     for part in parts.iter().cloned() {
         let kind = part
             .as_object()
@@ -277,7 +295,10 @@ mod tests {
     }
 
     /// Pre-existing reasoning_details on the message envelope get
-    /// extended (not overwritten) by lifted thinking parts.
+    /// extended (not overwritten) by lifted thinking parts. The
+    /// lifted entry's `index` must be offset past the max existing
+    /// index so downstream consumers keying on detail_index for
+    /// block ordering / identity see unique values.
     #[test]
     fn lifted_details_appended_to_existing_array() {
         let obj = run(json!([{
@@ -293,7 +314,56 @@ mod tests {
         let details = msg["reasoning_details"].as_array().unwrap();
         assert_eq!(details.len(), 2);
         assert_eq!(details[0]["text"], "prior");
+        assert_eq!(details[0]["index"], 0);
         assert_eq!(details[1]["text"], "new");
+        // Lifted entry must NOT collide with the pre-existing index=0.
+        assert_eq!(
+            details[1]["index"], 1,
+            "lifted index must offset past existing max"
+        );
+    }
+
+    /// Review follow-up to Bug H: when a message already carries
+    /// multiple reasoning_details with non-contiguous indexes (e.g.
+    /// 0, 2, 5), the lifted entries' indexes must all start past
+    /// max+1 (here: 6) AND each lifted entry's index must be unique
+    /// among the lifted set. Pre-fix, both lifted entries would
+    /// have indexes 0 and 1, colliding with the existing 0.
+    #[test]
+    fn lifted_details_offset_past_max_existing_index_and_stay_unique() {
+        let obj = run(json!([{
+            "role": "assistant",
+            "content": [
+                {"type":"thinking","thinking":"new-a","signature":""},
+                {"type":"redacted_thinking","data":"opaque"},
+                {"type":"thinking","thinking":"new-c","signature":""}
+            ],
+            "reasoning_details": [
+                {"type":"reasoning.text","format":"deepseek-v1","index":0,"text":"p0"},
+                {"type":"reasoning.text","format":"deepseek-v1","index":2,"text":"p2"},
+                {"type":"reasoning.text","format":"deepseek-v1","index":5,"text":"p5"}
+            ]
+        }]));
+        let msg = &obj["messages"][0];
+        let details = msg["reasoning_details"].as_array().unwrap();
+        assert_eq!(details.len(), 6, "3 existing + 3 lifted");
+        // Existing entries preserve their indexes.
+        assert_eq!(details[0]["index"], 0);
+        assert_eq!(details[1]["index"], 2);
+        assert_eq!(details[2]["index"], 5);
+        // Lifted entries start at max+1 = 6 and increment.
+        assert_eq!(details[3]["index"], 6);
+        assert_eq!(details[3]["text"], "new-a");
+        assert_eq!(details[4]["index"], 7);
+        assert_eq!(details[4]["data"], "opaque");
+        assert_eq!(details[5]["index"], 8);
+        assert_eq!(details[5]["text"], "new-c");
+        // All indexes are unique across the merged array.
+        let mut seen = std::collections::HashSet::new();
+        for d in details {
+            let idx = d["index"].as_u64().expect("index is u64");
+            assert!(seen.insert(idx), "duplicate index {idx} in merged details");
+        }
     }
 
     /// String content (legacy shape) is a no-op.
