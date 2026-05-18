@@ -1,4 +1,10 @@
-use super::*;
+use axum::http::HeaderMap;
+use serde_json::{Map, Value};
+
+use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
+use routectl_core::{ChatRequest, ContentPart, Error, MessageContent, ReasoningConfig, Result};
+
+use crate::ingress::read_alias_header;
 
 pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<ChatRequest> {
     let obj = body.as_object_mut().ok_or_else(|| {
