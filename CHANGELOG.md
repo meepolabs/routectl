@@ -33,8 +33,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `[models.X]` first-class TOML table. Required fields: `provider`
   (key in `[providers.X]`), `upstream` (wire model id). Optional:
-  `thinking`, `enabled`, `adaptive_thinking`, `additional_request_fields`,
-  `chat_template_kwargs`, `default_extras`.
+  `thinking`, `enabled`, `adaptive_thinking`, `additional_request_fields`.
 - Suffix-glob alias keys: `"claude-opus-*" = "opus-heavy"` matches
   any wire model starting with `claude-opus-`. Lookup precedence
   is exact match > longest matching prefix > `default`.
@@ -46,6 +45,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at first request.
 - Tracing dispatch events now carry `model = <nickname>` alongside
   `provider = <provider_name>` for per-model triage.
+
+### Deferred
+
+- Per-model `default_extras` and `chat_template_kwargs` are
+  deferred until the egress wiring lands; they will return as
+  `[models.X]` fields in a future release. They shipped briefly
+  on `ModelEntry` in earlier rc builds but never reached the
+  egress, so accepting the TOML surface would be operator-
+  deceptive. The provider-side fields (`OpenAiCompatConfig::default_extras`,
+  `chat_template_kwargs` on the wire) are unaffected -- callers
+  continue to send them per-request via `provider_extras`.
 
 ### Migration
 
