@@ -435,6 +435,13 @@ pub(crate) struct AnthropicResponse {
     pub(crate) model: String,
     pub(crate) content: Vec<ContentBlock>,
     pub(crate) stop_reason: Option<String>,
+    /// The matched stop sequence (when `stop_reason == "stop_sequence"`).
+    /// Anthropic and Bedrock-Invoke set this on the response when the
+    /// upstream hit one of the request's `stop_sequences`. Pulled out
+    /// of the flatten-extras catchall so the egress normalizer can
+    /// surface it via `Choice.matched_stop_sequence`.
+    #[serde(default)]
+    pub(crate) stop_sequence: Option<String>,
     pub(crate) usage: Option<AnthropicUsage>,
     /// Forward-compat catchall for any top-level field not in the
     /// canonical Anthropic Messages baseline. Captures recently-added
@@ -554,6 +561,14 @@ pub(crate) enum SseDelta {
 #[derive(Debug, Deserialize)]
 pub(crate) struct SseMessageDelta {
     pub(crate) stop_reason: Option<String>,
+    /// Matched stop sequence on the `message_delta.delta` payload.
+    /// Anthropic streaming emits this alongside `stop_reason` when
+    /// the upstream stopped because of a matched sequence. None
+    /// otherwise. Lifted into `ChunkChoice.matched_stop_sequence`
+    /// when present so the Anthropic ingress can render the wire
+    /// `stop_sequence` field on `message_delta`.
+    #[serde(default)]
+    pub(crate) stop_sequence: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

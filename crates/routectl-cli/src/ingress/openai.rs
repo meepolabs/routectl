@@ -323,6 +323,7 @@ mod tests {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         };

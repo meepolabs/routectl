@@ -207,6 +207,7 @@ impl ResponsesStreamState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }]
@@ -541,6 +542,7 @@ impl ResponsesStreamState {
                 index: 0,
                 delta: ChunkDelta::default(),
                 finish_reason,
+                matched_stop_sequence: None,
             }],
             usage: usage_delta,
         }]
@@ -588,6 +590,7 @@ impl ResponsesStreamState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
@@ -617,6 +620,7 @@ impl ResponsesStreamState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
@@ -641,6 +645,7 @@ impl ResponsesStreamState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
@@ -669,6 +674,7 @@ impl ResponsesStreamState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
@@ -697,6 +703,7 @@ impl ResponsesStreamState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
