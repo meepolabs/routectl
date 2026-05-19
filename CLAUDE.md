@@ -176,6 +176,15 @@ Two additional knobs live on `[models.X]` (per-model overrides):
   Claude models and only some support a given beta (e.g.
   `context-1m-2025-08-07` works on opus/sonnet but is rejected
   for haiku) -- saves duplicating the entire provider config.
+  IMPORTANT: the merge is **additive**. A model entry's
+  `anthropic_beta = []` does NOT suppress a beta the provider
+  already sets via `extra_headers["anthropic-beta"]` or
+  `[providers.X] anthropic_beta`. To make a model opt OUT of a
+  provider-shipped beta, REMOVE the beta from the provider config
+  and add it back to each `[models.X] anthropic_beta` that needs
+  it. Comparison is exact-string (case sensitive) to match
+  Anthropic's beta-name semantics; a casing typo propagates so
+  the upstream's 400 surfaces the misconfig.
 - `stream_first_byte_timeout_ms = N` -- per-model > per-provider >
   global resolution. Pin opus xhigh adaptive thinking at 300s
   without forcing haiku to wait 5 min on a dead upstream.
