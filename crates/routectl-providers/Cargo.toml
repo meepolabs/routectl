@@ -74,3 +74,4 @@ base64 = { version = "0.22", optional = true }
 wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 pretty_assertions = "1"
+insta.workspace = true
