@@ -1,0 +1,32 @@
+---
+source: crates/routectl-providers/tests/contract_egress.rs
+expression: body
+---
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": "What is 6 times 7?",
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "sig_pretend_this_is_a_real_anthropic_signature_blob",
+          "thinking": "The user is asking about the answer. 6 * 7 is 42.",
+          "type": "thinking"
+        },
+        {
+          "text": "Sure, here is the answer: 42.",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": "And 6 times 8?",
+      "role": "user"
+    }
+  ],
+  "model": "claude-opus-4-7"
+}
