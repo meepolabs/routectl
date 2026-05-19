@@ -556,8 +556,12 @@ pub struct StructuralSummary {
     /// One of `"auto"`, `"required"`, `"none"`, `"function:<name>"`,
     /// `"object:<discriminator>"`, or None.
     pub tool_choice_shape: Option<String>,
-    /// Walk count of `cache_control` keys across `system` + `messages`
-    /// + `tools`.
+    /// Walk count of `cache_control` keys anywhere in the body
+    /// (system + messages + tools + top-level + any future
+    /// forward-compat extras that carry one). The recursive walk
+    /// matches the canonical's actual cache-control surface: the
+    /// auto-cache top-level breakpoint counts alongside the
+    /// per-block breakpoints.
     pub cache_control_count: u32,
     /// `messages.len()` (or `input.len()` for Responses-shape bodies).
     pub messages_len: u32,
@@ -754,20 +758,34 @@ pub fn trace_structural_summary(direction: &str, kind: &str, id: &str, body: &se
         return;
     }
     let s = extract_structural_summary(body);
+    // Every client-controlled string passes through `sanitize_for_log`
+    // before reaching tracing. `model`, the `effort` substring of
+    // `thinking_shape`, `output_config_effort`, the function-name
+    // substring of `tool_choice_shape`, and the entries of
+    // `anthropic_beta` / `provider_extras_keys` are all controllable
+    // by an authenticated client; a malicious payload with control
+    // characters or oversize content would otherwise mangle TRACE
+    // log lines the operator's smart-heartbeat validator depends on.
+    let model = sanitize_for_log(s.model.as_deref().unwrap_or(""));
+    let thinking_shape = sanitize_for_log(s.thinking_shape.as_deref().unwrap_or(""));
+    let output_config_effort = sanitize_for_log(s.output_config_effort.as_deref().unwrap_or(""));
+    let tool_choice_shape = sanitize_for_log(s.tool_choice_shape.as_deref().unwrap_or(""));
+    let anthropic_beta = sanitize_for_log(&s.anthropic_beta.join(","));
+    let provider_extras_keys = sanitize_for_log(&s.provider_extras_keys.join(","));
     tracing::trace!(
         direction,
         kind,
         id,
-        model = s.model.as_deref().unwrap_or(""),
+        model = %model,
         max_tokens = s.max_tokens.unwrap_or(0),
-        thinking_shape = s.thinking_shape.as_deref().unwrap_or(""),
-        output_config_effort = s.output_config_effort.as_deref().unwrap_or(""),
-        tool_choice_shape = s.tool_choice_shape.as_deref().unwrap_or(""),
+        thinking_shape = %thinking_shape,
+        output_config_effort = %output_config_effort,
+        tool_choice_shape = %tool_choice_shape,
         cache_control_count = s.cache_control_count,
         messages_len = s.messages_len,
         tools_len = s.tools_len,
-        anthropic_beta = %s.anthropic_beta.join(","),
-        provider_extras_keys = %s.provider_extras_keys.join(","),
+        anthropic_beta = %anthropic_beta,
+        provider_extras_keys = %provider_extras_keys,
         stream = s.stream.unwrap_or(false),
         "structural summary"
     );
