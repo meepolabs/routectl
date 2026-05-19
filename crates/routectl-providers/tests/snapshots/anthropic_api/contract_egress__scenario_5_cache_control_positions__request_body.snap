@@ -1,0 +1,55 @@
+---
+source: crates/routectl-providers/tests/contract_egress.rs
+expression: body
+---
+{
+  "cache_control": {
+    "ttl": "5m",
+    "type": "ephemeral"
+  },
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "cache_control": {
+            "ttl": "5m",
+            "type": "ephemeral"
+          },
+          "text": "Please review the attached document.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-opus-4-7",
+  "system": [
+    {
+      "cache_control": {
+        "ttl": "5m",
+        "type": "ephemeral"
+      },
+      "text": "You are an assistant with long instructions.",
+      "type": "text"
+    }
+  ],
+  "tools": [
+    {
+      "cache_control": {
+        "ttl": "5m",
+        "type": "ephemeral"
+      },
+      "description": "Look up documentation",
+      "input_schema": {
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "lookup_docs"
+    }
+  ]
+}

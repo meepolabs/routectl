@@ -1,0 +1,58 @@
+---
+source: crates/routectl-providers/tests/contract_egress.rs
+expression: body
+---
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": "What is the weather?",
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "toolu_01",
+          "input": {
+            "location": "San Francisco"
+          },
+          "name": "get_weather",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "72F and sunny",
+          "tool_use_id": "toolu_01",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": "And tomorrow?",
+      "role": "user"
+    }
+  ],
+  "model": "claude-3-opus",
+  "tools": [
+    {
+      "description": "Get the current weather for a location",
+      "input_schema": {
+        "properties": {
+          "location": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "location"
+        ],
+        "type": "object"
+      },
+      "name": "get_weather"
+    }
+  ]
+}
