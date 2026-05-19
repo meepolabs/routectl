@@ -166,11 +166,19 @@ impl OpenAiResponsesProvider {
         for (k, v) in &self.cfg.extra_headers {
             // Defense-in-depth: refuse to let TOML-supplied
             // `extra_headers` stomp on the auth header we just set.
-            if crate::http_client::is_reserved_extra_header(k) {
+            if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
+                );
+                continue;
+            }
+            if crate::http_client::is_managed_header(k) {
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "dropping managed header from extra_headers; composed dynamically by routectl"
                 );
                 continue;
             }
@@ -210,6 +218,7 @@ impl Provider for OpenAiResponsesProvider {
             obj.insert("stream".into(), Value::Bool(true));
         }
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let rb = self.build_headers(self.client.post(self.responses_url()))?;
         let resp = rb
@@ -386,6 +395,7 @@ impl Provider for OpenAiResponsesProvider {
             obj.insert("stream".into(), Value::Bool(true));
         }
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let rb = self.build_headers(self.client.post(self.responses_url()))?;
         let resp = rb

@@ -175,20 +175,26 @@ impl AnthropicApiProvider {
         for (k, v) in &self.cfg.extra_headers {
             // Defense-in-depth: refuse to let a TOML-supplied
             // `extra_headers` entry stomp on the auth header we just
-            // set. Override of `anthropic-version` / `anthropic-beta`
-            // remains intentional and supported.
-            if crate::http_client::is_reserved_extra_header(k) {
+            // set.
+            if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
                 );
                 continue;
             }
-            // `anthropic-beta` is handled above (merged with the
-            // request's anthropic_beta). Skip duplicate emission
-            // here so we don't append the static value a second time.
-            if k.eq_ignore_ascii_case("anthropic-beta") {
+            // `anthropic-beta` (and other managed headers) are composed
+            // dynamically by routectl -- this loop has already handled
+            // anthropic-beta above (merged with the request's
+            // anthropic_beta). Skip duplicate emission so we don't
+            // append the static value a second time.
+            if crate::http_client::is_managed_header(k) {
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "dropping managed header from extra_headers; composed dynamically by routectl"
+                );
                 continue;
             }
             rb = rb.header(k.as_str(), v.as_str());
@@ -244,6 +250,7 @@ impl Provider for AnthropicApiProvider {
         // `tracing::Level::TRACE` filter -- production with default
         // info level pays nothing.
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
             .build_headers(self.client.post(self.messages_url()), &req.anthropic_beta)
@@ -325,6 +332,7 @@ impl Provider for AnthropicApiProvider {
         }
 
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
             .build_headers(self.client.post(self.messages_url()), &req.anthropic_beta)

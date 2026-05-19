@@ -51,6 +51,11 @@ impl IngressAdapter for OpenAiIngress {
         // pass. Gated by `tracing::Level::TRACE`; default `info`
         // level pays nothing. Honors ROUTECTL_LOG_REDACT_PROMPTS=1.
         routectl_core::trace_ingress_body("openai", &body);
+        // Companion structural summary -- a single TRACE line of
+        // stable, prompt-content-free fields the operator's
+        // smart-heartbeat validator can grep without fighting the
+        // 16 KB body cap. See StructuralSummary on field stability.
+        routectl_core::trace_structural_summary("ingress", "ingress", "openai", &body);
         let mut body = body;
         // Coalesce DeepSeek/vLLM-shape `reasoning_content` into
         // canonical `reasoning` on each message BEFORE serde

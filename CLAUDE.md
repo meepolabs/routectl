@@ -362,8 +362,21 @@ ROUTECTL_LOG=routectl=trace ROUTECTL_LOG_REDACT_PROMPTS=1 \
 | `"outgoing request body"`          | 2 routectl -> upstream   | `provider_kind=<kind>` |
 | `"upstream success body"`          | 3 upstream -> routectl   | `provider_kind=<kind>` |
 | `"egress response body"`           | 4 routectl -> client     | `ingress=<openai\|anthropic>` |
+| `"structural summary"`             | 1 + 2 (request-side only) | `direction=ingress\|outgoing` |
 | `"stream summary"` `direction=upstream` | provider-side stream end | `chunks=`, `finish_reason=` |
 | `"stream summary"` `direction=egress`   | ingress-side stream end  | `chunks=`, `finish_reason=` |
+
+The `"structural summary"` line fires on every REQUEST-side body
+(directions 1 and 2 only -- response bodies are not summarized). It
+carries a stable set of prompt-content-free fields so the operator's
+smart-heartbeat validator can grep wire-shape invariants (`model=`,
+`max_tokens=`, `thinking_shape=`, `output_config_effort=`,
+`tool_choice_shape=`, `cache_control_count=`, `messages_len=`,
+`tools_len=`, `anthropic_beta=`, `provider_extras_keys=`, `stream=`)
+without fighting the 16 KB body cap that truncates fields appearing
+after a large messages array. Field-name stability: adding a new
+field is allowed without ceremony; renaming or removing an existing
+field requires updating this table.
 
 Old log message names retired in favor of the table above:
 - `"openai ingress body"`    -> `"ingress request body"` `ingress=openai`
