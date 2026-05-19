@@ -446,7 +446,20 @@ impl Provider for OpenAiCompatProvider {
 /// Body MUST be a JSON object (caller is the openai-compat egress; its
 /// `normalize_request` always returns an object). Non-object bodies are
 /// no-ops for safety.
-pub(crate) fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
+/// Auto-inject `stream_options.include_usage = true` on streaming
+/// request bodies so openai-compat hosts emit the terminal
+/// `finish_reason` + usage object that routectl's stream summary
+/// (and downstream token accounting) needs. Order-dependent: caller
+/// MUST run `normalize_request` first so operator-supplied
+/// `stream_options` from `default_extras` / `provider_extras` are
+/// already in `body` when this helper runs. The helper preserves any
+/// existing value (including explicit `false`) and short-circuits
+/// when `disabled` is `true`.
+///
+/// Private to the module: the single caller is `stream()` below.
+/// Promoting to `pub(crate)` would expose an order-dependent contract
+/// the type system cannot enforce.
+fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
     if disabled {
         return;
     }
