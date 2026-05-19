@@ -233,6 +233,14 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
     let (text, reasoning_details, tool_calls, parts) = walk_content_blocks(id, &resp.content)?;
     let usage = resp.usage.as_ref().map(translate_usage);
     let finish_reason = map_stop_reason(resp.stop_reason.as_deref());
+    // Lift the upstream `stop_sequence` only when the upstream stopped
+    // because of a matched sequence. Other stop reasons might emit a
+    // stray field on some hosts; ignoring it here keeps the Anthropic
+    // ingress from mis-rendering `stop_reason:"stop_sequence"`.
+    let matched_stop_sequence = match resp.stop_reason.as_deref() {
+        Some("stop_sequence") => resp.stop_sequence.clone(),
+        _ => None,
+    };
 
     let content = select_message_content(text, parts);
     let message = Message {
@@ -253,6 +261,7 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
             index: 0,
             message,
             finish_reason,
+            matched_stop_sequence,
         }],
         usage,
         routectl_provider: None,

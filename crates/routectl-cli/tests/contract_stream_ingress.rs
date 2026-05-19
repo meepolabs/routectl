@@ -53,6 +53,7 @@ fn content_chunk(text: &str) -> ChatChunk {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     }
@@ -70,6 +71,7 @@ fn finish_only_chunk(fr: &str) -> ChatChunk {
             index: 0,
             delta: ChunkDelta::default(),
             finish_reason: Some(fr.into()),
+            matched_stop_sequence: None,
         }],
         usage: None,
     }

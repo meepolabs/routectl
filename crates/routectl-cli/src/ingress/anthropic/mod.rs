@@ -80,6 +80,11 @@ pub struct AnthropicStreamState {
     /// chunk arrives (or `render_eos` runs) so we emit the combined
     /// message_delta + message_stop in the correct order.
     pending_finish_reason: Option<String>,
+    /// Matched stop sequence captured on the same chunk as
+    /// `pending_finish_reason`. Flushed together via `emit_message_delta`
+    /// so the Anthropic wire `stop_sequence` field travels with the
+    /// `stop_reason:"stop_sequence"` it correlates with.
+    pending_matched_stop_sequence: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -149,11 +154,17 @@ use stream::{
 /// `model_context_window_exceeded` to `end_turn`, breaking
 /// claude-code's per-stop-reason error handling.
 ///
-/// The `stop_sequence` -> `stop` -> `end_turn` ambiguity remains
-/// (information lost at the canonical layer); the more common
-/// `end_turn` wins on the reverse path. To preserve `stop_sequence`
-/// faithfully, the egress would need to set an additional native
-/// finish-reason field on the canonical Choice.
+/// `stop_sequence` is no longer routed through this mapping: the
+/// canonical `Choice.matched_stop_sequence` field carries the matched
+/// marker, and both `render.rs::render_messages_response` and
+/// `stream.rs::emit_message_delta` override this mapping when the
+/// field is present (emitting wire `stop_reason:"stop_sequence"`
+/// plus `stop_sequence:"<value>"` directly). The fallback below only
+/// fires when `matched_stop_sequence` was not lifted -- openai-compat
+/// upstreams where the heuristic didn't recover a match, or
+/// non-Anthropic providers without native surfacing. In those cases
+/// the canonical `stop` still maps to `end_turn`, which is the best
+/// we can do without upstream signal.
 ///
 /// Lives in `mod.rs` (rather than `render.rs` where it was originally
 /// defined) because both the non-streaming `render::build_content_array`
@@ -211,7 +222,8 @@ impl IngressAdapter for AnthropicIngress {
             close_open_block(s, &mut events);
             // Flush a deferred finish_reason (no usage chunk arrived).
             if let Some(fr) = s.pending_finish_reason.take() {
-                emit_message_delta(Some(&fr), None, &mut events);
+                let matched = s.pending_matched_stop_sequence.take();
+                emit_message_delta(Some(&fr), matched.as_deref(), None, &mut events);
             }
             emit_message_stop(s, &mut events);
         }

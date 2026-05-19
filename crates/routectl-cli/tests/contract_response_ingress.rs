@@ -74,3 +74,45 @@ fn ingress_anthropic_render_stop_reason_pause_turn() {
         insta::assert_json_snapshot!("scenario_4_render_stop_reason_pause_turn", wire);
     });
 }
+
+// =====================================================================
+// Scenario 11: matched_stop_sequence_round_trip
+// =====================================================================
+//
+// Response-side: canonical `Choice.matched_stop_sequence` MUST render
+// as wire `stop_reason:"stop_sequence"` + `stop_sequence:"<value>"`,
+// overriding the lossy `finish_reason -> stop_reason` mapping that
+// would otherwise emit `end_turn`. This closes the seam that broke
+// claude-code structured-output flows: SDK-configured stop_sequence
+// (the JSON fence) hit by a non-Anthropic backend (deepseek-v4-pro
+// via openai-compat) rendered with `stop_reason:"end_turn"`, which
+// the CLI couldn't reconcile and synthesized a `<synthetic>` wrap-up
+// message flagged `is_error: true`. Real $-impact failure
+// (2026-05-19 reviewer flow).
+
+#[test]
+fn ingress_anthropic_render_matched_stop_sequence() {
+    let resp = scenarios::scenario_11_response_matched_stop_sequence();
+
+    let wire = AnthropicIngress
+        .render_response(resp)
+        .expect("anthropic ingress render");
+
+    // The two assertions pin the wire-shape contract that closes
+    // the bug class: stop_reason MUST be "stop_sequence" (not the
+    // lossy "end_turn") and stop_sequence MUST carry the matched
+    // marker.
+    assert_eq!(
+        wire["stop_reason"], "stop_sequence",
+        "matched_stop_sequence must override the canonical \"stop\" \
+         -> wire \"end_turn\" mapping",
+    );
+    assert_eq!(
+        wire["stop_sequence"], "</answer>",
+        "the matched marker must surface on the wire so callers can \
+         distinguish structured-output termination from natural end_turn",
+    );
+    insta::with_settings!({snapshot_path => "snapshots/anthropic"}, {
+        insta::assert_json_snapshot!("scenario_11_render_matched_stop_sequence", wire);
+    });
+}

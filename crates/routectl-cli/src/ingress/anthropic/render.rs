@@ -26,16 +26,35 @@ pub(super) fn render_messages_response(resp: ChatResponse) -> Value {
         .unwrap_or_default();
     body.insert("content".into(), Value::Array(content));
 
-    let stop_reason = resp
-        .choices
-        .first()
-        .and_then(|c| c.finish_reason.as_deref())
-        .map(|fr| openai_finish_to_anthropic_stop(fr).to_string());
+    // When the upstream surfaced a matched stop sequence, emit the
+    // Anthropic-native `stop_reason:"stop_sequence"` + `stop_sequence`
+    // pair. Otherwise fall back to the lossy `finish_reason -> stop_reason`
+    // mapping (which collapses canonical `"stop"` to `end_turn`). The
+    // matched_stop_sequence is populated by Anthropic-shape egresses
+    // from the wire `stop_sequence` field, and by the openai-compat
+    // egress via a suffix-match / single-stop heuristic.
+    let first_choice = resp.choices.first();
+    let (stop_reason, stop_sequence_value) = match first_choice {
+        Some(c) if c.matched_stop_sequence.is_some() => (
+            Some("stop_sequence".to_string()),
+            c.matched_stop_sequence
+                .as_deref()
+                .map(|s| Value::String(s.to_string()))
+                .unwrap_or(Value::Null),
+        ),
+        Some(c) => (
+            c.finish_reason
+                .as_deref()
+                .map(|fr| openai_finish_to_anthropic_stop(fr).to_string()),
+            Value::Null,
+        ),
+        None => (None, Value::Null),
+    };
     body.insert(
         "stop_reason".into(),
         stop_reason.map(Value::String).unwrap_or(Value::Null),
     );
-    body.insert("stop_sequence".into(), Value::Null);
+    body.insert("stop_sequence".into(), stop_sequence_value);
 
     let usage = resp.usage.as_ref().map(|u| {
         // Anthropic's `input_tokens` is the RAW input portion; cache
