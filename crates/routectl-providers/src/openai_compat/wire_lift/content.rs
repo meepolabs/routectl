@@ -49,6 +49,19 @@ pub fn lift(
             continue;
         };
         rewrite_parts(id, msg_idx, parts, strict)?;
+        // Strip Anthropic-only per-block `cache_control` from every
+        // surviving part. The block-level warn path in
+        // `request::check_dropped_anthropic_fields` was informational
+        // only; the strip itself never happened, so a canonical
+        // request with `cache_control` on any text / tool_use /
+        // tool_result / thinking content block would emit the field
+        // into the openai-compat wire body and 400 strict hosts.
+        // Caught by `contract_egress::scenario_5_cache_control_positions::openai_compat_egress`.
+        for part in parts.iter_mut() {
+            if let Some(obj) = part.as_object_mut() {
+                obj.remove("cache_control");
+            }
+        }
     }
     Ok(())
 }
