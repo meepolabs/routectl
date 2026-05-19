@@ -252,6 +252,60 @@ mod scenario_3_multi_turn_with_tool_result {
 // catches a regression that leaks any cache_control field into the
 // openai-compat body.
 
+// =====================================================================
+// Scenario 10: reasoning_details_signature_replay
+// =====================================================================
+//
+// Multi-turn history carries an assistant turn with Anthropic-shape
+// reasoning_details (format `anthropic-claude-v1`, payload `{text,
+// signature}`). The Anthropic egress MUST emit the assistant turn
+// with a `thinking` content block carrying both the text and the
+// signature -- Anthropic 400s on thinking blocks missing the
+// signature field. The openai-compat egress drops reasoning_details
+// (the wire shape has no thinking-block equivalent; reasoning travels
+// on `reasoning_content` or `reasoning_details` on the message and
+// the egress's history_reasoning policy decides whether to strip).
+
+mod scenario_10_reasoning_details_signature_replay {
+    use super::*;
+
+    #[test]
+    fn anthropic_api_egress() {
+        let req = scenarios::scenario_10_reasoning_details_signature_replay();
+        let body = anthropic_api_provider()
+            .normalize_request(&req)
+            .expect("anthropic_api normalize");
+
+        // Sanity-pin the assistant turn carries a `thinking` block
+        // with a non-empty `signature` BEFORE the snapshot so a
+        // regression that drops the signature fails with a clear
+        // message rather than a generic snapshot diff. Bug class:
+        // see CLAUDE.md "Anthropic streaming reasoning replay
+        // residual" -- Anthropic 400s on Thinking blocks missing the
+        // signature field, so the egress must preserve it on replay.
+        let assistant = body["messages"][1].as_object().expect("assistant turn");
+        assert_eq!(assistant["role"], "assistant");
+        let parts = assistant["content"]
+            .as_array()
+            .expect("assistant content must be a typed-block array on replay");
+        let thinking = parts
+            .iter()
+            .find(|p| p["type"] == "thinking")
+            .expect("assistant turn must carry a `thinking` content block on replay");
+        let signature = thinking["signature"]
+            .as_str()
+            .expect("thinking block must carry `signature` as a string");
+        assert!(
+            !signature.is_empty(),
+            "thinking block signature must be non-empty (Anthropic 400s on empty/missing); thinking: {thinking}"
+        );
+
+        insta::with_settings!({snapshot_path => "snapshots/anthropic_api"}, {
+            insta::assert_json_snapshot!("request_body", body);
+        });
+    }
+}
+
 mod scenario_5_cache_control_positions {
     use super::*;
 
