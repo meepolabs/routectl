@@ -527,6 +527,252 @@ pub fn trace_egress_body(ingress: &str, body: &serde_json::Value) {
     );
 }
 
+/// Stable subset of request-body fields that the operator's
+/// structural validator (smart heartbeat) needs to confirm wire-shape
+/// invariants WITHOUT trying to grep through a truncated 16 KB body
+/// blob.
+///
+/// Field-name stability contract: the field names emitted by
+/// [`trace_structural_summary`] are operator-facing API. Adding a new
+/// field is allowed without a major bump; renaming or removing an
+/// existing field is a breaking change and requires a CLAUDE.md entry
+/// under "Triage trace-level surfaces". Treat as a v-minor bump.
+///
+/// All fields are prompt-content-free by design. Counts are emitted in
+/// place of arrays; opaque shape discriminators are emitted in place
+/// of arbitrary string values (`thinking_shape`, `tool_choice_shape`).
+/// The exception is `anthropic_beta` which is a small list of
+/// operator-greppable enum-like flags.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StructuralSummary {
+    pub model: Option<String>,
+    pub max_tokens: Option<u32>,
+    /// One of `"enabled:<budget>"`, `"adaptive:<effort>"`, or None.
+    /// The raw budget integer and effort string are encoded into the
+    /// discriminator so the field stays a single string-typed value.
+    pub thinking_shape: Option<String>,
+    /// `output_config.effort` verbatim (when present).
+    pub output_config_effort: Option<String>,
+    /// One of `"auto"`, `"required"`, `"none"`, `"function:<name>"`,
+    /// `"object:<discriminator>"`, or None.
+    pub tool_choice_shape: Option<String>,
+    /// Walk count of `cache_control` keys across `system` + `messages`
+    /// + `tools`.
+    pub cache_control_count: u32,
+    /// `messages.len()` (or `input.len()` for Responses-shape bodies).
+    pub messages_len: u32,
+    /// `tools.len()`.
+    pub tools_len: u32,
+    /// The `anthropic_beta` array verbatim if non-empty. Small +
+    /// operator-greppable enum-like flag set.
+    pub anthropic_beta: Vec<String>,
+    /// Sorted top-level keys of `provider_extras` if present (for
+    /// forward-compat sweep visibility).
+    pub provider_extras_keys: Vec<String>,
+    pub stream: Option<bool>,
+}
+
+/// Walk `body` (a request-side JSON value) and extract a stable set of
+/// structural fields for diagnosis. Pure function, no side effects --
+/// the TRACE emit lives in [`trace_structural_summary`]. Designed so
+/// unit tests can pin every field without touching a tracing harness.
+///
+/// Tolerates missing keys (returns the type's default). Tolerates
+/// type-mismatch (e.g. `model: 5` rather than a string) by returning
+/// None for that field.
+pub fn extract_structural_summary(body: &serde_json::Value) -> StructuralSummary {
+    let obj = match body.as_object() {
+        Some(o) => o,
+        None => return StructuralSummary::default(),
+    };
+
+    let model = obj
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let max_tokens = obj
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let stream = obj.get("stream").and_then(|v| v.as_bool());
+
+    let thinking_shape = obj.get("thinking").and_then(|t| t.as_object()).map(|t| {
+        match t.get("type").and_then(|v| v.as_str()) {
+            Some("enabled") => {
+                let budget = t
+                    .get("budget_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                format!("enabled:{budget}")
+            }
+            Some("adaptive") => {
+                // Adaptive thinking pairs with `output_config.effort`;
+                // the discriminator pulls that effort string into the
+                // shape so the structural value is self-contained.
+                let effort = obj
+                    .get("output_config")
+                    .and_then(|v| v.as_object())
+                    .and_then(|o| o.get("effort"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                format!("adaptive:{effort}")
+            }
+            Some(other) => other.to_string(),
+            None => "absent".to_string(),
+        }
+    });
+
+    let output_config_effort = obj
+        .get("output_config")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("effort"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let tool_choice_shape = obj.get("tool_choice").map(|v| match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(o) => {
+            // OpenAI nested shape: {type:"function", function:{name:"X"}}
+            // Anthropic / OpenAI Responses flat shape: {type:"function", name:"X"}
+            let kind = o.get("type").and_then(|v| v.as_str());
+            let nested_name = o
+                .get("function")
+                .and_then(|f| f.as_object())
+                .and_then(|fo| fo.get("name"))
+                .and_then(|n| n.as_str());
+            let flat_name = o.get("name").and_then(|v| v.as_str());
+            let name = nested_name.or(flat_name);
+            match (kind, name) {
+                (Some("function"), Some(n)) => format!("function:{n}"),
+                (Some(t), _) => format!("object:{t}"),
+                (None, _) => "object:?".to_string(),
+            }
+        }
+        _ => "other".to_string(),
+    });
+
+    let cache_control_count = count_cache_control(body);
+
+    // Messages-shape bodies (Anthropic + openai-compat ingress) use
+    // `messages`; Responses-shape bodies use `input`. Either field
+    // contributes to `messages_len`; assume only one is present.
+    let messages_len = obj
+        .get("messages")
+        .or_else(|| obj.get("input"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u32)
+        .unwrap_or(0);
+
+    let tools_len = obj
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len() as u32)
+        .unwrap_or(0);
+
+    let anthropic_beta = obj
+        .get("anthropic_beta")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut provider_extras_keys: Vec<String> = obj
+        .get("provider_extras")
+        .and_then(|v| v.as_object())
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    provider_extras_keys.sort();
+
+    StructuralSummary {
+        model,
+        max_tokens,
+        thinking_shape,
+        output_config_effort,
+        tool_choice_shape,
+        cache_control_count,
+        messages_len,
+        tools_len,
+        anthropic_beta,
+        provider_extras_keys,
+        stream,
+    }
+}
+
+/// Recursive walk over `v` counting every object map that carries a
+/// `cache_control` key. Counts the key itself (one per object that has
+/// it) rather than the keys-on-leaves it might decompose into.
+fn count_cache_control(v: &serde_json::Value) -> u32 {
+    let mut count: u32 = 0;
+    walk_cache_control(v, &mut count);
+    count
+}
+
+fn walk_cache_control(v: &serde_json::Value, count: &mut u32) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("cache_control") {
+                *count += 1;
+            }
+            for (_, child) in map {
+                walk_cache_control(child, count);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for elem in arr {
+                walk_cache_control(elem, count);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Emit a single TRACE line summarizing the structural shape of a
+/// REQUEST-side body, so the operator's smart-heartbeat validator can
+/// grep stable field names without fighting the 16 KB body cap.
+///
+/// `direction` is `"ingress"` (direction 1: client -> routectl) or
+/// `"outgoing"` (direction 2: routectl -> upstream). `kind` and `id`
+/// reuse the body-trace helpers' semantics:
+///   - For direction 1 (`"ingress"`), pass `kind = "ingress"` and
+///     `id` = the ingress name (`"openai"` / `"anthropic"`).
+///   - For direction 2 (`"outgoing"`), pass `kind` = the provider-kind
+///     literal (`"openai-compat"` etc.) and `id` = the provider id.
+///
+/// Scope: REQUEST bodies only. Response bodies have different
+/// structure and the operator's validator only consumes request-side
+/// summaries. Skip directions 3 and 4 deliberately.
+///
+/// Field-name stability: see [`StructuralSummary`]. Renaming or
+/// removing fields requires a CLAUDE.md note; adding new fields is
+/// allowed without ceremony.
+pub fn trace_structural_summary(direction: &str, kind: &str, id: &str, body: &serde_json::Value) {
+    if !tracing::event_enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    let s = extract_structural_summary(body);
+    tracing::trace!(
+        direction,
+        kind,
+        id,
+        model = s.model.as_deref().unwrap_or(""),
+        max_tokens = s.max_tokens.unwrap_or(0),
+        thinking_shape = s.thinking_shape.as_deref().unwrap_or(""),
+        output_config_effort = s.output_config_effort.as_deref().unwrap_or(""),
+        tool_choice_shape = s.tool_choice_shape.as_deref().unwrap_or(""),
+        cache_control_count = s.cache_control_count,
+        messages_len = s.messages_len,
+        tools_len = s.tools_len,
+        anthropic_beta = %s.anthropic_beta.join(","),
+        provider_extras_keys = %s.provider_extras_keys.join(","),
+        stream = s.stream.unwrap_or(false),
+        "structural summary"
+    );
+}
+
 /// Emit a single TRACE line summarizing a streaming response at
 /// termination. NOT a per-chunk firehose: chunk_count + final
 /// finish_reason + final usage are typically the only fields operators

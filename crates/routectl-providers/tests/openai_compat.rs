@@ -32,6 +32,7 @@ fn make_provider(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatProvi
         history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
+        disable_stream_include_usage: false,
     })
 }
 
@@ -95,6 +96,7 @@ async fn extra_headers_reserved_name_does_not_override_authorization() {
         history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
+        disable_stream_include_usage: false,
     });
 
     // If the guard is missing, the wiremock matcher above won't find
@@ -477,6 +479,7 @@ fn strict_translation_off_warns_and_allows_request() {
         history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
+        disable_stream_include_usage: false,
     });
     let req = ChatRequest {
         model: "gpt-4o".into(),
@@ -520,6 +523,7 @@ fn strict_translation_on_rejects_canonical_only_fields() {
         history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: true,
+        disable_stream_include_usage: false,
     });
     let req = ChatRequest {
         model: "gpt-4o".into(),
