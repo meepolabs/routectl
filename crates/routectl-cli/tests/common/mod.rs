@@ -32,7 +32,8 @@ use routectl_core::{
     content_part::{ContentPart, KnownContentPart},
     system_content::{SystemBlock, SystemContent},
     tool_def::{CustomTool, ToolDef},
-    ChatRequest, ChatResponse, Choice, Message, MessageContent, Role,
+    ChatRequest, ChatResponse, Choice, Message, MessageContent, ReasoningDetail,
+    ReasoningDetailKind, Role,
 };
 use serde_json::json;
 
@@ -317,6 +318,52 @@ pub mod scenarios {
             system: Some(system_with_cc),
             tools: Some(vec![cached_tool]),
             cache_control: Some(CacheControl::ephemeral_5m()),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    /// Scenario 10: assistant history carries `reasoning_details`
+    /// with the Anthropic `thinking` shape (format
+    /// `anthropic-claude-v1`, payload `{text, signature}`).
+    ///
+    /// Multi-turn replay: a follow-up user message arrives after
+    /// the assistant turn that included a thinking block. The
+    /// Anthropic egress MUST emit the assistant turn with a
+    /// `thinking` content block carrying both the text and the
+    /// `signature` field. Anthropic 400s on `thinking` blocks
+    /// missing `signature` (see CLAUDE.md "Anthropic streaming
+    /// reasoning replay residual"); the contract test pins the
+    /// round-trip so a regression in signature emission breaks
+    /// CI rather than silently breaking every Claude 4.5
+    /// multi-turn after a tool-only thinking turn.
+    pub fn scenario_10_reasoning_details_signature_replay() -> ChatRequest {
+        let assistant_with_thinking = Message {
+            role: Role::Assistant,
+            content: MessageContent::Text("Sure, here is the answer: 42.".into()),
+            reasoning: None,
+            reasoning_details: vec![ReasoningDetail {
+                kind: ReasoningDetailKind::Text,
+                id: None,
+                format: Some("anthropic-claude-v1".into()),
+                index: Some(0),
+                payload: json!({
+                    "text": "The user is asking about the answer. 6 * 7 is 42.",
+                    "signature": "sig_pretend_this_is_a_real_anthropic_signature_blob"
+                }),
+            }],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+
+        ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![
+                user_msg("What is 6 times 7?"),
+                assistant_with_thinking,
+                user_msg("And 6 times 8?"),
+            ],
             max_tokens: Some(1024),
             ..Default::default()
         }

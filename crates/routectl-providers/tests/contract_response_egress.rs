@@ -179,3 +179,71 @@ mod scenario_4_normalize_response_stop_reason_pause_turn {
     // anthropic_api sub-scenario above is the only one that exercises
     // the bug class.
 }
+
+// =====================================================================
+// Scenario 9: null_content_with_reasoning
+// =====================================================================
+//
+// NIM-style upstreams (e.g. meta/llama-3.3-70b-instruct, Clarifai-
+// hosted models on OpenRouter) emit BOTH `reasoning: null` and
+// `reasoning_content: "..."` on the same message. The openai-compat
+// normalize_response's `coalesce_reasoning_content_in_response`
+// preprocessor merges these into the canonical `Message.reasoning`
+// field, preferring the non-null value. Without the coalesce the
+// canonical message ends up with `reasoning: None` and the
+// reasoning chain-of-thought is silently dropped. Bug class:
+// `null content alongside non-null reasoning` (see CLAUDE.md gotcha
+// section).
+//
+// Anthropic API does not emit `reasoning_content` (it carries
+// thinking as a typed content block), so this scenario is
+// openai_compat-only.
+
+mod scenario_9_null_content_with_reasoning {
+    use super::*;
+
+    #[test]
+    fn openai_compat_egress() {
+        // NIM-style raw upstream: `reasoning` is explicitly null AND
+        // `reasoning_content` carries the real value. The coalescer
+        // must drop the null and lift `reasoning_content` into
+        // canonical `Message.reasoning`.
+        let raw = json!({
+            "id": "chatcmpl-nim-01",
+            "model": "meta/llama-3.3-70b-instruct",
+            "created": 0,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning": null,
+                    "reasoning_content": "Let me think... 6 * 7 = 42."
+                },
+                "finish_reason": "stop"
+            }]
+        });
+
+        let resp = openai_compat_provider()
+            .normalize_response(raw)
+            .expect("openai_compat normalize_response");
+
+        assert_eq!(resp.choices.len(), 1);
+        // Legacy `Message.reasoning` field MUST carry the lifted
+        // reasoning_content. The coalesce-from-null path is the bug
+        // class; without it the field stays None and downstream
+        // ingress render drops the chain-of-thought.
+        assert_eq!(
+            resp.choices[0].message.reasoning.as_deref(),
+            Some("Let me think... 6 * 7 = 42."),
+            "openai-compat normalize_response must lift reasoning_content into Message.reasoning when reasoning is null"
+        );
+        // Content text must NOT get clobbered by the coalesce.
+        match &resp.choices[0].message.content {
+            routectl_core::MessageContent::Text(t) => {
+                assert_eq!(t, "The answer is 42.")
+            }
+            other => panic!("expected Text content, got {other:?}"),
+        }
+    }
+}
