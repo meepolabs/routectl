@@ -199,6 +199,312 @@ mod scenario_4_normalize_response_stop_reason_pause_turn {
 // thinking as a typed content block), so this scenario is
 // openai_compat-only.
 
+// =====================================================================
+// Scenario 11: matched_stop_sequence_round_trip
+// =====================================================================
+//
+// Anthropic-shape upstreams surface the matched stop sequence as the
+// wire field `stop_sequence` alongside `stop_reason:"stop_sequence"`.
+// The egress's `normalize_response` MUST lift that into
+// `Choice.matched_stop_sequence` so the Anthropic ingress can render
+// `stop_reason:"stop_sequence"` + `stop_sequence:"<value>"` on the
+// way out. Without the lift, the canonical `finish_reason:"stop"`
+// collapses to wire `end_turn` and claude-code structured-output
+// flows fail with synthetic `is_error: true` envelopes.
+//
+// OpenAI-compat upstreams don't carry the matched sequence on the
+// wire (the OpenAI spec has no such field; most hosts also strip the
+// marker from response content). The egress applies a heuristic:
+// suffix-match the response content against `req.stop` and, when
+// exactly one stop sequence was configured, fall back to that single
+// sequence even on a stripped-content response (the common
+// structured-output single-fence pattern).
+
+mod scenario_11_normalize_response_matched_stop_sequence {
+    use super::*;
+    use routectl_providers::openai_compat::response::apply_stop_sequence_heuristic;
+
+    #[test]
+    fn anthropic_api_egress_lifts_native_stop_sequence() {
+        let raw = json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-opus",
+            "content": [{"type": "text", "text": "Here is the structured answer."}],
+            "stop_reason": "stop_sequence",
+            "stop_sequence": "</answer>",
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        });
+
+        let resp = anthropic_api_provider()
+            .normalize_response(raw)
+            .expect("anthropic_api normalize_response");
+
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(
+            resp.choices[0].finish_reason.as_deref(),
+            Some("stop"),
+            "stop_sequence still maps to canonical `stop` for OpenAI-compat consumers",
+        );
+        assert_eq!(
+            resp.choices[0].matched_stop_sequence.as_deref(),
+            Some("</answer>"),
+            "anthropic_api egress must lift wire `stop_sequence` into canonical \
+             `Choice.matched_stop_sequence`",
+        );
+    }
+
+    #[test]
+    fn anthropic_api_ignores_stop_sequence_when_reason_is_end_turn() {
+        // A stray `stop_sequence` field on a non-stop_sequence response
+        // must be ignored so the Anthropic ingress doesn't mis-render
+        // a `stop_reason:"stop_sequence"` over an `end_turn` upstream.
+        let raw = json!({
+            "id": "msg_02",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-opus",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": "</leak>",
+            "usage": {"input_tokens": 5, "output_tokens": 1}
+        });
+
+        let resp = anthropic_api_provider()
+            .normalize_response(raw)
+            .expect("anthropic_api normalize_response");
+
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert!(
+            resp.choices[0].matched_stop_sequence.is_none(),
+            "stop_sequence only meaningful when stop_reason == \"stop_sequence\"; \
+             a stray field on end_turn must NOT propagate",
+        );
+    }
+
+    #[test]
+    fn openai_compat_heuristic_suffix_match() {
+        // Upstream left the marker in the content; suffix match recovers
+        // it precisely.
+        let raw = json!({
+            "id": "chatcmpl-2",
+            "model": "deepseek-v4-pro",
+            "created": 0,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Here is the answer.</answer>"},
+                "finish_reason": "stop"
+            }]
+        });
+
+        let mut resp = openai_compat_provider()
+            .normalize_response(raw)
+            .expect("openai_compat normalize_response");
+        // Heuristic runs in `complete()`; call directly here since the
+        // contract harness bypasses the HTTP-driven path.
+        let stops = vec!["</answer>".to_string()];
+        apply_stop_sequence_heuristic(&mut resp, Some(stops.as_slice()));
+
+        assert_eq!(
+            resp.choices[0].matched_stop_sequence.as_deref(),
+            Some("</answer>"),
+            "openai-compat heuristic must suffix-match a stop sequence still present in content",
+        );
+    }
+
+    #[test]
+    fn openai_compat_heuristic_single_stop_fallback() {
+        // Common structured-output case: host strips the matched
+        // marker from content, single stop sequence was configured.
+        // Heuristic falls back to the sole stop as the best-guess so
+        // the Anthropic ingress emits `stop_reason:"stop_sequence"`
+        // instead of `end_turn`. Captures the deepseek-v4-pro
+        // reviewer-flow failure (2026-05-19).
+        let raw = json!({
+            "id": "chatcmpl-3",
+            "model": "deepseek-v4-pro",
+            "created": 0,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Here is the answer."},
+                "finish_reason": "stop"
+            }]
+        });
+
+        let mut resp = openai_compat_provider()
+            .normalize_response(raw)
+            .expect("openai_compat normalize_response");
+        let stops = vec!["</answer>".to_string()];
+        apply_stop_sequence_heuristic(&mut resp, Some(stops.as_slice()));
+
+        assert_eq!(
+            resp.choices[0].matched_stop_sequence.as_deref(),
+            Some("</answer>"),
+            "single-stop fallback must kick in when the host strips the matched marker",
+        );
+    }
+
+    #[test]
+    fn openai_compat_heuristic_skips_non_stop_finish_reason() {
+        // length / tool_calls etc. must NOT trigger the heuristic.
+        let raw = json!({
+            "id": "chatcmpl-4",
+            "model": "deepseek-v4-pro",
+            "created": 0,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "truncated"},
+                "finish_reason": "length"
+            }]
+        });
+
+        let mut resp = openai_compat_provider()
+            .normalize_response(raw)
+            .expect("openai_compat normalize_response");
+        let stops = vec!["</answer>".to_string()];
+        apply_stop_sequence_heuristic(&mut resp, Some(stops.as_slice()));
+
+        assert!(
+            resp.choices[0].matched_stop_sequence.is_none(),
+            "heuristic must only fire on finish_reason == \"stop\"",
+        );
+    }
+
+    #[test]
+    fn openai_compat_heuristic_skips_when_content_is_null() {
+        // Regression: when the response has no content to evidence the
+        // match (Null content, empty Parts), the single-stop fallback
+        // must NOT fire -- otherwise we over-claim `stop_sequence` on
+        // turns where the model never emitted one. Bug class flagged
+        // by code review of the initial issue #8 fix.
+        let raw = json!({
+            "id": "chatcmpl-null",
+            "model": "deepseek-v4-pro",
+            "created": 0,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": null},
+                "finish_reason": "stop"
+            }]
+        });
+
+        let mut resp = openai_compat_provider()
+            .normalize_response(raw)
+            .expect("openai_compat normalize_response");
+        let stops = vec!["</answer>".to_string()];
+        apply_stop_sequence_heuristic(&mut resp, Some(stops.as_slice()));
+
+        assert!(
+            resp.choices[0].matched_stop_sequence.is_none(),
+            "null-content responses must not trigger the single-stop fallback",
+        );
+    }
+
+    #[test]
+    fn openai_compat_heuristic_skips_when_content_is_whitespace() {
+        // Regression: whitespace-only content trims to empty, so the
+        // single-stop fallback must NOT fire (same reason as the
+        // null-content case -- no actual content to evidence the
+        // match).
+        let raw = json!({
+            "id": "chatcmpl-ws",
+            "model": "deepseek-v4-pro",
+            "created": 0,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "   \n  "},
+                "finish_reason": "stop"
+            }]
+        });
+
+        let mut resp = openai_compat_provider()
+            .normalize_response(raw)
+            .expect("openai_compat normalize_response");
+        let stops = vec!["</answer>".to_string()];
+        apply_stop_sequence_heuristic(&mut resp, Some(stops.as_slice()));
+
+        assert!(
+            resp.choices[0].matched_stop_sequence.is_none(),
+            "whitespace-only content must not trigger the single-stop fallback",
+        );
+    }
+
+    #[test]
+    fn openai_compat_heuristic_filters_empty_string_stop_entries() {
+        // Operator-misconfigured `stop` list with empty strings must
+        // not poison the heuristic. Empty entries are filtered before
+        // matching; a list of only empty strings collapses to no
+        // effective stops, and a mixed list pins the heuristic to the
+        // non-empty entries only.
+        let raw = json!({
+            "id": "chatcmpl-empty-stops",
+            "model": "deepseek-v4-pro",
+            "created": 0,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Here is the answer.</answer>"},
+                "finish_reason": "stop"
+            }]
+        });
+
+        // Only empty strings -> no effective stops -> stays None.
+        let mut resp_only_empty = openai_compat_provider()
+            .normalize_response(raw.clone())
+            .expect("openai_compat normalize_response");
+        apply_stop_sequence_heuristic(
+            &mut resp_only_empty,
+            Some(vec!["".to_string(), "".to_string()].as_slice()),
+        );
+        assert!(
+            resp_only_empty.choices[0].matched_stop_sequence.is_none(),
+            "all-empty stop list must collapse to no effective stops",
+        );
+
+        // Mixed list -> non-empty entries used for matching.
+        let mut resp_mixed = openai_compat_provider()
+            .normalize_response(raw)
+            .expect("openai_compat normalize_response");
+        apply_stop_sequence_heuristic(
+            &mut resp_mixed,
+            Some(vec!["".to_string(), "</answer>".to_string()].as_slice()),
+        );
+        assert_eq!(
+            resp_mixed.choices[0].matched_stop_sequence.as_deref(),
+            Some("</answer>"),
+            "mixed list must filter empties and suffix-match the real entry",
+        );
+    }
+
+    #[test]
+    fn openai_compat_heuristic_ambiguous_multi_stop_stays_none() {
+        // Multiple stop sequences configured AND no suffix hit in
+        // content -> we can't pick a winner; leave None rather than
+        // over-claim.
+        let raw = json!({
+            "id": "chatcmpl-5",
+            "model": "deepseek-v4-pro",
+            "created": 0,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "neutral content"},
+                "finish_reason": "stop"
+            }]
+        });
+
+        let mut resp = openai_compat_provider()
+            .normalize_response(raw)
+            .expect("openai_compat normalize_response");
+        let stops = vec!["</answer>".to_string(), "</next>".to_string()];
+        apply_stop_sequence_heuristic(&mut resp, Some(stops.as_slice()));
+
+        assert!(
+            resp.choices[0].matched_stop_sequence.is_none(),
+            "ambiguous multi-stop without a suffix hit must stay None",
+        );
+    }
+}
+
 mod scenario_9_null_content_with_reasoning {
     use super::*;
 

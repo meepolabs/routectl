@@ -11,7 +11,7 @@
 
 use serde_json::Value;
 
-use routectl_core::{ChatResponse, Error, Message, Result};
+use routectl_core::{ChatResponse, Error, Message, MessageContent, Result};
 
 use super::dialect::ReasoningDialect;
 
@@ -25,6 +25,129 @@ pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<Chat
     }
 
     Ok(resp)
+}
+
+/// OpenAI-compat upstreams (DeepSeek, vLLM, OpenRouter, NIM, llama.cpp,
+/// ...) don't expose the matched stop sequence on the response wire --
+/// the spec carries only `finish_reason`, and most hosts strip the
+/// matched sequence from the response content. The Anthropic ingress
+/// needs `Choice.matched_stop_sequence` populated to render
+/// `stop_reason:"stop_sequence"` instead of the lossy `end_turn`,
+/// which breaks claude-code structured-output flows whose
+/// `is_error: true` envelope is keyed on the wire `stop_reason`.
+///
+/// Heuristic: when the request shipped at least one stop_sequence AND
+/// a Choice finished with `finish_reason == "stop"` AND the egress
+/// hasn't already lifted a native value, look for a suffix match
+/// against the response content. If exactly one stop_sequence was
+/// configured and no suffix match is found (typical: the host
+/// stripped the matched marker from the content), fall back to that
+/// sole sequence -- this is the common structured-output pattern
+/// (single fence, finish_reason "stop") and the alternative is a
+/// hard `end_turn` mis-render. Multiple ambiguous stops without a
+/// suffix hit stay `None` so we don't over-claim.
+/// Public for integration-test access; not a stability surface --
+/// `#[doc(hidden)]` keeps it out of the rendered docs.
+#[doc(hidden)]
+pub fn apply_stop_sequence_heuristic(
+    chat_resp: &mut ChatResponse,
+    request_stop: Option<&[String]>,
+) {
+    let stops = match request_stop {
+        Some(s) if !s.is_empty() => s,
+        _ => return,
+    };
+    for choice in chat_resp.choices.iter_mut() {
+        if choice.matched_stop_sequence.is_some() {
+            continue;
+        }
+        if choice.finish_reason.as_deref() != Some("stop") {
+            continue;
+        }
+        let text = message_text_for_match(&choice.message);
+        choice.matched_stop_sequence = detect_matched_stop_sequence(text.as_deref(), stops);
+    }
+}
+
+/// Pick a single suffix-matching stop sequence from `stops` if the
+/// content trails one (host left it in the body). Otherwise, when
+/// exactly one stop_sequence was configured AND the response actually
+/// carried content, fall back to that sequence as the best-guess for
+/// the structured-output single-fence flow. Returns `None` for
+/// multiple ambiguous stops without a suffix hit, or when there is
+/// no content to evidence either way.
+///
+/// Public for integration-test access; not a stability surface --
+/// `#[doc(hidden)]` keeps it out of the rendered docs.
+#[doc(hidden)]
+pub fn detect_matched_stop_sequence(text: Option<&str>, stops: &[String]) -> Option<String> {
+    // Bail when there is no content to evidence the heuristic. Common
+    // cases: tool-only responses (defense in depth -- `finish_reason`
+    // on tool turns is "tool_calls", not "stop", and the caller
+    // already gates on "stop", but be explicit), reasoning-only
+    // responses, and `MessageContent::Null` from non-Anthropic hosts.
+    // Without this gate the single-stop fallback below would over-claim
+    // on responses that never actually emitted a stop_sequence.
+    let t = text?;
+    let trimmed = t.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Try the longest sequences first so an inner "</answer>" wins over a
+    // shorter "<" when both are configured. Stable on equal length.
+    let mut ordered: Vec<&String> = stops.iter().filter(|s| !s.is_empty()).collect();
+    ordered.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    for s in ordered.iter() {
+        // ASCII-safe on UTF-8 because `str::ends_with(&str)` aligns
+        // on char boundaries. Note we trim trailing whitespace from
+        // content but NOT from `stops` -- mirror trimming the stop
+        // would silently rewrite an operator's explicit choice and is
+        // not worth the bytes saved.
+        if trimmed.ends_with(s.as_str()) {
+            return Some((**s).clone());
+        }
+    }
+    // Single-stop fallback: structured-output flows configure one fence
+    // and rely on stop_reason discrimination. Without this fallback the
+    // common case stays broken because most hosts strip the matched
+    // marker from the content. Only safe when content was present
+    // (the `trimmed.is_empty()` guard above handles tool-only / null /
+    // whitespace-only responses).
+    //
+    // Residual risk: a non-structured-output flow that configures a
+    // single stop_sequence and naturally ends mid-thought without
+    // emitting the sequence gets `stop_sequence` instead of
+    // `end_turn`. Operators tracking this can disable the fallback by
+    // adopting an Anthropic-upstream provider, which surfaces the
+    // matched sequence natively.
+    if ordered.len() == 1 {
+        return Some(ordered[0].clone());
+    }
+    None
+}
+
+fn message_text_for_match(msg: &Message) -> Option<String> {
+    match &msg.content {
+        MessageContent::Text(t) => Some(t.clone()),
+        MessageContent::Parts(parts) => {
+            let mut buf = String::new();
+            for p in parts {
+                if let routectl_core::ContentPart::Known(routectl_core::KnownContentPart::Text {
+                    text,
+                    ..
+                }) = p
+                {
+                    buf.push_str(text);
+                }
+            }
+            if buf.is_empty() {
+                None
+            } else {
+                Some(buf)
+            }
+        }
+        MessageContent::Null => None,
+    }
 }
 
 /// Coalesce `message.reasoning_content` -> `message.reasoning` across all

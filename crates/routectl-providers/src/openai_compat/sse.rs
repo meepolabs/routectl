@@ -195,6 +195,7 @@ impl ThinkTagAccumulator {
                 index,
                 delta,
                 finish_reason,
+                matched_stop_sequence: None,
             });
         }
 

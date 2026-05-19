@@ -84,6 +84,16 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
             index: 0,
             message,
             finish_reason,
+            // Bedrock Converse does NOT echo the matched stop sequence
+            // on the top-level response. AWS surfaces it via
+            // `additionalModelResponseFields["stop_sequence"]` only
+            // when the request set `additionalModelResponseFieldPaths
+            // = ["/stop_sequence"]`. Wiring that opt-in path-set is
+            // tracked as a follow-up; the Bedrock-Invoke path (which
+            // delegates to `anthropic_api::response::normalize`) lifts
+            // the native field today, so all-Anthropic-on-Bedrock via
+            // Invoke is already covered.
+            matched_stop_sequence: None,
         }],
         usage,
         routectl_provider: None,

@@ -1197,6 +1197,7 @@ mod resolved_models_tests {
                         tool_calls: None,
                     },
                     finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
                 }],
                 usage: Some(routectl_core::Usage::default()),
                 routectl_provider: None,

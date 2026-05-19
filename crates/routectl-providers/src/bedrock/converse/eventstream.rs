@@ -510,6 +510,15 @@ fn build_closing_chunk(
             index: 0,
             delta: ChunkDelta::default(),
             finish_reason,
+            // Same caveat as `converse/response.rs::translate`:
+            // Bedrock Converse stream events do not include the
+            // matched stop sequence on `messageStop`. AWS surfaces
+            // it via `additionalModelResponseFields` only when
+            // `additionalModelResponseFieldPaths` opted in on the
+            // request side. Tracked as a follow-up. Bedrock-Invoke
+            // (which delegates to `anthropic_api::sse::SseState`)
+            // already lifts the native field.
+            matched_stop_sequence: None,
         }],
         usage: usage_delta,
     }
@@ -526,6 +535,7 @@ fn text_chunk(text: String) -> ChatChunk {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     }
@@ -548,6 +558,7 @@ fn tool_delta_chunk(id: String, name: String, call_index: u32, partial_json: Str
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     }
@@ -567,6 +578,7 @@ fn reasoning_text_chunk(thinking: String) -> ChatChunk {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     }
@@ -603,6 +615,7 @@ fn reasoning_terminal_chunk(
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     }
@@ -626,6 +639,7 @@ fn reasoning_redacted_chunk(data: String) -> ChatChunk {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     }

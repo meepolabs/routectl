@@ -182,6 +182,7 @@ pub mod scenarios {
                 index: 0,
                 message: assistant_text_msg("Hello there!"),
                 finish_reason: Some("stop".into()),
+                matched_stop_sequence: None,
             }],
             usage: None,
             routectl_provider: None,
@@ -201,6 +202,27 @@ pub mod scenarios {
                 index: 0,
                 message: assistant_text_msg("Pausing for tool result."),
                 finish_reason: Some("pause_turn".into()),
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+        }
+    }
+
+    /// Scenario 11: canonical `ChatResponse` with
+    /// `matched_stop_sequence` set. Mirrors the cli-crate builder of
+    /// the same name. See that builder's doc for context.
+    pub fn scenario_11_response_matched_stop_sequence() -> ChatResponse {
+        ChatResponse {
+            id: "msg_stop_seq_01".into(),
+            model: "claude-3-opus".into(),
+            created: 0,
+            choices: vec![Choice {
+                index: 0,
+                message: assistant_text_msg("Here is the structured answer."),
+                finish_reason: Some("stop".into()),
+                matched_stop_sequence: Some("</answer>".into()),
             }],
             usage: None,
             routectl_provider: None,

@@ -68,7 +68,12 @@ pub(super) fn render_chunk_internal(
             close_open_block(state, &mut events);
             if chunk.usage.is_some() {
                 // Inline usage: emit combined delta + stop now.
-                emit_message_delta(Some(fr), chunk.usage.as_ref(), &mut events);
+                emit_message_delta(
+                    Some(fr),
+                    choice.matched_stop_sequence.as_deref(),
+                    chunk.usage.as_ref(),
+                    &mut events,
+                );
                 emit_message_stop(state, &mut events);
             } else if state.pending_finish_reason.is_some() {
                 // Second finish_reason on a stream that already buffered
@@ -91,12 +96,14 @@ pub(super) fn render_chunk_internal(
                 // message_stop is a protocol violation (the trailing
                 // delta arrives post-stop).
                 state.pending_finish_reason = Some(fr.to_string());
+                state.pending_matched_stop_sequence = choice.matched_stop_sequence.clone();
             }
         }
     } else if let Some(usage) = chunk.usage.as_ref() {
         if let Some(fr) = state.pending_finish_reason.take() {
             // Finalize the buffered finish_reason now that we have usage.
-            emit_message_delta(Some(&fr), Some(usage), &mut events);
+            let matched = state.pending_matched_stop_sequence.take();
+            emit_message_delta(Some(&fr), matched.as_deref(), Some(usage), &mut events);
             emit_message_stop(state, &mut events);
         } else {
             // Mid-stream usage update (rare; some hosts emit interim
@@ -104,7 +111,7 @@ pub(super) fn render_chunk_internal(
             // terminating the stream. (The outer `state.finished`
             // guard above handles the post-stop case; this branch only
             // fires while the stream is still active.)
-            emit_message_delta(None, Some(usage), &mut events);
+            emit_message_delta(None, None, Some(usage), &mut events);
         }
     }
 
@@ -391,17 +398,30 @@ fn push_block_delta(events: &mut Vec<SseEvent>, idx: usize, delta: Value) {
 
 pub(super) fn emit_message_delta(
     finish_reason: Option<&str>,
+    matched_stop_sequence: Option<&str>,
     usage: Option<&routectl_core::UsageDelta>,
     events: &mut Vec<SseEvent>,
 ) {
     let mut delta = Map::new();
-    delta.insert(
-        "stop_reason".into(),
-        finish_reason
-            .map(|fr| Value::String(openai_finish_to_anthropic_stop(fr).into()))
-            .unwrap_or(Value::Null),
-    );
-    delta.insert("stop_sequence".into(), Value::Null);
+    // When the upstream surfaced a matched stop sequence, override the
+    // OpenAI mapping with the native `stop_sequence` shape. Otherwise
+    // fall back to the lossy `finish_reason -> stop_reason` mapping
+    // and emit a null `stop_sequence`.
+    let (stop_reason_value, stop_sequence_value) = if let Some(seq) = matched_stop_sequence {
+        (
+            Value::String("stop_sequence".into()),
+            Value::String(seq.to_string()),
+        )
+    } else {
+        (
+            finish_reason
+                .map(|fr| Value::String(openai_finish_to_anthropic_stop(fr).into()))
+                .unwrap_or(Value::Null),
+            Value::Null,
+        )
+    };
+    delta.insert("stop_reason".into(), stop_reason_value);
+    delta.insert("stop_sequence".into(), stop_sequence_value);
 
     let mut payload = Map::new();
     payload.insert("type".into(), Value::String("message_delta".into()));
