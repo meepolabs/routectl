@@ -1,0 +1,300 @@
+//! Shared canonical-ChatRequest builders for contract tests.
+//!
+//! Each scenario function returns a canonical `ChatRequest` used as
+//! BOTH the assertion target for the ingress tests in this crate and
+//! the input fixture for the egress tests in `routectl-providers`.
+//! The same builder is mirrored in
+//! `routectl-providers/tests/common/mod.rs`.
+//!
+//! Canonical-shape caveat: routectl's canonical layer is intentionally
+//! pass-through on certain fields (`tool_choice`, OpenAI-vs-Anthropic
+//! tool-call representation in history). Each ingress preserves its
+//! native wire shape rather than normalizing to one canonical, so the
+//! Anthropic and OpenAI ingresses may legitimately produce DIFFERENT
+//! canonical `ChatRequest` values from semantically equivalent inputs.
+//! Each scenario's doc comment records which ingress shape it
+//! represents; ingress tests for the other ingress assert on their
+//! own native canonical, not on the shared builder.
+//!
+//! Mirror sync: field-level drift between the two `common/mod.rs`
+//! files is caught at compile time (struct shape errors). SEMANTIC
+//! drift -- divergent field values, different scenario fixtures,
+//! out-of-sync doc comments -- has no compile tripwire. Review the
+//! mirror file whenever editing a scenario here.
+//!
+//! When adding a scenario, add it here AND in the providers crate's
+//! mirror file.
+
+#![allow(dead_code)]
+
+use routectl_core::{
+    cache_control::CacheControl,
+    content_part::{ContentPart, KnownContentPart},
+    system_content::{SystemBlock, SystemContent},
+    tool_def::{CustomTool, ToolDef},
+    ChatRequest, ChatResponse, Choice, Message, MessageContent, Role,
+};
+use serde_json::json;
+
+pub fn user_msg(text: &str) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Text(text.into()),
+        reasoning: None,
+        reasoning_details: vec![],
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+pub fn assistant_text_msg(text: &str) -> Message {
+    Message {
+        role: Role::Assistant,
+        content: MessageContent::Text(text.into()),
+        reasoning: None,
+        reasoning_details: vec![],
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+/// Build a `get_weather` custom tool used by scenarios 2-3.
+pub fn get_weather_tool() -> ToolDef {
+    ToolDef::Custom(CustomTool {
+        name: "get_weather".into(),
+        description: Some("Get the current weather for a location".into()),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "location": {"type": "string"}
+            },
+            "required": ["location"]
+        }),
+        cache_control: None,
+        defer_loading: None,
+        strict: None,
+        type_tag: None,
+    })
+}
+
+pub mod scenarios {
+    use super::*;
+
+    /// Scenario 1: a single user turn with a top-level system prompt.
+    ///
+    /// Anthropic ingress arrives with `system: "..."` (top-level
+    /// string). OpenAI ingress arrives with a `Role::System` message
+    /// inside `messages`; `lift_system_messages` hoists it into
+    /// canonical `req.system`. Both flows must produce this exact
+    /// canonical shape.
+    pub fn scenario_1_system_handling() -> ChatRequest {
+        ChatRequest {
+            model: "claude-3-opus".into(),
+            messages: vec![user_msg("Hello!")],
+            system: Some(SystemContent::Text("You are a helpful assistant.".into())),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    /// Scenario 2 (auto): one custom tool + `tool_choice: "auto"`.
+    ///
+    /// Canonical-shape note: this builder represents the OpenAI-ingress
+    /// canonical (bare string). The Anthropic ingress preserves its
+    /// native object shape `{"type":"auto"}` and produces a DIFFERENT
+    /// canonical `tool_choice` value; the Anthropic ingress test for
+    /// this scenario asserts the object form directly rather than
+    /// against this builder. The egress tests for this scenario
+    /// exercise the bare-string path only -- Anthropic-shape canonical
+    /// `tool_choice` is covered by `translate_tool_choice` unit tests
+    /// in `anthropic_api/request.rs`. A future PR could split this
+    /// into two builders to close the egress contract gap for the
+    /// Anthropic-ingress canonical path.
+    pub fn scenario_2_tool_choice_auto() -> ChatRequest {
+        ChatRequest {
+            model: "claude-3-opus".into(),
+            messages: vec![user_msg("What is the weather?")],
+            tools: Some(vec![get_weather_tool()]),
+            tool_choice: Some(json!("auto")),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    /// Scenario 2 (named function): one custom tool + a
+    /// `tool_choice` value that pins the model to one specific tool.
+    ///
+    /// Canonical carries the OpenAI-shape object so the openai-compat
+    /// egress can passthrough; the Anthropic egress's
+    /// `translate_tool_choice` rewrites to
+    /// `{"type":"tool","name":"get_weather"}`.
+    pub fn scenario_2_tool_choice_named_function() -> ChatRequest {
+        ChatRequest {
+            model: "claude-3-opus".into(),
+            messages: vec![user_msg("What is the weather?")],
+            tools: Some(vec![get_weather_tool()]),
+            tool_choice: Some(json!({
+                "type": "function",
+                "function": {"name": "get_weather"}
+            })),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    /// Scenario 3: a four-message history with a tool round-trip.
+    ///
+    /// Messages: user question -> assistant `tool_use` -> tool result
+    /// -> user follow-up.
+    ///
+    /// Canonical-shape note: this builder represents the
+    /// Anthropic-ingress canonical -- the assistant turn carries
+    /// `ContentPart::Known(KnownContentPart::ToolUse{...})` on
+    /// `message.content` (NOT on `message.tool_calls`) and the
+    /// tool-result turn is a `Role::Tool` message with `tool_call_id`
+    /// linking back to `ToolUse.id`. The OpenAI ingress preserves a
+    /// different shape (assistant `tool_calls` array + `Role::Tool`
+    /// message; no ToolUse content part), and the OpenAI ingress test
+    /// for this scenario asserts the OpenAI-shape canonical directly.
+    /// The egress tests feed this Anthropic-ingress canonical; both
+    /// the Anthropic egress (preserves typed blocks) and the
+    /// openai-compat egress (lowers to `tool_calls` + `role:"tool"`)
+    /// must accept it.
+    pub fn scenario_3_multi_turn_with_tool_result() -> ChatRequest {
+        let assistant_with_tool_use = Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::ToolUse {
+                id: "toolu_01".into(),
+                name: "get_weather".into(),
+                input: json!({"location": "San Francisco"}),
+                cache_control: None,
+            })]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+        let tool_result = Message {
+            role: Role::Tool,
+            content: MessageContent::Text("72F and sunny".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some("toolu_01".into()),
+            tool_calls: None,
+        };
+        ChatRequest {
+            model: "claude-3-opus".into(),
+            messages: vec![
+                user_msg("What is the weather?"),
+                assistant_with_tool_use,
+                tool_result,
+                user_msg("And tomorrow?"),
+            ],
+            tools: Some(vec![get_weather_tool()]),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    /// Scenario 4 (end_turn): canonical `ChatResponse` with
+    /// `finish_reason: "stop"` -- the OpenAI mapping of Anthropic's
+    /// `end_turn`. The Anthropic ingress's `render_response` must
+    /// round-trip this back to `stop_reason: "end_turn"`.
+    pub fn scenario_4_response_stop_reason_end_turn() -> ChatResponse {
+        ChatResponse {
+            id: "msg_end_turn_01".into(),
+            model: "claude-3-opus".into(),
+            created: 0,
+            choices: vec![Choice {
+                index: 0,
+                message: assistant_text_msg("Hello there!"),
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+        }
+    }
+
+    /// Scenario 4 (pause_turn): canonical `ChatResponse` whose
+    /// `finish_reason` is the Anthropic-only `pause_turn` value
+    /// (passthrough preserved by `map_stop_reason` for non-overlap
+    /// stop reasons). The Anthropic ingress's `render_response` must
+    /// emit `stop_reason: "pause_turn"` -- NOT clobber it to
+    /// `end_turn`. Bug class: B/K.
+    pub fn scenario_4_response_stop_reason_pause_turn() -> ChatResponse {
+        ChatResponse {
+            id: "msg_pause_turn_01".into(),
+            model: "claude-3-opus".into(),
+            created: 0,
+            choices: vec![Choice {
+                index: 0,
+                message: assistant_text_msg("Pausing for tool result."),
+                finish_reason: Some("pause_turn".into()),
+            }],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+        }
+    }
+
+    /// Scenario 5: cache_control set on all four supported positions.
+    ///
+    /// (1) top-level (auto-cache), (2) a system block, (3) a tool
+    /// definition, (4) a user message content block. All four must
+    /// survive the Anthropic-in / Anthropic-out path verbatim; the
+    /// openai-compat egress must silently drop every position.
+    ///
+    /// Ordering is constrained: cache prefix is tools -> system ->
+    /// messages -> top-level, and 1h breakpoints must precede 5m.
+    /// Pick a uniform `ephemeral_5m` so the validator accepts the
+    /// four breakpoints together.
+    pub fn scenario_5_cache_control_positions() -> ChatRequest {
+        let user_with_cc_block = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "Please review the attached document.".into(),
+                cache_control: Some(CacheControl::ephemeral_5m()),
+            })]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+
+        let cached_tool = ToolDef::Custom(CustomTool {
+            name: "lookup_docs".into(),
+            description: Some("Look up documentation".into()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}}
+            }),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        });
+
+        let system_with_cc = SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "You are an assistant with long instructions.".into(),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            citations: None,
+        }]);
+
+        ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_with_cc_block],
+            system: Some(system_with_cc),
+            tools: Some(vec![cached_tool]),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+}

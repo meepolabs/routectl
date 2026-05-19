@@ -52,6 +52,7 @@ wiremock.workspace = true
 reqwest = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+insta.workspace = true
 
 # cargo-deb metadata. Preserved so a future PR can re-enable .deb
 # packaging in .github/workflows/release.yml without re-deriving these
