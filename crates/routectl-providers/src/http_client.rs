@@ -40,12 +40,31 @@ pub fn build(user_agent: Option<&str>) -> Client {
         .expect("reqwest::Client::build failed (TLS init?); fatal at startup")
 }
 
-/// Header names that `extra_headers` is NOT allowed to set, because
-/// doing so would silently bypass the provider's auth contract or
-/// corrupt the wire body shape. Compared case-insensitively against
-/// the user-supplied key.
+/// Header names that carry the provider's auth secret. An entry in
+/// `extra_headers` matching one of these would silently bypass the
+/// provider's auth contract (the operator could ship a different
+/// Bearer or x-api-key value than the one resolved from the secret
+/// store). Compared case-insensitively against the user-supplied key.
 ///
-/// - `authorization` and `x-api-key` are the auth carriers themselves.
+/// `anthropic-version` is included because Anthropic-API egresses fix
+/// the version at provider construction time (operator config) and
+/// allowing an `extra_headers["anthropic-version"]` override would
+/// desync from the body-schema versioning the egress assumes.
+const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "anthropic-version"];
+
+/// Header names that routectl owns the value of for wire-shape
+/// correctness, but are NOT auth carriers. An operator setting one of
+/// these in `extra_headers` would silently lose to routectl's dynamic
+/// composition (or worse, emit twice on the wire). Compared
+/// case-insensitively against the user-supplied key.
+///
+/// - `anthropic-beta` is composed dynamically per request by
+///   `anthropic_api::AnthropicApiProvider::build_headers` from the
+///   merged set of static `extra_headers["anthropic-beta"]` config and
+///   request-time `req.anthropic_beta`. The per-egress builder reads
+///   from extra_headers separately, bypassing this guard
+///   intentionally; the guard here exists so a NEW egress that loops
+///   over extra_headers does not accidentally double-emit.
 /// - `host` is request-routing; overriding it would let TOML pin a
 ///   different upstream and confuse SigV4 / virtual-host aware servers.
 /// - `content-type` is set by reqwest's `.json()` to
@@ -54,27 +73,130 @@ pub fn build(user_agent: Option<&str>) -> Client {
 ///   looks like an auth or schema error.
 /// - `content-length` is computed by reqwest from the serialized body;
 ///   a TOML override desyncs the wire contract.
-const RESERVED_EXTRA_HEADERS: &[&str] = &[
-    "authorization",
-    "x-api-key",
-    "host",
-    "content-type",
-    "content-length",
-    // `anthropic-beta` is now constructed dynamically per request by
-    // `anthropic_api::AnthropicApiProvider::build_headers` from the
-    // merged set of static `extra_headers["anthropic-beta"]` config and
-    // request-time `req.anthropic_beta`. An operator setting it via
-    // `extra_headers` directly would be silently overridden (or worse,
-    // emitted twice on the wire if a future code change uses raw
-    // header_mut). Reserve the name so the canonical management site
-    // is unambiguous; the per-egress builder reads from extra_headers
-    // separately, bypassing this guard intentionally.
-    "anthropic-beta",
-];
+const MANAGED_HEADERS: &[&str] = &["anthropic-beta", "host", "content-type", "content-length"];
+
+/// True if the given header name carries provider auth. Case-insensitive.
+pub fn is_auth_header(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    AUTH_HEADERS.contains(&lc.as_str())
+}
+
+/// True if the given header name is dynamically composed by routectl
+/// (NOT an auth carrier). Case-insensitive.
+pub fn is_managed_header(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    MANAGED_HEADERS.contains(&lc.as_str())
+}
 
 /// True if the given header name is reserved for routectl's own
-/// management and must not be set via user `extra_headers`.
+/// management and must not be set via user `extra_headers`. Union of
+/// [`is_auth_header`] and [`is_managed_header`]. Callers that need to
+/// distinguish the two reasons (so they can emit different log
+/// messages) should call the split predicates directly.
+///
+/// In-tree callers all use the split predicates; this union is kept
+/// for external library consumers that need the legacy single-check
+/// shape.
+#[allow(dead_code)]
 pub fn is_reserved_extra_header(name: &str) -> bool {
-    let lc = name.to_ascii_lowercase();
-    RESERVED_EXTRA_HEADERS.contains(&lc.as_str())
+    is_auth_header(name) || is_managed_header(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_auth_header, is_managed_header, is_reserved_extra_header, AUTH_HEADERS, MANAGED_HEADERS,
+    };
+
+    #[test]
+    fn is_auth_header_matches_auth_names() {
+        for name in ["authorization", "Authorization", "AUTHORIZATION"] {
+            assert!(is_auth_header(name), "{name:?} should classify as auth");
+        }
+        for name in ["x-api-key", "X-Api-Key", "X-API-KEY"] {
+            assert!(is_auth_header(name), "{name:?} should classify as auth");
+        }
+        for name in [
+            "anthropic-version",
+            "Anthropic-Version",
+            "ANTHROPIC-VERSION",
+        ] {
+            assert!(is_auth_header(name), "{name:?} should classify as auth");
+        }
+        for name in ["anthropic-beta", "content-type", "host", "x-request-id"] {
+            assert!(!is_auth_header(name), "{name:?} must NOT classify as auth");
+        }
+    }
+
+    #[test]
+    fn is_managed_header_matches_managed_names() {
+        for name in ["anthropic-beta", "Anthropic-Beta", "ANTHROPIC-BETA"] {
+            assert!(
+                is_managed_header(name),
+                "{name:?} should classify as managed"
+            );
+        }
+        for name in ["host", "Host", "HOST"] {
+            assert!(
+                is_managed_header(name),
+                "{name:?} should classify as managed"
+            );
+        }
+        for name in ["content-type", "Content-Type", "CONTENT-TYPE"] {
+            assert!(
+                is_managed_header(name),
+                "{name:?} should classify as managed"
+            );
+        }
+        for name in ["content-length", "Content-Length"] {
+            assert!(
+                is_managed_header(name),
+                "{name:?} should classify as managed"
+            );
+        }
+        for name in [
+            "authorization",
+            "x-api-key",
+            "anthropic-version",
+            "x-request-id",
+        ] {
+            assert!(
+                !is_managed_header(name),
+                "{name:?} must NOT classify as managed"
+            );
+        }
+    }
+
+    #[test]
+    fn is_reserved_extra_header_unions_both() {
+        // Every member of either slice flows through the union.
+        for &h in AUTH_HEADERS.iter().chain(MANAGED_HEADERS.iter()) {
+            assert!(
+                is_reserved_extra_header(h),
+                "{h:?} should classify as reserved"
+            );
+        }
+        // A non-reserved header is not part of the union.
+        assert!(!is_reserved_extra_header("x-request-id"));
+        assert!(!is_reserved_extra_header("user-agent"));
+    }
+
+    #[test]
+    fn is_auth_and_managed_are_disjoint() {
+        // No header should be classified as BOTH auth and managed --
+        // the WARN/DEBUG branch in caller code depends on this, and a
+        // future addition that lands in both lists would double-log.
+        for &h in AUTH_HEADERS {
+            assert!(
+                !MANAGED_HEADERS.contains(&h),
+                "header {h:?} appears in both AUTH and MANAGED lists",
+            );
+        }
+        for &h in MANAGED_HEADERS {
+            assert!(
+                !AUTH_HEADERS.contains(&h),
+                "header {h:?} appears in both AUTH and MANAGED lists",
+            );
+        }
+    }
 }

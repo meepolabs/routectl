@@ -1033,10 +1033,20 @@ fn translate_messages(id: &str, messages: &[Message]) -> Result<Vec<AnthropicMes
 
 /// Merge `provider_extras` into the assembled body. Caller-supplied
 /// keys win EXCEPT for routectl-managed top-level keys (see
-/// `is_routectl_managed_key`); those are dropped with a WARN log so a
-/// malicious or careless `provider_extras = {"messages": [...]}` can't
-/// replace the assembled messages array. This was an architecture-review
+/// `is_routectl_managed_key`); those are dropped so a malicious or
+/// careless `provider_extras = {"messages": [...]}` can't replace the
+/// assembled messages array. This was an architecture-review
 /// finding (MEDIUM-1).
+///
+/// Source: this helper only ever sees `req.provider_extras` -- the
+/// Anthropic ingress's forward-compat sweep destination. Drops here
+/// are by design (the swept key would conflict with a key routectl
+/// builds itself, e.g. `thinking`) and were flooding
+/// `routectl-warn.log` on every claude-code request. The drop log
+/// fires at DEBUG with neutral phrasing. If a future caller wires a
+/// new source (operator-config `default_extras` on this egress) the
+/// log level should branch on the source the way the openai-compat
+/// `merge_extras` does.
 fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
     let Some(extras) = extras else { return };
     let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) else {
@@ -1044,10 +1054,10 @@ fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
     };
     for (k, v) in extra_obj {
         if is_routectl_managed_key(k) {
-            tracing::warn!(
+            tracing::debug!(
                 provider = id,
                 key = %k,
-                "provider_extras attempted to override routectl-managed key; dropped"
+                "forward-compat extra would override routectl-managed key; dropped"
             );
             continue;
         }
