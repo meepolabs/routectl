@@ -172,6 +172,7 @@ impl SseState {
                                     ..Default::default()
                                 },
                                 finish_reason: None,
+                                matched_stop_sequence: None,
                             }],
                             usage: None,
                         }));
@@ -248,6 +249,16 @@ impl SseState {
 
             SseEvent::MessageDelta { delta, usage } => {
                 let finish_reason = map_stop_reason(delta.stop_reason.as_deref());
+                // Lift the matched stop sequence so the Anthropic ingress
+                // can render `stop_reason:"stop_sequence"` +
+                // `stop_sequence:"<value>"` instead of the lossy
+                // `end_turn` mapping. Mirrors the non-streaming path in
+                // `response::normalize`. Only meaningful when
+                // `stop_reason == "stop_sequence"`.
+                let matched_stop_sequence = match delta.stop_reason.as_deref() {
+                    Some("stop_sequence") => delta.stop_sequence.clone(),
+                    _ => None,
+                };
                 // Anthropic emits input usage only on message_start, so
                 // the closing chunk must carry it forward for OpenAI
                 // clients to see full prompt_tokens.
@@ -352,6 +363,7 @@ impl SseState {
                         index: 0,
                         delta: ChunkDelta::default(),
                         finish_reason,
+                        matched_stop_sequence,
                     }],
                     usage: usage_delta,
                 }))
@@ -388,6 +400,7 @@ impl SseState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
@@ -411,6 +424,7 @@ impl SseState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
@@ -453,6 +467,7 @@ impl SseState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
@@ -485,6 +500,7 @@ impl SseState {
                     ..Default::default()
                 },
                 finish_reason: None,
+                matched_stop_sequence: None,
             }],
             usage: None,
         }
@@ -534,6 +550,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
                         ..Default::default()
                     },
                     finish_reason: None,
+                    matched_stop_sequence: None,
                 }],
                 usage: None,
             }));
@@ -545,6 +562,18 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
         let stop_reason = v.pointer("/delta/stop_reason").and_then(|r| r.as_str());
         let finish_reason = map_stop_reason(stop_reason);
         if finish_reason.is_some() {
+            // Mirror the stateful `SseState::MessageDelta` path: lift
+            // the matched `stop_sequence` only when the upstream
+            // stopped for that reason, so the Anthropic ingress can
+            // render `stop_reason:"stop_sequence"` instead of the
+            // lossy `end_turn` mapping.
+            let matched_stop_sequence = match stop_reason {
+                Some("stop_sequence") => v
+                    .pointer("/delta/stop_sequence")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+                _ => None,
+            };
             return Ok(Some(ChatChunk {
                 id: "stream".to_string(),
                 model: "unknown".to_string(),
@@ -552,6 +581,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
                     index: 0,
                     delta: ChunkDelta::default(),
                     finish_reason,
+                    matched_stop_sequence,
                 }],
                 usage: None,
             }));

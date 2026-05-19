@@ -251,6 +251,11 @@ impl Provider for OpenAiCompatProvider {
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw);
 
         let mut chat_resp = self.normalize_response(raw)?;
+        // OpenAI-compat hosts don't surface the matched stop sequence
+        // on the response wire. Recover it from the request stop list
+        // so the Anthropic ingress can render `stop_reason:"stop_sequence"`
+        // instead of `end_turn` for claude-code structured-output flows.
+        response::apply_stop_sequence_heuristic(&mut chat_resp, req.stop.as_deref());
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         Ok(chat_resp)
     }
@@ -300,6 +305,11 @@ impl Provider for OpenAiCompatProvider {
 
         let provider_id = self.cfg.id.clone();
         let dialect = self.cfg.reasoning_dialect;
+        // Capture the request stop list for the openai-compat stop-sequence
+        // heuristic (see `response::apply_stop_sequence_heuristic`). Cloned
+        // up front because `req` doesn't survive into the async_stream
+        // closure.
+        let request_stop: Option<Vec<String>> = req.stop.clone();
 
         // The ThinkTagAccumulator owns state across chunks; it lives in the
         // stream task closure for RawThinkTag dialect.
@@ -309,6 +319,11 @@ impl Provider for OpenAiCompatProvider {
 
         let out = async_stream::stream! {
             let mut think_acc = ThinkTagAccumulator::new();
+            // Running concatenation of `delta.content` text across chunks.
+            // The terminal chunk (the one carrying `finish_reason`) gets
+            // the matched_stop_sequence applied just before yield, mirroring
+            // what the non-streaming path does after `normalize_response`.
+            let mut accumulated_text = String::new();
             while let Some(event_result) = event_stream.next().await {
                 let event = match event_result {
                     Ok(e) => e,
@@ -341,7 +356,41 @@ impl Provider for OpenAiCompatProvider {
 
                 match result {
                     Ok(None) => {}
-                    Ok(Some(chunk)) => yield Ok(chunk),
+                    Ok(Some(mut chunk)) => {
+                        // Accumulate content text from EVERY chunk, including
+                        // the terminal one (the chunk that carries
+                        // finish_reason). Terminal-chunk text is intentionally
+                        // included so the suffix-match heuristic sees the
+                        // full body: some openai-compat hosts (and the
+                        // RawThinkTag dialect's post-strip emit) put real
+                        // content on the same chunk as the terminator.
+                        for choice in chunk.choices.iter() {
+                            if let Some(t) = choice.delta.content.as_deref() {
+                                accumulated_text.push_str(t);
+                            }
+                        }
+                        // Apply the stop-sequence heuristic on any choice
+                        // that carries the terminal finish_reason and no
+                        // matched_stop_sequence yet. The non-streaming
+                        // path runs the same recovery in `complete()`
+                        // after `normalize_response`.
+                        if let Some(stops) = request_stop.as_deref() {
+                            for choice in chunk.choices.iter_mut() {
+                                if choice.matched_stop_sequence.is_some() {
+                                    continue;
+                                }
+                                if choice.finish_reason.as_deref() != Some("stop") {
+                                    continue;
+                                }
+                                choice.matched_stop_sequence =
+                                    response::detect_matched_stop_sequence(
+                                        Some(accumulated_text.as_str()),
+                                        stops,
+                                    );
+                            }
+                        }
+                        yield Ok(chunk);
+                    }
                     Err(e) => yield Err(e),
                 }
             }

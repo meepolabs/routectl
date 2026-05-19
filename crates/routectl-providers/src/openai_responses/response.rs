@@ -84,6 +84,7 @@ pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<Ch
             index: 0,
             message,
             finish_reason,
+            matched_stop_sequence: None,
         }],
         usage,
         routectl_provider: None,

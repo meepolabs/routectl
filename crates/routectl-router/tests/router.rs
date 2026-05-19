@@ -134,6 +134,7 @@ fn ok_response(id: &str, model: &str) -> ChatResponse {
                 tool_calls: None,
             },
             finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(Usage::default()),
         routectl_provider: None,
@@ -152,6 +153,7 @@ fn ok_chunk(id: &str, model: &str, content: &str) -> ChatChunk {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     }
