@@ -620,13 +620,19 @@ pub async fn build_resolved_models(
             }
         };
 
-        let resolved = ResolvedModel::new(
+        let mut resolved = ResolvedModel::new(
             nickname.clone(),
             entry.provider.clone(),
             provider,
             entry.upstream.clone(),
         )
         .with_reasoning(entry.reasoning_defaults.clone());
+        if !entry.anthropic_beta.is_empty() {
+            resolved = resolved.with_anthropic_beta(entry.anthropic_beta.clone());
+        }
+        if let Some(ms) = entry.stream_first_byte_timeout_ms {
+            resolved = resolved.with_stream_first_byte_timeout_ms(ms);
+        }
         models.insert(nickname.clone(), Arc::new(resolved));
     }
 
@@ -1504,6 +1510,71 @@ mod build_resolved_models_tests {
         // compiles. The end-to-end behavior is exercised by the
         // live Bedrock tests in routectl-cli.
         let _f = build_provider_with_bedrock_model_override;
+    }
+
+    #[tokio::test]
+    async fn anthropic_beta_propagates_from_model_entry_to_resolved() {
+        // Pin: a per-model anthropic_beta list lands on
+        // ResolvedModel.anthropic_beta after build_resolved_models.
+        let store = MemoryStore;
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "opus",
+                ModelEntry::new("anthropic", "claude-opus-4-7").with_anthropic_beta(vec![
+                    "context-1m-2025-08-07".into(),
+                    "prompt-cache-1h".into(),
+                ]),
+            )],
+        );
+        let (models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = models.get("opus").expect("opus entry");
+        assert_eq!(
+            opus.anthropic_beta,
+            vec![
+                "context-1m-2025-08-07".to_string(),
+                "prompt-cache-1h".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_first_byte_timeout_ms_propagates_from_model_entry() {
+        let store = MemoryStore;
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "opus",
+                ModelEntry::new("anthropic", "claude-opus-4-7")
+                    .with_stream_first_byte_timeout_ms(300_000),
+            )],
+        );
+        let (models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = models.get("opus").expect("opus entry");
+        assert_eq!(opus.stream_first_byte_timeout_ms, Some(300_000));
+    }
+
+    #[tokio::test]
+    async fn empty_anthropic_beta_and_none_timeout_yield_defaults() {
+        // Pin: a model entry without the new fields leaves the
+        // resolved model with default values (empty list, None).
+        let store = MemoryStore;
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
+        );
+        let (models, _) = build_resolved_models(&cfg, &store, BuildOptions::default())
+            .await
+            .expect("ok");
+        let haiku = models.get("haiku").expect("haiku entry");
+        assert!(haiku.anthropic_beta.is_empty());
+        assert!(haiku.stream_first_byte_timeout_ms.is_none());
     }
 }
 
