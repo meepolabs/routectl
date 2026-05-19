@@ -294,13 +294,16 @@ fn ingress_openai_tool_choice_named_function() {
 // Scenario 3: multi_turn_with_tool_result
 // =====================================================================
 //
-// Four-message history -> user -> assistant tool_use -> tool result ->
-// user follow-up. The ingress must preserve role boundaries and the
-// `tool_use_id` linkage so the egresses can reconstruct each
-// upstream's native shape. The Anthropic ingress carries the assistant
-// tool_use as a `KnownContentPart::ToolUse`; the OpenAI ingress
-// carries the assistant tool_use as `msg.tool_calls` on an assistant
-// `Role::Assistant` message.
+// Five-message history -> user -> assistant tool_use -> tool result ->
+// assistant text -> user follow-up. AWS Converse (and Anthropic
+// Messages) require strict user/assistant alternation, so a realistic
+// flow includes the assistant's text response after the tool result
+// before the next user turn. The ingress must preserve role boundaries
+// and the `tool_use_id` linkage so each egress can reconstruct its
+// native shape. The Anthropic ingress carries the assistant tool_use
+// as a `KnownContentPart::ToolUse`; the OpenAI ingress carries the
+// assistant tool_use as `msg.tool_calls` on a `Role::Assistant`
+// message.
 
 #[test]
 fn ingress_anthropic_multi_turn_with_tool_result() {
@@ -329,6 +332,7 @@ fn ingress_anthropic_multi_turn_with_tool_result() {
                     }
                 ]
             },
+            { "role": "assistant", "content": "It is currently 72F and sunny in San Francisco." },
             { "role": "user", "content": "And tomorrow?" }
         ],
         "tools": [
@@ -349,11 +353,12 @@ fn ingress_anthropic_multi_turn_with_tool_result() {
         .parse_request(&HeaderMap::new(), wire_body)
         .expect("anthropic ingress parse");
 
-    assert_eq!(req.messages.len(), 4);
+    assert_eq!(req.messages.len(), 5);
     assert!(matches!(req.messages[0].role, Role::User));
     assert!(matches!(req.messages[1].role, Role::Assistant));
     assert!(matches!(req.messages[2].role, Role::User));
-    assert!(matches!(req.messages[3].role, Role::User));
+    assert!(matches!(req.messages[3].role, Role::Assistant));
+    assert!(matches!(req.messages[4].role, Role::User));
 
     // Assistant turn carries a typed ToolUse content part.
     match &req.messages[1].content {
@@ -385,12 +390,21 @@ fn ingress_anthropic_multi_turn_with_tool_result() {
         other => panic!("user tool-result message must carry Parts content, got {other:?}"),
     }
 
+    // Assistant text response between tool_result and the next user
+    // turn -- the alternation pin.
+    match &req.messages[3].content {
+        MessageContent::Text(t) => {
+            assert_eq!(t, "It is currently 72F and sunny in San Francisco.")
+        }
+        other => panic!("message[3] expected Text content (assistant), got {other:?}"),
+    }
+
     // Follow-up user turn: text content must round-trip verbatim.
     // Without this the test would not catch a regression that silently
     // merges or drops trailing messages.
-    match &req.messages[3].content {
+    match &req.messages[4].content {
         MessageContent::Text(t) => assert_eq!(t, "And tomorrow?"),
-        other => panic!("message[3] expected Text content, got {other:?}"),
+        other => panic!("message[4] expected Text content (user), got {other:?}"),
     }
 }
 
@@ -419,6 +433,7 @@ fn ingress_openai_multi_turn_with_tool_result() {
                 "tool_call_id": "toolu_01",
                 "content": "72F and sunny"
             },
+            { "role": "assistant", "content": "It is currently 72F and sunny in San Francisco." },
             { "role": "user", "content": "And tomorrow?" }
         ],
         "tools": [
@@ -442,11 +457,12 @@ fn ingress_openai_multi_turn_with_tool_result() {
         .parse_request(&HeaderMap::new(), wire_body)
         .expect("openai ingress parse");
 
-    assert_eq!(req.messages.len(), 4);
+    assert_eq!(req.messages.len(), 5);
     assert!(matches!(req.messages[0].role, Role::User));
     assert!(matches!(req.messages[1].role, Role::Assistant));
     assert!(matches!(req.messages[2].role, Role::Tool));
-    assert!(matches!(req.messages[3].role, Role::User));
+    assert!(matches!(req.messages[3].role, Role::Assistant));
+    assert!(matches!(req.messages[4].role, Role::User));
 
     // Assistant turn in OpenAI shape: `content: null` (no text body)
     // and `tool_calls` array carries the function-call shape verbatim.
@@ -483,10 +499,19 @@ fn ingress_openai_multi_turn_with_tool_result() {
         other => panic!("tool result must carry Text content, got {other:?}"),
     }
 
-    // Follow-up user turn: text content must round-trip verbatim.
+    // Assistant text response between tool_result and the next user
+    // turn -- the alternation pin.
     match &req.messages[3].content {
+        MessageContent::Text(t) => {
+            assert_eq!(t, "It is currently 72F and sunny in San Francisco.")
+        }
+        other => panic!("message[3] expected Text content (assistant), got {other:?}"),
+    }
+
+    // Follow-up user turn: text content must round-trip verbatim.
+    match &req.messages[4].content {
         MessageContent::Text(t) => assert_eq!(t, "And tomorrow?"),
-        other => panic!("message[3] expected Text content, got {other:?}"),
+        other => panic!("message[4] expected Text content (user), got {other:?}"),
     }
 }
 

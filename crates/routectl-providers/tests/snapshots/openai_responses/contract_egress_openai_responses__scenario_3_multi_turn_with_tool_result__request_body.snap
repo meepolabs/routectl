@@ -1,0 +1,72 @@
+---
+source: crates/routectl-providers/tests/contract_egress_openai_responses.rs
+expression: body
+---
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "What is the weather?",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "arguments": "{\"location\":\"San Francisco\"}",
+      "call_id": "toolu_01",
+      "name": "get_weather",
+      "type": "function_call"
+    },
+    {
+      "call_id": "toolu_01",
+      "output": "72F and sunny",
+      "type": "function_call_output"
+    },
+    {
+      "content": [
+        {
+          "text": "It is currently 72F and sunny in San Francisco.",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "And tomorrow?",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "",
+  "model": "claude-3-opus",
+  "parallel_tool_calls": true,
+  "store": false,
+  "stream": false,
+  "tools": [
+    {
+      "description": "Get the current weather for a location",
+      "name": "get_weather",
+      "parameters": {
+        "properties": {
+          "location": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "location"
+        ],
+        "type": "object"
+      },
+      "type": "function"
+    }
+  ]
+}

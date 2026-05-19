@@ -134,6 +134,34 @@ mod scenario_2_tool_choice_auto {
     }
 }
 
+mod scenario_2_tool_choice_auto_anthropic_shape {
+    use super::*;
+
+    #[test]
+    fn anthropic_api_egress() {
+        let req = scenarios::scenario_2_tool_choice_auto_anthropic_shape();
+        let body = anthropic_api_provider()
+            .normalize_request(&req)
+            .expect("anthropic_api normalize");
+
+        insta::with_settings!({snapshot_path => "snapshots/anthropic_api"}, {
+            insta::assert_json_snapshot!("request_body", body);
+        });
+    }
+
+    #[test]
+    fn openai_compat_egress() {
+        let req = scenarios::scenario_2_tool_choice_auto_anthropic_shape();
+        let body = openai_compat_provider()
+            .normalize_request(&req)
+            .expect("openai_compat normalize");
+
+        insta::with_settings!({snapshot_path => "snapshots/openai_compat"}, {
+            insta::assert_json_snapshot!("request_body", body);
+        });
+    }
+}
+
 mod scenario_2_tool_choice_named_function {
     use super::*;
 
