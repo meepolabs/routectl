@@ -132,6 +132,38 @@ pub struct ModelEntry {
     /// managed body fields. Other egresses ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_request_fields: Option<serde_json::Value>,
+
+    /// Per-model `anthropic-beta` flags. Lifted by the router onto
+    /// `req.anthropic_beta` at dispatch time and deduplicated against
+    /// the request-side entries (request entries preserved first,
+    /// model entries appended only if not already present). The
+    /// Anthropic-API egress's `build_headers` then merges the
+    /// resulting list with the provider's static
+    /// `extra_headers["anthropic-beta"]` value (also deduplicated).
+    /// Bedrock-Invoke / Bedrock-Converse also read
+    /// `req.anthropic_beta` (through `filter_bedrock_betas`), so the
+    /// lift extends to those egresses automatically.
+    ///
+    /// Use case: when a single provider serves multiple Claude models
+    /// and only some opt into a beta (e.g. `context-1m-2025-08-07`
+    /// works on opus/sonnet but is rejected for haiku), set the beta
+    /// here per-model instead of duplicating the entire provider
+    /// config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anthropic_beta: Vec<String>,
+
+    /// Per-model first-byte timeout for streaming responses. Resolved
+    /// with precedence per-model > per-provider > global, extending
+    /// the existing two-tier provider > global resolution on
+    /// `RetryPolicy::stream_first_byte_timeout_ms`.
+    ///
+    /// Use case: opus xhigh adaptive thinking on large prompts can
+    /// take >90s to emit the first token while non-thinking models
+    /// (haiku, llama) start responding in <5s. A per-model override
+    /// lets opus sit at 300s without forcing every other model to
+    /// wait 5 min on a dead upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_byte_timeout_ms: Option<u64>,
 }
 
 impl ModelEntry {
@@ -143,6 +175,8 @@ impl ModelEntry {
             reasoning_defaults: ReasoningDefaults::default(),
             adaptive_thinking: None,
             additional_request_fields: None,
+            anthropic_beta: Vec::new(),
+            stream_first_byte_timeout_ms: None,
         }
     }
 
@@ -161,6 +195,20 @@ impl ModelEntry {
     /// the TOML key collision with reasoning's `enabled`.
     pub fn with_selectable(mut self, b: bool) -> Self {
         self.selectable = b;
+        self
+    }
+
+    /// Set the per-model `anthropic_beta` list. Lifted onto
+    /// `req.anthropic_beta` at dispatch time.
+    pub fn with_anthropic_beta(mut self, betas: Vec<String>) -> Self {
+        self.anthropic_beta = betas;
+        self
+    }
+
+    /// Set the per-model `stream_first_byte_timeout_ms`. Wins over
+    /// the per-provider and global resolution.
+    pub fn with_stream_first_byte_timeout_ms(mut self, ms: u64) -> Self {
+        self.stream_first_byte_timeout_ms = Some(ms);
         self
     }
 }
@@ -1204,6 +1252,87 @@ selectable = false
         let names: Vec<&str> = v.nicknames().collect();
         assert_eq!(names, vec!["solo"]);
     }
+
+    #[test]
+    fn model_entry_anthropic_beta_round_trip() {
+        // Pin: per-model anthropic_beta list parses from TOML and
+        // survives a serialize -> deserialize round-trip.
+        let toml_text = r#"
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-7-20251022"
+anthropic_beta = ["context-1m-2025-08-07", "prompt-cache-1h"]
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let m = cfg.models.get("opus").expect("opus entry");
+        assert_eq!(
+            m.anthropic_beta,
+            vec![
+                "context-1m-2025-08-07".to_string(),
+                "prompt-cache-1h".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn model_entry_anthropic_beta_default_empty() {
+        // Pin: omitting the field yields an empty list (not panic),
+        // so existing configs without the key keep parsing.
+        let toml_text = r#"
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-7-20251022"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let m = cfg.models.get("opus").expect("opus entry");
+        assert!(m.anthropic_beta.is_empty());
+    }
+
+    #[test]
+    fn model_entry_anthropic_beta_skip_serializing_when_empty() {
+        // Pin: serialize-skip-when-empty so config dumps stay terse
+        // for models without the field set.
+        let m = ModelEntry::new("p", "u");
+        let dump = toml::to_string(&m).expect("serialize");
+        assert!(
+            !dump.contains("anthropic_beta"),
+            "empty list should be omitted from TOML; got: {dump}"
+        );
+    }
+
+    #[test]
+    fn model_entry_stream_first_byte_timeout_ms_round_trip() {
+        let toml_text = r#"
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-7-20251022"
+stream_first_byte_timeout_ms = 300000
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let m = cfg.models.get("opus").expect("opus entry");
+        assert_eq!(m.stream_first_byte_timeout_ms, Some(300_000));
+    }
+
+    #[test]
+    fn model_entry_stream_first_byte_timeout_ms_default_none() {
+        let toml_text = r#"
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-7-20251022"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let m = cfg.models.get("opus").expect("opus entry");
+        assert!(m.stream_first_byte_timeout_ms.is_none());
+    }
+
+    #[test]
+    fn model_entry_builders_set_new_fields() {
+        let m = ModelEntry::new("p", "u")
+            .with_anthropic_beta(vec!["b1".into(), "b2".into()])
+            .with_stream_first_byte_timeout_ms(15_000);
+        assert_eq!(m.anthropic_beta, vec!["b1".to_string(), "b2".to_string()]);
+        assert_eq!(m.stream_first_byte_timeout_ms, Some(15_000));
+    }
 }
 
 #[cfg(test)]
@@ -1441,7 +1570,14 @@ fn default_backoff_multiplier() -> f64 {
 }
 
 fn default_fallback_status() -> Vec<u16> {
-    vec![408, 429, 500, 502, 503, 504]
+    // Standard 5xx codes plus Cloudflare extended 5xx (520-527, 530).
+    // Cloudflare-fronted upstreams (opencode.ai, openrouter.ai, etc.)
+    // surface upstream-origin failures via this range; without it,
+    // a single 520 from a Cloudflare-fronted provider kills the
+    // request even though a sibling provider could have served it.
+    vec![
+        408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530,
+    ]
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -1450,4 +1586,63 @@ pub enum LegacyCompat {
     #[default]
     Openrouter,
     Openai,
+}
+
+#[cfg(test)]
+mod default_fallback_status_tests {
+    //! Pin the default `fallback_on_status` vocabulary. Cloudflare
+    //! extended 5xx codes (520-527, 530) belong on the default list
+    //! because Cloudflare-fronted upstreams (opencode.ai, openrouter.ai,
+    //! etc.) surface upstream-origin failures via this range; without
+    //! them, a single 520 from a Cloudflare-fronted provider kills the
+    //! request even though a sibling provider could have served it.
+    use super::{default_fallback_status, RetryPolicy};
+
+    #[test]
+    fn default_fallback_status_contains_legacy_codes() {
+        // Pin: existing operator configs depend on these codes being
+        // present. Pre-extension list, all six must survive.
+        let list = default_fallback_status();
+        for code in [408, 429, 500, 502, 503, 504] {
+            assert!(
+                list.contains(&code),
+                "expected default fallback list to contain legacy code {code}; got {list:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_fallback_status_contains_cloudflare_codes() {
+        // Pin: Cloudflare-extended 5xx range (520-527 + 530) is on
+        // the default fallback list.
+        let list = default_fallback_status();
+        for code in [520, 521, 522, 523, 524, 525, 526, 527, 530] {
+            assert!(
+                list.contains(&code),
+                "expected default fallback list to contain Cloudflare code {code}; got {list:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_fallback_status_does_not_contain_unrelated_5xx() {
+        // Pin: codes that are NOT eligible for retry stay off the
+        // default list. 501 (Not Implemented) is terminal and must
+        // never be retried automatically.
+        let list = default_fallback_status();
+        assert!(
+            !list.contains(&501),
+            "501 (Not Implemented) is terminal and must not be on the default fallback list"
+        );
+    }
+
+    #[test]
+    fn retries_for_status_treats_cloudflare_520_as_retryable() {
+        // Pin: with the default RetryPolicy, a 520 upstream error
+        // gets `max_attempts` retries (since 520 is in the default
+        // fallback list AND in the 5xx class).
+        let policy = RetryPolicy::default();
+        let retries = policy.retries_for_status(520);
+        assert_eq!(retries, policy.max_attempts);
+    }
 }

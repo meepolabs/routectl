@@ -55,6 +55,17 @@ pub struct ResolvedModel {
     /// and `[models.X] enabled`. Empty when the operator left both
     /// fields unset; the merge step short-circuits on empty.
     pub reasoning: ReasoningDefaults,
+    /// Per-model `anthropic-beta` flags from `[models.X] anthropic_beta`.
+    /// Lifted onto `req.anthropic_beta` at dispatch time, deduplicated
+    /// against the request-side entries. Empty when the operator left
+    /// the field unset.
+    pub anthropic_beta: Vec<String>,
+    /// Per-model first-byte timeout for streaming responses from
+    /// `[models.X] stream_first_byte_timeout_ms`. When set, wins over
+    /// the per-provider and global resolution in
+    /// `Router::compose_attempt_policy`. None defers to those lower
+    /// tiers.
+    pub stream_first_byte_timeout_ms: Option<u64>,
 }
 
 impl ResolvedModel {
@@ -70,11 +81,27 @@ impl ResolvedModel {
             provider,
             upstream: upstream.into(),
             reasoning: ReasoningDefaults::default(),
+            anthropic_beta: Vec::new(),
+            stream_first_byte_timeout_ms: None,
         }
     }
 
     pub fn with_reasoning(mut self, defaults: ReasoningDefaults) -> Self {
         self.reasoning = defaults;
+        self
+    }
+
+    /// Set the per-model `anthropic_beta` list. Lifted onto
+    /// `req.anthropic_beta` at dispatch time.
+    pub fn with_anthropic_beta(mut self, betas: Vec<String>) -> Self {
+        self.anthropic_beta = betas;
+        self
+    }
+
+    /// Set the per-model `stream_first_byte_timeout_ms` override.
+    /// Wins over per-provider and global resolution.
+    pub fn with_stream_first_byte_timeout_ms(mut self, ms: u64) -> Self {
+        self.stream_first_byte_timeout_ms = Some(ms);
         self
     }
 }
@@ -87,6 +114,11 @@ impl std::fmt::Debug for ResolvedModel {
             .field("provider_id", &self.provider.id())
             .field("upstream", &self.upstream)
             .field("reasoning", &self.reasoning)
+            .field("anthropic_beta", &self.anthropic_beta)
+            .field(
+                "stream_first_byte_timeout_ms",
+                &self.stream_first_byte_timeout_ms,
+            )
             .finish()
     }
 }
@@ -145,5 +177,28 @@ mod tests {
         let m = ResolvedModel::new("x", "p", p, "u")
             .with_reasoning(ReasoningDefaults::new().with_thinking("high"));
         assert_eq!(m.reasoning.thinking.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn with_anthropic_beta_sets_field() {
+        let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
+        let m = ResolvedModel::new("x", "p", p, "u")
+            .with_anthropic_beta(vec!["context-1m-2025-08-07".into()]);
+        assert_eq!(m.anthropic_beta, vec!["context-1m-2025-08-07".to_string()]);
+    }
+
+    #[test]
+    fn with_stream_first_byte_timeout_ms_sets_field() {
+        let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
+        let m = ResolvedModel::new("x", "p", p, "u").with_stream_first_byte_timeout_ms(15_000);
+        assert_eq!(m.stream_first_byte_timeout_ms, Some(15_000));
+    }
+
+    #[test]
+    fn defaults_have_empty_anthropic_beta_and_none_timeout() {
+        let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
+        let m = ResolvedModel::new("x", "p", p, "u");
+        assert!(m.anthropic_beta.is_empty());
+        assert!(m.stream_first_byte_timeout_ms.is_none());
     }
 }
