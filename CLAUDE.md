@@ -156,6 +156,30 @@ default           = "default"
 # field is ignored. Header always wins over the aliases map.
 ```
 
+## Retry and fallback defaults
+
+The default `RetryPolicy.fallback_on_status` list (`[retry]` table in
+TOML, `default_fallback_status` in `crates/routectl-router/src/config.rs`)
+includes the Cloudflare extended 5xx range (520-527, 530) alongside the
+standard `[408, 429, 500, 502, 503, 504]`. Cloudflare-fronted upstreams
+(opencode.ai, openrouter.ai, etc.) surface upstream-origin failures via
+this range; without them in the default list, a single 520 from a
+Cloudflare-fronted provider would kill the request even when a sibling
+provider in the chain could have served it. Operators with bespoke
+upstream behavior can still override `fallback_on_status` in `[retry]`.
+
+Two additional knobs live on `[models.X]` (per-model overrides):
+
+- `anthropic_beta = [...]` -- lifted onto `req.anthropic_beta` at
+  dispatch time, deduplicated against client-supplied entries
+  (client wins on order). Use when a provider serves multiple
+  Claude models and only some support a given beta (e.g.
+  `context-1m-2025-08-07` works on opus/sonnet but is rejected
+  for haiku) -- saves duplicating the entire provider config.
+- `stream_first_byte_timeout_ms = N` -- per-model > per-provider >
+  global resolution. Pin opus xhigh adaptive thinking at 300s
+  without forcing haiku to wait 5 min on a dead upstream.
+
 ## Verification gate
 
 Every change must keep two things green:

@@ -115,6 +115,14 @@ struct DispatchTarget {
     /// Model nickname (the `[models]` table key) for tracing. `None`
     /// in legacy mode where there's no nickname concept.
     nickname: Option<String>,
+    /// Per-model `anthropic_beta` list lifted from `[models.X]`.
+    /// Merged into `req.anthropic_beta` at dispatch time. Empty when
+    /// the operator left the field unset.
+    anthropic_beta: Vec<String>,
+    /// Per-model `stream_first_byte_timeout_ms`. When `Some`, this
+    /// value wins over the per-provider and global resolution in
+    /// `compose_attempt_policy`.
+    stream_first_byte_timeout_ms: Option<u64>,
 }
 
 impl Router {
@@ -350,6 +358,11 @@ impl Router {
                     "applied resolved-model reasoning defaults",
                 );
             }
+            // v0.6: per-model anthropic_beta list lifts onto
+            // req.anthropic_beta, dedup against existing entries.
+            if !target.anthropic_beta.is_empty() {
+                merge_model_anthropic_beta_into(&mut attempt_req, &target.anthropic_beta);
+            }
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
@@ -382,7 +395,11 @@ impl Router {
                     backoff = mul_duration(backoff, policy.backoff_multiplier);
                 }
 
-                let attempt_policy = self.compose_attempt_policy(&policy, provider_name);
+                let attempt_policy = self.compose_attempt_policy(
+                    &policy,
+                    provider_name,
+                    target.stream_first_byte_timeout_ms,
+                );
                 let result = run_with_timeout(
                     provider_name,
                     provider.as_ref(),
@@ -492,8 +509,17 @@ impl Router {
             if let Some(defaults) = target.reasoning.as_ref() {
                 merge_reasoning_defaults_into(&mut attempt_req, defaults);
             }
+            // v0.6: per-model anthropic_beta lifts onto req.anthropic_beta,
+            // dedup against existing entries.
+            if !target.anthropic_beta.is_empty() {
+                merge_model_anthropic_beta_into(&mut attempt_req, &target.anthropic_beta);
+            }
 
-            let attempt_policy = self.compose_attempt_policy(&policy, provider_name);
+            let attempt_policy = self.compose_attempt_policy(
+                &policy,
+                provider_name,
+                target.stream_first_byte_timeout_ms,
+            );
             match try_stream_with_first_chunk(provider_name, provider, attempt_req, &attempt_policy)
                 .await
             {
@@ -596,7 +622,19 @@ impl Router {
     /// resolved `RetryPolicy`. Provider-level fills in only when the
     /// base left the field None. Both None falls through to reqwest's
     /// default.
-    fn compose_attempt_policy(&self, base: &RetryPolicy, provider_name: &str) -> RetryPolicy {
+    ///
+    /// Resolution precedence for `stream_first_byte_timeout_ms`:
+    /// per-model (`model_first_byte_timeout_override`) >
+    /// per-provider (`ProviderRuntimePolicy.stream_first_byte_timeout_ms`) >
+    /// global (`[retry].stream_first_byte_timeout_ms` baked into
+    /// `base`). When the per-model override is `Some`, it wins
+    /// unconditionally over the provider + global tiers.
+    fn compose_attempt_policy(
+        &self,
+        base: &RetryPolicy,
+        provider_name: &str,
+        model_first_byte_timeout_override: Option<u64>,
+    ) -> RetryPolicy {
         let provider_runtime = self
             .config
             .providers
@@ -606,11 +644,37 @@ impl Router {
         if out.request_timeout_ms.is_none() {
             out.request_timeout_ms = provider_runtime.and_then(|p| p.request_timeout_ms);
         }
-        if out.stream_first_byte_timeout_ms.is_none() {
+        // Per-model override wins unconditionally over the
+        // provider + global resolution.
+        if let Some(ms) = model_first_byte_timeout_override {
+            out.stream_first_byte_timeout_ms = Some(ms);
+        } else if out.stream_first_byte_timeout_ms.is_none() {
             out.stream_first_byte_timeout_ms =
                 provider_runtime.and_then(|p| p.stream_first_byte_timeout_ms);
         }
         out
+    }
+}
+
+/// Merge a model entry's `anthropic_beta` list into the per-attempt
+/// request's `anthropic_beta` field. Deduplicated: request entries
+/// preserved first (in their existing order); model entries appended
+/// only when not already present.
+///
+/// Use case: a single provider serves multiple Claude models where
+/// only some opt into a beta (e.g. `context-1m-2025-08-07` works on
+/// opus/sonnet but is rejected for haiku). Per-model
+/// `[models.X] anthropic_beta` lifts the right flags onto the right
+/// requests without duplicating the entire provider config.
+pub fn merge_model_anthropic_beta_into(req: &mut ChatRequest, model_betas: &[String]) {
+    if model_betas.is_empty() {
+        return;
+    }
+    let mut seen: std::collections::BTreeSet<String> = req.anthropic_beta.iter().cloned().collect();
+    for entry in model_betas {
+        if seen.insert(entry.clone()) {
+            req.anthropic_beta.push(entry.clone());
+        }
     }
 }
 
@@ -635,6 +699,8 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
             Some(m.reasoning.clone())
         },
         nickname: Some(m.nickname.clone()),
+        anthropic_beta: m.anthropic_beta.clone(),
+        stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
     }
 }
 
@@ -938,7 +1004,7 @@ mod tests {
         // Expected: provider's values land in the per-attempt policy.
         let router = build_router_with_provider_timeouts(Some(180_000), Some(60_000));
         let base = RetryPolicy::default(); // both timeout fields None
-        let composed = router.compose_attempt_policy(&base, "p1");
+        let composed = router.compose_attempt_policy(&base, "p1", None);
         assert_eq!(composed.request_timeout_ms, Some(180_000));
         assert_eq!(composed.stream_first_byte_timeout_ms, Some(60_000));
     }
@@ -953,7 +1019,7 @@ mod tests {
             stream_first_byte_timeout_ms: Some(5_000),
             ..RetryPolicy::default()
         };
-        let composed = router.compose_attempt_policy(&base, "p1");
+        let composed = router.compose_attempt_policy(&base, "p1", None);
         assert_eq!(composed.request_timeout_ms, Some(30_000));
         assert_eq!(composed.stream_first_byte_timeout_ms, Some(5_000));
     }
@@ -968,7 +1034,7 @@ mod tests {
             request_timeout_ms: Some(45_000),
             ..RetryPolicy::default()
         };
-        let composed = router.compose_attempt_policy(&base, "p1");
+        let composed = router.compose_attempt_policy(&base, "p1", None);
         assert_eq!(composed.request_timeout_ms, Some(45_000));
         assert_eq!(composed.stream_first_byte_timeout_ms, Some(120_000));
     }
@@ -984,7 +1050,7 @@ mod tests {
             request_timeout_ms: Some(7_000),
             ..RetryPolicy::default()
         };
-        let composed = router.compose_attempt_policy(&base, "missing-provider");
+        let composed = router.compose_attempt_policy(&base, "missing-provider", None);
         assert_eq!(composed.request_timeout_ms, Some(7_000));
         assert!(composed.stream_first_byte_timeout_ms.is_none());
     }
@@ -996,9 +1062,240 @@ mod tests {
         // (router falls through to reqwest's default).
         let router = build_router_with_provider_timeouts(None, None);
         let base = RetryPolicy::default();
-        let composed = router.compose_attempt_policy(&base, "p1");
+        let composed = router.compose_attempt_policy(&base, "p1", None);
         assert!(composed.request_timeout_ms.is_none());
         assert!(composed.stream_first_byte_timeout_ms.is_none());
+    }
+
+    #[test]
+    fn compose_model_first_byte_timeout_wins_over_provider_and_global() {
+        // Per-model > per-provider > global. The per-model override
+        // pins 5000 even though global is 90000 and provider is 60000.
+        let router = build_router_with_provider_timeouts(None, Some(60_000));
+        let base = RetryPolicy {
+            stream_first_byte_timeout_ms: Some(90_000),
+            ..RetryPolicy::default()
+        };
+        let composed = router.compose_attempt_policy(&base, "p1", Some(5_000));
+        assert_eq!(composed.stream_first_byte_timeout_ms, Some(5_000));
+    }
+
+    #[test]
+    fn compose_model_first_byte_timeout_none_falls_back_to_provider_resolution() {
+        // No per-model override -> provider + global path resolves
+        // exactly as before. With base unset, the provider's value wins.
+        let router = build_router_with_provider_timeouts(None, Some(60_000));
+        let base = RetryPolicy::default();
+        let composed = router.compose_attempt_policy(&base, "p1", None);
+        assert_eq!(composed.stream_first_byte_timeout_ms, Some(60_000));
+    }
+
+    #[test]
+    fn compose_model_first_byte_timeout_wins_over_base_too() {
+        // Per-model override beats base (global) even when base is set.
+        // Pins the per-model > global precedence regardless of provider state.
+        let router = build_router_with_provider_timeouts(None, None);
+        let base = RetryPolicy {
+            stream_first_byte_timeout_ms: Some(45_000),
+            ..RetryPolicy::default()
+        };
+        let composed = router.compose_attempt_policy(&base, "p1", Some(10_000));
+        assert_eq!(composed.stream_first_byte_timeout_ms, Some(10_000));
+    }
+}
+
+#[cfg(test)]
+mod merge_model_anthropic_beta_tests {
+    use super::*;
+
+    fn req_with_betas(betas: Vec<&str>) -> ChatRequest {
+        ChatRequest {
+            model: "any".into(),
+            messages: vec![],
+            anthropic_beta: betas.into_iter().map(String::from).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_model_betas_is_noop() {
+        let mut req = req_with_betas(vec!["a"]);
+        merge_model_anthropic_beta_into(&mut req, &[]);
+        assert_eq!(req.anthropic_beta, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn appends_new_entries_preserves_request_order() {
+        // Request: ["a"], Model: ["a", "b"] -> result ["a", "b"].
+        // Request entries preserved first (in their existing order);
+        // model entries appended only when not already present.
+        let mut req = req_with_betas(vec!["a"]);
+        merge_model_anthropic_beta_into(&mut req, &["a".into(), "b".into()]);
+        assert_eq!(req.anthropic_beta, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn dedupes_duplicates_within_request() {
+        // Even when the request already had duplicates, the model's
+        // entries don't re-add anything already present in the set.
+        // Existing request duplicates are preserved (the dedup only
+        // gates new entries from the model side).
+        let mut req = req_with_betas(vec!["a", "b"]);
+        merge_model_anthropic_beta_into(&mut req, &["b".into(), "c".into()]);
+        assert_eq!(
+            req.anthropic_beta,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_request_betas_with_model_betas_populates_list() {
+        let mut req = req_with_betas(vec![]);
+        merge_model_anthropic_beta_into(&mut req, &["x".into(), "y".into()]);
+        assert_eq!(req.anthropic_beta, vec!["x".to_string(), "y".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod model_anthropic_beta_lift_tests {
+    //! Integration: pin that the per-model `anthropic_beta` list lifts
+    //! onto the upstream request on both the complete and stream
+    //! dispatch paths.
+    use super::*;
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use parking_lot::Mutex as ParkingMutex;
+    use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, Provider};
+    use std::collections::BTreeMap;
+
+    struct CapturingProvider {
+        id: String,
+        captured: Arc<ParkingMutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl Provider for CapturingProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            let model = req.model.clone();
+            self.captured.lock().push(req);
+            Ok(ChatResponse {
+                id: "ok".into(),
+                model,
+                created: 0,
+                choices: vec![Choice {
+                    index: 0,
+                    message: Message {
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+            })
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.captured.lock().push(req);
+            // Emit one minimal chunk so the stream path completes.
+            let s = futures::stream::once(async move {
+                Ok(ChatChunk {
+                    id: "c0".into(),
+                    model: "x".into(),
+                    choices: vec![],
+                    usage: None,
+                })
+            });
+            Ok(s.boxed())
+        }
+    }
+
+    fn router_with_capture(
+        anthropic_beta: Vec<String>,
+    ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
+        let cfg = Arc::new(Config::default());
+        let mut router = Router::new(cfg);
+        let captured: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "cap".into(),
+            captured: captured.clone(),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        let mut resolved = ResolvedModel::new("haiku", "anthropic", provider, "claude-haiku-4-5");
+        if !anthropic_beta.is_empty() {
+            resolved = resolved.with_anthropic_beta(anthropic_beta);
+        }
+        models.insert("haiku".into(), Arc::new(resolved));
+        router.install_resolved_models(models);
+        (router, captured)
+    }
+
+    #[tokio::test]
+    async fn complete_path_lifts_model_anthropic_beta_onto_request() {
+        let (router, captured) = router_with_capture(vec![
+            "context-1m-2025-08-07".into(),
+            "prompt-cache-1h".into(),
+        ]);
+        let req = ChatRequest {
+            model: "haiku".into(),
+            messages: vec![],
+            anthropic_beta: vec!["client-supplied".into()],
+            ..Default::default()
+        };
+        router.complete(req).await.expect("ok");
+        let captured = captured.lock();
+        let upstream = captured.first().expect("one upstream call");
+        // Request entries preserved first, model entries appended.
+        assert_eq!(
+            upstream.anthropic_beta,
+            vec![
+                "client-supplied".to_string(),
+                "context-1m-2025-08-07".to_string(),
+                "prompt-cache-1h".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_path_lifts_model_anthropic_beta_onto_request() {
+        let (router, captured) = router_with_capture(vec!["context-1m-2025-08-07".into()]);
+        let req = ChatRequest {
+            model: "haiku".into(),
+            messages: vec![],
+            anthropic_beta: vec![],
+            ..Default::default()
+        };
+        let _ = router
+            .stream(req)
+            .await
+            .expect("ok")
+            .collect::<Vec<_>>()
+            .await;
+        let captured = captured.lock();
+        let upstream = captured.first().expect("one upstream call");
+        assert_eq!(
+            upstream.anthropic_beta,
+            vec!["context-1m-2025-08-07".to_string()]
+        );
     }
 }
 
