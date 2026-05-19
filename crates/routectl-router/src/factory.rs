@@ -232,6 +232,7 @@ async fn build_provider_inner(
                 history_reasoning: map_history_reasoning(*history_reasoning),
                 user_agent: user_agent.clone(),
                 strict_translation: opts.strict_translation,
+                disable_stream_include_usage: false,
             };
             Ok(Arc::new(OpenAiCompatProvider::new(cfg)))
         }

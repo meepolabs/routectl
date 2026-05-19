@@ -78,6 +78,13 @@ pub struct OpenAiCompatConfig {
     /// `Error::Validation` instead of warn-and-dropped. Set from
     /// `[server] strict_translation` at provider build time.
     pub strict_translation: bool,
+    /// When `true`, suppress the auto-injected
+    /// `stream_options.include_usage = true` on streaming requests.
+    /// Default `false` (auto-inject). Use for openai-compat hosts that
+    /// 400 on unknown fields. Operator-supplied `stream_options` in
+    /// `default_extras` / `provider_extras` always wins -- including an
+    /// explicit `include_usage = false`.
+    pub disable_stream_include_usage: bool,
 }
 
 /// Outgoing-history reasoning policy. Sibling of the router-side
@@ -137,11 +144,19 @@ impl OpenAiCompatProvider {
             // we just set. HeaderMap::insert replaces by name, so without
             // this guard `extra_headers = { "authorization" = "..." }` would
             // silently override the Bearer token.
-            if crate::http_client::is_reserved_extra_header(k) {
+            if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
+                );
+                continue;
+            }
+            if crate::http_client::is_managed_header(k) {
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "dropping managed header from extra_headers; composed dynamically by routectl"
                 );
                 continue;
             }
@@ -201,6 +216,7 @@ impl Provider for OpenAiCompatProvider {
         // `tracing::Level::TRACE`; default `info` filter pays
         // nothing.
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
             .client
@@ -265,11 +281,22 @@ impl Provider for OpenAiCompatProvider {
         let mut body = self.normalize_request(&req)?;
         body["stream"] = Value::Bool(true);
 
+        // Auto-inject `stream_options.include_usage = true` so the
+        // upstream emits a terminal usage chunk + finish_reason.
+        // Without this, many openai-compat hosts end the stream with a
+        // bare `data: [DONE]` and routectl's stream summary reports
+        // `chunks=N finish_reason=unknown total_tokens=0` even on a
+        // fully successful stream. Operator-supplied `stream_options`
+        // (default_extras / provider_extras) always wins; the opt-out
+        // toggle is `disable_stream_include_usage = true`.
+        ensure_stream_options_include_usage(&mut body, self.cfg.disable_stream_include_usage);
+
         let headers = self.build_headers()?;
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions (stream)");
 
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
             .client
@@ -402,5 +429,83 @@ impl Provider for OpenAiCompatProvider {
             PROVIDER_KIND,
             self.cfg.id.clone(),
         ))
+    }
+}
+
+/// Ensure `body.stream_options.include_usage = true` on outgoing
+/// streaming requests so the upstream emits a terminal usage chunk +
+/// finish_reason. Precedence rules:
+///
+///   1. If `disabled == true`, return early (operator opt-out).
+///   2. If `stream_options.include_usage` is already present (operator
+///      supplied via `default_extras` / `provider_extras`), leave it
+///      verbatim -- even an explicit `false` wins over the auto-inject.
+///   3. Otherwise, create the `stream_options` object if missing and
+///      set `include_usage = true`.
+///
+/// Body MUST be a JSON object (caller is the openai-compat egress; its
+/// `normalize_request` always returns an object). Non-object bodies are
+/// no-ops for safety.
+pub(crate) fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
+    if disabled {
+        return;
+    }
+    if body.pointer("/stream_options/include_usage").is_some() {
+        return;
+    }
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let entry = obj
+        .entry("stream_options".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(so) = entry.as_object_mut() {
+        so.insert("include_usage".to_string(), Value::Bool(true));
+    }
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::ensure_stream_options_include_usage;
+    use serde_json::json;
+
+    #[test]
+    fn injects_when_absent_and_not_disabled() {
+        let mut body = json!({"model": "x", "stream": true});
+        ensure_stream_options_include_usage(&mut body, false);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn opt_out_suppresses_injection() {
+        let mut body = json!({"model": "x", "stream": true});
+        ensure_stream_options_include_usage(&mut body, true);
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn preserves_operator_supplied_true() {
+        let mut body = json!({"stream_options": {"include_usage": true, "other": 1}});
+        ensure_stream_options_include_usage(&mut body, false);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        // Existing sibling fields untouched.
+        assert_eq!(body["stream_options"]["other"], 1);
+    }
+
+    #[test]
+    fn preserves_operator_supplied_false() {
+        // Operator opted out via extras -- explicit `false` must win
+        // over the auto-inject, not silently flip to true.
+        let mut body = json!({"stream_options": {"include_usage": false}});
+        ensure_stream_options_include_usage(&mut body, false);
+        assert_eq!(body["stream_options"]["include_usage"], false);
+    }
+
+    #[test]
+    fn creates_stream_options_object_when_other_keys_present_outside() {
+        let mut body = json!({"stream_options": {"unrelated_key": "v"}});
+        ensure_stream_options_include_usage(&mut body, false);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["stream_options"]["unrelated_key"], "v");
     }
 }

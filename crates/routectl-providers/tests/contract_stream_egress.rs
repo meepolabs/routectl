@@ -72,6 +72,7 @@ fn openai_compat_provider(base_url: &str) -> OpenAiCompatProvider {
         history_reasoning: HistoryReasoning::Auto,
         user_agent: None,
         strict_translation: false,
+        disable_stream_include_usage: false,
     })
 }
 
@@ -294,13 +295,18 @@ mod scenario_7_basic_stream_sequence {
             Some("stop"),
             "openai-compat egress must surface terminal finish_reason `stop`"
         );
-        // The canned fixture does not include `stream_options:
-        // {include_usage: true}`, so the egress must NOT synthesize
-        // usage from nothing. Negative assertion catches a regression
-        // that fabricates usage on the wire.
-        assert!(
-            chunks.iter().all(|c| c.usage.is_none()),
-            "openai-compat egress must not synthesize usage when the wire fixture carries none; chunks: {chunks:?}"
+        // The egress now auto-injects `stream_options.include_usage = true`
+        // on streaming requests so the upstream emits a terminal usage
+        // chunk + finish_reason. Pin the wire-body by reading the
+        // captured request body off the mock server.
+        let received = server.received_requests().await.expect("received requests");
+        assert_eq!(received.len(), 1, "exactly one upstream request expected");
+        let body: serde_json::Value =
+            serde_json::from_slice(&received[0].body).expect("body parses as JSON");
+        assert_eq!(
+            body.pointer("/stream_options/include_usage"),
+            Some(&serde_json::Value::Bool(true)),
+            "egress must auto-inject stream_options.include_usage = true on streaming requests; body: {body}"
         );
     }
 }
@@ -370,4 +376,96 @@ mod scenario_8_post_done_trailer {
             "openai-compat egress must surface terminal finish_reason on pre-DONE chunk"
         );
     }
+}
+
+// =====================================================================
+// stream_options auto-inject precedence (issue #4)
+// =====================================================================
+//
+// The openai-compat egress defaults to injecting `stream_options.include_usage = true`
+// on streaming requests so most upstreams emit a terminal usage chunk +
+// finish_reason. The precedence rules:
+//
+//   - operator opt-out via `disable_stream_include_usage = true` -> no inject
+//   - operator-supplied `stream_options` in `default_extras` /
+//     `provider_extras` wins -- including an explicit `include_usage = false`.
+
+#[tokio::test]
+async fn openai_compat_egress_opt_out_suppresses_stream_options() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "openai-compat-test".into(),
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        extra_headers: vec![],
+        default_extras: None,
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: HistoryReasoning::Auto,
+        user_agent: None,
+        strict_translation: false,
+        disable_stream_include_usage: true,
+    });
+    let _ = collect_chunks(&provider, stream_request("gpt-4o")).await;
+
+    let received = server.received_requests().await.expect("received requests");
+    assert_eq!(received.len(), 1, "exactly one upstream request expected");
+    let body: serde_json::Value =
+        serde_json::from_slice(&received[0].body).expect("body parses as JSON");
+    assert!(
+        body.get("stream_options").is_none(),
+        "opt-out must suppress the auto-injected stream_options entirely; body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn openai_compat_egress_preserves_operator_supplied_stream_options() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+
+    // Operator explicitly opted out via default_extras with
+    // `include_usage = false`. The auto-inject must not flip it to
+    // true -- explicit operator config wins.
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "openai-compat-test".into(),
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        extra_headers: vec![],
+        default_extras: Some(serde_json::json!({
+            "stream_options": {"include_usage": false}
+        })),
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: HistoryReasoning::Auto,
+        user_agent: None,
+        strict_translation: false,
+        disable_stream_include_usage: false,
+    });
+    let _ = collect_chunks(&provider, stream_request("gpt-4o")).await;
+
+    let received = server.received_requests().await.expect("received requests");
+    assert_eq!(received.len(), 1, "exactly one upstream request expected");
+    let body: serde_json::Value =
+        serde_json::from_slice(&received[0].body).expect("body parses as JSON");
+    assert_eq!(
+        body.pointer("/stream_options/include_usage"),
+        Some(&serde_json::Value::Bool(false)),
+        "operator-supplied include_usage=false must win over auto-inject; body: {body}"
+    );
 }

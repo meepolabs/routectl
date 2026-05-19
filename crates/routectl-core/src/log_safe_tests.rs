@@ -711,3 +711,150 @@ fn truncate_short_body_no_marker() {
     assert_eq!(got, "{\"a\":1}");
     assert!(!got.contains("[truncated"));
 }
+
+// ---------------------------------------------------------------------
+// structural summary (issue #7)
+// ---------------------------------------------------------------------
+
+#[test]
+fn extract_structural_summary_extracts_nominal_fields() {
+    let body = json!({
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 4096,
+        "stream": true,
+        "thinking": {"type": "enabled", "budget_tokens": 8192},
+        "tool_choice": "auto",
+        "anthropic_beta": ["context-1m-2025-08-07", "prompt-cache-1h"],
+        "provider_extras": {"context_management": {"type": "default"}, "mcp_servers": []},
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"name": "t1"}, {"name": "t2"}],
+    });
+    let s = super::extract_structural_summary(&body);
+    assert_eq!(s.model.as_deref(), Some("claude-sonnet-4-5"));
+    assert_eq!(s.max_tokens, Some(4096));
+    assert_eq!(s.stream, Some(true));
+    assert_eq!(s.thinking_shape.as_deref(), Some("enabled:8192"));
+    assert_eq!(s.output_config_effort, None);
+    assert_eq!(s.tool_choice_shape.as_deref(), Some("auto"));
+    assert_eq!(s.cache_control_count, 0);
+    assert_eq!(s.messages_len, 1);
+    assert_eq!(s.tools_len, 2);
+    assert_eq!(
+        s.anthropic_beta,
+        vec!["context-1m-2025-08-07", "prompt-cache-1h"]
+    );
+    // provider_extras keys come back sorted for stable greps.
+    assert_eq!(
+        s.provider_extras_keys,
+        vec!["context_management".to_string(), "mcp_servers".to_string()]
+    );
+}
+
+#[test]
+fn extract_structural_summary_handles_missing_keys() {
+    let body = json!({});
+    let s = super::extract_structural_summary(&body);
+    assert_eq!(s.model, None);
+    assert_eq!(s.max_tokens, None);
+    assert_eq!(s.stream, None);
+    assert_eq!(s.thinking_shape, None);
+    assert_eq!(s.output_config_effort, None);
+    assert_eq!(s.tool_choice_shape, None);
+    assert_eq!(s.cache_control_count, 0);
+    assert_eq!(s.messages_len, 0);
+    assert_eq!(s.tools_len, 0);
+    assert!(s.anthropic_beta.is_empty());
+    assert!(s.provider_extras_keys.is_empty());
+}
+
+#[test]
+fn extract_structural_summary_walks_cache_control_nested() {
+    // Three cache_control breakpoints:
+    //   - top-level (Anthropic-shape on the request itself)
+    //   - one inside messages[0].content[1]
+    //   - one inside tools[0]
+    let body = json!({
+        "cache_control": {"type": "ephemeral"},
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "no breakpoint"},
+                {"type": "text", "text": "with breakpoint", "cache_control": {"type": "ephemeral"}},
+            ],
+        }],
+        "tools": [{
+            "name": "t1",
+            "cache_control": {"type": "ephemeral"},
+        }],
+    });
+    let s = super::extract_structural_summary(&body);
+    assert_eq!(s.cache_control_count, 3);
+}
+
+#[test]
+fn extract_structural_summary_omits_budget_tokens() {
+    // The raw budget integer is encoded into the discriminator
+    // string. The StructuralSummary struct does NOT carry the raw
+    // u32 -- the operator's validator wants a single stable string
+    // field per shape.
+    let body = json!({"thinking": {"type": "enabled", "budget_tokens": 12345}});
+    let s = super::extract_structural_summary(&body);
+    assert_eq!(s.thinking_shape.as_deref(), Some("enabled:12345"));
+    // Verify there is no separate `budget_tokens` field. Compile-time
+    // proof: any `s.budget_tokens` access here would not compile.
+    // Runtime documentation: the only place the budget value appears
+    // is inside the discriminator string.
+    let dump = format!("{:?}", s);
+    // The discriminator carries the int; no separate int field exposes it.
+    assert!(dump.contains("enabled:12345"));
+}
+
+#[test]
+fn extract_structural_summary_collapses_tool_choice_shapes() {
+    for (input, expected) in [
+        (json!("auto"), "auto"),
+        (json!("none"), "none"),
+        (json!("required"), "required"),
+        (
+            json!({"type": "function", "function": {"name": "x"}}),
+            "function:x",
+        ),
+        // Flat shape (Anthropic / OpenAI Responses).
+        (json!({"type": "function", "name": "x"}), "function:x"),
+        // Forward-compat unknown object discriminator.
+        (json!({"type": "tool"}), "object:tool"),
+    ] {
+        let body = json!({"tool_choice": input});
+        let s = super::extract_structural_summary(&body);
+        assert_eq!(
+            s.tool_choice_shape.as_deref(),
+            Some(expected),
+            "tool_choice {body} should collapse to {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn extract_structural_summary_adaptive_thinking_pairs_with_effort() {
+    let body = json!({
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
+    });
+    let s = super::extract_structural_summary(&body);
+    assert_eq!(s.thinking_shape.as_deref(), Some("adaptive:high"));
+    assert_eq!(s.output_config_effort.as_deref(), Some("high"));
+}
+
+#[test]
+fn extract_structural_summary_uses_input_for_responses_shape() {
+    // OpenAI Responses ingress carries the conversation in `input`
+    // rather than `messages`. The structural extractor counts either.
+    let body = json!({
+        "input": [
+            {"role": "user", "content": "a"},
+            {"role": "user", "content": "b"},
+        ],
+    });
+    let s = super::extract_structural_summary(&body);
+    assert_eq!(s.messages_len, 2);
+}
