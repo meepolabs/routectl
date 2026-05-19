@@ -1,0 +1,15 @@
+---
+source: crates/routectl-providers/tests/contract_egress_bedrock_invoke.rs
+expression: body
+---
+{
+  "anthropic_version": "bedrock-2023-05-31",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": "Hello!",
+      "role": "user"
+    }
+  ],
+  "system": "You are a helpful assistant."
+}

@@ -98,6 +98,20 @@ pub mod scenarios {
         }
     }
 
+    /// Scenario 2 (auto, Anthropic-ingress canonical): the
+    /// Anthropic-shape object form of `tool_choice`. Mirrors the
+    /// cli-crate builder of the same name.
+    pub fn scenario_2_tool_choice_auto_anthropic_shape() -> ChatRequest {
+        ChatRequest {
+            model: "claude-3-opus".into(),
+            messages: vec![user_msg("What is the weather?")],
+            tools: Some(vec![get_weather_tool()]),
+            tool_choice: Some(json!({"type": "auto"})),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
     /// Scenario 2 (named function): one custom tool + a
     /// `tool_choice` value that pins the model to one specific tool.
     /// Mirrors the cli-crate builder of the same name.
@@ -115,7 +129,7 @@ pub mod scenarios {
         }
     }
 
-    /// Scenario 3: a four-message history with a tool round-trip.
+    /// Scenario 3: a five-message history with a tool round-trip.
     /// Mirrors the cli-crate builder of the same name.
     pub fn scenario_3_multi_turn_with_tool_result() -> ChatRequest {
         let assistant_with_tool_use = Message {
@@ -147,6 +161,7 @@ pub mod scenarios {
                 user_msg("What is the weather?"),
                 assistant_with_tool_use,
                 tool_result,
+                assistant_text_msg("It is currently 72F and sunny in San Francisco."),
                 user_msg("And tomorrow?"),
             ],
             tools: Some(vec![get_weather_tool()]),

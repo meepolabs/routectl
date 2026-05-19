@@ -1,0 +1,23 @@
+---
+source: crates/routectl-providers/tests/contract_egress_openai_responses.rs
+expression: body
+---
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "Hello!",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "You are a helpful assistant.",
+  "model": "claude-3-opus",
+  "parallel_tool_calls": true,
+  "store": false,
+  "stream": false
+}

@@ -1,0 +1,87 @@
+---
+source: crates/routectl-providers/tests/contract_egress_bedrock_converse.rs
+expression: body
+---
+{
+  "inferenceConfig": {
+    "maxTokens": 1024
+  },
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "What is the weather?"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "toolUse": {
+            "input": {
+              "location": "San Francisco"
+            },
+            "name": "get_weather",
+            "toolUseId": "toolu_01"
+          }
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "toolResult": {
+            "content": [
+              {
+                "text": "72F and sunny"
+              }
+            ],
+            "toolUseId": "toolu_01"
+          }
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "It is currently 72F and sunny in San Francisco."
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "And tomorrow?"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "toolConfig": {
+    "tools": [
+      {
+        "toolSpec": {
+          "description": "Get the current weather for a location",
+          "inputSchema": {
+            "json": {
+              "properties": {
+                "location": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "location"
+              ],
+              "type": "object"
+            }
+          },
+          "name": "get_weather"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,42 @@
+---
+source: crates/routectl-providers/tests/contract_egress_openai_responses.rs
+expression: body
+---
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "What is the weather?",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "",
+  "model": "claude-3-opus",
+  "parallel_tool_calls": true,
+  "store": false,
+  "stream": false,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "description": "Get the current weather for a location",
+      "name": "get_weather",
+      "parameters": {
+        "properties": {
+          "location": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "location"
+        ],
+        "type": "object"
+      },
+      "type": "function"
+    }
+  ]
+}
