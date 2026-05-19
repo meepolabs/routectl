@@ -99,8 +99,14 @@ impl ResolvedModel {
     }
 
     /// Set the per-model `stream_first_byte_timeout_ms` override.
-    /// Wins over per-provider and global resolution.
+    /// Wins over per-provider and global resolution. A value of 0 is
+    /// an operator-error sentinel (every stream would time out before
+    /// the first chunk arrived); flagged in debug builds.
     pub fn with_stream_first_byte_timeout_ms(mut self, ms: u64) -> Self {
+        debug_assert!(
+            ms > 0,
+            "stream_first_byte_timeout_ms must be > 0; 0 would time out every stream",
+        );
         self.stream_first_byte_timeout_ms = Some(ms);
         self
     }

@@ -659,13 +659,21 @@ impl Router {
 /// Merge a model entry's `anthropic_beta` list into the per-attempt
 /// request's `anthropic_beta` field. Deduplicated: request entries
 /// preserved first (in their existing order); model entries appended
-/// only when not already present.
+/// only when not already present. Comparison is exact-string (case
+/// sensitive) because Anthropic beta names are case-sensitive
+/// identifiers (`context-1m-2025-08-07` != `Context-1m-2025-08-07`);
+/// a casing typo SHOULD propagate so the upstream's 400 surfaces the
+/// misconfig immediately.
 ///
 /// Use case: a single provider serves multiple Claude models where
-/// only some opt into a beta (e.g. `context-1m-2025-08-07` works on
-/// opus/sonnet but is rejected for haiku). Per-model
-/// `[models.X] anthropic_beta` lifts the right flags onto the right
-/// requests without duplicating the entire provider config.
+/// only some opt into a beta. The merge is **additive**: per-model
+/// `anthropic_beta` can ADD flags but cannot SUPPRESS a flag that
+/// the provider already sets via `extra_headers["anthropic-beta"]`
+/// or `[providers.X] anthropic_beta`. To make a model opt OUT of a
+/// provider-shipped beta, the operator must remove the beta from the
+/// provider's config and re-add it to the per-model entries that
+/// actually want it. See CLAUDE.md "Retry and fallback defaults"
+/// section for the migration pattern.
 pub fn merge_model_anthropic_beta_into(req: &mut ChatRequest, model_betas: &[String]) {
     if model_betas.is_empty() {
         return;
@@ -1153,6 +1161,45 @@ mod merge_model_anthropic_beta_tests {
         let mut req = req_with_betas(vec![]);
         merge_model_anthropic_beta_into(&mut req, &["x".into(), "y".into()]);
         assert_eq!(req.anthropic_beta, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn dedup_is_case_sensitive_matching_anthropic_beta_semantics() {
+        // Anthropic beta names are case-sensitive identifiers; a
+        // casing typo SHOULD propagate so the upstream's 400 surfaces
+        // the misconfig rather than the merge silently smoothing it
+        // over. Request `Context-1m-2025-08-07` (wrong case) plus
+        // model `context-1m-2025-08-07` (correct) yields both on the
+        // wire; upstream picks the canonical match and ignores or
+        // 400s on the other -- either way the operator sees the
+        // disagreement.
+        let mut req = req_with_betas(vec!["Context-1m-2025-08-07"]);
+        merge_model_anthropic_beta_into(&mut req, &["context-1m-2025-08-07".into()]);
+        assert_eq!(
+            req.anthropic_beta,
+            vec![
+                "Context-1m-2025-08-07".to_string(),
+                "context-1m-2025-08-07".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn additive_only_cannot_suppress_request_betas() {
+        // Per-model anthropic_beta is additive: it can ADD flags but
+        // cannot REMOVE one already in `req.anthropic_beta` (which
+        // typically gets populated from provider-level
+        // `extra_headers["anthropic-beta"]` upstream, or from the
+        // inbound HTTP header). Pin the contract so a future change
+        // that quietly reinterprets the merge as a replace doesn't
+        // pass review unnoticed.
+        let mut req = req_with_betas(vec!["context-1m-2025-08-07"]);
+        merge_model_anthropic_beta_into(&mut req, &[]);
+        assert_eq!(
+            req.anthropic_beta,
+            vec!["context-1m-2025-08-07".to_string()],
+            "empty model list must not strip existing request betas",
+        );
     }
 }
 
