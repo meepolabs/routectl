@@ -67,7 +67,7 @@ uuid = { version = "1", features = ["v4", "v7"] }
 
 # Test deps (used in dev-dependencies of individual crates)
 wiremock = "0.6"
-insta = { version = "1", features = ["yaml"] }
+insta = { version = "1", features = ["yaml", "json"] }
 tokio-test = "0.4"
 
 [profile.release]

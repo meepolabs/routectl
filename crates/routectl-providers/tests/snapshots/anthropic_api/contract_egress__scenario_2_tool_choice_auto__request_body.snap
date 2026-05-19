@@ -1,0 +1,34 @@
+---
+source: crates/routectl-providers/tests/contract_egress.rs
+expression: body
+---
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": "What is the weather?",
+      "role": "user"
+    }
+  ],
+  "model": "claude-3-opus",
+  "tool_choice": {
+    "type": "auto"
+  },
+  "tools": [
+    {
+      "description": "Get the current weather for a location",
+      "input_schema": {
+        "properties": {
+          "location": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "location"
+        ],
+        "type": "object"
+      },
+      "name": "get_weather"
+    }
+  ]
+}

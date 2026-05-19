@@ -1,0 +1,18 @@
+---
+source: crates/routectl-providers/tests/contract_egress.rs
+expression: body
+---
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": "You are a helpful assistant.",
+      "role": "system"
+    },
+    {
+      "content": "Hello!",
+      "role": "user"
+    }
+  ],
+  "model": "claude-3-opus"
+}
