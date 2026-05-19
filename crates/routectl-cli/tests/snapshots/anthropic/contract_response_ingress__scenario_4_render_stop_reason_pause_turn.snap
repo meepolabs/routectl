@@ -1,0 +1,18 @@
+---
+source: crates/routectl-cli/tests/contract_response_ingress.rs
+expression: wire
+---
+{
+  "content": [
+    {
+      "text": "Pausing for tool result.",
+      "type": "text"
+    }
+  ],
+  "id": "msg_pause_turn_01",
+  "model": "claude-3-opus",
+  "role": "assistant",
+  "stop_reason": "pause_turn",
+  "stop_sequence": null,
+  "type": "message"
+}

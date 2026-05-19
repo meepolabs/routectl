@@ -1,4 +1,4 @@
-//! Contract tests for the ingress layer.
+//! Contract tests for the request-side ingress layer.
 //!
 //! Each scenario takes a real client wire body (Anthropic v1/messages
 //! shape or OpenAI chat completions shape) and asserts that
@@ -10,10 +10,13 @@
 //! canonical-shape caveat in `common::mod.rs`.
 //!
 //! See the sibling `contract_egress` tests in `routectl-providers` for
-//! the canonical-to-upstream half. Scenario builders are mirrored in
-//! both crates: field-level drift (struct shape changes) fails
-//! compilation in both files; SEMANTIC drift between the mirrors is
-//! not compile-checked, so review the mirror when editing scenarios.
+//! the canonical-to-upstream half. Response-side ingress assertions
+//! (canonical `ChatResponse` -> wire body via `render_response`) live
+//! in the sibling `contract_response_ingress` file. Scenario builders
+//! are mirrored in both crates: field-level drift (struct shape
+//! changes) fails compilation in both files; SEMANTIC drift between
+//! the mirrors is not compile-checked, so review the mirror when
+//! editing scenarios.
 
 mod common;
 
@@ -516,51 +519,6 @@ fn ingress_openai_multi_turn_with_tool_result() {
 }
 
 // =====================================================================
-// Scenario 4: stop_reason_round_trip
-// =====================================================================
-//
-// Response-side scenario: feed a canonical `ChatResponse` through the
-// Anthropic ingress's `render_response` and assert the wire shape
-// `stop_reason` survives round-trip for both the OpenAI-mapped value
-// (`stop` -> `end_turn`) and the Anthropic-only passthrough
-// (`pause_turn`). Only Anthropic ingress is tested because
-// openai-compat does not have these stop reasons. Bug class caught:
-// Anthropic-only stop reasons clobbered to `end_turn`.
-
-#[test]
-fn ingress_anthropic_render_stop_reason_end_turn() {
-    let resp = scenarios::scenario_4_response_stop_reason_end_turn();
-
-    let wire = AnthropicIngress
-        .render_response(resp)
-        .expect("anthropic ingress render");
-
-    assert_eq!(wire["stop_reason"], "end_turn");
-    assert_eq!(wire["id"], "msg_end_turn_01");
-    assert_eq!(wire["role"], "assistant");
-    assert_eq!(wire["type"], "message");
-}
-
-#[test]
-fn ingress_anthropic_render_stop_reason_pause_turn() {
-    let resp = scenarios::scenario_4_response_stop_reason_pause_turn();
-
-    let wire = AnthropicIngress
-        .render_response(resp)
-        .expect("anthropic ingress render");
-
-    // Anthropic-only stop reasons must passthrough verbatim --
-    // they must NOT be clobbered to `end_turn`. Pre-fix the
-    // legacy mapping would lose `pause_turn`, breaking
-    // claude-code's per-stop-reason error handling.
-    assert_eq!(
-        wire["stop_reason"], "pause_turn",
-        "pause_turn must passthrough verbatim, not clobber to end_turn"
-    );
-    assert_eq!(wire["id"], "msg_pause_turn_01");
-}
-
-// =====================================================================
 // Scenario 5: cache_control_positions
 // =====================================================================
 //
@@ -660,4 +618,83 @@ fn ingress_anthropic_cache_control_positions() {
         },
         other => panic!("user message must carry Parts content, got {other:?}"),
     }
+}
+
+// =====================================================================
+// Scenario 6: anthropic_beta_header_lift
+// =====================================================================
+//
+// The Anthropic TypeScript SDK and claude-code carry first-party beta
+// flags (context-management, prompt-cache-1h, adaptive-thinking, ...)
+// on the `anthropic-beta` HTTP header rather than the body's
+// `anthropic_beta` array. Routectl's ingress lifts header values into
+// canonical `req.anthropic_beta` so a downstream egress that wants the
+// body form (Bedrock-Invoke, anthropic-api against api.anthropic.com
+// for either auth flavor) sees a consistent canonical surface. The
+// lift must: split comma-separated values, trim whitespace,
+// deduplicate, and preserve order (body-level entries first, then
+// header additions). Bug class caught: J (header dropped, betas
+// silently lost from the request -- breaks every cc-via-* flow that
+// relies on a beta).
+
+#[test]
+fn ingress_anthropic_anthropic_beta_header_lift() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::HeaderName::from_static("anthropic-beta"),
+        "context-management-2025-06-27, prompt-cache-1h-2025-07-29 , context-management-2025-06-27"
+            .parse()
+            .unwrap(),
+    );
+
+    let wire_body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 8,
+        "anthropic_beta": ["body-flag-2024-01-01"]
+    });
+
+    let req = AnthropicIngress
+        .parse_request(&headers, wire_body)
+        .expect("anthropic ingress parse");
+
+    // Body-level value comes first; header values follow; duplicate
+    // (`context-management-2025-06-27` appears twice on the header)
+    // is collapsed; surrounding whitespace on the second header value
+    // is trimmed.
+    assert_eq!(
+        req.anthropic_beta,
+        vec![
+            "body-flag-2024-01-01".to_string(),
+            "context-management-2025-06-27".to_string(),
+            "prompt-cache-1h-2025-07-29".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn ingress_anthropic_anthropic_beta_header_lift_empty_body() {
+    // Header-only flow: claude-code typically does not echo `betas`
+    // into the body. Ensures the canonical field is populated even
+    // when the body's `anthropic_beta` is absent.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::HeaderName::from_static("anthropic-beta"),
+        "context-management-2025-06-27".parse().unwrap(),
+    );
+
+    let wire_body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 8
+    });
+
+    let req = AnthropicIngress
+        .parse_request(&headers, wire_body)
+        .expect("anthropic ingress parse");
+
+    assert_eq!(
+        req.anthropic_beta,
+        vec!["context-management-2025-06-27".to_string()]
+    );
 }
