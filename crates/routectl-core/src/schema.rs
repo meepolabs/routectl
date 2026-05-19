@@ -218,6 +218,17 @@ pub struct Choice {
     pub message: Message,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    /// The matched stop sequence (when the upstream surfaced one). Set
+    /// by Anthropic-shape egresses from the wire `stop_sequence` field,
+    /// and by openai-compat egress via a suffix-match heuristic against
+    /// the request's `stop` list. The Anthropic ingress uses this to
+    /// emit `stop_reason:"stop_sequence"` + `stop_sequence:"<value>"`
+    /// instead of the lossy `end_turn` it would otherwise produce when
+    /// `finish_reason` is the canonical `"stop"`. None means either
+    /// the upstream stopped for another reason or routectl couldn't
+    /// recover a match (openai-compat without a recoverable suffix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_stop_sequence: Option<String>,
 }
 
 /// Usage tallies. v0.4.0 extension: cache stats from Anthropic /
@@ -285,6 +296,12 @@ pub struct ChunkChoice {
     pub delta: ChunkDelta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
+    /// The matched stop sequence on the terminal chunk. Parallel to
+    /// `Choice.matched_stop_sequence`; populated on the same chunk
+    /// that carries the `finish_reason`. None on every non-terminal
+    /// chunk and on terminal chunks where no stop sequence matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_stop_sequence: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

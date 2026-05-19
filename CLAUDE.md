@@ -562,10 +562,39 @@ Refer back when a similar failure mode shows up.
   `end_turn`, breaking claude-code's per-stop-reason error handling
   for `pause_turn`, `refusal`, and `model_context_window_exceeded`.
   Fixed: `openai_finish_to_anthropic_stop` now passes through unknown
-  values. The `stop_sequence -> stop -> end_turn` ambiguity remains
-  (information lost at the canonical layer); preserving it would
-  require an additional native finish-reason field on the canonical
-  Choice.
+  values.
+
+- **`stop_sequence` was collapsed to `end_turn` end-to-end.** Until
+  the fix landed for issue #8 (2026-05-19), the canonical layer had
+  no native field for the matched stop sequence:
+  Anthropic upstream `stop_reason:"stop_sequence"` -> canonical
+  `finish_reason:"stop"` -> wire `stop_reason:"end_turn"`. claude-code
+  structured-output flows (SDK-configured stop_sequence fences the
+  output) saw `end_turn` on turns it expected `stop_sequence`, could
+  not reconcile, synthesized a `<synthetic>` wrap-up message, and
+  flagged `is_error: true` on the ResultMessage envelope. Fixed by
+  adding `Choice.matched_stop_sequence: Option<String>` (and
+  `ChunkChoice.matched_stop_sequence`) to the canonical schema. The
+  Anthropic egress (and Bedrock-Invoke transitively) lifts the wire
+  `stop_sequence` into this field on both non-streaming and SSE
+  `MessageDelta` paths. The Anthropic ingress's `render_response` and
+  `emit_message_delta` emit wire `stop_reason:"stop_sequence"` +
+  `stop_sequence:"<value>"` when the field is set, overriding the
+  lossy `end_turn` mapping. For openai-compat upstreams, where the
+  wire spec carries no equivalent field, `openai_compat::response::
+  apply_stop_sequence_heuristic` runs after `normalize_response` and
+  on terminal stream chunks: it suffix-matches the response content
+  against `req.stop` (longest first), and falls back to the single
+  configured stop when exactly one was configured AND the response
+  carried non-empty content. The fallback is gated on content
+  presence so tool-only / null-content responses don't over-claim,
+  but a single-stop request that naturally ends mid-thought (without
+  emitting the sequence) WILL get `stop_sequence` instead of
+  `end_turn` -- a known residual seam, since the openai-compat wire
+  carries no signal to disambiguate. Bedrock Converse is not yet
+  covered: AWS surfaces the matched sequence via
+  `additionalModelResponseFields` only when the request opts in via
+  `additionalModelResponseFieldPaths`. Tracked as a follow-up.
 
 - **OpenAI Responses chatgpt-oauth endpoint is stream-only.** Sending
   `stream:false` returns HTTP 400 `{"detail":"Stream must be set to true"}`.

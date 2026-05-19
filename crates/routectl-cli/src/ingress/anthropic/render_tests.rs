@@ -24,6 +24,7 @@ fn render_response_emits_messages_shape() {
                 tool_calls: None,
             },
             finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(Usage {
             prompt_tokens: 10,
@@ -92,6 +93,7 @@ fn render_response_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() 
                 })]),
             },
             finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(Usage {
             prompt_tokens: 5,
@@ -156,6 +158,7 @@ fn render_response_emits_tool_use_from_tool_calls_when_parts_has_no_tool_use() {
                 })]),
             },
             finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(Usage {
             prompt_tokens: 5,
@@ -215,6 +218,7 @@ fn render_response_dedupes_tool_use_when_parts_carries_other_typed_tool_use() {
                 })]),
             },
             finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(Usage {
             prompt_tokens: 5,
@@ -273,6 +277,7 @@ fn render_response_does_not_dedupe_other_tool_use_when_id_missing() {
                 })]),
             },
             finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(Usage {
             prompt_tokens: 5,

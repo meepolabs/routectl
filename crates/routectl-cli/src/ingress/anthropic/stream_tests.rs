@@ -79,6 +79,7 @@ fn stream_chunks_after_message_stop_are_dropped() {
             index: 0,
             delta: routectl_core::ChunkDelta::default(),
             finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(UsageDelta {
             prompt_tokens: Some(10),
@@ -146,6 +147,7 @@ fn text_chunk(text: &str, finish: Option<&str>) -> ChatChunk {
                 ..Default::default()
             },
             finish_reason: finish.map(|s| s.into()),
+            matched_stop_sequence: None,
         }],
         usage: None,
     }
@@ -212,6 +214,7 @@ fn stream_finish_with_inline_usage_emits_immediately() {
             index: 0,
             delta: ChunkDelta::default(),
             finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(UsageDelta {
             prompt_tokens: Some(10),
@@ -311,6 +314,7 @@ fn stream_two_concurrent_tool_calls_each_get_their_own_block() {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     };
@@ -350,6 +354,7 @@ fn stream_interleaved_tool_call_chunks_flush_in_valid_order_at_finish() {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     };
@@ -376,6 +381,7 @@ fn stream_interleaved_tool_call_chunks_flush_in_valid_order_at_finish() {
                 ..Default::default()
             },
             finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
         }],
         usage: Some(routectl_core::UsageDelta {
             prompt_tokens: Some(10),
@@ -493,6 +499,7 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     };
@@ -512,6 +519,7 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     };
@@ -583,6 +591,7 @@ fn stream_tool_call_index_above_cap_returns_streaming_error() {
                 ..Default::default()
             },
             finish_reason: None,
+            matched_stop_sequence: None,
         }],
         usage: None,
     };

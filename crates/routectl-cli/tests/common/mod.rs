@@ -238,6 +238,7 @@ pub mod scenarios {
                 index: 0,
                 message: assistant_text_msg("Hello there!"),
                 finish_reason: Some("stop".into()),
+                matched_stop_sequence: None,
             }],
             usage: None,
             routectl_provider: None,
@@ -260,6 +261,7 @@ pub mod scenarios {
                 index: 0,
                 message: assistant_text_msg("Pausing for tool result."),
                 finish_reason: Some("pause_turn".into()),
+                matched_stop_sequence: None,
             }],
             usage: None,
             routectl_provider: None,
@@ -366,6 +368,33 @@ pub mod scenarios {
             ],
             max_tokens: Some(1024),
             ..Default::default()
+        }
+    }
+
+    /// Scenario 11: canonical `ChatResponse` with
+    /// `matched_stop_sequence` set. Mirrors what Anthropic-shape
+    /// egresses lift from the upstream wire `stop_sequence` field and
+    /// what the openai-compat egress's suffix-match heuristic recovers
+    /// from a `req.stop` list. The Anthropic ingress's `render_response`
+    /// must emit `stop_reason:"stop_sequence"` + `stop_sequence:"<value>"`
+    /// instead of the lossy `end_turn` mapping it would otherwise apply
+    /// to the canonical `finish_reason:"stop"`. Bug class: claude-code
+    /// structured-output flows mis-rendered as `end_turn` (real
+    /// $-impact failure on deepseek-v4-pro reviewer flow, 2026-05-19).
+    pub fn scenario_11_response_matched_stop_sequence() -> ChatResponse {
+        ChatResponse {
+            id: "msg_stop_seq_01".into(),
+            model: "claude-3-opus".into(),
+            created: 0,
+            choices: vec![Choice {
+                index: 0,
+                message: assistant_text_msg("Here is the structured answer."),
+                finish_reason: Some("stop".into()),
+                matched_stop_sequence: Some("</answer>".into()),
+            }],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
         }
     }
 }
