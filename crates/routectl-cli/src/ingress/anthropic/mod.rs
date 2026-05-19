@@ -195,6 +195,11 @@ impl IngressAdapter for AnthropicIngress {
         // sensitivity story as the openai ingress. Honors
         // ROUTECTL_LOG_REDACT_PROMPTS=1.
         routectl_core::trace_ingress_body("anthropic", &body);
+        // Companion structural summary -- a single TRACE line of
+        // stable, prompt-content-free fields the operator's
+        // smart-heartbeat validator can grep without fighting the
+        // 16 KB body cap. See StructuralSummary on field stability.
+        routectl_core::trace_structural_summary("ingress", "ingress", "anthropic", &body);
         translate_request(headers, body)
     }
 

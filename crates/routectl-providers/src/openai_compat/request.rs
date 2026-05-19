@@ -19,6 +19,19 @@ use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
 use super::HistoryReasoning;
 
+/// `source` value passed to [`merge_extras`] for operator-config-supplied
+/// extras (`[providers.X] default_extras = {...}`). Drop here is
+/// adversarial -- the operator asked routectl to send a managed key.
+const DEFAULT_EXTRAS_SOURCE: &str = "default_extras";
+
+/// `source` value passed to [`merge_extras`] for canonical-swept
+/// `req.provider_extras` (the Anthropic ingress's forward-compat sweep
+/// destination). Drop here is by design -- the swept field has no
+/// openai-compat equivalent and routectl already documented it gets
+/// dropped; an Anthropic-only beta field showing up in extras is NOT
+/// an operator misconfiguration.
+const PROVIDER_EXTRAS_SOURCE: &str = "provider_extras";
+
 pub fn normalize(
     id: &str,
     req: &ChatRequest,
@@ -130,20 +143,29 @@ pub fn normalize(
     // of `provider_extras = {"messages":[...]}` could replace the
     // assembled messages.
     if let Some(extras) = default_extras {
-        merge_extras(id, obj, extras, "default_extras");
+        merge_extras(id, obj, extras, DEFAULT_EXTRAS_SOURCE);
     }
     if let Some(extras) = req.provider_extras.as_ref() {
-        merge_extras(id, obj, extras, "provider_extras");
+        merge_extras(id, obj, extras, PROVIDER_EXTRAS_SOURCE);
     }
 
     Ok(body)
 }
 
 /// Shallow-merge `extras` into `obj` with a routectl-managed-keys
-/// allow-list. Drop + WARN when an extras entry tries to override a
-/// key routectl owns (model, messages, stream, tools, etc.). The
-/// `source` arg names where the override came from for log
-/// readability.
+/// allow-list. Drop when an extras entry tries to override a key
+/// routectl owns (model, messages, stream, tools, etc.). The
+/// `source` arg names where the override came from and selects the
+/// log level + wording:
+///
+///   - `DEFAULT_EXTRAS_SOURCE` -> WARN with the existing adversarial
+///     phrasing. Operator asked routectl to send a managed key, so
+///     the drop deserves their attention.
+///   - `PROVIDER_EXTRAS_SOURCE` -> DEBUG with neutral phrasing. The
+///     Anthropic ingress's forward-compat sweep is the source for
+///     this path; a swept Anthropic-only beta field with no
+///     openai-compat equivalent is BY DESIGN and was flooding
+///     `routectl-warn.log` on every Anthropic-ingress request.
 fn merge_extras(
     id: &str,
     obj: &mut serde_json::Map<String, Value>,
@@ -155,12 +177,21 @@ fn merge_extras(
     };
     for (k, v) in extra_obj {
         if is_routectl_managed_key(k) {
-            tracing::warn!(
-                provider = id,
-                source = source,
-                key = %k,
-                "extras attempted to override routectl-managed key; dropped"
-            );
+            if source == PROVIDER_EXTRAS_SOURCE {
+                tracing::debug!(
+                    provider = id,
+                    source = source,
+                    key = %k,
+                    "forward-compat extra has no openai-compat equivalent; dropped"
+                );
+            } else {
+                tracing::warn!(
+                    provider = id,
+                    source = source,
+                    key = %k,
+                    "extras attempted to override routectl-managed key; dropped"
+                );
+            }
             continue;
         }
         obj.insert(k.clone(), v.clone());
@@ -652,6 +683,51 @@ mod tests {
         assert_eq!(body["top_k"], 40);
         assert_eq!(body["service_tier"], "premium");
         assert_eq!(body["safety_settings"]["hate"], "high");
+    }
+
+    /// Drop-semantics parity: a managed-key collision from
+    /// `default_extras` (operator-config source) is dropped EXACTLY
+    /// the way the provider_extras (forward-compat sweep source)
+    /// drop is. The source-branching change in `merge_extras` only
+    /// toggles the log level/wording; the dropped-key set is
+    /// identical. This pins that the two source branches converge on
+    /// the same body shape (the WARN vs DEBUG choice is reviewable in
+    /// source; the drop is asserted here).
+    #[test]
+    fn default_extras_cannot_override_routectl_managed_keys() {
+        let mut req = simple_req("gpt-4o");
+        req.seed = Some(7);
+        let defaults = json!({
+            // canonical fields -- MUST be dropped:
+            "model": "evil-model",
+            "messages": [{"role": "user", "content": "INJECTED"}],
+            "stream": true,
+            "tools": [],
+            "max_tokens": 1,
+            "seed": 99,
+            // long-tail provider knobs -- MUST pass through:
+            "top_k": 40,
+            "service_tier": "premium",
+        });
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            Some(&defaults),
+            false,
+        )
+        .unwrap();
+        // Canonical fields preserved from the request, NOT overridden.
+        assert_eq!(body["model"], "gpt-4o");
+        let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_ne!(messages[0]["content"], "INJECTED");
+        assert_ne!(body["max_tokens"], 1);
+        assert_eq!(body["seed"], 7);
+        // Long-tail extras land verbatim.
+        assert_eq!(body["top_k"], 40);
+        assert_eq!(body["service_tier"], "premium");
     }
 
     #[test]

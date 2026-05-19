@@ -279,6 +279,12 @@ impl Provider for BedrockProvider {
             &self.cfg.id,
             &body,
         );
+        routectl_core::trace_structural_summary(
+            "outgoing",
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
 
         let url = match self.cfg.api_shape {
             BedrockApiShape::Invoke => {
@@ -302,16 +308,24 @@ impl Provider for BedrockProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         for (k, v) in &self.cfg.extra_headers {
-            // Defense-in-depth: refuse reserved headers from
+            // Defense-in-depth: refuse auth-reserved headers from
             // user-supplied extra_headers. The Bedrock SigV4 path
             // would overwrite Authorization later anyway, but the
             // BearerKey path wouldn't -- so guarding here keeps both
             // paths safe and surfaces the misconfiguration.
-            if crate::http_client::is_reserved_extra_header(k) {
+            if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
+                );
+                continue;
+            }
+            if crate::http_client::is_managed_header(k) {
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "dropping managed header from extra_headers; composed dynamically by routectl"
                 );
                 continue;
             }
@@ -367,6 +381,12 @@ impl Provider for BedrockProvider {
             &self.cfg.id,
             &body,
         );
+        routectl_core::trace_structural_summary(
+            "outgoing",
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            &body,
+        );
 
         let url = match self.cfg.api_shape {
             BedrockApiShape::Invoke => {
@@ -393,16 +413,24 @@ impl Provider for BedrockProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
         for (k, v) in &self.cfg.extra_headers {
-            // Defense-in-depth: refuse reserved headers from
+            // Defense-in-depth: refuse auth-reserved headers from
             // user-supplied extra_headers. The Bedrock SigV4 path
             // would overwrite Authorization later anyway, but the
             // BearerKey path wouldn't -- so guarding here keeps both
             // paths safe and surfaces the misconfiguration.
-            if crate::http_client::is_reserved_extra_header(k) {
+            if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
+                );
+                continue;
+            }
+            if crate::http_client::is_managed_header(k) {
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "dropping managed header from extra_headers; composed dynamically by routectl"
                 );
                 continue;
             }
