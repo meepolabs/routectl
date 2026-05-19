@@ -103,21 +103,34 @@ pub mod scenarios {
     ///
     /// Canonical-shape note: this builder represents the OpenAI-ingress
     /// canonical (bare string). The Anthropic ingress preserves its
-    /// native object shape `{"type":"auto"}` and produces a DIFFERENT
-    /// canonical `tool_choice` value; the Anthropic ingress test for
-    /// this scenario asserts the object form directly rather than
-    /// against this builder. The egress tests for this scenario
-    /// exercise the bare-string path only -- Anthropic-shape canonical
-    /// `tool_choice` is covered by `translate_tool_choice` unit tests
-    /// in `anthropic_api/request.rs`. A future PR could split this
-    /// into two builders to close the egress contract gap for the
-    /// Anthropic-ingress canonical path.
+    /// native object shape `{"type":"auto"}` -- see the sibling
+    /// [`scenario_2_tool_choice_auto_anthropic_shape`] builder for
+    /// that canonical, used by the matching egress tests so both
+    /// canonical paths reach a snapshot.
     pub fn scenario_2_tool_choice_auto() -> ChatRequest {
         ChatRequest {
             model: "claude-3-opus".into(),
             messages: vec![user_msg("What is the weather?")],
             tools: Some(vec![get_weather_tool()]),
             tool_choice: Some(json!("auto")),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    /// Scenario 2 (auto, Anthropic-ingress canonical): the same intent
+    /// as [`scenario_2_tool_choice_auto`] but with the Anthropic-shape
+    /// object form of `tool_choice`. Pinning the egress side of this
+    /// canonical closes the gap flagged in a prior change's HIGH review finding
+    /// (the bare-string-only egress coverage left the Anthropic
+    /// ingress -> Anthropic egress and Anthropic ingress ->
+    /// openai-compat egress paths uncontract-tested).
+    pub fn scenario_2_tool_choice_auto_anthropic_shape() -> ChatRequest {
+        ChatRequest {
+            model: "claude-3-opus".into(),
+            messages: vec![user_msg("What is the weather?")],
+            tools: Some(vec![get_weather_tool()]),
+            tool_choice: Some(json!({"type": "auto"})),
             max_tokens: Some(1024),
             ..Default::default()
         }
@@ -144,10 +157,20 @@ pub mod scenarios {
         }
     }
 
-    /// Scenario 3: a four-message history with a tool round-trip.
+    /// Scenario 3: a five-message history with a tool round-trip.
     ///
     /// Messages: user question -> assistant `tool_use` -> tool result
-    /// -> user follow-up.
+    /// -> assistant text response -> user follow-up.
+    ///
+    /// Alternation note: AWS Converse (and Anthropic Messages) require
+    /// strict user/assistant alternation. After a `Role::Tool` message
+    /// (which lowers to a user-role tool_result on the wire), the next
+    /// non-tool message MUST be an assistant turn before another user
+    /// message can land. The earlier four-message form (user ->
+    /// assistant -> tool -> user) caused Bedrock-Converse to emit two
+    /// adjacent `role:"user"` messages and would 400 on AWS in
+    /// production; this five-message form mirrors what real Claude
+    /// Code multi-turn flows actually send.
     ///
     /// Canonical-shape note: this builder represents the
     /// Anthropic-ingress canonical -- the assistant turn carries
@@ -192,6 +215,7 @@ pub mod scenarios {
                 user_msg("What is the weather?"),
                 assistant_with_tool_use,
                 tool_result,
+                assistant_text_msg("It is currently 72F and sunny in San Francisco."),
                 user_msg("And tomorrow?"),
             ],
             tools: Some(vec![get_weather_tool()]),

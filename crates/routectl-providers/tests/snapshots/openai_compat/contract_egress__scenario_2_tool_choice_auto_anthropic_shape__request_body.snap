@@ -8,36 +8,10 @@ expression: body
     {
       "content": "What is the weather?",
       "role": "user"
-    },
-    {
-      "content": null,
-      "role": "assistant",
-      "tool_calls": [
-        {
-          "function": {
-            "arguments": "{\"location\":\"San Francisco\"}",
-            "name": "get_weather"
-          },
-          "id": "toolu_01",
-          "type": "function"
-        }
-      ]
-    },
-    {
-      "content": "72F and sunny",
-      "role": "tool",
-      "tool_call_id": "toolu_01"
-    },
-    {
-      "content": "It is currently 72F and sunny in San Francisco.",
-      "role": "assistant"
-    },
-    {
-      "content": "And tomorrow?",
-      "role": "user"
     }
   ],
   "model": "claude-3-opus",
+  "tool_choice": "auto",
   "tools": [
     {
       "function": {
