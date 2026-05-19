@@ -23,7 +23,8 @@ use routectl_core::{
     content_part::{ContentPart, KnownContentPart},
     system_content::{SystemBlock, SystemContent},
     tool_def::{CustomTool, ToolDef},
-    ChatRequest, ChatResponse, Choice, Message, MessageContent, Role,
+    ChatRequest, ChatResponse, Choice, Message, MessageContent, ReasoningDetail,
+    ReasoningDetailKind, Role,
 };
 use serde_json::json;
 
@@ -249,6 +250,40 @@ pub mod scenarios {
             system: Some(system_with_cc),
             tools: Some(vec![cached_tool]),
             cache_control: Some(CacheControl::ephemeral_5m()),
+            max_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
+    /// Scenario 10: reasoning_details signature replay.
+    /// Mirrors the cli-crate builder of the same name.
+    pub fn scenario_10_reasoning_details_signature_replay() -> ChatRequest {
+        let assistant_with_thinking = Message {
+            role: Role::Assistant,
+            content: MessageContent::Text("Sure, here is the answer: 42.".into()),
+            reasoning: None,
+            reasoning_details: vec![ReasoningDetail {
+                kind: ReasoningDetailKind::Text,
+                id: None,
+                format: Some("anthropic-claude-v1".into()),
+                index: Some(0),
+                payload: json!({
+                    "text": "The user is asking about the answer. 6 * 7 is 42.",
+                    "signature": "sig_pretend_this_is_a_real_anthropic_signature_blob"
+                }),
+            }],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+
+        ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![
+                user_msg("What is 6 times 7?"),
+                assistant_with_thinking,
+                user_msg("And 6 times 8?"),
+            ],
             max_tokens: Some(1024),
             ..Default::default()
         }
