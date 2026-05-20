@@ -1,0 +1,44 @@
+# gitleaks config -- adopted from meepo-conventions baseline.
+#
+# Inherits the default ruleset and adds project-specific allowlist
+# patterns for files that legitimately contain hex/base64-looking
+# strings (lockfiles, build artifacts).
+#
+# Keep this file conservative: every allowlist entry is a place where
+# a real secret could hide undetected. Prefer fixing the false
+# positive (e.g. moving a fixture out of the path) over widening the
+# allowlist.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Build outputs and lockfiles -- not source"
+
+# Anchor patterns to repo root with `^` so a stray nested path
+# (e.g. submodule, backup dir) with the same name doesn't auto-bypass
+# scanning. EVERY directory pattern below MUST be anchored.
+paths = [
+  # Lockfile (file extension anchors effectively without `^`).
+  '''Cargo\.lock''',
+
+  # Rust build artifact -- ANCHORED.
+  '''^target/''',
+
+  # Live-traffic fixture capture dir -- gitignored already; listed
+  # here defensively in case a developer ever stages an entry. Bodies
+  # contain user prompts AND assistant outputs and must never reach
+  # the repo, but if they do, secret scanning would also produce
+  # heavy false positives on long base64-ish JSON payloads.
+  '''^crates/routectl-cli/tests/fixtures/captured/''',
+]
+
+# .env.example by name -- it's a template; should never contain real
+# values. Same discipline applies to .env.test: even test-scoped
+# credentials are credentials. Use clearly fake placeholder values
+# (e.g. `test-key-not-real`) in BOTH files. If a real value ever
+# appears, that's the bug we want to surface, not allow.
+files = [
+  '''^\.env\.example$''',
+  '''^\.env\.test$''',
+]
