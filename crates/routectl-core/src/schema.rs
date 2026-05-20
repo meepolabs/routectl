@@ -132,6 +132,19 @@ pub struct RoutectlInternal {
     /// Per-model openai-compat history-reasoning policy. `None` means
     /// fall back to the egress's own default.
     pub history_reasoning: Option<crate::reasoning_dialect::HistoryReasoning>,
+    /// Merged header_extras map (provider + model, model-wins on key
+    /// collision). The dispatch layer composes this and hands it to
+    /// the egress; the egress's `build_headers` reads from here instead
+    /// of `self.cfg.header_extras` so per-model headers reach the wire.
+    /// `None` means the router was not in the loop (library consumer);
+    /// the egress should fall back to its own `self.cfg.header_extras`.
+    ///
+    /// `anthropic-beta` is intentionally NOT in this map -- it rides on
+    /// the canonical `ChatRequest.anthropic_beta` field and is composed
+    /// from THREE sources (ingress lift + provider + model) by the
+    /// dispatch layer. Keeping it out of `header_extras` here prevents
+    /// double-handling by the Anthropic-API egress.
+    pub header_extras: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

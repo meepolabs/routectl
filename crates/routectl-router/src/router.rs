@@ -841,15 +841,20 @@ pub fn merge_header_extras(
         }
     }
 
-    // Today the egresses read `header_extras` from their own
-    // `OpenAiCompatConfig`/`AnthropicApiConfig`/... snapshots
-    // (constructed at factory time from the provider entry).
-    // `merged` therefore lives in spirit on `req.routectl_internal` /
-    // canonical -- but the only header the egresses currently
-    // re-read per request is `anthropic-beta`, which we have already
-    // written back into `req.anthropic_beta`. The remaining merged
-    // entries are surfaced via the DEBUG line below so an operator
-    // triaging a missing header has a breadcrumb.
+    // Strip `anthropic-beta` from the merged map before publishing it
+    // to the egress -- it rides on `req.anthropic_beta` instead and
+    // double-handling would cause the Anthropic-API egress to emit
+    // duplicate values. The list-valued post-pass above already
+    // wrote the unioned set there.
+    let keys_to_strip: Vec<String> = merged
+        .keys()
+        .filter(|k| k.eq_ignore_ascii_case("anthropic-beta"))
+        .cloned()
+        .collect();
+    for k in keys_to_strip {
+        merged.remove(&k);
+    }
+
     if !merged.is_empty() {
         tracing::debug!(
             provider = %provider_name,
@@ -857,6 +862,14 @@ pub fn merge_header_extras(
             "composed header_extras (provider + model + list-valued union)",
         );
     }
+
+    // Publish the merged map to the egress via the transport-internal
+    // carrier. Egresses read this in `build_headers` and union it with
+    // their construction-time `self.cfg.header_extras` snapshot (model
+    // wins on key collision). Library consumers that construct a
+    // ChatRequest without the router leave this `None`, and the egress
+    // falls back to its `self.cfg.header_extras` alone.
+    req.routectl_internal.header_extras = Some(merged);
 }
 
 /// Merge per-provider and per-model `payload_extras` into the
@@ -864,12 +877,13 @@ pub fn merge_header_extras(
 /// leaf collision; the result lands on `req.provider_extras` so each
 /// egress's existing `provider_extras` reader picks it up.
 ///
-/// Existing `req.provider_extras` (from the ingress's forward-compat
-/// sweep) is preserved -- the model+provider payload is layered ON TOP
-/// of it, so a swept Anthropic body field wins over a provider's
-/// default that tried to set the same key. This matches the spec:
-/// "Operator payload_extras layered into req.provider_extras" plus
-/// "ingress forward-compat sweep stays the canonical source".
+/// Layer order: `req.provider_extras` (ingress forward-compat sweep,
+/// pre-existing on the request) -> provider `payload_extras` ->
+/// model `payload_extras`. The provider's payload IS deep-merged
+/// over the ingress sweep on key collision, and the model's payload
+/// then deep-merges over both. Net precedence: model > provider >
+/// ingress sweep on shared leaf keys; ingress-only keys survive
+/// untouched because no other source set them.
 pub fn merge_payload_extras(
     provider_name: &str,
     provider_extras: Option<&Value>,
@@ -1452,23 +1466,123 @@ mod merge_header_extras_tests {
     }
 
     #[test]
-    fn auth_reserved_keys_drop() {
-        // Authorization on model entry must drop with WARN; never
-        // reach the merged map.
+    fn auth_reserved_keys_drop_but_other_keys_survive() {
+        // Pairing the reserved key with a non-reserved key gives a real
+        // observable: the reserved key MUST NOT land on the merged map
+        // published via `req.routectl_internal.header_extras`, while
+        // the non-reserved sibling MUST land.
         let mut req = req_with_betas(vec![]);
         let model = map(&[("authorization", "Bearer evil"), ("x-app", "ok")]);
         merge_header_extras("p", None, &model, &mut req);
-        // No side effect on req.anthropic_beta (none of the model
-        // entries are list-valued).
-        assert!(req.anthropic_beta.is_empty());
+        let published = req
+            .routectl_internal
+            .header_extras
+            .expect("merger publishes a map");
+        assert!(
+            !published.contains_key("authorization"),
+            "auth-reserved key must drop, not propagate",
+        );
+        assert_eq!(
+            published.get("x-app").map(String::as_str),
+            Some("ok"),
+            "non-reserved sibling on the same model entry must reach the published map",
+        );
     }
 
     #[test]
-    fn managed_reserved_keys_drop() {
+    fn managed_reserved_keys_drop_but_other_keys_survive() {
         let mut req = req_with_betas(vec![]);
-        let model = map(&[("host", "evil.example.com"), ("content-type", "text/plain")]);
+        let model = map(&[
+            ("host", "evil.example.com"),
+            ("content-type", "text/plain"),
+            ("x-app", "ok"),
+        ]);
         merge_header_extras("p", None, &model, &mut req);
-        assert!(req.anthropic_beta.is_empty());
+        let published = req
+            .routectl_internal
+            .header_extras
+            .expect("merger publishes a map");
+        assert!(!published.contains_key("host"));
+        assert!(!published.contains_key("content-type"));
+        assert_eq!(published.get("x-app").map(String::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn non_list_header_model_wins_on_key_collision() {
+        // Pin the model > provider precedence for plain key-value
+        // headers. Without this contract, per-model header_extras
+        // would only matter for `anthropic-beta`.
+        let mut req = req_with_betas(vec![]);
+        let provider = map(&[("x-foo", "provider-value")]);
+        let model = map(&[("x-foo", "model-value")]);
+        merge_header_extras("p", Some(&provider), &model, &mut req);
+        let published = req
+            .routectl_internal
+            .header_extras
+            .expect("merger publishes a map");
+        assert_eq!(
+            published.get("x-foo").map(String::as_str),
+            Some("model-value"),
+            "model header_extras must win on key collision (last-writer-wins)",
+        );
+    }
+
+    #[test]
+    fn non_list_provider_only_header_propagates_to_published_map() {
+        // Pure provider header (no per-model override) must still
+        // reach the egress via the published map.
+        let mut req = req_with_betas(vec![]);
+        let provider = map(&[("x-stainless-arch", "x64")]);
+        merge_header_extras("p", Some(&provider), &BTreeMap::new(), &mut req);
+        let published = req
+            .routectl_internal
+            .header_extras
+            .expect("merger publishes a map");
+        assert_eq!(
+            published.get("x-stainless-arch").map(String::as_str),
+            Some("x64"),
+        );
+    }
+
+    #[test]
+    fn anthropic_beta_stripped_from_published_map() {
+        // After the list-valued union writes to `req.anthropic_beta`,
+        // the merger MUST remove `anthropic-beta` from the published
+        // header_extras map. Leaving it would cause the Anthropic-API
+        // egress (which also unions with req.anthropic_beta) to emit
+        // duplicate values on the wire.
+        let mut req = req_with_betas(vec![]);
+        let provider = map(&[("anthropic-beta", "claude-code-20250219")]);
+        merge_header_extras("p", Some(&provider), &BTreeMap::new(), &mut req);
+        let published = req
+            .routectl_internal
+            .header_extras
+            .expect("merger publishes a map");
+        assert!(
+            !published.contains_key("anthropic-beta"),
+            "anthropic-beta must be stripped from the published map (it rides on req.anthropic_beta instead)",
+        );
+        assert_eq!(req.anthropic_beta, vec!["claude-code-20250219".to_string()]);
+    }
+
+    #[test]
+    fn router_side_auth_and_managed_constants_are_disjoint() {
+        // The router defines its own `AUTH_HEADERS` / `MANAGED_HEADERS`
+        // constants for the merge_header_extras dispatch. http_client
+        // has its own copies (the egress-side gate). Both copies must
+        // be disjoint independently.
+        for h in AUTH_HEADERS {
+            assert!(
+                !MANAGED_HEADERS.contains(h),
+                "router-side: {h:?} appears in both AUTH and MANAGED",
+            );
+        }
+        for h in MANAGED_HEADERS {
+            assert!(
+                !AUTH_HEADERS.contains(h),
+                "router-side: {h:?} appears in both MANAGED and AUTH",
+            );
+        }
     }
 }
 
