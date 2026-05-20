@@ -43,6 +43,24 @@ use super::types::{
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
+/// Anthropic Messages API minimum for `thinking.budget_tokens` on the
+/// legacy `ThinkingConfig::Enabled` wire shape. Anthropic 400s any
+/// value below this AND requires `max_tokens > budget_tokens`. The
+/// smallest legal body that carries legacy thinking has
+/// `max_tokens > 1024` (1024 budget plus at least 1 visible token).
+const ANTHROPIC_MIN_THINKING_BUDGET: u32 = 1024;
+
+/// True iff the caller's `max_tokens` can accommodate the Anthropic
+/// minimum thinking budget plus at least one visible-output token.
+/// Used by `build_thinking` to drop the legacy `Enabled` shape on
+/// probe-sized requests (title generation, topic summaries) instead
+/// of emitting a body that Anthropic would 400. The adaptive shape
+/// has no equivalent floor and is unaffected.
+fn legacy_thinking_fits(req: &ChatRequest) -> bool {
+    let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    max > ANTHROPIC_MIN_THINKING_BUDGET
+}
+
 /// Proportional budget_tokens as fraction of max_tokens per effort level.
 /// Only consulted on the legacy `ThinkingConfig::Enabled` path -- the
 /// adaptive-thinking path passes `effort` through verbatim into
@@ -130,26 +148,93 @@ pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<Thinki
         return Some(ThinkingConfig::Adaptive);
     }
 
+    // Legacy wire shape constraint: Anthropic requires
+    // `budget_tokens >= 1024` AND `max_tokens > budget_tokens`. Probe-
+    // sized requests (claude-code title gen, topic summaries) routinely
+    // send `max_tokens=64`; emitting any legacy `Enabled` body for
+    // those would 400 upstream. Drop thinking for this one request
+    // rather than reshape the caller's `max_tokens`.
+    if !legacy_thinking_fits(req) {
+        tracing::warn!(
+            request_max_tokens = req.max_tokens,
+            min_required = ANTHROPIC_MIN_THINKING_BUDGET + 1,
+            reasoning_effort = ?r.effort,
+            reasoning_max_tokens = ?r.max_tokens,
+            "anthropic legacy thinking shape requires max_tokens > 1024; \
+             dropping thinking for this probe-sized request. Set \
+             adaptive_thinking=true on the provider for Opus 4.7+ to avoid \
+             the budget-vs-max_tokens coupling, or send max_tokens > 1024."
+        );
+        return None;
+    }
+
     // Legacy wire shape: Enabled { budget_tokens }. Translate the
     // canonical signal (explicit budget > effort > enabled=true).
+    // Every arm runs the budget through `clamp_budget_to_legacy_window`,
+    // which enforces BOTH Anthropic invariants:
+    //   - `budget_tokens >= 1024` (floor); a sub-1024 explicit budget
+    //     gets raised with a WARN so an operator can see the silent
+    //     promotion. The effort/enabled arms can only land below the
+    //     floor in the 1025-1279 (effort=high) band; same clamp.
+    //   - `budget_tokens < max_tokens` (ceiling); an explicit budget
+    //     that exceeds `req.max_tokens` would otherwise produce a
+    //     wire body Anthropic 400s. The clamp caps at
+    //     `max.saturating_sub(1)` to leave at least one visible-
+    //     output token. The gate above guarantees `max > 1024`, so
+    //     the ceiling (`max - 1`) is always at least 1024 and the
+    //     floor never collides with the ceiling.
+    let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     if let Some(budget) = r.max_tokens {
         return Some(ThinkingConfig::Enabled {
-            budget_tokens: budget,
+            budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Explicit),
         });
     }
     if let Some(effort) = r.effort.as_deref() {
-        let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let budget = ((max as f64) * effort_ratio(effort)).max(1.0) as u32;
         return Some(ThinkingConfig::Enabled {
-            budget_tokens: budget,
+            budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
         });
     }
     // r.enabled == Some(true) without budget or effort.
-    let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-    let budget = (max / 2).max(1);
+    let budget = max / 2;
     Some(ThinkingConfig::Enabled {
-        budget_tokens: budget,
+        budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
     })
+}
+
+/// Origin of a `budget_tokens` value about to be clamped to
+/// Anthropic's legal `[1024, max_tokens-1]` window. Used to gate
+/// whether a silent floor promotion should WARN: `Explicit` means
+/// the caller asked for a specific number and we are about to ignore
+/// it -- worth a log line; `Derived` means routectl computed the
+/// number from `effort_ratio` or the `enabled=true` half-of-max
+/// fallback, and the operator's per-model config implicitly opted in.
+#[derive(Copy, Clone)]
+enum BudgetSource {
+    Explicit,
+    Derived,
+}
+
+/// Bring `budget` into Anthropic's `[1024, max_tokens-1]` window for
+/// the legacy `Enabled` wire shape. The gate at the top of
+/// `build_thinking` guarantees `max > 1024`, so `max - 1 >= 1024`
+/// and the window is non-empty. On an explicit caller budget that
+/// gets clamped UP from below the floor, fire a WARN so the operator
+/// can correlate "I asked for 500 tokens of thinking, why is the
+/// model using 1024" with a single grep.
+fn clamp_budget_to_legacy_window(budget: u32, max: u32, source: BudgetSource) -> u32 {
+    let ceiling = max.saturating_sub(1);
+    let clamped = budget.max(ANTHROPIC_MIN_THINKING_BUDGET).min(ceiling);
+    if matches!(source, BudgetSource::Explicit) && budget < ANTHROPIC_MIN_THINKING_BUDGET {
+        tracing::warn!(
+            requested_budget = budget,
+            clamped_to = clamped,
+            "reasoning.max_tokens below Anthropic legacy minimum (1024); \
+             clamping up. The model will use more thinking budget than \
+             the caller asked for."
+        );
+    }
+    clamped
 }
 
 /// Pair `ThinkingConfig::Adaptive` with a top-level `output_config`.
@@ -1413,7 +1498,7 @@ mod multi_turn_tool_use_tests {
         let req = ChatRequest {
             model: "claude-opus-4-6".into(),
             messages: vec![user_msg("hi")],
-            max_tokens: Some(1024),
+            max_tokens: Some(2048),
             reasoning: Some(ReasoningConfig {
                 effort: Some("high".into()),
                 max_tokens: None,
@@ -1426,8 +1511,8 @@ mod multi_turn_tool_use_tests {
 
         let thinking = body.get("thinking").expect("thinking field present");
         assert_eq!(thinking["type"], "enabled");
-        // budget_tokens = max_tokens (1024) * effort_ratio("high")=0.80 = 819
-        assert_eq!(thinking["budget_tokens"], 819);
+        // budget_tokens = max_tokens (2048) * effort_ratio("high")=0.80 = 1638
+        assert_eq!(thinking["budget_tokens"], 1638);
 
         // No output_config on the legacy path.
         assert!(
@@ -1450,7 +1535,7 @@ mod multi_turn_tool_use_tests {
         let req = ChatRequest {
             model: "claude-sonnet-4-6".into(),
             messages: vec![user_msg("hi")],
-            max_tokens: Some(1000),
+            max_tokens: Some(2000),
             reasoning: Some(ReasoningConfig {
                 effort: Some("max".into()),
                 max_tokens: None,
@@ -1462,8 +1547,8 @@ mod multi_turn_tool_use_tests {
         let body = normalize("test-anthropic", &req, false, &[]).unwrap();
         let thinking = body.get("thinking").unwrap();
         assert_eq!(thinking["type"], "enabled");
-        // 1000 * 0.99 = 990
-        assert_eq!(thinking["budget_tokens"], 990);
+        // 2000 * 0.99 = 1980
+        assert_eq!(thinking["budget_tokens"], 1980);
     }
 
     /// `reasoning.effort = "none"` produces `Disabled` on both
@@ -1549,6 +1634,208 @@ mod multi_turn_tool_use_tests {
         // The caller's effort string survives even though the budget
         // was dropped.
         assert_eq!(body["output_config"]["effort"], "low");
+    }
+
+    /// Real claude-code probe shape: `max_tokens=64` + operator
+    /// `effort="high"`. The legacy `Enabled` wire shape would emit
+    /// `budget_tokens=51` (64*0.80) which Anthropic 400s on the
+    /// `budget_tokens >= 1024` validator. routectl must drop thinking
+    /// for this request rather than emit a body that cannot succeed.
+    /// Caller's `max_tokens` is preserved verbatim.
+    #[test]
+    fn small_max_tokens_drops_legacy_thinking() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be absent on probe-sized legacy requests, got {body:?}"
+        );
+        assert_eq!(body["max_tokens"], 64, "caller's max_tokens preserved");
+    }
+
+    /// Variant of the above with an explicit sub-1024 `reasoning
+    /// .max_tokens`. Even an explicit caller budget must be dropped
+    /// when `max_tokens` cannot carry it: emitting `Enabled
+    /// { budget_tokens: 500 }` would still 400.
+    #[test]
+    fn small_max_tokens_drops_thinking_with_explicit_budget() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            reasoning: Some(ReasoningConfig {
+                effort: None,
+                max_tokens: Some(500),
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        assert!(body.get("thinking").is_none());
+    }
+
+    /// The adaptive shape is unaffected by the legacy floor: probe-
+    /// sized `max_tokens` still receives adaptive thinking because
+    /// the wire has no `budget_tokens` field and no Anthropic minimum
+    /// to violate. Pins that the new gate is legacy-only.
+    #[test]
+    fn small_max_tokens_keeps_adaptive_thinking() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    /// `effort="high"` on `max_tokens=1100` computes `1100*0.80=880`,
+    /// which would still 400 (below the 1024 floor) even though the
+    /// gate accepts the request (1100 > 1024). The clamp inside each
+    /// `Enabled` arm rescues the body by raising the budget to 1024.
+    /// 1024 < 1100 holds, so Anthropic's `max_tokens > budget_tokens`
+    /// constraint is satisfied; visible-output budget shrinks to 76.
+    #[test]
+    fn floor_clamps_budget_in_carryable_band() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1100),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+    }
+
+    /// Boundary: `max_tokens=1025` is the smallest value the gate
+    /// admits (`max > MIN`, not `max >= MIN`). Pins the off-by-one
+    /// and confirms the clamp lands at exactly 1024.
+    #[test]
+    fn exactly_1025_max_tokens_keeps_thinking() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1025),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+    }
+
+    /// Anthropic also requires `max_tokens > budget_tokens`. A caller
+    /// who sends an explicit `reasoning.max_tokens` larger than
+    /// `req.max_tokens` would otherwise produce a wire body that
+    /// 400s. The clamp caps the budget at `max_tokens - 1`, leaving
+    /// at least one visible-output token. Pins that the cap fires on
+    /// the explicit-budget arm.
+    #[test]
+    fn explicit_budget_above_max_tokens_capped_to_max_minus_one() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1100),
+            reasoning: Some(ReasoningConfig {
+                effort: None,
+                max_tokens: Some(1200),
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 1099);
+        // Anthropic invariant: max_tokens > budget_tokens.
+        assert_eq!(body["max_tokens"], 1100);
+    }
+
+    /// Caller's `reasoning.max_tokens` of 500 sits BELOW the
+    /// Anthropic floor (1024). With `req.max_tokens=2048` the gate
+    /// accepts, and the per-arm clamp raises the budget to 1024.
+    /// Pins the silent-promotion behavior on the explicit arm; the
+    /// accompanying WARN is observable in production via
+    /// `ROUTECTL_LOG=routectl=warn`.
+    #[test]
+    fn explicit_budget_below_floor_clamped_up_to_min() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(2048),
+            reasoning: Some(ReasoningConfig {
+                effort: None,
+                max_tokens: Some(500),
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+    }
+
+    /// `reasoning.enabled = false` short-circuits to `Disabled`
+    /// before the new gate runs. Without this pin, a future refactor
+    /// that moved the gate above the `enabled=false` check would
+    /// silently rewrite an explicit opt-out into absent-thinking.
+    #[test]
+    fn explicit_disable_wins_over_small_max_tokens() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(false),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
     }
 
     /// Tool-choice translation lives in the egress (different upstreams
