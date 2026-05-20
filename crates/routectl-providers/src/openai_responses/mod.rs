@@ -162,11 +162,20 @@ impl OpenAiResponsesProvider {
         format!("{}/responses", self.cfg.base_url.trim_end_matches('/'))
     }
 
-    fn build_headers(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+    fn build_headers(
+        &self,
+        rb: reqwest::RequestBuilder,
+        req: &ChatRequest,
+    ) -> Result<reqwest::RequestBuilder> {
         let mut rb = auth::apply(rb, &self.cfg)?;
-        for (k, v) in &self.cfg.header_extras {
-            // Defense-in-depth: refuse to let TOML-supplied
-            // `extra_headers` stomp on the auth header we just set.
+        // Prefer the router-composed map (provider + model merged at
+        // dispatch) if present; fall back to `self.cfg.header_extras`
+        // for library consumers that built the provider directly.
+        let source = crate::http_client::effective_header_extras(
+            &self.cfg.header_extras,
+            req.routectl_internal.header_extras.as_ref(),
+        );
+        for (k, v) in &source {
             if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
@@ -221,7 +230,7 @@ impl Provider for OpenAiResponsesProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let rb = self.build_headers(self.client.post(self.responses_url()))?;
+        let rb = self.build_headers(self.client.post(self.responses_url()), &req)?;
         let resp = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
@@ -398,7 +407,7 @@ impl Provider for OpenAiResponsesProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let rb = self.build_headers(self.client.post(self.responses_url()))?;
+        let rb = self.build_headers(self.client.post(self.responses_url()), &req)?;
         let resp = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")

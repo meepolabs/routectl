@@ -121,7 +121,7 @@ impl AnthropicApiProvider {
     fn build_headers(
         &self,
         rb: reqwest::RequestBuilder,
-        anthropic_beta: &[String],
+        req: &ChatRequest,
     ) -> reqwest::RequestBuilder {
         let mut rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
         rb = match self.cfg.auth_kind {
@@ -143,7 +143,7 @@ impl AnthropicApiProvider {
         // = [("anthropic-beta", "ctx-1m")]` works without a router.
         let mut beta_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut merged_betas: Vec<String> = Vec::new();
-        for entry in anthropic_beta {
+        for entry in &req.anthropic_beta {
             let t = entry.trim();
             if !t.is_empty() && beta_seen.insert(t.to_string()) {
                 merged_betas.push(t.to_string());
@@ -166,9 +166,13 @@ impl AnthropicApiProvider {
             rb = rb.header("anthropic-beta", merged_betas.join(","));
         }
 
-        for (k, v) in &self.cfg.header_extras {
-            // Defense-in-depth: refuse to let a TOML-supplied
-            // `header_extras` entry stomp on the auth header.
+        // Prefer the router-composed map for non-beta headers; fall
+        // back to `self.cfg.header_extras` for library consumers.
+        let source = crate::http_client::effective_header_extras(
+            &self.cfg.header_extras,
+            req.routectl_internal.header_extras.as_ref(),
+        );
+        for (k, v) in &source {
             if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
@@ -177,10 +181,6 @@ impl AnthropicApiProvider {
                 );
                 continue;
             }
-            // anthropic-beta was emitted above with the unioned value;
-            // skip the static config entry here to avoid a duplicate
-            // header on the wire. Other managed headers (host,
-            // content-type, content-length) are routectl-owned.
             if k.eq_ignore_ascii_case("anthropic-beta") || crate::http_client::is_managed_header(k)
             {
                 tracing::debug!(
@@ -246,7 +246,7 @@ impl Provider for AnthropicApiProvider {
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
-            .build_headers(self.client.post(self.messages_url()), &req.anthropic_beta)
+            .build_headers(self.client.post(self.messages_url()), &req)
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -328,7 +328,7 @@ impl Provider for AnthropicApiProvider {
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let resp = self
-            .build_headers(self.client.post(self.messages_url()), &req.anthropic_beta)
+            .build_headers(self.client.post(self.messages_url()), &req)
             .header("content-type", "application/json")
             .json(&body)
             .send()
