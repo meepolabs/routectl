@@ -56,3 +56,28 @@ impl ReasoningDialect {
         matches!(self, Self::DeepSeek | Self::Vllm)
     }
 }
+
+/// Default required by `OpenAiCompatConfig`'s `Default::default()`
+/// fallback for library consumers that don't pin a dialect.
+impl Default for ReasoningDialect {
+    fn default() -> Self {
+        Self::OpenAi
+    }
+}
+
+/// Map the cross-crate carrier enum (`routectl_core`) into the
+/// providers-private dispatch enum. Keeps the carrier on
+/// `ChatRequest::routectl_internal` crate-neutral while letting this
+/// crate's dispatch loop use a tighter (#[non_exhaustive]) shape.
+impl From<routectl_core::CoreReasoningDialect> for ReasoningDialect {
+    fn from(d: routectl_core::CoreReasoningDialect) -> Self {
+        match d {
+            routectl_core::CoreReasoningDialect::Openai => Self::OpenAi,
+            routectl_core::CoreReasoningDialect::Deepseek => Self::DeepSeek,
+            routectl_core::CoreReasoningDialect::Vllm => Self::Vllm,
+            routectl_core::CoreReasoningDialect::RawThinkTag => Self::RawThinkTag,
+            routectl_core::CoreReasoningDialect::Openrouter => Self::OpenRouter,
+            routectl_core::CoreReasoningDialect::Passthrough => Self::Passthrough,
+        }
+    }
+}

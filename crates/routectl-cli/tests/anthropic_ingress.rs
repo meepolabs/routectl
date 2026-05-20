@@ -19,8 +19,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use routectl_router::{
-    AliasValue, Config, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy, ServerAuth,
-    ServerConfig,
+    AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerAuth, ServerConfig,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path};
@@ -1838,7 +1837,7 @@ async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
         api_shape: BedrockApiShape::Invoke,
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
-        extra_headers: Vec::new(),
+        header_extras: Vec::new(),
         anthropic_beta: vec![],
         allowed_betas: vec![
             "context-1m-2025-08-07".into(),
@@ -1909,13 +1908,13 @@ fn deepseek_dialect_config(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "deepseek-mock".to_string(),
-        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key")
-            .with_reasoning_dialect(ReasoningDialect::Deepseek),
+        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
     );
     let mut models = BTreeMap::new();
     models.insert(
         "ds-chat".to_string(),
-        ModelEntry::new("deepseek-mock", "deepseek-chat"),
+        ModelEntry::new("deepseek-mock", "deepseek-chat")
+            .with_reasoning_dialect(routectl_router::ReasoningDialect::Deepseek),
     );
     let mut aliases = BTreeMap::new();
     aliases.insert("heavy".to_string(), AliasValue::Single("ds-chat".into()));
@@ -1939,13 +1938,13 @@ fn vllm_dialect_config(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "vllm-mock".to_string(),
-        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key")
-            .with_reasoning_dialect(ReasoningDialect::Vllm),
+        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
     );
     let mut models = BTreeMap::new();
     models.insert(
         "qwen".to_string(),
-        ModelEntry::new("vllm-mock", "qwen3-30b"),
+        ModelEntry::new("vllm-mock", "qwen3-30b")
+            .with_reasoning_dialect(routectl_router::ReasoningDialect::Vllm),
     );
     let mut aliases = BTreeMap::new();
     aliases.insert("heavy".to_string(), AliasValue::Single("qwen".into()));
@@ -2186,7 +2185,7 @@ async fn converse_request_body_has_camel_case_inference_config() {
         api_shape: BedrockApiShape::Converse,
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
-        extra_headers: Vec::new(),
+        header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: vec![
             "context-1m-2025-08-07".into(),
@@ -2298,7 +2297,7 @@ async fn converse_request_includes_tool_config_for_tool_defs() {
         api_shape: BedrockApiShape::Converse,
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
-        extra_headers: Vec::new(),
+        header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: vec![
             "context-1m-2025-08-07".into(),
@@ -2481,7 +2480,7 @@ async fn converse_request_system_with_cache_control_emits_cache_point_block() {
         api_shape: BedrockApiShape::Converse,
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
-        extra_headers: Vec::new(),
+        header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: vec![
             "context-1m-2025-08-07".into(),

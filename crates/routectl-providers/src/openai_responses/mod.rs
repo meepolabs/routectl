@@ -107,10 +107,11 @@ pub struct OpenAiResponsesConfig {
     pub base_url: String,
     /// Auth dispatch.
     pub auth_kind: AuthKind,
-    /// Extra HTTP headers applied to every Responses request. Reserved
-    /// header names (`authorization`, `host`, `content-type`, ...) are
-    /// rejected at apply-time to keep the auth contract intact.
-    pub extra_headers: Vec<(String, String)>,
+    /// Provider-level extra HTTP headers (renamed from
+    /// `extra_headers` in v0.6.0). Reserved header names
+    /// (`authorization`, `host`, `content-type`, ...) are rejected
+    /// at apply-time to keep the auth contract intact.
+    pub header_extras: Vec<(String, String)>,
     /// Override the User-Agent. `None` -> default
     /// `routectl/<version> codex-cli`.
     pub user_agent: Option<String>,
@@ -127,7 +128,7 @@ impl OpenAiResponsesConfig {
             account_id: None,
             base_url: "https://chatgpt.com/backend-api/codex".into(),
             auth_kind: AuthKind::ChatgptOauth,
-            extra_headers: Vec::new(),
+            header_extras: Vec::new(),
             user_agent: None,
             originator: None,
         }
@@ -163,14 +164,14 @@ impl OpenAiResponsesProvider {
 
     fn build_headers(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
         let mut rb = auth::apply(rb, &self.cfg)?;
-        for (k, v) in &self.cfg.extra_headers {
+        for (k, v) in &self.cfg.header_extras {
             // Defense-in-depth: refuse to let TOML-supplied
             // `extra_headers` stomp on the auth header we just set.
             if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
                 );
                 continue;
             }
@@ -178,7 +179,7 @@ impl OpenAiResponsesProvider {
                 tracing::debug!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "dropping managed header from extra_headers; composed dynamically by routectl"
+                    "dropping managed header from header_extras; composed dynamically by routectl"
                 );
                 continue;
             }
@@ -505,7 +506,7 @@ mod e2e_tests {
             account_id: Some("acct-uuid".into()),
             base_url: base_url.to_string(),
             auth_kind: AuthKind::ChatgptOauth,
-            extra_headers: Vec::new(),
+            header_extras: Vec::new(),
             user_agent: None,
             originator: None,
         };

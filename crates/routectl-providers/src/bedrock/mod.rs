@@ -187,8 +187,10 @@ pub struct BedrockConfig {
     /// IAM policy gating Bedrock access uses an `aws:UserAgent`
     /// condition (e.g. Claude Code's role).
     pub user_agent: Option<String>,
-    /// Extra HTTP headers applied to every request (after auth/UA).
-    pub extra_headers: Vec<(String, String)>,
+    /// Provider-level extra HTTP headers (renamed from
+    /// `extra_headers` in v0.6.0). The router merges per-model
+    /// `header_extras` into this map at dispatch time.
+    pub header_extras: Vec<(String, String)>,
     /// Anthropic beta gates passed through to the model. For `Invoke`
     /// shape, these go in the request body's top-level `anthropic_beta`
     /// array; for `Converse`, they go in
@@ -307,7 +309,7 @@ impl Provider for BedrockProvider {
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
-        for (k, v) in &self.cfg.extra_headers {
+        for (k, v) in &self.cfg.header_extras {
             // Defense-in-depth: refuse auth-reserved headers from
             // user-supplied extra_headers. The Bedrock SigV4 path
             // would overwrite Authorization later anyway, but the
@@ -317,7 +319,7 @@ impl Provider for BedrockProvider {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
                 );
                 continue;
             }
@@ -325,7 +327,7 @@ impl Provider for BedrockProvider {
                 tracing::debug!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "dropping managed header from extra_headers; composed dynamically by routectl"
+                    "dropping managed header from header_extras; composed dynamically by routectl"
                 );
                 continue;
             }
@@ -412,7 +414,7 @@ impl Provider for BedrockProvider {
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
-        for (k, v) in &self.cfg.extra_headers {
+        for (k, v) in &self.cfg.header_extras {
             // Defense-in-depth: refuse auth-reserved headers from
             // user-supplied extra_headers. The Bedrock SigV4 path
             // would overwrite Authorization later anyway, but the
@@ -422,7 +424,7 @@ impl Provider for BedrockProvider {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
                 );
                 continue;
             }
@@ -430,7 +432,7 @@ impl Provider for BedrockProvider {
                 tracing::debug!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "dropping managed header from extra_headers; composed dynamically by routectl"
+                    "dropping managed header from header_extras; composed dynamically by routectl"
                 );
                 continue;
             }
@@ -721,7 +723,7 @@ mod tests {
                 session_token: None,
             },
             user_agent: None,
-            extra_headers: Vec::new(),
+            header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             allowed_betas: Vec::new(),
             allowed_body_fields: Vec::new(),

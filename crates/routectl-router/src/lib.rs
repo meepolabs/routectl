@@ -12,9 +12,9 @@ pub mod router;
 pub mod runtime_state;
 
 pub use config::{
-    AliasValue, Config, LegacyCompat, ModelEntry, ProviderEntry, ProviderKind,
-    ProviderRuntimePolicy, ReasoningDefaults, ReasoningDialect, RetryPolicy, ServerAuth,
-    ServerConfig,
+    AliasValue, Config, EffortLevel, HistoryReasoning, LegacyCompat, ModelEntry, ProviderEntry,
+    ProviderKind, ProviderRuntimePolicy, ReasoningDefaults, ReasoningDialect, RetryPolicy,
+    ServerAuth, ServerConfig, ThinkingChoice,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};

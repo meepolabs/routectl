@@ -8,10 +8,7 @@ use std::sync::Arc;
 use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{Provider, Result};
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
-use routectl_providers::openai_compat::{
-    HistoryReasoning as ProviderHistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider,
-    ReasoningDialect as ProviderDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
 #[cfg(feature = "bedrock")]
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
@@ -21,10 +18,9 @@ use routectl_providers::openai_responses::{
     AuthKind as OpenaiResponsesAuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
 };
 
-use crate::config::HistoryReasoning;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
-use crate::config::{Config, ProviderEntry, ReasoningDialect};
+use crate::config::{Config, ProviderEntry};
 use crate::resolved::ResolvedModel;
 
 /// Convenience wrapper that builds a provider with `BuildOptions::default()`.
@@ -211,25 +207,30 @@ async fn build_provider_inner(
         ProviderEntry::OpenaiCompat {
             base_url,
             api_key_ref,
-            extra_headers,
-            reasoning_dialect,
-            history_reasoning,
+            header_extras,
+            payload_extras: _,
             user_agent,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
             let api_key = resolve(secrets, api_key_ref).await?;
+            // v0.6.0: reasoning_dialect + history_reasoning moved off
+            // [providers.X] to [models.X]; the egress reads them from
+            // `req.routectl_internal` at request time. The config-side
+            // defaults left here are pure fallback for library
+            // consumers constructing an `OpenAiCompatConfig` directly
+            // (no router).
             let cfg = OpenAiCompatConfig {
                 id: format!("openai-compat:{name}"),
                 base_url: base_url.clone(),
                 api_key,
-                extra_headers: extra_headers
+                header_extras: header_extras
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
-                default_extras: None,
-                reasoning_dialect: map_dialect(*reasoning_dialect),
-                history_reasoning: map_history_reasoning(*history_reasoning),
+                payload_extras: None,
+                reasoning_dialect: Default::default(),
+                history_reasoning: Default::default(),
                 user_agent: user_agent.clone(),
                 strict_translation: opts.strict_translation,
                 disable_stream_include_usage: false,
@@ -241,7 +242,8 @@ async fn build_provider_inner(
             base_url,
             anthropic_version,
             auth_kind,
-            extra_headers,
+            header_extras,
+            payload_extras: _,
             user_agent,
             allowed_betas,
             runtime: _,
@@ -254,7 +256,7 @@ async fn build_provider_inner(
                 base_url: base_url.clone(),
                 anthropic_version: anthropic_version.clone(),
                 auth_kind: *auth_kind,
-                extra_headers: extra_headers
+                header_extras: header_extras
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
@@ -272,7 +274,8 @@ async fn build_provider_inner(
             account_id_ref,
             base_url,
             auth_kind,
-            extra_headers,
+            header_extras,
+            payload_extras: _,
             user_agent,
             originator,
             runtime: _,
@@ -293,7 +296,7 @@ async fn build_provider_inner(
                 account_id,
                 base_url: resolved_base_url,
                 auth_kind: *auth_kind,
-                extra_headers: extra_headers
+                header_extras: header_extras
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
@@ -308,7 +311,8 @@ async fn build_provider_inner(
             api_shape,
             creds,
             user_agent,
-            extra_headers,
+            header_extras,
+            payload_extras: _,
             anthropic_beta,
             runtime: _,
         } => {
@@ -342,7 +346,7 @@ async fn build_provider_inner(
                 api_shape: map_bedrock_api_shape(*api_shape),
                 creds: bedrock_creds,
                 user_agent: user_agent.clone(),
-                extra_headers: extra_headers
+                header_extras: header_extras
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
@@ -484,14 +488,14 @@ pub async fn build_resolved_models(
         #[cfg(not(feature = "bedrock"))]
         let is_bedrock = false;
 
-        // AnthropicApi with `[models.X] adaptive_thinking = true`:
+        // AnthropicApi with `[models.X] thinking = "adaptive"`:
         // one Arc per model so each gets its own
         // `AnthropicApiConfig::adaptive_thinking` value. v0.6.0 moved
         // the flag from `[providers.X]` to `[models.X]`. AnthropicApi
         // models that leave the flag at None still share one cached
         // `Arc<dyn Provider>` per `[providers.X]`.
         let is_anthropic_per_model = matches!(provider_entry, ProviderEntry::AnthropicApi { .. })
-            && entry.adaptive_thinking.is_some();
+            && entry.is_adaptive_thinking();
 
         let provider = if is_bedrock {
             #[cfg(feature = "bedrock")]
@@ -529,7 +533,11 @@ pub async fn build_resolved_models(
 
                 let overrides = BedrockModelOverrides {
                     model_id: entry.upstream.clone(),
-                    adaptive_thinking: entry.adaptive_thinking,
+                    adaptive_thinking: if entry.is_adaptive_thinking() {
+                        Some(true)
+                    } else {
+                        None
+                    },
                     additional_model_request_fields: entry.additional_request_fields.clone(),
                 };
                 match build_provider_with_bedrock_model_override(
@@ -562,7 +570,7 @@ pub async fn build_resolved_models(
             }
         } else if is_anthropic_per_model {
             let overrides = AnthropicModelOverrides {
-                adaptive_thinking: entry.adaptive_thinking,
+                adaptive_thinking: Some(true),
             };
             match build_provider_with_anthropic_model_override(
                 &entry.provider,
@@ -627,9 +635,18 @@ pub async fn build_resolved_models(
             provider,
             entry.upstream.clone(),
         )
-        .with_reasoning(entry.reasoning_defaults.clone());
-        if !entry.anthropic_beta.is_empty() {
-            resolved = resolved.with_anthropic_beta(entry.anthropic_beta.clone());
+        .with_reasoning(entry.reasoning_defaults_view());
+        if let Some(d) = entry.reasoning_dialect {
+            resolved = resolved.with_reasoning_dialect(d);
+        }
+        if let Some(h) = entry.history_reasoning {
+            resolved = resolved.with_history_reasoning(h);
+        }
+        if !entry.header_extras.is_empty() {
+            resolved = resolved.with_header_extras(entry.header_extras.clone());
+        }
+        if let Some(extras) = entry.payload_extras.as_ref() {
+            resolved = resolved.with_payload_extras(extras.clone());
         }
         if let Some(ms) = entry.stream_first_byte_timeout_ms {
             resolved = resolved.with_stream_first_byte_timeout_ms(ms);
@@ -750,24 +767,12 @@ fn scheme_of(uri: &str) -> &'static str {
     }
 }
 
-fn map_dialect(d: ReasoningDialect) -> ProviderDialect {
-    match d {
-        ReasoningDialect::Openai => ProviderDialect::OpenAi,
-        ReasoningDialect::Deepseek => ProviderDialect::DeepSeek,
-        ReasoningDialect::Vllm => ProviderDialect::Vllm,
-        ReasoningDialect::RawThinkTag => ProviderDialect::RawThinkTag,
-        ReasoningDialect::Openrouter => ProviderDialect::OpenRouter,
-        ReasoningDialect::Passthrough => ProviderDialect::Passthrough,
-    }
-}
-
-fn map_history_reasoning(h: HistoryReasoning) -> ProviderHistoryReasoning {
-    match h {
-        HistoryReasoning::Auto => ProviderHistoryReasoning::Auto,
-        HistoryReasoning::Strip => ProviderHistoryReasoning::Strip,
-        HistoryReasoning::Preserve => ProviderHistoryReasoning::Preserve,
-    }
-}
+// v0.6.0: ReasoningDialect / HistoryReasoning mappings moved to
+// `From` impls on `routectl_providers::openai_compat::{ReasoningDialect,
+// HistoryReasoning}` so the dispatch-layer carrier
+// (`ChatRequest::routectl_internal`) can convert without the factory in
+// the middle. The factory no longer reads either field off
+// `[providers.X]` (both fields live on `[models.X]` now).
 
 /// Pick the default Responses API base URL for a given auth_kind. The
 /// factory uses this whenever the operator left `base_url` unset.
@@ -952,72 +957,22 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
     )
 }
 
-/// Validate the `[models.X] thinking` knob across every configured
-/// model. The validator accumulates errors so an operator with
-/// multiple offending models gets one consolidated startup error
-/// rather than fixing them one at a time.
+/// Validate the `[models.X] thinking` / `effort` knobs across every
+/// configured model.
 ///
-/// Rejected shapes:
-///   - empty string `""` -- without this the egress emits `effort: ""`
-///     on every routed request, which most upstreams 400 on.
-///   - whitespace-only (e.g. `"  "`) -- same failure mode as empty,
-///     just less obvious.
-///   - ASCII control characters (0x00-0x1F, 0x7F) -- they would
-///     corrupt log lines / wire bodies. Non-ASCII characters
-///     (printable Unicode) ARE accepted; future vendor vocabularies
-///     may include extended characters and the validator stays out
-///     of the way.
-///   - longer than 64 bytes -- effort strings are short tokens by
-///     design ("minimal", "low", "medium", "high", "xhigh", "max",
-///     "none", or a vendor-specific extension). 64 bytes is well
-///     above any realistic value and catches accidental paste of a
-///     full prompt or path.
-///
-/// Otherwise unknown values pass through verbatim -- the provider-side
-/// translation tables are forward-compatible by design, and pinning
-/// the validator to a closed enum here would require a routectl
-/// release every time a vendor adds a new effort level.
+/// v0.6.0 collapsed the old free-form `thinking: String` field into
+/// two typed enums: `thinking: ThinkingChoice` (closed `Bool | Adaptive`)
+/// and `effort: EffortLevel` (closed lowercase enum). Both reject bad
+/// values at TOML parse time, so the heavy string validation that
+/// lived here pre-v0.6 is no longer needed. The function is kept as
+/// a stable startup-validation hook (called from `routectl-cli`
+/// `commands::config`, `commands::test`, and `server::start`) so the
+/// CLI surface keeps a single place to add semantic invariants if
+/// future shapes need them.
 ///
 /// Call once per process startup BEFORE building any providers.
-pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()> {
-    use routectl_core::Error;
-
-    const MAX_THINKING_BYTES: usize = 64;
-    let mut errors: Vec<String> = Vec::new();
-    for (name, entry) in &config.models {
-        let Some(thinking) = entry.reasoning_defaults.thinking.as_deref() else {
-            continue;
-        };
-        if thinking.is_empty() {
-            errors.push(format!(
-                "model `{name}`: `thinking` must be a non-empty string \
-                 (e.g. \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \
-                 \"max\", \"none\"); remove the field to leave reasoning \
-                 effort unset"
-            ));
-        } else if thinking.trim().is_empty() {
-            errors.push(format!(
-                "model `{name}`: `thinking` value `{thinking}` is whitespace-only; \
-                 remove the field or set a real value (e.g. \"low\")"
-            ));
-        } else if thinking.chars().any(|c| c.is_ascii_control()) {
-            errors.push(format!(
-                "model `{name}`: `thinking` value contains ASCII control \
-                 characters; effort strings must not contain control characters"
-            ));
-        } else if thinking.len() > MAX_THINKING_BYTES {
-            errors.push(format!(
-                "model `{name}`: `thinking` value is {} bytes; max {MAX_THINKING_BYTES} \
-                 (effort strings should be short tokens like \"high\")",
-                thinking.len()
-            ));
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::Config(errors.join("\n")))
-    }
+pub fn validate_reasoning_defaults(_config: &crate::config::Config) -> Result<()> {
+    Ok(())
 }
 
 /// Validate that every entry in `[aliases]` resolves to a known and
@@ -1210,7 +1165,8 @@ mod bedrock_validation_tests {
             api_shape: BedrockApiShapeConfig::Invoke,
             creds: BedrockCredsConfig::DefaultChain,
             user_agent: None,
-            extra_headers: BTreeMap::new(),
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
             anthropic_beta: Vec::new(),
             runtime: Default::default(),
         }
@@ -1222,7 +1178,8 @@ mod bedrock_validation_tests {
             api_shape,
             creds,
             user_agent,
-            extra_headers,
+            header_extras,
+            payload_extras,
             runtime,
             ..
         } = bedrock_provider_entry()
@@ -1234,7 +1191,8 @@ mod bedrock_validation_tests {
             api_shape,
             creds,
             user_agent,
-            extra_headers,
+            header_extras,
+            payload_extras,
             anthropic_beta: vec!["future-flag-2026-12-31".into()],
             runtime,
         }
@@ -1349,7 +1307,8 @@ mod bedrock_validation_tests {
                 api_shape: BedrockApiShapeConfig::Converse,
                 creds: BedrockCredsConfig::DefaultChain,
                 user_agent: None,
-                extra_headers: BTreeMap::new(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
                 anthropic_beta: Vec::new(),
                 runtime: Default::default(),
             },
@@ -1514,18 +1473,22 @@ mod build_resolved_models_tests {
     }
 
     #[tokio::test]
-    async fn anthropic_beta_propagates_from_model_entry_to_resolved() {
-        // Pin: a per-model anthropic_beta list lands on
-        // ResolvedModel.anthropic_beta after build_resolved_models.
+    async fn header_extras_propagate_from_model_entry_to_resolved() {
+        // Pin: v0.6.0 -- per-model `header_extras` lands on
+        // ResolvedModel.header_extras after build_resolved_models.
+        // Operators now set anthropic-beta via header_extras instead
+        // of the dropped Vec<String> field.
         let store = MemoryStore;
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert(
+            "anthropic-beta".to_string(),
+            "context-1m-2025-08-07,prompt-cache-1h".to_string(),
+        );
         let cfg = config_with_models(
             vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
             vec![(
                 "opus",
-                ModelEntry::new("anthropic", "claude-opus-4-7").with_anthropic_beta(vec![
-                    "context-1m-2025-08-07".into(),
-                    "prompt-cache-1h".into(),
-                ]),
+                ModelEntry::new("anthropic", "claude-opus-4-7").with_header_extras(headers),
             )],
         );
         let (models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
@@ -1534,11 +1497,8 @@ mod build_resolved_models_tests {
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
         let opus = models.get("opus").expect("opus entry");
         assert_eq!(
-            opus.anthropic_beta,
-            vec![
-                "context-1m-2025-08-07".to_string(),
-                "prompt-cache-1h".to_string(),
-            ]
+            opus.header_extras.get("anthropic-beta"),
+            Some(&"context-1m-2025-08-07,prompt-cache-1h".to_string())
         );
     }
 
@@ -1562,9 +1522,9 @@ mod build_resolved_models_tests {
     }
 
     #[tokio::test]
-    async fn empty_anthropic_beta_and_none_timeout_yield_defaults() {
+    async fn empty_header_extras_and_none_timeout_yield_defaults() {
         // Pin: a model entry without the new fields leaves the
-        // resolved model with default values (empty list, None).
+        // resolved model with default values (empty maps, None).
         let store = MemoryStore;
         let cfg = config_with_models(
             vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
@@ -1574,7 +1534,8 @@ mod build_resolved_models_tests {
             .await
             .expect("ok");
         let haiku = models.get("haiku").expect("haiku entry");
-        assert!(haiku.anthropic_beta.is_empty());
+        assert!(haiku.header_extras.is_empty());
+        assert!(haiku.payload_extras.is_none());
         assert!(haiku.stream_first_byte_timeout_ms.is_none());
     }
 }

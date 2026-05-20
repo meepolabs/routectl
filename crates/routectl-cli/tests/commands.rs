@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 
 use routectl_cli::commands;
 use routectl_router::{
-    AliasValue, Config, LegacyCompat, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy,
-    ServerConfig,
+    AliasValue, Config, LegacyCompat, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -15,8 +14,7 @@ fn config_with(server_url: &str) -> Config {
     let mut providers = BTreeMap::new();
     providers.insert(
         "mock".into(),
-        ProviderEntry::openai_compat(format!("{server_url}/v1"), "literal:test-key")
-            .with_reasoning_dialect(ReasoningDialect::Openai),
+        ProviderEntry::openai_compat(format!("{server_url}/v1"), "literal:test-key"),
     );
     let mut models = BTreeMap::new();
     models.insert("fast-mini".into(), ModelEntry::new("mock", "gpt-4o-mini"));
@@ -63,8 +61,7 @@ async fn config_check_passes_for_valid_config() {
     };
     config.providers.insert(
         "mock".into(),
-        ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc")
-            .with_reasoning_dialect(ReasoningDialect::Openai),
+        ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc"),
     );
     config
         .models
@@ -118,8 +115,7 @@ fn bare_config() -> Config {
 fn add_mock_provider(config: &mut Config) {
     config.providers.insert(
         "mock".into(),
-        ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc")
-            .with_reasoning_dialect(ReasoningDialect::Openai),
+        ProviderEntry::openai_compat("http://127.0.0.1:9", "literal:abc"),
     );
 }
 
@@ -206,8 +202,7 @@ fn config_show_redacts_literal_secrets() {
     };
     config.providers.insert(
         "secret".into(),
-        ProviderEntry::openai_compat("https://api.example.com/v1", "literal:sk-very-secret")
-            .with_reasoning_dialect(ReasoningDialect::Openai),
+        ProviderEntry::openai_compat("https://api.example.com/v1", "literal:sk-very-secret"),
     );
 
     // Capture stdout via a wrapping function. Easiest: write our own
@@ -246,8 +241,7 @@ fn config_show_keeps_env_uris_intact() {
         ProviderEntry::openai_compat(
             "https://api.example.com/v1",
             "env://ROUTECTL_TEST_ANTHROPIC",
-        )
-        .with_reasoning_dialect(ReasoningDialect::Openai),
+        ),
     );
 
     commands::config::show(&config).expect("show ok");

@@ -594,7 +594,7 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
             api_shape: BedrockApiShape::Invoke,
             creds,
             user_agent: Some("routectl-live-test/0.4".into()),
-            extra_headers: Vec::new(),
+            header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             allowed_betas: vec![
                 "context-1m-2025-08-07".into(),
@@ -1008,7 +1008,7 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
             api_shape: BedrockApiShape::Converse,
             creds,
             user_agent: Some("routectl-live-test/0.4".into()),
-            extra_headers: Vec::new(),
+            header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             allowed_betas: vec![
                 "context-1m-2025-08-07".into(),
@@ -1188,7 +1188,7 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
                 account_id_ref: Some("env://OPENAI_ACCOUNT_ID".into()),
                 base_url: Some(OPENAI_RESPONSES_BASE.into()),
                 auth_kind: OpenaiResponsesAuthKind::ChatgptOauth,
-                extra_headers: BTreeMap::new(),
+                header_extras: BTreeMap::new(),
                 user_agent: None,
                 originator: None,
                 runtime: Default::default(),

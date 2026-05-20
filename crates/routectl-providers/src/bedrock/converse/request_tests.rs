@@ -25,7 +25,7 @@ fn fake_cfg() -> BedrockConfig {
         api_shape: BedrockApiShape::Converse,
         creds: BedrockCreds::BearerKey { key: "test".into() },
         user_agent: None,
-        extra_headers: Vec::new(),
+        header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: vec![
             "context-1m-2025-08-07".into(),

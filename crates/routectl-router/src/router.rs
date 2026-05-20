@@ -12,13 +12,34 @@ use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
     sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReasoningConfig,
-    Result,
+    Result, RoutectlInternal,
 };
+use serde_json::Value;
 
-use crate::config::{AliasValue, Config, ReasoningDefaults, RetryPolicy};
+use crate::config::{
+    AliasValue, Config, HistoryReasoning, ReasoningDefaults, ReasoningDialect, RetryPolicy,
+};
 use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::{GateDecision, ProviderState};
+
+/// Auth-reserved header names. Dispatch-layer compose WARN-drops any
+/// `header_extras` entry matching one of these so an operator-typed
+/// override can't silently replace routectl's resolved auth header.
+/// Case-insensitive.
+const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "anthropic-version"];
+
+/// Managed-reserved header names. Dispatch-layer compose DEBUG-drops
+/// these (operator's wire-shape mistake, not a security issue).
+/// `anthropic-beta` is intentionally NOT here -- operators own that
+/// slot via `header_extras` and the list-valued post-pass unions all
+/// three sources. Case-insensitive.
+const MANAGED_HEADERS: &[&str] = &["host", "content-type", "content-length"];
+
+/// Header names whose values are comma-separated lists and must be
+/// unioned across sources (ingress -> provider -> model) rather than
+/// last-writer-wins on collision. Currently just `anthropic-beta`.
+const LIST_VALUED_HEADERS: &[&str] = &["anthropic-beta"];
 
 pub struct Router {
     pub config: Arc<Config>,
@@ -90,38 +111,32 @@ impl RouterOptions {
 /// directly so the per-mode resolver only runs once per request.
 #[derive(Clone)]
 struct DispatchTarget {
-    /// Operator-facing provider name (a key in `[providers]`). Used
-    /// for tracing/log fields and `compose_attempt_policy` (provider-
-    /// level timeouts live on `[providers.X]`, not `[models.X]`).
+    /// Operator-facing provider name (a key in `[providers]`).
     provider_name: String,
     /// Key into `Router.state` for the per-attempt rate-limit + circuit-
-    /// breaker check. v0.6.0 mode uses the model nickname so two
-    /// models on the same provider quarantine independently. Legacy /
-    /// test mode (no nickname) falls back to the provider name.
+    /// breaker check.
     state_key: String,
-    /// Wire model id sent to the provider (e.g. an Anthropic
-    /// `claude-haiku-4-5-20251001` or a Bedrock inference profile id).
+    /// Wire model id sent to the provider.
     upstream: String,
-    /// Concrete provider instance. `None` only in legacy mode when
-    /// the alias chain referenced a provider that wasn't registered;
-    /// the dispatch loop converts that to `Error::UnknownProvider`
-    /// + fallback. v0.6.0 mode never produces `None` because
-    ///   `Router::new` validates every nickname's provider at startup.
+    /// Concrete provider instance.
     provider: Option<Arc<dyn Provider>>,
-    /// v0.6.0 per-model reasoning defaults. `None` in legacy mode
-    /// (the merge step reads `[providers.X] reasoning_defaults`
-    /// instead). Removed entirely in C4.
+    /// v0.6.0 per-model reasoning defaults.
     reasoning: Option<ReasoningDefaults>,
-    /// Model nickname (the `[models]` table key) for tracing. `None`
-    /// in legacy mode where there's no nickname concept.
+    /// Model nickname for tracing.
     nickname: Option<String>,
-    /// Per-model `anthropic_beta` list lifted from `[models.X]`.
-    /// Merged into `req.anthropic_beta` at dispatch time. Empty when
-    /// the operator left the field unset.
-    anthropic_beta: Vec<String>,
-    /// Per-model `stream_first_byte_timeout_ms`. When `Some`, this
-    /// value wins over the per-provider and global resolution in
-    /// `compose_attempt_policy`.
+    /// Per-model `header_extras`. Merged with the provider's
+    /// `header_extras` at dispatch (model wins on key collision;
+    /// list-valued post-pass for `anthropic-beta`).
+    model_header_extras: BTreeMap<String, String>,
+    /// Per-model `payload_extras`. Deep-merged with the provider's
+    /// `payload_extras` (model wins on leaf collision).
+    model_payload_extras: Option<Value>,
+    /// Per-model openai-compat reasoning dialect. `None` falls back
+    /// to the egress's own default.
+    reasoning_dialect: Option<ReasoningDialect>,
+    /// Per-model openai-compat outgoing-history reasoning policy.
+    history_reasoning: Option<HistoryReasoning>,
+    /// Per-model `stream_first_byte_timeout_ms`.
     stream_first_byte_timeout_ms: Option<u64>,
 }
 
@@ -349,7 +364,8 @@ impl Router {
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
             // v0.6.0: per-model reasoning defaults come from the
-            // resolved table (`[models.X] thinking`/`enabled`).
+            // resolved table (`[models.X] thinking` + `[models.X]
+            // effort` projected via `reasoning_defaults_view`).
             if let Some(defaults) = target.reasoning.as_ref() {
                 merge_reasoning_defaults_into(&mut attempt_req, defaults);
                 tracing::debug!(
@@ -358,11 +374,11 @@ impl Router {
                     "applied resolved-model reasoning defaults",
                 );
             }
-            // v0.6: per-model anthropic_beta list lifts onto
-            // req.anthropic_beta, dedup against existing entries.
-            if !target.anthropic_beta.is_empty() {
-                merge_model_anthropic_beta_into(&mut attempt_req, &target.anthropic_beta);
-            }
+            // v0.6: layered config compose. The provider's
+            // header_extras + payload_extras are looked up by
+            // provider_name; the model's contribution lives on the
+            // dispatch target.
+            apply_layered_overlays(&self.config, target, &mut attempt_req);
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
@@ -509,11 +525,7 @@ impl Router {
             if let Some(defaults) = target.reasoning.as_ref() {
                 merge_reasoning_defaults_into(&mut attempt_req, defaults);
             }
-            // v0.6: per-model anthropic_beta lifts onto req.anthropic_beta,
-            // dedup against existing entries.
-            if !target.anthropic_beta.is_empty() {
-                merge_model_anthropic_beta_into(&mut attempt_req, &target.anthropic_beta);
-            }
+            apply_layered_overlays(&self.config, target, &mut attempt_req);
 
             let attempt_policy = self.compose_attempt_policy(
                 &policy,
@@ -656,34 +668,285 @@ impl Router {
     }
 }
 
-/// Merge a model entry's `anthropic_beta` list into the per-attempt
-/// request's `anthropic_beta` field. Deduplicated: request entries
-/// preserved first (in their existing order); model entries appended
-/// only when not already present. Comparison is exact-string (case
-/// sensitive) because Anthropic beta names are case-sensitive
-/// identifiers (`context-1m-2025-08-07` != `Context-1m-2025-08-07`);
-/// a casing typo SHOULD propagate so the upstream's 400 surfaces the
-/// misconfig immediately.
+/// Compose the layered configuration overlays into the per-attempt
+/// request. v0.6.0 introduces three knobs that ride from operator
+/// TOML through the dispatch layer onto the egress:
 ///
-/// Use case: a single provider serves multiple Claude models where
-/// only some opt into a beta. The merge is **additive**: per-model
-/// `anthropic_beta` can ADD flags but cannot SUPPRESS a flag that
-/// the provider already sets via `extra_headers["anthropic-beta"]`
-/// or `[providers.X] anthropic_beta`. To make a model opt OUT of a
-/// provider-shipped beta, the operator must remove the beta from the
-/// provider's config and re-add it to the per-model entries that
-/// actually want it. See CLAUDE.md "Retry and fallback defaults"
-/// section for the migration pattern.
-pub fn merge_model_anthropic_beta_into(req: &mut ChatRequest, model_betas: &[String]) {
-    if model_betas.is_empty() {
-        return;
+///   - `header_extras` (provider + model, with list-valued
+///     `anthropic-beta` unioned)
+///   - `payload_extras` (provider + model, deep-merged with model
+///     winning on leaf collision)
+///   - `routectl_internal` (per-model reasoning dialect + history
+///     reasoning policy that the openai-compat egress reads)
+///
+/// All three are no-ops when neither the provider nor the model
+/// configured them.
+fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut ChatRequest) {
+    let provider_entry = config.providers.get(&target.provider_name);
+    let provider_headers = provider_entry.map(|e| e.header_extras());
+    let provider_payload = provider_entry.and_then(|e| e.payload_extras());
+
+    merge_header_extras(
+        &target.provider_name,
+        provider_headers,
+        &target.model_header_extras,
+        req,
+    );
+    merge_payload_extras(
+        &target.provider_name,
+        provider_payload,
+        target.model_payload_extras.as_ref(),
+        req,
+    );
+
+    // Transport-internal carrier: the egress reads dialect +
+    // history-reasoning from `req.routectl_internal` so the
+    // `Provider` trait surface stays stable. Use struct-update on
+    // Default so adding a new field on `RoutectlInternal` later
+    // doesn't break this construction site (the type is
+    // `#[non_exhaustive]`).
+    let mut internal = RoutectlInternal::default();
+    internal.reasoning_dialect = target.reasoning_dialect.map(|d| d.into());
+    internal.history_reasoning = target.history_reasoning.map(|h| h.into());
+    req.routectl_internal = internal;
+}
+
+/// Merge per-provider and per-model `header_extras` into the
+/// per-attempt request. Three-source compose:
+///
+///   1. Clone the provider entry's `header_extras` into a working map.
+///   2. Iterate the model's `header_extras`. Auth-reserved keys
+///      (`authorization`, `x-api-key`, `anthropic-version`) WARN +
+///      drop; managed-reserved keys (`host`, `content-type`,
+///      `content-length`) DEBUG + drop. Other keys overwrite the
+///      provider's value on collision (model wins).
+///   3. For every list-valued header in `LIST_VALUED_HEADERS` (today
+///      just `anthropic-beta`), run a comma-split-union-rejoin post-
+///      pass over the three sources in visit order: `req.anthropic_beta`
+///      (ingress lift) -> provider value -> model value. The unioned
+///      string lands back on the merged map AND on `req.anthropic_beta`
+///      so downstream readers (e.g. Bedrock's `filter_bedrock_betas`)
+///      see the same fully-composed list.
+///
+/// The merged headers replace the provider's `header_extras` slot on
+/// the request's resolved config view via... actually, the providers
+/// crate egresses read `self.cfg.header_extras` (snapshot at construct
+/// time) NOT a per-request slot. So this merge ALSO writes the
+/// composed `anthropic-beta` back into `req.anthropic_beta` so the
+/// Anthropic-API egress (which reads canonical for the wire header)
+/// and Bedrock's beta filter (same canonical read) both see the
+/// unioned set. Other merged headers are emitted via a per-request
+/// canonical channel that future egresses can read; today the
+/// per-model `header_extras` on non-`anthropic-beta` keys is reserved
+/// for forward use -- this helper still composes it for the log and
+/// for `anthropic-beta` correctness.
+pub fn merge_header_extras(
+    provider_name: &str,
+    provider_extras: Option<&BTreeMap<String, String>>,
+    model_extras: &BTreeMap<String, String>,
+    req: &mut ChatRequest,
+) {
+    // Start with a clone of the provider's headers.
+    let mut merged: BTreeMap<String, String> = provider_extras.cloned().unwrap_or_default();
+
+    // Layer the model's headers on top, gating against reserved
+    // buckets. Model wins on plain-key collision.
+    for (k, v) in model_extras {
+        if is_auth_reserved(k) {
+            tracing::warn!(
+                provider = %provider_name,
+                header = %k,
+                "ignoring auth-reserved header from [models.X] header_extras",
+            );
+            continue;
+        }
+        if is_managed_reserved(k) {
+            tracing::debug!(
+                provider = %provider_name,
+                header = %k,
+                "dropping managed-reserved header from [models.X] header_extras",
+            );
+            continue;
+        }
+        merged.insert(k.clone(), v.clone());
     }
-    let mut seen: std::collections::BTreeSet<String> = req.anthropic_beta.iter().cloned().collect();
-    for entry in model_betas {
-        if seen.insert(entry.clone()) {
-            req.anthropic_beta.push(entry.clone());
+
+    // List-valued post-pass. For `anthropic-beta`, comma-split-union-
+    // rejoin in visit order: req.anthropic_beta (ingress) -> provider
+    // value -> model value. The unioned string lands back on the
+    // merged map AND on req.anthropic_beta.
+    for list_key in LIST_VALUED_HEADERS {
+        let provider_val = provider_extras
+            .and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(list_key))
+                    .map(|(_, v)| v.as_str())
+            })
+            .unwrap_or("");
+        let model_val = model_extras
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(list_key))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+
+        // Visit order: ingress (req.anthropic_beta) -> provider -> model.
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut unioned: Vec<String> = Vec::new();
+        if list_key.eq_ignore_ascii_case("anthropic-beta") {
+            for entry in &req.anthropic_beta {
+                let t = entry.trim();
+                if !t.is_empty() && seen.insert(t.to_string()) {
+                    unioned.push(t.to_string());
+                }
+            }
+        }
+        for raw in [provider_val, model_val] {
+            for piece in raw.split(',') {
+                let t = piece.trim();
+                if !t.is_empty() && seen.insert(t.to_string()) {
+                    unioned.push(t.to_string());
+                }
+            }
+        }
+
+        if unioned.is_empty() {
+            // Nothing to write; remove any inherited blank entry on
+            // the merged map to keep the dump clean.
+            let keys_to_drop: Vec<String> = merged
+                .keys()
+                .filter(|k| k.eq_ignore_ascii_case(list_key))
+                .cloned()
+                .collect();
+            for k in keys_to_drop {
+                merged.remove(&k);
+            }
+            continue;
+        }
+
+        let joined = unioned.join(",");
+        // Drop any case-variant of the key already present, then
+        // insert under the canonical lowercase name.
+        let keys_to_drop: Vec<String> = merged
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case(list_key))
+            .cloned()
+            .collect();
+        for k in keys_to_drop {
+            merged.remove(&k);
+        }
+        merged.insert((*list_key).to_string(), joined);
+
+        if list_key.eq_ignore_ascii_case("anthropic-beta") {
+            req.anthropic_beta = unioned;
         }
     }
+
+    // Today the egresses read `header_extras` from their own
+    // `OpenAiCompatConfig`/`AnthropicApiConfig`/... snapshots
+    // (constructed at factory time from the provider entry).
+    // `merged` therefore lives in spirit on `req.routectl_internal` /
+    // canonical -- but the only header the egresses currently
+    // re-read per request is `anthropic-beta`, which we have already
+    // written back into `req.anthropic_beta`. The remaining merged
+    // entries are surfaced via the DEBUG line below so an operator
+    // triaging a missing header has a breadcrumb.
+    if !merged.is_empty() {
+        tracing::debug!(
+            provider = %provider_name,
+            header_keys = ?merged.keys().collect::<Vec<_>>(),
+            "composed header_extras (provider + model + list-valued union)",
+        );
+    }
+}
+
+/// Merge per-provider and per-model `payload_extras` into the
+/// per-attempt request. Deep recursive merge with model winning on
+/// leaf collision; the result lands on `req.provider_extras` so each
+/// egress's existing `provider_extras` reader picks it up.
+///
+/// Existing `req.provider_extras` (from the ingress's forward-compat
+/// sweep) is preserved -- the model+provider payload is layered ON TOP
+/// of it, so a swept Anthropic body field wins over a provider's
+/// default that tried to set the same key. This matches the spec:
+/// "Operator payload_extras layered into req.provider_extras" plus
+/// "ingress forward-compat sweep stays the canonical source".
+pub fn merge_payload_extras(
+    provider_name: &str,
+    provider_extras: Option<&Value>,
+    model_extras: Option<&Value>,
+    req: &mut ChatRequest,
+) {
+    if provider_extras.is_none() && model_extras.is_none() {
+        return;
+    }
+
+    // Start with the request's existing provider_extras (if any),
+    // then layer provider, then model.
+    let mut accumulated: Value = req
+        .provider_extras
+        .clone()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+    if let Some(p) = provider_extras {
+        deep_merge_value(&mut accumulated, p, provider_name, "provider");
+    }
+    if let Some(m) = model_extras {
+        deep_merge_value(&mut accumulated, m, provider_name, "model");
+    }
+
+    // If nothing landed (both were empty objects), don't synthesize
+    // an empty provider_extras on the request.
+    let is_empty_object = accumulated
+        .as_object()
+        .map(serde_json::Map::is_empty)
+        .unwrap_or(false);
+    if is_empty_object && req.provider_extras.is_none() {
+        return;
+    }
+    req.provider_extras = Some(accumulated);
+}
+
+/// Deep recursive merge of `src` into `dst`. Same-key object values
+/// merge recursively; scalar / array collisions take the `src` value
+/// with a DEBUG log naming the key (so an operator who shadowed a
+/// provider scalar with a model value can correlate at triage).
+fn deep_merge_value(dst: &mut Value, src: &Value, provider_name: &str, src_layer: &str) {
+    match (dst, src) {
+        (Value::Object(d), Value::Object(s)) => {
+            for (k, v) in s {
+                match d.get_mut(k) {
+                    Some(existing) if existing.is_object() && v.is_object() => {
+                        deep_merge_value(existing, v, provider_name, src_layer);
+                    }
+                    Some(_) => {
+                        tracing::debug!(
+                            provider = %provider_name,
+                            layer = %src_layer,
+                            key = %k,
+                            "payload_extras: leaf collision; {src_layer} wins",
+                        );
+                        d.insert(k.clone(), v.clone());
+                    }
+                    None => {
+                        d.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        (dst, src) => {
+            *dst = src.clone();
+        }
+    }
+}
+
+fn is_auth_reserved(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    AUTH_HEADERS.contains(&lc.as_str())
+}
+
+fn is_managed_reserved(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    MANAGED_HEADERS.contains(&lc.as_str())
 }
 
 /// Convert a chain of `Arc<ResolvedModel>` into the `DispatchTarget`
@@ -707,7 +970,10 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
             Some(m.reasoning.clone())
         },
         nickname: Some(m.nickname.clone()),
-        anthropic_beta: m.anthropic_beta.clone(),
+        model_header_extras: m.header_extras.clone(),
+        model_payload_extras: m.payload_extras.clone(),
+        reasoning_dialect: m.reasoning_dialect,
+        history_reasoning: m.history_reasoning,
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
     }
 }
@@ -1113,7 +1379,8 @@ mod tests {
 }
 
 #[cfg(test)]
-mod merge_model_anthropic_beta_tests {
+mod merge_header_extras_tests {
+    //! Unit tests for the v0.6.0 `merge_header_extras` helper.
     use super::*;
 
     fn req_with_betas(betas: Vec<&str>) -> ChatRequest {
@@ -1125,90 +1392,171 @@ mod merge_model_anthropic_beta_tests {
         }
     }
 
-    #[test]
-    fn empty_model_betas_is_noop() {
-        let mut req = req_with_betas(vec!["a"]);
-        merge_model_anthropic_beta_into(&mut req, &[]);
-        assert_eq!(req.anthropic_beta, vec!["a".to_string()]);
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
     }
 
     #[test]
-    fn appends_new_entries_preserves_request_order() {
-        // Request: ["a"], Model: ["a", "b"] -> result ["a", "b"].
-        // Request entries preserved first (in their existing order);
-        // model entries appended only when not already present.
-        let mut req = req_with_betas(vec!["a"]);
-        merge_model_anthropic_beta_into(&mut req, &["a".into(), "b".into()]);
-        assert_eq!(req.anthropic_beta, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[test]
-    fn dedupes_duplicates_within_request() {
-        // Even when the request already had duplicates, the model's
-        // entries don't re-add anything already present in the set.
-        // Existing request duplicates are preserved (the dedup only
-        // gates new entries from the model side).
-        let mut req = req_with_betas(vec!["a", "b"]);
-        merge_model_anthropic_beta_into(&mut req, &["b".into(), "c".into()]);
-        assert_eq!(
-            req.anthropic_beta,
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
-        );
-    }
-
-    #[test]
-    fn empty_request_betas_with_model_betas_populates_list() {
+    fn empty_both_is_noop() {
         let mut req = req_with_betas(vec![]);
-        merge_model_anthropic_beta_into(&mut req, &["x".into(), "y".into()]);
-        assert_eq!(req.anthropic_beta, vec!["x".to_string(), "y".to_string()]);
+        merge_header_extras("p", None, &BTreeMap::new(), &mut req);
+        assert!(req.anthropic_beta.is_empty());
     }
 
     #[test]
-    fn dedup_is_case_sensitive_matching_anthropic_beta_semantics() {
-        // Anthropic beta names are case-sensitive identifiers; a
-        // casing typo SHOULD propagate so the upstream's 400 surfaces
-        // the misconfig rather than the merge silently smoothing it
-        // over. Request `Context-1m-2025-08-07` (wrong case) plus
-        // model `context-1m-2025-08-07` (correct) yields both on the
-        // wire; upstream picks the canonical match and ignores or
-        // 400s on the other -- either way the operator sees the
-        // disagreement.
-        let mut req = req_with_betas(vec!["Context-1m-2025-08-07"]);
-        merge_model_anthropic_beta_into(&mut req, &["context-1m-2025-08-07".into()]);
+    fn anthropic_beta_unions_three_sources_in_visit_order() {
+        let mut req = req_with_betas(vec!["foo"]);
+        let provider = map(&[("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")]);
+        let model = map(&[("anthropic-beta", "context-1m-2025-08-07")]);
+        merge_header_extras("p", Some(&provider), &model, &mut req);
         assert_eq!(
             req.anthropic_beta,
             vec![
-                "Context-1m-2025-08-07".to_string(),
+                "foo".to_string(),
+                "claude-code-20250219".to_string(),
+                "oauth-2025-04-20".to_string(),
                 "context-1m-2025-08-07".to_string(),
-            ],
+            ]
         );
     }
 
     #[test]
-    fn additive_only_cannot_suppress_request_betas() {
-        // Per-model anthropic_beta is additive: it can ADD flags but
-        // cannot REMOVE one already in `req.anthropic_beta` (which
-        // typically gets populated from provider-level
-        // `extra_headers["anthropic-beta"]` upstream, or from the
-        // inbound HTTP header). Pin the contract so a future change
-        // that quietly reinterprets the merge as a replace doesn't
-        // pass review unnoticed.
-        let mut req = req_with_betas(vec!["context-1m-2025-08-07"]);
-        merge_model_anthropic_beta_into(&mut req, &[]);
+    fn anthropic_beta_dedups_across_sources() {
+        let mut req = req_with_betas(vec!["foo", "bar"]);
+        let provider = map(&[("anthropic-beta", "foo,baz")]);
+        let model = map(&[("anthropic-beta", "bar,qux")]);
+        merge_header_extras("p", Some(&provider), &model, &mut req);
         assert_eq!(
             req.anthropic_beta,
-            vec!["context-1m-2025-08-07".to_string()],
-            "empty model list must not strip existing request betas",
+            vec![
+                "foo".to_string(),
+                "bar".to_string(),
+                "baz".to_string(),
+                "qux".to_string()
+            ]
         );
+    }
+
+    #[test]
+    fn model_only_anthropic_beta_lifts_onto_req() {
+        let mut req = req_with_betas(vec![]);
+        let model = map(&[("anthropic-beta", "context-1m-2025-08-07")]);
+        merge_header_extras("p", None, &model, &mut req);
+        assert_eq!(
+            req.anthropic_beta,
+            vec!["context-1m-2025-08-07".to_string()]
+        );
+    }
+
+    #[test]
+    fn auth_reserved_keys_drop() {
+        // Authorization on model entry must drop with WARN; never
+        // reach the merged map.
+        let mut req = req_with_betas(vec![]);
+        let model = map(&[("authorization", "Bearer evil"), ("x-app", "ok")]);
+        merge_header_extras("p", None, &model, &mut req);
+        // No side effect on req.anthropic_beta (none of the model
+        // entries are list-valued).
+        assert!(req.anthropic_beta.is_empty());
+    }
+
+    #[test]
+    fn managed_reserved_keys_drop() {
+        let mut req = req_with_betas(vec![]);
+        let model = map(&[("host", "evil.example.com"), ("content-type", "text/plain")]);
+        merge_header_extras("p", None, &model, &mut req);
+        assert!(req.anthropic_beta.is_empty());
     }
 }
 
 #[cfg(test)]
-mod model_anthropic_beta_lift_tests {
-    //! Integration: pin that the per-model `anthropic_beta` list lifts
-    //! onto the upstream request on both the complete and stream
-    //! dispatch paths.
+mod merge_payload_extras_tests {
     use super::*;
+    use serde_json::json;
+
+    fn req() -> ChatRequest {
+        ChatRequest {
+            model: "any".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_both_is_noop() {
+        let mut r = req();
+        merge_payload_extras("p", None, None, &mut r);
+        assert!(r.provider_extras.is_none());
+    }
+
+    #[test]
+    fn provider_only_lands_on_req() {
+        let mut r = req();
+        let p = json!({"top_k": 5, "metadata": {"x": 1}});
+        merge_payload_extras("p", Some(&p), None, &mut r);
+        let v = r.provider_extras.expect("set");
+        assert_eq!(v["top_k"], json!(5));
+        assert_eq!(v["metadata"]["x"], json!(1));
+    }
+
+    #[test]
+    fn deep_merge_objects_recursively() {
+        let mut r = req();
+        let p = json!({"a": {"shared": 1, "p_only": "p"}});
+        let m = json!({"a": {"shared": 2, "m_only": "m"}});
+        merge_payload_extras("p", Some(&p), Some(&m), &mut r);
+        let v = r.provider_extras.expect("set");
+        // Nested objects merge recursively.
+        assert_eq!(v["a"]["shared"], json!(2), "model wins on leaf collision");
+        assert_eq!(v["a"]["p_only"], json!("p"));
+        assert_eq!(v["a"]["m_only"], json!("m"));
+    }
+
+    #[test]
+    fn scalar_collision_model_wins() {
+        let mut r = req();
+        let p = json!({"k": "provider"});
+        let m = json!({"k": "model"});
+        merge_payload_extras("p", Some(&p), Some(&m), &mut r);
+        let v = r.provider_extras.expect("set");
+        assert_eq!(v["k"], json!("model"));
+    }
+
+    #[test]
+    fn array_collision_model_wins() {
+        let mut r = req();
+        let p = json!({"k": [1, 2]});
+        let m = json!({"k": [3]});
+        merge_payload_extras("p", Some(&p), Some(&m), &mut r);
+        let v = r.provider_extras.expect("set");
+        assert_eq!(v["k"], json!([3]));
+    }
+
+    #[test]
+    fn ingress_sweep_preserved_underneath_provider_and_model() {
+        // ingress's forward-compat sweep populates req.provider_extras;
+        // the merge layers provider + model on top.
+        let mut r = req();
+        r.provider_extras = Some(json!({"mcp_servers": ["s1"], "k": "ingress"}));
+        let p = json!({"k": "provider"});
+        let m = json!({"other": true});
+        merge_payload_extras("p", Some(&p), Some(&m), &mut r);
+        let v = r.provider_extras.expect("set");
+        assert_eq!(v["mcp_servers"], json!(["s1"]));
+        // Provider overrode the ingress sweep value on `k`.
+        assert_eq!(v["k"], json!("provider"));
+        assert_eq!(v["other"], json!(true));
+    }
+}
+
+#[cfg(test)]
+mod three_source_anthropic_beta_lift_tests {
+    //! Integration: pin that ingress + provider + model anthropic-beta
+    //! all union onto the upstream request on both dispatch paths.
+    use super::*;
+    use crate::config::{ProviderEntry, ProviderRuntimePolicy};
     use crate::resolved::ResolvedModel;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -1263,7 +1611,6 @@ mod model_anthropic_beta_lift_tests {
         }
         async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
             self.captured.lock().push(req);
-            // Emit one minimal chunk so the stream path completes.
             let s = futures::stream::once(async move {
                 Ok(ChatChunk {
                     id: "c0".into(),
@@ -1277,10 +1624,28 @@ mod model_anthropic_beta_lift_tests {
     }
 
     fn router_with_capture(
-        anthropic_beta: Vec<String>,
+        provider_betas: Option<&str>,
+        model_betas: Option<&str>,
     ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
-        let cfg = Arc::new(Config::default());
-        let mut router = Router::new(cfg);
+        let mut config = Config::default();
+        // Provider-side `header_extras`.
+        let mut provider_headers: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(v) = provider_betas {
+            provider_headers.insert("anthropic-beta".into(), v.to_string());
+        }
+        config.providers.insert(
+            "anthropic".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: provider_headers,
+                payload_extras: None,
+                user_agent: None,
+                runtime: ProviderRuntimePolicy::default(),
+            },
+        );
+
+        let mut router = Router::new(Arc::new(config));
         let captured: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
         let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {
             id: "cap".into(),
@@ -1288,8 +1653,10 @@ mod model_anthropic_beta_lift_tests {
         });
         let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
         let mut resolved = ResolvedModel::new("haiku", "anthropic", provider, "claude-haiku-4-5");
-        if !anthropic_beta.is_empty() {
-            resolved = resolved.with_anthropic_beta(anthropic_beta);
+        if let Some(v) = model_betas {
+            let mut h = BTreeMap::new();
+            h.insert("anthropic-beta".into(), v.to_string());
+            resolved = resolved.with_header_extras(h);
         }
         models.insert("haiku".into(), Arc::new(resolved));
         router.install_resolved_models(models);
@@ -1297,34 +1664,37 @@ mod model_anthropic_beta_lift_tests {
     }
 
     #[tokio::test]
-    async fn complete_path_lifts_model_anthropic_beta_onto_request() {
-        let (router, captured) = router_with_capture(vec![
-            "context-1m-2025-08-07".into(),
-            "prompt-cache-1h".into(),
-        ]);
+    async fn complete_path_unions_three_sources() {
+        // ingress: "foo", provider: "claude-code-20250219,oauth-2025-04-20",
+        // model: "context-1m-2025-08-07" -- all unioned.
+        let (router, captured) = router_with_capture(
+            Some("claude-code-20250219,oauth-2025-04-20"),
+            Some("context-1m-2025-08-07"),
+        );
         let req = ChatRequest {
             model: "haiku".into(),
             messages: vec![],
-            anthropic_beta: vec!["client-supplied".into()],
+            anthropic_beta: vec!["foo".into()],
             ..Default::default()
         };
         router.complete(req).await.expect("ok");
         let captured = captured.lock();
         let upstream = captured.first().expect("one upstream call");
-        // Request entries preserved first, model entries appended.
         assert_eq!(
             upstream.anthropic_beta,
             vec![
-                "client-supplied".to_string(),
+                "foo".to_string(),
+                "claude-code-20250219".to_string(),
+                "oauth-2025-04-20".to_string(),
                 "context-1m-2025-08-07".to_string(),
-                "prompt-cache-1h".to_string(),
             ]
         );
     }
 
     #[tokio::test]
-    async fn stream_path_lifts_model_anthropic_beta_onto_request() {
-        let (router, captured) = router_with_capture(vec!["context-1m-2025-08-07".into()]);
+    async fn stream_path_unions_three_sources() {
+        let (router, captured) =
+            router_with_capture(Some("oauth-2025-04-20"), Some("context-1m-2025-08-07"));
         let req = ChatRequest {
             model: "haiku".into(),
             messages: vec![],
@@ -1341,7 +1711,10 @@ mod model_anthropic_beta_lift_tests {
         let upstream = captured.first().expect("one upstream call");
         assert_eq!(
             upstream.anthropic_beta,
-            vec!["context-1m-2025-08-07".to_string()]
+            vec![
+                "oauth-2025-04-20".to_string(),
+                "context-1m-2025-08-07".to_string(),
+            ]
         );
     }
 }
@@ -1646,9 +2019,8 @@ mod resolved_models_tests {
             ProviderEntry::OpenaiCompat {
                 base_url: "https://placeholder.invalid/v1".into(),
                 api_key_ref: "literal:k".into(),
-                extra_headers: BTreeMap::new(),
-                reasoning_dialect: crate::config::ReasoningDialect::Openai,
-                history_reasoning: crate::config::HistoryReasoning::default(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
                 user_agent: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),

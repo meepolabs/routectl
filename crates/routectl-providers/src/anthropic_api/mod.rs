@@ -55,12 +55,13 @@ pub struct AnthropicApiConfig {
     pub base_url: String,
     pub anthropic_version: String,
     pub auth_kind: AuthKind,
-    /// Extra HTTP headers applied to every Anthropic API request.
-    /// Use this to declare `anthropic-beta` flags (e.g. `context-1m-2025-08-07`,
-    /// `prompt-caching-2024-07-31`) or any other vendor-required header.
-    /// Applied AFTER auth headers, so callers can override `anthropic-version`
-    /// or `anthropic-beta` if they need to.
-    pub extra_headers: Vec<(String, String)>,
+    /// Provider-level extra HTTP headers (renamed from `extra_headers`
+    /// in v0.6.0). The router's dispatch layer merges this with the
+    /// per-model `header_extras` before reaching the egress (see
+    /// `Router::merge_header_extras`). Use this to declare
+    /// vendor-required headers; `anthropic-beta` flags are
+    /// composed dynamically (see `build_headers`).
+    pub header_extras: Vec<(String, String)>,
     /// Override the User-Agent on outbound requests. Useful for IAM
     /// policies that gate access on `aws:UserAgent` (e.g. Claude Code's
     /// Bedrock role). `None` keeps reqwest's default UA.
@@ -94,7 +95,7 @@ impl AnthropicApiConfig {
             base_url: "https://api.anthropic.com".into(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::ApiKey,
-            extra_headers: Vec::new(),
+            header_extras: Vec::new(),
             user_agent: None,
             adaptive_thinking: None,
             allowed_betas: Vec::new(),
@@ -130,70 +131,62 @@ impl AnthropicApiProvider {
             }
         };
 
-        // Compose the `anthropic-beta` HTTP header from two sources:
-        //   1. The static `extra_headers["anthropic-beta"]` value
-        //      from the provider config (operator-supplied,
-        //      typically the cc-spoof flag set).
-        //   2. The request's `anthropic_beta` array, which was lifted
-        //      from the inbound HTTP header at the ingress (cc sends
-        //      its session-specific flags this way).
-        // Merge deduplicated, preserving order: config first, then
-        // request additions. Real Anthropic's OAuth endpoint
-        // recognizes betas ONLY when they arrive on the HTTP header,
-        // not when they appear in the request BODY's `anthropic_beta`
-        // array -- this is the difference between the api-key and
-        // OAuth-Bearer authorization flavors. Emitting both keeps
-        // anthropic-api egresses working against direct
-        // `api.anthropic.com` access (header path) AND against
-        // upstreams that read from the body shape (passthrough
-        // routectl -> Bedrock, etc.).
+        // anthropic-beta composition. The router's dispatch-layer
+        // (`Router::merge_header_extras`) is the canonical source: it
+        // unions ingress `req.anthropic_beta` + provider
+        // header_extras["anthropic-beta"] + model
+        // header_extras["anthropic-beta"] and lands the result on
+        // `req.anthropic_beta`. For direct library consumers that
+        // bypass the router, the config-side
+        // `header_extras["anthropic-beta"]` is the only source -- we
+        // union it in here too (deduplicated) so a `cfg.header_extras
+        // = [("anthropic-beta", "ctx-1m")]` works without a router.
         let mut beta_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut merged_betas: Vec<String> = Vec::new();
+        for entry in anthropic_beta {
+            let t = entry.trim();
+            if !t.is_empty() && beta_seen.insert(t.to_string()) {
+                merged_betas.push(t.to_string());
+            }
+        }
         let config_betas = self
             .cfg
-            .extra_headers
+            .header_extras
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
             .map(|(_, v)| v.as_str())
             .unwrap_or("");
         for entry in config_betas.split(',') {
-            let trimmed = entry.trim();
-            if !trimmed.is_empty() && beta_seen.insert(trimmed.to_string()) {
-                merged_betas.push(trimmed.to_string());
-            }
-        }
-        for entry in anthropic_beta {
-            let trimmed = entry.trim();
-            if !trimmed.is_empty() && beta_seen.insert(trimmed.to_string()) {
-                merged_betas.push(trimmed.to_string());
+            let t = entry.trim();
+            if !t.is_empty() && beta_seen.insert(t.to_string()) {
+                merged_betas.push(t.to_string());
             }
         }
         if !merged_betas.is_empty() {
             rb = rb.header("anthropic-beta", merged_betas.join(","));
         }
 
-        for (k, v) in &self.cfg.extra_headers {
+        for (k, v) in &self.cfg.header_extras {
             // Defense-in-depth: refuse to let a TOML-supplied
-            // `extra_headers` entry stomp on the auth header we just
-            // set.
+            // `header_extras` entry stomp on the auth header.
             if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
+                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
                 );
                 continue;
             }
-            // `anthropic-beta` (and other managed headers) are composed
-            // dynamically by routectl -- this loop has already handled
-            // anthropic-beta above (merged with the request's
-            // anthropic_beta). Skip duplicate emission so we don't
-            // append the static value a second time.
-            if crate::http_client::is_managed_header(k) {
+            // anthropic-beta was emitted above with the unioned value;
+            // skip the static config entry here to avoid a duplicate
+            // header on the wire. Other managed headers (host,
+            // content-type, content-length) are routectl-owned.
+            if k.eq_ignore_ascii_case("anthropic-beta") || crate::http_client::is_managed_header(k)
+            {
                 tracing::debug!(
                     provider = %self.cfg.id,
                     header = %k,
-                    "dropping managed header from extra_headers; composed dynamically by routectl"
+                    "dropping managed header from header_extras; composed dynamically by routectl"
                 );
                 continue;
             }
