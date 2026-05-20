@@ -67,7 +67,14 @@ mod tests {
         ChatRequest {
             model: model.into(),
             messages: msgs,
-            max_tokens: Some(1024),
+            // 2048 sits above the Anthropic legacy-thinking floor
+            // (`max_tokens > 1024`) so tests exercising the
+            // `ThinkingConfig::Enabled` arm reach the wire body
+            // instead of being dropped at the new gate in
+            // `build_thinking`. See `small_max_tokens_drops_legacy_thinking`
+            // in `anthropic_api/request.rs::tests` for the dropped
+            // case.
+            max_tokens: Some(2048),
             ..Default::default()
         }
     }
@@ -171,6 +178,10 @@ mod tests {
     fn reasoning_max_tokens_maps_to_budget_tokens() {
         let provider = make_provider("https://api.anthropic.com");
         let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
+        // Bump request max_tokens above the explicit budget so the
+        // ceiling cap in `clamp_budget_to_legacy_window` (which keeps
+        // budget < max_tokens) does NOT lower the caller's value.
+        req.max_tokens = Some(8192);
         req.reasoning = Some(ReasoningConfig {
             max_tokens: Some(5000),
             ..Default::default()

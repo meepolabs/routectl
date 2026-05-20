@@ -198,7 +198,12 @@ async fn anthropic_default_thinking_high_reaches_upstream_legacy_shape() {
 
     let body = json!({
         "model": "heavy",
-        "max_tokens": 1024,
+        // Sized above the Anthropic legacy-thinking floor
+        // (`max_tokens > 1024`) so the gate in `build_thinking` keeps
+        // the Enabled shape on a probe-sized request. See
+        // `small_max_tokens_drops_legacy_thinking` for the dropped
+        // case.
+        "max_tokens": 2048,
         "messages": [{
             "role": "user",
             "content": [{"type": "text", "text": "hello"}],
@@ -222,9 +227,10 @@ async fn anthropic_default_thinking_high_reaches_upstream_legacy_shape() {
         upstream_body["thinking"]["type"], "enabled",
         "expected legacy thinking shape; got body: {upstream_body}"
     );
-    // 1024 * 0.80 = 819.2 -> u32 truncation -> 819.
+    // 2048 * 0.80 = 1638.4 -> u32 truncation -> 1638. Above the
+    // Anthropic floor (1024) so no clamp fires here.
     assert_eq!(
-        upstream_body["thinking"]["budget_tokens"], 819,
+        upstream_body["thinking"]["budget_tokens"], 1638,
         "operator default thinking=high must derive budget from caller max_tokens"
     );
 }
@@ -449,7 +455,7 @@ async fn vllm_default_enabled_true_emits_chat_template_kwargs() {
 
 /// Pin: caller-supplied `thinking.budget_tokens` on the wire wins over
 /// the operator's `thinking = "high"` default. The egress must emit
-/// the caller's exact budget (256), NOT a budget derived from the
+/// the caller's exact budget (2048), NOT a budget derived from the
 /// operator default (which would be ~3276 for `high` at max_tokens=
 /// 4096).
 #[tokio::test]
@@ -467,7 +473,11 @@ async fn caller_reasoning_overrides_provider_default_high() {
     let body = json!({
         "model": "heavy",
         "max_tokens": 4096,
-        "thinking": {"type": "enabled", "budget_tokens": 256},
+        // Caller's budget must sit above Anthropic's 1024 floor so
+        // the per-arm clamp does not mask the "caller wins"
+        // assertion. The sub-floor variant is covered by the unit
+        // test `small_max_tokens_drops_thinking_with_explicit_budget`.
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
         "messages": [{
             "role": "user",
             "content": [{"type": "text", "text": "hello"}],
@@ -490,8 +500,8 @@ async fn caller_reasoning_overrides_provider_default_high() {
         "caller asked for legacy enabled shape; got body: {upstream_body}"
     );
     assert_eq!(
-        upstream_body["thinking"]["budget_tokens"], 256,
-        "caller's budget_tokens=256 must win over operator default thinking=high"
+        upstream_body["thinking"]["budget_tokens"], 2048,
+        "caller's budget_tokens=2048 must win over operator default thinking=high"
     );
 }
 
@@ -507,9 +517,12 @@ async fn caller_reasoning_overrides_provider_default_high() {
 ///
 /// Setup: model-a returns 500 with `thinking = "low"`, model-b
 /// returns 200 with `thinking = "high"`. The client sends one request
-/// with `max_tokens = 1024`. Assert:
-///   - Upstream A received `budget_tokens = 204` (1024 * 0.20).
-///   - Upstream B received `budget_tokens = 819` (1024 * 0.80).
+/// with `max_tokens = 8000` (sized so both effort levels produce
+/// budgets above the 1024 floor; using 1024 would cause both hops to
+/// clamp to the same value and erase the per-hop distinction the
+/// test exists to pin). Assert:
+///   - Upstream A received `budget_tokens = 1600` (8000 * 0.20).
+///   - Upstream B received `budget_tokens = 6400` (8000 * 0.80).
 #[tokio::test]
 async fn fallback_chain_applies_per_hop_reasoning_defaults() {
     // Arrange: two upstream wiremocks, A 500 / B 200.
@@ -580,7 +593,7 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
 
     let body = json!({
         "model": "heavy",
-        "max_tokens": 1024,
+        "max_tokens": 8000,
         "messages": [{
             "role": "user",
             "content": [{"type": "text", "text": "hello"}],
@@ -607,8 +620,8 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
     );
     let body_a: Value = serde_json::from_slice(&received_a[0].body).unwrap();
     assert_eq!(
-        body_a["thinking"]["budget_tokens"], 204,
-        "model-a's `thinking = low` must derive budget_tokens=204; got body: {body_a}"
+        body_a["thinking"]["budget_tokens"], 1600,
+        "model-a's `thinking = low` must derive budget_tokens=1600 (8000*0.20); got body: {body_a}"
     );
 
     let received_b = upstream_b.received_requests().await.unwrap();
@@ -619,8 +632,8 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
     );
     let body_b: Value = serde_json::from_slice(&received_b[0].body).unwrap();
     assert_eq!(
-        body_b["thinking"]["budget_tokens"], 819,
-        "model-b's `thinking = high` must derive budget_tokens=819 \
+        body_b["thinking"]["budget_tokens"], 6400,
+        "model-b's `thinking = high` must derive budget_tokens=6400 (8000*0.80) \
          (no bleed-through from model-a); got body: {body_b}"
     );
 }
@@ -634,8 +647,8 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
 /// `stream: true` on the request and an SSE response body. The
 /// reasoning-defaults merge happens in `stream_with_options` after
 /// `attempt_req = req.clone()`, so the upstream-captured body must
-/// carry the operator's `thinking = "high"` (legacy budget_tokens=819
-/// for max_tokens=1024).
+/// carry the operator's `thinking = "high"` (legacy
+/// budget_tokens=1638 for max_tokens=2048).
 #[tokio::test]
 async fn streaming_default_thinking_high_reaches_upstream() {
     // Arrange: Anthropic-shape SSE response. message_start +
@@ -667,7 +680,7 @@ data: {\"type\":\"message_stop\"}\n\n";
 
     let body = json!({
         "model": "heavy",
-        "max_tokens": 1024,
+        "max_tokens": 2048,
         "stream": true,
         "messages": [{
             "role": "user",
@@ -696,7 +709,7 @@ data: {\"type\":\"message_stop\"}\n\n";
 
     // Assert: upstream-captured body has the operator's thinking
     // applied via the streaming path. Same numeric pin as case (a):
-    // 1024 * 0.80 -> 819.
+    // 2048 * 0.80 -> 1638.
     let received = upstream.received_requests().await.unwrap();
     assert_eq!(received.len(), 1);
     let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
@@ -710,7 +723,7 @@ data: {\"type\":\"message_stop\"}\n\n";
         "expected legacy thinking shape on streaming path; got body: {upstream_body}"
     );
     assert_eq!(
-        upstream_body["thinking"]["budget_tokens"], 819,
+        upstream_body["thinking"]["budget_tokens"], 1638,
         "operator default thinking=high must reach upstream on streaming path \
          (1024 * 0.80 -> 819); got body: {upstream_body}"
     );
