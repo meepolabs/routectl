@@ -106,7 +106,7 @@ mod tests {
             account_id: Some("acct-uuid".into()),
             base_url: "https://chatgpt.com/backend-api/codex".into(),
             auth_kind,
-            extra_headers: Vec::new(),
+            header_extras: Vec::new(),
             user_agent: None,
             originator: None,
         }

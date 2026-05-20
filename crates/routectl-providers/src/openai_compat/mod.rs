@@ -58,17 +58,30 @@ pub struct OpenAiCompatConfig {
     pub id: String,
     pub base_url: String,
     pub api_key: String,
-    /// Optional extra headers (e.g. OpenRouter `HTTP-Referer`, `X-Title`).
-    pub extra_headers: Vec<(String, String)>,
-    /// Provider-level default extras merged into every request body.
-    pub default_extras: Option<Value>,
-    /// Which reasoning wire-format quirks apply.
+    /// Provider-level extra headers (renamed from `extra_headers` in
+    /// v0.6.0). Operators set `[providers.X] header_extras = { ... }`;
+    /// the router-side dispatch merges these with per-model
+    /// `header_extras` before reaching the egress (see
+    /// `Router::merge_header_extras`).
+    pub header_extras: Vec<(String, String)>,
+    /// Provider-level payload extras (renamed from `default_extras` in
+    /// v0.6.0). Lives here as a fallback for library consumers
+    /// constructing `OpenAiCompatConfig` directly without the router;
+    /// when the router is in the loop, deep-merged with per-model
+    /// `payload_extras` and landed on `req.provider_extras` before
+    /// reaching this egress, so this slot is typically `None`.
+    pub payload_extras: Option<Value>,
+    /// Default reasoning dialect used by library consumers that build
+    /// a provider directly (no router). With the router in the loop,
+    /// every request carries the per-model dialect via
+    /// `req.routectl_internal.reasoning_dialect` and the dispatch
+    /// path reads from there; this field is the fallback for direct
+    /// construction.
     pub reasoning_dialect: ReasoningDialect,
-    /// How to handle reasoning fields on outgoing assistant messages
-    /// in multi-turn history. `Auto` defers to the dialect's default
-    /// (DeepSeek/Vllm strip, OpenAI/OpenRouter pass through). `Strip`
-    /// and `Preserve` are explicit overrides. See
-    /// `HistoryReasoning` docs for the v3-vs-v4 motivation.
+    /// Default outgoing-history reasoning policy for library consumers
+    /// that build a provider directly. With the router in the loop,
+    /// every request carries the per-model policy via
+    /// `req.routectl_internal.history_reasoning`.
     pub history_reasoning: HistoryReasoning,
     /// Override the User-Agent on outbound requests. `None` keeps reqwest's default.
     pub user_agent: Option<String>,
@@ -82,7 +95,7 @@ pub struct OpenAiCompatConfig {
     /// `stream_options.include_usage = true` on streaming requests.
     /// Default `false` (auto-inject). Use for openai-compat hosts that
     /// 400 on unknown fields. Operator-supplied `stream_options` in
-    /// `default_extras` / `provider_extras` always wins -- including an
+    /// `payload_extras` / `provider_extras` always wins -- including an
     /// explicit `include_usage = false`.
     pub disable_stream_include_usage: bool,
 }
@@ -112,6 +125,16 @@ pub enum HistoryReasoning {
     Preserve,
 }
 
+impl From<routectl_core::CoreHistoryReasoning> for HistoryReasoning {
+    fn from(h: routectl_core::CoreHistoryReasoning) -> Self {
+        match h {
+            routectl_core::CoreHistoryReasoning::Auto => Self::Auto,
+            routectl_core::CoreHistoryReasoning::Strip => Self::Strip,
+            routectl_core::CoreHistoryReasoning::Preserve => Self::Preserve,
+        }
+    }
+}
+
 pub struct OpenAiCompatProvider {
     cfg: OpenAiCompatConfig,
     client: reqwest::Client,
@@ -130,6 +153,28 @@ impl OpenAiCompatProvider {
         )
     }
 
+    /// Resolve the per-request reasoning dialect. v0.6.0 moved the
+    /// dialect off `[providers.X]` to `[models.X]`; the router lifts
+    /// it onto `req.routectl_internal.reasoning_dialect` before
+    /// dispatch. When the carrier is empty (library consumer
+    /// constructing `ChatRequest` directly with no router) the
+    /// `OpenAiCompatConfig` default applies.
+    fn dialect_for(&self, req: &ChatRequest) -> ReasoningDialect {
+        req.routectl_internal
+            .reasoning_dialect
+            .map(ReasoningDialect::from)
+            .unwrap_or(self.cfg.reasoning_dialect)
+    }
+
+    /// Same fallback contract as `dialect_for` but for the history-
+    /// reasoning policy.
+    fn history_reasoning_for(&self, req: &ChatRequest) -> HistoryReasoning {
+        req.routectl_internal
+            .history_reasoning
+            .map(HistoryReasoning::from)
+            .unwrap_or(self.cfg.history_reasoning)
+    }
+
     fn build_headers(&self) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -138,7 +183,7 @@ impl OpenAiCompatProvider {
                 .map_err(|e| Error::Config(format!("invalid api_key for header: {e}")))?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        for (k, v) in &self.cfg.extra_headers {
+        for (k, v) in &self.cfg.header_extras {
             // Defense-in-depth, parity with anthropic_api / bedrock: refuse
             // to let TOML-supplied `extra_headers` stomp on the auth header
             // we just set. HeaderMap::insert replaces by name, so without
@@ -177,27 +222,30 @@ impl Provider for OpenAiCompatProvider {
     }
 
     fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
+        let dialect = self.dialect_for(req);
+        let history = self.history_reasoning_for(req);
         request::normalize(
             &self.cfg.id,
             req,
-            self.cfg.reasoning_dialect,
-            self.cfg.history_reasoning,
-            self.cfg.default_extras.as_ref(),
+            dialect,
+            history,
+            self.cfg.payload_extras.as_ref(),
             self.cfg.strict_translation,
         )
     }
 
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
+        // No `req` context here (the trait signature is response-only);
+        // fall back to the config-side default. Streaming callers
+        // route through `stream()` which captures the per-request
+        // dialect into the SSE state machine via `dialect_for(req)`.
         response::normalize(&self.cfg.id, raw, self.cfg.reasoning_dialect)
     }
 
-    /// Stateless per-chunk normalization. Handles DeepSeek/vLLM
-    /// `reasoning_content` lifting. Returns `Ok(None)` for `[DONE]` and
-    /// keepalive frames.
-    ///
-    /// For `RawThinkTag` dialect, callers that need cross-chunk state must
-    /// use `ThinkTagAccumulator::process` directly (as `stream()` does).
-    /// This method still parses the frame but skips tag-splitting.
+    /// Stateless per-chunk normalization. Falls back to the
+    /// config-side dialect when called outside an active `stream()`
+    /// (no request context available). `stream()` itself captures the
+    /// per-request dialect from `req.routectl_internal`.
     fn normalize_chunk(&self, raw: &str) -> Result<Option<ChatChunk>> {
         sse::parse_chunk(&self.cfg.id, raw, self.cfg.reasoning_dialect)
     }
@@ -266,11 +314,14 @@ impl Provider for OpenAiCompatProvider {
         // the wire form, not the post-processed form.
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw);
 
-        let mut chat_resp = self.normalize_response(raw)?;
-        // OpenAI-compat hosts don't surface the matched stop sequence
-        // on the response wire. Recover it from the request stop list
-        // so the Anthropic ingress can render `stop_reason:"stop_sequence"`
-        // instead of `end_turn` for claude-code structured-output flows.
+        // Use the per-request dialect (lifted from the router's
+        // RoutectlInternal carrier; falls back to config when the
+        // request bypassed the router) so a request that landed on a
+        // DeepSeek-dialect model lifts reasoning_content even though
+        // the trait-level `normalize_response` only sees the
+        // config-side default.
+        let dialect = self.dialect_for(&req);
+        let mut chat_resp = response::normalize(&self.cfg.id, raw, dialect)?;
         response::apply_stop_sequence_heuristic(&mut chat_resp, req.stop.as_deref());
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         Ok(chat_resp)
@@ -331,7 +382,7 @@ impl Provider for OpenAiCompatProvider {
         }
 
         let provider_id = self.cfg.id.clone();
-        let dialect = self.cfg.reasoning_dialect;
+        let dialect = self.dialect_for(&req);
         // Capture the request stop list for the openai-compat stop-sequence
         // heuristic (see `response::apply_stop_sequence_heuristic`). Cloned
         // up front because `req` doesn't survive into the async_stream

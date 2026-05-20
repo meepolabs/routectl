@@ -23,8 +23,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use routectl_router::{
-    AliasValue, Config, ModelEntry, ProviderEntry, ReasoningDefaults, ReasoningDialect,
-    RetryPolicy, ServerConfig,
+    AliasValue, Config, EffortLevel, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy,
+    ServerConfig, ThinkingChoice,
 };
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
@@ -92,6 +92,18 @@ fn empty_server() -> ServerConfig {
     }
 }
 
+fn parse_effort(s: &str) -> EffortLevel {
+    match s {
+        "minimal" => EffortLevel::Minimal,
+        "low" => EffortLevel::Low,
+        "medium" => EffortLevel::Medium,
+        "high" => EffortLevel::High,
+        "xhigh" => EffortLevel::Xhigh,
+        "max" => EffortLevel::Max,
+        _ => panic!("unsupported effort token in test fixture: {s}"),
+    }
+}
+
 /// Build a config with one Anthropic-API provider and one model whose
 /// `[models.X]` carries the operator-side reasoning defaults.
 /// `adaptive` toggles the Opus 4.7+ wire shape on the model.
@@ -105,11 +117,13 @@ fn anthropic_config_with_defaults(
         ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_base.to_string());
     providers.insert("anthropic-mock".to_string(), entry);
 
-    let mut model = ModelEntry::new("anthropic-mock", "claude-haiku-4-5")
-        .with_reasoning_defaults(ReasoningDefaults::new().with_thinking(thinking.to_string()));
-    if adaptive {
-        model = model.with_adaptive_thinking(true);
-    }
+    let mut model =
+        ModelEntry::new("anthropic-mock", "claude-haiku-4-5").with_effort(parse_effort(thinking));
+    model = if adaptive {
+        model.with_thinking(ThinkingChoice::Adaptive)
+    } else {
+        model.with_thinking(ThinkingChoice::Bool(true))
+    };
     let mut models = BTreeMap::new();
     models.insert("haiku".to_string(), model);
 
@@ -135,12 +149,15 @@ fn anthropic_config_with_defaults(
 /// API here for parity with the rest of the test fixture surface.
 fn vllm_config_with_enabled(upstream_base: &str, enabled: bool) -> Arc<Config> {
     let mut providers = BTreeMap::new();
-    let entry = ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key")
-        .with_reasoning_dialect(ReasoningDialect::Vllm);
+    let entry = ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key");
     providers.insert("vllm-mock".to_string(), entry);
 
-    let mut model = ModelEntry::new("vllm-mock", "qwen3-30b");
-    model.reasoning_defaults.enabled = Some(enabled);
+    // v0.6.0: `thinking = true` -> ReasoningDefaults::enabled = Some(true).
+    // The model's reasoning_dialect must also be vllm so the egress
+    // injects chat_template_kwargs.enable_thinking on the wire.
+    let model = ModelEntry::new("vllm-mock", "qwen3-30b")
+        .with_thinking(ThinkingChoice::Bool(enabled))
+        .with_reasoning_dialect(ReasoningDialect::Vllm);
     let mut models = BTreeMap::new();
     models.insert("qwen".to_string(), model);
 
@@ -327,7 +344,8 @@ auth_kind = "chatgpt-oauth"
     providers.insert("gpt-mock".to_string(), entry);
 
     let mut model = ModelEntry::new("gpt-mock", "gpt-5.3-codex")
-        .with_reasoning_defaults(ReasoningDefaults::new().with_thinking("high"));
+        .with_thinking(ThinkingChoice::Bool(true))
+        .with_effort(EffortLevel::High);
     let mut models = BTreeMap::new();
     models.insert("codex".to_string(), model.clone());
     let _ = &mut model;
@@ -525,12 +543,14 @@ async fn fallback_chain_applies_per_hop_reasoning_defaults() {
     models.insert(
         "model-a".to_string(),
         ModelEntry::new("provider-a", "claude-haiku-4-5")
-            .with_reasoning_defaults(ReasoningDefaults::new().with_thinking("low")),
+            .with_thinking(ThinkingChoice::Bool(true))
+            .with_effort(EffortLevel::Low),
     );
     models.insert(
         "model-b".to_string(),
         ModelEntry::new("provider-b", "claude-haiku-4-5")
-            .with_reasoning_defaults(ReasoningDefaults::new().with_thinking("high")),
+            .with_thinking(ThinkingChoice::Bool(true))
+            .with_effort(EffortLevel::High),
     );
 
     // Alias chain: model-a first (returns 500 -> fallback), then model-b (200).

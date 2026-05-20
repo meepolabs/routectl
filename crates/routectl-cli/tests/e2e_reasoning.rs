@@ -36,13 +36,13 @@ fn deepseek_alias_config(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "deepseek".into(),
-        ProviderEntry::openai_compat(format!("{upstream_base}/v1"), "literal:test")
-            .with_reasoning_dialect(ReasoningDialect::Deepseek),
+        ProviderEntry::openai_compat(format!("{upstream_base}/v1"), "literal:test"),
     );
     let mut models = BTreeMap::new();
     models.insert(
         "ds-reasoner".into(),
-        ModelEntry::new("deepseek", "deepseek-reasoner"),
+        ModelEntry::new("deepseek", "deepseek-reasoner")
+            .with_reasoning_dialect(ReasoningDialect::Deepseek),
     );
     let mut aliases = BTreeMap::new();
     aliases.insert("reasoning".into(), AliasValue::Single("ds-reasoner".into()));
