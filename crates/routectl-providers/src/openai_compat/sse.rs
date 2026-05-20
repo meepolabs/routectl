@@ -40,12 +40,69 @@ pub fn parse_chunk(id: &str, raw: &str, dialect: ReasoningDialect) -> Result<Opt
     // operate on a uniform shape.
     coalesce_chunk_reasoning_keys(&mut val);
 
+    // Lift OpenAI/DeepSeek usage sub-bags into canonical typed slots
+    // BEFORE serde deserialization. `UsageDelta` does not carry a
+    // `#[serde(flatten)] extras` catchall, so unknown sub-fields are
+    // silently dropped at deserialize time -- without this lift, the
+    // terminal-chunk's `completion_tokens_details.reasoning_tokens`
+    // and `prompt_cache_hit_tokens` / `prompt_tokens_details
+    // .cached_tokens` would never reach canonical.
+    lift_chunk_usage_subbags(&mut val);
+
     apply_chunk_dialect(id, &mut val, dialect)?;
 
     let chunk: ChatChunk = serde_json::from_value(val)
         .map_err(|e| Error::normalize_response(id, format!("chunk deserialize: {e}")))?;
 
     Ok(Some(chunk))
+}
+
+/// JSON-side mirror of `response::lift_and_strip_usage_extras` for the
+/// SSE path. Operates on the chunk JSON before serde deserialization
+/// because `UsageDelta` has no extras catchall; deserialization would
+/// otherwise silently drop the sub-bags. Idempotent: only writes the
+/// top-level fields when they are not already populated by the
+/// upstream.
+fn lift_chunk_usage_subbags(val: &mut Value) {
+    let Some(usage) = val.get_mut("usage").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+
+    let reasoning_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|v| v.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64());
+    if let Some(n) = reasoning_tokens {
+        usage.entry("reasoning_tokens").or_insert(Value::from(n));
+    }
+
+    let cache_read = usage
+        .get("prompt_cache_hit_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|v| v.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+        });
+    if let Some(n) = cache_read {
+        usage
+            .entry("cache_read_input_tokens")
+            .or_insert(Value::from(n));
+    }
+
+    // Sub-bags themselves are unknown to UsageDelta and would be
+    // dropped by serde regardless; an explicit remove makes the
+    // intention readable in the trace and keeps any future extras
+    // flatten on UsageDelta from accidentally readmitting them.
+    for k in [
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+        "prompt_tokens_details",
+        "completion_tokens_details",
+    ] {
+        usage.remove(k);
+    }
 }
 
 /// Walk `choices[].delta` and merge `reasoning_content` into `reasoning`.
@@ -561,5 +618,94 @@ mod tests {
             .unwrap();
         // Combined `<thanks!` is not a tag; whole thing flows visibly.
         assert_eq!(c2.choices[0].delta.content.as_deref(), Some("<thanks!"));
+    }
+
+    // --- Terminal-chunk usage sub-bag lift tests ---
+
+    fn terminal_chunk_with_usage(usage: serde_json::Value) -> String {
+        json!({
+            "id": "chunk-final",
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": usage
+        })
+        .to_string()
+    }
+
+    /// OpenAI terminal chunk delivers `completion_tokens_details
+    /// .reasoning_tokens` in the final `usage` object. `UsageDelta`
+    /// has no extras catchall; the sub-bag must be lifted into the
+    /// canonical typed `reasoning_tokens` field BEFORE serde would
+    /// otherwise drop it.
+    #[test]
+    fn terminal_chunk_lifts_reasoning_tokens() {
+        let raw = terminal_chunk_with_usage(json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "total_tokens": 30,
+            "completion_tokens_details": {"reasoning_tokens": 7}
+        }));
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi)
+            .unwrap()
+            .unwrap();
+        let usage = chunk.usage.expect("terminal usage present");
+        assert_eq!(usage.reasoning_tokens, Some(7));
+    }
+
+    /// DeepSeek terminal chunk delivers `prompt_cache_hit_tokens`
+    /// directly on `usage`. Lift into canonical `cache_read_input_tokens`.
+    #[test]
+    fn terminal_chunk_lifts_cache_read_from_deepseek() {
+        let raw = terminal_chunk_with_usage(json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_cache_hit_tokens": 80,
+            "prompt_cache_miss_tokens": 20
+        }));
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek)
+            .unwrap()
+            .unwrap();
+        let usage = chunk.usage.expect("terminal usage present");
+        assert_eq!(usage.cache_read_input_tokens, Some(80));
+    }
+
+    /// OpenAI terminal chunk delivers `prompt_tokens_details
+    /// .cached_tokens`. Lift into canonical `cache_read_input_tokens`.
+    #[test]
+    fn terminal_chunk_lifts_cache_read_from_openai_prompt_tokens_details() {
+        let raw = terminal_chunk_with_usage(json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 64}
+        }));
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi)
+            .unwrap()
+            .unwrap();
+        let usage = chunk.usage.expect("terminal usage present");
+        assert_eq!(usage.cache_read_input_tokens, Some(64));
+    }
+
+    /// Idempotency mirror of the response-side test: when the
+    /// upstream already set a top-level canonical field, the lift
+    /// from the sub-bag does NOT overwrite it.
+    #[test]
+    fn terminal_chunk_lift_does_not_clobber_already_set_field() {
+        let raw = terminal_chunk_with_usage(json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "total_tokens": 30,
+            "reasoning_tokens": 11,
+            "completion_tokens_details": {"reasoning_tokens": 99}
+        }));
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk.usage.unwrap().reasoning_tokens, Some(11));
     }
 }
