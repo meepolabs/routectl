@@ -11,9 +11,39 @@
 
 use serde_json::Value;
 
-use routectl_core::{ChatResponse, Error, Message, MessageContent, Result};
+use routectl_core::{ChatResponse, Error, Message, MessageContent, Result, Usage};
 
 use super::dialect::ReasoningDialect;
+
+/// OpenAI-compat envelope fields that must NOT round-trip through the
+/// canonical extras catchall to a non-OpenAI ingress. The forward-compat
+/// catchall on `ChatResponse.extras` is designed for Anthropic-spec
+/// additions (e.g. `context_management`); when the upstream is openai-
+/// compat, the catchall would otherwise carry the OpenAI envelope's
+/// `object`/`system_fingerprint` and the DeepSeek vendor `cost` field
+/// through to an Anthropic egress unchanged. Strip them at the
+/// normalize seam so canonical stays provider-agnostic.
+///
+/// Conservatively excluded from the strip list:
+///   - `role`: not actually leaked here. The Anthropic ingress's
+///     render emits `"role":"assistant"` from a hardcoded insert, not
+///     via `extras`.
+///   - `service_tier`: Anthropic-spec response field; must round-trip.
+const OPENAI_COMPAT_ENVELOPE_KEYS: &[&str] = &["object", "system_fingerprint", "cost"];
+
+/// OpenAI/DeepSeek usage sub-bag keys that must NOT round-trip through
+/// `Usage.extras`. Two of them carry information canonical models in
+/// typed fields (`reasoning_tokens`, `cache_read_input_tokens`) and we
+/// lift the value into those before stripping; the other two are
+/// either redundant (`prompt_cache_miss_tokens` = `prompt_tokens -
+/// cache_read`) or pure OpenAI-vendor detail that does not map to any
+/// canonical concept.
+const OPENAI_COMPAT_USAGE_SUBKEYS: &[&str] = &[
+    "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens",
+    "prompt_tokens_details",
+    "completion_tokens_details",
+];
 
 pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<ChatResponse> {
     let preprocessed = coalesce_reasoning_content_in_response(raw);
@@ -24,7 +54,66 @@ pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<Chat
         apply_dialect_to_message(id, &mut choice.message, dialect)?;
     }
 
+    if let Some(usage) = resp.usage.as_mut() {
+        lift_and_strip_usage_extras(usage);
+    }
+    strip_envelope_extras(&mut resp.extras);
+
     Ok(resp)
+}
+
+/// Lift OpenAI / DeepSeek usage sub-bag values that canonical models
+/// in typed fields, then strip the now-redundant sub-bags from
+/// `Usage.extras`. Idempotent: callers can run it more than once on
+/// the same `Usage` without losing data.
+///
+/// Lifts (when the canonical field is still `None`):
+///   - `completion_tokens_details.reasoning_tokens` -> `reasoning_tokens`.
+///   - `prompt_cache_hit_tokens` (DeepSeek) OR
+///     `prompt_tokens_details.cached_tokens` (OpenAI) ->
+///     `cache_read_input_tokens`.
+///
+/// DeepSeek precedence: when both `prompt_cache_hit_tokens` and
+/// `prompt_tokens_details.cached_tokens` are present (rare),
+/// DeepSeek's wins because it is the dialect for the host most likely
+/// to ship both. Either way the cumulative semantics align with
+/// Anthropic's `cache_read_input_tokens`.
+pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) {
+    if usage.reasoning_tokens.is_none() {
+        usage.reasoning_tokens = usage
+            .extras
+            .get("completion_tokens_details")
+            .and_then(|v| v.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+    }
+    if usage.cache_read_input_tokens.is_none() {
+        usage.cache_read_input_tokens = usage
+            .extras
+            .get("prompt_cache_hit_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                usage
+                    .extras
+                    .get("prompt_tokens_details")
+                    .and_then(|v| v.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+            })
+            .map(|n| n as u32);
+    }
+    for k in OPENAI_COMPAT_USAGE_SUBKEYS {
+        usage.extras.remove(*k);
+    }
+}
+
+/// Strip OpenAI-compat envelope keys from `ChatResponse.extras`.
+/// Anthropic-spec / Anthropic-beta fields (`service_tier`,
+/// `context_management`, `container`, ...) and any unknown forward-
+/// compat keys stay intact.
+fn strip_envelope_extras(extras: &mut serde_json::Map<String, Value>) {
+    for k in OPENAI_COMPAT_ENVELOPE_KEYS {
+        extras.remove(*k);
+    }
 }
 
 /// OpenAI-compat upstreams (DeepSeek, vLLM, OpenRouter, NIM, llama.cpp,
@@ -305,5 +394,168 @@ mod tests {
         let raw = fake_response("openrouter content");
         let resp = normalize("test", raw, ReasoningDialect::OpenRouter).unwrap();
         assert_eq!(resp.choices[0].message.reasoning_details.len(), 0);
+    }
+
+    /// The forward-compat catchall on `ChatResponse.extras` exists for
+    /// Anthropic-spec additions; openai-compat envelope fields
+    /// (`object`, `system_fingerprint`, `cost`) must NOT round-trip
+    /// through it to a non-OpenAI egress. Pin the strip.
+    #[test]
+    fn envelope_keys_stripped_from_extras() {
+        let raw = json!({
+            "id": "chatcmpl-test",
+            "model": "test-model",
+            "object": "chat.completion",
+            "system_fingerprint": "fp_test_v1",
+            "cost": "0",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+        assert!(
+            !resp.extras.contains_key("object"),
+            "object must be stripped, got extras={:?}",
+            resp.extras
+        );
+        assert!(!resp.extras.contains_key("system_fingerprint"));
+        assert!(!resp.extras.contains_key("cost"));
+    }
+
+    /// `service_tier` is an Anthropic-spec response field shipped on
+    /// every recent Anthropic response; the openai-compat normalize
+    /// path must not strip it (the strip list is openai-compat-only).
+    #[test]
+    fn service_tier_preserved_through_normalize() {
+        let raw = json!({
+            "id": "test",
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "service_tier": "standard"
+        });
+        let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+        assert_eq!(resp.extras.get("service_tier"), Some(&json!("standard")));
+    }
+
+    /// `completion_tokens_details.reasoning_tokens` lifts into
+    /// canonical `Usage.reasoning_tokens` and the sub-bag is stripped.
+    #[test]
+    fn usage_lifts_reasoning_tokens_from_completion_details() {
+        let raw = json!({
+            "id": "test", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30,
+                "completion_tokens_details": {"reasoning_tokens": 7}
+            }
+        });
+        let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.reasoning_tokens, Some(7));
+        assert!(!usage.extras.contains_key("completion_tokens_details"));
+    }
+
+    /// DeepSeek's `prompt_cache_hit_tokens` lifts into canonical
+    /// `Usage.cache_read_input_tokens`. The vendor sibling
+    /// `prompt_cache_miss_tokens` is stripped without a lift (no
+    /// canonical slot; equivalent to `prompt_tokens - cache_read`).
+    #[test]
+    fn usage_lifts_cache_read_from_deepseek_prompt_cache_hit() {
+        let raw = json!({
+            "id": "test", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+                "prompt_cache_hit_tokens": 80,
+                "prompt_cache_miss_tokens": 20
+            }
+        });
+        let resp = normalize("test", raw, ReasoningDialect::DeepSeek).unwrap();
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.cache_read_input_tokens, Some(80));
+        assert!(!usage.extras.contains_key("prompt_cache_hit_tokens"));
+        assert!(!usage.extras.contains_key("prompt_cache_miss_tokens"));
+    }
+
+    /// OpenAI's `prompt_tokens_details.cached_tokens` lifts into
+    /// canonical `Usage.cache_read_input_tokens` when the DeepSeek
+    /// `prompt_cache_hit_tokens` sibling is absent.
+    #[test]
+    fn usage_lifts_cache_read_from_openai_prompt_tokens_details() {
+        let raw = json!({
+            "id": "test", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+                "prompt_tokens_details": {"cached_tokens": 64}
+            }
+        });
+        let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.cache_read_input_tokens, Some(64));
+        assert!(!usage.extras.contains_key("prompt_tokens_details"));
+    }
+
+    /// When both DeepSeek-style and OpenAI-style cache-hit fields are
+    /// present, DeepSeek wins. Documents the precedence so a future
+    /// reader sees the intent.
+    #[test]
+    fn usage_deepseek_cache_hit_wins_over_openai_cached() {
+        let raw = json!({
+            "id": "test", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+                "prompt_cache_hit_tokens": 80,
+                "prompt_tokens_details": {"cached_tokens": 64}
+            }
+        });
+        let resp = normalize("test", raw, ReasoningDialect::DeepSeek).unwrap();
+        assert_eq!(resp.usage.unwrap().cache_read_input_tokens, Some(80));
+    }
+
+    /// Idempotency: when canonical `reasoning_tokens` is already set
+    /// (e.g. the upstream put it at the top of `usage` directly), the
+    /// sub-bag lift does NOT overwrite it. Pins the `or_insert`-style
+    /// semantics intended by the helper.
+    #[test]
+    fn usage_lift_does_not_clobber_already_set_canonical_field() {
+        let raw = json!({
+            "id": "test", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30,
+                "reasoning_tokens": 11,
+                "completion_tokens_details": {"reasoning_tokens": 99}
+            }
+        });
+        let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+        assert_eq!(resp.usage.unwrap().reasoning_tokens, Some(11));
     }
 }
