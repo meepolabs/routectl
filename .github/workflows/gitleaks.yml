@@ -1,0 +1,42 @@
+# Secret scanning -- adopted from shared conventions baseline.
+#
+# Runs on every PR + push to main/develop, plus a weekly full-history
+# scan to catch anything historical that slipped past the diff scan
+# on prior PRs.
+
+name: gitleaks
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  scan:
+    name: Scan for secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Full history so the schedule run can see everything.
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gitleaks-action v2 requires a license key for any repo
+          # owned by a GitHub organization (free tier exists for small
+          # orgs). Store the key from gitleaks.io as a repo or org
+          # secret named GITLEAKS_LICENSE; the action fails with
+          # "License key is required" if it's unset on an org repo.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true
+          GITLEAKS_ENABLE_SUMMARY: true
