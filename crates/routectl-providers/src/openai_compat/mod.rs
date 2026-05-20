@@ -175,7 +175,7 @@ impl OpenAiCompatProvider {
             .unwrap_or(self.cfg.history_reasoning)
     }
 
-    fn build_headers(&self) -> Result<HeaderMap> {
+    fn build_headers(&self, req: &ChatRequest) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -183,12 +183,14 @@ impl OpenAiCompatProvider {
                 .map_err(|e| Error::Config(format!("invalid api_key for header: {e}")))?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        for (k, v) in &self.cfg.header_extras {
-            // Defense-in-depth, parity with anthropic_api / bedrock: refuse
-            // to let TOML-supplied `extra_headers` stomp on the auth header
-            // we just set. HeaderMap::insert replaces by name, so without
-            // this guard `extra_headers = { "authorization" = "..." }` would
-            // silently override the Bearer token.
+        // Prefer the router-composed map (provider + model merged at
+        // dispatch) if present; fall back to `self.cfg.header_extras`
+        // for library consumers that built the provider directly.
+        let source = crate::http_client::effective_header_extras(
+            &self.cfg.header_extras,
+            req.routectl_internal.header_extras.as_ref(),
+        );
+        for (k, v) in &source {
             if crate::http_client::is_auth_header(k) {
                 tracing::warn!(
                     provider = %self.cfg.id,
@@ -256,7 +258,7 @@ impl Provider for OpenAiCompatProvider {
         // Force non-streaming.
         body["stream"] = Value::Bool(false);
 
-        let headers = self.build_headers()?;
+        let headers = self.build_headers(&req)?;
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions");
 
@@ -342,7 +344,7 @@ impl Provider for OpenAiCompatProvider {
         // toggle is `disable_stream_include_usage = true`.
         ensure_stream_options_include_usage(&mut body, self.cfg.disable_stream_include_usage);
 
-        let headers = self.build_headers()?;
+        let headers = self.build_headers(&req)?;
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions (stream)");
 
