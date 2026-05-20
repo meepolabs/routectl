@@ -205,7 +205,6 @@ fn build_router_v6_full(
         config_providers.insert(
             name,
             ProviderEntry::openai_compat("http://example.invalid", "literal:x")
-                .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai)
                 .with_runtime(runtime),
         );
     }

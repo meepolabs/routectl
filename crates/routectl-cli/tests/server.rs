@@ -45,8 +45,7 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
     let mut providers = BTreeMap::new();
     providers.insert(
         provider_name.to_string(),
-        ProviderEntry::openai_compat(upstream_base, "literal:test-key")
-            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+        ProviderEntry::openai_compat(upstream_base, "literal:test-key"),
     );
 
     let mut models = BTreeMap::new();
@@ -73,13 +72,11 @@ fn two_provider_config(first_base: &str, second_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
     providers.insert(
         "first".to_string(),
-        ProviderEntry::openai_compat(first_base, "literal:test-key")
-            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+        ProviderEntry::openai_compat(first_base, "literal:test-key"),
     );
     providers.insert(
         "second".to_string(),
-        ProviderEntry::openai_compat(second_base, "literal:test-key")
-            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+        ProviderEntry::openai_compat(second_base, "literal:test-key"),
     );
 
     let mut models = BTreeMap::new();
@@ -185,8 +182,7 @@ async fn models_includes_alias_keys_and_nicknames() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "p".into(),
-        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k")
-            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
     );
     let mut models = BTreeMap::new();
     models.insert("fast-model".into(), ModelEntry::new("p", "gpt-4o"));
@@ -472,8 +468,7 @@ async fn chat_completions_unknown_model_routes_to_default_alias() {
     let mut providers = BTreeMap::new();
     providers.insert(
         "mock-provider".to_string(),
-        ProviderEntry::openai_compat(upstream.uri(), "literal:test-key")
-            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+        ProviderEntry::openai_compat(upstream.uri(), "literal:test-key"),
     );
     let mut models = BTreeMap::new();
     models.insert(
@@ -570,8 +565,7 @@ async fn server_fails_startup_when_referenced_provider_cannot_build() {
         ProviderEntry::openai_compat(
             "http://127.0.0.1:1",
             "env://ROUTECTL_TEST_THIS_VAR_IS_NEVER_SET_F3",
-        )
-        .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+        ),
     );
     let mut models = BTreeMap::new();
     models.insert("broken-gpt".into(), ModelEntry::new("broken", "gpt-4o"));
@@ -618,13 +612,11 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
         ProviderEntry::openai_compat(
             "http://127.0.0.1:1",
             "env://ROUTECTL_TEST_THIS_VAR_IS_NEVER_SET_F3",
-        )
-        .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+        ),
     );
     providers.insert(
         "working".into(),
-        ProviderEntry::openai_compat("http://127.0.0.1:2", "literal:test")
-            .with_reasoning_dialect(routectl_router::ReasoningDialect::Openai),
+        ProviderEntry::openai_compat("http://127.0.0.1:2", "literal:test"),
     );
     let mut models = BTreeMap::new();
     // Only define a model on `working`; `broken` is unused.

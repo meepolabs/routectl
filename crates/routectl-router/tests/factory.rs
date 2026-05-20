@@ -7,8 +7,7 @@ use routectl_router::{build_provider, ProviderEntry, ReasoningDialect};
 #[tokio::test]
 async fn build_openai_compat_resolves_secret() {
     let store = MemoryStore;
-    let entry = ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-abc")
-        .with_reasoning_dialect(ReasoningDialect::Openai);
+    let entry = ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-abc");
     let provider = build_provider("test", &entry, &store).await.expect("build");
     assert_eq!(provider.id(), "openai-compat:test");
 }
@@ -109,7 +108,8 @@ api_key_ref = "env://ANTHROPIC_API_KEY"
 
 /// Same test but for the OpenAI-compat shape: a custom `base_url`
 /// must survive TOML round-trip. Lots of providers (OpenCode-Go,
-/// NIM, llama.cpp) rely on this.
+/// NIM, llama.cpp) rely on this. v0.6.0 moved `reasoning_dialect` to
+/// `[models.X]`; the provider entry no longer carries it.
 #[test]
 fn openai_compat_custom_base_url_round_trips_through_toml() {
     let toml_src = r#"
@@ -117,6 +117,10 @@ fn openai_compat_custom_base_url_round_trips_through_toml() {
 kind = "openai-compat"
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_ref = "env://OPENCODE_GO_API_KEY"
+
+[models.dsv4]
+provider = "example-deepseek-host"
+upstream = "deepseek-v4-pro"
 reasoning_dialect = "deepseek"
 "#;
     let cfg: routectl_router::Config = toml::from_str(toml_src).expect("parse");
@@ -125,16 +129,13 @@ reasoning_dialect = "deepseek"
         .get("example-deepseek-host")
         .expect("opencode entry");
     match entry {
-        ProviderEntry::OpenaiCompat {
-            base_url,
-            reasoning_dialect,
-            ..
-        } => {
+        ProviderEntry::OpenaiCompat { base_url, .. } => {
             assert_eq!(base_url, "https://opencode.ai/zen/go/v1");
-            assert!(matches!(reasoning_dialect, ReasoningDialect::Deepseek));
         }
         other => panic!("expected OpenaiCompat, got {other:?}"),
     }
+    let model = cfg.models.get("dsv4").expect("model");
+    assert_eq!(model.reasoning_dialect, Some(ReasoningDialect::Deepseek));
 }
 
 #[tokio::test]
@@ -151,16 +152,17 @@ async fn build_with_missing_env_var_errors() {
     }
 }
 
-/// TOML round-trip for Anthropic `extra_headers` and `user_agent`.
+/// TOML round-trip for Anthropic `header_extras` and `user_agent`
+/// (renamed from `extra_headers` in v0.6.0).
 #[test]
-fn anthropic_extra_headers_and_user_agent_round_trip_through_toml() {
+fn anthropic_header_extras_and_user_agent_round_trip_through_toml() {
     let toml_src = r#"
 [providers.anthropic]
 kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 user_agent = "claude-code/1.2.3"
 
-[providers.anthropic.extra_headers]
+[providers.anthropic.header_extras]
 "anthropic-beta" = "context-1m-2025-08-07,prompt-caching-2024-07-31"
 "x-custom-trace" = "abc123"
 "#;
@@ -168,17 +170,17 @@ user_agent = "claude-code/1.2.3"
     let entry = cfg.providers.get("anthropic").expect("anthropic entry");
     match entry {
         ProviderEntry::AnthropicApi {
-            extra_headers,
+            header_extras,
             user_agent,
             ..
         } => {
             assert_eq!(user_agent.as_deref(), Some("claude-code/1.2.3"));
             assert_eq!(
-                extra_headers.get("anthropic-beta").map(String::as_str),
+                header_extras.get("anthropic-beta").map(String::as_str),
                 Some("context-1m-2025-08-07,prompt-caching-2024-07-31"),
             );
             assert_eq!(
-                extra_headers.get("x-custom-trace").map(String::as_str),
+                header_extras.get("x-custom-trace").map(String::as_str),
                 Some("abc123")
             );
         }
@@ -328,7 +330,7 @@ user_agent = "claude-code/1.2.3"
 anthropic_beta = ["context-1m-2025-08-07", "prompt-caching-2024-07-31"]
 creds = { kind = "bearer-key", key_ref = "file:///home/me/.config/routectl/bedrock.key" }
 
-[providers.bedrock_anthropic.extra_headers]
+[providers.bedrock_anthropic.header_extras]
 "x-trace-id" = "abc"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
@@ -339,7 +341,7 @@ creds = { kind = "bearer-key", key_ref = "file:///home/me/.config/routectl/bedro
                 api_shape,
                 user_agent,
                 anthropic_beta,
-                extra_headers,
+                header_extras,
                 creds,
                 ..
             } => {
@@ -354,7 +356,7 @@ creds = { kind = "bearer-key", key_ref = "file:///home/me/.config/routectl/bedro
                     ]
                 );
                 assert_eq!(
-                    extra_headers.get("x-trace-id").map(String::as_str),
+                    header_extras.get("x-trace-id").map(String::as_str),
                     Some("abc")
                 );
                 match creds {

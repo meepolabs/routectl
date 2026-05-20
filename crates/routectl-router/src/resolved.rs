@@ -4,33 +4,30 @@
 //! per hop, instead of re-parsing `provider:model` strings on every
 //! request.
 //!
-//! `ResolvedModel` carries the four pieces dispatch needs together:
+//! `ResolvedModel` carries everything the dispatch hot-path needs:
 //!
-//!   - `nickname`: stable identifier for tracing (`model = <nickname>`)
-//!   - `provider_name`: the operator-facing provider key (used for
-//!     the same per-provider gates / runtime state map keys)
-//!   - `provider`: the concrete `Arc<dyn Provider>` instance.
-//!     Multiple `ResolvedModel` entries may share one Arc when they
-//!     route to the same non-Bedrock provider; Bedrock fans out to
-//!     one Arc per model (each gets its own `BedrockConfig.model_id`).
-//!   - `upstream`: the wire `model` value the provider sends upstream
-//!   - `reasoning`: per-model operator-side `ReasoningDefaults`
-//!     (lifted from `[models.X]` -- transport-side defaults are gone
-//!     in v0.6.0).
-//!
-//! Built once and immutable thereafter -- if you find yourself
-//! mutating one of these you almost certainly want to mint a new
-//! resolved entry instead.
+//!   - `nickname`, `provider_name`, `provider`, `upstream`: identity
+//!     + transport (see field docs for details).
+//!   - `reasoning`: per-model `ReasoningDefaults` projected from the
+//!     model's `thinking` + `effort` knobs.
+//!   - `reasoning_dialect` / `history_reasoning`: per-model
+//!     openai-compat knobs (v0.6.0 moved off `[providers.X]`).
+//!   - `header_extras` / `payload_extras`: per-model overlays merged
+//!     into the request at dispatch (see `Router::merge_header_extras`
+//!     + `Router::merge_payload_extras`).
+//!   - `stream_first_byte_timeout_ms`: per-model timeout override.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use routectl_core::Provider;
+use serde_json::Value;
 
-use crate::config::ReasoningDefaults;
+use crate::config::{HistoryReasoning, ReasoningDefaults, ReasoningDialect};
 
 /// One fully-resolved model entry: a nickname bound to a concrete
-/// provider, an upstream string, and per-model reasoning defaults.
-/// See module docs.
+/// provider, an upstream string, and per-model knobs lifted off
+/// `[models.X]`. See module docs.
 #[derive(Clone)]
 pub struct ResolvedModel {
     /// The model entry's table key in `[models]`. Used as the
@@ -42,29 +39,31 @@ pub struct ResolvedModel {
     /// gate lookups (RPM bucket, circuit breaker) which are keyed by
     /// provider name.
     pub provider_name: String,
-    /// The concrete provider instance. Cached `Arc` for non-Bedrock
-    /// providers (one per `[providers.X]`); per-model `Arc` for
-    /// Bedrock since each model carries its own `BedrockConfig.model_id`.
+    /// The concrete provider instance.
     pub provider: Arc<dyn Provider>,
-    /// Wire value of the `model` field on outbound requests. For
-    /// openai-compat egresses this is the upstream model id; for
-    /// Bedrock this is the AWS inference profile id (also stored
-    /// internally on `BedrockConfig.model_id`).
+    /// Wire value of the `model` field on outbound requests.
     pub upstream: String,
-    /// Operator-side reasoning defaults from `[models.X] thinking`
-    /// and `[models.X] enabled`. Empty when the operator left both
-    /// fields unset; the merge step short-circuits on empty.
+    /// Operator-side reasoning defaults projected from `[models.X]
+    /// thinking` + `[models.X] effort`. Empty when neither knob was
+    /// set; the merge step short-circuits on empty.
     pub reasoning: ReasoningDefaults,
-    /// Per-model `anthropic-beta` flags from `[models.X] anthropic_beta`.
-    /// Lifted onto `req.anthropic_beta` at dispatch time, deduplicated
-    /// against the request-side entries. Empty when the operator left
-    /// the field unset.
-    pub anthropic_beta: Vec<String>,
-    /// Per-model first-byte timeout for streaming responses from
-    /// `[models.X] stream_first_byte_timeout_ms`. When set, wins over
-    /// the per-provider and global resolution in
-    /// `Router::compose_attempt_policy`. None defers to those lower
-    /// tiers.
+    /// Per-model openai-compat reasoning dialect (v0.6.0 moved off
+    /// `[providers.X]`). `None` means fall back to the provider's
+    /// existing default (`ReasoningDialect::OpenAi` today).
+    pub reasoning_dialect: Option<ReasoningDialect>,
+    /// Per-model openai-compat outgoing-history reasoning policy.
+    /// `None` means fall back to provider's default.
+    pub history_reasoning: Option<HistoryReasoning>,
+    /// Per-model header extras. Merged with the provider's
+    /// `header_extras` at dispatch time (model wins on key collision;
+    /// list-valued `anthropic-beta` runs through a comma-union
+    /// post-pass).
+    pub header_extras: BTreeMap<String, String>,
+    /// Per-model payload extras. Deep-merged with the provider's
+    /// `payload_extras` (model wins on leaf collision).
+    pub payload_extras: Option<Value>,
+    /// Per-model first-byte timeout for streaming responses. Wins
+    /// over per-provider + global tiers when set.
     pub stream_first_byte_timeout_ms: Option<u64>,
 }
 
@@ -81,7 +80,10 @@ impl ResolvedModel {
             provider,
             upstream: upstream.into(),
             reasoning: ReasoningDefaults::default(),
-            anthropic_beta: Vec::new(),
+            reasoning_dialect: None,
+            history_reasoning: None,
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
             stream_first_byte_timeout_ms: None,
         }
     }
@@ -91,10 +93,23 @@ impl ResolvedModel {
         self
     }
 
-    /// Set the per-model `anthropic_beta` list. Lifted onto
-    /// `req.anthropic_beta` at dispatch time.
-    pub fn with_anthropic_beta(mut self, betas: Vec<String>) -> Self {
-        self.anthropic_beta = betas;
+    pub fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
+        self.reasoning_dialect = Some(d);
+        self
+    }
+
+    pub fn with_history_reasoning(mut self, h: HistoryReasoning) -> Self {
+        self.history_reasoning = Some(h);
+        self
+    }
+
+    pub fn with_header_extras(mut self, headers: BTreeMap<String, String>) -> Self {
+        self.header_extras = headers;
+        self
+    }
+
+    pub fn with_payload_extras(mut self, extras: Value) -> Self {
+        self.payload_extras = Some(extras);
         self
     }
 
@@ -120,7 +135,13 @@ impl std::fmt::Debug for ResolvedModel {
             .field("provider_id", &self.provider.id())
             .field("upstream", &self.upstream)
             .field("reasoning", &self.reasoning)
-            .field("anthropic_beta", &self.anthropic_beta)
+            .field("reasoning_dialect", &self.reasoning_dialect)
+            .field("history_reasoning", &self.history_reasoning)
+            .field(
+                "header_extras_keys",
+                &self.header_extras.keys().collect::<Vec<_>>(),
+            )
+            .field("payload_extras_present", &self.payload_extras.is_some())
             .field(
                 "stream_first_byte_timeout_ms",
                 &self.stream_first_byte_timeout_ms,
@@ -186,11 +207,15 @@ mod tests {
     }
 
     #[test]
-    fn with_anthropic_beta_sets_field() {
+    fn with_header_extras_sets_field() {
         let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
-        let m = ResolvedModel::new("x", "p", p, "u")
-            .with_anthropic_beta(vec!["context-1m-2025-08-07".into()]);
-        assert_eq!(m.anthropic_beta, vec!["context-1m-2025-08-07".to_string()]);
+        let mut h = BTreeMap::new();
+        h.insert("anthropic-beta".into(), "context-1m-2025-08-07".into());
+        let m = ResolvedModel::new("x", "p", p, "u").with_header_extras(h);
+        assert_eq!(
+            m.header_extras.get("anthropic-beta"),
+            Some(&"context-1m-2025-08-07".to_string())
+        );
     }
 
     #[test]
@@ -201,10 +226,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_have_empty_anthropic_beta_and_none_timeout() {
+    fn defaults_have_empty_header_extras_and_none_timeout() {
         let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
         let m = ResolvedModel::new("x", "p", p, "u");
-        assert!(m.anthropic_beta.is_empty());
+        assert!(m.header_extras.is_empty());
+        assert!(m.payload_extras.is_none());
         assert!(m.stream_first_byte_timeout_ms.is_none());
     }
 }

@@ -156,6 +156,113 @@ default           = "default"
 # field is ignored. Header always wins over the aliases map.
 ```
 
+## Config layering: provider vs model
+
+v0.6.0 splits configuration into two layers that compose at dispatch
+time: `[providers.X]` (transport-wide knobs -- auth, base URL, runtime
+gates) and `[models.X]` (per-model behavior -- reasoning, dialect,
+quirks). Two fields live on BOTH layers and merge per request:
+`header_extras` and `payload_extras`. The router's
+`apply_layered_overlays` helper (in `routectl-router/src/router.rs`)
+runs the merge before calling `provider.complete(req)` /
+`provider.stream(req)` -- the `Provider` trait surface stays stable
+across all five concrete providers.
+
+### Field-assignment table
+
+| Field                          | Lives on            | Merge semantics                                                        |
+|--------------------------------|---------------------|------------------------------------------------------------------------|
+| `provider`                     | `[models.X]`        | required; refs a `[providers]` key                                     |
+| `upstream`                     | `[models.X]`        | required                                                               |
+| `selectable`                   | `[models.X]`        | default true                                                           |
+| `thinking` (bool or "adaptive")| `[models.X]`        | model-only; caller `reasoning.enabled=false` always wins               |
+| `effort` (enum)                | `[models.X]`        | model-only; caller `reasoning.effort` always wins                      |
+| `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
+| `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
+| `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
+| `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
+| `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
+| `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
+| `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
+| `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only                                                          |
+| `user_agent`                   | `[providers.X]`     | provider-only                                                          |
+| `runtime` (RPM, breaker, timeouts) | `[providers.X]` | provider-only                                                          |
+| `allowed_betas`                | `[providers.X]` Anthropic / `[bedrock]` global | provider-only                              |
+
+### Merge semantics: `header_extras`
+
+1. Clone provider's `header_extras` into a working map.
+2. Iterate model's `header_extras`:
+   - auth-reserved keys WARN + drop (see "Reserved-header buckets" below)
+   - managed-reserved keys DEBUG + drop
+   - every other key model-wins on collision (last-writer-wins)
+3. List-valued post-pass on `LIST_VALUED_HEADERS` (`anthropic-beta`):
+   comma-split + union + dedup + comma-rejoin in visit order
+   `req.anthropic_beta -> provider value -> model value`. The unioned
+   string lands back on the merged map AND on `req.anthropic_beta`, so
+   downstream readers (the Anthropic-API egress's wire header,
+   `bedrock::betas::filter_bedrock_betas`) see the same fully-composed
+   list.
+
+### Merge semantics: `payload_extras`
+
+Deep recursive merge with model > provider. Object values at the same
+key merge recursively; scalar / array collisions take the model value
+with a DEBUG log naming the key. The merged result lands on
+`req.provider_extras`; each egress's existing `merge_provider_extras`
+path picks it up.
+
+Existing `req.provider_extras` (from the Anthropic ingress's
+forward-compat sweep) is preserved -- the merge layers
+provider + model ON TOP. A provider-side `payload_extras = { foo =
+"p" }` wins over a swept ingress value at the same key; a model-side
+value wins over both.
+
+### Reserved-header buckets
+
+| Bucket                | Keys                                                | Action on `header_extras` entry             |
+|-----------------------|-----------------------------------------------------|---------------------------------------------|
+| `AUTH_HEADERS`        | `authorization`, `x-api-key`, `anthropic-version`   | WARN + drop (operator misconfig)            |
+| `MANAGED_HEADERS`     | `host`, `content-type`, `content-length`            | DEBUG + drop (wire-shape protection)        |
+| `LIST_VALUED_HEADERS` | `anthropic-beta`                                    | comma-split-union-rejoin across all sources |
+
+`anthropic-beta` is NOT in MANAGED any more (pre-v0.6 it was).
+Operators set per-provider and per-model values via `header_extras`;
+the list-valued post-pass unions them with the ingress lift.
+
+### Worked example: three-source `anthropic-beta` compose
+
+claude-code sends `betas: ["foo"]` as an SDK option. The TypeScript
+SDK translates that to the `anthropic-beta: foo` HTTP header. The
+Anthropic ingress lifts the header into `req.anthropic_beta = ["foo"]`
+(unchanged in v0.6.0). Then:
+
+```toml
+[providers.anthropic-oauth]
+kind = "anthropic-api"
+api_key_ref = "env://ROUTECTL_ANTHROPIC"
+auth_kind = "oauth-bearer"
+header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
+
+[models.anthropic-opus]
+provider = "anthropic-oauth"
+upstream = "claude-opus-4-7"
+header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }
+```
+
+The dispatch-layer compose runs the list-valued post-pass in visit
+order:
+- `req.anthropic_beta = ["foo"]` (ingress)
+- provider `anthropic-beta` -> `"claude-code-20250219,oauth-2025-04-20"`
+- model `anthropic-beta` -> `"context-1m-2025-08-07"`
+
+Result: `req.anthropic_beta = ["foo", "claude-code-20250219",
+"oauth-2025-04-20", "context-1m-2025-08-07"]`. The Anthropic-API
+egress reads `req.anthropic_beta` and emits ONE
+`anthropic-beta: foo,claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07`
+HTTP header. Bedrock egresses route the same canonical list through
+`filter_bedrock_betas`.
+
 ## Retry and fallback defaults
 
 The default `RetryPolicy.fallback_on_status` list (`[retry]` table in
