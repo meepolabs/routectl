@@ -309,7 +309,14 @@ impl Provider for BedrockProvider {
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
-        for (k, v) in &self.cfg.header_extras {
+        // Prefer the router-composed map (provider + model merged at
+        // dispatch) if present; fall back to `self.cfg.header_extras`
+        // for library consumers that built the provider directly.
+        let header_source = crate::http_client::effective_header_extras(
+            &self.cfg.header_extras,
+            req.routectl_internal.header_extras.as_ref(),
+        );
+        for (k, v) in &header_source {
             // Defense-in-depth: refuse auth-reserved headers from
             // user-supplied extra_headers. The Bedrock SigV4 path
             // would overwrite Authorization later anyway, but the
@@ -414,7 +421,14 @@ impl Provider for BedrockProvider {
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
-        for (k, v) in &self.cfg.header_extras {
+        // Prefer the router-composed map (provider + model merged at
+        // dispatch) if present; fall back to `self.cfg.header_extras`
+        // for library consumers that built the provider directly.
+        let header_source = crate::http_client::effective_header_extras(
+            &self.cfg.header_extras,
+            req.routectl_internal.header_extras.as_ref(),
+        );
+        for (k, v) in &header_source {
             // Defense-in-depth: refuse auth-reserved headers from
             // user-supplied extra_headers. The Bedrock SigV4 path
             // would overwrite Authorization later anyway, but the

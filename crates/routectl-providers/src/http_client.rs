@@ -89,6 +89,27 @@ pub fn is_managed_header(name: &str) -> bool {
     MANAGED_HEADERS.contains(&lc.as_str())
 }
 
+/// Resolve the effective per-request `header_extras` source for an
+/// egress's `build_headers`. When the router is in the loop it pre-
+/// composes provider + model `header_extras` into
+/// `ChatRequest.routectl_internal.header_extras`; the egress reads
+/// from that to give model-level headers a path to the wire. Library
+/// consumers that construct a `ChatRequest` directly leave the
+/// carrier `None` and the egress falls back to its own
+/// `cfg_header_extras` snapshot.
+///
+/// Returns an owned vec because callers iterate it once and the
+/// allocation is single-digit-entries.
+pub fn effective_header_extras(
+    cfg_header_extras: &[(String, String)],
+    req_override: Option<&std::collections::BTreeMap<String, String>>,
+) -> Vec<(String, String)> {
+    match req_override {
+        Some(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        None => cfg_header_extras.to_vec(),
+    }
+}
+
 /// True if the given header name is reserved for routectl's own
 /// management and must not be set via user `extra_headers`. Union of
 /// [`is_auth_header`] and [`is_managed_header`]. Callers that need to

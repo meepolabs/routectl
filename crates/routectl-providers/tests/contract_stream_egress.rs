@@ -427,6 +427,82 @@ async fn openai_compat_egress_opt_out_suppresses_stream_options() {
     );
 }
 
+// =====================================================================
+// Per-model header_extras reach the wire
+// =====================================================================
+//
+// v0.6.0 promoted `header_extras` to both provider AND model levels.
+// The router's dispatch layer composes the merged map into
+// `ChatRequest.routectl_internal.header_extras`; the openai-compat
+// egress's `build_headers` reads from there (with `self.cfg.header_extras`
+// as a library-consumer fallback). This contract test pins the wire-side
+// outcome: a model-level header set ONLY via the router-side carrier
+// must appear on the upstream HTTP request, AND model values must win
+// over provider values on key collision.
+//
+// Bug class caught: round 1 review of 8fb4699 surfaced that the original
+// commit composed the merged map at dispatch but never published it to
+// the egress -- only `anthropic-beta` reached the wire (via the
+// canonical `req.anthropic_beta` lift). All other model-level headers
+// were silently discarded.
+
+#[tokio::test]
+async fn openai_compat_per_model_header_extras_reach_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .mount(&server)
+        .await;
+
+    // Provider sets one base header; the router-composed map (which
+    // mirrors what `Router::merge_header_extras` would land on the
+    // request) sets the SAME key with a different value plus an
+    // additional model-only key.
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+        id: "openai-compat-test".into(),
+        base_url: server.uri(),
+        api_key: "test-key".into(),
+        header_extras: vec![("x-shared".into(), "provider-only".into())],
+        payload_extras: None,
+        reasoning_dialect: ReasoningDialect::OpenAi,
+        history_reasoning: HistoryReasoning::Auto,
+        user_agent: None,
+        strict_translation: false,
+        disable_stream_include_usage: false,
+    });
+
+    // Simulate what the router would publish onto the request before
+    // calling provider.stream(). Model wins on the shared key; the
+    // model-only key joins the map.
+    let mut req = stream_request("gpt-4o");
+    let mut merged = std::collections::BTreeMap::new();
+    merged.insert("x-shared".into(), "model-wins".into());
+    merged.insert("x-model-only".into(), "from-model".into());
+    req.routectl_internal.header_extras = Some(merged);
+
+    let _ = collect_chunks(&provider, req).await;
+
+    let received = server.received_requests().await.expect("received requests");
+    assert_eq!(received.len(), 1, "exactly one upstream request expected");
+    let hdrs = &received[0].headers;
+    assert_eq!(
+        hdrs.get("x-shared").map(|h| h.to_str().unwrap_or_default()),
+        Some("model-wins"),
+        "model-level header_extras must win over provider-level on key collision",
+    );
+    assert_eq!(
+        hdrs.get("x-model-only")
+            .map(|h| h.to_str().unwrap_or_default()),
+        Some("from-model"),
+        "model-only header_extras keys must reach the wire",
+    );
+}
+
 #[tokio::test]
 async fn openai_compat_egress_preserves_operator_supplied_stream_options() {
     let server = MockServer::start().await;
