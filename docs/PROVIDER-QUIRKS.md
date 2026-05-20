@@ -109,13 +109,13 @@ NIM's DeepSeek v4 Flash / Pro defaults to **non-thinking mode**. Thinking is ena
 
 **To enable thinking on every NIM request:** the operator-side
 `default_extras` knob (which would unconditionally inject
-`reasoning_effort` into the body) is deferred for v0.6.0-rc.2 -- the
-field shipped briefly on `[models.X]` but never reached the egress
-and was withdrawn so the TOML surface didn't lie. For now, callers
-must send `reasoning.effort = "high"` (or set the equivalent on the
-client side); the OpenAI-dialect translator forwards it as
-`reasoning_effort` to NIM. The default-injection knob will return in
-a later release once the wiring lands.
+`reasoning_effort` into the body) is deferred to a future release
+-- the field shipped briefly on `[models.X]` but never reached the
+egress and was withdrawn so the TOML surface didn't lie. For now,
+callers must send `reasoning.effort = "high"` (or set the
+equivalent on the client side); the OpenAI-dialect translator
+forwards it as `reasoning_effort` to NIM. The default-injection
+knob will return once the wiring lands.
 
 ```toml
 [providers.nim]

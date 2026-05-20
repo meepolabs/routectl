@@ -4,7 +4,7 @@ A local LLM router. One Rust binary, listening on `127.0.0.1`, that proxies Open
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
-[![Workspace tests](https://img.shields.io/badge/tests-700%2B%20passing-brightgreen.svg)](#testing)
+[![Workspace tests](https://img.shields.io/badge/tests-1000%2B%20passing-brightgreen.svg)](#testing)
 
 ## Features
 
