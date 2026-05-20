@@ -54,7 +54,7 @@ fn make_request(stream: bool) -> ChatRequest {
 fn build_oauth_provider(token: String) -> AnthropicApiProvider {
     let mut cfg = AnthropicApiConfig::new("anthropic-oauth-test", token);
     cfg.auth_kind = AuthKind::OauthBearer;
-    cfg.extra_headers = vec![("anthropic-beta".into(), "oauth-2025-04-20".into())];
+    cfg.header_extras = vec![("anthropic-beta".into(), "oauth-2025-04-20".into())];
     AnthropicApiProvider::new(cfg)
 }
 

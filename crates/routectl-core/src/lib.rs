@@ -9,6 +9,7 @@ pub mod content_part;
 pub mod error;
 pub mod log_safe;
 pub mod provider;
+pub mod reasoning_dialect;
 pub mod reserved;
 pub mod schema;
 pub mod system_content;
@@ -31,10 +32,14 @@ pub use log_safe::{
 #[allow(deprecated)]
 pub use log_safe::MAX_TRACE_OUTGOING_BODY_BYTES;
 pub use provider::Provider;
+pub use reasoning_dialect::{
+    HistoryReasoning as CoreHistoryReasoning, ReasoningDialect as CoreReasoningDialect,
+};
 pub use reserved::is_canonical_request_key;
 pub use schema::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Message, MessageContent,
-    Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, Role, Usage, UsageDelta,
+    Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, Role, RoutectlInternal,
+    Usage, UsageDelta,
 };
 pub use system_content::{SystemBlock, SystemContent};
 pub use tool_def::{CustomTool, ToolDef};
