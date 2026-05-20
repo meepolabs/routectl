@@ -345,11 +345,12 @@ impl Router {
         opts: RouterOptions,
     ) -> Result<ChatResponse> {
         let chain = self.dispatch_chain(&req.model)?;
+        let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         let hard_cap = policy.hard_retry_cap();
         let mut last_err: Option<Error> = None;
 
-        'chain: for target in chain.iter() {
+        'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
             let state_key = target.state_key.as_str();
             let model = target.upstream.as_str();
@@ -454,12 +455,22 @@ impl Router {
                         }
                         // Done with this provider. Decide fallback vs propagate.
                         if do_fallback {
-                            tracing::warn!(
-                                provider = provider_name,
-                                model = %target.nickname.as_deref().unwrap_or(""),
-                                error = ?e,
-                                "fallback to next",
-                            );
+                            let has_next = chain_idx + 1 < chain_len;
+                            if has_next {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = %target.nickname.as_deref().unwrap_or(""),
+                                    error = ?e,
+                                    "fallback to next",
+                                );
+                            } else {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = %target.nickname.as_deref().unwrap_or(""),
+                                    error = ?e,
+                                    "chain exhausted; no fallback target available; request will fail",
+                                );
+                            }
                             last_err = Some(e);
                             continue 'chain;
                         }
@@ -488,10 +499,11 @@ impl Router {
         opts: RouterOptions,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let chain = self.dispatch_chain(&req.model)?;
+        let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         let mut last_err: Option<Error> = None;
 
-        'chain: for target in chain.iter() {
+        'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
             let state_key = target.state_key.as_str();
             let model = target.upstream.as_str();
@@ -555,12 +567,32 @@ impl Router {
                         return Err(e);
                     }
                     if do_fallback {
-                        tracing::warn!(
-                            provider = provider_name,
-                            model = %target.nickname.as_deref().unwrap_or(""),
-                            error = ?e,
-                            "stream fallback to next",
-                        );
+                        let has_next = chain_idx + 1 < chain_len;
+                        if has_next {
+                            tracing::warn!(
+                                provider = provider_name,
+                                model = %target.nickname.as_deref().unwrap_or(""),
+                                error = ?e,
+                                "stream fallback to next",
+                            );
+                        } else {
+                            // The previous shape WARNed "fallback to next"
+                            // with `provider=<self> model=<self>` because
+                            // we always log the SOURCE of the hop, not the
+                            // target. On a single-entry chain (or the
+                            // final entry of a longer chain) there is no
+                            // next target -- the loop exits and the
+                            // request fails. Log accordingly so an
+                            // operator triaging a misleading "fallback
+                            // happened" line sees what actually
+                            // happened.
+                            tracing::warn!(
+                                provider = provider_name,
+                                model = %target.nickname.as_deref().unwrap_or(""),
+                                error = ?e,
+                                "stream chain exhausted; no fallback target available; request will fail",
+                            );
+                        }
                         last_err = Some(e);
                         continue 'chain;
                     }
