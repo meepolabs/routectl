@@ -98,6 +98,40 @@ pub struct ChatRequest {
     /// Long-tail provider knobs we don't normalize. Merged into upstream body verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_extras: Option<Value>,
+
+    /// Transport-internal carrier for resolved-model knobs that the
+    /// dispatch layer hands to the egress without bouncing through the
+    /// wire. Never serialized -- `#[serde(skip)]` keeps the field
+    /// invisible to TOML/JSON.
+    ///
+    /// The router populates this from `ResolvedModel` right before
+    /// calling `provider.complete(req)` / `provider.stream(req)` so the
+    /// `Provider` trait signature stays stable across all five
+    /// concrete providers. Today the carrier ferries the openai-compat
+    /// reasoning_dialect + history_reasoning (moved from
+    /// `[providers.X]` to `[models.X]` in v0.6.0); future per-model
+    /// transport knobs land here too.
+    #[serde(skip)]
+    pub routectl_internal: RoutectlInternal,
+}
+
+/// Transport-internal carrier for resolved-model knobs the dispatch
+/// layer hands to the egress without bouncing through the wire. See
+/// `ChatRequest::routectl_internal` for the contract.
+///
+/// Every field is `Option` so an egress can fall back to its own
+/// `self.cfg.*` value when the carrier is empty (library consumers
+/// constructing a `ChatRequest` directly never set the carrier).
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct RoutectlInternal {
+    /// Per-model openai-compat reasoning dialect. `None` means the
+    /// egress should fall back to its own `OpenAiCompatConfig`-side
+    /// default (today: `ReasoningDialect::OpenAi`).
+    pub reasoning_dialect: Option<crate::reasoning_dialect::ReasoningDialect>,
+    /// Per-model openai-compat history-reasoning policy. `None` means
+    /// fall back to the egress's own default.
+    pub history_reasoning: Option<crate::reasoning_dialect::HistoryReasoning>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -57,7 +57,7 @@ fn bedrock_converse_provider() -> BedrockProvider {
             key: "test-key".into(),
         },
         user_agent: None,
-        extra_headers: Vec::new(),
+        header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         allowed_betas: Vec::new(),
         allowed_body_fields: Vec::new(),

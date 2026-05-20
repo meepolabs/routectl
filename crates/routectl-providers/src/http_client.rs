@@ -54,17 +54,10 @@ const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "anthropic-version
 
 /// Header names that routectl owns the value of for wire-shape
 /// correctness, but are NOT auth carriers. An operator setting one of
-/// these in `extra_headers` would silently lose to routectl's dynamic
+/// these in `header_extras` would silently lose to routectl's dynamic
 /// composition (or worse, emit twice on the wire). Compared
 /// case-insensitively against the user-supplied key.
 ///
-/// - `anthropic-beta` is composed dynamically per request by
-///   `anthropic_api::AnthropicApiProvider::build_headers` from the
-///   merged set of static `extra_headers["anthropic-beta"]` config and
-///   request-time `req.anthropic_beta`. The per-egress builder reads
-///   from extra_headers separately, bypassing this guard
-///   intentionally; the guard here exists so a NEW egress that loops
-///   over extra_headers does not accidentally double-emit.
 /// - `host` is request-routing; overriding it would let TOML pin a
 ///   different upstream and confuse SigV4 / virtual-host aware servers.
 /// - `content-type` is set by reqwest's `.json()` to
@@ -73,7 +66,15 @@ const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "anthropic-version
 ///   looks like an auth or schema error.
 /// - `content-length` is computed by reqwest from the serialized body;
 ///   a TOML override desyncs the wire contract.
-const MANAGED_HEADERS: &[&str] = &["anthropic-beta", "host", "content-type", "content-length"];
+///
+/// v0.6.0 removed `anthropic-beta` from this list. The Anthropic
+/// ingress lifts the inbound `anthropic-beta` HTTP header into
+/// `req.anthropic_beta`; the router's dispatch-layer compose merges
+/// the three sources (ingress + provider header_extras + model
+/// header_extras) into one comma-joined value. Operators now own the
+/// per-provider and per-model `anthropic-beta` slots via
+/// `header_extras`.
+const MANAGED_HEADERS: &[&str] = &["host", "content-type", "content-length"];
 
 /// True if the given header name carries provider auth. Case-insensitive.
 pub fn is_auth_header(name: &str) -> bool {
@@ -129,13 +130,24 @@ mod tests {
     }
 
     #[test]
+    fn is_managed_header_does_not_contain_anthropic_beta() {
+        // v0.6.0 removed `anthropic-beta` from the managed list.
+        // Operators now own the per-provider and per-model values
+        // via `header_extras`; the router's dispatch-layer compose
+        // unions inbound HTTP header + provider + model into one
+        // comma-joined header.
+        assert!(
+            !is_managed_header("anthropic-beta"),
+            "anthropic-beta MUST NOT classify as managed in v0.6.0+",
+        );
+        assert!(
+            !is_managed_header("Anthropic-Beta"),
+            "case-insensitive: Anthropic-Beta MUST NOT be managed",
+        );
+    }
+
+    #[test]
     fn is_managed_header_matches_managed_names() {
-        for name in ["anthropic-beta", "Anthropic-Beta", "ANTHROPIC-BETA"] {
-            assert!(
-                is_managed_header(name),
-                "{name:?} should classify as managed"
-            );
-        }
         for name in ["host", "Host", "HOST"] {
             assert!(
                 is_managed_header(name),

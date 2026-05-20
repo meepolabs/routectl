@@ -20,9 +20,10 @@ use super::dialects::util::strip_history_reasoning;
 use super::HistoryReasoning;
 
 /// `source` value passed to [`merge_extras`] for operator-config-supplied
-/// extras (`[providers.X] default_extras = {...}`). Drop here is
-/// adversarial -- the operator asked routectl to send a managed key.
-const DEFAULT_EXTRAS_SOURCE: &str = "default_extras";
+/// extras (`[providers.X] payload_extras = {...}` -- renamed from the
+/// pre-v0.6.0 `default_extras`). Drop here is adversarial -- the
+/// operator asked routectl to send a managed key.
+const DEFAULT_EXTRAS_SOURCE: &str = "payload_extras";
 
 /// `source` value passed to [`merge_extras`] for canonical-swept
 /// `req.provider_extras` (the Anthropic ingress's forward-compat sweep
@@ -37,7 +38,7 @@ pub fn normalize(
     req: &ChatRequest,
     dialect: ReasoningDialect,
     history_reasoning: HistoryReasoning,
-    default_extras: Option<&Value>,
+    payload_extras: Option<&Value>,
     strict_translation: bool,
 ) -> Result<Value> {
     // Lossy seams: Anthropic-canonical fields the OpenAI-compat wire
@@ -138,11 +139,12 @@ pub fn normalize(
         }
     }
 
-    // default_extras then provider_extras (caller wins). Both gated
-    // by the managed-key allow-list -- without this, a request body
-    // of `provider_extras = {"messages":[...]}` could replace the
-    // assembled messages.
-    if let Some(extras) = default_extras {
+    // payload_extras (provider-level) then req.provider_extras
+    // (canonical, post-dispatch merge of provider + model). Both
+    // gated by the managed-key allow-list -- without this, a request
+    // body of `provider_extras = {"messages":[...]}` could replace
+    // the assembled messages.
+    if let Some(extras) = payload_extras {
         merge_extras(id, obj, extras, DEFAULT_EXTRAS_SOURCE);
     }
     if let Some(extras) = req.provider_extras.as_ref() {
