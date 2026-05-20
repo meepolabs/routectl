@@ -371,7 +371,12 @@ fn thinking_config_lands_in_additional_model_request_fields() {
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![user_msg("hi")],
-        max_tokens: Some(1024),
+        // Sized above Anthropic's legacy-thinking floor
+        // (`max_tokens > 1024`); the gate in
+        // `anthropic_api::request::build_thinking` would otherwise
+        // drop thinking. Bedrock Converse shares the same helper,
+        // so this constraint is identical on AWS.
+        max_tokens: Some(2048),
         reasoning: Some(ReasoningConfig {
             effort: Some("high".into()),
             max_tokens: None,
@@ -389,8 +394,46 @@ fn thinking_config_lands_in_additional_model_request_fields() {
         .expect("expected additionalModelRequestFields, got {body}");
     let thinking = bag.get("thinking").expect("expected thinking in bag");
     assert_eq!(thinking["type"], "enabled");
-    // budget_tokens = max_tokens (1024) * effort_ratio("high")=0.80 = 819
-    assert_eq!(thinking["budget_tokens"], 819);
+    // budget_tokens = max_tokens (2048) * effort_ratio("high")=0.80 = 1638
+    assert_eq!(thinking["budget_tokens"], 1638);
+}
+
+/// Bedrock Converse routes through `anthropic_api::request::build_thinking`
+/// for the `thinking` value placed into `additionalModelRequestFields`,
+/// so the legacy-thinking floor introduced for the Anthropic egress
+/// must drop the thinking key on AWS Converse too. Mirror of
+/// `small_max_tokens_drops_legacy_thinking` in
+/// `anthropic_api/request.rs::tests`. Without this pin, a future
+/// refactor that wired Converse to a separate thinking builder
+/// could silently re-introduce the upstream 400 on probe-sized
+/// requests routed through Bedrock.
+#[test]
+fn small_max_tokens_drops_legacy_thinking_in_bedrock_converse() {
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hi")],
+        max_tokens: Some(64),
+        reasoning: Some(ReasoningConfig {
+            effort: Some("high".into()),
+            max_tokens: None,
+            exclude: None,
+            enabled: Some(true),
+        }),
+        ..Default::default()
+    };
+    let body = normalize_request(&cfg, &req).unwrap();
+    // The bag may be absent entirely when thinking is its only
+    // contents (Converse skips serializing an empty bag) OR may be
+    // present with `thinking` missing. Either form proves the drop.
+    let thinking_present = body
+        .get("additionalModelRequestFields")
+        .and_then(|bag| bag.get("thinking"))
+        .is_some();
+    assert!(
+        !thinking_present,
+        "thinking must be absent on probe-sized requests via Bedrock Converse; got body: {body}"
+    );
 }
 
 #[test]
