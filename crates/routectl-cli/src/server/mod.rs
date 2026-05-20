@@ -86,6 +86,11 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
     // first traced body, which means an operator who set the var
     // after launching routectl would silently get unredacted traces.
     routectl_core::log_redaction_status();
+    // Same shape for ROUTECTL_TRACE_BODY_BYTES: announce the
+    // resolved cap once at boot so an operator capturing live-
+    // traffic fixtures can see whether the override took effect
+    // before any traced body fires.
+    routectl_core::log_trace_body_cap_status();
 
     let token_set = resolve_listener_tokens(&config).await?;
 
