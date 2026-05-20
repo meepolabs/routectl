@@ -4,113 +4,61 @@ All notable changes to routectl. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-rc.1]
+## [0.6.0]
 
-### Fixed
-
-- Per-model circuit breaker isolation. Two `[models.X]` rows pointing
-  at the same `[providers.X]` now have independent breaker counters
-  and RPM buckets. Pre-rc.2 the router keyed runtime state by provider
-  name -- which contradicted the rc.1 CHANGELOG claim that "each
-  model gets its own circuit breaker" for Bedrock fan-out -- so a
-  single flaky model could trip the breaker for every healthy sibling
-  on the same transport. State is now keyed by `[models.X]` nickname.
-
-- Bedrock SSO probe deduplication across models on one
-  `[providers.X]`. The factory now caches resolved AWS credentials
-  per provider name; building 5 Bedrock models on one provider hits
-  the credential chain once instead of 5x. The `reqwest::Client`
-  cache is a follow-up (currently each per-model BedrockProvider
-  builds its own client; the connection-pool fan-out is per-model).
-
-- Alias chain validation at startup. `serve` and `routectl test`
-  reject `[aliases]` chains pointing at unknown OR `selectable =
-  false` `[models.X]` nicknames before the server binds, instead of
-  silently returning `UnknownAlias` at first request time. Validator
-  accumulates every offending alias/nickname pair into one
-  consolidated error so an operator with multiple typos sees them
-  all at once. `routectl config check` shares the same validator.
-
-- Alias glob double-parse. `Router::new` parsed each `*`-bearing
-  alias key twice (once to dispatch, once to insert). Pattern is
-  now reused via let-binding.
-
-- `routectl test` help text and module docstring referenced the
-  removed `provider:model` direct-target form. Now references the
-  alias key / model nickname inputs that the v0.6.0 router actually
-  accepts.
-
-### Removed (BREAKING)
-
-- `enabled` on `[models.X]` -- renamed to `selectable` to free the
-  TOML key for the flattened `ReasoningDefaults::enabled` (reasoning
-  on/off). Operators wanting per-model reasoning-off semantics now
-  write `enabled = false` (the more common intent) and `selectable =
-  false` is the routing-disable knob.
-- `[aliases.X.retry]` per-alias retry overrides -- removed when
-  `[aliases]` collapsed into a flat wire-string -> nickname-or-chain
-  map. Use the global `[retry]` table; per-error-class caps
-  (`retry_on_429`, `retry_on_5xx`, `retry_on_network`) cover the
-  knobs operators previously set per alias. Per-target timeout
-  variation can be expressed via separate `[providers.X]` entries.
-- `type` field on `[providers.X]` -- renamed to `kind` to disambiguate
-  from the `type` Rust keyword and match `BedrockCredsConfig.kind`.
-- `model_id` on `[providers.bedrock-X]` -- moves to
-  `[models.X].upstream`. Bedrock providers are no longer 1:1 with a
-  model; the factory builds one provider instance per `[models.X]`
-  row that points at a Bedrock provider, so each model gets its own
-  circuit breaker.
-- `thinking`, `enabled`, `adaptive_thinking` on `[providers.X]` --
-  move to `[models.X]`. Per-provider was the wrong granularity; two
-  models on one provider can now carry different reasoning floors.
-- `additional_model_request_fields` on `[providers.bedrock-X]` --
-  renamed to `additional_request_fields` and moved to `[models.X]`.
-- `default_extras` on `[providers.X]` -- moves to `[models.X]`.
-- `[ingress.X.aliases]` per-ingress alias maps -- collapsed into the
-  unified top-level `[aliases]` table. The wire-string keyspaces
-  don't collide in practice (claude-* vs gpt-* vs deepseek-*).
-- `[aliases.X] chain = [...]` sub-tables -- chains live as list
-  values directly in `[aliases]`: `heavy = ["opus", "sonnet"]`.
-- top-level `default_model = "..."` -- replaced by `default = "..."`
-  inside `[aliases]`.
+The big v0.6 release: layered provider + model config, dispatch
+hygiene fixes, openai-compat normalization, and a wave of dogfood
+fixes from daily live use.
 
 ### Added
 
-- `[models.X]` first-class TOML table. Required fields: `provider`
+- **Layered provider + model config**. `[providers.X]` carries
+  transport-wide knobs (auth, base URL, runtime gates) and
+  `[models.X]` carries per-model behavior (reasoning, dialect,
+  quirks). Two fields live on BOTH layers and merge at dispatch
+  time -- `header_extras` and `payload_extras` -- with model winning
+  on key collision and `anthropic-beta` comma-unioning across all
+  sources. The router's `apply_layered_overlays` helper runs the
+  merge before calling `provider.complete()` / `provider.stream()`
+  so the `Provider` trait surface stays stable across all four
+  concrete providers (openai-compat, anthropic-api, bedrock,
+  openai-responses).
+
+- **`[models.X]` first-class TOML table**. Required: `provider`
   (key in `[providers.X]`), `upstream` (wire model id). Optional:
-  `thinking`, `enabled`, `adaptive_thinking`, `additional_request_fields`.
-- Suffix-glob alias keys: `"claude-opus-*" = "opus-heavy"` matches
-  any wire model starting with `claude-opus-`. Lookup precedence
-  is exact match > longest matching prefix > `default`.
-- Alias values are `String | Vec<String>` (untagged enum). Single
-  string is a one-entry chain; list is a fallback chain.
-- `Router::new` precomputes a `BTreeMap<String, Arc<ResolvedModel>>`
-  from the `[models]` table, so dispatch is one O(1) lookup per
-  hop and unknown nicknames in alias chains fail at startup, not
-  at first request.
-- Tracing dispatch events now carry `model = <nickname>` alongside
+  `thinking` (bool or `"adaptive"`), `effort` (enum), `reasoning_dialect`,
+  `history_reasoning`, `additional_request_fields`, `anthropic_beta`,
+  `stream_first_byte_timeout_ms`, `header_extras`, `payload_extras`,
+  `selectable`.
+
+- **Suffix-glob alias keys** in the unified `[aliases]` table:
+  `"claude-opus-*" = "heavy"` matches any wire model starting with
+  `claude-opus-`. Lookup precedence: exact match > longest matching
+  prefix > `default`. Alias values are `String | Vec<String>` --
+  single string is a one-entry chain, list is a fallback chain.
+
+- **`Router::new` precomputes** a `BTreeMap<String, Arc<ResolvedModel>>`
+  from `[models]`, so dispatch is one O(1) lookup per hop. Unknown
+  nicknames in alias chains fail at startup, not at first request.
+
+- **Tracing dispatch events** carry `model = <nickname>` alongside
   `provider = <provider_name>` for per-model triage.
 
-### Deferred
+- **`anthropic-beta` HTTP header lifted into canonical
+  `req.anthropic_beta`**. The Anthropic TypeScript SDK translates
+  the `betas: [...]` SDK option into an `anthropic-beta: a,b,c` HTTP
+  header (not a body field); claude-code uses this surface for
+  first-party betas (context-management, prompt-cache-1h,
+  adaptive-thinking, ...). routectl now lifts the header so the
+  egress emits it in the upstream body (Anthropic accepts either
+  surface).
 
-- Per-model `default_extras` and `chat_template_kwargs` are
-  deferred until the egress wiring lands; they will return as
-  `[models.X]` fields in a future release. They shipped briefly
-  on `ModelEntry` in earlier rc builds but never reached the
-  egress, so accepting the TOML surface would be operator-
-  deceptive. The provider-side fields (`OpenAiCompatConfig::default_extras`,
-  `chat_template_kwargs` on the wire) are unaffected -- callers
-  continue to send them per-request via `provider_extras`.
-
-### Migration
-
-No automated migration tool; old configs hit raw serde errors at
-startup. Hand-edit your TOML against the new shape -- see
-`examples/config.toml` for a complete reference.
-
-## [Unreleased]
-
-### Added
+- **`POST /v1/messages` openai-responses provider** (default-on
+  `openai-responses` Cargo feature). ChatGPT Codex endpoint via
+  `chatgpt-oauth` bearer JWT. Stream-only (`complete()` forces
+  `stream:true` and drains SSE to `response.completed`). Flat
+  Responses-shape tools and `tool_choice`. `instructions` field
+  always serialized (the server 400s if absent).
 
 - **Operator-owned Bedrock allowlists** -- `[bedrock] allowed_betas`
   and `[bedrock] allowed_body_fields` in TOML. Filters the body's
@@ -118,34 +66,43 @@ startup. Hand-edit your TOML against the new shape -- see
   body fields the Anthropic ingress sweeps in (`mcp_servers`,
   `diagnostics`, `context_hint`, `speed`, ...). routectl ships no
   built-in default; AWS schema drift is operator-tracked. Empty list
-  (or omitted `[bedrock]` section) puts the corresponding filter in
-  pass-through mode for discovery -- bring up routectl, observe sent
-  fields/flags via `ROUTECTL_LOG=routectl_providers::bedrock=trace`,
-  populate the lists. `examples/bedrock.toml` ships the empirical
-  2026-05-12 baseline (16 betas + 16 body fields). Closes
-  `issues.md::INV-6` and `INV-7`.
+  (or omitted `[bedrock]` section) is pass-through for discovery --
+  bring up routectl, observe sent flags via
+  `ROUTECTL_LOG=routectl_providers::bedrock=trace`, populate the
+  lists. `examples/bedrock.toml` ships the empirical 2026-05-12
+  baseline (16 betas + 16 body fields).
 
-  BREAKING: `[bedrock] anthropic_beta` is renamed to
-  `[bedrock] allowed_betas`. Configs using the old name need a rename.
-
-- **`history_reasoning` per-provider TOML knob** on `[providers.X]` of
+- **`history_reasoning` per-provider knob** on `[providers.X]` of
   type `openai-compat`. Three values: `auto` (default; defer to the
-  reasoning dialect's strip vs preserve default), `strip` (always
-  strip canonical reasoning fields from outgoing assistant history --
-  required for DeepSeek v3 and vLLM <= 0.6 hosts that 400 on
-  echo-back), `preserve` (echo canonical reasoning back to the
-  upstream in the dialect-native shape -- required for DeepSeek v4+
-  and vLLM 0.7+ hosts that 400 on missing echo-back). Per-dialect
-  preserve impls: DeepSeek and vLLM render `reasoning_content`
-  scalars; OpenRouter renders typed `reasoning_details[]`; OpenAI and
-  Passthrough are no-ops (no preserve shape on the wire).
+  dialect's strip-vs-preserve default), `strip` (required for
+  DeepSeek v3 and vLLM <= 0.6), `preserve` (required for DeepSeek
+  v4+ and vLLM 0.7+ hosts that 400 on missing echo-back).
+  Per-dialect preserve impls: DeepSeek and vLLM render
+  `reasoning_content` scalars; OpenRouter renders typed
+  `reasoning_details[]`; OpenAI and Passthrough are no-ops.
 
-- **Per-provider timeout overrides** on `[providers.X]` of type
-  `openai-compat`, `anthropic-api`, and `bedrock`:
+- **Per-provider and per-model timeout overrides**:
   `request_timeout_ms` and `stream_first_byte_timeout_ms`. Resolution
-  priority is `[aliases.X.retry] > [providers.X] > [retry]`. Eliminates
-  alias-level repetition when an entire upstream is uniformly slow
-  (e.g. NIM cold-start, Opus 4.7 high-effort).
+  priority: per-model > per-provider > global `[retry]`. Eliminates
+  alias-level repetition (e.g. NIM cold-start, Opus 4.7
+  high-effort).
+
+- **CF extended 5xx range in default `fallback_on_status`**:
+  `[408, 429, 500, 502, 503, 504, 520-527, 530]`. Cloudflare-fronted
+  upstreams (opencode.ai, openrouter.ai) surface upstream-origin
+  failures via 520-527; without these in the default list, a single
+  520 would kill a request even when a sibling provider in the chain
+  could have served it.
+
+- **`ROUTECTL_TRACE_BODY_BYTES` env var** to override the 16 KB
+  TRACE body cap at process start. Set to 1 MB (`1048576`) for
+  live-traffic fixture capture; real claude-code requests routinely
+  exceed 16 KB. Resolved cap is announced once at server boot.
+
+- **`scripts/capture_fixtures.sh`** -- operator script that drains
+  the TRACE log into per-request fixture directories under
+  `crates/routectl-cli/tests/fixtures/captured/` (gitignored). Atomic
+  writes via `.tmp.<id>.XXXXXX` rename pattern.
 
 - **`docs/PROVIDER-QUIRKS.md`** -- operator-facing config guide.
   Per-model rows for Anthropic Opus 4.7+ (adaptive thinking),
@@ -154,49 +111,183 @@ startup. Hand-edit your TOML against the new shape -- see
   Cross-cutting timing notes, multi-host fallback chain examples,
   troubleshooting matrix.
 
+- **`SECURITY.md`** -- vulnerability disclosure policy.
+
 ### Fixed
+
+- **Per-model circuit breaker isolation**. Two `[models.X]` rows
+  pointing at the same `[providers.X]` now have independent breaker
+  counters and RPM buckets. State is keyed by `[models.X]` nickname,
+  not by provider name -- a single flaky model no longer trips the
+  breaker for every healthy sibling on the same transport.
+
+- **Bedrock SSO probe deduplication** across models on one
+  `[providers.X]`. The factory now caches resolved AWS credentials
+  per provider name; building 5 Bedrock models on one provider hits
+  the credential chain once instead of 5x.
+
+- **Alias chain validation at startup**. `serve` and `routectl test`
+  reject `[aliases]` chains pointing at unknown OR
+  `selectable = false` `[models.X]` nicknames before the server
+  binds, instead of silently returning `UnknownAlias` at first
+  request time. Validator accumulates every offending alias/nickname
+  pair into one consolidated error.
+
+- **Per-model `header_extras` reaches the wire**. The merged value
+  (provider + model + ingress) lands on `req.anthropic_beta` and the
+  Anthropic egress emits one comma-unioned `anthropic-beta` HTTP
+  header.
+
+- **Anthropic legacy thinking budget clamp**. Drop legacy
+  `thinking: Enabled` when `req.max_tokens <= 1024` (Anthropic
+  requires `max > budget`, floor `budget >= 1024`); enforce both the
+  1024 floor and the `max - 1` ceiling on every Enabled emission
+  path. Caught live on probe-sized requests (e.g. title-generation,
+  topic-summary, "continue?" prompts with `max_tokens=64`) when the
+  operator's per-model config carried `thinking = true effort =
+  high`. Bedrock Invoke + Converse share the helper transitively.
+
+- **openai-compat: strip vendor envelope + lift usage sub-bags**.
+  Anthropic-shape ingress + openai-compat upstream was bleeding
+  envelope fields (`object`, `system_fingerprint`, `cost`) and four
+  DeepSeek/OpenAI usage sub-bags (`prompt_cache_hit_tokens`,
+  `prompt_cache_miss_tokens`, `prompt_tokens_details`,
+  `completion_tokens_details`) back to the Anthropic-shape response.
+  Now lifted to canonical `Usage.reasoning_tokens` and
+  `Usage.cache_read_input_tokens` and stripped from the extras
+  catchall. Mirrored on the SSE path before serde (`UsageDelta` has
+  no extras flatten).
 
 - **`tool_choice` shape mismatch: OpenAI bare-string -> Anthropic
   tagged-enum**. Anthropic's Messages API and Bedrock-Invoke reject
-  `tool_choice: "auto"` with a 400 (the validator names the field on
-  Opus 4.7+ but the Bedrock generic 400 is opaque). The Anthropic-API
-  egress now translates: `"auto" | "none" | "required"` and the
-  OpenAI `{"type":"function","function":{"name":"X"}}` object map to
-  Anthropic-shape `{"type":...}`. Anthropic-shape inputs pass through
-  unchanged.
+  `tool_choice: "auto"` with a 400. The Anthropic-API egress now
+  translates `"auto" | "none" | "required"` and the OpenAI
+  `{"type":"function","function":{"name":"X"}}` object map to
+  Anthropic-shape `{"type":...}`. Anthropic-shape inputs pass
+  through unchanged.
 
 - **Top-level `system` leaks onto openai-compat wire**. The OpenAI
   ingress lifts wire `role: "system"` into canonical `req.system`
   (Anthropic-shape top-level field). The openai-compat egress now
   performs the inverse lower: prepends a synthetic
-  `role: "system"` message to the messages array and strips the
-  top-level `system` key. Lenient hosts (OpenAI, OpenRouter,
-  opencode-go) silently ignored the unknown field; strict hosts
-  (NVIDIA NIM) 400'd with `Validation: Unsupported parameter(s):
-  system`.
+  `role: "system"` message and strips the top-level `system` key.
+  Strict hosts (NVIDIA NIM) used to 400 with
+  `Validation: Unsupported parameter(s): system`.
 
-- **OpenAI ingress: `reasoning_content` keys not coalesced before
-  schema deserialization**. DeepSeek-shape `reasoning_content` arrived
-  unmerged on `messages[].reasoning_content`, missing the canonical
-  `reasoning` lift on multi-turn echo-back. Added pre-deserialization
-  coalescer in
-  `crates/routectl-cli/src/ingress/openai.rs::coalesce_message_reasoning_keys`
-  that mirrors the response-side `merge_reasoning_keys`.
+- **OpenAI ingress: `reasoning_content` keys coalesced before
+  schema deserialization**. DeepSeek-shape `reasoning_content` was
+  arriving unmerged on `messages[].reasoning_content`, missing the
+  canonical `reasoning` lift on multi-turn echo-back. Added
+  pre-deserialization coalescer mirroring the response-side
+  `merge_reasoning_keys`.
 
-- **`prompt_tokens` translation: cache_creation/cache_read not summed
+- **`prompt_tokens` translation: cache_creation/cache_read summed
   into Anthropic streaming usage**. The Anthropic SSE response now
   captures `message_start` input usage, sums `input_tokens +
   cache_creation_input_tokens + cache_read_input_tokens` into the
   closing `message_delta` `UsageDelta`, and exposes per-TTL cache
-  breakdown via field-level merge. Closes the gap where streaming
-  responses underreported `prompt_tokens` by the cache contribution.
+  breakdown via field-level merge.
+
+- **Stop-sequence end-to-end**. Preserve the matched stop sequence
+  through canonical so the Anthropic ingress can emit
+  `stop_reason: "stop_sequence"` + `stop_sequence: "<value>"` instead
+  of collapsing to `end_turn`. Previously broke claude-code
+  structured-output flows (stop_sequence fences the output) by
+  flagging `is_error: true` on the result envelope. Bedrock Converse
+  is a known follow-up -- AWS surfaces the matched sequence via
+  `additionalModelResponseFields` only when the request opts in.
+
+- **Router log clarity: chain-exhausted vs fallback hop**. Both
+  `complete()` and `stream()` previously WARNed "fallback to next" on
+  every fallbackable terminal error including the LAST chain entry.
+  Now emits "chain exhausted; no fallback target available; request
+  will fail" when no next target exists.
 
 - **WARN at egress when canonical reasoning is silently stripped**.
-  Operator visibility for the case where `history_reasoning = "auto"`
-  resolves to strip but the request actually carried reasoning -- the
-  config choice is logged so DeepSeek-v4-style upstreams 400ing on
-  missing echo-back are diagnosable from the routectl side without
-  enabling trace-level body logging.
+  Operator visibility for the `history_reasoning = "auto"` + strip
+  dialect case where the request actually carried reasoning.
+
+- **Alias glob double-parse**. `Router::new` parsed each `*`-bearing
+  alias key twice; pattern is now reused via let-binding.
+
+- **`routectl test` help text and module docstring** referenced the
+  removed `provider:model` direct-target form. Now references the
+  alias key / model nickname inputs the v0.6.0 router accepts.
+
+### Security
+
+- **Log redaction at TRACE level**. `ROUTECTL_LOG_REDACT_PROMPTS=1`
+  walks every traced body and replaces known prompt-bearing fields
+  (text blocks, system, instructions, tool_use input,
+  function_call arguments, refusal blocks, image source data,
+  image_url data URIs, Bedrock Converse `toolUse.input`) with
+  `<redacted len=N>` placeholders while preserving structural
+  fields (model, tools, sampling params, finish_reason, usage).
+  Read once on first traced body; one-shot startup log line
+  reports the resolved value.
+
+- **gitleaks workflow + `.gitleaks.toml`** -- secret scan on every
+  PR + push + weekly full-history sweep. Inherits the default rule
+  set; allowlists Cargo.lock, target/, and the captured/ fixture
+  directory.
+
+- **CI hygiene**: pinned every third-party action to a commit SHA
+  with a version comment (floating tags can be retroactively moved
+  by an attacker), added `permissions: contents: read` at the
+  workflow level.
+
+### Removed (BREAKING)
+
+- `enabled` on `[models.X]` -- renamed to `selectable` to free the
+  TOML key for the flattened `ReasoningDefaults::enabled` (reasoning
+  on/off). Operators wanting per-model reasoning-off semantics now
+  write `enabled = false`; `selectable = false` is the routing-
+  disable knob.
+- `[aliases.X.retry]` per-alias retry overrides -- removed when
+  `[aliases]` collapsed into a flat wire-string -> nickname-or-chain
+  map. Use the global `[retry]` table; per-error-class caps
+  (`retry_on_429`, `retry_on_5xx`, `retry_on_network`) cover the
+  knobs operators previously set per alias.
+- `type` field on `[providers.X]` -- renamed to `kind` to disambiguate
+  from the `type` Rust keyword.
+- `model_id` on `[providers.bedrock-X]` -- moves to
+  `[models.X].upstream`. Bedrock providers are no longer 1:1 with a
+  model.
+- `thinking`, `enabled`, `adaptive_thinking` on `[providers.X]` --
+  move to `[models.X]`. Per-provider was the wrong granularity; two
+  models on one provider can now carry different reasoning floors.
+- `additional_model_request_fields` on `[providers.bedrock-X]` --
+  renamed to `additional_request_fields` and moved to `[models.X]`.
+- `default_extras` on `[providers.X]` -- moves to `[models.X]`.
+- `[ingress.X.aliases]` per-ingress alias maps -- collapsed into the
+  unified top-level `[aliases]` table.
+- `[aliases.X] chain = [...]` sub-tables -- chains live as list
+  values directly in `[aliases]`: `heavy = ["opus", "sonnet"]`.
+- top-level `default_model = "..."` -- replaced by `default = "..."`
+  inside `[aliases]`.
+- `[bedrock] anthropic_beta` -- renamed to `[bedrock] allowed_betas`.
+
+### Deferred
+
+- Per-model `default_extras` and `chat_template_kwargs` deferred
+  until the egress wiring lands; they will return as `[models.X]`
+  fields in a future release. The provider-side fields
+  (`OpenAiCompatConfig::default_extras`, `chat_template_kwargs` on
+  the wire) are unaffected -- callers continue to send them
+  per-request via `provider_extras`.
+- Bedrock Converse stop_sequence round-trip -- AWS surfaces the
+  matched sequence only when the request opts into
+  `additionalModelResponseFieldPaths`. Tracked as a follow-up.
+- OAuth token hot-rotation. routectl reads `ROUTECTL_ANTHROPIC` once
+  at startup; a credentials.json rotation by claude-code requires a
+  routectl restart. Manual snapshot + restart workflow today;
+  inotify-based file-watch is staged for a future release.
+
+### Migration
+
+No automated migration tool; old configs hit raw serde errors at
+startup. Hand-edit your TOML against the new shape -- see
+`examples/config.toml` for a complete reference.
 
 ## [0.4.0] - 2026-04-XX
 
@@ -431,6 +522,7 @@ Initial release.
 - Per-provider retry with exponential backoff.
 - TOML config in `~/.config/routectl/config.toml`.
 
-[Unreleased]: https://github.com/meepolabs/routectl/compare/v0.2.0...HEAD
+[0.6.0]: https://github.com/meepolabs/routectl/compare/v0.4.0...v0.6.0
+[0.4.0]: https://github.com/meepolabs/routectl/compare/v0.2.0...v0.4.0
 [0.2.0]: https://github.com/meepolabs/routectl/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/meepolabs/routectl/releases/tag/v0.1.0

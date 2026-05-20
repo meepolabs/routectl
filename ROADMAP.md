@@ -124,7 +124,7 @@ that speaks either wire format can route through any backend.
    bodies all available behind tracing levels with `request_id`
    correlation.
 
-## v0.5.0 (in flight on `develop`) -- Translation-pipe hardening + dogfood fixes
+## v0.5.0 (DONE) -- Translation-pipe hardening + dogfood fixes
 
 Bug-fix and ergonomics cycle driven by daily dogfood of the v0.4
 surface. Real-world wire-shape mismatches surfaced and got pinned;
@@ -176,7 +176,49 @@ Deferred (not in this milestone):
 - WARN on `default_model` fallthrough (currently DEBUG; visibility
   feature request).
 
-## v0.6.0+ (planned) -- Latency-aware routing + observability
+## v0.6.0 (DONE) -- Layered config + dispatch hygiene
+
+Schema refactor that splits transport-wide and per-model concerns,
+plus a wave of openai-compat normalization fixes from daily
+dogfood.
+
+1. **Layered provider + model config**. `[providers.X]` (transport-
+   wide: auth, base URL, runtime gates) and `[models.X]` (per-model:
+   reasoning, dialect, quirks). `header_extras` and `payload_extras`
+   live on both layers and merge at dispatch time, with
+   `anthropic-beta` comma-unioning across ingress + provider + model.
+2. **Per-model circuit breaker isolation**. Two models on one
+   provider now have independent breaker counters and RPM buckets;
+   state is keyed by `[models.X]` nickname.
+3. **Unified `[aliases]` table** with suffix-glob keys and
+   `String | Vec<String>` values (chain or single). `default = "..."`
+   is the catch-all.
+4. **`POST /v1/messages` openai-responses provider** -- ChatGPT
+   Codex endpoint via chatgpt-oauth bearer JWT. Stream-only.
+5. **openai-compat normalization**: strip vendor envelope (`object`,
+   `system_fingerprint`, `cost`), lift `reasoning_tokens` and
+   `cache_read_input_tokens` from usage sub-bags. Default
+   `stream_options.include_usage`. Tightened log-shape and trace-
+   field visibility.
+6. **Anthropic legacy thinking budget hygiene**: clamp to the
+   1024 floor and `max - 1` ceiling, drop legacy thinking when
+   `max_tokens <= 1024`. Caught probe-sized requests on Opus 4.7+
+   adaptive chains.
+7. **Stop-sequence preservation end-to-end** so claude-code
+   structured-output flows see `stop_reason: "stop_sequence"` +
+   `stop_sequence: "<value>"` instead of `end_turn`.
+8. **CF extended 5xx range** in default `fallback_on_status`
+   (520-527, 530). Cloudflare-fronted upstreams surface origin
+   failures via this range.
+9. **Per-provider and per-model `request_timeout_ms` /
+   `stream_first_byte_timeout_ms`** with resolution priority
+   model > provider > global.
+10. **`ROUTECTL_TRACE_BODY_BYTES`** env-overridable TRACE body
+    cap for live-traffic fixture capture; default 16 KB.
+11. **CI: gitleaks workflow + `.gitleaks.toml`** + SECURITY.md +
+    pinned action SHAs + scoped `permissions: contents: read`.
+
+## v0.7.0+ (planned) -- Latency-aware routing + observability
 
 Originally scoped for v0.3.1; deferred to focus earlier milestones on
 correctness work.
@@ -185,8 +227,16 @@ correctness work.
    chain (sliding-window p95 tracking, weighted random).
 2. **Spend tracking** -- per-provider request count + token usage
    metric, exposed via `/v1/metrics` for Prometheus scrape.
+3. **OAuth token hot-rotation** via inotify file-watch +
+   401-retry. routectl reads `ROUTECTL_ANTHROPIC` once at startup
+   today; a credentials.json rotation by claude-code requires a
+   restart. Native file-watch eliminates the manual snapshot
+   workflow.
+4. **Bedrock Converse stop_sequence round-trip**. AWS surfaces the
+   matched sequence via `additionalModelResponseFields` only when
+   the request opts into `additionalModelResponseFieldPaths`.
 
-## Post-v0.6 (deferred / never)
+## Post-v0.7 (deferred / never)
 
 - Caching layer (use a proxy if you want this)
 - Web UI / config editor (CLI-only by design)
