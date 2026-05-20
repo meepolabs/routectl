@@ -2136,6 +2136,143 @@ async fn cross_anthropic_explicit_effort_wins_over_derived_on_deepseek() {
 }
 
 // ---------------------------------------------------------------------------
+// Egress shape: openai-compat upstream -> Anthropic ingress response body
+// ---------------------------------------------------------------------------
+//
+// Pins that openai-compat envelope / vendor / usage sub-bag fields do
+// NOT leak through canonical's `extras` flatten catchall to the
+// Anthropic client. See the strip+lift logic in
+// `openai_compat/response.rs::lift_and_strip_usage_extras` +
+// `strip_envelope_extras`. The unit tests in that module cover the
+// helper in isolation; this integration test pins the full stack:
+// wiremock noisy openai-compat body -> openai_compat normalize ->
+// canonical -> Anthropic ingress render -> wire body served to client.
+
+#[tokio::test]
+async fn anthropic_egress_from_openai_compat_strips_envelope_fields() {
+    let upstream = MockServer::start().await;
+    // Noisy openai-compat body: includes every envelope key we expect
+    // routectl to strip, plus the lift-source sub-bags.
+    let noisy_body = json!({
+        "id": "chatcmpl-noisy",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_test_v1",
+        "cost": "0",
+        "created": 1_700_000_000_i64,
+        "model": "deepseek-chat",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "OK"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 87,
+            "completion_tokens": 48,
+            "total_tokens": 135,
+            "prompt_cache_hit_tokens": 80,
+            "prompt_cache_miss_tokens": 7,
+            "prompt_tokens_details": {"cached_tokens": 80},
+            "completion_tokens_details": {"reasoning_tokens": 46}
+        }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(noisy_body))
+        .mount(&upstream)
+        .await;
+    let config = openai_compat_proxy_config(&upstream.uri());
+    let base = helpers::spawn(config).await;
+
+    let req_body = json!({
+        "model": "heavy",
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "say OK"}],
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let egress: Value = resp.json().await.unwrap();
+
+    // Strip: openai-compat envelope keys must NOT reach the Anthropic
+    // client at any level.
+    assert!(
+        egress.get("object").is_none(),
+        "object must not leak from openai-compat upstream to Anthropic egress: {egress}"
+    );
+    assert!(egress.get("system_fingerprint").is_none());
+    assert!(egress.get("cost").is_none());
+
+    // Strip: openai-compat usage sub-bags must NOT appear under
+    // `usage`.
+    let usage = egress.get("usage").expect("usage present");
+    assert!(usage.get("prompt_cache_hit_tokens").is_none());
+    assert!(usage.get("prompt_cache_miss_tokens").is_none());
+    assert!(usage.get("prompt_tokens_details").is_none());
+    assert!(usage.get("completion_tokens_details").is_none());
+
+    // Lift: canonical `cache_read_input_tokens` lands on the
+    // Anthropic-shape usage envelope (DeepSeek's
+    // `prompt_cache_hit_tokens=80` -> 80).
+    assert_eq!(
+        usage.get("cache_read_input_tokens"),
+        Some(&json!(80)),
+        "expected cache_read_input_tokens lifted from prompt_cache_hit_tokens: {usage}"
+    );
+}
+
+/// Pin: Anthropic-spec usage field `service_tier` must round-trip
+/// from an openai-compat upstream when present (some openai-compat
+/// hosts now mirror Anthropic's usage shape). The strip list is
+/// narrow enough not to touch this; the test exists to lock that
+/// boundary in place.
+#[tokio::test]
+async fn anthropic_egress_from_openai_compat_preserves_service_tier() {
+    let upstream = MockServer::start().await;
+    let body = json!({
+        "id": "chatcmpl-tier",
+        "model": "deepseek-chat",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "OK"},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "service_tier": "standard"
+        }
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&upstream)
+        .await;
+    let config = openai_compat_proxy_config(&upstream.uri());
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&json!({
+            "model": "heavy",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .send()
+        .await
+        .unwrap();
+    let egress: Value = resp.json().await.unwrap();
+    assert_eq!(
+        egress["usage"]["service_tier"], "standard",
+        "service_tier must round-trip from openai-compat upstream to Anthropic egress: {egress}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Bedrock Converse adapter -- ingress-to-egress round-trip
 // ---------------------------------------------------------------------------
 //
