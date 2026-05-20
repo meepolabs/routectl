@@ -150,12 +150,20 @@ pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
 /// volume by returning megabyte-sized error pages.
 pub const MAX_DEBUG_BODY_BYTES: usize = 4096;
 
-/// Cap on the serialized body emitted at TRACE level by all four body
-/// trace helpers (`trace_ingress_body`, `trace_outgoing_body`,
-/// `trace_upstream_success_body`, `trace_egress_body`). 16 KB is
-/// generous for diagnosis without flooding logs when a debug session
-/// gets left on by accident. Operators can bump this locally for
-/// full-body debugging during a campaign.
+/// Default cap on the serialized body emitted at TRACE level by all
+/// four body trace helpers (`trace_ingress_body`,
+/// `trace_outgoing_body`, `trace_upstream_success_body`,
+/// `trace_egress_body`). 16 KB is generous for diagnosis without
+/// flooding logs when a debug session gets left on by accident.
+///
+/// Operators capturing live-traffic fixtures need full bodies, not
+/// truncated ones, because real claude-code requests routinely
+/// exceed 16 KB (full conversation history + tool defs +
+/// cache_control breakpoints). Set `ROUTECTL_TRACE_BODY_BYTES=<n>`
+/// to override at process start; a 1 MB value (`1048576`) covers
+/// almost all real bodies. See [`trace_body_cap`] for the resolution
+/// rule. The const name is kept for downstream consumers that read
+/// the default at compile time.
 pub const MAX_TRACE_BODY_BYTES: usize = 16 * 1024;
 
 /// Backward-compatible alias for the old name. Prefer
@@ -188,6 +196,42 @@ fn truncate_json_for_log(body: &serde_json::Value, cap: usize) -> String {
     } else {
         s
     }
+}
+
+/// Resolved trace body cap. Reads `ROUTECTL_TRACE_BODY_BYTES` once
+/// from the env on first use and freezes the value via `OnceLock`.
+/// Falls back to [`MAX_TRACE_BODY_BYTES`] (16 KB) when the env var
+/// is unset, non-numeric, or zero.
+///
+/// Same setup caveat as [`redact_enabled`]: set the env var BEFORE
+/// launching routectl. The resolved value is announced once at
+/// startup via [`log_trace_body_cap_status`] so operators can confirm
+/// the override took effect.
+pub fn trace_body_cap() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("ROUTECTL_TRACE_BODY_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(MAX_TRACE_BODY_BYTES)
+    })
+}
+
+/// Read the cap env var and emit a single `info` line so operators
+/// can confirm the resolved value at startup. Calling this also
+/// seeds the `OnceLock` with the value present at process boot.
+/// Mirror of [`log_redaction_status`].
+pub fn log_trace_body_cap_status() {
+    static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let cap = trace_body_cap();
+    EMITTED.get_or_init(|| {
+        tracing::info!(
+            trace_body_cap = cap,
+            default = MAX_TRACE_BODY_BYTES,
+            "ROUTECTL_TRACE_BODY_BYTES resolved (frozen for the rest of this process)"
+        );
+    });
 }
 
 /// Whether `ROUTECTL_LOG_REDACT_PROMPTS` is set to a truthy value.
@@ -454,7 +498,7 @@ pub fn trace_ingress_body(ingress: &str, body: &serde_json::Value) {
         return;
     }
     let safe = redact_prompts_in(body);
-    let truncated = truncate_json_for_log(&safe, MAX_TRACE_BODY_BYTES);
+    let truncated = truncate_json_for_log(&safe, trace_body_cap());
     tracing::trace!(
         ingress,
         body = %truncated,
@@ -477,7 +521,7 @@ pub fn trace_outgoing_body(provider_kind: &str, provider_id: &str, body: &serde_
         return;
     }
     let safe = redact_prompts_in(body);
-    let truncated = truncate_json_for_log(&safe, MAX_TRACE_BODY_BYTES);
+    let truncated = truncate_json_for_log(&safe, trace_body_cap());
     tracing::trace!(
         provider_kind,
         provider = provider_id,
@@ -501,7 +545,7 @@ pub fn trace_upstream_success_body(
         return;
     }
     let safe = redact_prompts_in(body);
-    let truncated = truncate_json_for_log(&safe, MAX_TRACE_BODY_BYTES);
+    let truncated = truncate_json_for_log(&safe, trace_body_cap());
     tracing::trace!(
         provider_kind,
         provider = provider_id,
@@ -519,7 +563,7 @@ pub fn trace_egress_body(ingress: &str, body: &serde_json::Value) {
         return;
     }
     let safe = redact_prompts_in(body);
-    let truncated = truncate_json_for_log(&safe, MAX_TRACE_BODY_BYTES);
+    let truncated = truncate_json_for_log(&safe, trace_body_cap());
     tracing::trace!(
         ingress,
         body = %truncated,
