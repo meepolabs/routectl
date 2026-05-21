@@ -3,7 +3,7 @@
 This document covers routectl's logging surface: env filter, default
 level, recipes, request correlation, triage modes for full body
 inspection, and the prompt-redaction knob. For TOML configuration of
-providers, models, and the runtime, see `CONFIGURATION.md`.
+providers, models, and the runtime, see [CONFIGURATION.md](CONFIGURATION.md).
 
 ## Env filter and default level
 
