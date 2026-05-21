@@ -4,15 +4,6 @@ Per-model config tips for routectl operators. Most upstream LLMs work out of
 the box with default routectl config -- the entries below cover the cases
 where you need to flip a knob.
 
-> **v0.6 schema:** snippets below split provider transport (`kind`, `base_url`,
-> `creds`, `extra_headers`, runtime gates) onto `[providers.X]` blocks and
-> per-model knobs (`upstream`, `thinking`, `adaptive_thinking`,
-> `additional_request_fields`) onto `[models.X]` blocks. Aliases live in a
-> single flat `[aliases]` table where each value is a model nickname or a
-> fallback chain. Per-alias retry overrides were removed in v0.6 -- the
-> global `[retry]` table is the only retry surface. See `examples/config.toml`
-> for the canonical shape.
-
 If your model isn't listed and works fine, you don't need anything from this
 doc. If it 4xxs or behaves weirdly, find the matching row.
 
@@ -61,7 +52,7 @@ request_timeout_ms           = 600000   # 10 min, applies to every model
 
 Need different timeouts for different models on the same upstream? Split into separate `[providers.X]` entries (e.g. `bedrock-fast`, `bedrock-heavy`) with their own runtime knobs and route each `[models.X]` at the right one.
 
-Resolution priority: `[providers.X].X` > `[retry].X` > unset (no cap). Per-alias retry was removed in v0.6.
+Resolution priority: `[providers.X].X` > `[retry].X` > unset (no cap).
 
 **Why opt-in per model, not auto-detect by name:** Anthropic is rolling adaptive thinking out gradually with no clean naming pattern. `opus-4-7` matches today's model but misses `opus-5` / `sonnet-4-7`; `opus-4-` catches the still-legacy `4-5`/`4-6`. TOML opt-in lets you flip the day a new model lands.
 
@@ -109,13 +100,10 @@ NIM's DeepSeek v4 Flash / Pro defaults to **non-thinking mode**. Thinking is ena
 
 **To enable thinking on every NIM request:** the operator-side
 `default_extras` knob (which would unconditionally inject
-`reasoning_effort` into the body) is deferred to a future release
--- the field shipped briefly on `[models.X]` but never reached the
-egress and was withdrawn so the TOML surface didn't lie. For now,
-callers must send `reasoning.effort = "high"` (or set the
-equivalent on the client side); the OpenAI-dialect translator
-forwards it as `reasoning_effort` to NIM. The default-injection
-knob will return once the wiring lands.
+`reasoning_effort` into the body) is deferred to a future release.
+Until then, callers must send `reasoning.effort = "high"` (or set
+the equivalent on the client side); the OpenAI-dialect translator
+forwards it as `reasoning_effort` to NIM.
 
 ```toml
 [providers.nim]
@@ -158,7 +146,7 @@ auth_kind = "oauth-bearer"
 extra_headers = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
 ```
 
-routectl no longer auto-injects beta gates -- declare the ones you need.
+routectl does not auto-inject beta gates -- declare the ones you need.
 
 ### Bedrock (any region)
 
@@ -183,11 +171,11 @@ filter applied). Use `ROUTECTL_LOG=routectl_providers::bedrock=trace`
 to capture sent flags/fields when building the lists. See
 `examples/bedrock.toml` for the empirical 2026-05-12 baseline.
 
-**RPM bucket semantics for shared Bedrock providers.** v0.6.0 keys the
-runtime state (circuit breaker + RPM token bucket) by `[models.X]`
+**RPM bucket semantics for shared Bedrock providers.** Runtime state
+(circuit breaker + RPM token bucket) is keyed by `[models.X]`
 nickname, not by `[providers.X]` name. This is the right semantic for
 breakers (a flaky model on one Bedrock provider should not trip the
-breaker for siblings), but it means `rpm_limit` is now per-model:
+breaker for siblings), but it means `rpm_limit` is per-model:
 `rpm_limit = 60` on a provider serving 3 `[models.X]` rows admits up
 to 180 RPM in aggregate to the underlying Bedrock account. Operators
 with tight Bedrock service quotas should size `rpm_limit` per the
@@ -260,7 +248,7 @@ Default is 10s (set in `[retry]`). Fine for most non-thinking models, too aggres
 1. `[providers.Y] stream_first_byte_timeout_ms` -- per-provider default (use when an upstream is uniformly slow; every model routing through it inherits)
 2. `[retry] stream_first_byte_timeout_ms` -- workspace default (keep tight to surface real timeouts on routine calls)
 
-Per-alias retry was removed in v0.6 -- when different routes need different timeouts, split into separate `[providers.X]` entries with their own runtime knobs and route each `[models.X]` accordingly.
+Per-route timeouts: split into separate `[providers.X]` entries with their own runtime knobs and route each `[models.X]` accordingly.
 
 ### `request_timeout_ms`
 
@@ -319,11 +307,9 @@ When a request fails, the upstream's error body is the truth source. routectl lo
 |---|---|
 | `400 thinking.type.enabled is not supported` | Need `adaptive_thinking = true` on `[models.X]` (Opus 4.7+) |
 | `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on `[providers.X]` (DeepSeek v4) |
-| `400 unknown variant 'auto', expected 'function'` | Old routectl version -- upgrade to one with the `tool_choice` egress translator |
 | `stream first-byte timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
 | Empty `content` + non-zero `reasoning_tokens` | Model used full `max_tokens` budget on reasoning. Increase `max_tokens` |
 | `400 thinking enabled requires temperature 1.0` | Don't set `temperature` when reasoning is enabled (routectl auto-forces 1.0 if you do) |
-| `prompt_tokens` smaller than expected | You're on a routectl version older than v0.5.x -- upgrade so the cache_creation/cache_read sum lands |
 
 ## When in doubt
 
