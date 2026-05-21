@@ -6,9 +6,10 @@ keeps ingress dialects and egress providers decoupled, the
 forward-compat catchalls that absorb upstream wire drift without code
 edits, and the dispatch-time overlay model that lets configuration
 layer cleanly without bloating the `Provider` trait. For per-file
-detail see CODEMAP.md; for TOML configuration knobs see
-CONFIGURATION.md; for upstream wire weirdness already encountered in
-the wild see WIRE-GOTCHAS.md.
+detail see [CODEMAP.md](CODEMAP.md); for TOML configuration knobs
+see [CONFIGURATION.md](CONFIGURATION.md); for upstream wire
+weirdness already encountered in the wild see
+[WIRE-GOTCHAS.md](WIRE-GOTCHAS.md).
 
 ## Repo map
 
@@ -101,4 +102,4 @@ runs the merge before calling `provider.complete(req)` /
 `provider.stream(req)` -- the `Provider` trait surface stays stable
 across all five concrete providers. For the field-assignment table,
 header/payload merge semantics, reserved-header buckets, and worked
-examples, see CONFIGURATION.md.
+examples, see [CONFIGURATION.md](CONFIGURATION.md).

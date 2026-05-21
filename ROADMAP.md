@@ -52,7 +52,7 @@ provider `history_reasoning = auto | strip | preserve` for DeepSeek
 v3/v4 + vLLM. Per-provider `request_timeout_ms` /
 `stream_first_byte_timeout_ms`. Operator-owned `[bedrock]
 allowed_betas` / `allowed_body_fields` (BREAKING rename). Anthropic-
-on-Converse body translation. PROVIDER-QUIRKS.md operator guide.
+on-Converse body translation. [docs/PROVIDER-QUIRKS.md](docs/PROVIDER-QUIRKS.md) operator guide.
 
 ### v0.6.0 (DONE) -- Layered config + dispatch hygiene
 
