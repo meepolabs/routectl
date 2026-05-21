@@ -251,7 +251,7 @@ Empty lists (or omitted `[bedrock]` section) = pass-through (no filter applied) 
 
 ## Routing
 
-`[aliases]` maps incoming wire model strings to model nicknames declared in `[models.X]`. List values are fallback chains -- when the primary model's provider fails (rate limit, 5xx, network error), the router falls through to the next entry. Per-alias retry overrides live alongside in the top-level `[retry]` section.
+`[aliases]` maps incoming wire model strings to model nicknames declared in `[models.X]`. List values are fallback chains -- when the primary model's provider fails (rate limit, 5xx, network error), the router falls through to the next entry. Global retry policy lives in the top-level `[retry]` table (shown below).
 
 ```toml
 [models.opus-bedrock]
@@ -333,7 +333,7 @@ crates/
                          + provider factory
   routectl-auth/         SecretStore: env:// / file:// (TOCTOU-safe) / literal:
   routectl-cli/          axum HTTP server (/v1/chat/completions + /v1/messages)
-                         + clap CLI (serve, test, config)
+                         + clap CLI (serve, test, config, login)
                          + IngressAdapter trait (one file per ingress dialect)
 ```
 
@@ -373,7 +373,7 @@ routectl speaks several wire protocols and forwards whatever credentials you sup
 
 ## Contributing
 
-Issues and PRs welcome. See [`CLAUDE.md`](CLAUDE.md) for the development runbook (tests, where to put new code, common failure-mode gotchas), and [`ROADMAP.md`](ROADMAP.md) for the milestone-by-milestone trajectory.
+Issues and PRs welcome. [`CLAUDE.md`](CLAUDE.md) is the slim entry point with a routing index; deep references live under [`docs/`](docs/) (architecture, codemap, configuration, logging, wire gotchas, development workflow, per-provider quirks, tested models). [`ROADMAP.md`](ROADMAP.md) tracks the milestone-by-milestone trajectory.
 
 Conventions:
 
