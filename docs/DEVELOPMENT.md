@@ -5,9 +5,10 @@ verification gate every change must clear, the debug runbooks for the
 two most common failure modes (Anthropic ingress regressions and live
 matrix breakage), the worked example for adding a new model, and the
 code style rules. For repo layout and the hub-and-spoke architecture
-see `ARCHITECTURE.md`; for TOML configuration see `CONFIGURATION.md`;
-for logging recipes see `LOGGING.md`; for known wire-shape gotchas
-see `WIRE-GOTCHAS.md`.
+see [ARCHITECTURE.md](ARCHITECTURE.md); for TOML configuration see
+[CONFIGURATION.md](CONFIGURATION.md); for logging recipes see
+[LOGGING.md](LOGGING.md); for known wire-shape gotchas see
+[WIRE-GOTCHAS.md](WIRE-GOTCHAS.md).
 
 ## Verification gate
 

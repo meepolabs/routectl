@@ -4,7 +4,8 @@ This is the running log of upstream wire-shape weirdness routectl handles
 internally. Each entry names the wire-level reality, where in the code it's
 handled, and any residual seams. When a model breaks the live matrix, grep
 this doc first for similar patterns. For operator-facing config recipes see
-PROVIDER-QUIRKS.md; for the debug runbook see DEVELOPMENT.md.
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md); for the debug runbook see
+[DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## openai-compat surface
 
