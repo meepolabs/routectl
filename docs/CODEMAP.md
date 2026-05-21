@@ -4,7 +4,7 @@ File-tree map of every Rust source file under `crates/`. Use this when
 you know the kind of code you're looking for ("eventstream decoding",
 "Anthropic content-block translation", "SigV4 signing") but not the
 file path. For module-level architecture and dataflow, see
-`ARCHITECTURE.md`.
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 Each line is one file: path, then a one-line description of what the
 file does. Test sidecars (`*_tests.rs` paired with a source file) are
