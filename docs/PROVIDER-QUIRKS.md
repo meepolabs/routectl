@@ -316,4 +316,4 @@ When a request fails, the upstream's error body is the truth source. routectl lo
 `./routectl config check --config <path>` validates the schema before serve.
 `./routectl config show` prints the resolved config (for inspection).
 
-Combine with `ROUTECTL_LOG=routectl=debug` and a `grep request_id=<id>` workflow when triaging a specific failure -- see `CLAUDE.md` "Triage recipes" for full examples.
+Combine with `ROUTECTL_LOG=routectl=debug` and a `grep request_id=<id>` workflow when triaging a specific failure -- see [LOGGING.md](LOGGING.md) for the full triage recipes.

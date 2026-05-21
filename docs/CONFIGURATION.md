@@ -6,7 +6,7 @@ per-upstream tuning recipes (DeepSeek echo-back, NIM cold-start, Bedrock
 allowlists, OpenRouter analytics headers) see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md). For the rationale behind the
 two-layer split (provider vs model) and the hub-and-spoke contract see
-ARCHITECTURE.md.
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Top-level shape
 
@@ -276,4 +276,4 @@ trace logging.
 
 For active triage of a specific failing request, combine `config show`
 with `ROUTECTL_LOG=routectl=debug` and the `request_id` correlation
-workflow -- see LOGGING.md for the full triage recipes.
+workflow -- see [LOGGING.md](LOGGING.md) for the full triage recipes.
