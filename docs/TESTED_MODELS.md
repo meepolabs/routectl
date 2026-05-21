@@ -77,6 +77,32 @@ during testing across multiple OpenAI-compatible upstreams:
 - **DeepSeek-style `reasoning_content`**: the `deepseek` dialect lifts
   this into `reasoning_details[format="deepseek-v1"]`.
 
+## opencode-go (`reasoning_dialect = "deepseek"` for DeepSeek; "openai" otherwise)
+
+Hits `https://opencode.ai/zen/go/v1` with a Cloudflare front. Skipped
+unless `OPENCODE_GO_API_KEY` is set.
+
+| Model | Mode | Notes |
+|---|---|---|
+| `minimax-m2.7` | complete | |
+| `minimax-m2.5` | complete | |
+| `kimi-k2.6` | complete | |
+| `kimi-k2.5` | complete | |
+| `glm-5.1` | complete | |
+| `glm-5` | complete | |
+| `deepseek-v4-pro` | complete | DeepSeek dialect; reasoning lifted |
+| `deepseek-v4-flash` | complete | DeepSeek dialect; reasoning lifted |
+| `qwen3.6-plus` | complete | |
+| `qwen3.5-plus` | complete | |
+| `mimo-v2-pro` | complete | |
+| `mimo-v2-omni` | complete | |
+| `mimo-v2.5-pro` | complete | |
+| `mimo-v2.5` | complete | |
+
+Cloudflare-fronted: 5xx responses in the 520-527/530 range are
+covered by the default `[retry] fallback_on_status` list so a sibling
+host can take over without killing the request.
+
 ## NIM -- NVIDIA Inference Microservices (`reasoning_dialect = "openai"`)
 
 Hits `https://integrate.api.nvidia.com/v1`.
@@ -121,7 +147,7 @@ available.
 | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | complete | Used as the cache_control verification target (1024-token cache minimum) |
 | `us.anthropic.claude-opus-4-20250514-v1:0` | complete | |
 
-Three additional ingress-through-Bedrock tests verify the v0.4
+Three additional ingress-through-Bedrock tests verify the
 hub-and-spoke seam end-to-end:
 
 - `openai_ingress_through_bedrock`: OpenAI Chat Completions wire body
@@ -135,6 +161,18 @@ hub-and-spoke seam end-to-end:
   the Anthropic ingress, decoding Bedrock's binary eventstream
   frames, asserts the rendered SSE event sequence
   (`message_start` -> `content_block_*` -> `message_stop`).
+
+### Bedrock Converse (`api_shape = "converse"`)
+
+The Converse path runs as a separate sub-matrix against the AWS
+Converse API (`/model/{id}/converse`) rather than InvokeModel. Same
+auth surfaces, distinct request/response shape and binary
+eventstream decoder.
+
+| Model | Mode | Notes |
+|---|---|---|
+| `us.anthropic.claude-haiku-4-5-20251001-v1:0` | complete + stream | |
+| `us.anthropic.claude-3-5-haiku-20241022-v1:0` | complete + stream | |
 
 ## OpenAI Responses API (`kind = "openai-responses"`, chatgpt-oauth surface)
 
@@ -155,7 +193,7 @@ cargo test -p routectl-cli --features live-integration --release \
   --test live_matrix openai_responses -- --nocapture --test-threads=1
 ```
 
-Wire-shape notes validated in CG.C smoke (2026-05-12):
+Wire-shape notes for the chatgpt-oauth surface:
 
 - **Stream-only**: the endpoint rejects `stream:false` with HTTP 400
   `{"detail":"Stream must be set to true"}`. `complete()` forces
@@ -178,16 +216,13 @@ Wire-shape notes validated in CG.C smoke (2026-05-12):
   when the field is absent.
 - **encrypted_content (reasoning replay)**: sent on prior-turn reasoning
   items when `encrypted_content` is non-empty. Empty string is accepted
-  and treated as no-op (codex `arc_monitor.rs:325-336`).
+  and treated as no-op.
 
 | Model | Mode | Status | Notes |
 |---|---|---|---|
-| `gpt-5.3-codex` | complete + stream | PASS | Default codex CLI model; smoke 2026-05-12 |
+| `gpt-5.3-codex` | complete + stream | PASS | Default codex CLI model |
 | `gpt-5.4` | complete + stream | PASS | General-purpose flagship |
 | `gpt-5.4-mini` | complete + stream | PASS | Faster/cheaper variant |
-
-Verified: 4 wire-shape bugs found and fixed in CG.C before the matrix ran.
-See `CLAUDE.md` "Common gotchas" for the full fix record.
 
 ## Adding a new model
 
