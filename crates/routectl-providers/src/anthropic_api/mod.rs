@@ -414,20 +414,24 @@ impl Provider for AnthropicApiProvider {
             // never has to guess WHY a request failed. Auth failures
             // keep the auth_kind field for parity with the documented
             // log shape; other errors get a generic "anthropic
-            // upstream error" tag.
+            // upstream error" tag. Sanitize before tracing: the
+            // upstream may return attacker-controlled bytes (CRLF,
+            // control chars, very long lines) that would otherwise
+            // forge log lines on text-format subscribers.
+            let safe_excerpt = sanitize_for_log(&msg);
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
                     auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %msg,
+                    body_excerpt = %safe_excerpt,
                     "anthropic upstream auth failed",
                 );
             } else {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
-                    body_excerpt = %msg,
+                    body_excerpt = %safe_excerpt,
                     "anthropic upstream error",
                 );
             }
@@ -473,21 +477,23 @@ impl Provider for AnthropicApiProvider {
         if status >= 400 {
             // Same text-first-then-opportunistic-JSON pattern as
             // `complete()` -- see comment there. Helper extracted at
-            // `read_anthropic_error`.
+            // `read_anthropic_error`. Sanitize the excerpt for the
+            // same reason as `complete()`.
             let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
+            let safe_excerpt = sanitize_for_log(&msg);
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
                     auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %msg,
+                    body_excerpt = %safe_excerpt,
                     "anthropic upstream auth failed",
                 );
             } else {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
-                    body_excerpt = %msg,
+                    body_excerpt = %safe_excerpt,
                     "anthropic upstream error",
                 );
             }
@@ -605,10 +611,8 @@ impl Provider for AnthropicApiProvider {
             // Sanitize before tracing: the upstream may return
             // attacker-controlled bytes (CRLF, control chars, very
             // long lines) and `body_excerpt = %msg` would otherwise
-            // emit them verbatim into operator logs. The pre-existing
-            // `complete()` and `stream()` paths have the same
-            // un-sanitized pattern; a separate fix tracks updating
-            // those.
+            // emit them verbatim into operator logs. Same posture as
+            // the `complete()` and `stream()` paths above.
             let safe_excerpt = sanitize_for_log(&msg);
             if status == 401 || status == 403 {
                 tracing::warn!(
