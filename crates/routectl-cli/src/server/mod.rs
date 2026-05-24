@@ -252,7 +252,8 @@ fn build_axum_router(state: Arc<AppState>, token_set: Arc<TokenSet>) -> AxumRout
     // Authenticated routes: /v1/models lists configured aliases (low
     // sensitivity but still gated when auth is on); /v1/chat/completions
     // and /v1/messages carry the body of every request and forward
-    // upstream.
+    // upstream. /v1/messages/count_tokens is a probe call claude-code
+    // uses for context-budget display.
     let mut authed = AxumRouter::new()
         .route("/v1/models", get(handlers::models::list_models))
         .route(
@@ -260,6 +261,10 @@ fn build_axum_router(state: Arc<AppState>, token_set: Arc<TokenSet>) -> AxumRout
             post(handlers::chat_completions::chat_completions),
         )
         .route("/v1/messages", post(handlers::messages::messages))
+        .route(
+            "/v1/messages/count_tokens",
+            post(handlers::messages_count_tokens::count_tokens),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES));
 
     // Mount the auth middleware only when tokens are configured.
