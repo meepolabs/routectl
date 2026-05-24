@@ -12,7 +12,7 @@ use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
     sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReasoningConfig,
-    Result, RoutectlInternal,
+    Result, RoutectlInternal, TokenCount,
 };
 use serde_json::Value;
 
@@ -483,6 +483,91 @@ impl Router {
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
     }
 
+    /// Probe call: route a request to the FIRST provider in the
+    /// dispatch chain and call `Provider::count_tokens`. Used by
+    /// claude-code's context-budget display via the
+    /// `/v1/messages/count_tokens` endpoint.
+    ///
+    /// Why first-only (no fallback chain walk): count_tokens reports
+    /// tokens for the upstream's tokenizer. Falling back to a
+    /// different model would return tokens computed by a different
+    /// tokenizer, which would silently miscount the caller's budget.
+    /// On `Error::NotImplemented`, the error propagates to the caller
+    /// verbatim; this function does not enter the dispatch retry
+    /// loop, so no retry/fallback semantics apply. Callers (the
+    /// count_tokens handler) translate `NotImplemented` to a 501
+    /// response per the gateway-doc contract.
+    ///
+    /// count_tokens calls consume the same RPM bucket and honor the
+    /// same circuit breaker as messages calls: the gate runs before
+    /// the upstream is touched, and a successful or failed probe
+    /// records into the breaker exactly like `complete()`. This
+    /// prevents probe-spam from bypassing operator rate limits.
+    #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
+    pub async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        let chain = self.dispatch_chain(&req.model)?;
+        let target = chain
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::UnknownAlias(req.model.clone()))?;
+        let provider = target
+            .provider
+            .clone()
+            .ok_or_else(|| Error::UnknownProvider(target.provider_name.clone()))?;
+
+        // Gate: rate limit + circuit breaker. Mirrors
+        // `complete_with_options` and `stream_with_options` so a
+        // count_tokens probe cannot bypass operator rate limits.
+        // Unlike `complete_with_options`, count_tokens does NOT walk
+        // the fallback chain on a gate block (tokenizer correctness
+        // rules out walking the chain), so we propagate the gate
+        // error directly.
+        if let Some((gate_kind, gate_err)) =
+            self.gate_check(&target.state_key, &target.provider_name)
+        {
+            tracing::warn!(
+                provider = %target.provider_name,
+                model = %target.nickname.as_deref().unwrap_or(""),
+                gate_kind,
+                error = ?gate_err,
+                "count_tokens gate blocked",
+            );
+            return Err(gate_err);
+        }
+
+        // Apply the same per-attempt overlays the messages path does
+        // so header_extras / payload_extras / reasoning defaults are
+        // consistent. This matters for `anthropic-beta` flags --
+        // count_tokens must observe the same beta surface as the
+        // messages endpoint or the upstream may reject a request
+        // that would have been accepted on /v1/messages.
+        let mut attempt_req = req.clone();
+        attempt_req.model = target.upstream.clone();
+        if let Some(defaults) = target.reasoning.as_ref() {
+            merge_reasoning_defaults_into(&mut attempt_req, defaults);
+        }
+        apply_layered_overlays(&self.config, &target, &mut attempt_req);
+
+        match provider.count_tokens(attempt_req).await {
+            Ok(tc) => {
+                self.record_success(&target.state_key);
+                Ok(tc)
+            }
+            Err(e) => {
+                // Mirror `complete_with_options::should_fallback`:
+                // status-0 / 5xx-class errors record a breaker
+                // failure; client-class errors (NotImplemented,
+                // 4xx) do NOT count against the breaker. Use the
+                // existing helper so the policy stays consistent
+                // across complete / stream / count_tokens.
+                if should_fallback(&e, &self.config.retry) {
+                    self.record_failure(&target.state_key);
+                }
+                Err(e)
+            }
+        }
+    }
+
     pub async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.stream_with_options(req, RouterOptions::default())
             .await
@@ -737,9 +822,17 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // Default so adding a new field on `RoutectlInternal` later
     // doesn't break this construction site (the type is
     // `#[non_exhaustive]`).
+    //
+    // Preserve `claude_code_headers` captured by the ingress: those
+    // are inbound-request data, not per-model knobs, and the
+    // Anthropic-API egress reads them downstream to forward
+    // X-Claude-Code-* headers for gateway cost attribution.
+    let captured_claude_code_headers =
+        std::mem::take(&mut req.routectl_internal.claude_code_headers);
     let mut internal = RoutectlInternal::default();
     internal.reasoning_dialect = target.reasoning_dialect.map(|d| d.into());
     internal.history_reasoning = target.history_reasoning.map(|h| h.into());
+    internal.claude_code_headers = captured_claude_code_headers;
     req.routectl_internal = internal;
 }
 
@@ -2281,5 +2374,100 @@ mod resolved_models_tests {
         // provider, not the direct `foo` model's provider.
         assert_eq!(resp.routectl_provider.as_deref(), Some("p-alias"));
         assert_eq!(resp.model, "u-alias");
+    }
+}
+
+#[cfg(test)]
+mod count_tokens_tests {
+    //! Pin: `Router::count_tokens` does NOT walk the fallback chain
+    //! and propagates `Error::NotImplemented` from the provider as-is
+    //! (no retries). Tokenizer correctness rules out walking the
+    //! chain -- a count from the wrong tokenizer would silently
+    //! miscount the caller's budget.
+    use super::*;
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider, TokenCount};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Tracks how many times `count_tokens` was called so the test
+    /// can assert there's no retry on `NotImplemented`.
+    struct NotImplProvider {
+        id: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for NotImplProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            unreachable!()
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            unreachable!()
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!()
+        }
+        async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::NotImplemented(
+                self.id.clone(),
+                "count_tokens".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn not_implemented_propagates_without_retry() {
+        // Arrange
+        let calls = Arc::new(AtomicUsize::new(0));
+        let p: Arc<dyn Provider> = Arc::new(NotImplProvider {
+            id: "no-count".into(),
+            calls: calls.clone(),
+        });
+        let cfg = Arc::new(Config::default());
+        let mut router = Router::new(cfg);
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "haiku".to_string(),
+            Arc::new(ResolvedModel::new(
+                "haiku",
+                "no-count",
+                p.clone(),
+                "claude-haiku-4-5",
+            )),
+        );
+        router.install_resolved_models(models);
+
+        let req = ChatRequest {
+            model: "haiku".into(),
+            ..Default::default()
+        };
+
+        // Act
+        let err = router.count_tokens(req).await.unwrap_err();
+
+        // Assert: no retry (single call), NotImplemented surfaces
+        // verbatim.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "count_tokens must NOT retry on NotImplemented"
+        );
+        assert!(
+            matches!(err, Error::NotImplemented(_, _)),
+            "expected Error::NotImplemented, got {err:?}"
+        );
     }
 }

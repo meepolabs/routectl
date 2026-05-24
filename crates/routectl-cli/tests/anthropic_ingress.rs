@@ -378,7 +378,12 @@ async fn five_breakpoints_rejected_with_400() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let envelope: Value = resp.json().await.unwrap();
-    assert_eq!(envelope["error"]["type"], "validation_error");
+    // Anthropic-shape envelope (set on the AnthropicIngress adapter):
+    // outer `{"type":"error", ...}` plus `error.type` mapped to
+    // Anthropic's `invalid_request_error` from routectl's internal
+    // `validation_error` tag.
+    assert_eq!(envelope["type"], "error");
+    assert_eq!(envelope["error"]["type"], "invalid_request_error");
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +472,68 @@ async fn auth_rejects_bogus_token() {
         .unwrap();
     assert_eq!(resp.status(), 401);
     let envelope: Value = resp.json().await.unwrap();
+    // The listener-auth middleware (`server::auth::auth_layer`) fires
+    // BEFORE any ingress is selected, but the inbound path tells us
+    // which dialect the caller speaks. /v1/messages* gets the
+    // Anthropic envelope so claude-code's per-error.type handling
+    // works; /v1/chat/completions* gets the OpenAI envelope.
+    assert_eq!(envelope["type"], "error");
+    assert_eq!(envelope["error"]["type"], "authentication_error");
+}
+
+/// Regression for the path-aware auth envelope: a 401 on /v1/messages
+/// must use the Anthropic shape (`{"type":"error","error":{...}}`).
+#[tokio::test]
+async fn auth_rejects_anthropic_messages_with_anthropic_envelope() {
+    let config = anthropic_proxy_config(
+        "http://127.0.0.1:1",
+        Some(vec!["literal:sk-real".into()]),
+        BTreeMap::new(),
+    );
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&json!({
+            "model": "heavy",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let envelope: Value = resp.json().await.unwrap();
+    assert_eq!(envelope["type"], "error", "expected Anthropic envelope");
+    assert_eq!(envelope["error"]["type"], "authentication_error");
+}
+
+/// Regression: a 401 on /v1/chat/completions keeps the historical
+/// OpenAI shape (`{"error":{...}}` with no outer `type` field).
+#[tokio::test]
+async fn auth_rejects_openai_chat_completions_with_openai_envelope() {
+    let config = anthropic_proxy_config(
+        "http://127.0.0.1:1",
+        Some(vec!["literal:sk-real".into()]),
+        BTreeMap::new(),
+    );
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&json!({
+            "model": "heavy",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let envelope: Value = resp.json().await.unwrap();
+    assert!(
+        envelope.get("type").is_none(),
+        "OpenAI envelope is flat (no outer `type`): {envelope}"
+    );
     assert_eq!(envelope["error"]["type"], "authentication_error");
 }
 
@@ -630,7 +697,11 @@ async fn tool_def_other_cache_control_counts_toward_breakpoint_cap() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let envelope: Value = resp.json().await.unwrap();
-    assert_eq!(envelope["error"]["type"], "validation_error");
+    // Anthropic envelope: outer `type:error` + `error.type` mapped
+    // from routectl's internal `validation_error` tag to Anthropic's
+    // `invalid_request_error`.
+    assert_eq!(envelope["type"], "error");
+    assert_eq!(envelope["error"]["type"], "invalid_request_error");
     assert!(
         envelope["error"]["message"]
             .as_str()
@@ -2669,5 +2740,238 @@ async fn converse_request_system_with_cache_control_emits_cache_point_block() {
     assert!(
         cache_point.is_object(),
         "expected cachePoint block after text with cache_control: {system:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /v1/messages/count_tokens endpoint
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn count_tokens_endpoint_proxies_to_upstream_count_tokens_path() {
+    // Arrange
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "input_tokens": 7
+        })))
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages/count_tokens"))
+        .json(&json!({
+            "model": "heavy",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["input_tokens"], 7);
+
+    // Confirm the upstream saw the request on the count_tokens path
+    // (not /v1/messages).
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].url.path(), "/v1/messages/count_tokens");
+}
+
+#[tokio::test]
+async fn count_tokens_endpoint_returns_anthropic_error_envelope_on_unknown_alias() {
+    // Arrange: server with no upstream traffic expected; an unknown
+    // model alias never reaches a provider.
+    let config = anthropic_proxy_config("http://127.0.0.1:1", None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages/count_tokens"))
+        .json(&json!({
+            "model": "does-not-exist",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 404);
+    let envelope: Value = resp.json().await.unwrap();
+    assert_eq!(envelope["type"], "error");
+    assert_eq!(envelope["error"]["type"], "not_found_error");
+}
+
+#[tokio::test]
+async fn count_tokens_endpoint_listed_in_route_table_under_auth_layer() {
+    // Listener auth must gate /v1/messages/count_tokens just like
+    // /v1/messages. A request without `x-api-key` against a server
+    // with `[server.auth].tokens` populated returns 401 from the
+    // listener-auth middleware. The /v1/messages* path uses the
+    // Anthropic envelope per the path-aware auth-layer policy.
+    let config = anthropic_proxy_config(
+        "http://127.0.0.1:1",
+        Some(vec!["literal:sk-real".into()]),
+        BTreeMap::new(),
+    );
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages/count_tokens"))
+        .json(&json!({
+            "model": "heavy",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+}
+
+/// Regression: an oversize body to /v1/messages/count_tokens must
+/// surface as 413 (Payload Too Large) with the Anthropic-shape error
+/// envelope. Pre-fix the handler collapsed every JsonRejection into a
+/// `Validation` error, which `map_error` rendered as 400. The shared
+/// `render_json_rejection` helper now preserves the rejection's
+/// status code on both /v1/messages and /v1/messages/count_tokens.
+#[tokio::test]
+async fn count_tokens_rejects_payload_too_large_with_413_anthropic_envelope() {
+    let config = anthropic_proxy_config("http://127.0.0.1:1", None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    // Build a >4 MiB body (server-side cap is 4 MiB). 5 MiB of `a`s
+    // overflows the cap so axum's DefaultBodyLimit fires.
+    let huge = "a".repeat(5 * 1024 * 1024);
+    let body = json!({
+        "model": "heavy",
+        "messages": [{"role": "user", "content": huge}]
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages/count_tokens"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 413);
+    let envelope: Value = resp.json().await.unwrap();
+    // Anthropic-shape envelope (set on the AnthropicIngress adapter):
+    // outer `{"type":"error", ...}` plus `error.type` mapped to
+    // Anthropic's `invalid_request_error` from routectl's
+    // `payload_too_large` tag.
+    assert_eq!(envelope["type"], "error");
+    assert_eq!(envelope["error"]["type"], "invalid_request_error");
+}
+
+/// Pin: count_tokens unions the three `anthropic-beta` sources
+/// (ingress header + per-provider header_extras + per-model
+/// header_extras) onto the upstream HTTP `anthropic-beta` header.
+/// Mirrors the contract `anthropic_beta_header_merges_with_body_anthropic_beta_dedup`
+/// pins for `/v1/messages` -- count_tokens MUST observe the same
+/// merged beta surface or upstream may reject a request that would
+/// have been accepted on `/v1/messages`.
+#[tokio::test]
+async fn count_tokens_path_unions_anthropic_beta_from_three_sources() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"input_tokens": 5})))
+        .mount(&upstream)
+        .await;
+
+    // Build a config with the three sources distinct and detectable:
+    //   provider header_extras["anthropic-beta"] = "provider-source-beta"
+    //   model header_extras["anthropic-beta"] = "model-source-beta"
+    //   inbound HTTP header anthropic-beta = "ingress-source-beta"
+    let mut providers = BTreeMap::new();
+    let mut provider_headers = BTreeMap::new();
+    provider_headers.insert(
+        "anthropic-beta".to_string(),
+        "provider-source-beta".to_string(),
+    );
+    let provider_entry = ProviderEntry::anthropic_api("literal:test-key")
+        .with_base_url(upstream.uri())
+        .with_header_extras(provider_headers);
+    providers.insert("anthropic-mock".to_string(), provider_entry);
+
+    let mut model_headers = BTreeMap::new();
+    model_headers.insert(
+        "anthropic-beta".to_string(),
+        "model-source-beta".to_string(),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "haiku".to_string(),
+        ModelEntry::new("anthropic-mock", "claude-haiku-4-5").with_header_extras(model_headers),
+    );
+
+    let mut aliases = BTreeMap::new();
+    aliases.insert("heavy".to_string(), AliasValue::Single("haiku".into()));
+
+    let config = Arc::new(Config {
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            auth: None,
+            strict_translation: false,
+            allow_disable_fallbacks: true,
+        },
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    });
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages/count_tokens"))
+        .header("anthropic-beta", "ingress-source-beta")
+        .json(&json!({
+            "model": "heavy",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let beta_header = received[0]
+        .headers
+        .get("anthropic-beta")
+        .expect("anthropic-beta header missing on count_tokens upstream request")
+        .to_str()
+        .unwrap();
+    let names: Vec<&str> = beta_header.split(',').map(str::trim).collect();
+    assert!(
+        names.contains(&"ingress-source-beta"),
+        "ingress source missing in upstream anthropic-beta: {beta_header}"
+    );
+    assert!(
+        names.contains(&"provider-source-beta"),
+        "provider source missing in upstream anthropic-beta: {beta_header}"
+    );
+    assert!(
+        names.contains(&"model-source-beta"),
+        "model source missing in upstream anthropic-beta: {beta_header}"
+    );
+    // Dedup contract: each source appears at most once.
+    let mut sorted = names.clone();
+    sorted.sort();
+    let mut dedup = sorted.clone();
+    dedup.dedup();
+    assert_eq!(
+        sorted, dedup,
+        "anthropic-beta header has duplicates: {beta_header}"
     );
 }

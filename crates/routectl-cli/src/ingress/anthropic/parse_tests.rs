@@ -240,3 +240,57 @@ fn is_safe_beta_value_rejects_crlf_strings() {
     assert!(!is_safe_beta_value("evil-trailing\r"));
     assert!(!is_safe_beta_value("evil-trailing\n"));
 }
+
+/// Gateway-correctness contract: every inbound header whose name
+/// starts with `x-claude-code-` is captured into
+/// `routectl_internal.claude_code_headers` so the Anthropic-API egress
+/// can forward them upstream. Other headers (auth, the routectl alias
+/// header, anything not matching the prefix) MUST NOT be captured.
+/// axum/http normalizes inbound HeaderMap keys to lowercase on
+/// receive, so this test always sees lowercase names regardless of
+/// what the client wrote on the wire.
+#[test]
+fn captures_x_claude_code_headers_inside_namespace() {
+    use axum::http::{HeaderMap, HeaderName, HeaderValue};
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("x-claude-code-session-id"),
+        HeaderValue::from_static("11111111-aaaa-bbbb-cccc-222222222222"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-claude-code-agent-id"),
+        HeaderValue::from_static("33333333-aaaa-bbbb-cccc-444444444444"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-routectl-alias"),
+        HeaderValue::from_static("default"),
+    );
+    headers.insert(
+        HeaderName::from_static("authorization"),
+        HeaderValue::from_static("Bearer dummy"),
+    );
+
+    let body = serde_json::json!({"model": "claude-test", "messages": []});
+    let req = translate_request(&headers, body).unwrap();
+
+    let h = &req.routectl_internal.claude_code_headers;
+    assert_eq!(h.len(), 2, "captured: {h:?}");
+    // Casing contract: axum/http normalizes inbound HeaderMap keys to
+    // lowercase, so the captured tuples store lowercase names. Pin
+    // this contract explicitly so a future refactor (or a different
+    // http-stack version) that changes the casing surfaces in CI.
+    assert!(h.iter().any(|(n, _)| n == "x-claude-code-session-id"));
+    assert!(h.iter().any(|(n, _)| n == "x-claude-code-agent-id"));
+    // No mixed-case names should appear: every captured name is the
+    // lowercase form regardless of the client's wire casing.
+    for (name, _) in h {
+        assert_eq!(
+            name.as_str(),
+            name.to_ascii_lowercase().as_str(),
+            "captured name `{name}` must be lowercase",
+        );
+    }
+    // x-routectl-alias and authorization must NOT be captured.
+    assert!(!h.iter().any(|(n, _)| n == "x-routectl-alias"));
+    assert!(!h.iter().any(|(n, _)| n == "authorization"));
+}

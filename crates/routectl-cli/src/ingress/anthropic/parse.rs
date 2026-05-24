@@ -66,6 +66,11 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // preserving order and dropping duplicates.
     merge_inbound_anthropic_beta_header(headers, &mut req);
 
+    // Capture inbound X-Claude-Code-* headers so the Anthropic-API
+    // egress can forward them upstream for gateway cost attribution
+    // (see `capture_claude_code_headers` for the contract).
+    capture_claude_code_headers(headers, &mut req);
+
     // Translate thinking config.
     if let Some(t) = thinking {
         req.reasoning = Some(translate_thinking(&t));
@@ -203,6 +208,42 @@ fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatReques
 /// strings, bypassing `HeaderValue`'s defense).
 fn is_safe_beta_value(s: &str) -> bool {
     !s.contains(['\r', '\n'])
+}
+
+/// Capture inbound `x-claude-code-*` headers (case-insensitive prefix
+/// match on namespace) into `req.routectl_internal.claude_code_headers`
+/// for later filtering at the egress. Per the LLM gateway docs, the
+/// three documented gateway-attribution headers are
+/// `x-claude-code-session-id`, `x-claude-code-agent-id`, and
+/// `x-claude-code-parent-agent-id`, but Anthropic owns the namespace
+/// and may add more. The Anthropic-API egress consults its
+/// per-provider `forward_client_headers` config to decide which
+/// captured names actually go upstream; everything else is dropped.
+/// Skips non-UTF-8 values.
+///
+/// Header name casing: axum/http normalizes inbound `HeaderMap` keys
+/// to lowercase on receive, so `name.as_str()` here is always
+/// lowercase regardless of how the client wrote the header. The
+/// captured Vec stores the lowercase form, and the Anthropic-API
+/// egress emits it lowercase upstream. This is standards-compliant:
+/// HTTP/2 requires lowercase header names, and HTTP/1.1 servers are
+/// case-insensitive on receive (RFC 7230 sec 3.2). Operators
+/// expecting a specific case in upstream-traffic captures should not
+/// rely on the original wire casing.
+fn capture_claude_code_headers(headers: &HeaderMap, req: &mut ChatRequest) {
+    for (name, val) in headers.iter() {
+        if !name
+            .as_str()
+            .to_ascii_lowercase()
+            .starts_with("x-claude-code-")
+        {
+            continue;
+        }
+        let Ok(v) = val.to_str() else { continue };
+        req.routectl_internal
+            .claude_code_headers
+            .push((name.as_str().to_string(), v.to_string()));
+    }
 }
 
 /// Fold legacy top-level `output_format` into `output_config.format`.

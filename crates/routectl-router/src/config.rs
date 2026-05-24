@@ -690,6 +690,16 @@ pub enum ProviderEntry {
         /// pass-through.
         #[serde(default)]
         allowed_betas: Vec<String>,
+        /// Strict allowlist of inbound `x-claude-code-*` header names
+        /// the egress is permitted to forward to api.anthropic.com.
+        /// Empty (default) drops every captured `x-claude-code-*`
+        /// header at the egress -- secure-by-default for new
+        /// providers. Names match case-insensitively. Capture happens
+        /// at the Anthropic ingress (defense-in-depth, namespace-
+        /// bounded); this list is the operator's filter on which
+        /// captured names actually go upstream.
+        #[serde(default)]
+        forward_client_headers: Vec<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -883,6 +893,7 @@ impl ProviderEntry {
             payload_extras: None,
             user_agent: None,
             allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -952,6 +963,21 @@ impl ProviderEntry {
             _ => {
                 panic!("ProviderEntry::with_anthropic_version only applies to anthropic-api")
             }
+        }
+        self
+    }
+
+    /// Set the AnthropicApi variant's `forward_client_headers`
+    /// allowlist (names of inbound `x-claude-code-*` headers the
+    /// egress may forward to api.anthropic.com). Panics on other
+    /// variants -- the field is AnthropicApi-only.
+    pub fn with_forward_client_headers(mut self, v: Vec<String>) -> Self {
+        match &mut self {
+            Self::AnthropicApi {
+                forward_client_headers,
+                ..
+            } => *forward_client_headers = v,
+            _ => panic!("ProviderEntry::with_forward_client_headers only applies to anthropic-api"),
         }
         self
     }
@@ -1240,7 +1266,7 @@ impl Default for RetryPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::ProviderEntry;
+    use super::{Config, ProviderEntry};
 
     #[test]
     #[should_panic(expected = "with_anthropic_version")]
@@ -1254,6 +1280,76 @@ mod tests {
         let mut entry = ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-test");
         entry.redact_secrets();
         assert_eq!(entry.secret_uris(), vec!["literal:[REDACTED]"]);
+    }
+
+    /// `forward_client_headers` defaults to an empty list when the
+    /// field is omitted from the TOML (secure-by-default: drop every
+    /// captured `x-claude-code-*` header). Explicit lists round-trip
+    /// through serialize/deserialize so the operator's allowlist is
+    /// preserved end-to-end.
+    #[test]
+    fn anthropic_api_forward_client_headers_round_trips() {
+        // Default: omitted -> empty Vec.
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse default");
+        let entry = cfg.providers.get("anthropic").expect("anthropic provider");
+        match entry {
+            ProviderEntry::AnthropicApi {
+                forward_client_headers,
+                ..
+            } => assert!(
+                forward_client_headers.is_empty(),
+                "default must be empty; got: {forward_client_headers:?}"
+            ),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+
+        // Explicit list of two names.
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse explicit");
+        let entry = cfg.providers.get("anthropic").expect("anthropic provider");
+        match entry {
+            ProviderEntry::AnthropicApi {
+                forward_client_headers,
+                ..
+            } => assert_eq!(
+                forward_client_headers,
+                &vec![
+                    "x-claude-code-session-id".to_string(),
+                    "x-claude-code-agent-id".to_string(),
+                ],
+                "explicit list must round-trip"
+            ),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+
+        // Round-trip: serialize, deserialize, compare.
+        let cfg_in: Config = toml::from_str(toml_text).expect("parse in");
+        let serialized = toml::to_string(&cfg_in).expect("serialize");
+        let cfg_out: Config = toml::from_str(&serialized).expect("parse out");
+        match cfg_out.providers.get("anthropic").expect("anthropic") {
+            ProviderEntry::AnthropicApi {
+                forward_client_headers,
+                ..
+            } => assert_eq!(
+                forward_client_headers,
+                &vec![
+                    "x-claude-code-session-id".to_string(),
+                    "x-claude-code-agent-id".to_string(),
+                ],
+                "round-trip must preserve list"
+            ),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
     }
 }
 

@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
-use crate::ingress::{IngressAdapter, IngressStreamState, SseEvent};
+use crate::ingress::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
 use crate::server::AppState;
 
 const DISABLE_FALLBACKS_HEADER: &str = "x-routectl-disable-fallbacks";
@@ -30,29 +30,15 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
     adapter: A,
 ) -> Response {
+    let envelope = adapter.error_envelope_shape();
     let Json(raw_body) = match body {
         Ok(b) => b,
-        Err(e) => {
-            // JsonRejection carries the right status code for each
-            // failure mode: 413 Payload Too Large for body-size cap
-            // hits, 400 Bad Request for parse errors, 415 for missing
-            // content-type, etc. Mirror that status into our error
-            // envelope rather than collapsing every rejection into 400.
-            let status = e.status();
-            let kind = if status == StatusCode::PAYLOAD_TOO_LARGE {
-                "payload_too_large"
-            } else if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
-                "unsupported_media_type"
-            } else {
-                "bad_request"
-            };
-            return error_response(status, kind, &e.to_string(), "invalid_request_error");
-        }
+        Err(e) => return render_json_rejection(envelope, e),
     };
 
     let req = match adapter.parse_request(&headers, raw_body) {
         Ok(r) => r,
-        Err(e) => return map_error(e),
+        Err(e) => return map_error(envelope, e),
     };
 
     let mut opts = RouterOptions::new();
@@ -70,7 +56,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     if streaming {
         stream_response(state, req, opts, adapter).await
     } else {
-        complete_response(state, req, opts, adapter).await
+        complete_response(state, req, opts, adapter, envelope).await
     }
 }
 
@@ -84,11 +70,41 @@ fn header_truthy(headers: &HeaderMap, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Render an `axum::extract::rejection::JsonRejection` into a properly
+/// shaped error envelope while preserving the rejection's status code.
+///
+/// Axum's body extractor surfaces 413 Payload Too Large (body-size cap),
+/// 415 Unsupported Media Type (missing/wrong content-type), and 400 Bad
+/// Request (parse failure) on the rejection's `status()`. Both
+/// `/v1/messages` and `/v1/messages/count_tokens` route their JSON
+/// rejections through here so the status code never gets collapsed to
+/// 400 and the dialect-correct envelope (Anthropic vs OpenAI) is used.
+pub(crate) fn render_json_rejection(
+    shape: ErrorEnvelopeShape,
+    e: axum::extract::rejection::JsonRejection,
+) -> Response {
+    // JsonRejection carries the right status code for each failure
+    // mode: 413 Payload Too Large for body-size cap hits, 400 Bad
+    // Request for parse errors, 415 for missing content-type, etc.
+    // Mirror that status into our error envelope rather than
+    // collapsing every rejection into 400.
+    let status = e.status();
+    let kind = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        "payload_too_large"
+    } else if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        "unsupported_media_type"
+    } else {
+        "bad_request"
+    };
+    error_response(shape, status, kind, &e.to_string(), "invalid_request_error")
+}
+
 async fn complete_response<A: IngressAdapter>(
     state: Arc<AppState>,
     req: routectl_core::ChatRequest,
     opts: RouterOptions,
     adapter: A,
+    envelope: ErrorEnvelopeShape,
 ) -> Response {
     match state.router.complete_with_options(req, opts).await {
         Ok(resp) => match adapter.render_response(resp) {
@@ -100,9 +116,9 @@ async fn complete_response<A: IngressAdapter>(
                 routectl_core::trace_egress_body(adapter.id(), &body);
                 (StatusCode::OK, Json(body)).into_response()
             }
-            Err(e) => map_error(e),
+            Err(e) => map_error(envelope, e),
         },
-        Err(e) => map_error(e),
+        Err(e) => map_error(envelope, e),
     }
 }
 
@@ -112,11 +128,12 @@ async fn stream_response<A: IngressAdapter + 'static>(
     opts: RouterOptions,
     adapter: A,
 ) -> Response {
+    let envelope = adapter.error_envelope_shape();
     let stream_result = state.router.stream_with_options(req, opts).await;
 
     let upstream = match stream_result {
         Ok(s) => s,
-        Err(e) => return map_error(e),
+        Err(e) => return map_error(envelope, e),
     };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
@@ -218,7 +235,7 @@ fn sse_to_axum(ev: SseEvent) -> Event {
     e
 }
 
-fn map_error(e: Error) -> Response {
+pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
     let (status, type_str) = error_status_and_type(&e);
     // For server-internal classes (config / auth resolution), the
     // detailed Display message can leak diagnostic info to remote
@@ -238,7 +255,7 @@ fn map_error(e: Error) -> Response {
         }
         _ => e.to_string(),
     };
-    error_response(status, type_str, &public_message, type_str)
+    error_response(shape, status, type_str, &public_message, type_str)
 }
 
 fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
@@ -261,19 +278,61 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
         Error::Auth(_) => (StatusCode::SERVICE_UNAVAILABLE, "auth_error"),
         Error::Streaming(_) => (StatusCode::BAD_GATEWAY, "streaming_error"),
         Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
+        Error::NotImplemented(_, _) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
 }
 
-fn error_response(status: StatusCode, err_type: &str, message: &str, code: &str) -> Response {
-    let body: Value = json!({
-        "error": {
-            "message": message,
-            "type": err_type,
-            "code": code
-        }
-    });
+fn error_response(
+    shape: ErrorEnvelopeShape,
+    status: StatusCode,
+    err_type: &str,
+    message: &str,
+    code: &str,
+) -> Response {
+    let body: Value = match shape {
+        ErrorEnvelopeShape::OpenAi => json!({
+            "error": {
+                "message": message,
+                "type": err_type,
+                "code": code,
+            }
+        }),
+        ErrorEnvelopeShape::Anthropic => json!({
+            "type": "error",
+            "error": {
+                "type": anthropic_error_type(err_type, status),
+                "message": message,
+            }
+        }),
+    };
     (status, Json(body)).into_response()
+}
+
+/// Map routectl's internal `err_type` tag (the second field in
+/// `error_status_and_type`) to the wire string Anthropic clients
+/// expect on `error.type`. The Anthropic API uses a small fixed
+/// vocabulary -- `invalid_request_error`, `authentication_error`,
+/// `permission_error`, `not_found_error`, `rate_limit_error`,
+/// `api_error`, `overloaded_error`. routectl's tags are richer
+/// (e.g. `validation_error`, `payload_too_large`,
+/// `unsupported_media_type`); collapse them to the closest
+/// Anthropic equivalent so claude-code's per-`error.type` handling
+/// fires correctly. Status code is consulted for `upstream_error`
+/// to distinguish `overloaded_error` (503/529) from the generic
+/// `api_error` bucket.
+fn anthropic_error_type(err_type: &str, status: StatusCode) -> &'static str {
+    match (err_type, status.as_u16()) {
+        ("unknown_alias", _) | ("unknown_provider", _) => "not_found_error",
+        ("bad_request", _)
+        | ("validation_error", _)
+        | ("payload_too_large", _)
+        | ("unsupported_media_type", _) => "invalid_request_error",
+        ("auth_error", _) | ("authentication_error", _) => "authentication_error",
+        ("upstream_error", 503) | ("upstream_error", 529) => "overloaded_error",
+        ("upstream_error", _) | ("streaming_error", _) | ("bad_gateway", _) => "api_error",
+        (_, _) => "api_error",
+    }
 }
 
 /// RAII guard that emits a single `direction=egress` stream summary on
@@ -396,5 +455,122 @@ impl Drop for EgressStreamSummary {
             finish_reason,
             usage.as_ref(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pin the dispatch from `Error` -> envelope shape so the two
+    //! ingress dialects render the right error wire shape. The
+    //! integration tests in `crates/routectl-cli/tests/anthropic_ingress.rs`
+    //! cover the end-to-end path through axum; these tests pin the
+    //! pure mapping without needing a server.
+    use super::*;
+    use axum::body::to_bytes;
+    use routectl_core::Error;
+
+    async fn body_to_value(resp: Response) -> Value {
+        let bytes = to_bytes(resp.into_body(), 8 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn anthropic_envelope_unknown_alias_emits_not_found_error() {
+        // Arrange
+        let err = Error::UnknownAlias("nonesuch".into());
+
+        // Act
+        let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+        let status = resp.status();
+        let body = body_to_value(resp).await;
+
+        // Assert
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "not_found_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("nonesuch"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_envelope_validation_error_emits_invalid_request_error() {
+        // Arrange
+        let err = Error::Validation("max_tokens must be positive".into());
+
+        // Act
+        let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+        let status = resp.status();
+        let body = body_to_value(resp).await;
+
+        // Assert
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("max_tokens"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_envelope_5xx_emits_api_error_or_overloaded() {
+        // 503 -> overloaded_error
+        let err503 = Error::Upstream {
+            provider: "p".into(),
+            status: 503,
+            body: "service unavailable".into(),
+        };
+        let resp = map_error(ErrorEnvelopeShape::Anthropic, err503);
+        let status = resp.status();
+        let body = body_to_value(resp).await;
+        assert_eq!(status.as_u16(), 503);
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "overloaded_error");
+
+        // 529 -> overloaded_error
+        let err529 = Error::Upstream {
+            provider: "p".into(),
+            status: 529,
+            body: "anthropic overloaded".into(),
+        };
+        let resp = map_error(ErrorEnvelopeShape::Anthropic, err529);
+        assert_eq!(resp.status().as_u16(), 529);
+        let body = body_to_value(resp).await;
+        assert_eq!(body["error"]["type"], "overloaded_error");
+
+        // 502 -> api_error
+        let err502 = Error::Upstream {
+            provider: "p".into(),
+            status: 502,
+            body: "bad gateway".into(),
+        };
+        let resp = map_error(ErrorEnvelopeShape::Anthropic, err502);
+        assert_eq!(resp.status().as_u16(), 502);
+        let body = body_to_value(resp).await;
+        assert_eq!(body["error"]["type"], "api_error");
+    }
+
+    #[tokio::test]
+    async fn openai_envelope_unchanged_regression_pin() {
+        // Pin the legacy OpenAI envelope shape so a future refactor
+        // doesn't accidentally Anthropic-ify it. claude-code's
+        // chat-completions adapter parses the flat `{"error":{...}}`
+        // shape with `code` populated.
+        let err = Error::UnknownAlias("nonesuch".into());
+
+        let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+        let status = resp.status();
+        let body = body_to_value(resp).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.get("type").is_none(), "OpenAI envelope is flat");
+        assert_eq!(body["error"]["type"], "unknown_alias");
+        assert_eq!(body["error"]["code"], "unknown_alias");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("nonesuch"));
     }
 }
