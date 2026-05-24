@@ -88,12 +88,22 @@ impl OAuthFlow for Anthropic {
         http: &reqwest::Client,
         code: &str,
         verifier: &str,
+        state: &str,
         redirect_uri: &str,
     ) -> OAuthResult<TokenRecord> {
+        // claude.ai's `oauth-2025-04-20` token endpoint takes JSON
+        // (despite RFC 6749 prescribing form-urlencoded for OAuth 2.0
+        // token endpoints) and requires the CSRF `state` echoed in the
+        // body. Without `state` the upstream returns 400
+        // invalid_request_error: "Invalid request format". Confirmed
+        // against three independent OSS implementations
+        // (pacifio/cersei, achetronic/claude-oauth-proxy, querymt/
+        // anthropic-auth).
         let body = serde_json::json!({
             "grant_type": "authorization_code",
             "code": code,
             "code_verifier": verifier,
+            "state": state,
             "redirect_uri": redirect_uri,
             "client_id": CLIENT_ID,
         });
@@ -105,7 +115,7 @@ impl OAuthFlow for Anthropic {
             .send()
             .await
             .map_err(|e| OAuthError::Network(format!("token endpoint POST: {e}")))?;
-        decode_token_response(resp).await
+        decode_token_response(resp, TokenFlow::Exchange).await
     }
 
     async fn refresh_token(
@@ -113,6 +123,8 @@ impl OAuthFlow for Anthropic {
         http: &reqwest::Client,
         refresh_token: &str,
     ) -> OAuthResult<TokenRecord> {
+        // Same JSON content-type as exchange_code per RFC 6749 section 6
+        // (and the upstream's actual behavior on `oauth-2025-04-20`).
         let body = serde_json::json!({
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -126,7 +138,7 @@ impl OAuthFlow for Anthropic {
             .send()
             .await
             .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
-        decode_token_response(resp).await
+        decode_token_response(resp, TokenFlow::Refresh).await
     }
 }
 
@@ -162,15 +174,30 @@ pub(super) struct AccountField {
 
 /// Shared response decoder for both `exchange_code` and `refresh_token`.
 /// Three discrete steps (status check + parse + map) so each is small
-/// enough to keep in head with its failure modes.
-async fn decode_token_response(resp: reqwest::Response) -> OAuthResult<TokenRecord> {
+/// enough to keep in head with its failure modes. `flow` selects how
+/// `invalid_grant` is bucketed: a fresh login that hits invalid_grant
+/// means the auth code is bad (expired, already used, or PKCE/redirect
+/// mismatch); a refresh that hits invalid_grant means the refresh token
+/// is gone.
+async fn decode_token_response(
+    resp: reqwest::Response,
+    flow: TokenFlow,
+) -> OAuthResult<TokenRecord> {
     let status = resp.status();
     let url = resp.url().to_string();
     let body = read_capped_body(resp).await?;
 
-    check_status_error(status, &url, &body)?;
+    check_status_error(status, &url, &body, flow)?;
     let parsed = parse_token_response_json(&body)?;
     Ok(map_to_record(parsed))
+}
+
+/// Which token-endpoint call produced the response. Used by
+/// `check_status_error` to bucket `invalid_grant` correctly.
+#[derive(Clone, Copy)]
+pub(super) enum TokenFlow {
+    Exchange,
+    Refresh,
 }
 
 /// Pull the response body as UTF-8, capped at `MAX_TOKEN_BODY_BYTES`.
@@ -198,11 +225,22 @@ async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
 /// invalid_grant body fragment maps to `RefreshExpired` so the operator
 /// gets "re-run routectl login" guidance instead of a generic
 /// "endpoint error".
-fn check_status_error(status: reqwest::StatusCode, url: &str, body: &str) -> OAuthResult<()> {
+/// Map status + body to an `OAuthError`. On 4xx/5xx, branch on `flow`:
+/// a refresh that hits `invalid_grant` is `RefreshExpired` (operator
+/// guidance: re-run login). An exchange that hits the same is
+/// `TokenEndpoint` -- the auth code is the thing that died, and the
+/// upstream body explains how (expired / already used / PKCE
+/// mismatch / redirect_uri mismatch).
+fn check_status_error(
+    status: reqwest::StatusCode,
+    url: &str,
+    body: &str,
+    flow: TokenFlow,
+) -> OAuthResult<()> {
     if status.is_success() {
         return Ok(());
     }
-    if body.contains("invalid_grant") {
+    if matches!(flow, TokenFlow::Refresh) && body.contains("invalid_grant") {
         return Err(OAuthError::RefreshExpired("anthropic".into()));
     }
     Err(OAuthError::TokenEndpoint(format!(
@@ -338,11 +376,12 @@ mod tests {
     }
 
     #[test]
-    fn check_status_error_invalid_grant_buckets_to_refresh_expired() {
+    fn check_status_error_invalid_grant_on_refresh_buckets_to_refresh_expired() {
         let err = check_status_error(
             reqwest::StatusCode::BAD_REQUEST,
             "https://example.invalid/v1/oauth/token",
             r#"{"error":"invalid_grant"}"#,
+            TokenFlow::Refresh,
         )
         .unwrap_err();
         match err {
@@ -352,11 +391,34 @@ mod tests {
     }
 
     #[test]
+    fn check_status_error_invalid_grant_on_exchange_is_token_endpoint() {
+        // During login (exchange), invalid_grant means the auth code
+        // is the thing that died, not the refresh token. Operator
+        // needs the upstream's actual error body so they can tell
+        // expired-code from PKCE-mismatch from redirect_uri-mismatch.
+        let err = check_status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            "https://example.invalid/v1/oauth/token",
+            r#"{"error":"invalid_grant","error_description":"code expired"}"#,
+            TokenFlow::Exchange,
+        )
+        .unwrap_err();
+        match err {
+            OAuthError::TokenEndpoint(msg) => {
+                assert!(msg.contains("400"), "got: {msg}");
+                assert!(msg.contains("invalid_grant"), "got: {msg}");
+            }
+            other => panic!("expected TokenEndpoint, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn check_status_error_other_failure_is_token_endpoint() {
         let err = check_status_error(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             "https://example.invalid/v1/oauth/token",
             "boom",
+            TokenFlow::Exchange,
         )
         .unwrap_err();
         let msg = err.to_string();
