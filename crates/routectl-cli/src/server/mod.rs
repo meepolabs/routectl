@@ -10,8 +10,10 @@ use crate::handlers;
 
 pub mod auth;
 pub mod request_id;
+pub mod secrets;
 
 use auth::TokenSet;
+pub use secrets::CompositeStore;
 
 pub struct AppState {
     pub router: Arc<Router>,
@@ -151,7 +153,15 @@ async fn resolve_listener_tokens(config: &Config) -> Result<Arc<TokenSet>> {
 }
 
 async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
-    let secrets = MemoryStore::new();
+    // Composite resolver: oauth:// refs flow through OAuthStore (the
+    // routectl-managed credentials.json), everything else through
+    // MemoryStore. Built once per startup; cheap to clone
+    // (Arc-shared). Wrapped in `Arc<dyn SecretStore>` so the factory
+    // can share the same store handle into the per-provider
+    // `ManagedToken` for `oauth://` refs (lives across the whole
+    // server lifetime; refresh + 401 retry land in PR2).
+    let secrets: Arc<dyn routectl_auth::SecretStore> =
+        Arc::new(CompositeStore::open_default().await?);
     let mut router = Router::new(config.clone());
 
     // Surface incoherent `[bedrock]` config (e.g. populated
@@ -182,7 +192,7 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     // model. Failures are collected and only fatal when an `[aliases]`
     // chain references a model whose provider failed to build.
     let (resolved_models, failed) =
-        routectl_router::build_resolved_models(&config, &secrets, opts).await?;
+        routectl_router::build_resolved_models(&config, secrets, opts).await?;
     router.install_resolved_models(resolved_models);
 
     // Provider build failures are normally non-fatal (an operator

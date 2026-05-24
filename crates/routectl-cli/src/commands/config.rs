@@ -1,17 +1,19 @@
 //! `routectl config <subcommand>` -- check, show, example.
 
-use routectl_auth::{MemoryStore, SecretRef, SecretStore};
+use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{
     validate_alias_chain_targets, validate_bedrock_global_config, validate_reasoning_defaults,
     Config, ProviderEntry,
 };
 
+use crate::server::CompositeStore;
+
 /// Validate the loaded config: parse syntax (already done by main.rs), resolve
 /// every secret reference (env / file / literal), and report any aliases that
 /// reference unknown providers.
 pub async fn check(config: &Config) -> Result<()> {
-    let secrets = MemoryStore::new();
+    let secrets = CompositeStore::open_default().await?;
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 

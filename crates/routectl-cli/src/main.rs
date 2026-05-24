@@ -2,7 +2,10 @@
 //!
 //! Subcommands:
 //!   serve   Start the local OpenAI-compatible HTTP server.
-//!   login   Capture a consumer-session cookie (claude.ai, chatgpt.com).
+//!   login   Run the OAuth 2.0 PKCE flow against a managed provider;
+//!           tokens persist to ~/.config/routectl/credentials.json.
+//!   whoami  Print the OAuth provider state from the routectl
+//!           credentials store.
 //!   test    One-shot completion against an alias or model nickname.
 //!   config  Validate or print the resolved config.
 
@@ -42,12 +45,26 @@ enum Cmd {
         #[arg(long)]
         unsafe_public: bool,
     },
-    /// Capture a consumer-session cookie via webview popup.
+    /// Log into a managed OAuth provider (claude.ai for now; codex
+    /// in PR3). Spawns a local callback server, opens the browser to
+    /// the provider's auth URL, and persists tokens to
+    /// `~/.config/routectl/credentials.json`.
     Login {
         /// Which provider to log into.
-        #[arg(value_parser = ["claude", "chatgpt"])]
+        #[arg(value_parser = ["anthropic"])]
         provider: String,
+        /// Print the auth URL to stdout and read the redirect from
+        /// stdin instead of launching a browser. For SSH/headless.
+        #[arg(long)]
+        print_url: bool,
+        /// Override the local callback port. Default: random ephemeral.
+        #[arg(long)]
+        callback_port: Option<u16>,
     },
+    /// Print the OAuth provider state from the routectl credentials
+    /// store. Exits 0 when at least one provider is logged in,
+    /// non-zero otherwise.
+    Whoami,
     /// One-shot completion against an alias key or model nickname.
     Test {
         /// Alias key (`[aliases]` entry) or model nickname (`[models.X]` table key).
@@ -104,12 +121,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Cmd::Login { provider } => {
-            if let Err(e) = commands::login::run(&provider) {
+        Cmd::Login {
+            provider,
+            print_url,
+            callback_port,
+        } => {
+            if let Err(e) = commands::login::run(&provider, print_url, callback_port).await {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
         }
+        Cmd::Whoami => match commands::whoami::run().await {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        },
         Cmd::Test { target, prompt } => {
             let config = load_config(cli.config.as_deref())?;
             if let Err(e) = commands::test::run(config, &target, &prompt).await {

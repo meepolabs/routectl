@@ -27,7 +27,7 @@ mod tests {
     fn make_provider(base_url: &str) -> AnthropicApiProvider {
         let cfg = AnthropicApiConfig {
             id: "test-anthropic".into(),
-            api_key: "test-key".into(),
+            auth: std::sync::Arc::new(routectl_core::StaticToken::new("test-key")),
             base_url: base_url.to_string(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::ApiKey,
@@ -1192,7 +1192,7 @@ mod tests {
         // or set to oauth-2025-04-20 -- the provider should hit timeout.
         let cfg = AnthropicApiConfig {
             id: "oauth-test".into(),
-            api_key: "test-key".into(),
+            auth: std::sync::Arc::new(routectl_core::StaticToken::new("test-key")),
             base_url: mock_server.uri(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::OauthBearer,
@@ -1226,7 +1226,7 @@ mod tests {
 
         let cfg = AnthropicApiConfig {
             id: "apikey-test".into(),
-            api_key: "test-key".into(),
+            auth: std::sync::Arc::new(routectl_core::StaticToken::new("test-key")),
             base_url: mock_server.uri(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::ApiKey,
@@ -1253,7 +1253,7 @@ mod tests {
 
         let cfg = AnthropicApiConfig {
             id: "ua-test".into(),
-            api_key: "test-key".into(),
+            auth: std::sync::Arc::new(routectl_core::StaticToken::new("test-key")),
             base_url: mock_server.uri(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::ApiKey,

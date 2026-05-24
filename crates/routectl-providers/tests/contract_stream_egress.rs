@@ -50,7 +50,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn anthropic_api_provider(base_url: &str) -> AnthropicApiProvider {
     AnthropicApiProvider::new(AnthropicApiConfig {
         id: "anthropic-test".into(),
-        api_key: "test-key".into(),
+        auth: std::sync::Arc::new(routectl_core::StaticToken::new("test-key")),
         base_url: base_url.into(),
         anthropic_version: "2023-06-01".into(),
         auth_kind: AuthKind::ApiKey,

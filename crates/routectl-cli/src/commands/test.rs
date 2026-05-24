@@ -3,16 +3,21 @@
 
 use std::sync::Arc;
 
-use routectl_auth::MemoryStore;
 use routectl_core::{schema::MessageContent, ChatRequest, Error, Message, Result, Role};
 use routectl_router::{
     build_resolved_models, validate_alias_chain_targets, validate_bedrock_global_config,
     validate_reasoning_defaults, BuildOptions, Config, Router,
 };
 
+use crate::server::CompositeStore;
+
 pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     let config = Arc::new(config);
-    let secrets = MemoryStore::new();
+    // Same composite resolver as `serve`: oauth:// goes to OAuthStore,
+    // env/file/literal to MemoryStore. Lets `routectl test` exercise
+    // the same secret-resolution path the server uses.
+    let secrets: Arc<dyn routectl_auth::SecretStore> =
+        Arc::new(CompositeStore::open_default().await?);
     let mut router = Router::new(config.clone());
 
     // Surface incoherent `[bedrock]` config (e.g. populated
@@ -46,7 +51,7 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     // v0.6.0: build per-model resolved providers from the `[models]`
     // table once. Failures only become fatal when the requested
     // `target` references a model whose provider couldn't build.
-    let (resolved_models, failed) = build_resolved_models(&config, &secrets, opts).await?;
+    let (resolved_models, failed) = build_resolved_models(&config, secrets, opts).await?;
     router.install_resolved_models(resolved_models);
 
     // Mirror serve's "fail loudly when a referenced model can't

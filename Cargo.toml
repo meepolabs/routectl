@@ -65,6 +65,12 @@ tokio-stream = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 
+# OAuth-adjacent crypto + secret hygiene
+sha2 = "0.11"
+rand = "0.9"
+subtle = "2"
+zeroize = { version = "1", features = ["derive"] }
+
 # Test deps (used in dev-dependencies of individual crates)
 wiremock = "0.6"
 insta = { version = "1", features = ["yaml", "json"] }
