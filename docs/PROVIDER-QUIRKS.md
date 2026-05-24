@@ -17,7 +17,7 @@ doc. If it 4xxs or behaves weirdly, find the matching row.
 | **DeepSeek v3 / older vLLM** | (default `history_reasoning = "auto"` strips for you) |
 | **NVIDIA NIM hosting DeepSeek** | callers must send `reasoning_effort = "high"` per request (the operator-side `default_extras` knob is deferred -- callers can still set effort via wire `reasoning.effort`) |
 | **NIM cold-start streaming** | `[providers.X] stream_first_byte_timeout_ms = 180000` (3 min) |
-| **Anthropic + 1M-context beta** | `[providers.X] extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }` |
+| **Anthropic + 1M-context beta** | `[providers.X] header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }` |
 | **OAuth bearer to Anthropic** | `[providers.X] auth_kind = "oauth-bearer"` + the matching beta header |
 
 ## Per-model config
@@ -133,7 +133,7 @@ Default config works for Claude 4.5/4.6 / Haiku 4.5. The two times you need extr
 [providers.anthropic]
 kind = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
-extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }
+header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }
 ```
 
 **OAuth bearer auth** (Claude Code subscription tokens, `sk-ant-oat01-...`):
@@ -143,7 +143,7 @@ extra_headers = { "anthropic-beta" = "context-1m-2025-08-07" }
 kind = "anthropic-api"
 api_key_ref = "file:///path/to/oauth-token"
 auth_kind = "oauth-bearer"
-extra_headers = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
+header_extras = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
 ```
 
 routectl does not auto-inject beta gates -- declare the ones you need.
@@ -240,7 +240,7 @@ kind = "openai-compat"
 base_url = "https://openrouter.ai/api/v1"
 api_key_ref = "env://OPENROUTER_API_KEY"
 reasoning_dialect = "openrouter"
-extra_headers = {
+header_extras = {
   "HTTP-Referer" = "https://github.com/your/project",
   "X-Title" = "your-project-name"
 }
