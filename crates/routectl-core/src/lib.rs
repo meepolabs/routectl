@@ -41,7 +41,7 @@ pub use reserved::is_canonical_request_key;
 pub use schema::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Message, MessageContent,
     Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, Role, RoutectlInternal,
-    Usage, UsageDelta,
+    TokenCount, Usage, UsageDelta,
 };
 pub use system_content::{SystemBlock, SystemContent};
 pub use token_source::{StaticToken, TokenSource};

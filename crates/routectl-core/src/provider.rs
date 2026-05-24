@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde_json::Value;
 
-use crate::error::Result;
-use crate::schema::{ChatChunk, ChatRequest, ChatResponse};
+use crate::error::{Error, Result};
+use crate::schema::{ChatChunk, ChatRequest, ChatResponse, TokenCount};
 
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -43,4 +43,23 @@ pub trait Provider: Send + Sync {
 
     /// Streaming completion. Each yielded chunk is already normalized.
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>>;
+
+    /// Probe call returning the token count for a request without
+    /// invoking model inference. claude-code uses this for context-budget
+    /// display.
+    ///
+    /// Default impl returns `Error::NotImplemented` so non-Anthropic
+    /// providers don't need explicit overrides; the router treats this
+    /// as a hard 501 rather than retrying or falling back. Anthropic's
+    /// `AnthropicApiProvider` overrides this to call
+    /// `POST /v1/messages/count_tokens`.
+    ///
+    /// Wire reference (Anthropic):
+    /// <https://docs.anthropic.com/en/api/messages-count-tokens>
+    async fn count_tokens(&self, _req: ChatRequest) -> Result<TokenCount> {
+        Err(Error::NotImplemented(
+            self.id().to_string(),
+            "count_tokens".into(),
+        ))
+    }
 }

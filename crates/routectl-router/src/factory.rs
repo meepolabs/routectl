@@ -246,6 +246,7 @@ async fn build_provider_inner(
             payload_extras: _,
             user_agent,
             allowed_betas,
+            forward_client_headers,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -272,6 +273,7 @@ async fn build_provider_inner(
                     .as_ref()
                     .and_then(|o| o.adaptive_thinking),
                 allowed_betas: allowed_betas.clone(),
+                forward_client_headers: forward_client_headers.clone(),
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }

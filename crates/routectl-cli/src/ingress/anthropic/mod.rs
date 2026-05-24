@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 
-use super::{IngressAdapter, IngressStreamState, SseEvent};
+use super::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
 
 /// The format tag the canonical layer uses for Anthropic-shape
 /// reasoning details (from the Anthropic-API egress on the upstream
@@ -188,6 +188,10 @@ fn openai_finish_to_anthropic_stop(fr: &str) -> &str {
 impl IngressAdapter for AnthropicIngress {
     fn id(&self) -> &str {
         "anthropic"
+    }
+
+    fn error_envelope_shape(&self) -> ErrorEnvelopeShape {
+        ErrorEnvelopeShape::Anthropic
     }
 
     fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {

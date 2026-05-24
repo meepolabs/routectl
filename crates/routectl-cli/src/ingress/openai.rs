@@ -23,7 +23,7 @@ use routectl_core::{
 };
 use serde_json::{Map, Value};
 
-use super::{read_alias_header, IngressAdapter, IngressStreamState, SseEvent};
+use super::{read_alias_header, ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
 
 const DONE_SENTINEL: &str = "[DONE]";
 
@@ -42,6 +42,10 @@ impl IngressStreamState for OpenAiStreamState {
 impl IngressAdapter for OpenAiIngress {
     fn id(&self) -> &str {
         "openai"
+    }
+
+    fn error_envelope_shape(&self) -> ErrorEnvelopeShape {
+        ErrorEnvelopeShape::OpenAi
     }
 
     fn parse_request(&self, headers: &HeaderMap, body: Value) -> Result<ChatRequest> {
