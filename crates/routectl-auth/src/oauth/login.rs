@@ -90,7 +90,12 @@ async fn run_browser(
     let pkce = Pkce::generate();
 
     let bind = bind_callback_listener(requested_port).await?;
-    let redirect_uri = format!("http://127.0.0.1:{}{}", bind.port, flow.callback_path());
+    // Bind on 127.0.0.1 (no DNS, no IPv6 races) but advertise the
+    // redirect_uri using `localhost` because claude.ai's allowed
+    // redirect URIs for the public client are registered against
+    // `localhost`, not `127.0.0.1`. Browsers resolve `localhost`
+    // back to 127.0.0.1, so the callback still lands on our listener.
+    let redirect_uri = format!("http://localhost:{}{}", bind.port, flow.callback_path());
 
     let (code_rx, server_handle) =
         spawn_callback_server(flow, bind.listener, pkce.state().to_string());
@@ -120,7 +125,13 @@ async fn run_browser(
 
     let code = cb.code?;
     let record = flow
-        .exchange_code(store.http(), &code, pkce.verifier(), &redirect_uri)
+        .exchange_code(
+            store.http(),
+            &code,
+            pkce.verifier(),
+            pkce.state(),
+            &redirect_uri,
+        )
         .await?;
     store
         .write_record(flow.provider_id(), record.clone())
@@ -226,7 +237,13 @@ async fn run_print_url(flow: &'static dyn OAuthFlow, store: &OAuthStore) -> OAut
     }
 
     let record = flow
-        .exchange_code(store.http(), code, pkce.verifier(), &redirect_uri)
+        .exchange_code(
+            store.http(),
+            code,
+            pkce.verifier(),
+            pkce.state(),
+            &redirect_uri,
+        )
         .await?;
     store
         .write_record(flow.provider_id(), record.clone())
