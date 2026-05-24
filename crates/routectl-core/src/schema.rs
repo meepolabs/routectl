@@ -145,6 +145,16 @@ pub struct RoutectlInternal {
     /// dispatch layer. Keeping it out of `header_extras` here prevents
     /// double-handling by the Anthropic-API egress.
     pub header_extras: Option<std::collections::BTreeMap<String, String>>,
+    /// Inbound `X-Claude-Code-*` headers captured by the Anthropic
+    /// ingress (any header whose name, case-insensitive, starts with
+    /// `x-claude-code-`). The Anthropic-API egress merges these into
+    /// the outbound request for gateway cost attribution per the
+    /// llm-gateway docs at https://code.claude.com/docs/en/llm-gateway.
+    /// Other egresses ignore this. Order-preserving so multiple
+    /// `X-Claude-Code-Agent-Id` headers (if a future shape ships them)
+    /// are sent in inbound order. Empty when no matching headers were
+    /// supplied; non-Anthropic ingresses (openai-compat) leave it empty.
+    pub claude_code_headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +324,24 @@ pub struct CacheCreation {
     pub ephemeral_5m_input_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_1h_input_tokens: Option<u32>,
+}
+
+/// Result of a `count_tokens` probe call. Mirrors Anthropic's
+/// `/v1/messages/count_tokens` response. Currently `input_tokens` is
+/// the only required field; future cache breakdown fields (cache
+/// creation/read tokens) ride in `extras` so the canonical can grow
+/// without breaking serialization for existing callers.
+///
+/// Wire reference: <https://docs.anthropic.com/en/api/messages-count-tokens>
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenCount {
+    pub input_tokens: u32,
+    /// Forward-compat catchall. Anthropic's response carries
+    /// `cache_creation_input_tokens` and `cache_read_input_tokens`
+    /// in some experimental beta surfaces; future adds land here
+    /// and serialize back out alongside the typed field.
+    #[serde(default, flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extras: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Streaming SSE chunk (delta).

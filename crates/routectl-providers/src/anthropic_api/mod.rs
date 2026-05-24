@@ -22,7 +22,7 @@ use serde_json::Value;
 use routectl_core::{
     debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
     trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
-    StaticToken, TokenSource,
+    StaticToken, TokenCount, TokenSource,
 };
 
 pub(crate) mod parts;
@@ -95,6 +95,18 @@ pub struct AnthropicApiConfig {
     /// multi-tenant or API-gateway deployments can constrain which
     /// betas authenticated clients can opt into.
     pub allowed_betas: Vec<String>,
+    /// Strict allowlist of inbound `x-claude-code-*` header names the
+    /// egress is permitted to forward upstream. The Anthropic ingress
+    /// greedy-captures the whole namespace into
+    /// `req.routectl_internal.claude_code_headers`; this list is the
+    /// operator's filter to pick which captured names actually go to
+    /// api.anthropic.com. Empty (default) drops every captured header --
+    /// secure-by-default for new providers. Names match
+    /// case-insensitively. Values not on the list are dropped at the
+    /// egress for defense-in-depth (the ingress capture remains
+    /// namespace-bounded so debug surface stays useful even when the
+    /// allowlist is empty).
+    pub forward_client_headers: Vec<String>,
 }
 
 impl std::fmt::Debug for AnthropicApiConfig {
@@ -112,6 +124,10 @@ impl std::fmt::Debug for AnthropicApiConfig {
             .field("user_agent", &self.user_agent)
             .field("adaptive_thinking", &self.adaptive_thinking)
             .field("allowed_betas_len", &self.allowed_betas.len())
+            .field(
+                "forward_client_headers",
+                &format!("[{} entries]", self.forward_client_headers.len()),
+            )
             .finish()
     }
 }
@@ -139,6 +155,7 @@ impl AnthropicApiConfig {
             user_agent: None,
             adaptive_thinking: None,
             allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
         }
     }
 }
@@ -156,6 +173,13 @@ impl AnthropicApiProvider {
 
     fn messages_url(&self) -> String {
         format!("{}/v1/messages", self.cfg.base_url.trim_end_matches('/'))
+    }
+
+    fn count_tokens_url(&self) -> String {
+        format!(
+            "{}/v1/messages/count_tokens",
+            self.cfg.base_url.trim_end_matches('/')
+        )
     }
 
     fn build_headers(
@@ -205,6 +229,24 @@ impl AnthropicApiProvider {
             rb = rb.header("anthropic-beta", merged_betas.join(","));
         }
 
+        // Build a per-request HeaderMap for `header_extras` and
+        // forwarded client headers. We want one collision policy:
+        // FORWARDED CLIENT HEADERS WIN OVER `header_extras` on the
+        // same lowercase name. Rationale: the operator opted into
+        // client passthrough for that specific name via
+        // `forward_client_headers`; the client value is more specific
+        // than the operator's static `header_extras` default.
+        //
+        // reqwest's `RequestBuilder::header()` APPENDS rather than
+        // overrides on collision (see `header_sensitive` ->
+        // `headers_mut().append(...)` in reqwest 0.12). To express
+        // "client wins", we build a HeaderMap explicitly: insert
+        // header_extras first, then INSERT (overriding) the client
+        // headers on top, then call `rb.headers(map)` ONCE, which
+        // uses `replace_headers` semantics (entries in `src` replace
+        // entries in `dst` keyed by the same name).
+        let mut header_map = reqwest::header::HeaderMap::new();
+
         // Prefer the router-composed map for non-beta headers; fall
         // back to `self.cfg.header_extras` for library consumers.
         let source = crate::http_client::effective_header_extras(
@@ -229,10 +271,67 @@ impl AnthropicApiProvider {
                 );
                 continue;
             }
-            rb = rb.header(k.as_str(), v.as_str());
+            insert_header(&mut header_map, &self.cfg.id, k, v);
+        }
+
+        // Forward inbound X-Claude-Code-* headers per the operator's
+        // allowlist. The ingress greedy-captures the whole namespace;
+        // this step filters down to operator-blessed names. Empty list
+        // = drop all, which is the secure-by-default posture for new
+        // providers. Client values OVERRIDE any header_extras entry
+        // with the same name (see comment above).
+        if !self.cfg.forward_client_headers.is_empty() {
+            for (name, val) in &req.routectl_internal.claude_code_headers {
+                let lc = name.to_ascii_lowercase();
+                if self
+                    .cfg
+                    .forward_client_headers
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(&lc))
+                {
+                    insert_header(&mut header_map, &self.cfg.id, name.as_str(), val.as_str());
+                }
+            }
+        }
+
+        if !header_map.is_empty() {
+            rb = rb.headers(header_map);
         }
         rb
     }
+}
+
+/// Insert a header name+value into a `HeaderMap`, replacing any
+/// existing entry with the same (case-insensitive) name. Skips the
+/// entry with a WARN if either the name or value cannot be parsed
+/// into the http-crate types -- an invalid value would otherwise
+/// poison `RequestBuilder::headers()`'s merge.
+fn insert_header(map: &mut reqwest::header::HeaderMap, provider_id: &str, name: &str, value: &str) {
+    let header_name = match reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_id,
+                header = %name,
+                error = %e,
+                "skipping malformed header name",
+            );
+            return;
+        }
+    };
+    let header_value = match reqwest::header::HeaderValue::from_str(value) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_id,
+                header = %name,
+                error = %e,
+                "skipping malformed header value",
+            );
+            return;
+        }
+    };
+    map.insert(header_name, header_value);
 }
 
 #[async_trait]
@@ -310,19 +409,7 @@ impl Provider for AnthropicApiProvider {
         // grepping `body_excerpt=...` get a consistent shape across
         // providers.
         if status >= 400 {
-            let body_text = resp.text().await.unwrap_or_default();
-            // Emit the FULL upstream error body at debug level so
-            // triage doesn't have to reproduce. The 200B WARN
-            // excerpt below stays unchanged for `routectl-warn.log`
-            // scannability.
-            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
-            let msg = serde_json::from_str::<Value>(&body_text)
-                .ok()
-                .as_ref()
-                .and_then(|v| v.pointer("/error/message"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| sanitize_upstream_body(&body_text));
+            let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
             // Extend the auth-only WARN to all 4xx/5xx so an operator
             // never has to guess WHY a request failed. Auth failures
             // keep the auth_kind field for parity with the documented
@@ -344,7 +431,7 @@ impl Provider for AnthropicApiProvider {
                     "anthropic upstream error",
                 );
             }
-            return Err(Error::upstream(&self.cfg.id, status, msg));
+            return Err(err);
         }
 
         let raw_body: Value = resp
@@ -385,16 +472,9 @@ impl Provider for AnthropicApiProvider {
         let status = resp.status().as_u16();
         if status >= 400 {
             // Same text-first-then-opportunistic-JSON pattern as
-            // `complete()` -- see comment there.
-            let body_text = resp.text().await.unwrap_or_default();
-            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
-            let msg = serde_json::from_str::<Value>(&body_text)
-                .ok()
-                .as_ref()
-                .and_then(|v| v.pointer("/error/message"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| sanitize_upstream_body(&body_text));
+            // `complete()` -- see comment there. Helper extracted at
+            // `read_anthropic_error`.
+            let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
@@ -411,7 +491,7 @@ impl Provider for AnthropicApiProvider {
                     "anthropic upstream error",
                 );
             }
-            return Err(Error::upstream(&self.cfg.id, status, msg));
+            return Err(err);
         }
 
         let provider_id = self.cfg.id.clone();
@@ -474,5 +554,395 @@ impl Provider for AnthropicApiProvider {
             PROVIDER_KIND,
             self.cfg.id.clone(),
         ))
+    }
+
+    /// `POST /v1/messages/count_tokens` -- a probe call that returns
+    /// the input-token count for a request without invoking model
+    /// inference. claude-code uses this for context-budget display.
+    /// Wire reference:
+    /// <https://docs.anthropic.com/en/api/messages-count-tokens>
+    ///
+    /// Body assembly: `normalize_request` produces a fully-built
+    /// `/v1/messages` body. We then BUILD the count_tokens body from
+    /// scratch using only the allowlist of fields the count_tokens
+    /// endpoint accepts (per the Anthropic docs URL above):
+    /// `model`, `messages`, `system`, `tools`, `tool_choice`,
+    /// `thinking`, `mcp_servers`, `metadata`. This is more defensive
+    /// than strip-by-blocklist: a future addition to
+    /// `normalize_request` (e.g. `output_config.format`, which IS
+    /// rejected by `/v1/messages/count_tokens`) won't accidentally
+    /// leak into count_tokens.
+    ///
+    /// Headers are identical to `complete()` (anthropic-beta union,
+    /// anthropic-version, header_extras, X-Claude-Code-* allowlist
+    /// filter, auth) -- so a count_tokens call observes the same
+    /// merged beta surface as the messages endpoint.
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+        let normalized = self.normalize_request(&req)?;
+        let body = build_count_tokens_body(&normalized);
+
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
+
+        let token = self.cfg.auth.token().await?;
+
+        let resp = self
+            .build_headers(self.client.post(self.count_tokens_url()), &req, &token)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            // Same text-first-then-opportunistic-JSON pattern as
+            // `complete()` -- a non-JSON 502/503 from a misconfigured
+            // proxy must not collapse to an opaque serde error.
+            // Helper extracted at `read_anthropic_error`.
+            let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
+            // Sanitize before tracing: the upstream may return
+            // attacker-controlled bytes (CRLF, control chars, very
+            // long lines) and `body_excerpt = %msg` would otherwise
+            // emit them verbatim into operator logs. The pre-existing
+            // `complete()` and `stream()` paths have the same
+            // un-sanitized pattern; a separate fix tracks updating
+            // those.
+            let safe_excerpt = sanitize_for_log(&msg);
+            if status == 401 || status == 403 {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    auth_kind = ?self.cfg.auth_kind,
+                    body_excerpt = %safe_excerpt,
+                    "anthropic count_tokens upstream auth failed",
+                );
+            } else {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    status,
+                    body_excerpt = %safe_excerpt,
+                    "anthropic count_tokens upstream error",
+                );
+            }
+            return Err(err);
+        }
+
+        let raw_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
+        trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
+        let token_count: TokenCount = serde_json::from_value(raw_body).map_err(|e| {
+            Error::normalize_response(&self.cfg.id, format!("count_tokens response parse: {e}"))
+        })?;
+        Ok(token_count)
+    }
+}
+
+/// Read a 4xx/5xx upstream response body and build a routectl
+/// `Error::Upstream` from it. Encapsulates the
+/// "text-first-then-opportunistic-JSON" pattern shared by
+/// `complete()`, `stream()`, and `count_tokens()`: a non-JSON
+/// upstream response (HTML 502 from a misconfigured proxy, a CDN
+/// cleartext error page, plain-text 529) must not collapse to an
+/// opaque serde error. Returns both the parsed message (for the
+/// caller's `body_excerpt` log) and the constructed `Error::Upstream`.
+async fn read_anthropic_error(
+    provider_id: &str,
+    status: u16,
+    resp: reqwest::Response,
+) -> (String, Error) {
+    let body_text = resp.text().await.unwrap_or_default();
+    // Emit the FULL upstream error body at debug level so triage
+    // doesn't have to reproduce. The caller's WARN excerpt stays
+    // unchanged for `routectl-warn.log` scannability.
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, &body_text);
+    let msg = serde_json::from_str::<Value>(&body_text)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.pointer("/error/message"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| sanitize_upstream_body(&body_text));
+    let err = Error::upstream(provider_id, status, msg.clone());
+    (msg, err)
+}
+
+/// Build the body for `POST /v1/messages/count_tokens` from the
+/// already-normalized `/v1/messages` body. Only the explicit allowlist
+/// of fields the count_tokens endpoint accepts (per
+/// <https://docs.anthropic.com/en/api/messages-count-tokens>) gets
+/// copied through:
+/// `model`, `messages`, `system`, `tools`, `tool_choice`, `thinking`,
+/// `mcp_servers`, `metadata`.
+///
+/// This is more defensive than strip-by-blocklist: future additions
+/// to `normalize_request` (e.g. `output_config.format`, which IS
+/// rejected by some Anthropic endpoints) won't accidentally leak
+/// into count_tokens.
+fn build_count_tokens_body(normalized: &Value) -> Value {
+    const ALLOWED: &[&str] = &[
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "tool_choice",
+        "thinking",
+        "mcp_servers",
+        "metadata",
+    ];
+    let mut out = serde_json::Map::new();
+    let Some(src) = normalized.as_object() else {
+        return Value::Object(out);
+    };
+    for &k in ALLOWED {
+        if let Some(v) = src.get(k) {
+            if !v.is_null() {
+                out.insert(k.to_string(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Allowlist of body fields accepted by Anthropic's
+    /// `/v1/messages/count_tokens` endpoint. Pulled from
+    /// <https://docs.anthropic.com/en/api/messages-count-tokens>.
+    /// Pinning the list as a const lets the test assert that no
+    /// extra fields leak into the count_tokens body even when
+    /// `normalize_request` is extended.
+    const COUNT_TOKENS_ALLOWED_FIELDS: &[&str] = &[
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "tool_choice",
+        "thinking",
+        "mcp_servers",
+        "metadata",
+    ];
+
+    /// Pin: `build_count_tokens_body` copies ONLY the allowlist
+    /// fields, even when `normalize_request` produces extra keys.
+    /// Without this contract, a future field added to
+    /// `normalize_request` (e.g. `output_config`) silently flows
+    /// into `/v1/messages/count_tokens` and the upstream 400s with
+    /// `Extra inputs are not permitted`.
+    #[test]
+    fn build_count_tokens_body_only_emits_allowlist_fields() {
+        let normalized = serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "you are helpful",
+            "tools": [{"name": "calculator", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "auto"},
+            "thinking": {"type": "enabled", "budget_tokens": 1024},
+            "mcp_servers": [{"name": "s1", "url": "https://mcp.example.com"}],
+            "metadata": {"user_id": "u_42"},
+            // Fields below MUST NOT reach the upstream count_tokens body:
+            "stream": true,
+            "max_tokens": 4096,
+            "anthropic_beta": ["context-1m-2025-08-07"],
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "stop_sequences": ["</block>"],
+            "output_config": {"format": {"type": "json_schema"}},
+        });
+
+        let body = build_count_tokens_body(&normalized);
+        let obj = body.as_object().expect("count_tokens body must be object");
+        for k in obj.keys() {
+            assert!(
+                COUNT_TOKENS_ALLOWED_FIELDS.contains(&k.as_str()),
+                "count_tokens body must only emit allowlist fields, found: {k}"
+            );
+        }
+        // Allowlist fields that ARE present in the input must round-trip.
+        assert_eq!(obj["model"], "claude-haiku-4-5");
+        assert_eq!(obj["system"], "you are helpful");
+        assert_eq!(obj["tools"][0]["name"], "calculator");
+        assert_eq!(obj["thinking"]["type"], "enabled");
+        assert_eq!(obj["metadata"]["user_id"], "u_42");
+    }
+
+    /// Allowlist fields not present on the input must NOT be synthesized
+    /// (e.g. `mcp_servers: null`); the helper only forwards keys that
+    /// existed and were non-null in the normalized body.
+    #[test]
+    fn build_count_tokens_body_skips_absent_allowlist_fields() {
+        let normalized = serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let body = build_count_tokens_body(&normalized);
+        let obj = body.as_object().expect("body is object");
+        assert!(obj.contains_key("model"));
+        assert!(obj.contains_key("messages"));
+        assert!(!obj.contains_key("system"));
+        assert!(!obj.contains_key("tools"));
+        assert!(!obj.contains_key("tool_choice"));
+        assert!(!obj.contains_key("thinking"));
+        assert!(!obj.contains_key("mcp_servers"));
+        assert!(!obj.contains_key("metadata"));
+    }
+
+    /// Drive `build_headers` end-to-end and return the assembled
+    /// outbound HTTP header names (lowercased) so allowlist tests can
+    /// assert which `x-claude-code-*` entries reached the wire.
+    /// Building the `RequestBuilder` does no I/O; `.build()` just
+    /// constructs the `reqwest::Request` object.
+    fn outbound_header_names(provider: &AnthropicApiProvider, req: &ChatRequest) -> Vec<String> {
+        let client = reqwest::Client::new();
+        let rb = client.post("http://127.0.0.1/test");
+        let rb = provider.build_headers(rb, req, "test-token");
+        let request = rb.build().expect("build outbound request");
+        request
+            .headers()
+            .iter()
+            .map(|(name, _)| name.as_str().to_ascii_lowercase())
+            .collect()
+    }
+
+    fn cfg_with_allowlist(forward_client_headers: Vec<String>) -> AnthropicApiConfig {
+        AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("test-key")),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::ApiKey,
+            header_extras: Vec::new(),
+            user_agent: None,
+            adaptive_thinking: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers,
+        }
+    }
+
+    fn req_with_claude_code_headers(pairs: Vec<(&str, &str)>) -> ChatRequest {
+        let mut req = ChatRequest::default();
+        // RoutectlInternal is `#[non_exhaustive]`, so we mutate the
+        // single field we need on the default-constructed value rather
+        // than using a struct expression with `..default()`.
+        req.routectl_internal.claude_code_headers = pairs
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        req
+    }
+
+    /// Empty allowlist drops every captured `x-claude-code-*` header.
+    /// Secure-by-default: a fresh provider with no operator opt-in MUST
+    /// NOT leak inbound attribution headers to api.anthropic.com.
+    #[test]
+    fn forward_client_headers_empty_drops_everything() {
+        let cfg = cfg_with_allowlist(Vec::new());
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = req_with_claude_code_headers(vec![
+            ("x-claude-code-session-id", "abc"),
+            ("x-claude-code-agent-id", "xyz"),
+        ]);
+        let names = outbound_header_names(&provider, &req);
+        assert!(
+            !names.iter().any(|n| n.starts_with("x-claude-code-")),
+            "empty allowlist must drop every captured header; got: {names:?}"
+        );
+    }
+
+    /// Names on the allowlist pass through verbatim (case preserved as
+    /// sent by the client). The egress emits the inbound name string,
+    /// not a normalized version.
+    #[test]
+    fn forward_client_headers_listed_names_pass_through() {
+        let cfg = cfg_with_allowlist(vec!["x-claude-code-session-id".into()]);
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+        let names = outbound_header_names(&provider, &req);
+        assert!(
+            names.iter().any(|n| n == "x-claude-code-session-id"),
+            "allowlisted header must reach outbound; got: {names:?}"
+        );
+    }
+
+    /// Only allowlisted names reach outbound; unlisted captured headers
+    /// are dropped at the egress. This is the core defense-in-depth
+    /// posture: inbound capture is namespace-bounded, but the egress
+    /// owns the final filter.
+    #[test]
+    fn forward_client_headers_unlisted_names_dropped() {
+        let cfg = cfg_with_allowlist(vec!["x-claude-code-session-id".into()]);
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = req_with_claude_code_headers(vec![
+            ("x-claude-code-session-id", "sid-42"),
+            ("x-claude-code-agent-id", "aid-7"),
+        ]);
+        let names = outbound_header_names(&provider, &req);
+        assert!(
+            names.iter().any(|n| n == "x-claude-code-session-id"),
+            "session-id must pass through; got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "x-claude-code-agent-id"),
+            "unlisted agent-id must be dropped; got: {names:?}"
+        );
+    }
+
+    /// Drive `build_headers` end-to-end and return the value of the
+    /// requested header on the assembled outbound request, or `None`
+    /// if the header is absent.
+    fn outbound_header_value(
+        provider: &AnthropicApiProvider,
+        req: &ChatRequest,
+        name: &str,
+    ) -> Option<String> {
+        let client = reqwest::Client::new();
+        let rb = client.post("http://127.0.0.1/test");
+        let rb = provider.build_headers(rb, req, "test-token");
+        let request = rb.build().expect("build outbound request");
+        request
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    }
+
+    /// Header collision policy: forwarded client headers WIN over
+    /// `header_extras` for the same lowercase name. Rationale: the
+    /// operator opted into client passthrough for that specific name
+    /// via `forward_client_headers`; the client value is more
+    /// specific than the operator's static `header_extras` default.
+    /// Pre-fix the egress called `RequestBuilder::header()` per entry
+    /// which APPENDS; the upstream then saw both values. With the
+    /// HeaderMap+`headers()` rebuild, the policy is explicit.
+    #[test]
+    fn client_forwarded_headers_override_header_extras_on_collision() {
+        let cfg = AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("test-key")),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::ApiKey,
+            header_extras: vec![(
+                "x-claude-code-session-id".into(),
+                "from-operator-config".into(),
+            )],
+            user_agent: None,
+            adaptive_thinking: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers: vec!["x-claude-code-session-id".into()],
+        };
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "from-client")]);
+        let value = outbound_header_value(&provider, &req, "x-claude-code-session-id")
+            .expect("session-id header missing");
+        assert_eq!(
+            value, "from-client",
+            "client-forwarded header must override header_extras on collision; got {value}"
+        );
     }
 }

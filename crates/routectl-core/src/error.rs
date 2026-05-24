@@ -39,6 +39,18 @@ pub enum Error {
     #[error("streaming: {0}")]
     Streaming(String),
 
+    /// The provider does not implement an optional `Provider` trait
+    /// method (e.g. `count_tokens`). Producers: the default trait
+    /// impl on `Provider` for any provider that hasn't overridden the
+    /// method. Surfaces as 501 Not Implemented at the HTTP boundary
+    /// and is NEVER retried (the next retry would land on the same
+    /// provider with the same default impl). Distinct from `Validation`
+    /// (caller error) and `Upstream` (request reached a provider but
+    /// the upstream rejected it) -- this signals "routectl can't run
+    /// this operation against this provider at all".
+    #[error("not implemented for provider `{0}`: {1}")]
+    NotImplemented(String, String),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 

@@ -20,6 +20,8 @@ use axum::response::{IntoResponse, Json, Response};
 use serde_json::json;
 use subtle::ConstantTimeEq;
 
+use crate::ingress::ErrorEnvelopeShape;
+
 /// Set of valid tokens. `None` (or empty) means "no auth required".
 ///
 /// Token comparison uses `subtle::ConstantTimeEq` so an attacker
@@ -131,22 +133,62 @@ pub async fn auth_layer(
         // token". Never log the supplied value or any prefix --
         // even a few bytes of a leaked secret materially helps an
         // attacker.
+        let path = req.uri().path();
         let has_x_api_key = req.headers().contains_key("x-api-key");
         let has_bearer = has_bearer_header(req.headers());
         tracing::warn!(
-            route = %req.uri().path(),
+            route = %path,
             has_x_api_key,
             has_bearer,
             "listener auth rejected",
         );
-        let body = json!({
+        // Path-aware envelope: the auth layer fires BEFORE any
+        // ingress is selected, but the inbound path tells us which
+        // dialect the caller speaks. claude-code parses Anthropic
+        // shape on /v1/messages*; OpenAI SDKs parse OpenAI shape on
+        // /v1/chat/completions*. Anything else stays on the OpenAI
+        // shape (the historical default; covers /v1/models and
+        // future routes).
+        let shape = envelope_shape_for_path(path);
+        unauthorized_response(shape)
+    }
+}
+
+/// Pick the error-envelope shape based on the inbound URL path.
+/// Exact-match against the routes that speak Anthropic Messages today;
+/// everything else (incl. `/v1/chat/completions`, `/v1/models`, future
+/// routes, and any same-prefix attacker path like
+/// `/v1/messages-x`) gets the OpenAI shape. New Anthropic routes MUST
+/// be added here explicitly -- prefix matching would silently catch
+/// non-Messages paths.
+fn envelope_shape_for_path(path: &str) -> ErrorEnvelopeShape {
+    match path {
+        "/v1/messages" | "/v1/messages/count_tokens" => ErrorEnvelopeShape::Anthropic,
+        _ => ErrorEnvelopeShape::OpenAi,
+    }
+}
+
+/// Render a 401 unauthorized response with the dialect-specific
+/// envelope. The auth layer fires before any handler so we render
+/// the envelope inline rather than reusing `ingress_handle::map_error`
+/// (no `Error` value to map; just a fixed authentication error).
+fn unauthorized_response(shape: ErrorEnvelopeShape) -> Response {
+    let body = match shape {
+        ErrorEnvelopeShape::OpenAi => json!({
             "error": {
                 "type": "authentication_error",
-                "message": "missing or invalid api key"
+                "message": "missing or invalid api key",
             }
-        });
-        (StatusCode::UNAUTHORIZED, Json(body)).into_response()
-    }
+        }),
+        ErrorEnvelopeShape::Anthropic => json!({
+            "type": "error",
+            "error": {
+                "type": "authentication_error",
+                "message": "missing or invalid api key",
+            }
+        }),
+    };
+    (StatusCode::UNAUTHORIZED, Json(body)).into_response()
 }
 
 #[cfg(test)]
@@ -163,6 +205,43 @@ mod tests {
             );
         }
         h
+    }
+
+    #[test]
+    fn envelope_shape_for_path_exact_matches_anthropic_routes() {
+        // Real Anthropic Messages routes get the Anthropic envelope.
+        assert_eq!(
+            envelope_shape_for_path("/v1/messages"),
+            ErrorEnvelopeShape::Anthropic
+        );
+        assert_eq!(
+            envelope_shape_for_path("/v1/messages/count_tokens"),
+            ErrorEnvelopeShape::Anthropic
+        );
+    }
+
+    #[test]
+    fn envelope_shape_for_path_prefix_collisions_default_to_openai() {
+        // Defense-in-depth: a path that merely shares the /v1/messages
+        // prefix but is NOT a registered Anthropic route falls through
+        // to the OpenAI envelope. Forces future routes to be added to
+        // the match arm explicitly.
+        for path in &[
+            "/v1/messages-something-malicious",
+            "/v1/messages_underscore",
+            "/v1/messagesfoo",
+            "/v1/messages/extra/path",
+            "/v1/chat/completions",
+            "/v1/models",
+            "/",
+            "",
+        ] {
+            assert_eq!(
+                envelope_shape_for_path(path),
+                ErrorEnvelopeShape::OpenAi,
+                "path `{path}` should default to OpenAI envelope",
+            );
+        }
     }
 
     #[test]

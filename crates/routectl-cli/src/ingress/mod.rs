@@ -114,9 +114,28 @@ pub trait IngressStreamState: Send {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
+/// Wire shape used to render error responses for a given ingress
+/// dialect. The Anthropic ingress emits Anthropic's standard error
+/// envelope (`{"type":"error","error":{"type","message"}}`); the
+/// OpenAI ingress emits OpenAI's (`{"error":{"message","type","code"}}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorEnvelopeShape {
+    OpenAi,
+    Anthropic,
+}
+
 /// Translation surface for one ingress dialect. See module docs.
 pub trait IngressAdapter: Send + Sync {
     fn id(&self) -> &str;
+
+    /// Wire shape this ingress uses to render error envelopes. The
+    /// generic ingress driver (`handlers::ingress_handle`) branches on
+    /// this so 4xx/5xx responses match the dialect the client expects:
+    /// Anthropic clients (claude-code, official SDK) parse
+    /// `{"type":"error","error":{...}}`; OpenAI clients parse the
+    /// flat `{"error":{...}}`. NO default impl: every adapter must
+    /// declare its envelope so the choice is reviewable in code.
+    fn error_envelope_shape(&self) -> ErrorEnvelopeShape;
 
     /// Parse an incoming JSON body + headers into the canonical
     /// `ChatRequest`. Errors map to 4xx in the handler.
