@@ -54,12 +54,15 @@ pub(crate) trait OAuthFlow: Send + Sync {
     /// Provider-specific because some upstreams send JSON, others
     /// form-urlencoded; some require extra headers
     /// (e.g. `anthropic-beta: oauth-2025-04-20`); some surface
-    /// `account` info inline, others via id_token claims.
+    /// `account` info inline, others via id_token claims. Some upstreams
+    /// (Anthropic) also expect the CSRF `state` echoed in the body
+    /// despite RFC 6749 not requiring it.
     async fn exchange_code(
         &self,
         http: &reqwest::Client,
         code: &str,
         verifier: &str,
+        state: &str,
         redirect_uri: &str,
     ) -> OAuthResult<TokenRecord>;
 
