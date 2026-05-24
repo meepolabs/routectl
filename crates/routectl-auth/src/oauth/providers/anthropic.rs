@@ -1,0 +1,365 @@
+//! Anthropic claude.ai OAuth flow.
+//!
+//! Constants extracted from the claude-code Node bundle (v2.1.150).
+//! These are the production-tier values used by the official CLI; the
+//! flow is a public OAuth 2.0 PKCE client (no client_secret), with
+//! `anthropic-beta: oauth-2025-04-20` required on token-endpoint
+//! requests.
+//!
+//! Surface map:
+//! - Authorize URL: <https://claude.com/cai/oauth/authorize>
+//! - Token URL:     <https://platform.claude.com/v1/oauth/token>
+//! - Manual paste:  <https://platform.claude.com/oauth/code/callback>
+//!   (used when the operator launches login on a headless machine and
+//!   pastes the code back into routectl rather than running a local
+//!   callback server).
+//!
+//! Two callback flavors are supported:
+//! 1. Browser-launched: redirect_uri = `http://127.0.0.1:<port>/callback`,
+//!    captured by routectl's local axum sub-app.
+//! 2. Manual (--print-url): redirect_uri = MANUAL_REDIRECT_URL,
+//!    operator pastes the resulting `code#state` back to routectl.
+
+use async_trait::async_trait;
+use url::Url;
+
+use crate::oauth::providers::{truncate, AuthParams, OAuthFlow};
+use crate::oauth::types::{unix_now, AccountInfo, SecretToken, TokenRecord};
+use crate::oauth::{OAuthError, OAuthResult};
+
+pub(crate) const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+pub(crate) const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+pub(crate) const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+pub(crate) const MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/callback";
+pub(crate) const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+
+/// Maximum number of bytes routectl will read from the token endpoint
+/// response. Real responses are well under 4 KiB; a 64 KiB cap leaves
+/// generous headroom for future fields (id_token, granted_scopes,
+/// vendor extensions) without letting a misbehaving or hostile upstream
+/// drive the loader toward OOM.
+const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
+
+/// Scopes claude-code requests on the claude.ai (subscription) flow.
+/// `user:inference` is the load-bearing one for routectl -- it is
+/// what the resulting access_token can use against
+/// `api.anthropic.com/v1/messages`. The others are claude-code-specific
+/// but harmless to include (parity with claude-code's tokens, less
+/// suspicious to Anthropic's heuristics).
+pub(crate) const SCOPES: &[&str] = &[
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+];
+
+pub(crate) struct Anthropic;
+
+#[async_trait]
+impl OAuthFlow for Anthropic {
+    fn provider_id(&self) -> &'static str {
+        "anthropic"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Anthropic (claude.ai)"
+    }
+
+    fn manual_redirect_url(&self) -> &'static str {
+        MANUAL_REDIRECT_URL
+    }
+
+    fn auth_url(&self, params: &AuthParams<'_>) -> Url {
+        let mut url = Url::parse(AUTHORIZE_URL).expect("authorize URL is a constant");
+        url.query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", CLIENT_ID)
+            .append_pair("redirect_uri", params.redirect_uri)
+            .append_pair("scope", &SCOPES.join(" "))
+            .append_pair("code_challenge", params.challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("state", params.state);
+        url
+    }
+
+    async fn exchange_code(
+        &self,
+        http: &reqwest::Client,
+        code: &str,
+        verifier: &str,
+        redirect_uri: &str,
+    ) -> OAuthResult<TokenRecord> {
+        let body = serde_json::json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": redirect_uri,
+            "client_id": CLIENT_ID,
+        });
+        let resp = http
+            .post(TOKEN_URL)
+            .header("anthropic-beta", OAUTH_BETA_HEADER)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| OAuthError::Network(format!("token endpoint POST: {e}")))?;
+        decode_token_response(resp).await
+    }
+
+    async fn refresh_token(
+        &self,
+        http: &reqwest::Client,
+        refresh_token: &str,
+    ) -> OAuthResult<TokenRecord> {
+        let body = serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": CLIENT_ID,
+        });
+        let resp = http
+            .post(TOKEN_URL)
+            .header("anthropic-beta", OAUTH_BETA_HEADER)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
+        decode_token_response(resp).await
+    }
+}
+
+/// Internal token-endpoint response shape. The vendor returns the same
+/// JSON for `authorization_code` and `refresh_token` grants. Public to
+/// the `providers` module (via `pub(super)`) so the parsing helper
+/// below can be unit-tested with hand-rolled fixture JSON without
+/// faking a `reqwest::Response`.
+#[derive(serde::Deserialize)]
+pub(super) struct Resp {
+    access_token: String,
+    refresh_token: String,
+    #[serde(default = "default_token_type")]
+    token_type: String,
+    expires_in: u64,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    account: Option<AccountField>,
+}
+
+fn default_token_type() -> String {
+    "Bearer".into()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct AccountField {
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default, alias = "uuid", alias = "id")]
+    account_id: Option<String>,
+}
+
+/// Shared response decoder for both `exchange_code` and `refresh_token`.
+/// Three discrete steps (status check + parse + map) so each is small
+/// enough to keep in head with its failure modes.
+async fn decode_token_response(resp: reqwest::Response) -> OAuthResult<TokenRecord> {
+    let status = resp.status();
+    let url = resp.url().to_string();
+    let body = read_capped_body(resp).await?;
+
+    check_status_error(status, &url, &body)?;
+    let parsed = parse_token_response_json(&body)?;
+    Ok(map_to_record(parsed))
+}
+
+/// Pull the response body as UTF-8, capped at `MAX_TOKEN_BODY_BYTES`.
+/// Anthropic's token endpoint speaks JSON; non-UTF-8 is a hard error
+/// rather than something to silently lose via `unwrap_or_default`.
+async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| OAuthError::Network(format!("read token response body: {e}")))?;
+    if bytes.len() > MAX_TOKEN_BODY_BYTES {
+        return Err(OAuthError::TokenEndpoint(format!(
+            "token response is {} bytes; refusing to load (cap is {} bytes)",
+            bytes.len(),
+            MAX_TOKEN_BODY_BYTES
+        )));
+    }
+    let s = std::str::from_utf8(&bytes).map_err(|e| {
+        OAuthError::TokenEndpoint(format!("token response is not valid UTF-8: {e}"))
+    })?;
+    Ok(s.to_string())
+}
+
+/// Translate a non-success HTTP status into an `OAuthError`. The
+/// invalid_grant body fragment maps to `RefreshExpired` so the operator
+/// gets "re-run routectl login" guidance instead of a generic
+/// "endpoint error".
+fn check_status_error(status: reqwest::StatusCode, url: &str, body: &str) -> OAuthResult<()> {
+    if status.is_success() {
+        return Ok(());
+    }
+    if body.contains("invalid_grant") {
+        return Err(OAuthError::RefreshExpired("anthropic".into()));
+    }
+    Err(OAuthError::TokenEndpoint(format!(
+        "{} {}: {}",
+        status.as_u16(),
+        url,
+        truncate(body, 500)
+    )))
+}
+
+/// Parse the JSON body into the internal `Resp` shape.
+/// Public-in-crate so tests can drive the deserializer directly with a
+/// fixture string -- the rest of `decode_token_response` is HTTP plumbing
+/// that the fixture would have to fake otherwise.
+pub(super) fn parse_token_response_json(body: &str) -> OAuthResult<Resp> {
+    serde_json::from_str::<Resp>(body).map_err(|e| {
+        OAuthError::TokenEndpoint(format!(
+            "parse token response: {e}; body={}",
+            truncate(body, 200)
+        ))
+    })
+}
+
+/// Project the parsed `Resp` onto the on-disk `TokenRecord`. Computes
+/// `expires_at_unix` against `unix_now()` once at exchange time so a
+/// later clock jump on disk does not corrupt validity.
+fn map_to_record(parsed: Resp) -> TokenRecord {
+    let now = unix_now();
+    let scopes = parsed
+        .scope
+        .map(|s| s.split_whitespace().map(String::from).collect())
+        .unwrap_or_default();
+    let account = parsed
+        .account
+        .map(|a| AccountInfo {
+            email: a.email,
+            account_id: a.account_id,
+        })
+        .unwrap_or_default();
+
+    TokenRecord {
+        access_token: SecretToken::new(parsed.access_token),
+        refresh_token: SecretToken::new(parsed.refresh_token),
+        token_type: parsed.token_type,
+        expires_at_unix: now.saturating_add(parsed.expires_in),
+        scopes,
+        account,
+        obtained_at_unix: now,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_url_includes_pkce_and_scopes() {
+        let url = Anthropic.auth_url(&AuthParams {
+            challenge: "CHAL",
+            state: "STATE",
+            redirect_uri: "http://127.0.0.1:12345/callback",
+        });
+        let s = url.as_str();
+        assert!(s.starts_with(AUTHORIZE_URL));
+        assert!(s.contains("response_type=code"));
+        assert!(s.contains(&format!("client_id={CLIENT_ID}")));
+        assert!(s.contains("code_challenge=CHAL"));
+        assert!(s.contains("code_challenge_method=S256"));
+        assert!(s.contains("state=STATE"));
+        // url::Url percent-encodes the redirect; check a fragment.
+        assert!(s.contains("127.0.0.1") || s.contains("127.0.0.1%3A"));
+        // Spaces in scope become '+' or '%20' under url::Url.
+        assert!(s.contains("user%3Ainference") || s.contains("user:inference"));
+    }
+
+    #[test]
+    fn manual_redirect_url_returns_constant() {
+        assert_eq!(Anthropic.manual_redirect_url(), MANUAL_REDIRECT_URL);
+    }
+
+    #[test]
+    fn parse_token_response_with_account_id_field() {
+        let body = r#"{
+            "access_token": "AT",
+            "refresh_token": "RT",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "user:inference user:profile",
+            "account": { "email": "u@example.com", "account_id": "acc-123" }
+        }"#;
+        let parsed = parse_token_response_json(body).unwrap();
+        assert_eq!(
+            parsed.account.as_ref().unwrap().account_id.as_deref(),
+            Some("acc-123")
+        );
+        let rec = map_to_record(parsed);
+        assert_eq!(rec.access_token.expose(), "AT");
+        assert_eq!(rec.refresh_token.expose(), "RT");
+        assert_eq!(rec.scopes.len(), 2);
+        assert_eq!(rec.account.email.as_deref(), Some("u@example.com"));
+    }
+
+    #[test]
+    fn parse_token_response_with_uuid_alias() {
+        // Some Anthropic responses surface the account id as `uuid`.
+        let body = r#"{
+            "access_token": "AT",
+            "refresh_token": "RT",
+            "expires_in": 100,
+            "account": { "uuid": "uuid-form-123" }
+        }"#;
+        let parsed = parse_token_response_json(body).unwrap();
+        assert_eq!(
+            parsed.account.as_ref().unwrap().account_id.as_deref(),
+            Some("uuid-form-123")
+        );
+    }
+
+    #[test]
+    fn parse_token_response_with_id_alias() {
+        // Some Anthropic responses surface the account id as `id`.
+        let body = r#"{
+            "access_token": "AT",
+            "refresh_token": "RT",
+            "expires_in": 100,
+            "account": { "id": "id-form-456" }
+        }"#;
+        let parsed = parse_token_response_json(body).unwrap();
+        assert_eq!(
+            parsed.account.as_ref().unwrap().account_id.as_deref(),
+            Some("id-form-456")
+        );
+    }
+
+    #[test]
+    fn check_status_error_invalid_grant_buckets_to_refresh_expired() {
+        let err = check_status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            "https://example.invalid/v1/oauth/token",
+            r#"{"error":"invalid_grant"}"#,
+        )
+        .unwrap_err();
+        match err {
+            OAuthError::RefreshExpired(p) => assert_eq!(p, "anthropic"),
+            other => panic!("expected RefreshExpired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_status_error_other_failure_is_token_endpoint() {
+        let err = check_status_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "https://example.invalid/v1/oauth/token",
+            "boom",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("500"), "got: {msg}");
+    }
+}

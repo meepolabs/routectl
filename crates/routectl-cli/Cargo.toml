@@ -17,6 +17,7 @@ routectl-core.workspace = true
 routectl-providers = { workspace = true, default-features = false, features = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"] }
 routectl-router.workspace = true
 routectl-auth.workspace = true
+async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
 clap.workspace = true
 serde.workspace = true
@@ -53,6 +54,8 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 insta.workspace = true
+tempfile = "3"
+serial_test = "3"
 
 # cargo-deb metadata. Preserved so a future PR can re-enable .deb
 # packaging in .github/workflows/release.yml without re-deriving these

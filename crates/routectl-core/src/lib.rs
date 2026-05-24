@@ -13,6 +13,7 @@ pub mod reasoning_dialect;
 pub mod reserved;
 pub mod schema;
 pub mod system_content;
+pub mod token_source;
 pub mod tool_def;
 
 pub use cache_control::{Breakpoint, BreakpointPosition, CacheControl};
@@ -43,6 +44,7 @@ pub use schema::{
     Usage, UsageDelta,
 };
 pub use system_content::{SystemBlock, SystemContent};
+pub use token_source::{StaticToken, TokenSource};
 pub use tool_def::{CustomTool, ToolDef};
 
 /// Cross-crate cap on `body_excerpt` fields in upstream-error tracing

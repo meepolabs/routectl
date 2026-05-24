@@ -3,10 +3,11 @@ use std::path::PathBuf;
 
 use routectl_core::{Error, Result};
 
-/// A reference to a secret, resolved at use-time. Three sources, all
+/// A reference to a secret, resolved at use-time. Four sources, all
 /// explicit-by-config -- the user picks per provider in TOML by writing
 /// the appropriate URI scheme. Routectl never auto-discovers credentials.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SecretRef {
     /// `env://VAR_NAME` -> process env var. Silent on every platform;
     /// the value is visible to anything that can read this process's
@@ -21,6 +22,12 @@ pub enum SecretRef {
     /// for placeholders like `literal:not-needed` (llama.cpp). Avoid
     /// for real secrets in version-controlled config.
     Literal(String),
+    /// `oauth://<provider>` -> token resolved from the routectl-managed
+    /// OAuth credentials store. Provider must have been logged in via
+    /// `routectl login <provider>` first. Resolution reads the token
+    /// from `~/.config/routectl/credentials.json`; refresh and 401-retry
+    /// are handled transparently by `OAuthStore`.
+    OAuth { provider: String },
 }
 
 impl SecretRef {
@@ -46,16 +53,45 @@ impl SecretRef {
         if let Some(lit) = uri.strip_prefix("literal:") {
             return Ok(Self::Literal(lit.to_string()));
         }
+        if let Some(prov) = uri.strip_prefix("oauth://") {
+            if prov.is_empty() {
+                return Err(Error::Auth("oauth:// URI missing provider name".into()));
+            }
+            // Provider name validation is deferred to the OAuth store at
+            // use-time -- mirroring env:// where existence of the var is
+            // also a use-time check, not a parse-time one.
+            return Ok(Self::OAuth {
+                provider: prov.to_string(),
+            });
+        }
         Err(Error::Auth(format!(
-            "unrecognized secret URI scheme: {uri} (expected env://, file://, or literal:)"
+            "unrecognized secret URI scheme: {uri} (expected env://, file://, literal:, or oauth://)"
         )))
+    }
+}
+
+impl fmt::Debug for SecretRef {
+    /// Hand-rolled to redact the `Literal(_)` arm. The other arms are
+    /// pointers (the secret is what they reference, not the URI), so
+    /// they keep the derived-style `Variant(field)` shape. The
+    /// `Literal` arm delegates to `Display`, which already redacts
+    /// to `literal:[REDACTED]`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SecretRef::Env(v) => f.debug_tuple("Env").field(v).finish(),
+            SecretRef::File(p) => f.debug_tuple("File").field(p).finish(),
+            SecretRef::OAuth { provider } => {
+                f.debug_struct("OAuth").field("provider", provider).finish()
+            }
+            SecretRef::Literal(_) => write!(f, "{self}"),
+        }
     }
 }
 
 impl fmt::Display for SecretRef {
     /// Renders a SecretRef without revealing the underlying secret
-    /// value. The `env://` and `file://` arms are pointers (the
-    /// referenced material is the secret, not the URI), so they
+    /// value. The `env://`, `file://`, and `oauth://` arms are pointers
+    /// (the referenced material is the secret, not the URI), so they
     /// round-trip safely. The `literal:` arm IS the secret material
     /// in-line, so we redact it here -- any caller that `format!`s
     /// or logs a SecretRef would otherwise leak the inline value.
@@ -66,6 +102,87 @@ impl fmt::Display for SecretRef {
             SecretRef::File(path) => write!(f, "file://{}", path.display()),
             SecretRef::Literal(val) if val.is_empty() => write!(f, "literal:"),
             SecretRef::Literal(_) => write!(f, "literal:[REDACTED]"),
+            SecretRef::OAuth { provider } => write!(f, "oauth://{provider}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_oauth_provider() {
+        let sr = SecretRef::parse("oauth://anthropic").unwrap();
+        assert_eq!(
+            sr,
+            SecretRef::OAuth {
+                provider: "anthropic".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_oauth_codex() {
+        let sr = SecretRef::parse("oauth://codex").unwrap();
+        assert_eq!(
+            sr,
+            SecretRef::OAuth {
+                provider: "codex".into()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_oauth_empty_provider() {
+        let err = SecretRef::parse("oauth://").unwrap_err();
+        assert!(err.to_string().contains("missing provider"));
+    }
+
+    #[test]
+    fn parses_oauth_unknown_provider_at_parse_time() {
+        // Parse accepts unknown provider names; OAuthStore rejects them
+        // at use-time with a more helpful "known providers: ..." error.
+        let sr = SecretRef::parse("oauth://made-up").unwrap();
+        assert_eq!(
+            sr,
+            SecretRef::OAuth {
+                provider: "made-up".into()
+            }
+        );
+    }
+
+    #[test]
+    fn display_oauth_round_trips() {
+        let sr = SecretRef::OAuth {
+            provider: "anthropic".into(),
+        };
+        assert_eq!(format!("{sr}"), "oauth://anthropic");
+        let parsed = SecretRef::parse(&format!("{sr}")).unwrap();
+        assert_eq!(parsed, sr);
+    }
+
+    #[test]
+    fn literal_debug_does_not_contain_secret() {
+        let s = SecretRef::Literal("hunter2".into());
+        let dbg = format!("{s:?}");
+        assert!(
+            !dbg.contains("hunter2"),
+            "Debug must not leak secret: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "Debug must show redacted marker: {dbg}"
+        );
+    }
+
+    #[test]
+    fn unknown_scheme_error_lists_oauth() {
+        let err = SecretRef::parse("vault://secret").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("oauth://"),
+            "error message must mention oauth: {msg}"
+        );
     }
 }
