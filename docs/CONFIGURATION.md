@@ -277,3 +277,179 @@ trace logging.
 For active triage of a specific failing request, combine `config show`
 with `ROUTECTL_LOG=routectl=debug` and the `request_id` correlation
 workflow -- see [LOGGING.md](LOGGING.md) for the full triage recipes.
+
+## claude-code as a gateway client
+
+### Why route claude-code through routectl
+
+routectl is a translation pipe: claude-code speaks Anthropic Messages
+on the wire and routectl forwards it unchanged to api.anthropic.com,
+or translates it into Bedrock Invoke / Converse, or (future) into
+OpenAI-compat shape. Pointing claude-code at routectl is the
+"LLM gateway" pattern that Anthropic explicitly endorses at
+<https://code.claude.com/docs/en/llm-gateway>:
+
+> Your proxy receives plaintext HTTP requests, can inspect and modify
+> them (including injecting credentials), then forwards to the real
+> API.
+
+Caveat: per the Agent SDK overview, claude.ai OAuth tokens may not be
+embedded in third-party PRODUCTS. Personal-use proxying with the
+operator's own subscription token is the operating envelope; do not
+ship a routectl deployment to other users that resolves your
+`oauth://anthropic` ref under their requests.
+
+### Operator setup checklist
+
+1. Build and run routectl:
+
+   ```bash
+   cargo build --release
+   ./target/release/routectl serve --config ~/.config/routectl/config.toml
+   ```
+
+2. Configure the Anthropic provider in
+   `~/.config/routectl/config.toml`. Two options:
+
+   **routectl-managed OAuth (recommended).** Run
+   `routectl login anthropic` once -- it opens the browser to the
+   claude.ai consent flow, captures the `sk-ant-oat01-...` token, and
+   persists it to `~/.config/routectl/credentials.json`. Then in the
+   TOML:
+
+   ```toml
+   [providers.anthropic-managed]
+   kind          = "anthropic-api"
+   api_key_ref   = "oauth://anthropic"
+   auth_kind     = "oauth-bearer"
+   user_agent    = "claude-cli/2.1.143 (external, cli)"
+   forward_client_headers = [
+       "x-claude-code-session-id",
+       "x-claude-code-agent-id",
+       "x-claude-code-parent-agent-id",
+   ]
+   header_extras = { ... }   # see "Header pack" below
+   ```
+
+   The `oauth://anthropic` ref resolves at request time against the
+   credentials store; the `auth_kind = "oauth-bearer"` flag emits
+   `Authorization: Bearer <token>` instead of `x-api-key`.
+
+   **Anthropic API key (no OAuth).** Standard pattern, no `routectl
+   login` needed:
+
+   ```toml
+   [providers.anthropic-api]
+   kind        = "anthropic-api"
+   api_key_ref = "env://ANTHROPIC_API_KEY"
+   auth_kind   = "api-key"
+   ```
+
+3. Add models and aliases that match what claude-code expects on the
+   wire. claude-code 2.1.x sends `claude-haiku-4-5-...`,
+   `claude-sonnet-4-...`, `claude-opus-4-...` model strings; the
+   suffix-glob aliases collapse the per-version churn:
+
+   ```toml
+   [models.anthropic-haiku]
+   provider = "anthropic-managed"
+   upstream = "claude-haiku-4-5-20251001"
+
+   [models.anthropic-sonnet]
+   provider = "anthropic-managed"
+   upstream = "claude-sonnet-4-6"
+
+   [models.anthropic-opus]
+   provider = "anthropic-managed"
+   upstream = "claude-opus-4-7"
+
+   [aliases]
+   "claude-haiku-*"  = "anthropic-haiku"
+   "claude-sonnet-*" = "anthropic-sonnet"
+   "claude-opus-*"   = "anthropic-opus"
+   ```
+
+4. Set claude-code env vars in `~/.bashrc` (or whichever shell
+   profile your terminal sources):
+
+   ```bash
+   export ANTHROPIC_BASE_URL=http://127.0.0.1:9100
+   export ANTHROPIC_AUTH_TOKEN=placeholder    # claude-code requires it; routectl uses the oauth:// ref to resolve the real token
+   export CLAUDE_CODE_ATTRIBUTION_HEADER=0    # documented as recommended for gateway use; better cache hit rate
+   ```
+
+   IMPORTANT: do NOT put these in `~/.claude/settings.json` under the
+   `env` block. That block is read at claude-code startup and
+   overrides shell exports for every session, so flipping
+   `ANTHROPIC_BASE_URL` per shell becomes painful. Keep them in the
+   shell profile.
+
+5. Verify the round-trip:
+
+   ```bash
+   claude --print "say hi"
+   ```
+
+   The `routectl serve` log should show one
+   `INFO request{method=POST path=/v1/messages ...}: ... close
+   time.busy=N time.idle=N` line per request. If you see a 401, the
+   `oauth://anthropic` token has expired -- re-run `routectl login
+   anthropic` (auto-refresh is a follow-up).
+
+### Header pack ("look like claude-code")
+
+Drop this into `header_extras` on the anthropic-managed provider so
+the upstream sees the same SDK fingerprint claude-code 2.1.143 sends
+from the bundled `@anthropic-ai/sdk`:
+
+```toml
+header_extras = {
+    "anthropic-beta"                         = "claude-code-20250219,oauth-2025-04-20",
+    "x-app"                                  = "cli",
+    "anthropic-dangerous-direct-browser-access" = "true",
+    "x-stainless-arch"                       = "x64",
+    "x-stainless-lang"                       = "js",
+    "x-stainless-os"                         = "Linux",
+    "x-stainless-package-version"            = "0.94.0",
+    "x-stainless-runtime"                    = "node",
+    "x-stainless-runtime-version"            = "v24.3.0",
+    "x-stainless-timeout"                    = "600",
+    "x-stainless-retry-count"                = "0",
+}
+```
+
+What each family does (one line each):
+
+- `anthropic-beta` -- the beta gates. routectl unions ingress +
+  provider + model `header_extras["anthropic-beta"]` per the
+  three-source compose described above.
+- `x-app`, `x-stainless-*` -- the SDK fingerprint the
+  `@anthropic-ai/sdk` pack emits. Some Anthropic-side analytics keys
+  off these; matching claude-code's values keeps cache and metrics
+  attribution stable.
+- `anthropic-dangerous-direct-browser-access` -- Anthropic-side flag
+  claude-cli sets when running outside a browser context. Mirror it.
+
+### What works, what doesn't
+
+| Capability | Status | Note |
+|---|---|---|
+| `/v1/messages` (sync + streaming) | works | full forward + headers union |
+| `/v1/messages/count_tokens` | works | proxied to upstream; first-target only (no fallback chain walk) |
+| `/v1/models` (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) | works | glob alias keys and `default` skipped |
+| OAuth refresh on 401 | not yet | re-run `routectl login anthropic` to refresh today; auto-refresh is a follow-up |
+| `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; configure an Anthropic-API fallback for this |
+| Tool use + streaming | works | end-to-end SSE, multi-turn |
+| Subagent / agent-team dispatch | works | every subagent call flows through the same `/v1/messages` route |
+| `claude.ai` Routines / `RemoteTrigger` / `PushNotification` / `ShareOnboardingGuide` | bypass routectl | hardcoded `claude.ai` integrations; the gateway has no visibility |
+| `WebFetch` / `WebSearch` model-side calls | bypass routectl | claude-code performs these directly to the user-supplied URL or its bundled search provider |
+
+### Recommended env vars (claude-code side)
+
+| Env var | Value | Why |
+|---|---|---|
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:9100` | route to routectl |
+| `ANTHROPIC_AUTH_TOKEN` | (placeholder) | claude-code requires it; routectl ignores when `oauth://` resolves the real token |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER` | `0` | omit prompt-fingerprint block; better cache hit rate per the gateway doc |
+| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | unset | only set to `1` as an emergency exit if a beta flag is causing 400s upstream |
+| `ENABLE_TOOL_SEARCH` | `true` (optional) | enable claude-code's tool-search beta; routectl forwards the `tool_reference` blocks correctly |

@@ -148,6 +148,37 @@ extra_headers = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
 
 routectl does not auto-inject beta gates -- declare the ones you need.
 
+### claude-code attribution headers (`X-Claude-Code-*`)
+
+Anthropic documents three gateway-mandatory passthrough headers at
+<https://code.claude.com/docs/en/llm-gateway> --
+`X-Claude-Code-Session-Id`, `X-Claude-Code-Agent-Id`, and
+`X-Claude-Code-Parent-Agent-Id` -- so cost and trace attribution work
+when claude-code traffic is fronted by a proxy. The Anthropic ingress
+greedy-captures the entire `x-claude-code-*` namespace into the
+canonical request; the Anthropic-API egress forwards a name upstream
+only when it appears on the per-provider `forward_client_headers`
+allowlist:
+
+```toml
+[providers.anthropic-managed]
+kind        = "anthropic-api"
+api_key_ref = "oauth://anthropic"
+forward_client_headers = [
+    "x-claude-code-session-id",
+    "x-claude-code-agent-id",
+    "x-claude-code-parent-agent-id",
+]
+```
+
+Default is empty (drop everything captured) -- safe-by-default for
+new providers. Future Anthropic-namespace additions are NOT
+auto-forwarded; the operator opts each name in. Synthesizing
+client-supplied identifiers in routectl is intentionally out of
+scope: synthesizing identifiers on a personal-use claude.ai proxy is
+TOS-adjacent, and the operator can already inject any static
+identifier via `header_extras` if they want a static value.
+
 ### Bedrock (any region)
 
 Both `api_shape = "invoke"` (Anthropic Messages body) and
