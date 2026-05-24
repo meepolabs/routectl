@@ -177,3 +177,53 @@ stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 # [bedrock]
 # allowed_betas = []
 # allowed_body_fields = []
+
+# ---- claude-code gateway config (optional template) ----
+# Drop-in snippet for fronting claude-code with routectl. See
+# docs/CONFIGURATION.md "claude-code as a gateway client" for the
+# full setup checklist (env vars on the claude-code side, the
+# `routectl login anthropic` step, and what works / doesn't).
+#
+# Step 1: `routectl login anthropic` once -- writes the OAuth token
+# into ~/.config/routectl/credentials.json. Then uncomment below.
+
+# [providers.anthropic-managed]
+# kind          = "anthropic-api"
+# api_key_ref   = "oauth://anthropic"          # resolves at request time
+# auth_kind     = "oauth-bearer"
+# user_agent    = "claude-cli/2.1.143 (external, cli)"
+# forward_client_headers = [
+#     "x-claude-code-session-id",
+#     "x-claude-code-agent-id",
+#     "x-claude-code-parent-agent-id",
+# ]
+# header_extras = {
+#     "anthropic-beta"                            = "claude-code-20250219,oauth-2025-04-20",
+#     "x-app"                                     = "cli",
+#     "anthropic-dangerous-direct-browser-access" = "true",
+#     "x-stainless-arch"                          = "x64",
+#     "x-stainless-lang"                          = "js",
+#     "x-stainless-os"                            = "Linux",
+#     "x-stainless-package-version"               = "0.94.0",
+#     "x-stainless-runtime"                       = "node",
+#     "x-stainless-runtime-version"               = "v24.3.0",
+#     "x-stainless-timeout"                       = "600",
+#     "x-stainless-retry-count"                   = "0",
+# }
+
+# [models.anthropic-haiku]
+# provider = "anthropic-managed"
+# upstream = "claude-haiku-4-5-20251001"
+
+# [models.anthropic-sonnet]
+# provider = "anthropic-managed"
+# upstream = "claude-sonnet-4-6"
+
+# [models.anthropic-opus]
+# provider = "anthropic-managed"
+# upstream = "claude-opus-4-7"
+
+# [aliases]
+# "claude-haiku-*"  = "anthropic-haiku"
+# "claude-sonnet-*" = "anthropic-sonnet"
+# "claude-opus-*"   = "anthropic-opus"
