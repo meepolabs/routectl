@@ -6,7 +6,7 @@
 #
 # [providers.X]   Transport + auth ONLY. How to reach an upstream.
 #                 (kind, api_key_ref, base_url, region/creds for
-#                 Bedrock, extra_headers, runtime gates, ...)
+#                 Bedrock, header_extras, runtime gates, ...)
 #
 # [models.X]      A model declaration. Points at one provider, names
 #                 the upstream model id, owns its reasoning defaults
@@ -62,7 +62,7 @@ api_key_ref = "env://ANTHROPIC_API_KEY"
 kind        = "anthropic-api"
 api_key_ref = "file://<local-path>"
 auth_kind   = "oauth-bearer"
-extra_headers = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
+header_extras = { "anthropic-beta" = "claude-code-20250219,oauth-2025-04-20" }
 
 # OpenAI Responses API via ChatGPT subscription bearer JWT (Codex).
 [providers.codex]

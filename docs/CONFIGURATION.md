@@ -218,7 +218,7 @@ Two per-model overrides live on `[models.X]`:
   for haiku) -- saves duplicating the entire provider config.
   IMPORTANT: the merge is **additive**. A model entry's
   `anthropic_beta = []` does NOT suppress a beta the provider
-  already sets via `extra_headers["anthropic-beta"]` or
+  already sets via `header_extras["anthropic-beta"]` or
   `[providers.X] anthropic_beta`. To make a model opt OUT of a
   provider-shipped beta, REMOVE the beta from the provider config
   and add it back to each `[models.X] anthropic_beta` that needs
