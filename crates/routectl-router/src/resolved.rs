@@ -65,6 +65,13 @@ pub struct ResolvedModel {
     /// Per-model first-byte timeout for streaming responses. Wins
     /// over per-provider + global tiers when set.
     pub stream_first_byte_timeout_ms: Option<u64>,
+    /// Source `SecretRef` used to resolve this model's primary auth
+    /// credential at provider-build time. Retained on the resolved
+    /// model so the router can wire 401 self-heal back through the
+    /// originating store (the OAuth store refresh path keys off this).
+    /// `None` for provider kinds that don't carry a primary api-key
+    /// reference (e.g. Bedrock under DefaultChain / Profile creds).
+    pub auth_secret_ref: Option<routectl_auth::SecretRef>,
 }
 
 impl ResolvedModel {
@@ -85,6 +92,7 @@ impl ResolvedModel {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
+            auth_secret_ref: None,
         }
     }
 
@@ -125,6 +133,14 @@ impl ResolvedModel {
         self.stream_first_byte_timeout_ms = Some(ms);
         self
     }
+
+    /// Attach the source `SecretRef` that resolved this model's
+    /// primary auth credential. Used by the 401 self-heal path so a
+    /// refresh hook can run against the originating store.
+    pub fn with_auth_secret_ref(mut self, sr: routectl_auth::SecretRef) -> Self {
+        self.auth_secret_ref = Some(sr);
+        self
+    }
 }
 
 impl std::fmt::Debug for ResolvedModel {
@@ -145,6 +161,10 @@ impl std::fmt::Debug for ResolvedModel {
             .field(
                 "stream_first_byte_timeout_ms",
                 &self.stream_first_byte_timeout_ms,
+            )
+            .field(
+                "auth_secret_ref",
+                &self.auth_secret_ref.as_ref().map(|sr| sr.to_string()),
             )
             .finish()
     }
@@ -232,5 +252,26 @@ mod tests {
         assert!(m.header_extras.is_empty());
         assert!(m.payload_extras.is_none());
         assert!(m.stream_first_byte_timeout_ms.is_none());
+    }
+
+    #[test]
+    fn resolved_model_with_auth_secret_ref_renders_via_display() {
+        // Pin: the Debug impl renders auth_secret_ref through Display
+        // (which redacts `Literal`), NOT through derived/manual Debug
+        // (which would leak the inline value). Operators reading a
+        // ResolvedModel out of tracing logs must never see the
+        // plaintext literal.
+        let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
+        let m = ResolvedModel::new("x", "p", p, "u")
+            .with_auth_secret_ref(routectl_auth::SecretRef::Literal("hunter2".into()));
+        let d = format!("{m:?}");
+        assert!(
+            !d.contains("hunter2"),
+            "Debug must redact literal value: {d}"
+        );
+        assert!(
+            d.contains("literal:[REDACTED]"),
+            "Debug must show Display-redacted literal: {d}"
+        );
     }
 }
