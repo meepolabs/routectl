@@ -309,7 +309,8 @@ async fn build_test_router(
 
     // MemoryStore resolves env:// refs by reading the process env directly,
     // so we don't need to write the key into the store.
-    let store = MemoryStore::new();
+    let store: std::sync::Arc<dyn routectl_auth::SecretStore> =
+        std::sync::Arc::new(MemoryStore::new());
     let secret_uri = format!("env://{api_key_env}");
 
     let mut providers = BTreeMap::new();
@@ -346,9 +347,10 @@ async fn build_test_router(
     });
 
     let mut router = Router::new(cfg.clone());
-    let (resolved_models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
-        .await
-        .expect("build resolved models");
+    let (resolved_models, failed) =
+        build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("build resolved models");
     assert!(failed.is_empty(), "unexpected build failures: {failed:?}");
     router.install_resolved_models(resolved_models);
     Some(Arc::new(router))
@@ -1173,7 +1175,8 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
 
     // The MemoryStore resolves env:// refs by reading the process env,
     // so we just need the env:// URI pointing to our env var.
-    let store = MemoryStore::new();
+    let store: std::sync::Arc<dyn routectl_auth::SecretStore> =
+        std::sync::Arc::new(MemoryStore::new());
 
     let mut providers = BTreeMap::new();
     let mut aliases = BTreeMap::new();
@@ -1213,9 +1216,10 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
     });
 
     let mut router = Router::new(cfg.clone());
-    let (resolved_models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
-        .await
-        .expect("build resolved openai-responses models");
+    let (resolved_models, failed) =
+        build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("build resolved openai-responses models");
     assert!(failed.is_empty(), "unexpected build failures: {failed:?}");
     router.install_resolved_models(resolved_models);
     Some(Arc::new(router))

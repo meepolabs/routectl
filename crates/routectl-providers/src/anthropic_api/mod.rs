@@ -10,6 +10,8 @@
 //!   with signature preserved for multi-turn tool-use continuity.
 //! - Multi-turn: thinking blocks are passed back unmodified; signature is mandatory.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{BoxStream, StreamExt};
@@ -20,6 +22,7 @@ use serde_json::Value;
 use routectl_core::{
     debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
     trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    StaticToken, TokenSource,
 };
 
 pub(crate) mod parts;
@@ -48,10 +51,17 @@ pub enum AuthKind {
     OauthBearer,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AnthropicApiConfig {
     pub id: String,
-    pub api_key: String,
+    /// Source of the bearer/API-key token. For env/file/literal
+    /// secret refs, this is a `StaticToken` resolved once at
+    /// construction. For `oauth://<provider>` refs, the factory
+    /// passes a `ManagedToken` impl that re-resolves through
+    /// `SecretStore::get` per request -- so token rotation in
+    /// `~/.config/routectl/credentials.json` is picked up live
+    /// without restarting routectl.
+    pub auth: Arc<dyn TokenSource>,
     pub base_url: String,
     pub anthropic_version: String,
     pub auth_kind: AuthKind,
@@ -87,11 +97,41 @@ pub struct AnthropicApiConfig {
     pub allowed_betas: Vec<String>,
 }
 
+impl std::fmt::Debug for AnthropicApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Hand-rolled Debug elides the auth source (its own Debug
+        // already redacts, but this saves one round-trip if a
+        // future TokenSource impl ever leaks).
+        f.debug_struct("AnthropicApiConfig")
+            .field("id", &self.id)
+            .field("auth", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("anthropic_version", &self.anthropic_version)
+            .field("auth_kind", &self.auth_kind)
+            .field("header_extras_len", &self.header_extras.len())
+            .field("user_agent", &self.user_agent)
+            .field("adaptive_thinking", &self.adaptive_thinking)
+            .field("allowed_betas_len", &self.allowed_betas.len())
+            .finish()
+    }
+}
+
 impl AnthropicApiConfig {
+    /// Construct with a static API-key string. The token is wrapped
+    /// in `StaticToken` so the provider's resolution call site is
+    /// uniform across static and managed sources. Existing callers
+    /// (tests, in-tree builders) that pass `"sk-ant-..."` keep their
+    /// signatures unchanged.
     pub fn new(id: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self::new_with_auth(id, Arc::new(StaticToken::new(api_key)))
+    }
+
+    /// Construct with a custom `TokenSource`. Used by the factory
+    /// when wiring `oauth://<provider>` to a per-request resolver.
+    pub fn new_with_auth(id: impl Into<String>, auth: Arc<dyn TokenSource>) -> Self {
         Self {
             id: id.into(),
-            api_key: api_key.into(),
+            auth,
             base_url: "https://api.anthropic.com".into(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::ApiKey,
@@ -122,13 +162,12 @@ impl AnthropicApiProvider {
         &self,
         rb: reqwest::RequestBuilder,
         req: &ChatRequest,
+        token: &str,
     ) -> reqwest::RequestBuilder {
         let mut rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
         rb = match self.cfg.auth_kind {
-            AuthKind::ApiKey => rb.header("x-api-key", &self.cfg.api_key),
-            AuthKind::OauthBearer => {
-                rb.header("authorization", format!("Bearer {}", self.cfg.api_key))
-            }
+            AuthKind::ApiKey => rb.header("x-api-key", token),
+            AuthKind::OauthBearer => rb.header("authorization", format!("Bearer {token}")),
         };
 
         // anthropic-beta composition. The router's dispatch-layer
@@ -245,8 +284,14 @@ impl Provider for AnthropicApiProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
+        // Per-request token resolution: for static refs this hits
+        // the in-memory `StaticToken` cache; for `oauth://<provider>`
+        // refs this dives into `OAuthStore` and resolves the current
+        // value (including the v0.7+ refresh path landing in a prior change).
+        let token = self.cfg.auth.token().await?;
+
         let resp = self
-            .build_headers(self.client.post(self.messages_url()), &req)
+            .build_headers(self.client.post(self.messages_url()), &req, &token)
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -327,8 +372,10 @@ impl Provider for AnthropicApiProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
+        let token = self.cfg.auth.token().await?;
+
         let resp = self
-            .build_headers(self.client.post(self.messages_url()), &req)
+            .build_headers(self.client.post(self.messages_url()), &req, &token)
             .header("content-type", "application/json")
             .json(&body)
             .send()

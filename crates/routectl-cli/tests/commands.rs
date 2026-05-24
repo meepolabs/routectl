@@ -7,8 +7,32 @@ use routectl_router::{
     AliasValue, Config, LegacyCompat, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig,
 };
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// RAII guard for `std::env::{set,remove}_var` mutations within tests.
+/// Restores the original value (or absence) on `Drop`, so a panicking
+/// `assert!` cannot leak modified env into sibling tests. Pair every
+/// guard binding with `let _xdg = EnvGuard::set(..)`.
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+impl EnvGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
 
 fn config_with(server_url: &str) -> Config {
     let mut providers = BTreeMap::new();
@@ -38,15 +62,38 @@ fn config_with(server_url: &str) -> Config {
 }
 
 #[tokio::test]
-async fn login_returns_not_enabled_error() {
-    match commands::login::run("claude") {
+async fn login_unknown_provider_errors_clearly() {
+    // The login flow should fail-fast on an unknown provider name
+    // BEFORE binding any sockets or opening browsers. (a prior change only ships
+    // anthropic; codex lands in a prior change.)
+    match commands::login::run("made-up-provider", false, None).await {
         Err(routectl_core::Error::Auth(msg)) => {
-            assert!(msg.contains("not enabled"), "got: {msg}");
-            assert!(msg.contains("v0.2"), "got: {msg}");
+            assert!(
+                msg.contains("unknown oauth provider"),
+                "expected unknown-provider message, got: {msg}",
+            );
+            assert!(
+                msg.contains("anthropic"),
+                "expected known-providers list to mention anthropic, got: {msg}",
+            );
         }
-        Ok(_) => panic!("expected error"),
-        Err(other) => panic!("expected Auth, got: {other:?}"),
+        Ok(_) => panic!("expected error for unknown provider"),
+        Err(other) => panic!("expected Auth error, got: {other:?}"),
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn whoami_returns_exit_code_2_when_empty() {
+    // Sandbox the credentials path so this test does not depend on
+    // (or pollute) the real home directory.
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+
+    let code = commands::whoami::run()
+        .await
+        .expect("whoami should not error on empty store");
+    assert_eq!(code, 2, "whoami must return 2 when no providers logged in");
 }
 
 #[tokio::test]
@@ -302,4 +349,108 @@ async fn test_command_propagates_upstream_error() {
         routectl_core::Error::Upstream { status, .. } => assert_eq!(status, 401),
         other => panic!("expected upstream 401, got: {other:?}"),
     }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_command_resolves_oauth_ref_when_logged_in() {
+    use routectl_providers::anthropic_api::AuthKind as AnthropicAuthKind;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+
+    // Seed a synthetic credentials.json under
+    // <tmp>/routectl/credentials.json. The OAuth subsystem's `file_io`
+    // helpers are pub(crate) in routectl-auth, so we hand-write the JSON
+    // shape (matching the v1 schema) and apply the 0o600 hygiene that
+    // OAuthStore::open enforces. Round-tripping through the public
+    // CredentialsFile/TokenRecord struct literals is blocked by their
+    // `#[non_exhaustive]` attribute outside the auth crate.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let creds_json = json!({
+        "schema_version": 1,
+        "providers": {
+            "anthropic": {
+                "access_token": "seeded-access-token",
+                "refresh_token": "seeded-refresh-token",
+                "token_type": "Bearer",
+                "expires_at_unix": now + 3600,
+                "scopes": ["user:profile", "user:inference"],
+                "account": {
+                    "email": "alice@example.com",
+                    "account_id": null
+                },
+                "obtained_at_unix": now
+            }
+        }
+    });
+    let creds_path = tmp.path().join("routectl").join("credentials.json");
+    std::fs::create_dir_all(creds_path.parent().unwrap()).expect("mkdir creds parent");
+    std::fs::write(
+        &creds_path,
+        serde_json::to_vec_pretty(&creds_json).expect("serialize creds"),
+    )
+    .expect("write creds");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0600");
+    }
+
+    // Mock Anthropic Messages endpoint. The Authorization-header matcher
+    // pins the bearer-forwarding contract: a regression that drops the
+    // header or sends a different token will fail this test (wiremock
+    // returns 404 by default for unmatched POSTs).
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("authorization", "Bearer seeded-access-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        })))
+        .mount(&mock)
+        .await;
+
+    // Build a Config with one anthropic_api provider that resolves
+    // its api key via `oauth://anthropic` and points at the mock URL.
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "anthropic_oauth".into(),
+        ProviderEntry::anthropic_api("oauth://anthropic")
+            .with_base_url(mock.uri())
+            .with_auth_kind(AnthropicAuthKind::OauthBearer),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "claude".into(),
+        ModelEntry::new("anthropic_oauth", "claude-sonnet-4-6"),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("default".into(), AliasValue::Single("claude".into()));
+    let config = Config {
+        server: ServerConfig::default(),
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        legacy_compat: LegacyCompat::Openrouter,
+        models,
+        ..Default::default()
+    };
+
+    let result = commands::test::run(config, "default", "Hi.").await;
+    assert!(
+        result.is_ok(),
+        "test::run should resolve oauth://anthropic via CompositeStore: {result:?}"
+    );
 }

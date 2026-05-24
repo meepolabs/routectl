@@ -305,3 +305,27 @@ async fn delete_is_read_only_error() {
     let err = store.delete(&r).await.unwrap_err();
     assert!(err.to_string().contains("read-only"));
 }
+
+// --- MemoryStore: oauth:// refs are explicitly refused ---
+
+#[tokio::test]
+async fn memory_store_get_rejects_oauth_with_composite_hint() {
+    // Out-of-band callers that wire only a MemoryStore (tests,
+    // downstream embedders) MUST get a loud error when an oauth://
+    // reference reaches it -- not a silent miss. The error must point
+    // them at CompositeStore so the fix is discoverable.
+    let store = MemoryStore::new();
+    let r = SecretRef::OAuth {
+        provider: "anthropic".into(),
+    };
+    let err = store.get(&r).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("CompositeStore") || msg.contains("OAuthStore"),
+        "expected CompositeStore/OAuthStore guidance, got: {msg}"
+    );
+    assert!(
+        msg.contains("anthropic"),
+        "provider name should appear in the error: {msg}"
+    );
+}

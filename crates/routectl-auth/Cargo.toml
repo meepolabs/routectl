@@ -6,7 +6,26 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Auth surface for routectl: secret references (env, file, literal)."
+description = "Auth surface for routectl: secret references (env, file, literal, oauth-managed)."
+
+[features]
+default = ["oauth"]
+# `oauth` pulls in the routectl-managed OAuth client (PKCE login, token
+# store, refresh). Disabling reverts the crate to the pre-v0.7 surface
+# (env://, file://, literal: only) for embedders who want a leaner dep
+# tree.
+oauth = [
+    "dep:reqwest",
+    "dep:axum",
+    "dep:url",
+    "dep:sha2",
+    "dep:base64",
+    "dep:rand",
+    "dep:subtle",
+    "dep:zeroize",
+    "dep:webbrowser",
+    "dep:tempfile",
+]
 
 [dependencies]
 routectl-core.workspace = true
@@ -15,9 +34,23 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["fs", "rt"] }
+tokio = { workspace = true, features = ["fs", "rt", "sync"] }
+
+# OAuth-only deps. Gated behind the `oauth` feature so the lean build
+# (no OAuth) does not pull in axum / reqwest / webbrowser etc.
+reqwest = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
+rand = { workspace = true, optional = true }
+subtle = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+webbrowser = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid.workspace = true
 tempfile = "3"
+serial_test = "3"

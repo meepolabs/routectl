@@ -37,7 +37,7 @@ use crate::resolved::ResolvedModel;
 pub async fn build_provider(
     name: &str,
     entry: &ProviderEntry,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
 ) -> Result<Arc<dyn Provider>> {
     build_provider_with_options(name, entry, secrets, BuildOptions::default()).await
 }
@@ -89,7 +89,7 @@ impl BuildOptions {
 pub async fn build_provider_with_options(
     name: &str,
     entry: &ProviderEntry,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
 ) -> Result<Arc<dyn Provider>> {
     #[cfg(feature = "bedrock")]
@@ -154,7 +154,7 @@ pub(crate) struct AnthropicModelOverrides {
 pub(crate) async fn build_provider_with_bedrock_model_override(
     name: &str,
     entry: &ProviderEntry,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
     bedrock_overrides: Option<BedrockModelOverrides>,
     cached_auth: Option<CachedBedrockAuth>,
@@ -179,7 +179,7 @@ pub(crate) async fn build_provider_with_bedrock_model_override(
 pub(crate) async fn build_provider_with_anthropic_model_override(
     name: &str,
     entry: &ProviderEntry,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
     anthropic_overrides: Option<AnthropicModelOverrides>,
 ) -> Result<Arc<dyn Provider>> {
@@ -197,7 +197,7 @@ pub(crate) async fn build_provider_with_anthropic_model_override(
 async fn build_provider_inner(
     name: &str,
     entry: &ProviderEntry,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
     #[cfg(feature = "bedrock")] bedrock_overrides: Option<BedrockModelOverrides>,
     anthropic_overrides: Option<AnthropicModelOverrides>,
@@ -213,7 +213,7 @@ async fn build_provider_inner(
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
-            let api_key = resolve(secrets, api_key_ref).await?;
+            let api_key = resolve(&*secrets, api_key_ref).await?;
             // v0.6.0: reasoning_dialect + history_reasoning moved off
             // [providers.X] to [models.X]; the egress reads them from
             // `req.routectl_internal` at request time. The config-side
@@ -249,10 +249,17 @@ async fn build_provider_inner(
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
-            let api_key = resolve(secrets, api_key_ref).await?;
+            // OAuth-aware: for `oauth://<provider>` refs the provider
+            // gets a `ManagedToken` that re-enters `SecretStore::get`
+            // per request, so token rotation in credentials.json is
+            // picked up live without restart. For env / file / literal
+            // the value is resolved once and wrapped in `StaticToken`
+            // (semantically equivalent to the pre-v0.7 `api_key:
+            // String` field).
+            let auth = resolve_token_source(&secrets, api_key_ref).await?;
             let cfg = AnthropicApiConfig {
                 id: format!("anthropic-api:{name}"),
-                api_key,
+                auth,
                 base_url: base_url.clone(),
                 anthropic_version: anthropic_version.clone(),
                 auth_kind: *auth_kind,
@@ -281,9 +288,9 @@ async fn build_provider_inner(
             runtime: _,
         } => {
             validate_openai_responses_account_id(name, *auth_kind, account_id_ref)?;
-            let api_key = resolve(secrets, api_key_ref).await?;
+            let api_key = resolve(&*secrets, api_key_ref).await?;
             let account_id = match account_id_ref {
-                Some(uri) => Some(resolve(secrets, uri).await?),
+                Some(uri) => Some(resolve(&*secrets, uri).await?),
                 None => None,
             };
             let resolved_base_url = base_url
@@ -329,7 +336,7 @@ async fn build_provider_inner(
             let (bedrock_creds, resolved) = if let Some(c) = cached_auth {
                 (c.creds, c.resolved)
             } else {
-                let bedrock_creds = resolve_bedrock_creds(secrets, creds).await?;
+                let bedrock_creds = resolve_bedrock_creds(&*secrets, creds).await?;
                 let resolved =
                     routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
                 (bedrock_creds, resolved)
@@ -430,6 +437,81 @@ async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
     secrets.get(&secret_ref).await
 }
 
+/// Pick the primary `api_key_ref` URI off a provider entry. Used by
+/// `build_resolved_models` to thread the originating `SecretRef` onto
+/// the resolved model so the 401 self-heal path can dispatch back
+/// through the originating store. Bedrock entries return `None` --
+/// their creds shape is multi-field and the caller doesn't need a
+/// single canonical SecretRef for the self-heal hook today.
+fn primary_api_key_uri(entry: &ProviderEntry) -> Option<&str> {
+    match entry {
+        ProviderEntry::OpenaiCompat { api_key_ref, .. } => Some(api_key_ref),
+        ProviderEntry::AnthropicApi { api_key_ref, .. } => Some(api_key_ref),
+        #[cfg(feature = "openai-responses")]
+        ProviderEntry::OpenaiResponses { api_key_ref, .. } => Some(api_key_ref),
+        #[cfg(feature = "bedrock")]
+        ProviderEntry::Bedrock { .. } => None,
+    }
+}
+
+/// Build a `TokenSource` for a provider that needs per-request token
+/// resolution. For `oauth://<provider>` refs this returns a
+/// `ManagedToken` that re-enters `SecretStore::get` per request -- so
+/// rotation in `~/.config/routectl/credentials.json` is picked up live
+/// without restart. For static refs (env / file / literal) the value
+/// is resolved once and cached as a `StaticToken`, semantically
+/// equivalent to the pre-v0.7 in-memory `api_key: String`.
+async fn resolve_token_source(
+    secrets: &Arc<dyn SecretStore>,
+    uri: &str,
+) -> Result<Arc<dyn routectl_core::TokenSource>> {
+    tracing::debug!(secret_scheme = scheme_of(uri), "resolving token source");
+    let secret_ref = SecretRef::parse(uri)?;
+    match secret_ref {
+        SecretRef::OAuth { .. } => {
+            let mt: Arc<dyn routectl_core::TokenSource> = Arc::new(ManagedToken {
+                secret_ref,
+                store: secrets.clone(),
+            });
+            Ok(mt)
+        }
+        // Static refs: resolve once and cache. Same hot-path cost as
+        // the pre-v0.7 baked-in `api_key: String`.
+        _ => {
+            let v = secrets.get(&secret_ref).await?;
+            let st: Arc<dyn routectl_core::TokenSource> =
+                Arc::new(routectl_core::StaticToken::new(v));
+            Ok(st)
+        }
+    }
+}
+
+/// `TokenSource` impl backed by a routectl-managed credentials store.
+/// Holds the original `SecretRef` and an `Arc` to the store so each
+/// `token()` call dispatches back through `SecretStore::get` -- which
+/// for `oauth://` refs lands in `OAuthStore` (in-memory cache + future
+/// a prior change refresh). The store is `Arc`-shared with the rest of routectl
+/// so we never duplicate the credentials file in memory.
+struct ManagedToken {
+    secret_ref: SecretRef,
+    store: Arc<dyn SecretStore>,
+}
+
+impl std::fmt::Debug for ManagedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagedToken")
+            .field("secret_ref", &self.secret_ref)
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl routectl_core::TokenSource for ManagedToken {
+    async fn token(&self) -> Result<String> {
+        self.store.get(&self.secret_ref).await
+    }
+}
+
 /// Build the per-nickname `ResolvedModel` table from a `Config`. Walks
 /// `[models]` once, building one `Arc<dyn Provider>` per non-Bedrock
 /// `[providers.X]` (cached across models referencing the same provider)
@@ -446,7 +528,7 @@ async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
 /// map does not contain them.
 pub async fn build_resolved_models(
     config: &Config,
-    secrets: &dyn SecretStore,
+    secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
 ) -> Result<(BTreeMap<String, Arc<ResolvedModel>>, Vec<(String, String)>)> {
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
@@ -506,7 +588,7 @@ pub async fn build_resolved_models(
                 // [models.X] reference it.
                 let cached = match bedrock_auth_cache.get(&entry.provider) {
                     Some(c) => Some(c.clone()),
-                    None => match resolve_bedrock_auth_for_entry(provider_entry, secrets).await {
+                    None => match resolve_bedrock_auth_for_entry(provider_entry, &*secrets).await {
                         Ok(c) => {
                             bedrock_auth_cache.insert(entry.provider.clone(), c.clone());
                             Some(c)
@@ -543,7 +625,7 @@ pub async fn build_resolved_models(
                 match build_provider_with_bedrock_model_override(
                     &entry.provider,
                     provider_entry,
-                    secrets,
+                    secrets.clone(),
                     opts.clone(),
                     Some(overrides),
                     cached,
@@ -575,7 +657,7 @@ pub async fn build_resolved_models(
             match build_provider_with_anthropic_model_override(
                 &entry.provider,
                 provider_entry,
-                secrets,
+                secrets.clone(),
                 opts.clone(),
                 Some(overrides),
             )
@@ -605,7 +687,7 @@ pub async fn build_resolved_models(
             match build_provider_with_options(
                 &entry.provider,
                 provider_entry,
-                secrets,
+                secrets.clone(),
                 opts.clone(),
             )
             .await
@@ -650,6 +732,11 @@ pub async fn build_resolved_models(
         }
         if let Some(ms) = entry.stream_first_byte_timeout_ms {
             resolved = resolved.with_stream_first_byte_timeout_ms(ms);
+        }
+        if let Some(uri) = primary_api_key_uri(provider_entry) {
+            if let Ok(sr) = SecretRef::parse(uri) {
+                resolved = resolved.with_auth_secret_ref(sr);
+            }
         }
         models.insert(nickname.clone(), Arc::new(resolved));
     }
@@ -1401,7 +1488,7 @@ mod build_resolved_models_tests {
 
     #[tokio::test]
     async fn non_bedrock_models_share_one_arc_per_provider() {
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
             vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
             vec![
@@ -1409,7 +1496,7 @@ mod build_resolved_models_tests {
                 ("sonnet", ModelEntry::new("anthropic", "claude-sonnet-4-6")),
             ],
         );
-        let (models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
             .await
             .expect("ok");
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
@@ -1424,7 +1511,7 @@ mod build_resolved_models_tests {
 
     #[tokio::test]
     async fn disabled_models_are_skipped() {
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
             vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
             vec![
@@ -1435,7 +1522,7 @@ mod build_resolved_models_tests {
                 ),
             ],
         );
-        let (models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
             .await
             .expect("ok");
         assert!(failed.is_empty());
@@ -1445,9 +1532,9 @@ mod build_resolved_models_tests {
 
     #[tokio::test]
     async fn unknown_provider_in_model_yields_failed_entry() {
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(vec![], vec![("orphan", ModelEntry::new("missing", "u"))]);
-        let (models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
             .await
             .expect("ok");
         assert!(models.is_empty());
@@ -1478,7 +1565,7 @@ mod build_resolved_models_tests {
         // ResolvedModel.header_extras after build_resolved_models.
         // Operators now set anthropic-beta via header_extras instead
         // of the dropped Vec<String> field.
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let mut headers = std::collections::BTreeMap::new();
         headers.insert(
             "anthropic-beta".to_string(),
@@ -1491,7 +1578,7 @@ mod build_resolved_models_tests {
                 ModelEntry::new("anthropic", "claude-opus-4-7").with_header_extras(headers),
             )],
         );
-        let (models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
             .await
             .expect("ok");
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
@@ -1504,7 +1591,7 @@ mod build_resolved_models_tests {
 
     #[tokio::test]
     async fn stream_first_byte_timeout_ms_propagates_from_model_entry() {
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
             vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
             vec![(
@@ -1513,7 +1600,7 @@ mod build_resolved_models_tests {
                     .with_stream_first_byte_timeout_ms(300_000),
             )],
         );
-        let (models, failed) = build_resolved_models(&cfg, &store, BuildOptions::default())
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
             .await
             .expect("ok");
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
@@ -1525,12 +1612,12 @@ mod build_resolved_models_tests {
     async fn empty_header_extras_and_none_timeout_yield_defaults() {
         // Pin: a model entry without the new fields leaves the
         // resolved model with default values (empty maps, None).
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
         let cfg = config_with_models(
             vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
             vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
         );
-        let (models, _) = build_resolved_models(&cfg, &store, BuildOptions::default())
+        let (models, _) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
             .await
             .expect("ok");
         let haiku = models.get("haiku").expect("haiku entry");
@@ -1655,5 +1742,94 @@ mod validate_alias_chain_targets_tests {
         assert!(msg.contains("missing-1"), "msg: {msg}");
         assert!(msg.contains("missing-2"), "msg: {msg}");
         assert!(msg.contains("shelved"), "msg: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod managed_token_tests {
+    //! Pin the v0.7 OAuth-aware `resolve_token_source` semantics:
+    //!   - `oauth://` refs return a `ManagedToken` that re-enters
+    //!     `SecretStore::get` on every `token()` call (so credentials
+    //!     rotation in `~/.config/routectl/credentials.json` is picked
+    //!     up live without restart).
+    //!   - `env://` / `file://` / `literal:` refs return a `StaticToken`
+    //!     resolved once at construction; subsequent `token()` calls
+    //!     never re-hit the SecretStore.
+
+    use super::*;
+    use async_trait::async_trait;
+    use routectl_auth::{SecretRef, SecretStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingStore {
+        calls: AtomicUsize,
+    }
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait]
+    impl SecretStore for CountingStore {
+        async fn get(&self, sr: &SecretRef) -> routectl_core::Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match sr {
+                SecretRef::OAuth { provider } => Ok(format!("token-for-{provider}")),
+                SecretRef::Env(_) => Ok("static-canned".to_string()),
+                _ => Err(routectl_core::Error::Auth(
+                    "counting store: oauth/env-only".into(),
+                )),
+            }
+        }
+        async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_token_re_enters_store_per_call() {
+        let counting = Arc::new(CountingStore::new());
+        let store: Arc<dyn SecretStore> = counting.clone();
+        let ts = resolve_token_source(&store, "oauth://anthropic")
+            .await
+            .unwrap();
+        assert_eq!(ts.token().await.unwrap(), "token-for-anthropic");
+        assert_eq!(ts.token().await.unwrap(), "token-for-anthropic");
+        assert_eq!(ts.token().await.unwrap(), "token-for-anthropic");
+        assert_eq!(
+            counting.calls(),
+            3,
+            "ManagedToken must hit store once per token() call"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_token_does_not_re_enter_store_per_call() {
+        // CountingStore intercepts `SecretRef::Env(_)` directly and
+        // returns a canned reply, so `std::env` is never consulted.
+        // The point of the test is to prove the StaticToken path
+        // caches: only ONE call lands in the store at construction,
+        // and subsequent `token()` invocations reuse the cached value.
+        let counting = Arc::new(CountingStore::new());
+        let store: Arc<dyn SecretStore> = counting.clone();
+        let ts = resolve_token_source(&store, "env://ROUTECTL_TEST_STATIC_TOKEN_VAR")
+            .await
+            .unwrap();
+        let _ = ts.token().await.unwrap();
+        let _ = ts.token().await.unwrap();
+        assert_eq!(
+            counting.calls(),
+            1,
+            "StaticToken caches; store hit only at construction"
+        );
     }
 }

@@ -1,22 +1,24 @@
 //! Provider factory tests with the default in-process SecretStore.
 
-use routectl_auth::MemoryStore;
+use routectl_auth::{MemoryStore, SecretRef};
 use routectl_core::Error;
 use routectl_router::{build_provider, ProviderEntry, ReasoningDialect};
 
 #[tokio::test]
 async fn build_openai_compat_resolves_secret() {
-    let store = MemoryStore;
+    let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
     let entry = ProviderEntry::openai_compat("https://example.com/v1", "literal:sk-abc");
-    let provider = build_provider("test", &entry, &store).await.expect("build");
+    let provider = build_provider("test", &entry, store.clone())
+        .await
+        .expect("build");
     assert_eq!(provider.id(), "openai-compat:test");
 }
 
 #[tokio::test]
 async fn build_anthropic_api_resolves_secret() {
-    let store = MemoryStore;
+    let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
     let entry = ProviderEntry::anthropic_api("literal:sk-ant-abc");
-    let provider = build_provider("anthropic", &entry, &store)
+    let provider = build_provider("anthropic", &entry, store.clone())
         .await
         .expect("build");
     assert_eq!(provider.id(), "anthropic-api:anthropic");
@@ -141,9 +143,9 @@ reasoning_dialect = "deepseek"
 #[tokio::test]
 async fn build_with_missing_env_var_errors() {
     std::env::remove_var("ROUTECTL_TEST_MISSING_KEY");
-    let store = MemoryStore;
+    let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
     let entry = ProviderEntry::anthropic_api("env://ROUTECTL_TEST_MISSING_KEY");
-    match build_provider("anthropic", &entry, &store).await {
+    match build_provider("anthropic", &entry, store.clone()).await {
         Err(Error::Auth(msg)) => {
             assert!(msg.contains("not set"), "got: {msg}");
         }
@@ -188,6 +190,94 @@ user_agent = "claude-code/1.2.3"
     }
 }
 
+/// Pin: `build_resolved_models` threads the originating `oauth://`
+/// SecretRef onto each ResolvedModel so the 401 self-heal hook can
+/// dispatch back through the OAuth store. MemoryStore parses the
+/// URI fine; we never call `.token()` here, just inspect the
+/// retained `auth_secret_ref`.
+#[tokio::test]
+async fn resolved_model_retains_oauth_secret_ref_for_anthropic() {
+    use routectl_router::{build_resolved_models, BuildOptions, Config, ModelEntry};
+    use std::collections::BTreeMap;
+
+    let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
+    let mut providers: BTreeMap<String, ProviderEntry> = BTreeMap::new();
+    providers.insert(
+        "anthropic".into(),
+        ProviderEntry::anthropic_api("oauth://anthropic"),
+    );
+    let mut models: BTreeMap<String, ModelEntry> = BTreeMap::new();
+    models.insert(
+        "claude".into(),
+        ModelEntry::new("anthropic", "claude-sonnet-4-6"),
+    );
+    let cfg = Config {
+        providers,
+        models,
+        ..Config::default()
+    };
+
+    let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+        .await
+        .expect("build_resolved_models");
+    assert!(failed.is_empty(), "expected no failures: {failed:?}");
+    let m = resolved.get("claude").expect("claude entry");
+    assert_eq!(
+        m.auth_secret_ref,
+        Some(SecretRef::OAuth {
+            provider: "anthropic".into()
+        })
+    );
+}
+
+/// Pin: openai-compat entries with `env://` refs also have their
+/// originating SecretRef retained on the ResolvedModel. The env var
+/// itself doesn't need to exist for this test -- the URI is parsed
+/// (not resolved) for `auth_secret_ref` propagation. The provider
+/// build itself uses the literal value via the MemoryStore literal
+/// shortcut, so we use `literal:k` for the actual build but the
+/// retained ref reflects the original URI.
+#[tokio::test]
+#[serial_test::serial]
+async fn resolved_model_retains_env_secret_ref_for_openai_compat() {
+    use routectl_router::{build_resolved_models, BuildOptions, Config, ModelEntry};
+    use std::collections::BTreeMap;
+
+    // Set the env var so MemoryStore's env:// arm can resolve at
+    // build time. The retained `auth_secret_ref` is parsed from the
+    // URI string regardless.
+    std::env::set_var("ROUTECTL_TEST_OPENAI_COMPAT_KEY", "sk-test-value");
+
+    let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
+    let mut providers: BTreeMap<String, ProviderEntry> = BTreeMap::new();
+    providers.insert(
+        "host".into(),
+        ProviderEntry::openai_compat(
+            "https://example.com/v1",
+            "env://ROUTECTL_TEST_OPENAI_COMPAT_KEY",
+        ),
+    );
+    let mut models: BTreeMap<String, ModelEntry> = BTreeMap::new();
+    models.insert("m".into(), ModelEntry::new("host", "some-model"));
+    let cfg = Config {
+        providers,
+        models,
+        ..Config::default()
+    };
+
+    let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+        .await
+        .expect("build_resolved_models");
+    std::env::remove_var("ROUTECTL_TEST_OPENAI_COMPAT_KEY");
+
+    assert!(failed.is_empty(), "expected no failures: {failed:?}");
+    let m = resolved.get("m").expect("m entry");
+    assert_eq!(
+        m.auth_secret_ref,
+        Some(SecretRef::Env("ROUTECTL_TEST_OPENAI_COMPAT_KEY".into()))
+    );
+}
+
 #[cfg(feature = "openai-responses")]
 mod openai_responses_tests {
     use routectl_auth::MemoryStore;
@@ -206,10 +296,13 @@ auth_kind = "chatgpt-oauth"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         let entry = cfg.providers.get("gpt").expect("gpt entry");
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn routectl_auth::SecretStore> =
+            std::sync::Arc::new(MemoryStore);
 
         // Act
-        let provider = build_provider("gpt", entry, &store).await.expect("build");
+        let provider = build_provider("gpt", entry, store.clone())
+            .await
+            .expect("build");
 
         // Assert
         assert_eq!(provider.id(), "openai-responses:gpt");
@@ -226,10 +319,11 @@ auth_kind = "chatgpt-oauth"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         let entry = cfg.providers.get("gpt").expect("gpt entry");
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn routectl_auth::SecretStore> =
+            std::sync::Arc::new(MemoryStore);
 
         // Act
-        let result = build_provider("gpt", entry, &store).await;
+        let result = build_provider("gpt", entry, store.clone()).await;
 
         // Assert
         match result {
@@ -253,10 +347,11 @@ auth_kind = "api-key"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         let entry = cfg.providers.get("gpt-api").expect("gpt-api entry");
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn routectl_auth::SecretStore> =
+            std::sync::Arc::new(MemoryStore);
 
         // Act
-        let provider = build_provider("gpt-api", entry, &store)
+        let provider = build_provider("gpt-api", entry, store.clone())
             .await
             .expect("build");
 
@@ -276,10 +371,11 @@ auth_kind = "api-key"
 "#;
         let cfg: Config = toml::from_str(toml_src).expect("parse");
         let entry = cfg.providers.get("gpt-api").expect("gpt-api entry");
-        let store = MemoryStore;
+        let store: std::sync::Arc<dyn routectl_auth::SecretStore> =
+            std::sync::Arc::new(MemoryStore);
 
         // Act
-        let result = build_provider("gpt-api", entry, &store).await;
+        let result = build_provider("gpt-api", entry, store.clone()).await;
 
         // Assert
         match result {

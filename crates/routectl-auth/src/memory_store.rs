@@ -13,17 +13,12 @@ use routectl_core::{Error, Result};
 
 use crate::{SecretRef, SecretStore};
 
+#[derive(Clone, Default)]
 pub struct MemoryStore;
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self
-    }
-}
-
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -42,13 +37,33 @@ impl SecretStore for MemoryStore {
             }),
             SecretRef::Literal(s) => Ok(s.clone()),
             SecretRef::File(path) => read_secret_file(path).await,
+            SecretRef::OAuth { provider } => {
+                // MemoryStore does not own the OAuth store. The
+                // composite store in routectl-cli (CompositeStore)
+                // routes oauth:// refs to OAuthStore before they reach
+                // here. If a caller wires only a MemoryStore (e.g.
+                // tests, downstream embedders), oauth:// is a hard
+                // error -- not a silent miss.
+                tracing::warn!(
+                    scheme = "oauth://",
+                    provider = %provider,
+                    reason = "MemoryStore does not handle oauth:// refs",
+                    "secret resolution failed",
+                );
+                Err(Error::Auth(format!(
+                    "oauth://{provider} cannot be resolved by MemoryStore; \
+                     wire a CompositeStore that includes OAuthStore (or run \
+                     `routectl login {provider}` from the CLI binary)",
+                )))
+            }
         }
     }
 
     async fn set(&self, _secret_ref: &SecretRef, _value: &str) -> Result<()> {
-        // All three sources are read-only via routectl. Users manage
-        // env vars, files, and inline literals through their own
-        // tooling -- routectl just resolves them at request time.
+        // All four sources are read-only via routectl. Users manage
+        // env vars, files, inline literals, and OAuth tokens through
+        // their own tooling -- routectl just resolves them at request
+        // time (OAuth tokens flow through `routectl login`, not `set`).
         Err(Error::Auth(
             "secrets are read-only via routectl; manage env vars / files outside the binary".into(),
         ))
