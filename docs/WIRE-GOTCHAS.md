@@ -237,3 +237,13 @@ this doc first for similar patterns. For operator-facing config recipes see
   The field on `ResponsesRequest` does NOT carry
   `#[serde(skip_serializing_if = "String::is_empty")]` -- it is always
   emitted (possibly as `""`) so the server never sees the field missing.
+
+## claude-code's hardcoded URL bypasses
+
+- claude-code performs `WebFetch`, `WebSearch`, `PushNotification`,
+  `RemoteTrigger`, `ShareOnboardingGuide`, the `/login` OAuth flow,
+  and MCP server connections against hardcoded URLs that ignore
+  `ANTHROPIC_BASE_URL`. routectl never sees these requests --
+  capturing them at the gateway layer alone is incomplete. Pair
+  routectl with a network-level proxy (mitmproxy, a side-channel
+  HTTP intercept) if full claude-code egress capture is required.
