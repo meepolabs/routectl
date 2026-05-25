@@ -521,6 +521,7 @@ fn build_closing_chunk(
             matched_stop_sequence: None,
         }],
         usage: usage_delta,
+        opaque_events: Vec::new(),
     }
 }
 
@@ -538,6 +539,7 @@ fn text_chunk(text: String) -> ChatChunk {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     }
 }
 
@@ -561,6 +563,7 @@ fn tool_delta_chunk(id: String, name: String, call_index: u32, partial_json: Str
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     }
 }
 
@@ -581,6 +584,7 @@ fn reasoning_text_chunk(thinking: String) -> ChatChunk {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     }
 }
 
@@ -618,6 +622,7 @@ fn reasoning_terminal_chunk(
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     }
 }
 
@@ -642,6 +647,7 @@ fn reasoning_redacted_chunk(data: String) -> ChatChunk {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     }
 }
 

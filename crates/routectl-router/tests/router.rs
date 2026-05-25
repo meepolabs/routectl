@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::{
     schema::{ChunkChoice, ChunkDelta},
-    ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, Provider, Result,
-    Role, Usage,
+    ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, OpaqueSseEvent,
+    Provider, Result, Role, Usage,
 };
 use routectl_router::{
     AliasValue, Config, ProviderEntry, ProviderRuntimePolicy, ResolvedModel, RetryPolicy, Router,
@@ -38,6 +38,17 @@ enum Behavior {
     /// this as a fallbackable streaming error rather than a clean
     /// empty completion.
     StreamEmpty,
+    /// `provider.stream()` returns Ok and the stream yields chunks
+    /// carrying `opaque_events` (capture path for unknown
+    /// `content_block` types preserved verbatim) interleaved with a
+    /// normal text chunk. Before forward-compat handling, a
+    /// `server_tool_use` block crashed SSE deserialization with
+    /// `Error::Streaming` and the router's `should_fallback`
+    /// returned true, walking the chain across providers for a
+    /// local forward-compat bug. This behavior pins the contract
+    /// that opaque-event chunks pass through cleanly without
+    /// triggering chain-walk.
+    StreamWithOpaqueEvents,
 }
 
 impl MockProvider {
@@ -113,6 +124,30 @@ impl Provider for MockProvider {
                 Ok(s.boxed())
             }
             Behavior::StreamEmpty => Ok(futures::stream::empty().boxed()),
+            Behavior::StreamWithOpaqueEvents => {
+                // Emit an opaque-only chunk (capture path for unknown
+                // `server_tool_use` block start + stop, no canonical
+                // delta), then a normal text chunk. The router must
+                // pass these through unchanged without raising
+                // `Error::Streaming` and without walking the chain.
+                let opaque_chunk = ChatChunk {
+                    id: format!("chunk-{id}"),
+                    model: req.model.clone(),
+                    choices: Vec::new(),
+                    usage: None,
+                    opaque_events: vec![
+                        OpaqueSseEvent::ContentBlockStart {
+                            upstream_index: 0,
+                            type_tag: "server_tool_use".into(),
+                            raw_data: br#"{"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{}}"#.to_vec(),
+                        },
+                        OpaqueSseEvent::ContentBlockStop { upstream_index: 0 },
+                    ],
+                };
+                let text_chunk = ok_chunk(&id, &req.model, "Hello");
+                let chunks = vec![opaque_chunk, text_chunk];
+                Ok(futures::stream::iter(chunks.into_iter().map(Ok)).boxed())
+            }
         }
     }
 }
@@ -156,6 +191,7 @@ fn ok_chunk(id: &str, model: &str, content: &str) -> ChatChunk {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     }
 }
 
@@ -561,6 +597,62 @@ async fn stream_propagates_mid_stream_error_no_fallback() {
     assert!(matches!(second, Err(Error::Streaming(_))));
     // p2 was never used because we already started streaming from p1.
     assert_eq!(p2.calls(), 0);
+}
+
+/// Before forward-compat handling, an Anthropic SSE stream containing
+/// an unknown `content_block` type (e.g. `server_tool_use`) crashed
+/// deserialization with `Error::Streaming`; the router's
+/// `should_fallback` returned true and the chain walked across
+/// providers, multiplying upstream calls for a local forward-compat
+/// bug (production logs showed 11+ retries / 3 minutes). With the
+/// catchall + sink-drain plus opaque-event replay in place,
+/// unknown variants travel through the canonical chunk
+/// stream as `opaque_events` payload and the router never sees
+/// `Error::Streaming`. This test pins the router-side regression
+/// gate: a streaming response carrying opaque events completes
+/// cleanly and the backstop provider is NEVER touched.
+#[tokio::test]
+async fn stream_with_unknown_anthropic_block_does_not_walk_chain() {
+    // Arrange: chain with primary + backstop. Primary emits an
+    // opaque-only chunk (server_tool_use start/stop) followed by a
+    // normal text chunk. Backstop is wired with `Ok` behavior so a
+    // regression that walks the chain produces visible call-count
+    // drift instead of a confusingly-empty failure.
+    let primary = MockProvider::new("primary", vec![Behavior::StreamWithOpaqueEvents]);
+    let backstop = MockProvider::new("backstop", vec![Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    let (k, v) = chain_alias("fast", &["m1", "m2"]);
+    aliases.insert(k, v);
+    let r = build_router_v6(
+        aliases,
+        vec![
+            ("m1".into(), "primary".into(), "m".into()),
+            ("m2".into(), "backstop".into(), "m".into()),
+        ],
+        vec![
+            ("primary".into(), primary.clone() as Arc<dyn Provider>),
+            ("backstop".into(), backstop.clone() as Arc<dyn Provider>),
+        ],
+    );
+
+    // Act: drain the stream to completion. Each item must be Ok --
+    // a single Err here means the regression is back.
+    let mut s = r.stream(req("fast")).await.expect("ok");
+    let mut count = 0;
+    while let Some(item) = s.next().await {
+        let _ = item.expect("opaque-event chunks must not surface as Err");
+        count += 1;
+    }
+
+    // Assert: stream completed without error, primary served the
+    // entire response, and the backstop was never reached.
+    assert_eq!(count, 2, "expected opaque-only chunk + text chunk");
+    assert_eq!(primary.calls(), 1, "primary should be called exactly once");
+    assert_eq!(
+        backstop.calls(),
+        0,
+        "backstop must NEVER be called -- chain-walk regression gate",
+    );
 }
 
 // ---------------------------------------------------------------------------
