@@ -3,8 +3,9 @@
 
 use routectl_core::{
     cache_control::{Breakpoint, BreakpointPosition},
-    CacheControl, ChatChunk, ChatRequest, ChatResponse, ContentPart, KnownContentPart, Reasoning,
-    ReasoningConfig, ReasoningDetail, ReasoningDetailKind, SystemBlock, SystemContent, ToolDef,
+    CacheControl, ChatChunk, ChatRequest, ChatResponse, ContentPart, KnownContentPart,
+    OpaqueSseEvent, Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, SystemBlock,
+    SystemContent, ToolDef,
 };
 use serde_json::{json, Value};
 
@@ -507,4 +508,55 @@ fn system_block_helper_constructs_minimally() {
     assert_eq!(v["type"], "text");
     assert_eq!(v["text"], "you are helpful");
     assert!(!v.as_object().unwrap().contains_key("cache_control"));
+}
+
+// ---------------------------------------------------------------------------
+// ChatChunk.opaque_events: skip-serialized carrier for opaque SSE bytes.
+// Anthropic egress writes; Anthropic ingress reads. Never on the wire.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chatchunk_wire_shape_unchanged_after_opaque_events() {
+    // Pin the contract: a default ChatChunk's wire JSON must not contain
+    // an `opaque_events` key. Adding the field is invisible to library
+    // consumers and OpenAI-shape ingresses.
+    let before = serde_json::to_value(ChatChunk::default()).unwrap();
+    assert!(before.get("opaque_events").is_none());
+
+    // And a chunk with opaque_events populated must also serialize without
+    // the key (the field is `#[serde(skip)]`).
+    let chunk = ChatChunk {
+        opaque_events: vec![OpaqueSseEvent::ContentBlockStop { upstream_index: 0 }],
+        ..Default::default()
+    };
+    let serialized = serde_json::to_value(&chunk).unwrap();
+    assert!(serialized.get("opaque_events").is_none());
+}
+
+#[test]
+fn chatchunk_opaque_events_round_trip_drops_to_empty() {
+    // Round-trip contract: serializing a ChatChunk with non-empty
+    // opaque_events and deserializing back yields opaque_events = [].
+    // The carrier is in-process only; ser/de erases it. This is by
+    // design so OpenAI-shape ingresses never see Anthropic-only blocks.
+    let chunk = ChatChunk {
+        id: "chunk-1".into(),
+        opaque_events: vec![
+            OpaqueSseEvent::ContentBlockStart {
+                upstream_index: 2,
+                type_tag: "server_tool_use".into(),
+                raw_data: b"{\"type\":\"server_tool_use\",\"id\":\"x\"}".to_vec(),
+            },
+            OpaqueSseEvent::ContentBlockDelta {
+                upstream_index: 2,
+                raw_delta: b"{\"type\":\"input_json_delta\"}".to_vec(),
+            },
+            OpaqueSseEvent::ContentBlockStop { upstream_index: 2 },
+        ],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&chunk).unwrap();
+    let restored: ChatChunk = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.id, "chunk-1");
+    assert!(restored.opaque_events.is_empty());
 }

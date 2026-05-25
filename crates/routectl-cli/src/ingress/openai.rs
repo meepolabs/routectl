@@ -335,6 +335,7 @@ mod tests {
                 matched_stop_sequence: None,
             }],
             usage: None,
+            opaque_events: Vec::new(),
         };
         let mut state = OpenAiIngress.new_stream_state();
         let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();

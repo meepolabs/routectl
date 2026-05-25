@@ -24,6 +24,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// whose clock is set before 1970 (pathological but possible in
 /// containers); a 1970 expiry will look "expired" everywhere, which
 /// is the safe direction.
+///
+/// Wall-clock dependency: reads the system clock, NOT a monotonic
+/// source. OAuth `expires_at_unix` decisions depend on this value;
+/// if the system clock skews (broken NTP, manual clock change, VM
+/// pause/resume), the router may treat valid tokens as expired or
+/// expired tokens as valid. In production, ensure NTP sync.
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

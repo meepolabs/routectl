@@ -750,8 +750,11 @@ impl Router {
         apply_layered_overlays(&self.config, &target, &mut attempt_req);
 
         let mut auth_retry_attempted = false;
+        let mut attempts_made: u32 = 0;
         loop {
-            match provider.count_tokens(attempt_req.clone()).await {
+            let result = provider.count_tokens(attempt_req.clone()).await;
+            attempts_made += 1;
+            match result {
                 Ok(tc) => {
                     self.record_success(&target.state_key);
                     return Ok(tc);
@@ -769,6 +772,7 @@ impl Router {
                         tracing::debug!(
                             provider = provider_name,
                             model = model_label,
+                            attempt = attempts_made,
                             "count_tokens 401; refreshing auth and retrying once",
                         );
                         provider.on_auth_failure().await?;
@@ -866,6 +870,7 @@ impl Router {
             // failure propagates immediately rather than walking the
             // fallback chain over a dead OAuth identity.
             let mut auth_retry_attempted = false;
+            let mut attempts_made: u32 = 0;
             let attempt_outcome = loop {
                 let r = try_stream_with_first_chunk(
                     provider_name,
@@ -874,12 +879,14 @@ impl Router {
                     &attempt_policy,
                 )
                 .await;
+                attempts_made += 1;
                 if let Err(ref err) = r {
                     if !auth_retry_attempted && matches!(err, Error::Upstream { status: 401, .. }) {
                         auth_retry_attempted = true;
                         tracing::debug!(
                             provider = provider_name,
                             model = %target.nickname.as_deref().unwrap_or(""),
+                            attempt = attempts_made,
                             "stream 401 pre-first-chunk; refreshing auth and retrying once",
                         );
                         provider.on_auth_failure().await?;
@@ -2113,6 +2120,7 @@ mod three_source_anthropic_beta_lift_tests {
                     model: "x".into(),
                     choices: vec![],
                     usage: None,
+                    opaque_events: Vec::new(),
                 })
             });
             Ok(s.boxed())
