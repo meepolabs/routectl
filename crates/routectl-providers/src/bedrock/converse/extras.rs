@@ -18,6 +18,7 @@ use crate::anthropic_api::types::ThinkingConfig;
 
 use super::super::betas::filter_bedrock_betas;
 use super::super::BedrockConfig;
+use super::types::ConverseToolChoice;
 
 /// Build the `additionalModelRequestFields` bag. Returns None when no
 /// fields land in the bag (avoids emitting `additionalModelRequestFields:
@@ -29,7 +30,19 @@ use super::super::BedrockConfig;
 /// Invoke (Anthropic-shape body) or Converse (`additionalModelRequestFields`).
 /// The Invoke gotcha applies on both paths: a single unsupported flag
 /// 400s the entire request.
-pub(super) fn build_additional_fields(cfg: &BedrockConfig, req: &ChatRequest) -> Option<Value> {
+///
+/// The post-translation `tool_choice` reference is consumed solely by
+/// `strip_thinking_when_tool_choice_forces_use` -- when toolChoice
+/// resolves to `{any:{}}` or `{tool:{name}}`, Anthropic's extended-
+/// thinking docs forbid pairing thinking with that tool_choice and
+/// the Converse upstream 400s. The strip removes thinking from the
+/// final bag while leaving toolChoice intact (the caller's intent to
+/// force a tool is preserved).
+pub(super) fn build_additional_fields(
+    cfg: &BedrockConfig,
+    req: &ChatRequest,
+    tool_choice: Option<&ConverseToolChoice>,
+) -> Option<Value> {
     let mut bag: Map<String, Value> = Map::new();
 
     insert_thinking(cfg, req, &mut bag);
@@ -63,6 +76,15 @@ pub(super) fn build_additional_fields(cfg: &BedrockConfig, req: &ChatRequest) ->
         &cfg.allowed_body_fields,
         super::super::body_fields::FilterContext::ConverseAdditionalFields,
     );
+
+    // Final pass: Anthropic's extended-thinking docs forbid `thinking`
+    // alongside a `tool_choice` that forces tool use. Strip thinking
+    // from the bag when toolChoice has resolved to `{any:{}}` or
+    // `{tool:{name}}`. Runs last so the check operates on the fully
+    // composed bag (insert_thinking + provider_extras + operator_extras
+    // + filtered for managed keys + body-field allowlist), matching
+    // the wire body the request will actually carry.
+    strip_thinking_when_tool_choice_forces_use(cfg, &mut bag, tool_choice);
 
     if bag.is_empty() {
         None
@@ -221,9 +243,54 @@ fn is_converse_managed_key(key: &str) -> bool {
         )
 }
 
+/// Anthropic's extended-thinking docs explicitly forbid pairing
+/// `thinking` with a `tool_choice` value that forces tool use. Anthropic
+/// on Bedrock honors the same constraint -- whether the thinking shape
+/// rides in an Anthropic Messages body (Invoke) or in a Converse
+/// `additionalModelRequestFields` bag, AWS forwards the bag verbatim to
+/// Anthropic which 400s with "Thinking may not be enabled when
+/// tool_choice forces tool use."
+///
+/// Strip `thinking` from the bag (NOT `toolChoice`; the caller's intent
+/// to force a tool is preserved) when the post-translation Converse
+/// `toolChoice` resolves to `Any` or `Tool`. `Auto` and absent
+/// `toolChoice` do not trigger the strip.
+fn strip_thinking_when_tool_choice_forces_use(
+    cfg: &BedrockConfig,
+    bag: &mut Map<String, Value>,
+    tool_choice: Option<&ConverseToolChoice>,
+) {
+    let forces_use = matches!(
+        tool_choice,
+        Some(ConverseToolChoice::Any { .. }) | Some(ConverseToolChoice::Tool { .. })
+    );
+    if !forces_use {
+        return;
+    }
+    if bag.remove("thinking").is_some() {
+        let variant = match tool_choice {
+            Some(ConverseToolChoice::Any { .. }) => "any",
+            Some(ConverseToolChoice::Tool { .. }) => "tool",
+            _ => unreachable!(
+                "forces_use guarantees Any or Tool; update this match \
+                 when adding a new forcing ConverseToolChoice variant"
+            ),
+        };
+        tracing::debug!(
+            provider = %cfg.id,
+            tool_choice_type = %variant,
+            "stripped thinking from Converse additionalModelRequestFields: \
+             toolChoice forces tool use; Anthropic forbids the combo"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_converse_managed_key;
+    use super::super::types::{ConverseSpecificTool, ConverseToolChoice, EmptyObject};
+    use super::{build_additional_fields, is_converse_managed_key};
+    use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
+    use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
 
     #[test]
     fn output_config_is_managed_key() {
@@ -253,5 +320,184 @@ mod tests {
         for k in ["top_k", "metadata", "service_tier", "container"] {
             assert!(!is_converse_managed_key(k), "expected {k:?} NOT managed");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // toolChoice + thinking conflict resolution (Converse parallel)
+    //
+    // Anthropic-on-Converse honors the same constraint as Anthropic
+    // direct: a `thinking` block in `additionalModelRequestFields`
+    // alongside `toolChoice` set to `{any:{}}` or `{tool:{name}}` causes
+    // AWS to forward to Anthropic which 400s. The strip removes thinking
+    // from the bag (NOT toolChoice; the caller's intent to force a tool
+    // is preserved).
+    // -----------------------------------------------------------------
+
+    /// Test config with `max_tokens > 1024` so legacy thinking is
+    /// composed onto the bag, and a permissive `allowed_body_fields`
+    /// list so the body-field filter doesn't drop `thinking` on its own.
+    fn fake_cfg() -> BedrockConfig {
+        BedrockConfig {
+            id: "bedrock:test-converse".into(),
+            region: "us-west-2".into(),
+            model_id: "anthropic.claude-sonnet-4-5".into(),
+            api_shape: BedrockApiShape::Converse,
+            creds: BedrockCreds::BearerKey { key: "test".into() },
+            user_agent: None,
+            header_extras: Vec::new(),
+            anthropic_beta: Vec::new(),
+            allowed_betas: Vec::new(),
+            allowed_body_fields: Vec::new(),
+            additional_model_request_fields: None,
+            adaptive_thinking: None,
+        }
+    }
+
+    /// Helper: build a ChatRequest with reasoning enabled (-> thinking
+    /// composition) at a `max_tokens` that fits the legacy floor.
+    fn req_with_thinking() -> ChatRequest {
+        ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            max_tokens: Some(2048),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("medium".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// True when `thinking` is absent from the wire bag. A `None` bag
+    /// (no fields at all) and a `Some(obj)` without a `thinking` key
+    /// are both wire-equivalent: nothing thinking-related reaches AWS.
+    fn bag_thinking_absent(bag: &Option<serde_json::Value>) -> bool {
+        match bag {
+            None => true,
+            Some(v) => v
+                .as_object()
+                .map(|o| o.get("thinking").is_none())
+                .unwrap_or(true),
+        }
+    }
+
+    #[test]
+    fn tool_choice_any_with_thinking_strips_thinking() {
+        // Arrange
+        let cfg = fake_cfg();
+        let req = req_with_thinking();
+        let tc = ConverseToolChoice::Any {
+            any: EmptyObject {},
+        };
+
+        // Act
+        let bag = build_additional_fields(&cfg, &req, Some(&tc));
+
+        // Assert: thinking dropped. Because thinking was the only field
+        // in the bag, the now-empty bag collapses to None -- either way
+        // thinking is gone from the wire.
+        assert!(
+            bag_thinking_absent(&bag),
+            "thinking must be stripped when toolChoice is Any, got: {bag:?}"
+        );
+    }
+
+    #[test]
+    fn tool_choice_tool_with_thinking_strips_thinking() {
+        // Arrange: the Claude Code WebSearch shape that motivated the fix.
+        let cfg = fake_cfg();
+        let req = req_with_thinking();
+        let tc = ConverseToolChoice::Tool {
+            tool: ConverseSpecificTool {
+                name: "web_search".into(),
+            },
+        };
+
+        // Act
+        let bag = build_additional_fields(&cfg, &req, Some(&tc));
+
+        // Assert: thinking dropped (bag collapses to None when empty).
+        assert!(
+            bag_thinking_absent(&bag),
+            "thinking must be stripped when toolChoice is Tool, got: {bag:?}"
+        );
+    }
+
+    #[test]
+    fn tool_choice_auto_with_thinking_keeps_thinking() {
+        // Regression guard: Auto does not force tool use, so thinking
+        // must survive in the bag.
+        let cfg = fake_cfg();
+        let req = req_with_thinking();
+        let tc = ConverseToolChoice::Auto {
+            auto: EmptyObject {},
+        };
+
+        let bag = build_additional_fields(&cfg, &req, Some(&tc)).expect("bag should be present");
+        let bag = bag.as_object().expect("bag is an object");
+
+        assert_eq!(
+            bag.get("thinking").and_then(|v| v.get("type")),
+            Some(&serde_json::Value::String("enabled".into())),
+            "thinking must survive on toolChoice Auto, got: {bag:?}"
+        );
+    }
+
+    #[test]
+    fn no_tool_choice_with_thinking_keeps_thinking() {
+        // Regression guard: absent toolChoice never triggers the strip.
+        let cfg = fake_cfg();
+        let req = req_with_thinking();
+
+        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+        let bag = bag.as_object().expect("bag is an object");
+
+        assert_eq!(
+            bag.get("thinking").and_then(|v| v.get("type")),
+            Some(&serde_json::Value::String("enabled".into())),
+            "thinking must survive when toolChoice is absent, got: {bag:?}"
+        );
+    }
+
+    #[test]
+    fn tool_choice_any_without_thinking_no_op() {
+        // Regression guard: when reasoning is absent (no thinking
+        // composed), the strip is harmless and the bag is either None
+        // or thinking-absent.
+        let cfg = fake_cfg();
+        let req = ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            max_tokens: Some(2048),
+            ..Default::default()
+        };
+        let tc = ConverseToolChoice::Any {
+            any: EmptyObject {},
+        };
+
+        let bag = build_additional_fields(&cfg, &req, Some(&tc));
+
+        assert!(
+            bag_thinking_absent(&bag),
+            "thinking must be absent when no reasoning was set, got: {bag:?}"
+        );
     }
 }
