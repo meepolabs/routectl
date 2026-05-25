@@ -363,6 +363,15 @@ pub struct ChatChunk {
     /// clients see the same totals at end-of-stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageDelta>,
+    /// Transport-internal carrier for opaque SSE events that don't fit
+    /// the canonical `ChunkDelta` shape. Populated by the Anthropic-API
+    /// egress when an unknown `content_block` type is open; consumed by
+    /// the matching Anthropic ingress for verbatim re-emission. Skip-
+    /// serialized so the canonical wire shape is unchanged for library
+    /// consumers and OpenAI-shape ingresses (which can't represent these
+    /// blocks anyway).
+    #[serde(skip)]
+    pub opaque_events: Vec<crate::schema_opaque::OpaqueSseEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

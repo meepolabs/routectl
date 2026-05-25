@@ -261,6 +261,7 @@ impl ThinkTagAccumulator {
             model,
             choices: new_choices,
             usage: None,
+            opaque_events: Vec::new(),
         }))
     }
 

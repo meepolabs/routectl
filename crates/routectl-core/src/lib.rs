@@ -12,6 +12,7 @@ pub mod provider;
 pub mod reasoning_dialect;
 pub mod reserved;
 pub mod schema;
+pub mod schema_opaque;
 pub mod system_content;
 pub mod token_source;
 pub mod tool_def;
@@ -43,6 +44,7 @@ pub use schema::{
     Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, Role, RoutectlInternal,
     TokenCount, Usage, UsageDelta,
 };
+pub use schema_opaque::OpaqueSseEvent;
 pub use system_content::{SystemBlock, SystemContent};
 pub use token_source::{StaticToken, TokenSource};
 pub use tool_def::{CustomTool, ToolDef};

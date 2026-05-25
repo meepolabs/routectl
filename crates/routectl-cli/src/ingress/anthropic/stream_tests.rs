@@ -49,6 +49,7 @@ fn stream_second_finish_reason_drops_when_pending_already_set() {
             total_tokens: Some(15),
             ..Default::default()
         }),
+        opaque_events: Vec::new(),
     };
     let flush_events = render_chunk_internal(usage_chunk, &mut s).unwrap();
     let flush_names: Vec<&str> = flush_events
@@ -87,6 +88,7 @@ fn stream_chunks_after_message_stop_are_dropped() {
             total_tokens: Some(15),
             ..Default::default()
         }),
+        opaque_events: Vec::new(),
     };
     let close_events = render_chunk_internal(closing, &mut s).unwrap();
     let close_names: Vec<&str> = close_events
@@ -114,6 +116,7 @@ fn stream_chunks_after_message_stop_are_dropped() {
             total_tokens: Some(30),
             ..Default::default()
         }),
+        opaque_events: Vec::new(),
     };
     let stray_events = render_chunk_internal(stray_usage, &mut s).unwrap();
     assert!(
@@ -150,6 +153,7 @@ fn text_chunk(text: &str, finish: Option<&str>) -> ChatChunk {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     }
 }
 
@@ -222,6 +226,7 @@ fn stream_finish_with_inline_usage_emits_immediately() {
             total_tokens: Some(15),
             ..Default::default()
         }),
+        opaque_events: Vec::new(),
     };
     let events = render_chunk_internal(closing, &mut s).unwrap();
     let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
@@ -260,6 +265,7 @@ fn stream_finish_then_separate_usage_chunk_emits_single_delta() {
             total_tokens: Some(150),
             ..Default::default()
         }),
+        opaque_events: Vec::new(),
     };
     let usage_events = render_chunk_internal(usage_chunk, &mut s).unwrap();
     let usage_names: Vec<&str> = usage_events
@@ -317,6 +323,7 @@ fn stream_two_concurrent_tool_calls_each_get_their_own_block() {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     };
     let mut s = fresh_state();
     let events = render_chunk_internal(chunk, &mut s).unwrap();
@@ -357,6 +364,7 @@ fn stream_interleaved_tool_call_chunks_flush_in_valid_order_at_finish() {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     };
     // Second chunk carries inline usage so the renderer emits
     // message_delta + message_stop immediately. Hosts that split
@@ -389,6 +397,7 @@ fn stream_interleaved_tool_call_chunks_flush_in_valid_order_at_finish() {
             total_tokens: Some(15),
             ..Default::default()
         }),
+        opaque_events: Vec::new(),
     };
 
     let _ = render_chunk_internal(first, &mut s).unwrap();
@@ -419,6 +428,7 @@ fn usage_only_chunk_emits_null_stop_reason() {
         model: "claude-opus-4-7".into(),
         choices: vec![],
         usage: Some(UsageDelta::default()),
+        opaque_events: Vec::new(),
     };
     let events = render_chunk_internal(usage_only, &mut s).unwrap();
     let payload: Value = serde_json::from_str(&events[0].data).unwrap();
@@ -455,6 +465,7 @@ fn message_delta_renders_raw_input_tokens_per_anthropic_spec() {
             }),
             ..Default::default()
         }),
+        opaque_events: Vec::new(),
     };
     let events = render_chunk_internal(closing, &mut s).unwrap();
     let delta_event = events
@@ -502,6 +513,7 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     };
     let second = ChatChunk {
         id: "msg_01".into(),
@@ -522,6 +534,7 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     };
 
     let mut s = fresh_state();
@@ -594,6 +607,7 @@ fn stream_tool_call_index_above_cap_returns_streaming_error() {
             matched_stop_sequence: None,
         }],
         usage: None,
+        opaque_events: Vec::new(),
     };
     let mut s = fresh_state();
     let err = render_chunk_internal(chunk, &mut s).unwrap_err();
@@ -602,3 +616,241 @@ fn stream_tool_call_index_above_cap_returns_streaming_error() {
         "expected streaming error with 'exceeds maximum', got: {err}"
     );
 }
+
+// -------- opaque-events replay --------
+
+/// Build a chunk that carries only opaque_events (no canonical
+/// content). Mirrors what the Anthropic-API egress surfaces when an
+/// unknown content_block (e.g. server_tool_use) flows through the
+/// pipeline: empty choices, populated opaque_events.
+fn opaque_only_chunk(events: Vec<routectl_core::OpaqueSseEvent>) -> ChatChunk {
+    ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![],
+        usage: None,
+        opaque_events: events,
+    }
+}
+
+#[test]
+fn opaque_event_only_chunk_emits_start_two_deltas_and_stop() {
+    // Arrange
+    use routectl_core::OpaqueSseEvent;
+    let events_in = vec![
+        OpaqueSseEvent::ContentBlockStart {
+            upstream_index: 7,
+            type_tag: "server_tool_use".into(),
+            raw_data: br#"{"type":"server_tool_use","id":"srv_01","name":"web_search","input":{}}"#
+                .to_vec(),
+        },
+        OpaqueSseEvent::ContentBlockDelta {
+            upstream_index: 7,
+            raw_delta: br#"{"type":"input_json_delta","partial_json":"\"q\":"}"#.to_vec(),
+        },
+        OpaqueSseEvent::ContentBlockDelta {
+            upstream_index: 7,
+            raw_delta: br#"{"type":"input_json_delta","partial_json":"\"x\""}"#.to_vec(),
+        },
+        OpaqueSseEvent::ContentBlockStop { upstream_index: 7 },
+    ];
+    let chunk = opaque_only_chunk(events_in);
+    let mut s = fresh_state();
+
+    // Act
+    let out = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert
+    let names: Vec<&str> = out.iter().filter_map(|e| e.event.as_deref()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_delta",
+            "content_block_stop",
+        ],
+        "expected message_start + 1 start + 2 deltas + 1 stop, got {names:?}"
+    );
+    // The opaque mapping must be cleared after stop.
+    assert!(
+        s.opaque_index_map.is_empty(),
+        "opaque_index_map should be empty after content_block_stop"
+    );
+}
+
+#[test]
+fn opaque_event_index_allocation_is_sequential() {
+    // Arrange: two distinct opaque blocks back-to-back, each
+    // start/delta/stop, with different upstream_index values. The
+    // ingress must allocate sequential ingress indexes (N, N+1).
+    use routectl_core::OpaqueSseEvent;
+    let events_in = vec![
+        OpaqueSseEvent::ContentBlockStart {
+            upstream_index: 10,
+            type_tag: "server_tool_use".into(),
+            raw_data: br#"{"type":"server_tool_use","id":"srv_a","name":"web_search","input":{}}"#
+                .to_vec(),
+        },
+        OpaqueSseEvent::ContentBlockDelta {
+            upstream_index: 10,
+            raw_delta: br#"{"type":"input_json_delta","partial_json":"\"a\""}"#.to_vec(),
+        },
+        OpaqueSseEvent::ContentBlockStop { upstream_index: 10 },
+        OpaqueSseEvent::ContentBlockStart {
+            upstream_index: 11,
+            type_tag: "web_search_tool_result".into(),
+            raw_data: br#"{"type":"web_search_tool_result","tool_use_id":"srv_a","content":[]}"#
+                .to_vec(),
+        },
+        OpaqueSseEvent::ContentBlockDelta {
+            upstream_index: 11,
+            raw_delta: br#"{"type":"citations_delta","citation":{"url":"https://x"}}"#.to_vec(),
+        },
+        OpaqueSseEvent::ContentBlockStop { upstream_index: 11 },
+    ];
+    let chunk = opaque_only_chunk(events_in);
+    let mut s = fresh_state();
+
+    // Act
+    let out = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert: scan only content_block_start events; their `index` field
+    // must be 0 then 1 (fresh state, no message_start steals an index).
+    let start_indexes: Vec<i64> = out
+        .iter()
+        .filter(|e| e.event.as_deref() == Some("content_block_start"))
+        .map(|e| {
+            let v: Value = serde_json::from_str(&e.data).unwrap();
+            v["index"].as_i64().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        start_indexes,
+        vec![0, 1],
+        "two opaque blocks must allocate sequential ingress indexes; got {start_indexes:?}"
+    );
+    // next_index advanced past both blocks.
+    assert_eq!(s.next_index, 2);
+    // All upstream entries cleared.
+    assert!(s.opaque_index_map.is_empty());
+}
+
+#[test]
+fn opaque_event_data_payload_is_byte_for_byte() {
+    // Arrange: a ContentBlockStart whose raw_data is a specific JSON
+    // object. The emitted SSE data: payload must contain those bytes
+    // VERBATIM as the `content_block` field (no re-serialization,
+    // no key-order rewrite).
+    use routectl_core::OpaqueSseEvent;
+    let raw =
+        br#"{"type":"server_tool_use","id":"srv_01","name":"web_search","input":{"query":"x"}}"#
+            .to_vec();
+    let raw_clone = raw.clone();
+    let chunk = opaque_only_chunk(vec![OpaqueSseEvent::ContentBlockStart {
+        upstream_index: 0,
+        type_tag: "server_tool_use".into(),
+        raw_data: raw,
+    }]);
+    let mut s = fresh_state();
+
+    // Act
+    let out = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert
+    let start_event = out
+        .iter()
+        .find(|e| e.event.as_deref() == Some("content_block_start"))
+        .expect("content_block_start emitted");
+    let raw_str = std::str::from_utf8(&raw_clone).unwrap();
+    let expected =
+        format!("{{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{raw_str}}}");
+    assert_eq!(
+        start_event.data, expected,
+        "opaque content_block raw_data must embed byte-for-byte"
+    );
+    // And just to be explicit: the raw bytes must be a substring of
+    // the emitted payload (catches any escaping/encoding regression).
+    assert!(
+        start_event.data.contains(raw_str),
+        "raw bytes must appear unchanged inside the SSE data payload"
+    );
+}
+
+#[test]
+fn empty_opaque_events_no_op() {
+    // Arrange: a normal text chunk (canonical-only) -- the legacy
+    // path. Asserts behavior is unchanged when opaque_events is empty.
+    let mut s = fresh_state();
+
+    // Act
+    let out = render_chunk_internal(text_chunk("hello", None), &mut s).unwrap();
+
+    // Assert: identical event sequence to the legacy unit test
+    // `stream_emits_message_start_then_text_block`.
+    let names: Vec<&str> = out.iter().filter_map(|e| e.event.as_deref()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "message_start",
+            "content_block_start",
+            "content_block_delta"
+        ],
+    );
+    assert!(s.opaque_index_map.is_empty());
+}
+
+#[test]
+fn opaque_event_delta_without_prior_start_warns_and_skips() {
+    // Arrange: malformed input where a delta arrives without a
+    // preceding start. The replay path MUST NOT terminate the stream;
+    // it logs at WARN and skips the event. Subsequent canonical
+    // content still emits.
+    use routectl_core::{ChunkChoice, ChunkDelta, OpaqueSseEvent};
+    let chunk = ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                content: Some("hi".into()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        opaque_events: vec![OpaqueSseEvent::ContentBlockDelta {
+            upstream_index: 99,
+            raw_delta: b"{\"type\":\"input_json_delta\"}".to_vec(),
+        }],
+    };
+    let mut s = fresh_state();
+
+    // Act
+    let out = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert: the orphan delta is skipped; canonical text block still
+    // emits message_start + content_block_start + content_block_delta.
+    let names: Vec<&str> = out.iter().filter_map(|e| e.event.as_deref()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+        ],
+        "orphan opaque delta must be skipped without terminating; got {names:?}"
+    );
+}
+
+// Note on `serialization_failure_on_one_event_does_not_terminate`:
+// the opaque carrier holds `Vec<u8>`. The replay path's only
+// failure mode is non-UTF-8 raw bytes (Anthropic SSE is JSON-over-
+// UTF-8 by spec). We could craft `raw_data: vec![0xFF, 0xFE]` to hit
+// the non-UTF-8 branch, but it's not a realistic SSE payload --
+// the egress would never produce it. The orphan-delta test above
+// already pins the don't-terminate-on-failure contract; pinning
+// "non-UTF-8 raw bytes get skipped" too is overspecification of an
+// internal defensive guard. Skipped intentionally.

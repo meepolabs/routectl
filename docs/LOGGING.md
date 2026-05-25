@@ -176,6 +176,69 @@ after a large messages array. Field-name stability: adding a new
 field is allowed without ceremony; renaming or removing an existing
 field requires updating this table.
 
+## Anthropic SSE forward-compat observability
+
+routectl's Anthropic-API egress sink-drains unknown SSE block / delta
+/ event types and (when in budget) preserves their wire bytes through
+the canonical pipeline for the matching Anthropic ingress to re-emit
+verbatim. The capture is bounded per block at 256 KB total bytes
+and 10000 deltas; once either cap trips, the block degrades to
+sink-drain for the rest of its life and the canonical stream keeps
+flowing. The six log emission sites give operators visibility into
+what's being passed through, dropped, or capped.
+
+| Site | Level | Fields |
+|---|---|---|
+| Unknown block opened (`sse_unknown::open_unknown_block`) | WARN | `provider`, `upstream_index`, `block_type`, `mode="v2_capture"` |
+| Index mismatch (`sse_unknown::index_matches`) | WARN | `provider`, `expected_index`, `got_index`, `event_kind`, `open_block_type` |
+| Per-delta capture (`sse_opaque::record_delta`) | DEBUG | `provider`, `upstream_index`, `delta_bytes` |
+| Block stop summary (`sse_opaque::record_stop`) | INFO | `provider`, `upstream_index`, `block_type`, `captured_bytes`, `delta_count` |
+| Cap exceeded / degrade (`sse_opaque::degrade`) | WARN | `provider`, `upstream_index`, `block_type`, `reason`, `captured_bytes`, `delta_count` |
+| Typed delta inside Unknown (`sse_unknown::capture_unknown_delta`) | DEBUG | `provider` |
+
+Example lines (formatted for readability; real output is one event
+per line and inherits the `request_id` span field):
+
+```
+WARN routectl_providers::anthropic_api::sse_unknown
+  provider=anthropic-prod upstream_index=1 block_type=server_tool_use
+  mode=v2_capture
+  "anthropic SSE: opening forward-compat opaque content block"
+
+WARN routectl_providers::anthropic_api::sse_unknown
+  provider=anthropic-prod expected_index=0 got_index=1
+  event_kind=delta open_block_type=text
+  "anthropic SSE: content-block index mismatch; dropping misattributed event"
+
+DEBUG routectl_providers::anthropic_api::sse_opaque
+  provider=anthropic-prod upstream_index=1 delta_bytes=312
+  "anthropic SSE: captured opaque delta"
+
+INFO routectl_providers::anthropic_api::sse_opaque
+  provider=anthropic-prod upstream_index=1 block_type=web_search_tool_result
+  captured_bytes=2048 delta_count=4
+  "anthropic SSE: opaque block closed"
+
+WARN routectl_providers::anthropic_api::sse_opaque
+  provider=anthropic-prod upstream_index=1 block_type=web_search_tool_result
+  reason=byte_overflow captured_bytes=261888 delta_count=287
+  "anthropic SSE: opaque-capture cap exceeded; degrading block to sink-drain"
+
+DEBUG routectl_providers::anthropic_api::sse_unknown
+  provider=anthropic-prod
+  "anthropic SSE: typed delta inside opaque block; sink-draining"
+```
+
+`reason` on the degrade WARN is one of `byte_overflow` or
+`delta_overflow` -- pin on this field in alerts, not on the message
+string.
+
+DEBUG-level logs are off by default; enable with
+`ROUTECTL_LOG=routectl=debug` to see per-delta capture or
+sink-drain detail. The INFO block-stop summary fires at the
+default level, so operators routinely see one summary per
+unknown block in production.
+
 ## Auth-failure log shapes
 
 No secret values, ever:
