@@ -34,3 +34,6 @@ issues.md
 crates/routectl-cli/tests/fixtures/captured/
 # local-tooling per-task worktrees + runtime state
 .local-tooling/
+
+# Local research scratch -- personal notes, config references, experiments.
+scratch/
