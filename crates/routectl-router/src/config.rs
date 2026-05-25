@@ -1082,9 +1082,9 @@ fn redact_literal_secret(uri: &str) -> String {
     }
 }
 
-/// Per-provider runtime knobs that gate dispatch: rate limits and a
-/// passive circuit breaker. All fields default to "off" so omitting
-/// the block leaves provider behavior unchanged.
+/// Per-provider runtime knobs that gate dispatch: rate limits, circuit
+/// breaker, timeouts, capability filters. All fields default to "off"
+/// so omitting the block leaves provider behavior unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ProviderRuntimePolicy {
@@ -1124,6 +1124,14 @@ pub struct ProviderRuntimePolicy {
     /// `request_timeout_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
+    /// Operator-supplied list of feature keys this provider does not
+    /// support. Router pre-filters the alias chain before dispatch -- a
+    /// provider listed here is skipped entirely (not tried-and-fallback)
+    /// when the request needs any of these features. Examples:
+    /// `web_search`, `computer_use`. See feature-key derivation in
+    /// `crates/routectl-router/src/feature_keys.rs`.
+    #[serde(default)]
+    pub unsupported_features: Vec<String>,
 }
 
 fn default_anthropic_base() -> String {

@@ -1065,16 +1065,16 @@ pub fn validate_reasoning_defaults(_config: &crate::config::Config) -> Result<()
 }
 
 /// Validate that every entry in `[aliases]` resolves to a known and
-/// selectable `[models.X]` nickname. Walks both `AliasValue::Single`
-/// and `AliasValue::Chain`; accumulates every offending nickname into
-/// one consolidated startup error so the operator gets the full list
-/// in one shot.
+/// selectable `[models.X]` nickname OR another alias key (recursive
+/// expansion). Walks both `AliasValue::Single` and `AliasValue::Chain`;
+/// accumulates every offending nickname into one consolidated startup
+/// error so the operator gets the full list in one shot.
 ///
-/// Three failure modes:
+/// Failure modes:
 ///
-///   - alias references a nickname that doesn't exist in `[models]`.
-///     Common cause: typo, or the operator deleted a model row but
-///     forgot to update the alias.
+///   - alias references a nickname that doesn't exist in `[models]`
+///     and is not another alias key. Common cause: typo, or the
+///     operator deleted a model row but forgot to update the alias.
 ///
 ///   - alias references a `selectable = false` nickname. The model
 ///     parses but the router refuses to dispatch to it; passing it
@@ -1085,15 +1085,26 @@ pub fn validate_reasoning_defaults(_config: &crate::config::Config) -> Result<()
 ///     to the alias not being declared at all -- surface the
 ///     misconfiguration at startup.
 ///
+///   - cycle in the alias graph (e.g. `A = ["B"]`, `B = ["A"]`).
+///     Detected via DFS over the alias keys; the error message names
+///     the cycle path so the operator can break the loop. The
+///     dispatch path also carries a runtime depth cap as belt-and-
+///     suspenders, but cycles caught here never reach it.
+///
 /// Call once per process startup AFTER `validate_reasoning_defaults`
 /// and BEFORE `build_resolved_models`. Glob keys (`claude-*` etc.)
 /// are validated identically to exact keys -- the chain target must
-/// still be a known nickname even though the alias key matches a
-/// pattern.
+/// still be a known nickname or alias key even though the alias key
+/// matches a pattern.
 pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()> {
     use routectl_core::Error;
 
     let mut errors: Vec<String> = Vec::new();
+
+    // Pass 1: empty-chain check + per-entry resolves-to-something
+    // check (must be either a known model nickname OR another alias
+    // key). Cycle detection is a separate pass below; it walks the
+    // graph structure rather than per-entry semantics.
     for (alias, value) in &config.aliases {
         if value.is_empty() {
             errors.push(format!(
@@ -1104,11 +1115,17 @@ pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()
             continue;
         }
         for nickname in value.nicknames() {
+            // An entry may either be another alias key (recursive
+            // expansion) OR a model nickname. Alias keys win on
+            // collision (matches the dispatch-time shadowing rule).
+            if config.aliases.contains_key(nickname) {
+                continue;
+            }
             match config.models.get(nickname) {
                 None => {
                     errors.push(format!(
                         "alias `{alias}`: target `{nickname}` is not a known \
-                         model nickname in [models]"
+                         model nickname in [models] and is not an alias key"
                     ));
                 }
                 Some(model) if !model.selectable => {
@@ -1122,11 +1139,95 @@ pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()
             }
         }
     }
+
+    // Pass 2: cycle detection via DFS. Each connected component is
+    // walked once -- `globally_visited` short-circuits keys that have
+    // already been fully explored from another start point. Cycles
+    // are recorded with the offending path so the operator can break
+    // the loop.
+    let mut globally_visited: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for start in config.aliases.keys() {
+        if globally_visited.contains(start) {
+            continue;
+        }
+        let mut path: Vec<String> = Vec::new();
+        let mut path_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        detect_alias_cycles_dfs(
+            &config.aliases,
+            start,
+            &mut path,
+            &mut path_set,
+            &mut globally_visited,
+            &mut errors,
+        );
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
         Err(Error::Config(errors.join("\n")))
     }
+}
+
+/// DFS helper for cycle detection in the alias graph. `path` /
+/// `path_set` track the currently-active recursion stack; a chain
+/// entry that hits the stack means we have a back-edge (cycle).
+/// `globally_visited` is the standard DFS "fully explored" set so
+/// each connected component is traversed once.
+///
+/// Errors are pushed into `errors` and accumulate alongside the
+/// per-entry diagnostics from pass 1 of
+/// `validate_alias_chain_targets`. Reuses `Error::Config` rather than
+/// introducing a new variant -- the message carries the cycle path
+/// (e.g. `alias `foo`: cycle detected: foo -> bar -> baz -> foo`).
+fn detect_alias_cycles_dfs(
+    aliases: &BTreeMap<String, crate::config::AliasValue>,
+    current: &str,
+    path: &mut Vec<String>,
+    path_set: &mut std::collections::BTreeSet<String>,
+    globally_visited: &mut std::collections::BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    if path_set.contains(current) {
+        // Back-edge: cycle. The cycle starts at the position in
+        // `path` where `current` first appears and closes by re-
+        // visiting `current`. Attribute the diagnostic to the FIRST
+        // alias actually in the cycle (`path[idx]`), not the DFS
+        // root, so the operator's eye lands on the alias that
+        // closes the loop. With external feeders like
+        // `c -> a -> b -> a`, the report names `a` (the cycle's
+        // entry) rather than `c` (which merely points into it).
+        let idx = path
+            .iter()
+            .position(|p| p == current)
+            .expect("path_set/path invariant: current must be present in path");
+        let mut cycle_path: Vec<&str> = path[idx..].iter().map(String::as_str).collect();
+        cycle_path.push(current);
+        let entry_alias = path[idx].clone();
+        errors.push(format!(
+            "alias `{entry_alias}`: cycle detected: {}",
+            cycle_path.join(" -> ")
+        ));
+        return;
+    }
+    if globally_visited.contains(current) {
+        return;
+    }
+    let Some(value) = aliases.get(current) else {
+        // Not an alias key; either a model nickname (handled in
+        // pass 1) or a dangling reference (also handled in pass 1).
+        // Either way, no cycle can pass through a non-alias leaf.
+        return;
+    };
+    path.push(current.to_string());
+    path_set.insert(current.to_string());
+    for entry in value.nicknames() {
+        detect_alias_cycles_dfs(aliases, entry, path, path_set, globally_visited, errors);
+    }
+    path.pop();
+    path_set.remove(current);
+    globally_visited.insert(current.to_string());
 }
 
 #[cfg(test)]
@@ -1744,6 +1845,167 @@ mod validate_alias_chain_targets_tests {
         assert!(msg.contains("missing-1"), "msg: {msg}");
         assert!(msg.contains("missing-2"), "msg: {msg}");
         assert!(msg.contains("shelved"), "msg: {msg}");
+    }
+
+    // ----- Recursive alias-chain validation (Task #5) -----
+    //
+    // Each test pins one slice of the recursive expansion contract:
+    // alias-of-alias resolves, dangling refs surface cleanly, cycles
+    // are detected with a path-bearing error, and globs follow the
+    // same rule as exact aliases.
+
+    #[test]
+    fn alias_referencing_another_alias_passes_validation() {
+        // A -> B -> model. Pass 1 sees `A`'s "B" as an alias key
+        // (skipped, recursion-checked later) and `B`'s "model-x" as
+        // a known nickname. Pass 2 walks A -> B -> model-x without
+        // hitting a cycle.
+        let cfg = config_with(
+            vec![("model-x", ModelEntry::new("anthropic", "claude-x"))],
+            vec![
+                ("a", AliasValue::Single("b".into())),
+                ("b", AliasValue::Single("model-x".into())),
+            ],
+        );
+        validate_alias_chain_targets(&cfg).expect("2-deep alias chain must validate");
+    }
+
+    #[test]
+    fn alias_referencing_three_deep_passes_validation() {
+        let cfg = config_with(
+            vec![
+                ("model-x", ModelEntry::new("anthropic", "claude-x")),
+                ("model-y", ModelEntry::new("anthropic", "claude-y")),
+            ],
+            vec![
+                ("a", AliasValue::Single("b".into())),
+                ("b", AliasValue::Single("c".into())),
+                (
+                    "c",
+                    AliasValue::Chain(vec!["model-x".into(), "model-y".into()]),
+                ),
+            ],
+        );
+        validate_alias_chain_targets(&cfg).expect("3-deep alias chain must validate");
+    }
+
+    #[test]
+    fn alias_cycle_detected_with_path() {
+        // A -> B -> A. Pass 1 sees both entries as alias keys (no
+        // dangling-ref errors). Pass 2 catches the back-edge.
+        let cfg = config_with(
+            vec![("model-x", ModelEntry::new("anthropic", "claude-x"))],
+            vec![
+                ("a", AliasValue::Single("b".into())),
+                ("b", AliasValue::Single("a".into())),
+            ],
+        );
+        let err = validate_alias_chain_targets(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cycle detected"), "msg: {msg}");
+        // The reported path includes both alias keys and closes back
+        // on the entry point.
+        assert!(
+            msg.contains("a -> b -> a") || msg.contains("b -> a -> b"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn alias_self_cycle_detected() {
+        // The 1-hop degenerate case: A -> A. Pass 1 lets it through
+        // (alias key); pass 2 catches the immediate back-edge.
+        let cfg = config_with(
+            vec![("model-x", ModelEntry::new("anthropic", "claude-x"))],
+            vec![("a", AliasValue::Single("a".into()))],
+        );
+        let err = validate_alias_chain_targets(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("cycle detected"), "msg: {msg}");
+        assert!(msg.contains("a -> a"), "msg: {msg}");
+    }
+
+    #[test]
+    fn external_alias_feeds_cycle_attributes_to_first_in_cycle() {
+        // Regression for the cycle-attribution fix: when a non-cycle
+        // alias feeds into a cycle, the diagnostic must name the
+        // FIRST alias in the cycle, not the DFS root that merely
+        // pointed at it. Config: `a -> b -> c -> b`; the cycle is
+        // `b <-> c` and `a` is the external feeder. (Root iteration
+        // is alphabetical because `config.aliases` is a `BTreeMap`,
+        // so `a` is the DFS root that detects the back-edge.)
+        //
+        // BEFORE the fix this reported `alias `a`: ...` (wrong --
+        // operator looks at `a`, finds it just points at `b`, can't
+        // see the cycle). AFTER the fix it reports `alias `b`: ...`
+        // -- the alias that closes the loop.
+        let cfg = config_with(
+            vec![("model-x", ModelEntry::new("anthropic", "claude-x"))],
+            vec![
+                ("a", AliasValue::Single("b".into())),
+                ("b", AliasValue::Single("c".into())),
+                ("c", AliasValue::Single("b".into())),
+            ],
+        );
+        let err = validate_alias_chain_targets(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("alias `b`:"), "msg: {msg}");
+        assert!(msg.contains("b -> c -> b"), "msg: {msg}");
+        assert!(
+            !msg.contains("alias `a`:"),
+            "external feeder `a` must not be the attributed alias; msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn dangling_ref_in_recursive_chain_is_caught() {
+        // A -> nonexistent. Neither an alias key nor a model
+        // nickname; pass 1 surfaces a dangling-reference error.
+        let cfg = config_with(
+            vec![("model-x", ModelEntry::new("anthropic", "claude-x"))],
+            vec![("a", AliasValue::Single("nonexistent".into()))],
+        );
+        let err = validate_alias_chain_targets(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("alias `a`"), "msg: {msg}");
+        assert!(msg.contains("nonexistent"), "msg: {msg}");
+        assert!(
+            msg.contains("not a known model nickname") && msg.contains("not an alias key"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn glob_alias_referencing_another_alias_passes_validation() {
+        // Per architect's verdict F: glob keys follow the same rule
+        // as exact keys. `claude-haiku*` -> `a` -> model. The fact
+        // that the glob key is a pattern (not a literal) does not
+        // change validation semantics.
+        let cfg = config_with(
+            vec![("model-x", ModelEntry::new("anthropic", "claude-x"))],
+            vec![
+                ("claude-haiku*", AliasValue::Single("a".into())),
+                ("a", AliasValue::Single("model-x".into())),
+            ],
+        );
+        validate_alias_chain_targets(&cfg).expect("glob key into alias must validate");
+    }
+
+    #[test]
+    fn dry_operator_pattern_passes_validation() {
+        // The DRY case from the spec: a single source-of-truth alias
+        // `a` plus a discoverability wrapper `claude-a` that just
+        // points at it. Both should validate cleanly so the operator
+        // can collapse the duplicated `claude-cheap`/`claude-codex-pro`
+        // /etc. shapes that currently inline the full chain.
+        let cfg = config_with(
+            vec![("model-x", ModelEntry::new("anthropic", "claude-x"))],
+            vec![
+                ("a", AliasValue::Single("model-x".into())),
+                ("claude-a", AliasValue::Single("a".into())),
+            ],
+        );
+        validate_alias_chain_targets(&cfg).expect("DRY single-pointer alias must validate");
     }
 }
 
