@@ -1,13 +1,17 @@
 //! routectl CLI.
 //!
 //! Subcommands:
-//!   serve   Start the local OpenAI-compatible HTTP server.
-//!   login   Run the OAuth 2.0 PKCE flow against a managed provider;
-//!           tokens persist to ~/.config/routectl/credentials.json.
-//!   whoami  Print the OAuth provider state from the routectl
-//!           credentials store.
-//!   test    One-shot completion against an alias or model nickname.
-//!   config  Validate or print the resolved config.
+//!   serve    Start the local OpenAI-compatible HTTP server.
+//!   login    Run the OAuth 2.0 PKCE flow against a managed provider;
+//!            tokens persist to ~/.config/routectl/credentials.json.
+//!   logout   Remove a provider's tokens from the routectl credentials
+//!            store.
+//!   refresh  Force a token refresh through the per-provider
+//!            single-flight gate, regardless of expiry.
+//!   whoami   Print the OAuth provider state from the routectl
+//!            credentials store.
+//!   test     One-shot completion against an alias or model nickname.
+//!   config   Validate or print the resolved config.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,6 +64,22 @@ enum Cmd {
         /// Override the local callback port. Default: random ephemeral.
         #[arg(long)]
         callback_port: Option<u16>,
+    },
+    /// Remove a provider's tokens from the routectl credentials store.
+    /// First-time logout (no record present) is reported but is not an
+    /// error.
+    Logout {
+        /// Which provider to log out of.
+        #[arg(value_parser = ["anthropic"])]
+        provider: String,
+    },
+    /// Force a token refresh for a provider through the per-provider
+    /// single-flight gate, regardless of expiry. Useful when a token
+    /// has been revoked server-side or before a long-running session.
+    Refresh {
+        /// Which provider to refresh.
+        #[arg(value_parser = ["anthropic"])]
+        provider: String,
     },
     /// Print the OAuth provider state from the routectl credentials
     /// store. Exits 0 when at least one provider is logged in,
@@ -127,6 +147,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             callback_port,
         } => {
             if let Err(e) = commands::login::run(&provider, print_url, callback_port).await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Cmd::Logout { provider } => {
+            if let Err(e) = commands::logout::run(&provider).await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Cmd::Refresh { provider } => {
+            if let Err(e) = commands::refresh::run(&provider).await {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }

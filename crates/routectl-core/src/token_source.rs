@@ -30,6 +30,19 @@ pub trait TokenSource: Send + Sync + std::fmt::Debug {
     /// so an OAuth-managed source can re-read from disk + refresh
     /// here without ingress contamination.
     async fn token(&self) -> Result<String>;
+
+    /// Notify the source that a token it minted just got rejected by
+    /// the upstream (typically a 401). Refreshable sources should
+    /// rotate; static sources should no-op (they have no rotation
+    /// path -- the operator must intervene). The router calls this
+    /// before retrying the same provider once with a fresh token; if
+    /// it returns an error the router surfaces that to the caller
+    /// rather than walking the fallback chain (the OAuth identity is
+    /// dead until re-login). Default impl is a no-op so non-
+    /// refreshable sources don't have to implement it.
+    async fn on_auth_failure(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Cached-string token. Used for `env://`, `file://`, and `literal:`

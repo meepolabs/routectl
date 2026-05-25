@@ -68,8 +68,8 @@ pub(crate) trait OAuthFlow: Send + Sync {
 
     /// POST to the token endpoint with `grant_type=refresh_token`.
     /// Provider-specific for the same reasons as `exchange_code`.
-    /// Wired up in a prior change (refresh + 401 retry); unused in a prior change.
-    #[allow(dead_code)]
+    /// Called from `OAuthStore::refresh_under_lock` for both the
+    /// near-expiry (`get`) and 401-recovery (`on_auth_failure`) paths.
     async fn refresh_token(
         &self,
         http: &reqwest::Client,

@@ -643,6 +643,17 @@ impl Provider for AnthropicApiProvider {
         })?;
         Ok(token_count)
     }
+
+    /// Forward upstream-401 to the underlying token source so an
+    /// `oauth://` ref can force-refresh through the OAuth store's
+    /// per-provider single-flight gate. Static-auth providers
+    /// (`env://`, `file://`, `literal:`) inherit the no-op default
+    /// from `TokenSource::on_auth_failure`. Errors propagate so the
+    /// router surfaces an actionable auth message rather than walking
+    /// the fallback chain over a dead OAuth identity.
+    async fn on_auth_failure(&self) -> Result<()> {
+        self.cfg.auth.on_auth_failure().await
+    }
 }
 
 /// Read a 4xx/5xx upstream response body and build a routectl
