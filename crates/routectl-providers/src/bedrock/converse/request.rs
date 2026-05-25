@@ -52,7 +52,13 @@ pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseReque
     let system = build_system(req);
     let messages = build_messages(&cfg.id, &req.messages)?;
     let tool_config = build_tool_config(&cfg.id, req)?;
-    let additional_model_request_fields = build_additional_fields(cfg, req);
+    // Reach into the post-translation toolChoice so build_additional_fields
+    // can decide whether to strip thinking. Done here (not inside
+    // build_additional_fields) so the extras module stays the single
+    // source of truth for bag composition while toolChoice translation
+    // stays in tools.rs.
+    let tool_choice = tool_config.as_ref().and_then(|tc| tc.tool_choice.as_ref());
+    let additional_model_request_fields = build_additional_fields(cfg, req, tool_choice);
 
     validate_breakpoints(req)?;
 

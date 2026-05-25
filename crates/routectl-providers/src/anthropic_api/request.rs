@@ -43,6 +43,11 @@ use super::types::{
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
+/// Anthropic `tool_choice.type` values that force tool use. Pairing
+/// either with `thinking` causes a 400 (extended-thinking docs).
+const TOOL_CHOICE_TYPE_ANY: &str = "any";
+const TOOL_CHOICE_TYPE_TOOL: &str = "tool";
+
 /// Anthropic Messages API minimum for `thinking.budget_tokens` on the
 /// legacy `ThinkingConfig::Enabled` wire shape. Anthropic 400s any
 /// value below this AND requires `max_tokens > budget_tokens`. The
@@ -416,7 +421,7 @@ fn translate_tool_choice(tc: Option<&Value>, has_tools: bool) -> Option<Value> {
     match tc {
         Value::String(s) => match s.as_str() {
             "auto" => Some(serde_json::json!({"type":"auto"})),
-            "required" => Some(serde_json::json!({"type":"any"})),
+            "required" => Some(serde_json::json!({"type": TOOL_CHOICE_TYPE_ANY})),
             "none" => {
                 if has_tools {
                     tracing::warn!(
@@ -436,7 +441,7 @@ fn translate_tool_choice(tc: Option<&Value>, has_tools: bool) -> Option<Value> {
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str());
                 match name {
-                    Some(n) => Some(serde_json::json!({"type":"tool","name":n})),
+                    Some(n) => Some(serde_json::json!({"type": TOOL_CHOICE_TYPE_TOOL, "name": n})),
                     None => {
                         tracing::warn!(
                             "tool_choice with type=\"function\" but missing function.name; \
@@ -1086,6 +1091,7 @@ pub fn normalize(
 
     merge_provider_extras(id, &mut body, req.provider_extras.as_ref());
     strip_unsupported_output_effort(&mut body, adaptive_thinking);
+    strip_thinking_when_tool_choice_forces_use(id, &mut body);
     Ok(body)
 }
 
@@ -1201,6 +1207,59 @@ fn strip_unsupported_output_effort(body: &mut Value, adaptive_thinking: bool) {
     if oc.remove("effort").is_some() && oc.is_empty() {
         obj.remove("output_config");
     }
+}
+
+/// Anthropic's extended-thinking docs forbid `thinking` paired with
+/// `tool_choice` values that force tool use. The Messages API 400s with
+/// "Thinking may not be enabled when tool_choice forces tool use." when
+/// the body carries `thinking` AND `tool_choice.type` is `"any"` or
+/// `"tool"`. The constraint is identical for adaptive thinking
+/// (`{"type":"adaptive"}`) per the adaptive-thinking docs page.
+///
+/// Real-world trigger: Claude Code's WebSearch tool sub-request fires
+/// `tool_choice: {type:"tool", name:"web_search"}` in tandem with
+/// `thinking: {type:"adaptive"}` (when the operator config sets
+/// `effort: "max"`). routectl emits both because each was set
+/// independently by separate concerns -- the tool_choice translator and
+/// the thinking composer don't talk to each other.
+///
+/// Strip `thinking` (not `tool_choice`) so the caller's intent to force
+/// the named tool is preserved; the request still completes
+/// successfully, just without thinking. `auto`, `none`, and absent
+/// `tool_choice` do not trigger the strip.
+///
+/// Runs after `merge_provider_extras` so the check operates on the
+/// final wire body, regardless of whether `thinking` was composed by
+/// `build_thinking` or layered in by some future provider-extras path
+/// that bypasses `is_routectl_managed_key`.
+fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    if !obj.contains_key("thinking") {
+        return;
+    }
+    // The `.filter()` short-circuits on non-forcing values (`auto` /
+    // `none` / unknown), so the owned `String` is allocated only on the
+    // strip path. The Option also lets the immutable borrow on `obj` end
+    // at the semicolon -- `obj.remove` below takes the mutable borrow
+    // without conflict.
+    let ttype = obj
+        .get("tool_choice")
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())
+        .filter(|&t| t == TOOL_CHOICE_TYPE_ANY || t == TOOL_CHOICE_TYPE_TOOL)
+        .map(str::to_string);
+    let Some(ttype) = ttype else {
+        return;
+    };
+    obj.remove("thinking");
+    tracing::debug!(
+        provider = provider_id,
+        tool_choice_type = %ttype,
+        "stripped thinking from outgoing body: tool_choice forces tool use; \
+         Anthropic forbids the combo"
+    );
 }
 
 #[cfg(test)]
@@ -2071,5 +2130,135 @@ mod multi_turn_tool_use_tests {
         let body = normalize("test", &req, /* adaptive_thinking= */ true, &[]).unwrap();
         let oc = body.get("output_config").expect("output_config preserved");
         assert_eq!(oc["effort"], "high");
+    }
+
+    // -----------------------------------------------------------------
+    // tool_choice + thinking conflict resolution
+    //
+    // Anthropic's extended-thinking docs explicitly forbid pairing
+    // `thinking` with a `tool_choice` value that forces tool use:
+    // `{"type":"any"}` or `{"type":"tool", "name": "..."}`. The
+    // Messages API 400s the request with "Thinking may not be enabled
+    // when tool_choice forces tool use." Real-world trigger: Claude
+    // Code's WebSearch tool fires sub-requests with
+    // `tool_choice: {type:"tool", name:"web_search"}` AND
+    // `thinking: {type:"adaptive"}`. The strip preserves the caller's
+    // tool_choice (which carries intent) and drops thinking (which is
+    // a routectl-composed convenience) so the request can complete.
+    // -----------------------------------------------------------------
+
+    /// Helper: build a request with both reasoning (-> thinking) and
+    /// the provided `tool_choice`. `max_tokens=2048` keeps thinking on
+    /// the legacy `Enabled` path above the 1024 floor; the legacy and
+    /// adaptive paths share the same conflict resolution.
+    fn req_with_thinking_and_tool_choice(tool_choice: Option<Value>) -> ChatRequest {
+        use routectl_core::ReasoningConfig;
+        ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(2048),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("medium".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            tool_choice,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tool_choice_any_with_thinking_strips_thinking() {
+        // Arrange
+        let req = req_with_thinking_and_tool_choice(Some(json!({"type": "any"})));
+
+        // Act
+        let body = normalize("test", &req, false, &[]).unwrap();
+
+        // Assert: thinking dropped, tool_choice preserved verbatim.
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be stripped when tool_choice forces tool use, got: {body}"
+        );
+        assert_eq!(body["tool_choice"], json!({"type": "any"}));
+    }
+
+    #[test]
+    fn tool_choice_tool_with_thinking_strips_thinking() {
+        // Arrange: the Claude Code WebSearch shape that motivated the fix.
+        let req =
+            req_with_thinking_and_tool_choice(Some(json!({"type": "tool", "name": "web_search"})));
+
+        // Act
+        let body = normalize("test", &req, false, &[]).unwrap();
+
+        // Assert: thinking dropped, tool_choice preserved verbatim.
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be stripped when tool_choice.type=tool, got: {body}"
+        );
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type": "tool", "name": "web_search"})
+        );
+    }
+
+    #[test]
+    fn tool_choice_auto_with_thinking_keeps_thinking() {
+        // Regression guard: `auto` does not force tool use, so thinking
+        // must survive.
+        let req = req_with_thinking_and_tool_choice(Some(json!("auto")));
+
+        // translate_tool_choice normalizes bare "auto" -> {"type":"auto"}
+        // before strip_thinking_when_tool_choice_forces_use runs.
+        let body = normalize("test", &req, false, &[]).unwrap();
+
+        assert_eq!(body["tool_choice"], json!({"type": "auto"}));
+        assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn tool_choice_none_with_thinking_keeps_thinking() {
+        // Regression guard: `none` translates to no tool_choice on the
+        // wire AND drops the tools array; thinking is unaffected.
+        let req = req_with_thinking_and_tool_choice(Some(json!("none")));
+
+        let body = normalize("test", &req, false, &[]).unwrap();
+
+        assert!(
+            body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
+            "tool_choice=none must drop the field"
+        );
+        assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn no_tool_choice_with_thinking_keeps_thinking() {
+        // Regression guard: absent tool_choice never triggers the strip.
+        let req = req_with_thinking_and_tool_choice(None);
+
+        let body = normalize("test", &req, false, &[]).unwrap();
+
+        assert!(body.get("tool_choice").is_none() || body["tool_choice"].is_null());
+        assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn tool_choice_any_without_thinking_no_op() {
+        // Regression guard: when thinking was never composed, the strip
+        // is harmless and tool_choice survives.
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(2048),
+            tool_choice: Some(json!({"type": "any"})),
+            ..Default::default()
+        };
+
+        let body = normalize("test", &req, false, &[]).unwrap();
+
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["tool_choice"], json!({"type": "any"}));
     }
 }
