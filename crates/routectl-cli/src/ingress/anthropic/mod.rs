@@ -15,6 +15,7 @@
 //! chunks arrive. See `AnthropicStreamState`.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use serde_json::Value;
@@ -85,6 +86,14 @@ pub struct AnthropicStreamState {
     /// so the Anthropic wire `stop_sequence` field travels with the
     /// `stop_reason:"stop_sequence"` it correlates with.
     pending_matched_stop_sequence: Option<String>,
+    /// Opaque-block index mapping: upstream_index -> ingress_index.
+    /// Anthropic egresses surface unknown `content_block` types
+    /// verbatim via `chunk.opaque_events`; the ingress replays those
+    /// bytes byte-for-byte but allocates fresh ingress indexes from
+    /// `next_index` so canonical and opaque blocks share a single
+    /// coherent index sequence on the wire. BTreeMap (not HashMap) for
+    /// deterministic iteration order during debug logging.
+    opaque_index_map: BTreeMap<u32, usize>,
 }
 
 #[derive(Debug, Default, Clone)]

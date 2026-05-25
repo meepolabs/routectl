@@ -42,7 +42,6 @@ use super::types::{SseDeltaUsage, SseMessage, SseMessageDelta};
 /// the full event Value preserved (including the `type` field) so the
 /// SSE state machine can log it and decide what to do.
 #[derive(Debug)]
-#[allow(dead_code)] // index/text/thinking captured for forward-compat replay
 pub(crate) enum SseEvent {
     MessageStart {
         message: SseMessage,
@@ -159,12 +158,18 @@ impl<'de> Deserialize<'de> for SseEvent {
 /// `type` tag so the state machine can map it to
 /// `OpenBlockKind::Unknown` and propagate as opaque-events.
 #[derive(Debug)]
-#[allow(dead_code)] // text/thinking captured for forward-compat replay
 pub(crate) enum SseContentBlockStart {
     Text {
+        // Field captured for forward-compat replay; the state machine
+        // matches via `Text { .. }` and only reads the outer `index`.
+        #[allow(dead_code)]
         text: String,
     },
     Thinking {
+        // Same reason as `Text::text`: matched via `..` because the
+        // streaming text arrives via `thinking_delta` events, not the
+        // block-start payload.
+        #[allow(dead_code)]
         thinking: String,
     },
     ToolUse {
@@ -224,7 +229,6 @@ impl<'de> Deserialize<'de> for SseContentBlockStart {
 /// forward-compat catchall: production trigger is `citations_delta`
 /// emitted inside `web_search_tool_result` blocks.
 #[derive(Debug)]
-#[allow(dead_code)] // Other(Value) wire body read via Value::get from the state machine
 #[allow(clippy::enum_variant_names)] // wire shape: Anthropic prefixes every delta with `*Delta`
 pub(crate) enum SseDelta {
     TextDelta {

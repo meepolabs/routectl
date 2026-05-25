@@ -29,7 +29,10 @@ pub(crate) mod parts;
 pub mod request;
 pub mod response;
 pub mod sse;
+pub mod sse_opaque;
+pub mod sse_unknown;
 pub(crate) mod types;
+pub(crate) mod types_sse;
 
 /// Provider-kind discriminator string used in tracing fields. See
 /// the openai_compat module for the rationale.
@@ -505,7 +508,7 @@ impl Provider for AnthropicApiProvider {
         let event_stream = byte_stream.eventsource();
 
         let stream = async_stream::stream! {
-            let mut state = SseState::default();
+            let mut state = SseState::new(&provider_id);
 
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {

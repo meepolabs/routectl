@@ -487,75 +487,19 @@ pub(crate) struct AnthropicCacheCreation {
 // ---------------------------------------------------------------------------
 // SSE event shapes
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[allow(dead_code)] // index/text/thinking captured for forward-compat replay
-pub(crate) enum SseEvent {
-    MessageStart {
-        message: SseMessage,
-    },
-    ContentBlockStart {
-        index: u32,
-        content_block: SseContentBlockStart,
-    },
-    ContentBlockDelta {
-        index: u32,
-        delta: SseDelta,
-    },
-    ContentBlockStop {
-        index: u32,
-    },
-    MessageDelta {
-        delta: SseMessageDelta,
-        usage: Option<SseDeltaUsage>,
-    },
-    MessageStop,
-    Ping,
-    Error {
-        error: Value,
-    },
-}
+//
+// `SseEvent`, `SseContentBlockStart`, and `SseDelta` (the three
+// strict-tagged enums that gain forward-compat `Other(Value)` arms)
+// live in the sibling `types_sse` module so this file stays under the
+// project's 800-LOC ceiling. They re-export from here so consumers
+// keep importing via `super::types::SseEvent`.
+pub(crate) use super::types_sse::{SseContentBlockStart, SseDelta, SseEvent};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SseMessage {
     pub(crate) id: String,
     pub(crate) model: String,
     pub(crate) usage: Option<AnthropicUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[allow(dead_code)] // text/thinking captured for forward-compat replay
-pub(crate) enum SseContentBlockStart {
-    Text {
-        text: String,
-    },
-    Thinking {
-        thinking: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-    },
-    /// Encrypted thinking block (server emits the data verbatim; no
-    /// per-token deltas follow). Required so a streamed response
-    /// containing `redacted_thinking` deserializes cleanly instead of
-    /// erroring on an unknown variant -- which silently dropped the
-    /// rest of the stream in v0.4.0 pre-fix.
-    RedactedThinking {
-        data: String,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[allow(clippy::enum_variant_names)] // wire shape: Anthropic prefixes every delta with `*Delta`
-pub(crate) enum SseDelta {
-    TextDelta { text: String },
-    ThinkingDelta { thinking: String },
-    SignatureDelta { signature: String },
-    InputJsonDelta { partial_json: String },
 }
 
 #[derive(Debug, Deserialize)]

@@ -13,19 +13,27 @@ use uuid::Uuid;
 
 use routectl_core::{
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
-    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result,
+    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, ReasoningDetailKind, Result,
 };
 
 use super::response::map_stop_reason;
+use super::sse_opaque::{OpaqueCapture, MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK};
 use super::types::SseEvent;
 
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
-/// Which kind of content block is currently open.
+/// Which kind of content block is currently open. Every variant
+/// carries the upstream `index` from its `content_block_start` so the
+/// state machine can validate that subsequent `content_block_delta`
+/// and `content_block_stop` events attribute to the correct block
+/// (Anthropic's wire-shape invariant).
 #[derive(Debug, Clone)]
 pub enum OpenBlockKind {
-    Text,
+    Text {
+        upstream_index: u32,
+    },
     Thinking {
+        upstream_index: u32,
         /// Accumulated thinking text from `thinking_delta` events.
         /// Aggregated into ONE structured `ReasoningDetail` emitted at
         /// `content_block_stop` so the final assistant message has a
@@ -51,11 +59,36 @@ pub enum OpenBlockKind {
         detail_index: u32,
     },
     ToolUse {
+        upstream_index: u32,
         id: String,
         name: String,
         /// Index in the tool_calls array being built.
         call_index: u32,
     },
+    /// Forward-compat: a `content_block.type` value that is not in the
+    /// known typed set (e.g. `server_tool_use`,
+    /// `web_search_tool_result`). The block emits no canonical chunks;
+    /// its raw bytes ride on `ChatChunk.opaque_events` for verbatim
+    /// re-emission by the matching Anthropic ingress (see
+    /// `sse_opaque`).
+    Unknown {
+        upstream_index: u32,
+        type_tag: String,
+    },
+}
+
+impl OpenBlockKind {
+    /// Upstream `content_block` index this open block was opened at.
+    /// Used to validate that subsequent delta and stop events
+    /// attribute to the correct block.
+    pub fn upstream_index(&self) -> u32 {
+        match self {
+            Self::Text { upstream_index }
+            | Self::Thinking { upstream_index, .. }
+            | Self::ToolUse { upstream_index, .. }
+            | Self::Unknown { upstream_index, .. } => *upstream_index,
+        }
+    }
 }
 
 /// Persistent state across SSE events for one streaming response.
@@ -74,6 +107,16 @@ pub struct SseState {
     /// (sum of input + cache_creation + cache_read), matching what
     /// OpenAI clients expect on the closing usage frame.
     pub captured_input_usage: Option<CapturedInputUsage>,
+    /// Buffer of opaque events captured while an `OpenBlockKind::Unknown`
+    /// block was open. Drained into `ChatChunk.opaque_events` on the
+    /// next emitted canonical chunk; flushed onto a synthetic empty
+    /// chunk at `MessageStop` if no canonical chunk followed the
+    /// unknown block.
+    pub pending_opaque: Vec<OpaqueSseEvent>,
+    /// Per-block running totals for the bounded opaque-capture state.
+    /// `Some` while an `OpenBlockKind::Unknown` block is open; cleared
+    /// on `content_block_stop`.
+    pub(super) current_capture: Option<OpaqueCapture>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -96,12 +139,40 @@ impl CapturedInputUsage {
 }
 
 impl SseState {
+    /// Construct a fresh state for one streaming response. Emits a
+    /// single TRACE line announcing the active opaque-capture caps so
+    /// operators triaging an overflow have the limits visible in logs
+    /// without grepping the source. Fires once per stream (not per
+    /// event), so the TRACE-level cost is bounded.
+    pub fn new(provider_id: &str) -> Self {
+        tracing::trace!(
+            provider = %provider_id,
+            max_opaque_bytes_per_block = MAX_OPAQUE_BYTES_PER_BLOCK,
+            max_opaque_deltas_per_block = MAX_OPAQUE_DELTAS_PER_BLOCK,
+            "anthropic SSE state opened: opaque-capture caps active",
+        );
+        Self::default()
+    }
+
     /// Parse one raw SSE data line (the JSON string after "data: ").
-    /// Returns Ok(None) for housekeeping events, Ok(Some(chunk)) for content.
-    pub fn parse_event(&mut self, _provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
+    /// Returns Ok(None) for housekeeping events, Ok(Some(chunk)) for
+    /// content. Wraps `dispatch_event` to drain `pending_opaque` onto
+    /// the next emitted chunk so opaque events captured during prior
+    /// no-emit events ride out together with the next canonical
+    /// emission (see `sse_opaque`).
+    pub fn parse_event(&mut self, provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
         let event: SseEvent = serde_json::from_str(data)
             .map_err(|e| Error::Streaming(format!("bad sse json: {e}")))?;
+        let emitted = self.dispatch_event(provider_id, event)?;
+        Ok(emitted.map(|mut chunk| {
+            if !self.pending_opaque.is_empty() {
+                chunk.opaque_events = std::mem::take(&mut self.pending_opaque);
+            }
+            chunk
+        }))
+    }
 
+    fn dispatch_event(&mut self, provider_id: &str, event: SseEvent) -> Result<Option<ChatChunk>> {
         match event {
             SseEvent::MessageStart { message } => {
                 self.id = message.id;
@@ -121,18 +192,21 @@ impl SseState {
             }
 
             SseEvent::ContentBlockStart {
-                index: _,
+                index,
                 content_block,
             } => {
                 use super::types::SseContentBlockStart;
                 match content_block {
                     SseContentBlockStart::Text { .. } => {
-                        self.open_block = Some(OpenBlockKind::Text);
+                        self.open_block = Some(OpenBlockKind::Text {
+                            upstream_index: index,
+                        });
                     }
                     SseContentBlockStart::Thinking { .. } => {
                         let di = self.next_detail_index;
                         self.next_detail_index += 1;
                         self.open_block = Some(OpenBlockKind::Thinking {
+                            upstream_index: index,
                             accumulated: String::new(),
                             signature: None,
                             detail_id: Uuid::new_v4().to_string(),
@@ -143,6 +217,7 @@ impl SseState {
                         let ci = self.next_call_index;
                         self.next_call_index += 1;
                         self.open_block = Some(OpenBlockKind::ToolUse {
+                            upstream_index: index,
                             id,
                             name,
                             call_index: ci,
@@ -175,13 +250,28 @@ impl SseState {
                                 matched_stop_sequence: None,
                             }],
                             usage: None,
+                            opaque_events: Vec::new(),
                         }));
+                    }
+                    SseContentBlockStart::Other(value) => {
+                        // Open an Unknown block and seed opaque capture
+                        // with the start payload. The matching Anthropic
+                        // ingress reconstructs the block from
+                        // `chunk.opaque_events`.
+                        self.open_unknown_block(index, &value, provider_id);
                     }
                 }
                 Ok(None)
             }
 
-            SseEvent::ContentBlockDelta { index: _, delta } => {
+            SseEvent::ContentBlockDelta { index, delta } => {
+                if !self.index_matches(index, "delta", provider_id) {
+                    return Ok(None);
+                }
+                if matches!(self.open_block, Some(OpenBlockKind::Unknown { .. })) {
+                    self.capture_unknown_delta(&delta, provider_id);
+                    return Ok(None);
+                }
                 use super::types::SseDelta;
                 match delta {
                     SseDelta::TextDelta { text } => Ok(Some(self.make_text_chunk(text))),
@@ -212,10 +302,18 @@ impl SseState {
                     SseDelta::InputJsonDelta { partial_json } => {
                         Ok(Some(self.make_tool_delta_chunk(partial_json)))
                     }
+                    // Unknown delta inside a typed block is upstream-
+                    // malformed; drop without canonical emission. The
+                    // Unknown-block branch above is the only place
+                    // opaque deltas are captured.
+                    SseDelta::Other(_) => Ok(None),
                 }
             }
 
-            SseEvent::ContentBlockStop { .. } => {
+            SseEvent::ContentBlockStop { index } => {
+                if !self.index_matches(index, "stop", provider_id) {
+                    return Ok(None);
+                }
                 // Strategy A terminal: emit ONE aggregated structured
                 // detail per thinking block carrying both text and
                 // signature, matching the non-streaming
@@ -226,6 +324,7 @@ impl SseState {
                         signature,
                         detail_id,
                         detail_index,
+                        ..
                     }) => {
                         // Edge case: empty thinking block (no text AND
                         // no signature). Skip emission so replay does
@@ -241,6 +340,15 @@ impl SseState {
                                 detail_index,
                             ))
                         }
+                    }
+                    Some(OpenBlockKind::Unknown { .. }) => {
+                        // Append the stop sentinel and emit the per-block
+                        // INFO summary. Capture state is consumed;
+                        // pending_opaque rides on the next emitted chunk.
+                        if let Some(mut capture) = self.current_capture.take() {
+                            capture.record_stop(provider_id, &mut self.pending_opaque);
+                        }
+                        None
                     }
                     _ => None,
                 };
@@ -366,10 +474,24 @@ impl SseState {
                         matched_stop_sequence,
                     }],
                     usage: usage_delta,
+                    opaque_events: Vec::new(),
                 }))
             }
 
-            SseEvent::MessageStop | SseEvent::Ping => Ok(None),
+            SseEvent::MessageStop => {
+                // Safety-net flush: if `pending_opaque` was never drained
+                // (no canonical chunk emitted between the unknown block
+                // closing and end-of-stream), emit a synthetic empty
+                // carrier chunk so the buffered events still reach the
+                // ingress. The wrapper drains pending into the chunk's
+                // `opaque_events` after this returns.
+                if self.pending_opaque.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(self.empty_carrier_chunk()))
+                }
+            }
+            SseEvent::Ping => Ok(None),
             // Anthropic spec: a 200 response can carry an in-band
             // error event mid-stream (e.g. `overloaded_error`,
             // `api_error`). Surface as `Error::Streaming` so the
@@ -382,6 +504,22 @@ impl SseState {
                 "anthropic in-stream error: {}",
                 error,
             ))),
+            // Forward-compat catchall for unknown top-level event tags.
+            // Top-level Other events are not captured into opaque_events
+            // (the carrier is keyed on content_block lifecycle only); a
+            // future event tag would need its own handling. For now,
+            // sink-drain so the stream does not crash; emit a DEBUG so
+            // a future Anthropic top-level event type is observable to
+            // operators.
+            SseEvent::Other(v) => {
+                let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                tracing::debug!(
+                    provider = %provider_id,
+                    event_type = %event_type,
+                    "anthropic SSE: unknown top-level event; sink-draining",
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -403,6 +541,7 @@ impl SseState {
                 matched_stop_sequence: None,
             }],
             usage: None,
+            opaque_events: Vec::new(),
         }
     }
 
@@ -427,6 +566,7 @@ impl SseState {
                 matched_stop_sequence: None,
             }],
             usage: None,
+            opaque_events: Vec::new(),
         }
     }
 
@@ -470,6 +610,7 @@ impl SseState {
                 matched_stop_sequence: None,
             }],
             usage: None,
+            opaque_events: Vec::new(),
         }
     }
 
@@ -479,6 +620,7 @@ impl SseState {
                 id,
                 name,
                 call_index,
+                ..
             }) => (id.clone(), name.clone(), *call_index),
             _ => (String::new(), String::new(), 0),
         };
@@ -503,6 +645,25 @@ impl SseState {
                 matched_stop_sequence: None,
             }],
             usage: None,
+            opaque_events: Vec::new(),
+        }
+    }
+
+    /// Synthetic empty chunk used as the carrier on `MessageStop` when
+    /// `pending_opaque` was never drained (no canonical chunk closed
+    /// the unknown block before end-of-stream). The wrapper drains
+    /// `pending_opaque` into this chunk's `opaque_events` after
+    /// `dispatch_event` returns, so the buffered events still reach
+    /// the matching ingress instead of being silently dropped.
+    /// Choices are empty by design: there is no canonical content to
+    /// translate; OpenAI-shape ingresses see a noop chunk.
+    fn empty_carrier_chunk(&self) -> ChatChunk {
+        ChatChunk {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            choices: Vec::new(),
+            usage: None,
+            opaque_events: Vec::new(),
         }
     }
 }
@@ -553,6 +714,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
                     matched_stop_sequence: None,
                 }],
                 usage: None,
+                opaque_events: Vec::new(),
             }));
         }
     }
@@ -584,6 +746,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
                     matched_stop_sequence,
                 }],
                 usage: None,
+                opaque_events: Vec::new(),
             }));
         }
     }
@@ -631,333 +794,12 @@ mod tests {
             .unwrap();
         assert!(got.is_none(), "ping must be Ok(None), got: {got:?}");
     }
-
-    /// `message_start.usage` carries the input side of token accounting.
-    /// Real Anthropic emits non-zero `input_tokens` plus cache numbers
-    /// here; some upstream variants (and routectl's own Anthropic
-    /// ingress today) emit zeros that get corrected later in
-    /// `message_delta`. The state must capture whatever's in
-    /// `message_start.usage` so the closing chunk can sum them into
-    /// `prompt_tokens`.
-    #[test]
-    fn message_start_captures_input_usage_for_summing() {
-        let mut state = SseState::default();
-        let payload = r#"{
-            "type":"message_start",
-            "message": {
-                "id": "msg_01",
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": "claude-opus-4-7",
-                "stop_reason": null,
-                "stop_sequence": null,
-                "usage": {
-                    "input_tokens": 100,
-                    "output_tokens": 0,
-                    "cache_creation_input_tokens": 200,
-                    "cache_read_input_tokens": 300
-                }
-            }
-        }"#;
-        let _ = state.parse_event("test", payload).unwrap();
-        let cap = state
-            .captured_input_usage
-            .as_ref()
-            .expect("input usage captured from message_start");
-        assert_eq!(cap.input_tokens, 100);
-        assert_eq!(cap.cache_creation_input_tokens, Some(200));
-        assert_eq!(cap.cache_read_input_tokens, Some(300));
-        // sum surfaces as the prompt_tokens helper.
-        assert_eq!(cap.prompt_tokens(), 600);
-    }
-
-    /// Closing `message_delta` chunk must carry the full
-    /// `prompt_tokens` (sum of input + cache_creation + cache_read)
-    /// so OpenAI clients see the cumulative context size at end-of-
-    /// stream, not zero (the prior bug) or just the new turn's
-    /// non-cached count.
-    #[test]
-    fn message_delta_emits_prompt_tokens_from_captured_input() {
-        let mut state = SseState::default();
-        // message_start with non-trivial input + cache numbers.
-        let _ = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_start",
-                    "message": {
-                        "id":"msg_01","type":"message","role":"assistant",
-                        "content":[],"model":"claude-opus-4-7",
-                        "stop_reason":null,"stop_sequence":null,
-                        "usage": {
-                            "input_tokens": 50,
-                            "output_tokens": 0,
-                            "cache_creation_input_tokens": 100,
-                            "cache_read_input_tokens": 200
-                        }
-                    }
-                }"#,
-            )
-            .unwrap();
-        // message_delta with output usage and stop_reason.
-        let chunk = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_delta",
-                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
-                    "usage": {"output_tokens": 25}
-                }"#,
-            )
-            .unwrap()
-            .expect("closing chunk emitted");
-        let usage = chunk.usage.expect("usage on closing chunk");
-        // 50 + 100 + 200 = 350
-        assert_eq!(usage.prompt_tokens, Some(350));
-        assert_eq!(usage.completion_tokens, Some(25));
-        assert_eq!(usage.total_tokens, Some(375));
-    }
-
-    /// When `message_delta.usage.input_tokens` is present (e.g. from
-    /// routectl's own Anthropic ingress emitting the post-cache total),
-    /// prefer it over the captured `message_start` value. This is the
-    /// "chained routectl" scenario: an upstream routectl renders the
-    /// final input count to `message_delta.usage.input_tokens` because
-    /// `message_start.usage` was hardcoded to zero.
-    #[test]
-    fn message_delta_input_tokens_overrides_captured_zero() {
-        let mut state = SseState::default();
-        // message_start with zero input (the upstream-hardcoded case).
-        let _ = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_start",
-                    "message": {
-                        "id":"msg_01","type":"message","role":"assistant",
-                        "content":[],"model":"claude-opus-4-7",
-                        "stop_reason":null,"stop_sequence":null,
-                        "usage": {"input_tokens": 0, "output_tokens": 0}
-                    }
-                }"#,
-            )
-            .unwrap();
-        let chunk = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_delta",
-                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
-                    "usage": {
-                        "input_tokens": 12345,
-                        "output_tokens": 50,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0
-                    }
-                }"#,
-            )
-            .unwrap()
-            .expect("closing chunk emitted");
-        let usage = chunk.usage.expect("usage");
-        assert_eq!(usage.prompt_tokens, Some(12345));
-        assert_eq!(usage.completion_tokens, Some(50));
-    }
-
-    /// Pin the chained-routectl invariant: when both message_start AND
-    /// message_delta carry non-zero input_tokens, the delta value
-    /// (which an upstream routectl writes as the already-summed
-    /// prompt_tokens) wins. Use DISTINCT values so the test
-    /// distinguishes "delta wins" from "captured wins" -- a regression
-    /// flipping the match arm order would fail this test.
-    #[test]
-    fn message_delta_input_tokens_wins_over_captured_when_both_nonzero() {
-        let mut state = SseState::default();
-        let _ = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_start",
-                    "message": {
-                        "id":"msg_01","type":"message","role":"assistant",
-                        "content":[],"model":"claude-opus-4-7",
-                        "stop_reason":null,"stop_sequence":null,
-                        "usage": {"input_tokens": 50, "output_tokens": 0}
-                    }
-                }"#,
-            )
-            .unwrap();
-        // Delta sends a DIFFERENT non-zero input count (the chained-
-        // upstream's pre-summed value, e.g. after a cache hit on the
-        // upstream side that wasn't visible to our message_start).
-        let chunk = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_delta",
-                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
-                    "usage": {"input_tokens": 99, "output_tokens": 10}
-                }"#,
-            )
-            .unwrap()
-            .expect("closing chunk emitted");
-        let usage = chunk.usage.expect("usage");
-        // 99 (delta) wins, NOT 50 (captured) and NOT 149 (sum).
-        assert_eq!(usage.prompt_tokens, Some(99));
-        assert_eq!(usage.completion_tokens, Some(10));
-        assert_eq!(usage.total_tokens, Some(109));
-    }
-
-    /// Per-spec semantics: when a delta carries RAW `input_tokens`
-    /// alongside non-zero `cache_creation_input_tokens` and
-    /// `cache_read_input_tokens`, the canonical prompt_tokens MUST be
-    /// the sum of all three. Pre-fix, routectl assumed the delta's
-    /// `input_tokens` was already-summed and silently undercounted
-    /// when a non-routectl Anthropic upstream sent raw values.
-    #[test]
-    fn message_delta_sums_raw_input_plus_cache_per_spec() {
-        let mut state = SseState::default();
-        let _ = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_start",
-                    "message": {
-                        "id":"msg_01","type":"message","role":"assistant",
-                        "content":[],"model":"claude-opus-4-7",
-                        "stop_reason":null,"stop_sequence":null,
-                        "usage": {"input_tokens": 0, "output_tokens": 0}
-                    }
-                }"#,
-            )
-            .unwrap();
-        // Hypothetical non-routectl Anthropic upstream: sends RAW
-        // input_tokens on message_delta, NOT pre-summed. cache fields
-        // are separate (per Anthropic spec).
-        let chunk = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_delta",
-                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
-                    "usage": {
-                        "input_tokens": 100,
-                        "output_tokens": 50,
-                        "cache_creation_input_tokens": 200,
-                        "cache_read_input_tokens": 300
-                    }
-                }"#,
-            )
-            .unwrap()
-            .expect("closing chunk emitted");
-        let usage = chunk.usage.expect("usage");
-        // 100 raw + 200 cache_creation + 300 cache_read = 600
-        assert_eq!(usage.prompt_tokens, Some(600));
-        assert_eq!(usage.completion_tokens, Some(50));
-        assert_eq!(usage.total_tokens, Some(650));
-    }
-
-    /// Pin the cache-merge zero-aware fallback: if the closing
-    /// `message_delta.usage` restates `cache_*` as explicit zero while
-    /// `message_start` had non-zero captured values, keep the captured
-    /// values. Otherwise a placeholder restatement would erase real
-    /// cache stats.
-    #[test]
-    fn message_delta_cache_zero_does_not_overwrite_captured_nonzero() {
-        let mut state = SseState::default();
-        let _ = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_start",
-                    "message": {
-                        "id":"msg_01","type":"message","role":"assistant",
-                        "content":[],"model":"claude-opus-4-7",
-                        "stop_reason":null,"stop_sequence":null,
-                        "usage": {
-                            "input_tokens": 10,
-                            "output_tokens": 0,
-                            "cache_creation_input_tokens": 100,
-                            "cache_read_input_tokens": 200
-                        }
-                    }
-                }"#,
-            )
-            .unwrap();
-        let chunk = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_delta",
-                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
-                    "usage": {
-                        "output_tokens": 7,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0
-                    }
-                }"#,
-            )
-            .unwrap()
-            .expect("closing chunk");
-        let usage = chunk.usage.expect("usage");
-        assert_eq!(usage.cache_creation_input_tokens, Some(100));
-        assert_eq!(usage.cache_read_input_tokens, Some(200));
-    }
-
-    /// Pin the per-TTL `cache_creation` field-level merge: a delta
-    /// carrying a partial or empty `cache_creation` object must NOT
-    /// wholesale-replace the captured object's per-TTL detail. Each
-    /// field falls back independently through the same zero-aware
-    /// pick.
-    #[test]
-    fn message_delta_partial_cache_creation_object_merges_per_ttl() {
-        let mut state = SseState::default();
-        // message_start with both TTL buckets set.
-        let _ = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_start",
-                    "message": {
-                        "id":"msg_01","type":"message","role":"assistant",
-                        "content":[],"model":"claude-opus-4-7",
-                        "stop_reason":null,"stop_sequence":null,
-                        "usage": {
-                            "input_tokens": 0,
-                            "output_tokens": 0,
-                            "cache_creation": {
-                                "ephemeral_5m_input_tokens": 50,
-                                "ephemeral_1h_input_tokens": 100
-                            }
-                        }
-                    }
-                }"#,
-            )
-            .unwrap();
-        // Delta restates ONLY the 5m bucket (e.g. an upstream that
-        // tracks 5m only); 1h is absent in the wire payload.
-        let chunk = state
-            .parse_event(
-                "test",
-                r#"{
-                    "type":"message_delta",
-                    "delta": {"stop_reason":"end_turn","stop_sequence":null},
-                    "usage": {
-                        "output_tokens": 5,
-                        "cache_creation": {
-                            "ephemeral_5m_input_tokens": 75
-                        }
-                    }
-                }"#,
-            )
-            .unwrap()
-            .expect("closing chunk");
-        let usage = chunk.usage.expect("usage");
-        let cc = usage.cache_creation.expect("cache_creation present");
-        // 5m: delta's 75 wins over captured 50.
-        assert_eq!(cc.ephemeral_5m_input_tokens, Some(75));
-        // 1h: absent from delta, falls back to captured 100. Pre-fix
-        // this would be None (whole-object replacement lost it).
-        assert_eq!(cc.ephemeral_1h_input_tokens, Some(100));
-    }
 }
+
+// Larger usage-accounting tests live in `sse_usage_tests.rs` so this
+// file stays under the project's 800-LOC ceiling. Compiled as a child
+// module of `sse` (via `#[path]`) so the tests retain access to
+// private items like `CapturedInputUsage::prompt_tokens`.
+#[cfg(test)]
+#[path = "sse_usage_tests.rs"]
+mod sse_usage_tests;
