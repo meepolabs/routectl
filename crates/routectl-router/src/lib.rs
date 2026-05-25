@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod factory;
+pub(crate) mod feature_keys;
 pub mod glob;
 pub mod resolved;
 pub mod router;

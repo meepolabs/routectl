@@ -41,6 +41,14 @@ const MANAGED_HEADERS: &[&str] = &["host", "content-type", "content-length"];
 /// last-writer-wins on collision. Currently just `anthropic-beta`.
 const LIST_VALUED_HEADERS: &[&str] = &["anthropic-beta"];
 
+/// Maximum recursion depth for nested alias resolution. Belt-and-
+/// suspenders for the dispatch path: cycles are caught at startup by
+/// `factory::validate_alias_chain_targets`, but a glob-shadow edge
+/// case the static walk missed could still introduce one at runtime.
+/// Depth > 8 hops fails the request with a clear `Error::Config`
+/// rather than recurse indefinitely.
+const ALIAS_MAX_RECURSION_DEPTH: usize = 8;
+
 pub struct Router {
     pub config: Arc<Config>,
     /// Provider implementations keyed by user-facing name. Private so
@@ -240,18 +248,25 @@ impl Router {
     /// shape matches. The `default` catch-all is consulted later in
     /// `dispatch_chain` so a wire model that's a known nickname wins
     /// over the default fallback.
-    fn resolve_v6_alias(&self, wire_model: &str) -> Option<Vec<Arc<ResolvedModel>>> {
+    ///
+    /// Chain entries that are themselves alias keys are recursively
+    /// expanded (DFS, preserving operator-stated fallback order).
+    /// `Err(Error::Config)` propagates if the recursion hits the
+    /// runtime depth cap (`ALIAS_MAX_RECURSION_DEPTH`); cycles are
+    /// caught earlier by `validate_alias_chain_targets`, so this is
+    /// only a defensive safety net.
+    fn resolve_v6_alias(&self, wire_model: &str) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
         let aliases = &self.config.aliases;
-        let value = aliases
+        let value = match aliases
             .get(wire_model)
             .cloned()
-            .or_else(|| self.alias_glob_index.longest_match(wire_model))?;
+            .or_else(|| self.alias_glob_index.longest_match(wire_model))
+        {
+            Some(v) => v,
+            None => return Ok(None),
+        };
         let mut chain: Vec<Arc<ResolvedModel>> = Vec::new();
-        for nickname in value.nicknames() {
-            if let Some(m) = self.resolve_nickname(nickname) {
-                chain.push(m);
-            }
-        }
+        self.expand_alias_value(&value, &mut chain, 0)?;
         if chain.is_empty() {
             // Alias key matched but every target was disabled or
             // unresolvable. Without this WARN the request silently
@@ -266,27 +281,78 @@ impl Router {
                 "alias resolved to empty chain (all targets disabled or unresolvable); \
                  falling through to direct nickname lookup or `default`",
             );
-            None
+            Ok(None)
         } else {
-            Some(chain)
+            Ok(Some(chain))
         }
     }
 
     /// Consult the catch-all `default` alias. Returns the resolved
-    /// chain, or `None` if no `default` key is configured.
-    fn resolve_default_alias(&self) -> Option<Vec<Arc<ResolvedModel>>> {
-        let value = self.config.aliases.get("default").cloned()?;
+    /// chain, or `None` if no `default` key is configured. Recurses
+    /// through nested alias keys identically to `resolve_v6_alias`.
+    fn resolve_default_alias(&self) -> Result<Option<Vec<Arc<ResolvedModel>>>> {
+        let value = match self.config.aliases.get("default").cloned() {
+            Some(v) => v,
+            None => return Ok(None),
+        };
         let mut chain: Vec<Arc<ResolvedModel>> = Vec::new();
-        for nickname in value.nicknames() {
-            if let Some(m) = self.resolve_nickname(nickname) {
-                chain.push(m);
-            }
-        }
+        self.expand_alias_value(&value, &mut chain, 0)?;
         if chain.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some(chain)
+            Ok(Some(chain))
         }
+    }
+
+    /// Recursively expand an `AliasValue` into a flat ordered list of
+    /// `Arc<ResolvedModel>`. Each chain entry is FIRST checked against
+    /// `[aliases]` keys (exact match); if it hits, the nested chain is
+    /// expanded inline DFS-style so the operator's stated fallback
+    /// order is preserved (`A = ["B", "C"]` with `B = ["X", "Y"]` and
+    /// `C` a model nickname yields `[X, Y, C]`). If the entry is not
+    /// an alias key, it is treated as a `[models.X]` nickname and
+    /// looked up in the resolved-model table; misses are silently
+    /// dropped (the static validator surfaces these at startup).
+    ///
+    /// `depth` is the current recursion depth; the recursion errors
+    /// out with `Error::Config` once it exceeds
+    /// `ALIAS_MAX_RECURSION_DEPTH`. This is a defensive safety net
+    /// for the case where a glob hit re-introduces a cycle the static
+    /// DFS missed.
+    fn expand_alias_value(
+        &self,
+        value: &AliasValue,
+        out: &mut Vec<Arc<ResolvedModel>>,
+        depth: usize,
+    ) -> Result<()> {
+        if depth > ALIAS_MAX_RECURSION_DEPTH {
+            return Err(Error::Config(format!(
+                "alias chain recursion exceeded depth {ALIAS_MAX_RECURSION_DEPTH}; \
+                 possible cycle that startup validation missed -- \
+                 run `routectl config check` to surface the offending alias"
+            )));
+        }
+        for entry in value.nicknames() {
+            // Alias keys win over model nicknames by the same shadowing
+            // rule the top-level dispatch uses.
+            //
+            // Glob-pattern entries (e.g. `claude-haiku*`) are matched by
+            // this exact `BTreeMap` lookup because glob keys live in
+            // `config.aliases` keyed on the literal pattern string, in
+            // addition to being indexed in `glob_index` for prefix
+            // matching at dispatch time. If those two are ever
+            // de-coupled (e.g. moving glob keys out of
+            // `config.aliases`), recursive expansion of glob-targeted
+            // chain entries breaks here.
+            if let Some(nested) = self.config.aliases.get(entry) {
+                self.expand_alias_value(nested, out, depth + 1)?;
+            } else if let Some(m) = self.resolve_nickname(entry) {
+                out.push(m);
+            }
+            // Else silently drop -- caught by `validate_alias_chain_targets`
+            // at startup.
+        }
+        Ok(())
     }
 
     pub fn register(&mut self, name: impl Into<String>, provider: Arc<dyn Provider>) {
@@ -317,7 +383,7 @@ impl Router {
     /// over direct nicknames -- e.g. `"claude-*" = "fallback"` shadows
     /// any nickname starting with `claude-`.
     fn dispatch_chain(&self, model: &str) -> Result<Vec<DispatchTarget>> {
-        if let Some(chain) = self.resolve_v6_alias(model) {
+        if let Some(chain) = self.resolve_v6_alias(model)? {
             return Ok(into_dispatch_targets(chain));
         }
         // Wire model could ALSO be a direct nickname.
@@ -327,10 +393,100 @@ impl Router {
         // Catch-all: only consulted after exact alias / glob / direct
         // nickname all miss. This ordering means a wire model that's
         // a known nickname always wins over a configured default.
-        if let Some(chain) = self.resolve_default_alias() {
+        if let Some(chain) = self.resolve_default_alias()? {
             return Ok(into_dispatch_targets(chain));
         }
         Err(Error::UnknownAlias(model.to_string()))
+    }
+
+    /// Resolve the dispatch chain for a request and pre-filter against
+    /// per-provider `unsupported_features` lists. Wraps `dispatch_chain`
+    /// so the three dispatch entry points (`complete_with_options`,
+    /// `stream_with_options`, `count_tokens`) share one filter pass.
+    ///
+    /// When the request carries built-in tools (e.g.
+    /// `web_search_20250305`) and the operator declared the feature
+    /// unsupported on a chain entry, that entry is dropped from the
+    /// chain BEFORE dispatch -- not tried-and-fallback. This avoids
+    /// per-target 400s from upstreams that simply don't accept the
+    /// tool shape, and keeps the breaker counters honest (a feature
+    /// mismatch is operator-known, not upstream health).
+    ///
+    /// Returns `Error::NotImplemented(alias, ...)` when the original
+    /// chain was non-empty AND the request had at least one feature
+    /// AND every chain entry got filtered. The error message names the
+    /// offending feature key(s) so the operator's triage starts from
+    /// the right place.
+    fn dispatch_chain_for_request(&self, req: &ChatRequest) -> Result<Vec<DispatchTarget>> {
+        let chain = self.dispatch_chain(&req.model)?;
+        let tools = req.tools.as_deref().unwrap_or(&[]);
+        let features = crate::feature_keys::derive_feature_keys(tools);
+        self.filter_chain_by_features(chain, &features, &req.model)
+    }
+
+    /// Filter the resolved chain by request features. Per-provider
+    /// `unsupported_features` lists are consulted via the provider
+    /// table; an entry whose `unsupported_features` intersects the
+    /// request feature set is dropped with a DEBUG log.
+    ///
+    /// No-ops when `features` is empty (no built-in tool in the
+    /// request -> nothing to filter against). Returns
+    /// `Error::NotImplemented` only when the input chain was non-empty,
+    /// at least one feature is in the request, AND every entry got
+    /// filtered out -- the architect's "terminal empty-chain" path. A
+    /// chain that was empty before filtering surfaces via the existing
+    /// `Err(Error::UnknownAlias(...))` path on `dispatch_chain`.
+    fn filter_chain_by_features(
+        &self,
+        chain: Vec<DispatchTarget>,
+        features: &[String],
+        alias: &str,
+    ) -> Result<Vec<DispatchTarget>> {
+        if features.is_empty() || chain.is_empty() {
+            return Ok(chain);
+        }
+        let mut filtered: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
+        for target in chain {
+            let unsupported_intersect = self
+                .config
+                .providers
+                .get(&target.provider_name)
+                .map(|e| {
+                    let unsupported = &e.runtime().unsupported_features;
+                    features
+                        .iter()
+                        .find(|f| unsupported.iter().any(|u| u == *f))
+                        .cloned()
+                })
+                .unwrap_or(None);
+            match unsupported_intersect {
+                Some(feature) => {
+                    tracing::debug!(
+                        provider = %target.provider_name,
+                        model = %target.nickname.as_deref().unwrap_or(""),
+                        feature = %feature,
+                        "provider skipped: feature in unsupported_features list",
+                    );
+                }
+                None => {
+                    filtered.push(target);
+                }
+            }
+        }
+        if filtered.is_empty() {
+            let feature_list = features.join(", ");
+            tracing::warn!(
+                alias = %alias,
+                features = %feature_list,
+                "alias chain filtered to empty by unsupported_features; \
+                 no provider in chain supports the requested features",
+            );
+            return Err(Error::NotImplemented(
+                alias.to_string(),
+                format!("no provider in chain supports features: {feature_list}"),
+            ));
+        }
+        Ok(filtered)
     }
 
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
@@ -344,7 +500,7 @@ impl Router {
         req: ChatRequest,
         opts: RouterOptions,
     ) -> Result<ChatResponse> {
-        let chain = self.dispatch_chain(&req.model)?;
+        let chain = self.dispatch_chain_for_request(&req)?;
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         let hard_cap = policy.hard_retry_cap();
@@ -505,7 +661,7 @@ impl Router {
     /// prevents probe-spam from bypassing operator rate limits.
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
-        let chain = self.dispatch_chain(&req.model)?;
+        let chain = self.dispatch_chain_for_request(&req)?;
         let target = chain
             .into_iter()
             .next()
@@ -583,7 +739,7 @@ impl Router {
         req: ChatRequest,
         opts: RouterOptions,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        let chain = self.dispatch_chain(&req.model)?;
+        let chain = self.dispatch_chain_for_request(&req)?;
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         let mut last_err: Option<Error> = None;
@@ -2375,6 +2531,202 @@ mod resolved_models_tests {
         assert_eq!(resp.routectl_provider.as_deref(), Some("p-alias"));
         assert_eq!(resp.model, "u-alias");
     }
+
+    // ----- Recursive alias-chain resolution (Task #5) -----
+    //
+    // Pin the runtime DFS expansion: an alias entry that is itself an
+    // alias key gets recursively expanded inline so the operator's
+    // stated fallback order is preserved. Globs follow the same rule
+    // as exact matches. The depth cap is exercised via a forced cycle
+    // (whose static walk would normally have rejected it) to confirm
+    // the belt-and-suspenders runtime guard fires.
+
+    fn make_provider(id: &str) -> Arc<dyn Provider> {
+        Arc::new(CountedProvider {
+            id: id.to_string(),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// Build a `Router` whose alias map references both alias keys
+    /// and model nicknames (so the recursive resolver has something
+    /// to walk). `aliases` is a slice of `(key, AliasValue)` pairs;
+    /// `models` is a slice of `(nickname, provider_name, upstream)`
+    /// tuples. Every provider name in `models` gets a fresh
+    /// `CountedProvider` instance, so the test can assert which model
+    /// landed in the dispatch chain by reading
+    /// `resp.routectl_provider`.
+    fn router_with_recursive_aliases(
+        aliases: &[(&str, AliasValue)],
+        models: &[(&str, &str, &str)],
+    ) -> Router {
+        let mut config = Config::default();
+        for (key, value) in aliases {
+            config.aliases.insert((*key).into(), value.clone());
+        }
+        let mut router = Router::new(Arc::new(config));
+        let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        for (nickname, provider_name, upstream) in models {
+            let provider = make_provider(provider_name);
+            resolved.insert(
+                (*nickname).into(),
+                Arc::new(ResolvedModel::new(
+                    *nickname,
+                    *provider_name,
+                    provider,
+                    *upstream,
+                )),
+            );
+        }
+        router.install_resolved_models(resolved);
+        router
+    }
+
+    #[tokio::test]
+    async fn alias_pointing_to_another_alias_resolves_two_deep() {
+        // A = ["B"], B = ["model-x"]. Wire model "a" must dispatch
+        // to model-x's provider (one hop through B).
+        let router = router_with_recursive_aliases(
+            &[
+                ("a", AliasValue::Single("b".into())),
+                ("b", AliasValue::Single("model-x".into())),
+            ],
+            &[("model-x", "p-x", "u-x")],
+        );
+        let req = ChatRequest {
+            model: "a".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("p-x"));
+        assert_eq!(resp.model, "u-x");
+    }
+
+    #[tokio::test]
+    async fn alias_three_deep_resolves_to_full_chain() {
+        // A = ["B"], B = ["C"], C = ["model-x", "model-y"]. Wire
+        // model "a" should dispatch to model-x first; if model-x
+        // were absent, would fall back to model-y. We just confirm
+        // the head of the resolved chain.
+        let router = router_with_recursive_aliases(
+            &[
+                ("a", AliasValue::Single("b".into())),
+                ("b", AliasValue::Single("c".into())),
+                (
+                    "c",
+                    AliasValue::Chain(vec!["model-x".into(), "model-y".into()]),
+                ),
+            ],
+            &[("model-x", "p-x", "u-x"), ("model-y", "p-y", "u-y")],
+        );
+        let req = ChatRequest {
+            model: "a".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("p-x"));
+    }
+
+    #[test]
+    fn alias_chain_preserves_fallback_order_across_recursion() {
+        // A = ["B", "model-c"], B = ["model-d", "model-e"]. Static
+        // expansion must yield [model-d, model-e, model-c] -- B's
+        // chain expanded inline before C, preserving the operator's
+        // stated fallback order. We test via dispatch_chain directly
+        // to inspect ordering without bringing up the full async
+        // dispatch loop.
+        let router = router_with_recursive_aliases(
+            &[
+                ("a", AliasValue::Chain(vec!["b".into(), "model-c".into()])),
+                (
+                    "b",
+                    AliasValue::Chain(vec!["model-d".into(), "model-e".into()]),
+                ),
+            ],
+            &[
+                ("model-c", "p-c", "u-c"),
+                ("model-d", "p-d", "u-d"),
+                ("model-e", "p-e", "u-e"),
+            ],
+        );
+        let chain = router.dispatch_chain("a").expect("dispatch_chain ok");
+        let upstreams: Vec<&str> = chain.iter().map(|t| t.upstream.as_str()).collect();
+        assert_eq!(
+            upstreams,
+            vec!["u-d", "u-e", "u-c"],
+            "B's chain must expand inline before C, preserving fallback order"
+        );
+    }
+
+    #[test]
+    fn dry_single_pointer_alias_resolves_to_underlying_model() {
+        // The DRY operator-config pattern from the spec:
+        // `a = ["model-x"]`, `claude-a = ["a"]`. Both wire models
+        // must dispatch to model-x. This is the shape that lets the
+        // operator collapse the inline-duplicated `claude-cheap`,
+        // `claude-codex-pro`, etc. wrappers in the user config.
+        let router = router_with_recursive_aliases(
+            &[
+                ("a", AliasValue::Single("model-x".into())),
+                ("claude-a", AliasValue::Single("a".into())),
+            ],
+            &[("model-x", "p-x", "u-x")],
+        );
+
+        let chain_a = router.dispatch_chain("a").expect("a resolves");
+        assert_eq!(chain_a.len(), 1);
+        assert_eq!(chain_a[0].upstream, "u-x");
+
+        let chain_claude = router
+            .dispatch_chain("claude-a")
+            .expect("claude-a resolves");
+        assert_eq!(chain_claude.len(), 1);
+        assert_eq!(chain_claude[0].upstream, "u-x");
+    }
+
+    #[test]
+    fn glob_alias_expands_through_nested_alias() {
+        // Per architect's verdict F: glob keys follow the same
+        // recursion rule as exact aliases. `claude-haiku*` -> `a` ->
+        // `model-x`. A wire model "claude-haiku-3" hits the glob and
+        // must resolve through `a` to model-x's provider.
+        let router = router_with_recursive_aliases(
+            &[
+                ("claude-haiku*", AliasValue::Single("a".into())),
+                ("a", AliasValue::Single("model-x".into())),
+            ],
+            &[("model-x", "p-x", "u-x")],
+        );
+        let chain = router
+            .dispatch_chain("claude-haiku-3")
+            .expect("glob match resolves");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].upstream, "u-x");
+    }
+
+    #[test]
+    fn recursion_depth_cap_fires_on_cycle_at_dispatch_time() {
+        // Belt-and-suspenders: if the static walk somehow missed a
+        // cycle (e.g. operator hot-edited the live Config without
+        // re-running validation), the runtime resolver must fail
+        // fast with `Error::Config` rather than recurse forever.
+        // We force the case here by building a router with a
+        // self-cycle directly (skipping `validate_alias_chain_targets`).
+        let router = router_with_recursive_aliases(&[("a", AliasValue::Single("a".into()))], &[]);
+        let res = router.dispatch_chain("a");
+        match res {
+            Err(Error::Config(msg)) => {
+                assert!(
+                    msg.contains("recursion exceeded depth"),
+                    "expected depth-cap error, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Error::Config from depth cap, got {other:?}"),
+            Ok(_) => panic!("expected Error::Config from depth cap, got Ok(...)"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2468,6 +2820,294 @@ mod count_tokens_tests {
         assert!(
             matches!(err, Error::NotImplemented(_, _)),
             "expected Error::NotImplemented, got {err:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod feature_filter_tests {
+    //! Tests for the v0.6.0 per-provider `unsupported_features`
+    //! pre-filter. Confirms that providers listing a request feature
+    //! get skipped BEFORE dispatch (no upstream call, no breaker
+    //! account) and that a chain reduced to empty surfaces as
+    //! `Error::NotImplemented` rather than walking and 400ing.
+    use super::*;
+    use crate::config::{ProviderEntry, ProviderRuntimePolicy};
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use parking_lot::Mutex as ParkingMutex;
+    use routectl_core::{
+        ChatChunk, ChatRequest, ChatResponse, Choice, CustomTool, Error, Message, Provider, ToolDef,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    /// Provider stub that records every `complete()` call. The test
+    /// asserts on `captured.len()` to prove a provider was (or was not)
+    /// dispatched to.
+    struct CapturingProvider {
+        id: String,
+        captured: Arc<ParkingMutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl Provider for CapturingProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            let model = req.model.clone();
+            let id = self.id.clone();
+            self.captured.lock().push(req);
+            Ok(ChatResponse {
+                id: format!("ok-{id}"),
+                model,
+                created: 0,
+                choices: vec![Choice {
+                    index: 0,
+                    message: Message {
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+            })
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!()
+        }
+    }
+
+    fn web_search_tool() -> ToolDef {
+        ToolDef::Other(json!({
+            "type": "web_search_20250305",
+            "name": "search"
+        }))
+    }
+
+    fn web_search_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            model: model.into(),
+            messages: vec![],
+            tools: Some(vec![web_search_tool()]),
+            ..Default::default()
+        }
+    }
+
+    /// Per-provider captured-request log for test introspection.
+    type CapturedRequests = Arc<ParkingMutex<Vec<ChatRequest>>>;
+
+    /// Build a router with a 2-entry alias chain `["bedrock-opus" ->
+    /// "anthropic-opus"]`. Each provider entry carries the
+    /// `unsupported_features` list passed by the caller.
+    fn build_router_with_chain(
+        unsupported_first: Vec<String>,
+        unsupported_second: Vec<String>,
+    ) -> (Router, CapturedRequests, CapturedRequests) {
+        let mut config = Config::default();
+        config.providers.insert(
+            "bedrock-prov".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                user_agent: None,
+                runtime: ProviderRuntimePolicy {
+                    unsupported_features: unsupported_first,
+                    ..Default::default()
+                },
+            },
+        );
+        config.providers.insert(
+            "anthropic-prov".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                user_agent: None,
+                runtime: ProviderRuntimePolicy {
+                    unsupported_features: unsupported_second,
+                    ..Default::default()
+                },
+            },
+        );
+        config.aliases.insert(
+            "alias".into(),
+            AliasValue::Chain(vec!["bedrock-opus".into(), "anthropic-opus".into()]),
+        );
+
+        let mut router = Router::new(Arc::new(config));
+        let captured_first: Arc<ParkingMutex<Vec<ChatRequest>>> =
+            Arc::new(ParkingMutex::new(Vec::new()));
+        let captured_second: Arc<ParkingMutex<Vec<ChatRequest>>> =
+            Arc::new(ParkingMutex::new(Vec::new()));
+        let p_first: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "bedrock-prov".into(),
+            captured: captured_first.clone(),
+        });
+        let p_second: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "anthropic-prov".into(),
+            captured: captured_second.clone(),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "bedrock-opus".into(),
+            Arc::new(ResolvedModel::new(
+                "bedrock-opus",
+                "bedrock-prov",
+                p_first,
+                "opus-via-bedrock",
+            )),
+        );
+        models.insert(
+            "anthropic-opus".into(),
+            Arc::new(ResolvedModel::new(
+                "anthropic-opus",
+                "anthropic-prov",
+                p_second,
+                "opus-via-anthropic",
+            )),
+        );
+        router.install_resolved_models(models);
+        (router, captured_first, captured_second)
+    }
+
+    #[tokio::test]
+    async fn web_search_skips_first_provider_when_listed_unsupported() {
+        // Chain [bedrock, anthropic]. Bedrock declares web_search
+        // unsupported. Request carries web_search_20250305. Dispatch
+        // must go DIRECTLY to anthropic (no bedrock attempt, no
+        // breaker accounting on bedrock).
+        let (router, captured_bedrock, captured_anthropic) =
+            build_router_with_chain(vec!["web_search".into()], vec![]);
+        let req = web_search_request("alias");
+        let resp = router.complete(req).await.expect("dispatch must succeed");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic-prov"));
+        assert_eq!(
+            captured_bedrock.lock().len(),
+            0,
+            "bedrock must be skipped, not tried-and-fallback",
+        );
+        assert_eq!(captured_anthropic.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_chain_after_filter_returns_not_implemented() {
+        // Both chain entries declare the feature unsupported. The
+        // filter eliminates everyone, so the router synthesizes a
+        // 501 NotImplemented naming the feature key. No upstream
+        // attempt happens.
+        let (router, captured_bedrock, captured_anthropic) =
+            build_router_with_chain(vec!["web_search".into()], vec!["web_search".into()]);
+        let req = web_search_request("alias");
+        let err = router.complete(req).await.unwrap_err();
+        match err {
+            Error::NotImplemented(alias, msg) => {
+                assert_eq!(alias, "alias");
+                assert!(
+                    msg.contains("web_search"),
+                    "error message must name the feature; got: {msg}",
+                );
+            }
+            other => panic!("expected Error::NotImplemented; got {other:?}"),
+        }
+        assert_eq!(captured_bedrock.lock().len(), 0);
+        assert_eq!(captured_anthropic.lock().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_features_in_request_is_no_op_filter() {
+        // Even when bedrock declares web_search unsupported, a
+        // request without tools (no feature keys derived) dispatches
+        // to bedrock first per the chain order.
+        let (router, captured_bedrock, _captured_anthropic) =
+            build_router_with_chain(vec!["web_search".into()], vec![]);
+        let req = ChatRequest {
+            model: "alias".into(),
+            messages: vec![],
+            tools: None,
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("bedrock-prov"));
+        assert_eq!(
+            captured_bedrock.lock().len(),
+            1,
+            "no features -> filter is a no-op, bedrock takes the request",
+        );
+    }
+
+    #[tokio::test]
+    async fn dated_suffix_versions_normalize_to_same_key() {
+        // `web_search_20250305` and a hypothetical
+        // `web_search_20251102` both reduce to the same key
+        // `web_search`. Bedrock declares `web_search` unsupported, so
+        // both versions get filtered identically.
+        let (router, captured_bedrock, captured_anthropic) =
+            build_router_with_chain(vec!["web_search".into()], vec![]);
+        let req = ChatRequest {
+            model: "alias".into(),
+            messages: vec![],
+            tools: Some(vec![ToolDef::Other(json!({
+                "type": "web_search_20251102",
+                "name": "search"
+            }))]),
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic-prov"));
+        assert_eq!(captured_bedrock.lock().len(), 0);
+        assert_eq!(captured_anthropic.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn custom_tools_dont_contribute_feature_keys() {
+        // A user-defined `ToolDef::Custom` tool has no version-stamped
+        // `type` and therefore contributes NO feature key. The filter
+        // is a no-op even when bedrock has unsupported_features set.
+        let (router, captured_bedrock, _captured_anthropic) =
+            build_router_with_chain(vec!["web_search".into()], vec![]);
+        let req = ChatRequest {
+            model: "alias".into(),
+            messages: vec![],
+            tools: Some(vec![ToolDef::Custom(CustomTool {
+                name: "calculator".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                cache_control: None,
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            })]),
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("bedrock-prov"));
+        assert_eq!(
+            captured_bedrock.lock().len(),
+            1,
+            "Custom tools must not be treated as feature keys",
         );
     }
 }

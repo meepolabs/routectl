@@ -87,7 +87,7 @@ the CLI.
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
 | `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only                                                          |
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
-| `runtime` (RPM, breaker, timeouts) | `[providers.X]` | provider-only                                                          |
+| `runtime` (RPM, breaker, timeouts, `unsupported_features`) | `[providers.X]` | provider-only                                                          |
 | `allowed_betas`                | `[providers.X]` Anthropic / `[bedrock]` global | provider-only                              |
 
 Caller request shape > model defaults > provider/internal defaults. An
@@ -176,6 +176,69 @@ egress reads `req.anthropic_beta` and emits ONE
 `anthropic-beta: foo,claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07`
 HTTP header. Bedrock egresses route the same canonical list through
 `filter_bedrock_betas`.
+
+## Per-provider capability filter (`unsupported_features`)
+
+Some upstreams reject specific built-in tool shapes (Bedrock, for
+example, currently 400s on Anthropic's `web_search_*` tool families).
+The legacy behavior was tried-and-fallback: dispatch to Bedrock, get
+a 400, walk to the next chain entry. That burns latency, surfaces a
+400 in operator dashboards, and counts the failure against Bedrock's
+breaker even though the request never had a chance.
+
+`unsupported_features` is a declarative, operator-supplied list on
+each provider's runtime block. The router derives feature keys from
+the request's `tools` array and pre-filters the alias chain BEFORE
+dispatch -- a chain entry whose provider lists ANY of the request's
+features is dropped. If every entry gets filtered, the router returns
+a 501 `Not Implemented` naming the offending feature.
+
+Feature-key derivation walks `tools[].type` strings on the
+canonical `ToolDef::Other` variant (Anthropic builtins, server-side
+tools, future shapes). A trailing `-YYYYMMDD` or `_YYYYMMDD` suffix
+is stripped so `web_search_20250305` and a future
+`web_search_20251102` both reduce to `web_search`. User-defined
+custom tools (`ToolDef::Custom`) do not contribute feature keys.
+
+```toml
+# Bedrock provider in a chain that also has anthropic-api fallback.
+# claude-code's web_search tool fails on Bedrock today; declaring it
+# unsupported here means the router skips Bedrock for web-search-using
+# requests entirely (no 400, no breaker hit) and goes straight to the
+# anthropic-api fallback.
+[providers.bedrock]
+kind   = "bedrock"
+region = "us-west-2"
+creds  = { kind = "default-chain" }
+unsupported_features = ["web_search"]
+
+[providers.anthropic-api]
+kind        = "anthropic-api"
+api_key_ref = "env://ANTHROPIC_API_KEY"
+
+[models.bedrock-opus]
+provider = "bedrock"
+upstream = "us.anthropic.claude-opus-4-7-v1:0"
+
+[models.anthropic-opus]
+provider = "anthropic-api"
+upstream = "claude-opus-4-7"
+
+[aliases]
+"claude-opus-*" = ["bedrock-opus", "anthropic-opus"]
+```
+
+A request without built-in tools dispatches to `bedrock-opus` first
+per the chain order. A request carrying a `web_search_20250305` tool
+skips Bedrock and goes directly to `anthropic-opus`. If BOTH
+providers listed `web_search` as unsupported, the router returns
+`501 not_implemented` with the message `no provider in chain
+supports feature \`web_search\``.
+
+Per-skip events log at DEBUG (`provider skipped: feature in
+unsupported_features list`); the terminal empty-chain event logs at
+WARN. INFO would flood; the codebase precedent is "fallback events
+at WARN, retry-same-provider at DEBUG".
 
 ## Retry and fallback defaults
 
@@ -438,7 +501,7 @@ What each family does (one line each):
 | `/v1/messages/count_tokens` | works | proxied to upstream; first-target only (no fallback chain walk) |
 | `/v1/models` (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) | works | glob alias keys and `default` skipped |
 | OAuth refresh on 401 | not yet | re-run `routectl login anthropic` to refresh today; auto-refresh is a follow-up |
-| `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; configure an Anthropic-API fallback for this |
+| `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; declare `unsupported_features = ["web_search"]` on the Bedrock provider so the chain skips it for web-search requests (see "Per-provider capability filter" above) |
 | Tool use + streaming | works | end-to-end SSE, multi-turn |
 | Subagent / agent-team dispatch | works | every subagent call flows through the same `/v1/messages` route |
 | `claude.ai` Routines / `RemoteTrigger` / `PushNotification` / `ShareOnboardingGuide` | bypass routectl | hardcoded `claude.ai` integrations; the gateway has no visibility |
