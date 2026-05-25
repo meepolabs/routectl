@@ -34,3 +34,6 @@ issues.md
 crates/routectl-cli/tests/fixtures/captured/
 # meepoctl per-task worktrees + runtime state
 .meepoctl/
+
+# Local research scratch -- personal notes, config references, experiments.
+scratch/
