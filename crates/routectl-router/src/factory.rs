@@ -512,6 +512,17 @@ impl routectl_core::TokenSource for ManagedToken {
     async fn token(&self) -> Result<String> {
         self.store.get(&self.secret_ref).await
     }
+
+    /// Forward upstream-401 notifications to the underlying store.
+    /// For `oauth://` refs this lands in `OAuthStore::on_auth_failure`,
+    /// which force-refreshes the token through the same per-provider
+    /// single-flight gate that `near_expiry` refreshes use. Failures
+    /// (invalid_grant, network error to token endpoint) propagate so
+    /// the router surfaces an actionable auth error rather than
+    /// masking dead credentials by walking the fallback chain.
+    async fn on_auth_failure(&self) -> Result<()> {
+        self.store.on_auth_failure(&self.secret_ref).await
+    }
 }
 
 /// Build the per-nickname `ResolvedModel` table from a `Config`. Walks

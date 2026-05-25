@@ -188,7 +188,7 @@ async fn decode_token_response(
     let body = read_capped_body(resp).await?;
 
     check_status_error(status, &url, &body, flow)?;
-    let parsed = parse_token_response_json(&body)?;
+    let parsed = parse_token_response_json(&body, flow)?;
     Ok(map_to_record(parsed))
 }
 
@@ -243,24 +243,42 @@ fn check_status_error(
     if matches!(flow, TokenFlow::Refresh) && body.contains("invalid_grant") {
         return Err(OAuthError::RefreshExpired("anthropic".into()));
     }
-    Err(OAuthError::TokenEndpoint(format!(
-        "{} {}: {}",
-        status.as_u16(),
-        url,
-        truncate(body, 500)
-    )))
+    // Refresh-flow request bodies carry the long-lived refresh token,
+    // and some IdPs echo request fields in error envelopes. Omit the
+    // upstream body excerpt entirely on the refresh path to prevent
+    // secret leakage into operator-visible errors and logs. The
+    // exchange path stays as-is; its body is the authorization code
+    // (single-use, short-lived) plus the PKCE verifier (already used).
+    Err(if matches!(flow, TokenFlow::Refresh) {
+        OAuthError::TokenEndpoint(format!("{} {}", status.as_u16(), url))
+    } else {
+        OAuthError::TokenEndpoint(format!(
+            "{} {}: {}",
+            status.as_u16(),
+            url,
+            truncate(body, 500)
+        ))
+    })
 }
 
-/// Parse the JSON body into the internal `Resp` shape.
+/// Parse the JSON body into the internal `Resp` shape. Flow-aware so a
+/// malformed refresh response does not echo the body (which may carry
+/// the long-lived refresh token in error envelopes some IdPs return);
+/// exchange responses keep the truncated body for operator triage
+/// since the auth code in that flow is single-use and short-lived.
 /// Public-in-crate so tests can drive the deserializer directly with a
 /// fixture string -- the rest of `decode_token_response` is HTTP plumbing
 /// that the fixture would have to fake otherwise.
-pub(super) fn parse_token_response_json(body: &str) -> OAuthResult<Resp> {
+pub(super) fn parse_token_response_json(body: &str, flow: TokenFlow) -> OAuthResult<Resp> {
     serde_json::from_str::<Resp>(body).map_err(|e| {
-        OAuthError::TokenEndpoint(format!(
-            "parse token response: {e}; body={}",
-            truncate(body, 200)
-        ))
+        if matches!(flow, TokenFlow::Refresh) {
+            OAuthError::TokenEndpoint(format!("parse token response: {e}"))
+        } else {
+            OAuthError::TokenEndpoint(format!(
+                "parse token response: {e}; body={}",
+                truncate(body, 200)
+            ))
+        }
     })
 }
 
@@ -331,7 +349,7 @@ mod tests {
             "scope": "user:inference user:profile",
             "account": { "email": "u@example.com", "account_id": "acc-123" }
         }"#;
-        let parsed = parse_token_response_json(body).unwrap();
+        let parsed = parse_token_response_json(body, TokenFlow::Exchange).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("acc-123")
@@ -352,7 +370,7 @@ mod tests {
             "expires_in": 100,
             "account": { "uuid": "uuid-form-123" }
         }"#;
-        let parsed = parse_token_response_json(body).unwrap();
+        let parsed = parse_token_response_json(body, TokenFlow::Exchange).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("uuid-form-123")
@@ -368,7 +386,7 @@ mod tests {
             "expires_in": 100,
             "account": { "id": "id-form-456" }
         }"#;
-        let parsed = parse_token_response_json(body).unwrap();
+        let parsed = parse_token_response_json(body, TokenFlow::Exchange).unwrap();
         assert_eq!(
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("id-form-456")
