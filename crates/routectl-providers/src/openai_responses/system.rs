@@ -49,7 +49,7 @@ pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
 fn warn_on_cache_control_loss(blocks: &[routectl_core::SystemBlock]) {
     let dropped = blocks.iter().filter(|b| b.cache_control.is_some()).count();
     if dropped > 0 {
-        tracing::warn!(
+        tracing::debug!(
             dropped_count = dropped,
             "openai-responses: dropping cache_control on system block(s); \
              Responses API has no prompt-cache breakpoint surface yet"
