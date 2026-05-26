@@ -182,6 +182,12 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
     // the operator the offending alias + nickname pair upfront.
     routectl_router::validate_alias_chain_targets(&config)?;
 
+    // Reject `[retry]` blocks that set both `retry_allowlist` and
+    // `retry_denylist`. The two are mutually exclusive predicates;
+    // failing here surfaces the conflict at startup rather than
+    // letting the silently-ignored denylist mask operator intent.
+    routectl_router::validate_retry_policy(&config)?;
+
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
         .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
