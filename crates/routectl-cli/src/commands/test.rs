@@ -6,7 +6,7 @@ use std::sync::Arc;
 use routectl_core::{schema::MessageContent, ChatRequest, Error, Message, Result, Role};
 use routectl_router::{
     build_resolved_models, validate_alias_chain_targets, validate_bedrock_global_config,
-    validate_reasoning_defaults, BuildOptions, Config, Router,
+    validate_reasoning_defaults, validate_retry_policy, BuildOptions, Config, Router,
 };
 
 use crate::server::CompositeStore;
@@ -36,6 +36,12 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     // misconfigured alias produces the same precise startup error
     // instead of an UnknownAlias at dispatch time.
     validate_alias_chain_targets(&config)?;
+
+    // Reject `[retry]` blocks that set both `retry_allowlist` and
+    // `retry_denylist`. Mirrors the serve-side guard so
+    // `routectl test` against a misconfigured retry block surfaces
+    // the conflict immediately.
+    validate_retry_policy(&config)?;
 
     // Same BuildOptions path as `serve` so a `routectl test` run
     // exercises exactly the production translation contract. Without

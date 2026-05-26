@@ -1606,7 +1606,7 @@ fn should_fallback(err: &Error, policy: &RetryPolicy) -> bool {
         // (DNS, TCP connect, TLS handshake, request body, timeout). Always
         // fallbackable -- nothing upstream-specific has happened yet.
         Error::Upstream { status: 0, .. } => true,
-        Error::Upstream { status, .. } => policy.fallback_on_status.contains(status),
+        Error::Upstream { status, .. } => policy.is_fallbackable_status(*status),
         Error::Streaming(_) => true,
         Error::UnknownProvider(_) => true,
         _ => false,
@@ -1778,6 +1778,38 @@ mod tests {
         };
         let composed = router.compose_attempt_policy(&base, "p1", Some(10_000));
         assert_eq!(composed.stream_first_byte_timeout_ms, Some(10_000));
+    }
+
+    #[test]
+    fn should_fallback_status_zero_is_always_true() {
+        // status 0 == network error (DNS, TCP, TLS, request body,
+        // request timeout). `should_fallback` returns true unconditionally
+        // regardless of how the operator set `retry_allowlist` or
+        // `retry_denylist`; the predicate only governs HTTP-status
+        // outcomes (>= 400). This pins the always-true contract so a
+        // future refactor of `is_fallbackable_status` can't accidentally
+        // break network-error fallback.
+        let err = Error::upstream("p", 0, "tcp connect refused");
+
+        // (1) Default policy (allowlist populated, denylist None).
+        let policy_default = RetryPolicy::default();
+        assert!(should_fallback(&err, &policy_default));
+
+        // (2) Empty allowlist (would otherwise mean "no HTTP fallback").
+        let policy_empty_allow = RetryPolicy {
+            retry_allowlist: vec![],
+            retry_denylist: None,
+            ..RetryPolicy::default()
+        };
+        assert!(should_fallback(&err, &policy_empty_allow));
+
+        // (3) Denylist set (governs HTTP statuses, not status 0).
+        let policy_deny = RetryPolicy {
+            retry_allowlist: vec![],
+            retry_denylist: Some(vec![501]),
+            ..RetryPolicy::default()
+        };
+        assert!(should_fallback(&err, &policy_deny));
     }
 }
 
