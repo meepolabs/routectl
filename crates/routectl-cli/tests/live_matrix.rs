@@ -146,7 +146,7 @@ async fn run_complete(router: Arc<Router>, target: String) -> Row {
     let elapsed = start.elapsed().as_millis();
     match res {
         Ok(Ok(resp)) => {
-            let msg = &resp.choices.get(0).map(|c| &c.message);
+            let msg = &resp.choices.first().map(|c| &c.message);
             let content_preview = match msg {
                 Some(m) => match &m.content {
                     MessageContent::Text(t) => t.chars().take(40).collect::<String>(),
@@ -211,7 +211,7 @@ async fn run_stream(router: Arc<Router>, target: String) -> Row {
                     Ok(chunk) => {
                         for ch in &chunk.choices {
                             let d = &ch.delta;
-                            if d.content.as_deref().map_or(false, |s| !s.is_empty()) {
+                            if d.content.as_deref().is_some_and(|s| !s.is_empty()) {
                                 content_chunks += 1;
                             }
                             if d.reasoning.is_some() || !d.reasoning_details.is_empty() {
@@ -317,8 +317,7 @@ async fn build_test_router(
     providers.insert(
         provider_name.to_string(),
         ProviderEntry::openai_compat(base_url, secret_uri.clone())
-            .with_extra_headers(extra_headers)
-            .with_reasoning_dialect(dialect),
+            .with_header_extras(extra_headers),
     );
 
     // v0.6.0: each target becomes one [models.X] entry (nickname == wire
@@ -331,7 +330,8 @@ async fn build_test_router(
         let nickname = sanitize_provider_name(t);
         models.insert(
             nickname.clone(),
-            ModelEntry::new(provider_name.to_string(), (*t).to_string()),
+            ModelEntry::new(provider_name.to_string(), (*t).to_string())
+                .with_reasoning_dialect(dialect),
         );
         aliases.insert((*t).to_string(), AliasValue::Single(nickname));
     }
@@ -745,7 +745,7 @@ async fn openai_ingress_through_bedrock() {
         ]
     });
 
-    let ingress = OpenAiIngress::default();
+    let ingress = OpenAiIngress;
     let req = ingress
         .parse_request(&HeaderMap::new(), body)
         .expect("parse openai body");
@@ -809,7 +809,7 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
         ]
     });
 
-    let ingress = AnthropicIngress::default();
+    let ingress = AnthropicIngress;
 
     // First call: should create the cache entry.
     let req1 = ingress
@@ -890,7 +890,7 @@ async fn anthropic_ingress_streaming_through_bedrock() {
         ]
     });
 
-    let ingress = AnthropicIngress::default();
+    let ingress = AnthropicIngress;
     let req = ingress
         .parse_request(&HeaderMap::new(), body)
         .expect("parse anthropic body");
@@ -926,7 +926,7 @@ async fn anthropic_ingress_streaming_through_bedrock() {
         "expected content_block_start, got {names:?}"
     );
     assert!(
-        names.iter().any(|n| *n == "content_block_delta"),
+        names.contains(&"content_block_delta"),
         "expected at least one content_block_delta, got {names:?}"
     );
     assert!(
@@ -1186,16 +1186,10 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
         let provider_name = format!("gpt-{}", sanitize_provider_name(model_id));
         providers.insert(
             provider_name.clone(),
-            ProviderEntry::OpenaiResponses {
-                api_key_ref: "env://OPENAI_BEARER_KEY".into(),
-                account_id_ref: Some("env://OPENAI_ACCOUNT_ID".into()),
-                base_url: Some(OPENAI_RESPONSES_BASE.into()),
-                auth_kind: OpenaiResponsesAuthKind::ChatgptOauth,
-                header_extras: BTreeMap::new(),
-                user_agent: None,
-                originator: None,
-                runtime: Default::default(),
-            },
+            ProviderEntry::openai_responses("env://OPENAI_BEARER_KEY")
+                .with_account_id_ref("env://OPENAI_ACCOUNT_ID")
+                .with_openai_responses_base_url(OPENAI_RESPONSES_BASE)
+                .with_openai_responses_auth_kind(OpenaiResponsesAuthKind::ChatgptOauth),
         );
         let nickname = sanitize_provider_name(model_id);
         models.insert(

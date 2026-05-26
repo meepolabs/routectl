@@ -898,10 +898,77 @@ impl ProviderEntry {
         }
     }
 
+    /// Construct an `OpenaiResponses` entry with sane defaults. The
+    /// only required field is `api_key_ref`; everything else defaults
+    /// to `None` / `Default::default()`. Use the variant-specific
+    /// setters below to populate optional fields.
+    #[cfg(feature = "openai-responses")]
+    pub fn openai_responses(api_key_ref: impl Into<String>) -> Self {
+        Self::OpenaiResponses {
+            api_key_ref: api_key_ref.into(),
+            account_id_ref: None,
+            base_url: None,
+            auth_kind: OpenaiResponsesAuthKind::default(),
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
+            user_agent: None,
+            originator: None,
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
     pub fn with_auth_kind(mut self, kind: AuthKind) -> Self {
         match &mut self {
             Self::AnthropicApi { auth_kind, .. } => *auth_kind = kind,
             _ => panic!("ProviderEntry::with_auth_kind only applies to anthropic-api"),
+        }
+        self
+    }
+
+    /// Set the `account_id_ref` on an `OpenaiResponses` entry. Panics
+    /// on other variants -- the field is OpenaiResponses-only.
+    #[cfg(feature = "openai-responses")]
+    pub fn with_account_id_ref(mut self, account_id_ref: impl Into<String>) -> Self {
+        match &mut self {
+            Self::OpenaiResponses {
+                account_id_ref: slot,
+                ..
+            } => {
+                *slot = Some(account_id_ref.into());
+            }
+            _ => panic!("ProviderEntry::with_account_id_ref only applies to openai-responses"),
+        }
+        self
+    }
+
+    /// Set the `base_url` on an `OpenaiResponses` entry. Panics on
+    /// other variants. Named `with_openai_responses_base_url` to avoid
+    /// colliding with `with_base_url` (which serves the api-backed
+    /// providers whose `base_url` is `String`, not `Option<String>`).
+    #[cfg(feature = "openai-responses")]
+    pub fn with_openai_responses_base_url(mut self, base_url: impl Into<String>) -> Self {
+        match &mut self {
+            Self::OpenaiResponses { base_url: slot, .. } => {
+                *slot = Some(base_url.into());
+            }
+            _ => panic!(
+                "ProviderEntry::with_openai_responses_base_url only applies to openai-responses"
+            ),
+        }
+        self
+    }
+
+    /// Set the `auth_kind` on an `OpenaiResponses` entry. Panics on
+    /// other variants. Named `with_openai_responses_auth_kind` to
+    /// avoid colliding with `with_auth_kind` (which targets the
+    /// AnthropicApi variant and takes a different enum).
+    #[cfg(feature = "openai-responses")]
+    pub fn with_openai_responses_auth_kind(mut self, kind: OpenaiResponsesAuthKind) -> Self {
+        match &mut self {
+            Self::OpenaiResponses { auth_kind, .. } => *auth_kind = kind,
+            _ => panic!(
+                "ProviderEntry::with_openai_responses_auth_kind only applies to openai-responses"
+            ),
         }
         self
     }
