@@ -100,8 +100,10 @@ unless `OPENCODE_GO_API_KEY` is set.
 | `mimo-v2.5` | complete | |
 
 Cloudflare-fronted: 5xx responses in the 520-527/530 range are
-covered by the default `[retry] retry_allowlist` list so a sibling
-host can take over without killing the request.
+covered by the default `[retry]` predicate (every 4xx/5xx is
+fallbackable when neither `retry_allowlist` nor `retry_denylist`
+is set) so a sibling host can take over without killing the
+request.
 
 ## NIM -- NVIDIA Inference Microservices (`reasoning_dialect = "openai"`)
 
