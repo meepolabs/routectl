@@ -242,18 +242,18 @@ at WARN, retry-same-provider at DEBUG".
 
 ## Retry and fallback defaults
 
-The default `RetryPolicy.retry_allowlist` list (`[retry]` table in
-TOML, `default_retry_allowlist` in `crates/routectl-router/src/config.rs`)
-includes the Cloudflare extended 5xx range (520-527, 530) alongside the
-standard `[408, 429, 500, 502, 503, 504]`. Cloudflare-fronted upstreams
-(opencode.ai, openrouter.ai, etc.) surface upstream-origin failures via
-this range; without them in the default list, a single 520 from a
-Cloudflare-fronted provider would kill the request even when a sibling
-provider in the chain could have served it. Operators with bespoke
-upstream behavior can override `retry_allowlist` in `[retry]` (an
-explicit set of fallback codes) OR `retry_denylist` (`400..=599`
-except these) -- the two are mutually exclusive and setting both is
-a config-load error.
+The default `[retry]` block falls back on every 4xx/5xx upstream
+response: `retry_allowlist` defaults to `[]` and `retry_denylist`
+defaults to `None`, so `RetryPolicy::is_fallbackable_status`
+(`crates/routectl-router/src/config.rs`) takes the "every 4xx/5xx"
+fall-through branch. This is the safest default for Cloudflare-fronted
+upstreams (opencode.ai, openrouter.ai, etc.), which surface
+upstream-origin failures through extended 5xx codes (520-527, 530)
+and would otherwise need each code listed by hand. Operators with
+bespoke upstream behavior can override either `retry_allowlist` (an
+explicit set of fallback codes -- everything else is terminal) OR
+`retry_denylist` (`400..=599` minus the listed codes) -- the two are
+mutually exclusive and setting both is a config-load error.
 
 ```toml
 [retry]
@@ -261,7 +261,10 @@ max_attempts                  = 2
 initial_backoff_ms            = 250
 backoff_multiplier            = 2.0
 jitter_ms                     = 50
-retry_allowlist               = [408, 429, 500, 502, 503, 504]   # override
+# Default: omit both lists -- every 4xx/5xx falls back. To narrow,
+# set EITHER an allowlist OR a denylist (not both):
+# retry_allowlist             = [408, 429, 500, 502, 503, 504]
+# retry_denylist              = [422]
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 ```

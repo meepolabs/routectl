@@ -162,7 +162,13 @@ max_attempts                  = 2
 initial_backoff_ms            = 250
 backoff_multiplier            = 2.0
 jitter_ms                     = 50
-retry_allowlist               = [408, 429, 500, 502, 503, 504]
+# Default behavior (omit both lists): every 4xx/5xx falls back. To
+# narrow, set EITHER `retry_allowlist` (only these codes fall back)
+# OR `retry_denylist` (everything in 400..=599 except these falls
+# back). The two are mutually exclusive -- setting both is a
+# config-load error.
+# retry_allowlist             = [408, 429, 500, 502, 503, 504]
+# retry_denylist              = [422]
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 # retry_on_429 = 1
