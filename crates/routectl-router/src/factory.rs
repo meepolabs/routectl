@@ -1075,6 +1075,32 @@ pub fn validate_reasoning_defaults(_config: &crate::config::Config) -> Result<()
     Ok(())
 }
 
+/// Validate the `[retry]` block: enforce that `retry_allowlist` and
+/// `retry_denylist` are mutually exclusive. Setting a non-empty
+/// `retry_allowlist` together with `retry_denylist = Some(_)` would
+/// otherwise leave the operator's intent ambiguous; the predicate
+/// in `RetryPolicy::is_fallbackable_status` resolves to the allowlist
+/// (everything else is terminal) but the denylist would be silently
+/// ignored, masking the misconfiguration. Surface the conflict at
+/// startup so the operator picks one.
+///
+/// Call once per process startup alongside the other validators.
+pub fn validate_retry_policy(config: &crate::config::Config) -> Result<()> {
+    use routectl_core::Error;
+
+    let r = &config.retry;
+    if !r.retry_allowlist.is_empty() && r.retry_denylist.is_some() {
+        return Err(Error::Config(
+            "[retry]: `retry_allowlist` and `retry_denylist` are \
+             mutually exclusive; pick one (allowlist for an explicit \
+             set of fallback codes, denylist for `400..=599 except \
+             these`)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate that every entry in `[aliases]` resolves to a known and
 /// selectable `[models.X]` nickname OR another alias key (recursive
 /// expansion). Walks both `AliasValue::Single` and `AliasValue::Chain`;
