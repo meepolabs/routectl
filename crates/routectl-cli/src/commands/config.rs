@@ -4,7 +4,7 @@ use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{
     validate_alias_chain_targets, validate_bedrock_global_config, validate_reasoning_defaults,
-    Config, ProviderEntry,
+    validate_retry_policy, Config, ProviderEntry,
 };
 
 use crate::server::CompositeStore;
@@ -67,6 +67,9 @@ pub async fn check(config: &Config) -> Result<()> {
         errors.push(e.to_string());
     }
     if let Err(e) = validate_bedrock_global_config(config) {
+        errors.push(e.to_string());
+    }
+    if let Err(e) = validate_retry_policy(config) {
         errors.push(e.to_string());
     }
 

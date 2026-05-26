@@ -1224,10 +1224,21 @@ pub struct RetryPolicy {
     /// Prevents thundering-herd retries when many clients fail at once.
     #[serde(default)]
     pub jitter_ms: u64,
-    /// Status codes that trigger fallback to the next provider in the chain
-    /// (in addition to network errors).
-    #[serde(default = "default_fallback_status")]
-    pub fallback_on_status: Vec<u16>,
+    /// Status codes that trigger fallback to the next provider in the
+    /// chain (in addition to network errors). When non-empty, only the
+    /// listed codes are fallbackable. Mutually exclusive with
+    /// `retry_denylist` -- setting both is a config-load error.
+    #[serde(default = "default_retry_allowlist")]
+    pub retry_allowlist: Vec<u16>,
+
+    /// Inverse of `retry_allowlist`: when `Some`, every 4xx/5xx code
+    /// EXCEPT those in the list triggers fallback. `None` defers to
+    /// `retry_allowlist` (or, when both are empty/None, the default
+    /// "all 4xx/5xx fall back" predicate). Mutually exclusive with a
+    /// non-empty `retry_allowlist` -- setting both is a config-load
+    /// error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_denylist: Option<Vec<u16>>,
 
     /// Per-error-class retry caps. When set, override `max_attempts` for
     /// that specific class. Useful because rate-limits often clear in
@@ -1262,7 +1273,8 @@ impl Default for RetryPolicy {
             initial_backoff_ms: default_backoff_ms(),
             backoff_multiplier: default_backoff_multiplier(),
             jitter_ms: 0,
-            fallback_on_status: default_fallback_status(),
+            retry_allowlist: default_retry_allowlist(),
+            retry_denylist: None,
             retry_on_429: None,
             retry_on_5xx: None,
             retry_on_network: None,
@@ -1763,22 +1775,52 @@ stream_first_byte_timeout_ms = 300000
 }
 
 impl RetryPolicy {
+    /// True when the given upstream HTTP status (>= 400) is eligible
+    /// for fallback to the next provider in the chain. Status 0
+    /// (network errors) is handled separately in `should_fallback` and
+    /// always falls back regardless of this predicate.
+    ///
+    /// Resolution order:
+    ///
+    ///   1. `retry_allowlist` non-empty -- contains check (any code in
+    ///      the list is fallbackable; everything else is terminal).
+    ///   2. `retry_denylist` is `Some` -- 400..=599 minus the list is
+    ///      fallbackable; everything else is terminal.
+    ///   3. otherwise -- every 400..=599 is fallbackable.
+    ///
+    /// `retry_allowlist` non-empty AND `retry_denylist` `Some` is a
+    /// config-load error (`validate_retry_policy`); this method
+    /// preserves the allowlist's outcome if both are nevertheless
+    /// constructed in code.
+    pub fn is_fallbackable_status(&self, status: u16) -> bool {
+        if !(400..=599).contains(&status) {
+            return false;
+        }
+        if !self.retry_allowlist.is_empty() {
+            return self.retry_allowlist.contains(&status);
+        }
+        if let Some(denylist) = &self.retry_denylist {
+            return !denylist.contains(&status);
+        }
+        true
+    }
+
     /// Resolve the retry cap for a given upstream HTTP status code.
     /// Returns 0 for non-retryable errors.
     ///
     /// Note: `retry_on_5xx` only applies to 5xx codes that are ALSO
-    /// listed in `fallback_on_status`. A 5xx code an operator removed
-    /// from `fallback_on_status` (e.g. 501 "not implemented") is
-    /// treated as non-retryable here AND as non-fallbackable in
-    /// `should_fallback`, so it propagates immediately to the caller.
-    /// This is intentional: an operator who removes a status from
-    /// `fallback_on_status` is asking routectl to surface the error
-    /// verbatim, and silently retrying anyway would contradict that.
+    /// fallbackable per `is_fallbackable_status`. A 5xx code excluded
+    /// by the allowlist (or named in the denylist) is treated as
+    /// non-retryable here AND as non-fallbackable in `should_fallback`,
+    /// so it propagates immediately to the caller. This is intentional:
+    /// an operator who excludes a status from the fallback predicate
+    /// is asking routectl to surface the error verbatim, and silently
+    /// retrying anyway would contradict that.
     pub fn retries_for_status(&self, status: u16) -> u32 {
         match status {
             0 => self.retry_on_network.unwrap_or(self.max_attempts),
             429 => self.retry_on_429.unwrap_or(self.max_attempts),
-            s if (500..600).contains(&s) && self.fallback_on_status.contains(&s) => {
+            s if (500..600).contains(&s) && self.is_fallbackable_status(s) => {
                 self.retry_on_5xx.unwrap_or(self.max_attempts)
             }
             _ => 0,
@@ -1809,7 +1851,7 @@ fn default_backoff_multiplier() -> f64 {
     2.0
 }
 
-fn default_fallback_status() -> Vec<u16> {
+fn default_retry_allowlist() -> Vec<u16> {
     // Standard 5xx codes plus Cloudflare extended 5xx (520-527, 530).
     // Cloudflare-fronted upstreams (opencode.ai, openrouter.ai, etc.)
     // surface upstream-origin failures via this range; without it,
@@ -1829,50 +1871,50 @@ pub enum LegacyCompat {
 }
 
 #[cfg(test)]
-mod default_fallback_status_tests {
-    //! Pin the default `fallback_on_status` vocabulary. Cloudflare
+mod default_retry_allowlist_tests {
+    //! Pin the default `retry_allowlist` vocabulary. Cloudflare
     //! extended 5xx codes (520-527, 530) belong on the default list
     //! because Cloudflare-fronted upstreams (opencode.ai, openrouter.ai,
     //! etc.) surface upstream-origin failures via this range; without
     //! them, a single 520 from a Cloudflare-fronted provider kills the
     //! request even though a sibling provider could have served it.
-    use super::{default_fallback_status, RetryPolicy};
+    use super::{default_retry_allowlist, RetryPolicy};
 
     #[test]
-    fn default_fallback_status_contains_legacy_codes() {
+    fn default_retry_allowlist_contains_legacy_codes() {
         // Pin: existing operator configs depend on these codes being
         // present. Pre-extension list, all six must survive.
-        let list = default_fallback_status();
+        let list = default_retry_allowlist();
         for code in [408, 429, 500, 502, 503, 504] {
             assert!(
                 list.contains(&code),
-                "expected default fallback list to contain legacy code {code}; got {list:?}"
+                "expected default retry allowlist to contain legacy code {code}; got {list:?}"
             );
         }
     }
 
     #[test]
-    fn default_fallback_status_contains_cloudflare_codes() {
+    fn default_retry_allowlist_contains_cloudflare_codes() {
         // Pin: Cloudflare-extended 5xx range (520-527 + 530) is on
         // the default fallback list.
-        let list = default_fallback_status();
+        let list = default_retry_allowlist();
         for code in [520, 521, 522, 523, 524, 525, 526, 527, 530] {
             assert!(
                 list.contains(&code),
-                "expected default fallback list to contain Cloudflare code {code}; got {list:?}"
+                "expected default retry allowlist to contain Cloudflare code {code}; got {list:?}"
             );
         }
     }
 
     #[test]
-    fn default_fallback_status_does_not_contain_unrelated_5xx() {
+    fn default_retry_allowlist_does_not_contain_unrelated_5xx() {
         // Pin: codes that are NOT eligible for retry stay off the
         // default list. 501 (Not Implemented) is terminal and must
         // never be retried automatically.
-        let list = default_fallback_status();
+        let list = default_retry_allowlist();
         assert!(
             !list.contains(&501),
-            "501 (Not Implemented) is terminal and must not be on the default fallback list"
+            "501 (Not Implemented) is terminal and must not be on the default retry allowlist"
         );
     }
 
@@ -1884,5 +1926,108 @@ mod default_fallback_status_tests {
         let policy = RetryPolicy::default();
         let retries = policy.retries_for_status(520);
         assert_eq!(retries, policy.max_attempts);
+    }
+}
+
+#[cfg(test)]
+mod is_fallbackable_status_tests {
+    //! Cover every branch of `RetryPolicy::is_fallbackable_status`
+    //! plus the mutually-exclusive `validate_retry_policy` guard.
+    //! Each test names the input shape it exercises.
+    use super::RetryPolicy;
+
+    fn policy() -> RetryPolicy {
+        RetryPolicy::default()
+    }
+
+    #[test]
+    fn allowlist_hit_returns_true() {
+        let mut p = policy();
+        p.retry_allowlist = vec![503];
+        p.retry_denylist = None;
+        assert!(p.is_fallbackable_status(503));
+    }
+
+    #[test]
+    fn allowlist_miss_returns_false() {
+        let mut p = policy();
+        p.retry_allowlist = vec![503];
+        p.retry_denylist = None;
+        // 500 is a 5xx but not in the allowlist -- terminal.
+        assert!(!p.is_fallbackable_status(500));
+    }
+
+    #[test]
+    fn denylist_hit_returns_false() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = Some(vec![501]);
+        assert!(!p.is_fallbackable_status(501));
+    }
+
+    #[test]
+    fn denylist_miss_returns_true_for_4xx_5xx() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = Some(vec![501]);
+        // 503 is in 4xx..=5xx and not in the denylist -- fallbackable.
+        assert!(p.is_fallbackable_status(503));
+    }
+
+    #[test]
+    fn neither_set_returns_true_for_4xx_and_5xx() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = None;
+        assert!(p.is_fallbackable_status(400), "400 must fall back");
+        assert!(p.is_fallbackable_status(429), "429 must fall back");
+        assert!(p.is_fallbackable_status(500), "500 must fall back");
+        assert!(p.is_fallbackable_status(599), "599 must fall back");
+    }
+
+    #[test]
+    fn neither_set_returns_false_for_2xx() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = None;
+        // 2xx are never fallbackable; the predicate is gated on
+        // 400..=599 even when neither list is configured.
+        assert!(!p.is_fallbackable_status(200));
+        assert!(!p.is_fallbackable_status(204));
+        assert!(!p.is_fallbackable_status(301));
+    }
+
+    #[test]
+    fn validate_retry_policy_rejects_both_set() {
+        // Mutually exclusive: non-empty allowlist + Some denylist is
+        // a config-load error.
+        use crate::config::Config;
+        use crate::factory::validate_retry_policy;
+
+        let mut cfg = Config::default();
+        cfg.retry.retry_allowlist = vec![503];
+        cfg.retry.retry_denylist = Some(vec![501]);
+        let err = validate_retry_policy(&cfg).expect_err("must reject both-set");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("retry_allowlist") && msg.contains("retry_denylist"),
+            "error must name both fields; got: {msg}"
+        );
+
+        // Sanity: each on its own is fine.
+        let mut cfg2 = Config::default();
+        cfg2.retry.retry_allowlist = vec![503];
+        cfg2.retry.retry_denylist = None;
+        validate_retry_policy(&cfg2).expect("allowlist alone must validate");
+
+        let mut cfg3 = Config::default();
+        cfg3.retry.retry_allowlist = vec![];
+        cfg3.retry.retry_denylist = Some(vec![501]);
+        validate_retry_policy(&cfg3).expect("denylist alone must validate");
+
+        // Default config (allowlist populated by default, denylist None)
+        // must validate.
+        let cfg4 = Config::default();
+        validate_retry_policy(&cfg4).expect("default config must validate");
     }
 }

@@ -94,7 +94,7 @@ fn two_provider_config(first_base: &str, second_base: &str) -> Arc<Config> {
 
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
-    retry.fallback_on_status = vec![503, 429, 500, 502, 504, 408];
+    retry.retry_allowlist = vec![503, 429, 500, 502, 504, 408];
 
     Arc::new(Config {
         server: ServerConfig::default(),
