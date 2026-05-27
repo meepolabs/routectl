@@ -31,9 +31,9 @@ use serde_json::{json, Value};
 
 use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
 use routectl_core::{
-    is_canonical_request_key, ChatRequest, ContentPart, CustomTool, Error, KnownContentPart,
-    Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent,
-    ToolDef,
+    is_canonical_request_key, ChatRequest, ContentPart, CoreHistoryReasoning, CustomTool, Error,
+    KnownContentPart, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role,
+    SystemContent, ToolDef,
 };
 
 use super::parts::{parse_image_url_source, strip_text_after_tool_use};
@@ -464,39 +464,61 @@ fn translate_tool_choice(tc: Option<&Value>, has_tools: bool) -> Option<Value> {
 // Content blocks
 // ---------------------------------------------------------------------------
 
-/// Walk the canonical `ChatRequest` messages and:
+/// Walk the canonical `ChatRequest` messages and apply two outgoing
+/// replay invariants. `history_reasoning` gates ONLY the second
+/// (unsigned-thinking strip); the tool_call_id reject is unconditional.
 ///
 /// - Hard-reject (Err) any tool_result message (`Role::Tool`) that
-///   lacks a `tool_call_id`. Anthropic 400s on such a body and the
-///   upstream error doesn't name the bad message; surfacing it locally
-///   gives operators a precise field to fix.
-/// - STRIP any `Thinking` content block whose `signature` is missing
-///   or empty from each message's `Parts` content. Cross-provider
-///   fallback (a prior turn handled by deepseek which signs with its
-///   own uuid format, then the next turn falls back to Anthropic) and
-///   SDKs that fail to round-trip the signature field would otherwise
-///   400 the request with a confusing upstream error. Strip drops just
-///   the offending block; signed thinking blocks pass through unchanged
-///   and so does every other block type.
+///   lacks a `tool_call_id`. This runs REGARDLESS of `history_reasoning`
+///   -- it is a separate correctness invariant, not part of the
+///   thinking-strip. Anthropic 400s on such a body and the upstream
+///   error doesn't name the bad message; surfacing it locally gives
+///   operators a precise field to fix.
+/// - STRIP any `Thinking` content block whose `signature` is missing or
+///   empty from each message's `Parts` content -- UNLESS
+///   `history_reasoning` is `Preserve`. Cross-provider fallback (a prior
+///   turn handled by deepseek which signs with its own uuid format, then
+///   the next turn falls back to Anthropic) and SDKs that fail to
+///   round-trip the signature field would otherwise 400 real Anthropic
+///   with a confusing upstream error. Strip drops just the offending
+///   block; signed thinking blocks pass through unchanged and so does
+///   every other block type.
+///
+///   `Preserve` skips the strip entirely: deepseek v4's `/anthropic`
+///   endpoint (provider kind anthropic-api) emits unsigned thinking AND
+///   400s the next turn unless that thinking is echoed back verbatim
+///   (`The content[].thinking in the thinking mode must be passed back
+///   to the API.`). `Auto` and the unset/None default both strip --
+///   there is no dialect-default concept for this egress, so Auto means
+///   strip, which is real-Anthropic-safe. Only explicit `Preserve`
+///   changes behavior.
 /// - When stripping leaves a message with no content blocks AND no
 ///   `reasoning_details` AND no `tool_calls`, drop the whole message.
 ///   Anthropic's wire spec rejects `content: []`; emitting the empty
 ///   message would just trade one 400 for another. The
 ///   `build_assistant_content` path still fills the wire content array
 ///   from `reasoning_details` / `tool_calls` when those are present,
-///   so we keep the message in that case.
+///   so we keep the message in that case. Preserve never strips, so
+///   this drop path does not run under Preserve.
 ///
 /// One structured WARN fires per request when stripping occurs,
 /// carrying the provider id, the count of dropped blocks, and the
 /// affected message indices. Block content is never logged (could be
-/// reasoning over sensitive data).
+/// reasoning over sensitive data). Preserve strips nothing, so the WARN
+/// does not fire under Preserve.
 ///
-/// Returns `Cow::Borrowed(&req.messages)` on the no-strip-needed
-/// common path so unmodified requests don't pay a clone.
-fn normalize_replay_invariants<'a>(id: &str, req: &'a ChatRequest) -> Result<Cow<'a, [Message]>> {
-    // Tool-result tool_call_id check stays a hard fail. Anthropic 400s
-    // a multi-turn body with tool_use ids that lack matching
-    // tool_results.
+/// Returns `Cow::Borrowed(&req.messages)` on the no-strip path (Preserve,
+/// or Strip/Auto with nothing to strip) so unmodified requests don't pay
+/// a clone.
+fn normalize_replay_invariants<'a>(
+    id: &str,
+    req: &'a ChatRequest,
+    history_reasoning: CoreHistoryReasoning,
+) -> Result<Cow<'a, [Message]>> {
+    // Tool-result tool_call_id check stays a hard fail REGARDLESS of
+    // history_reasoning -- it is a separate correctness invariant, not
+    // part of the thinking-strip. Anthropic 400s a multi-turn body with
+    // tool_use ids that lack matching tool_results.
     for (i, msg) in req.messages.iter().enumerate() {
         if matches!(msg.role, Role::Tool) && msg.tool_call_id.as_deref().unwrap_or("").is_empty() {
             return Err(Error::normalize_request(
@@ -509,8 +531,22 @@ fn normalize_replay_invariants<'a>(id: &str, req: &'a ChatRequest) -> Result<Cow
         }
     }
 
-    // Pre-scan: do we need to strip anything? No -> return Borrowed
-    // (no clone). Yes -> rebuild on the second pass.
+    // Preserve: skip the unsigned-thinking strip and pass the messages
+    // through unchanged. deepseek v4's `/anthropic` endpoint emits
+    // unsigned thinking AND 400s the next turn unless it is echoed back
+    // verbatim, so stripping would break every multi-turn replay. The
+    // tool_call_id check above is validation-only (no mutation), so
+    // Preserve can borrow; nothing is stripped, so no message-emptying
+    // and no WARN.
+    match history_reasoning {
+        CoreHistoryReasoning::Preserve => {
+            return Ok(Cow::Borrowed(&req.messages));
+        }
+        CoreHistoryReasoning::Auto | CoreHistoryReasoning::Strip => {}
+    }
+
+    // Strip / Auto pre-scan: do we need to strip anything? No -> return
+    // Borrowed (no clone). Yes -> rebuild on the second pass.
     let needs_strip = req.messages.iter().any(message_has_unsigned_thinking);
     if !needs_strip {
         return Ok(Cow::Borrowed(&req.messages));
@@ -1107,13 +1143,26 @@ pub fn normalize(
 ) -> Result<Value> {
     // Anthropic's wire requires every tool_result carry the
     // `tool_use_id` of the tool_use it answers; missing ids are
-    // rejected upfront. Thinking blocks must carry a `signature` for
-    // multi-turn replay, but cross-provider fallback (e.g. deepseek
-    // -> Anthropic) and SDKs that don't round-trip the signature
-    // field can produce unsigned blocks; those are STRIPPED here so
-    // routectl forwards a body Anthropic accepts rather than 400ing
-    // the whole request.
-    let messages = normalize_replay_invariants(id, req)?;
+    // rejected upfront (always, independent of history_reasoning).
+    //
+    // Thinking blocks must carry a `signature` for multi-turn replay on
+    // real Anthropic. Cross-provider fallback (e.g. deepseek ->
+    // Anthropic) and SDKs that don't round-trip the signature field can
+    // produce unsigned blocks, so by default routectl STRIPS them and
+    // forwards a body Anthropic accepts rather than 400ing the request.
+    //
+    // The strip is gated on `history_reasoning`: `Preserve` keeps
+    // unsigned thinking on the wire because deepseek v4's `/anthropic`
+    // endpoint emits unsigned thinking AND 400s the next turn unless it
+    // is echoed back verbatim. `Auto` (the unset/None default) and
+    // `Strip` both strip -- real-Anthropic-safe. The dispatch layer
+    // resolves the per-model policy onto `routectl_internal`; library
+    // callers that never set it get `Auto` = strip.
+    let hr = req
+        .routectl_internal
+        .history_reasoning
+        .unwrap_or(CoreHistoryReasoning::Auto);
+    let messages = normalize_replay_invariants(id, req, hr)?;
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let thinking = build_thinking(req, adaptive_thinking);
@@ -1433,7 +1482,7 @@ mod allowlist_tests {
 #[cfg(test)]
 mod multi_turn_tool_use_tests {
     use super::*;
-    use routectl_core::{ChatRequest, Message, Role};
+    use routectl_core::{ChatRequest, CoreHistoryReasoning, Message, Role};
     use serde_json::json;
 
     /// Minimal in-process tracing capture used by
@@ -2809,5 +2858,225 @@ mod multi_turn_tool_use_tests {
 
         assert!(body.get("thinking").is_none());
         assert_eq!(body["tool_choice"], json!({"type": "any"}));
+    }
+
+    // ----------------------------------------------------------------
+    // history_reasoning gating of the unsigned-thinking strip.
+    //
+    // deepseek v4's `/anthropic` endpoint (provider kind anthropic-api)
+    // emits thinking blocks WITHOUT a signature yet 400s the next turn
+    // unless that thinking is echoed back. `history_reasoning =
+    // "preserve"` tells the egress to skip the unsigned-thinking strip
+    // for those endpoints; Auto/Strip/unset keep the real-Anthropic-safe
+    // strip.
+    // ----------------------------------------------------------------
+
+    /// Build a multi-turn assistant message shaped `[text, thinking,
+    /// tool_use]`. `signature = None` makes the thinking block unsigned
+    /// (deepseek shape); `Some(..)` makes it signed.
+    fn assistant_with_thinking(signature: Option<&str>) -> Message {
+        use routectl_core::{ContentPart, KnownContentPart};
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![
+                ContentPart::Known(KnownContentPart::Text {
+                    text: "Let me think.".into(),
+                    cache_control: None,
+                }),
+                ContentPart::Known(KnownContentPart::Thinking {
+                    thinking: "deepseek reasoning".into(),
+                    signature: signature.map(|s| s.to_string()),
+                }),
+                ContentPart::Known(KnownContentPart::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "calc".into(),
+                    input: json!({"expr": "2+2"}),
+                    cache_control: None,
+                }),
+            ]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Multi-turn request carrying the given `history_reasoning` policy
+    /// on the dispatch carrier. `None` mirrors the dispatch default (no
+    /// per-model policy resolved).
+    fn req_with_hr(hr: Option<CoreHistoryReasoning>, assistant: Message) -> ChatRequest {
+        let mut req = ChatRequest {
+            model: "deepseek-chat".into(),
+            messages: vec![user_msg("compute 2+2"), assistant],
+            ..Default::default()
+        };
+        req.routectl_internal.history_reasoning = hr;
+        req
+    }
+
+    /// Pull the assistant message's wire content blocks from a
+    /// normalized body.
+    fn assistant_blocks(body: &Value) -> Vec<Value> {
+        body.get("messages")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+            })
+            .and_then(|m| m.get("content"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("assistant message with Blocks-form content present")
+    }
+
+    fn block_types(blocks: &[Value]) -> Vec<&str> {
+        blocks
+            .iter()
+            .filter_map(|b| b.get("type").and_then(|v| v.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn preserve_history_reasoning_keeps_unsigned_thinking_for_anthropic_api() {
+        // Arrange: deepseek-shape unsigned thinking + history_reasoning =
+        // Preserve.
+        let req = req_with_hr(
+            Some(CoreHistoryReasoning::Preserve),
+            assistant_with_thinking(None),
+        );
+
+        // Act: normalize under a capture so we can also assert no strip
+        // WARN fires.
+        let mut body = None;
+        let captured = test_capture::with_capture(|| {
+            body = Some(normalize("deepseek", &req, false, &[]).expect("normalize succeeds"));
+        });
+        let body = body.expect("normalize ran");
+
+        // Assert: all three blocks survive; the unsigned thinking is
+        // preserved (deepseek requires it echoed back).
+        let blocks = assistant_blocks(&body);
+        assert_eq!(
+            block_types(&blocks),
+            vec!["text", "thinking", "tool_use"],
+            "Preserve must retain the unsigned thinking block"
+        );
+        let thinking = blocks
+            .iter()
+            .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("thinking"))
+            .expect("thinking block present under Preserve");
+        assert_eq!(thinking["thinking"], "deepseek reasoning");
+        // Unsigned: signature serializes as the empty string, not dropped.
+        assert_eq!(thinking["signature"], "");
+
+        // No strip => no WARN.
+        assert!(
+            !captured
+                .iter()
+                .any(|e| e.message.contains("stripping unsigned thinking blocks")),
+            "Preserve must not emit the strip WARN; got events: {captured:?}"
+        );
+    }
+
+    #[test]
+    fn strip_mode_still_strips_unsigned_thinking() {
+        // Arrange.
+        let req = req_with_hr(
+            Some(CoreHistoryReasoning::Strip),
+            assistant_with_thinking(None),
+        );
+
+        // Act.
+        let body = normalize("anthropic", &req, false, &[]).expect("normalize succeeds");
+
+        // Assert: unsigned thinking removed, text + tool_use survive.
+        let blocks = assistant_blocks(&body);
+        assert_eq!(
+            block_types(&blocks),
+            vec!["text", "tool_use"],
+            "Strip must drop the unsigned thinking block"
+        );
+    }
+
+    #[test]
+    fn auto_and_unset_default_to_strip() {
+        // The dispatch default (None) and explicit Auto both resolve to
+        // strip for the anthropic-api egress: there is no dialect-default
+        // concept here, so Auto means strip (real-Anthropic-safe). Pins
+        // that the default path is unchanged by the Preserve gate.
+        for hr in [None, Some(CoreHistoryReasoning::Auto)] {
+            // Arrange.
+            let req = req_with_hr(hr, assistant_with_thinking(None));
+
+            // Act.
+            let body = normalize("anthropic", &req, false, &[]).expect("normalize succeeds");
+
+            // Assert.
+            let blocks = assistant_blocks(&body);
+            assert_eq!(
+                block_types(&blocks),
+                vec!["text", "tool_use"],
+                "Auto/unset ({hr:?}) must strip unsigned thinking"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_thinking_passes_through_in_all_modes() {
+        // A SIGNED thinking block is never the target of the
+        // unsigned-strip, so it survives under both Preserve and Strip.
+        // Pins that the gate only ever affects unsigned blocks.
+        for hr in [CoreHistoryReasoning::Preserve, CoreHistoryReasoning::Strip] {
+            // Arrange.
+            let req = req_with_hr(Some(hr), assistant_with_thinking(Some("sig_xyz")));
+
+            // Act.
+            let body = normalize("anthropic", &req, false, &[]).expect("normalize succeeds");
+
+            // Assert.
+            let blocks = assistant_blocks(&body);
+            assert_eq!(
+                block_types(&blocks),
+                vec!["text", "thinking", "tool_use"],
+                "signed thinking must survive under {hr:?}"
+            );
+            let thinking = blocks
+                .iter()
+                .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("thinking"))
+                .unwrap_or_else(|| panic!("thinking block absent under {hr:?}"));
+            assert_eq!(
+                thinking["signature"], "sig_xyz",
+                "signed thinking keeps its signature under {hr:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_id_reject_stays_unconditional_under_preserve() {
+        // The tool_result/tool_call_id hard-reject is a separate
+        // correctness invariant from the thinking-strip. Preserve must
+        // NOT relax it: a Role::Tool message lacking tool_call_id still
+        // errors regardless of history_reasoning.
+        let mut req = ChatRequest {
+            model: "deepseek-chat".into(),
+            messages: vec![Message {
+                role: Role::Tool,
+                content: MessageContent::Text("result content".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        req.routectl_internal.history_reasoning = Some(CoreHistoryReasoning::Preserve);
+
+        let err = normalize("deepseek", &req, false, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("tool_call_id"),
+            "must reject missing tool_call_id even under Preserve; got: {err}"
+        );
     }
 }
