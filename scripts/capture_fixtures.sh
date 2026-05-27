@@ -126,6 +126,41 @@ abspath_physical() {
 OUT="$(abspath_lexical "$OUT")"
 DEFAULT_OUT_ABS="$(abspath_lexical "$ROOT/crates/routectl-cli/tests/fixtures/captured")"
 if [ "$ALLOW_UNSAFE_OUT" = 0 ]; then
+  # Belt-and-suspenders: walk every OUT component UNDER the captured
+  # root and reject any symlink, even a DANGLING one (target does not
+  # exist). The physical resolution further down walks up to the
+  # nearest EXISTING ancestor with `cd -P`, so a broken symlink under
+  # the captured tree (e.g. `<captured>/<dangling-link>/<leaf>` where
+  # leaf does not yet exist) slips past it; `mkdir -p` below also
+  # cannot reify a dangling symlink as a directory. `[ -L ]` is the
+  # POSIX symlink test -- true for any symlink regardless of whether
+  # its target resolves -- and it is run BEFORE physical resolution
+  # because resolution loses the per-component symlink information.
+  # Out-of-tree paths skip this loop and are rejected by the physical
+  # confinement test below.
+  case "$OUT" in
+    "$DEFAULT_OUT_ABS" | "$DEFAULT_OUT_ABS"/*)
+      _check="$DEFAULT_OUT_ABS"
+      _remaining="${OUT:${#DEFAULT_OUT_ABS}}"
+      _remaining="${_remaining#/}"
+      while [ -n "$_remaining" ]; do
+        case "$_remaining" in
+          */*) _seg="${_remaining%%/*}"; _remaining="${_remaining#*/}" ;;
+          *)   _seg="$_remaining"; _remaining="" ;;
+        esac
+        [ -z "$_seg" ] && continue
+        _check="$_check/$_seg"
+        if [ -L "$_check" ]; then
+          echo "refusing --out '$OUT': symlink component at '$_check'." >&2
+          echo "fixtures contain raw headers (auth when ROUTECTL_TRACE_HEADERS is on);" >&2
+          echo "a symlink under the captured tree could redirect writes outside it." >&2
+          echo "pass --allow-unsafe-out to override." >&2
+          exit 2
+        fi
+      done
+      ;;
+  esac
+
   out_phys="$(abspath_physical "$OUT")"
   default_phys="$(abspath_physical "$DEFAULT_OUT_ABS")"
   case "$out_phys" in
@@ -413,3 +448,35 @@ if [ -n "$latest_ts" ]; then
 fi
 
 echo "captured=$captured since=$since latest=$latest_ts out=$OUT"
+
+# === Symlink-component check sanity test (manual) ===
+#
+# Verifies the per-component [-L] walk catches a dangling symlink in the
+# OUT path. The walk runs lexically before any filesystem touch, so a
+# synthetic captured/ tree exercises it without invoking the script.
+# Expected: the loop emits `PASS: detected <symlink path>`.
+#
+#   tmp="$(mktemp -d)"
+#   trap 'rm -rf "$tmp"' EXIT
+#   captured="$tmp/captured"
+#   mkdir -p "$captured"
+#   # Dangling symlink: target deliberately does not exist.
+#   ln -s "$tmp/no-such-target" "$captured/dangling"
+#   # Mirror the script's lexical walk in-process:
+#
+#   DEFAULT_OUT_ABS="$captured"
+#   OUT="$captured/dangling/leaf"
+#   _check="$DEFAULT_OUT_ABS"
+#   _remaining="${OUT:${#DEFAULT_OUT_ABS}}"
+#   _remaining="${_remaining#/}"
+#   hit=""
+#   while [ -n "$_remaining" ]; do
+#     case "$_remaining" in
+#       */*) _seg="${_remaining%%/*}"; _remaining="${_remaining#*/}" ;;
+#       *)   _seg="$_remaining"; _remaining="" ;;
+#     esac
+#     [ -z "$_seg" ] && continue
+#     _check="$_check/$_seg"
+#     if [ -L "$_check" ]; then hit="$_check"; break; fi
+#   done
+#   if [ -n "$hit" ]; then echo "PASS: detected $hit"; else echo "FAIL"; fi
