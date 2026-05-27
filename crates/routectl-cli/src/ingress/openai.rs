@@ -23,7 +23,10 @@ use routectl_core::{
 };
 use serde_json::{Map, Value};
 
-use super::{read_alias_header, ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
+use super::{
+    read_alias_header, ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent,
+    STREAM_ERROR_TYPE,
+};
 
 const DONE_SENTINEL: &str = "[DONE]";
 
@@ -140,6 +143,38 @@ impl IngressAdapter for OpenAiIngress {
 
     fn render_eos(&self, _state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
         vec![SseEvent::unnamed(DONE_SENTINEL)]
+    }
+
+    fn render_error_eos(
+        &self,
+        _state: &mut dyn IngressStreamState,
+        error: &dyn std::fmt::Display,
+    ) -> Vec<SseEvent> {
+        // The caller in `handlers::ingress_handle` already strips
+        // provider names, upstream bodies, and tokens before passing
+        // `error`, but a second `sanitize_for_log` pass here filters
+        // control chars (CRLF, ANSI escapes, NULs) that would
+        // otherwise break SSE wire framing or forge log lines on
+        // downstream text-format subscribers. Defense in depth.
+        let msg = routectl_core::sanitize_for_log(&error.to_string());
+        let payload = serde_json::json!({
+            "error": {
+                "type": STREAM_ERROR_TYPE,
+                "message": msg,
+            }
+        });
+        // OpenAI streaming clients consume `data: [DONE]` as the
+        // universal stream terminator (success OR failure). The
+        // preceding `error` chunk lets the SDK distinguish a clean
+        // failure from a clean completion, so it stops the
+        // suspected-truncation retry loop.
+        vec![
+            SseEvent::unnamed(
+                serde_json::to_string(&payload)
+                    .expect("Value serialization is infallible for BTreeMap-backed literals"),
+            ),
+            SseEvent::unnamed(DONE_SENTINEL),
+        ]
     }
 }
 
@@ -351,6 +386,73 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "[DONE]");
         assert!(events[0].event.is_none());
+    }
+
+    /// Mid-stream upstream failure on the OpenAI ingress: the adapter
+    /// must emit a clean FAILURE terminator pair (one `data:
+    /// {"error":...}` chunk followed by one `data: [DONE]` chunk) so
+    /// SDK consumers (Claude Code SDK, OpenAI SDK) see a clean failure
+    /// rather than network truncation. `[DONE]` is the OpenAI
+    /// universal stream terminator; without it, SDKs treat the close
+    /// as a truncation and retry.
+    #[test]
+    fn render_error_eos_returns_openai_error_chunk_then_done() {
+        // Arrange
+        let mut state = OpenAiIngress.new_stream_state();
+        let error_msg = "upstream stream error (HTTP 529)";
+
+        // Act
+        let events = OpenAiIngress.render_error_eos(state.as_mut(), &error_msg);
+
+        // Assert
+        // Two events: error chunk + [DONE].
+        assert_eq!(events.len(), 2, "expected error chunk + [DONE]");
+        // First: bare `data: <json>` chunk with the error envelope.
+        assert!(
+            events[0].event.is_none(),
+            "OpenAI emits unnamed (bare data:) frames"
+        );
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(payload["error"]["type"], STREAM_ERROR_TYPE);
+        assert!(payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("upstream stream error"));
+        // Second: the universal `[DONE]` terminator.
+        assert!(events[1].event.is_none());
+        assert_eq!(events[1].data, "[DONE]");
+    }
+
+    /// Belt-and-suspenders sanitization. Even though the caller in
+    /// `handlers::ingress_handle` strips provider names and tokens
+    /// before passing the error here, control characters in a
+    /// future caller's message must still be filtered out so the
+    /// emitted SSE bytes never break framing or forge log lines on
+    /// downstream text-format subscribers.
+    #[test]
+    fn render_error_eos_filters_control_chars_via_sanitize_for_log() {
+        // Arrange: a message containing CR, LF, and an ANSI escape.
+        let mut state = OpenAiIngress.new_stream_state();
+        let dirty = "upstream stream error\r\n\x1b[31mexploit\x1b[0m";
+
+        // Act
+        let events = OpenAiIngress.render_error_eos(state.as_mut(), &dirty);
+
+        // Assert: the emitted message has no raw \r, \n, or ESC bytes.
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        let msg = payload["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains('\r'), "raw CR must be filtered: {msg:?}");
+        assert!(!msg.contains('\n'), "raw LF must be filtered: {msg:?}");
+        assert!(
+            !msg.contains('\x1b'),
+            "raw ESC byte must be filtered: {msg:?}"
+        );
+        // The placeholder `?` from sanitize_for_log appears in place
+        // of each filtered byte.
+        assert!(
+            msg.contains('?'),
+            "sanitization placeholder present: {msg:?}"
+        );
     }
 
     #[test]

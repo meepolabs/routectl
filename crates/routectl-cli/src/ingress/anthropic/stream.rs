@@ -2,12 +2,20 @@ use serde_json::{json, Map, Value};
 
 use routectl_core::{ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result};
 
-use crate::ingress::{IngressStreamState, SseEvent};
+use crate::ingress::{IngressStreamState, SseEvent, STREAM_ERROR_TYPE};
 
 use super::{
     openai_finish_to_anthropic_stop, random_msg_id, AnthropicStreamState, OpenBlockKind,
     ToolBlockState,
 };
+
+/// SSE `event:` field name for Anthropic's terminal error event. Per
+/// the Anthropic Messages SSE spec, `event: error` is itself terminal
+/// (no further events follow). Module-level constant mirrors
+/// `DONE_SENTINEL` in `openai.rs`. Kept private to this file because
+/// the string is dialect-specific (the OpenAI ingress emits unnamed
+/// frames, never a named `error` event).
+const ANTHROPIC_ERROR_EVENT: &str = "error";
 
 pub(super) fn anthropic_state_mut(s: &mut dyn IngressStreamState) -> &mut AnthropicStreamState {
     s.as_any_mut()
@@ -637,6 +645,40 @@ pub(super) fn emit_message_stop(state: &mut AnthropicStreamState, events: &mut V
         "message_stop",
         serde_json::to_string(&json!({"type": "message_stop"})).unwrap_or_default(),
     ));
+}
+
+/// Build the dialect-specific terminal error event for an upstream
+/// stream failure. Per Anthropic SSE spec, `event: error` is itself
+/// terminal -- no further events follow. The renderer marks
+/// `state.finished` so any straggler chunks are dropped by the
+/// `render_chunk_internal` post-stop guard (defensive: the spawned
+/// task returns immediately after this and the state is dropped
+/// anyway, but keeping the invariant prevents a future refactor
+/// from silently regressing).
+///
+/// The error message is sanitized via `routectl_core::sanitize_for_log`
+/// to filter control chars (CRLF, ANSI escapes, NULs) that would
+/// otherwise break SSE framing or forge log lines on downstream
+/// text-format subscribers. The caller already strips provider names,
+/// upstream bodies, and tokens; this is defense in depth.
+pub(super) fn render_error_eos_internal(
+    state: &mut AnthropicStreamState,
+    error: &dyn std::fmt::Display,
+) -> Vec<SseEvent> {
+    state.finished = true;
+    let msg = routectl_core::sanitize_for_log(&error.to_string());
+    let payload = json!({
+        "type": "error",
+        "error": {
+            "type": STREAM_ERROR_TYPE,
+            "message": msg,
+        }
+    });
+    vec![SseEvent::named(
+        ANTHROPIC_ERROR_EVENT,
+        serde_json::to_string(&payload)
+            .expect("Value serialization is infallible for BTreeMap-backed literals"),
+    )]
 }
 
 // ---------------------------------------------------------------------------
