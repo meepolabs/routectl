@@ -337,7 +337,7 @@ crates/
                          + IngressAdapter trait (one file per ingress dialect)
 ```
 
-The hub-and-spoke design means N+M translators, not N×M: a new ingress dialect is one file under `routectl-cli/src/ingress/`; a new egress provider is one `Provider` impl in `routectl-providers/`. Neither side knows about the other.
+The hub-and-spoke design means N+M translators, not NxM: a new ingress dialect is one file under `routectl-cli/src/ingress/`; a new egress provider is one `Provider` impl in `routectl-providers/`. Neither side knows about the other.
 
 ## Testing
 
