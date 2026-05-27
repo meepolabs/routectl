@@ -504,6 +504,12 @@ impl Router {
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         let hard_cap = policy.hard_retry_cap();
+        // Availability-probe detection, computed ONCE: `max_tokens` is
+        // stable across the chain (overlays never touch it). Claude
+        // Code sends max_tokens=1 probes whose output is unread; on a
+        // 429/529 these fast-fail instead of spraying retry+fallback
+        // across the all-Anthropic chain. See `should_fallback`.
+        let is_probe = is_probe_request(&req, &policy);
         let mut last_err: Option<Error> = None;
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
@@ -626,7 +632,31 @@ impl Router {
                             provider.on_auth_failure().await?;
                             continue;
                         }
-                        let do_fallback = should_fallback(&e, &policy);
+                        let do_fallback = should_fallback(&e, &policy, is_probe);
+                        // Probe fast-fail: a probe (max_tokens <=
+                        // probe_max_tokens) that hit a rate-limit/overload
+                        // (429/529) returns the status immediately via an
+                        // explicit early return -- no retry, no fallback.
+                        // The span below is a deliberate no-op for this
+                        // path: record_failure is gated on `do_fallback`
+                        // and the retry branch on `can_retry_here`, both of
+                        // which are false for a fast-failed probe. Returning
+                        // here is behavior-preserving today AND robust if
+                        // either predicate ever drifts.
+                        let probe_fast_failed = if is_probe {
+                            probe_fast_fail_status(&e)
+                        } else {
+                            None
+                        };
+                        if let Some(status) = probe_fast_failed {
+                            log_probe_fast_fail(
+                                provider_name,
+                                target.nickname.as_deref().unwrap_or(""),
+                                status,
+                                req.max_tokens,
+                            );
+                            return Err(e);
+                        }
                         if do_fallback {
                             self.record_failure(state_key);
                         }
@@ -634,7 +664,7 @@ impl Router {
                             return Err(e);
                         }
                         let can_retry_here = attempts_made < hard_cap
-                            && should_retry_same_provider(&e, &policy, attempts_made);
+                            && should_retry_same_provider(&e, &policy, attempts_made, is_probe);
                         if can_retry_here {
                             tracing::debug!(
                                 provider = provider_name,
@@ -786,7 +816,13 @@ impl Router {
                     // sibling dispatch sites) so a future per-model
                     // retry surface stays aligned for count_tokens
                     // when it lands.
-                    if should_fallback(&e, &self.policy_for(&req.model)) {
+                    //
+                    // is_probe=false: count_tokens is NOT a generation
+                    // probe. Its token-count result IS consumed by the
+                    // caller (claude-code's context-budget display) and
+                    // it never walks the fallback chain, so a 429 here
+                    // keeps its existing breaker-accounting behavior.
+                    if should_fallback(&e, &self.policy_for(&req.model), false) {
                         self.record_failure(&target.state_key);
                     }
                     return Err(e);
@@ -813,6 +849,9 @@ impl Router {
         let chain = self.dispatch_chain_for_request(&req)?;
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
+        // Availability-probe detection (see `complete_with_options`). A
+        // streaming probe that 429/529s fast-fails the chain too.
+        let is_probe = is_probe_request(&req, &policy);
         let mut last_err: Option<Error> = None;
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
@@ -908,7 +947,30 @@ impl Router {
                     ));
                 }
                 Err(e) => {
-                    let do_fallback = should_fallback(&e, &policy);
+                    let do_fallback = should_fallback(&e, &policy, is_probe);
+                    // Probe fast-fail: a probe that hit a rate-limit/overload
+                    // (429/529) returns the status immediately via an
+                    // explicit early return -- no fallback. The span below
+                    // is a deliberate no-op for this path: record_failure is
+                    // gated on `do_fallback`, which is false for a
+                    // fast-failed probe. Returning here is behavior-
+                    // preserving today AND robust if the predicate ever
+                    // drifts. (Streams never retry the same provider, so
+                    // there is no can_retry_here to guard.)
+                    let probe_fast_failed = if is_probe {
+                        probe_fast_fail_status(&e)
+                    } else {
+                        None
+                    };
+                    if let Some(status) = probe_fast_failed {
+                        log_probe_fast_fail(
+                            provider_name,
+                            target.nickname.as_deref().unwrap_or(""),
+                            status,
+                            req.max_tokens,
+                        );
+                        return Err(e);
+                    }
                     if do_fallback {
                         self.record_failure(state_key);
                     }
@@ -1600,7 +1662,61 @@ async fn try_stream_with_first_chunk(
     }
 }
 
-fn should_fallback(err: &Error, policy: &RetryPolicy) -> bool {
+/// True when `req` is an availability/quota probe: its `max_tokens`
+/// is set and at or below the configured `probe_max_tokens` threshold.
+/// Claude Code sends `max_tokens=1` probes to `/v1/messages` whose tiny
+/// output is never read; on a rate-limit/overload the router fast-fails
+/// them instead of walking the fallback chain (see `should_fallback`).
+/// `probe_max_tokens = 0` disables detection (no request is a probe);
+/// a request with no `max_tokens` is never a probe.
+fn is_probe_request(req: &ChatRequest, policy: &RetryPolicy) -> bool {
+    policy.probe_max_tokens > 0 && req.max_tokens.is_some_and(|m| m <= policy.probe_max_tokens)
+}
+
+/// The upstream status of a probe-fast-fail-eligible error, or `None`
+/// when `err` is not one. 429 is a rate-limit; 529 is Anthropic's
+/// overload status. Both surface as `Error::Upstream { status, .. }`
+/// (the anthropic-api egress forwards the raw upstream status). A probe
+/// that hits one of these skips retry+fallback: on the all-Anthropic
+/// chain every hop shares the same limit, so walking it is futile and
+/// the probe's output is unread. A generic 5xx or a capability 4xx
+/// (e.g. Bedrock's `max_tokens=1` 400) returns `None` here so it keeps
+/// walking the chain -- a healthy sibling provider can still answer.
+fn probe_fast_fail_status(err: &Error) -> Option<u16> {
+    match err {
+        Error::Upstream {
+            status: s @ (429 | 529),
+            ..
+        } => Some(*s),
+        _ => None,
+    }
+}
+
+/// DEBUG-log a probe fast-fail decision, identically from both dispatch
+/// loops. Log-only by design: the caller owns the `return Err(..)` that
+/// actually short-circuits (a free fn cannot early-return its caller).
+/// `max_tokens` is the request value that tripped probe classification,
+/// surfaced so an operator can see which value matched the threshold.
+fn log_probe_fast_fail(provider: &str, model: &str, status: u16, max_tokens: Option<u32>) {
+    tracing::debug!(
+        provider,
+        model,
+        status,
+        max_tokens = ?max_tokens,
+        "probe request (max_tokens<=probe_max_tokens): not retrying/falling back on rate-limit",
+    );
+}
+
+fn should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
+    // Availability-probe fast-fail: a probe (max_tokens <=
+    // probe_max_tokens) that hits a rate-limit (429) or overload (529)
+    // does not fall back. Every OTHER error class -- generic 5xx,
+    // network/status-0, Streaming, and every 4xx including the
+    // Bedrock-style max_tokens=1 400 -- falls through to the normal
+    // predicate below, so real fallback is untouched.
+    if is_probe && probe_fast_fail_status(err).is_some() {
+        return false;
+    }
     match err {
         // status 0 means we never reached the upstream HTTP layer
         // (DNS, TCP connect, TLS handshake, request body, timeout). Always
@@ -1613,7 +1729,18 @@ fn should_fallback(err: &Error, policy: &RetryPolicy) -> bool {
     }
 }
 
-fn should_retry_same_provider(err: &Error, policy: &RetryPolicy, attempts_made: u32) -> bool {
+fn should_retry_same_provider(
+    err: &Error,
+    policy: &RetryPolicy,
+    attempts_made: u32,
+    is_probe: bool,
+) -> bool {
+    // Probe fast-fail mirrors `should_fallback`: a probe must not burn
+    // retry attempts against a rate-limited/overloaded provider (429 /
+    // 529). All other error classes fall through to the cap below.
+    if is_probe && probe_fast_fail_status(err).is_some() {
+        return false;
+    }
     let cap = match err {
         Error::Upstream { status, .. } => policy.retries_for_status(*status),
         // Streaming errors are transport-level (broken connection
@@ -1793,7 +1920,7 @@ mod tests {
 
         // (1) Default policy (allowlist populated, denylist None).
         let policy_default = RetryPolicy::default();
-        assert!(should_fallback(&err, &policy_default));
+        assert!(should_fallback(&err, &policy_default, false));
 
         // (2) Empty allowlist (would otherwise mean "no HTTP fallback").
         let policy_empty_allow = RetryPolicy {
@@ -1801,7 +1928,7 @@ mod tests {
             retry_denylist: None,
             ..RetryPolicy::default()
         };
-        assert!(should_fallback(&err, &policy_empty_allow));
+        assert!(should_fallback(&err, &policy_empty_allow, false));
 
         // (3) Denylist set (governs HTTP statuses, not status 0).
         let policy_deny = RetryPolicy {
@@ -1809,7 +1936,181 @@ mod tests {
             retry_denylist: Some(vec![501]),
             ..RetryPolicy::default()
         };
-        assert!(should_fallback(&err, &policy_deny));
+        assert!(should_fallback(&err, &policy_deny, false));
+    }
+}
+
+#[cfg(test)]
+mod probe_fast_fail_tests {
+    //! Availability-probe fast-fail. Claude Code sends `max_tokens=1`
+    //! quota/health probes to `/v1/messages`. On a rate-limit (429) or
+    //! overload (529) these skip retry+fallback -- walking the
+    //! all-Anthropic chain is futile (every hop shares the limit) and
+    //! the 1-token output is unread. Every OTHER error class is
+    //! unaffected, so real requests and 4xx-capability fallback keep
+    //! today's behavior. Each test names the (is_probe, status) shape
+    //! it pins.
+    use super::*;
+
+    fn upstream(status: u16) -> Error {
+        Error::upstream("probe-test-provider", status, "x")
+    }
+
+    fn req_with_max_tokens(max_tokens: Option<u32>) -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages: vec![],
+            max_tokens,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn probe_429_does_not_fall_back() {
+        // Arrange
+        let err = upstream(429);
+        let policy = RetryPolicy::default();
+        // Act
+        let fall_back = should_fallback(&err, &policy, true);
+        // Assert
+        assert!(
+            !fall_back,
+            "a max_tokens<=probe_max_tokens probe must not walk the chain on 429",
+        );
+    }
+
+    #[test]
+    fn probe_429_does_not_retry_same_provider() {
+        // Arrange: attempts_made=0 so the ONLY reason not to retry is
+        // the probe short-circuit (the cap would otherwise allow it).
+        let err = upstream(429);
+        let policy = RetryPolicy::default();
+        // Act
+        let retry = should_retry_same_provider(&err, &policy, 0, true);
+        // Assert
+        assert!(
+            !retry,
+            "a probe must not burn retry attempts against a rate-limited provider",
+        );
+    }
+
+    #[test]
+    fn probe_529_does_not_fall_back() {
+        // 529 is Anthropic's overload status; on an all-Anthropic chain
+        // every hop shares it, so a probe fast-fails it like a 429.
+        let err = upstream(529);
+        let policy = RetryPolicy::default();
+        assert!(!should_fallback(&err, &policy, true));
+    }
+
+    #[test]
+    fn probe_529_does_not_retry_same_provider() {
+        // Symmetry with the 429 retry short-circuit, for the 529 branch.
+        let err = upstream(529);
+        let policy = RetryPolicy::default();
+        assert!(!should_retry_same_provider(&err, &policy, 0, true));
+    }
+
+    #[test]
+    fn probe_400_still_falls_back() {
+        // Bedrock rejects max_tokens=1 with a 400; a sibling provider
+        // may accept it, so a probe must still walk the chain on 4xx.
+        let err = upstream(400);
+        let policy = RetryPolicy::default();
+        assert!(should_fallback(&err, &policy, true));
+    }
+
+    #[test]
+    fn probe_503_still_falls_back() {
+        // 503 is generic unavailability (not the chain-wide 429/529); a
+        // sibling provider may be healthy, so the probe still falls back.
+        let err = upstream(503);
+        let policy = RetryPolicy::default();
+        assert!(should_fallback(&err, &policy, true));
+    }
+
+    #[test]
+    fn real_request_429_still_retries_and_falls_back() {
+        // is_probe=false (a real request): a 429 keeps today's behavior
+        // -- fallbackable AND retryable up to the policy cap.
+        let err = upstream(429);
+        let policy = RetryPolicy::default();
+        assert!(
+            should_fallback(&err, &policy, false),
+            "real-request 429 still falls back",
+        );
+        assert!(
+            should_retry_same_provider(&err, &policy, 0, false),
+            "real-request 429 still retries (attempts_made=0 < cap)",
+        );
+    }
+
+    #[test]
+    fn is_probe_request_predicate_boundary() {
+        // Default threshold is 1.
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.probe_max_tokens, 1, "default probe_max_tokens is 1");
+
+        assert!(
+            is_probe_request(&req_with_max_tokens(Some(1)), &policy),
+            "max_tokens=1 at threshold 1 IS a probe",
+        );
+        assert!(
+            !is_probe_request(&req_with_max_tokens(Some(2)), &policy),
+            "max_tokens=2 above threshold 1 is NOT a probe",
+        );
+        assert!(
+            !is_probe_request(&req_with_max_tokens(None), &policy),
+            "max_tokens=None is NEVER a probe",
+        );
+    }
+
+    #[test]
+    fn probe_disabled_when_threshold_zero() {
+        // probe_max_tokens=0 disables probe detection entirely: a
+        // max_tokens=1 request is NOT a probe, so a 429 behaves like a
+        // real request (falls back + retries) -- today's behavior.
+        let policy = RetryPolicy {
+            probe_max_tokens: 0,
+            ..RetryPolicy::default()
+        };
+        let req = req_with_max_tokens(Some(1));
+        assert!(
+            !is_probe_request(&req, &policy),
+            "threshold 0 disables probe detection",
+        );
+
+        let is_probe = is_probe_request(&req, &policy); // false
+        let err = upstream(429);
+        assert!(should_fallback(&err, &policy, is_probe));
+        assert!(should_retry_same_provider(&err, &policy, 0, is_probe));
+    }
+
+    #[test]
+    fn custom_probe_max_tokens_threshold_is_inclusive() {
+        // A non-default threshold (probe_max_tokens=2) pins the `<=`
+        // boundary the default-1 tests cannot distinguish from `<`:
+        // max_tokens=2 IS a probe (at the threshold), max_tokens=3 is
+        // NOT (above it). A `<` regression would misclassify the
+        // at-threshold value as a real request.
+        let policy = RetryPolicy {
+            probe_max_tokens: 2,
+            ..RetryPolicy::default()
+        };
+        assert!(
+            is_probe_request(&req_with_max_tokens(Some(2)), &policy),
+            "max_tokens=2 is AT the custom probe_max_tokens=2 threshold (inclusive)",
+        );
+        assert!(
+            !is_probe_request(&req_with_max_tokens(Some(3)), &policy),
+            "max_tokens=3 is ABOVE the custom threshold; a real request",
+        );
+        // Downstream: an at-threshold probe still fast-fails a 429.
+        let is_probe = is_probe_request(&req_with_max_tokens(Some(2)), &policy);
+        assert!(
+            !should_fallback(&upstream(429), &policy, is_probe),
+            "an at-threshold probe must not fall back on 429 at a custom threshold",
+        );
     }
 }
 
