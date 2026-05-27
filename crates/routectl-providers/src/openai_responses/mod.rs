@@ -278,11 +278,18 @@ impl Provider for OpenAiResponsesProvider {
         let token = self.cfg.auth.token().await?;
 
         let rb = self.build_headers(self.client.post(self.responses_url()), &req, &token)?;
-        let resp = rb
+        let request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .json(&body)
-            .send()
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Dir 2: outgoing request headers (incl. auth) from the built
+        // request. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -331,6 +338,10 @@ impl Provider for OpenAiResponsesProvider {
         // body when the terminal event omits them. Streaming clients
         // never hit this seam because the SseState machine consumes
         // the deltas directly.
+        // Dir 3: upstream response headers, read BEFORE the SSE body
+        // stream consumes `resp`. complete() is stream-only, so this
+        // is the dir-3 capture point. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
         futures::pin_mut!(event_stream);
@@ -458,11 +469,18 @@ impl Provider for OpenAiResponsesProvider {
         let token = self.cfg.auth.token().await?;
 
         let rb = self.build_headers(self.client.post(self.responses_url()), &req, &token)?;
-        let resp = rb
+        let request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .json(&body)
-            .send()
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Dir 2: outgoing request headers (incl. auth) for the stream
+        // path. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -495,6 +513,11 @@ impl Provider for OpenAiResponsesProvider {
             }
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
+
+        // Dir 3: upstream response headers, read BEFORE `resp` is moved
+        // into the SSE byte stream below. Mirrors the complete() path so
+        // both directions emit dir-3. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
         let provider_id = self.cfg.id.clone();
         let byte_stream = resp.bytes_stream();

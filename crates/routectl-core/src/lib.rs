@@ -22,11 +22,14 @@ pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};
 pub use log_safe::{
     debug_upstream_error_body, extract_structural_summary, extract_upstream_message,
-    log_redaction_status, log_trace_body_cap_status, redact_prompts_in, redact_prompts_with_flag,
-    sanitize_for_log, sanitize_upstream_body, sanitize_upstream_body_with_cap, trace_body_cap,
-    trace_egress_body, trace_ingress_body, trace_outgoing_body, trace_stream_summary,
-    trace_structural_summary, trace_upstream_success_body, wrap_stream_with_summary,
-    StructuralSummary, MAX_TRACE_BODY_BYTES,
+    header_trace_enabled, headers_to_json, log_header_trace_status, log_redaction_status,
+    log_trace_body_cap_status, redact_prompts_in, redact_prompts_with_flag, sanitize_for_log,
+    sanitize_upstream_body, sanitize_upstream_body_with_cap, trace_body_cap, trace_egress_body,
+    trace_egress_headers, trace_ingress_body, trace_ingress_headers, trace_outgoing_body,
+    trace_outgoing_headers, trace_stream_summary, trace_structural_summary,
+    trace_upstream_response_headers, trace_upstream_success_body, wrap_stream_with_summary,
+    StructuralSummary, HDR_MSG_EGRESS, HDR_MSG_INGRESS, HDR_MSG_OUTGOING, HDR_MSG_UPSTREAM,
+    MAX_TRACE_BODY_BYTES,
 };
 // Re-export the deprecated alias from the crate root so downstream
 // consumers that imported the old name from `routectl_core::*` get a

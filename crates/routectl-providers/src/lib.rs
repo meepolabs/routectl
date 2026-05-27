@@ -15,6 +15,12 @@ pub mod model_profile;
 
 pub(crate) mod http_client;
 
+// Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Unconditional
+// like `http_client` (both lean on `reqwest`, which any provider feature
+// pulls in); every provider calls into it, so there is no dead code in a
+// feature-gated build.
+pub(crate) mod header_trace;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 
