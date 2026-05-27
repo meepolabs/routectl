@@ -267,7 +267,20 @@ jitter_ms                     = 50
 # retry_denylist              = [422]
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
+probe_max_tokens              = 1             # fast-fail availability probes
 ```
+
+`probe_max_tokens` (default `1`) fast-fails availability probes. A
+request whose `max_tokens` is at or below this value is treated as a
+probe -- Claude Code sends `max_tokens=1` quota/health checks to
+`/v1/messages`. On a rate-limit or overload (429/529) a probe skips
+retry+fallback and returns the status immediately: every hop of an
+all-Anthropic chain shares the same limit, so walking it is futile and
+the probe's tiny output is never read. Set `probe_max_tokens = 0` to
+disable (no request is ever treated as a probe). Real requests
+(`max_tokens` above the threshold), generic 5xx, network errors, and
+every 4xx (including a capability-rejection 400, which a sibling
+provider may accept) keep the normal retry+fallback behavior.
 
 Workspace defaults are tight on purpose -- surface real timeouts on
 routine calls. Bump per-provider for known-slow upstreams (see the
