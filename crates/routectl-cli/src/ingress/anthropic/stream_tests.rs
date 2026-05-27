@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::ingress::anthropic::{AnthropicIngress, ANTHROPIC_FORMAT};
-use crate::ingress::IngressAdapter;
+use crate::ingress::{IngressAdapter, STREAM_ERROR_TYPE};
 
 use super::*;
 
@@ -854,3 +854,91 @@ fn opaque_event_delta_without_prior_start_warns_and_skips() {
 // already pins the don't-terminate-on-failure contract; pinning
 // "non-UTF-8 raw bytes get skipped" too is overspecification of an
 // internal defensive guard. Skipped intentionally.
+
+// -------- terminal-error event on upstream mid-stream failure --------
+
+/// Mid-stream upstream failure on the Anthropic ingress: the adapter
+/// must emit ONE `event: error` named SSE event matching the
+/// Anthropic Messages SSE spec
+/// (`{"type":"error","error":{"type":"api_error","message":...}}`),
+/// and NOTHING ELSE. Per the Anthropic spec, the error event is
+/// itself terminal: no further events follow. Without this, SDK
+/// consumers (Claude Code SDK) treat the connection close as a
+/// truncated stream and retry up to 5 times.
+#[test]
+fn render_error_eos_returns_anthropic_error_event() {
+    // Arrange
+    let mut s = fresh_state();
+    let error_msg = "upstream stream error (HTTP 529)";
+
+    // Act
+    let events = render_error_eos_internal(&mut s, &error_msg);
+
+    // Assert
+    // Exactly one event.
+    assert_eq!(events.len(), 1, "Anthropic error event is terminal");
+    // Named `event: error` per Anthropic SSE spec.
+    assert_eq!(events[0].event.as_deref(), Some("error"));
+    // Payload is `{"type":"error","error":{"type":"api_error","message":...}}`.
+    let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], STREAM_ERROR_TYPE);
+    assert!(payload["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("upstream stream error"));
+    // State is marked finished so any straggler chunks are dropped
+    // by the `render_chunk_internal` post-stop guard.
+    assert!(
+        s.finished,
+        "state.finished must be set so stragglers are dropped"
+    );
+}
+
+/// Counterpart: a chunk arriving after `render_error_eos` must be
+/// dropped. Pins the `state.finished = true` invariant against any
+/// future refactor that forgets to mark the state as terminal.
+#[test]
+fn render_error_eos_marks_state_finished_so_stragglers_dropped() {
+    // Arrange
+    let mut s = fresh_state();
+    let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
+    let _ = render_error_eos_internal(&mut s, &"upstream stream error");
+
+    // Act: a misbehaving upstream might deliver a straggler chunk
+    // after the task tried to terminate -- defensive only since
+    // the spawned task returns immediately after `render_error_eos`,
+    // but the contract still holds inside the state machine.
+    let stray = render_chunk_internal(text_chunk(" more", None), &mut s).unwrap();
+
+    // Assert
+    assert!(
+        stray.is_empty(),
+        "post-error chunk must produce no events: {stray:?}"
+    );
+}
+
+/// Belt-and-suspenders sanitization. Control characters in the
+/// caller's error message must be filtered before reaching the
+/// SSE wire bytes, otherwise an attacker-controlled upstream body
+/// could break SSE framing or forge log lines on downstream
+/// text-format subscribers.
+#[test]
+fn render_error_eos_filters_control_chars_via_sanitize_for_log() {
+    // Arrange: a message containing CR, LF, and an ANSI escape.
+    let mut s = fresh_state();
+    let dirty = "upstream stream error\r\n\x1b[31mexploit\x1b[0m";
+
+    // Act
+    let events = render_error_eos_internal(&mut s, &dirty);
+
+    // Assert: the emitted message has no raw \r, \n, or ESC bytes.
+    let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+    let msg = payload["error"]["message"].as_str().unwrap();
+    assert!(!msg.contains('\r'), "raw CR must be filtered: {msg:?}");
+    assert!(!msg.contains('\n'), "raw LF must be filtered: {msg:?}");
+    assert!(
+        !msg.contains('\x1b'),
+        "raw ESC byte must be filtered: {msg:?}"
+    );
+}

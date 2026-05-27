@@ -150,7 +150,12 @@ async fn stream_response<A: IngressAdapter + 'static>(
         Err(e) => return map_error(envelope, e),
     };
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
+    // Inner channel carries our `SseEvent` type so the rendering loop
+    // is straightforward to unit-test (drain a `mpsc::Receiver<SseEvent>`
+    // and assert on event names + payload bytes). The conversion to
+    // `axum::response::sse::Event` is a one-liner `.map()` on the
+    // ReceiverStream and happens only on the production path below.
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Capture the current tracing span (which carries request_id from
     // the request_id middleware + ingress / router / provider span
@@ -165,81 +170,10 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // itself moves into the spawned render task (EgressStreamSummary),
     // as does `adapter`, so neither is reachable after the spawn.
     let egress_id = ingress_id.clone();
-    tokio::spawn(
-        async move {
-            let mut upstream = upstream;
-            let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state();
-            // Stream summary state. RAII guard so the summary
-            // fires on EVERY exit path (clean close, render error,
-            // upstream mid-stream error, client disconnect, runtime
-            // task cancellation). Truncation detection uses an
-            // inverse-flag pattern: the natural EOS path calls
-            // `mark_clean_close()`; any other exit (including ones
-            // we cannot explicitly mark, like task cancellation)
-            // leaves `clean_close = false` and Drop synthesizes
-            // `finish_reason="truncated"` so operators can
-            // distinguish a clean close from a cut.
-            let mut summary = EgressStreamSummary::new(ingress_id);
-            while let Some(item) = upstream.next().await {
-                match item {
-                    Ok(chunk) => {
-                        summary.observe(&chunk);
-                        match adapter.render_chunk(chunk, state.as_mut()) {
-                            Ok(events) => {
-                                for ev in events {
-                                    if tx.send(Ok(sse_to_axum(ev))).await.is_err() {
-                                        // Client disconnected mid-stream.
-                                        // Drop emits truncated by
-                                        // default (clean_close stays
-                                        // false), so no explicit
-                                        // marker call is needed.
-                                        return;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(error = ?e, "ingress chunk render failed");
-                                return;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Upstream stream errored mid-stream. Drop
-                        // the channel without emitting adapter EOS
-                        // (`[DONE]` for OpenAI, `message_stop` for
-                        // Anthropic) -- emitting it would let the
-                        // client see a clean completion despite the
-                        // failure, AND would skew router-side health
-                        // accounting (failed probe counted as a
-                        // successful stream). The client sees the
-                        // SSE connection close mid-stream, which
-                        // SSE consumers should already treat as a
-                        // non-clean termination. Egress summary
-                        // emits truncated via the inverse-flag Drop.
-                        tracing::error!(error = ?e, "upstream stream error -- terminating SSE without EOS sentinel");
-                        return;
-                    }
-                }
-            }
-            for ev in adapter.render_eos(state.as_mut()) {
-                if tx.send(Ok(sse_to_axum(ev))).await.is_err() {
-                    // Client disconnected during EOS render. Drop
-                    // emits truncated.
-                    return;
-                }
-            }
-            // Natural EOS reached. Mark clean close so the Drop
-            // emit reports the observed finish_reason rather than
-            // synthesizing "truncated".
-            summary.mark_clean_close();
-            // Clean close. The egress stream summary fires on Drop;
-            // no explicit emit needed here.
-            drop(summary);
-        }
-        .instrument(parent_span),
-    );
+    tokio::spawn(render_stream_task(upstream, adapter, ingress_id, tx).instrument(parent_span));
 
-    let receiver_stream = ReceiverStream::new(rx);
+    let receiver_stream =
+        ReceiverStream::new(rx).map(|ev| Ok::<Event, std::convert::Infallible>(sse_to_axum(ev)));
     let resp = Sse::new(receiver_stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response();
@@ -248,6 +182,153 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // returning. Uses the pre-spawn `egress_id` clone.
     trace_egress_headers_of(&egress_id, &resp);
     resp
+}
+
+/// Drive the upstream chunk stream through the ingress adapter,
+/// emitting one `SseEvent` per produced wire event. Exit paths:
+///
+/// 1. Upstream finishes naturally -> emit `render_eos` events,
+///    mark the egress summary `clean_close=true` so the Drop summary
+///    reports the observed `finish_reason`.
+/// 2. Upstream errors mid-stream -> emit `render_error_eos` events
+///    (the dialect-specific terminal ERROR event), then return.
+///    The summary Drop synthesizes `finish_reason="truncated"`
+///    via the inverse-flag pattern -- the upstream stream WAS
+///    truncated even though we now signal it cleanly to the
+///    client.
+/// 3. Render failure (canonical chunk that the adapter cannot turn
+///    into wire events) -> log + return. No EOS emission; the client
+///    sees an unclean disconnect because we don't have a
+///    well-formed wire event to send.
+/// 4. Client disconnects (channel send returns Err) -> return.
+///    Drop emits truncated.
+///
+/// Extracted from the spawn closure body so the streaming-error path
+/// is unit-testable without spinning up the axum layer: a test can
+/// build a synthesized `BoxStream<Result<ChatChunk>>` (e.g. one Ok
+/// chunk followed by one Err) and drain the resulting
+/// `mpsc::Receiver<SseEvent>` to assert on the wire shape of the
+/// terminal error event.
+async fn render_stream_task<A: IngressAdapter>(
+    upstream: futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+    adapter: A,
+    ingress_id: String,
+    tx: tokio::sync::mpsc::Sender<SseEvent>,
+) {
+    let mut upstream = upstream;
+    let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state();
+    // Stream summary state. RAII guard so the summary
+    // fires on EVERY exit path (clean close, render error,
+    // upstream mid-stream error, client disconnect, runtime
+    // task cancellation). Truncation detection uses an
+    // inverse-flag pattern: the natural EOS path calls
+    // `mark_clean_close()`; any other exit (including ones
+    // we cannot explicitly mark, like task cancellation)
+    // leaves `clean_close = false` and Drop synthesizes
+    // `finish_reason="truncated"` so operators can
+    // distinguish a clean close from a cut.
+    let mut summary = EgressStreamSummary::new(ingress_id);
+    while let Some(item) = upstream.next().await {
+        match item {
+            Ok(chunk) => {
+                summary.observe(&chunk);
+                match adapter.render_chunk(chunk, state.as_mut()) {
+                    Ok(events) => {
+                        for ev in events {
+                            if tx.send(ev).await.is_err() {
+                                // Client disconnected mid-stream.
+                                // Drop emits truncated by
+                                // default (clean_close stays
+                                // false), so no explicit
+                                // marker call is needed.
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Render failure on a canonical chunk (rare;
+                        // the adapter could not turn it into wire
+                        // events). Emit the dialect-specific terminal
+                        // error event so the client sees a clean
+                        // FAILURE rather than a truncated stream and
+                        // does not retry. The drop summary still
+                        // reports `finish_reason=truncated` via the
+                        // inverse-flag pattern. The send-failure
+                        // result is intentionally discarded: if the
+                        // client already disconnected, the Drop on
+                        // EgressStreamSummary still fires.
+                        tracing::error!(error = ?e, "ingress chunk render failed");
+                        let safe_msg = sanitize_stream_error_for_client(
+                            &routectl_core::Error::Streaming(e.to_string()),
+                        );
+                        for ev in adapter.render_error_eos(state.as_mut(), &safe_msg) {
+                            let _ = tx.send(ev).await;
+                        }
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                // Path 2: upstream stream errored mid-stream. Emit the
+                // dialect-specific terminal ERROR event (see the
+                // function-level rustdoc above for the SUCCESS-vs-ERROR
+                // EOS distinction and the rationale).
+                tracing::error!(
+                    error = ?e,
+                    "upstream stream error -- emitting terminal error event"
+                );
+                let safe_msg = sanitize_stream_error_for_client(&e);
+                for ev in adapter.render_error_eos(state.as_mut(), &safe_msg) {
+                    if tx.send(ev).await.is_err() {
+                        // Client disconnected before we could
+                        // deliver the terminal error event. Drop
+                        // emits truncated.
+                        return;
+                    }
+                }
+                return;
+            }
+        }
+    }
+    for ev in adapter.render_eos(state.as_mut()) {
+        if tx.send(ev).await.is_err() {
+            // Client disconnected during EOS render. Drop
+            // emits truncated.
+            return;
+        }
+    }
+    // Natural EOS reached. Mark clean close so the Drop
+    // emit reports the observed finish_reason rather than
+    // synthesizing "truncated".
+    summary.mark_clean_close();
+    // Clean close. The egress stream summary fires on Drop;
+    // no explicit emit needed here.
+    drop(summary);
+}
+
+/// Map a routectl `Error` to a short, client-safe summary suitable
+/// for inclusion in the streaming-error wire payload. STRIPPED of
+/// provider names, upstream response bodies, and any other internal
+/// tells so the wire bytes never leak secrets-store identifiers,
+/// deploy hostnames, tokens, or attacker-controlled upstream content.
+///
+/// The `body_excerpt` from `Error::Upstream` is intentionally
+/// dropped: it can carry attacker-controlled bytes that, even after
+/// `sanitize_for_log`, can leak per-tenant existence info or
+/// upstream-side rate limit hints we don't want to forward.
+/// Operators reading routectl logs still see the full error via the
+/// `tracing::error!(error = ?e, ...)` line that fires on the same
+/// path -- the wire bytes are the only place this short summary
+/// shows up.
+///
+/// Used only on the streaming-error path (`render_error_eos`). The
+/// non-streaming path goes through `map_error`, which carries
+/// caller-actionable validation detail and is appropriate to surface.
+fn sanitize_stream_error_for_client(e: &Error) -> String {
+    match e {
+        Error::Upstream { status, .. } => format!("upstream stream error (HTTP {status})"),
+        _ => "upstream stream error".to_string(),
+    }
 }
 
 fn sse_to_axum(ev: SseEvent) -> Event {
@@ -531,118 +612,5 @@ impl Drop for EgressStreamSummary {
 }
 
 #[cfg(test)]
-mod tests {
-    //! Pin the dispatch from `Error` -> envelope shape so the two
-    //! ingress dialects render the right error wire shape. The
-    //! integration tests in `crates/routectl-cli/tests/anthropic_ingress.rs`
-    //! cover the end-to-end path through axum; these tests pin the
-    //! pure mapping without needing a server.
-    use super::*;
-    use axum::body::to_bytes;
-    use routectl_core::Error;
-
-    async fn body_to_value(resp: Response) -> Value {
-        let bytes = to_bytes(resp.into_body(), 8 * 1024).await.unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    #[tokio::test]
-    async fn anthropic_envelope_unknown_alias_emits_not_found_error() {
-        // Arrange
-        let err = Error::UnknownAlias("nonesuch".into());
-
-        // Act
-        let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
-        let status = resp.status();
-        let body = body_to_value(resp).await;
-
-        // Assert
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body["type"], "error");
-        assert_eq!(body["error"]["type"], "not_found_error");
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("nonesuch"));
-    }
-
-    #[tokio::test]
-    async fn anthropic_envelope_validation_error_emits_invalid_request_error() {
-        // Arrange
-        let err = Error::Validation("max_tokens must be positive".into());
-
-        // Act
-        let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
-        let status = resp.status();
-        let body = body_to_value(resp).await;
-
-        // Assert
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["type"], "error");
-        assert_eq!(body["error"]["type"], "invalid_request_error");
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("max_tokens"));
-    }
-
-    #[tokio::test]
-    async fn anthropic_envelope_5xx_emits_api_error_or_overloaded() {
-        // 503 -> overloaded_error
-        let err503 = Error::Upstream {
-            provider: "p".into(),
-            status: 503,
-            body: "service unavailable".into(),
-        };
-        let resp = map_error(ErrorEnvelopeShape::Anthropic, err503);
-        let status = resp.status();
-        let body = body_to_value(resp).await;
-        assert_eq!(status.as_u16(), 503);
-        assert_eq!(body["type"], "error");
-        assert_eq!(body["error"]["type"], "overloaded_error");
-
-        // 529 -> overloaded_error
-        let err529 = Error::Upstream {
-            provider: "p".into(),
-            status: 529,
-            body: "anthropic overloaded".into(),
-        };
-        let resp = map_error(ErrorEnvelopeShape::Anthropic, err529);
-        assert_eq!(resp.status().as_u16(), 529);
-        let body = body_to_value(resp).await;
-        assert_eq!(body["error"]["type"], "overloaded_error");
-
-        // 502 -> api_error
-        let err502 = Error::Upstream {
-            provider: "p".into(),
-            status: 502,
-            body: "bad gateway".into(),
-        };
-        let resp = map_error(ErrorEnvelopeShape::Anthropic, err502);
-        assert_eq!(resp.status().as_u16(), 502);
-        let body = body_to_value(resp).await;
-        assert_eq!(body["error"]["type"], "api_error");
-    }
-
-    #[tokio::test]
-    async fn openai_envelope_unchanged_regression_pin() {
-        // Pin the legacy OpenAI envelope shape so a future refactor
-        // doesn't accidentally Anthropic-ify it. claude-code's
-        // chat-completions adapter parses the flat `{"error":{...}}`
-        // shape with `code` populated.
-        let err = Error::UnknownAlias("nonesuch".into());
-
-        let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
-        let status = resp.status();
-        let body = body_to_value(resp).await;
-
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body.get("type").is_none(), "OpenAI envelope is flat");
-        assert_eq!(body["error"]["type"], "unknown_alias");
-        assert_eq!(body["error"]["code"], "unknown_alias");
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("nonesuch"));
-    }
-}
+#[path = "ingress_handle_tests.rs"]
+mod tests;
