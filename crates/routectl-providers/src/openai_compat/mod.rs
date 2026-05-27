@@ -268,12 +268,20 @@ impl Provider for OpenAiCompatProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let resp = self
+        let request = self
             .client
             .post(&url)
             .headers(headers)
             .json(&body)
-            .send()
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Dir 2: outgoing request headers (incl. auth). build_headers
+        // assembled the auth into `headers`; capture the full set from
+        // the built request. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -304,6 +312,10 @@ impl Provider for OpenAiCompatProvider {
             return Err(Error::upstream(&self.cfg.id, status, sanitized));
         }
 
+        // Dir 3: upstream response headers, read BEFORE the body
+        // consume (resp.json() takes ownership). Opt-in via
+        // ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
         let raw: Value = resp
             .json()
             .await
@@ -351,12 +363,19 @@ impl Provider for OpenAiCompatProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let resp = self
+        let request = self
             .client
             .post(&url)
             .headers(headers)
             .json(&body)
-            .send()
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Dir 2: outgoing request headers (incl. auth) for the stream
+        // path. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -382,6 +401,12 @@ impl Provider for OpenAiCompatProvider {
             }
             return Err(Error::upstream(&self.cfg.id, status, sanitized));
         }
+
+        // Dir 3: upstream response headers, read BEFORE `resp` is moved
+        // into the SSE byte stream below. The stream path had no dir-3
+        // capture before; this closes the gap so it matches complete().
+        // Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
         let provider_id = self.cfg.id.clone();
         let dialect = self.dialect_for(&req);

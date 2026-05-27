@@ -234,6 +234,19 @@ pub fn log_trace_body_cap_status() {
     });
 }
 
+/// Parse a boolean-ish env var value: trim surrounding whitespace,
+/// ASCII-lowercase, then match the accepted truthy spellings
+/// (`1`/`true`/`yes`/`on`). Anything else (including empty) is false.
+/// Shared by [`redact_enabled`] and [`header_trace_enabled`] so the two
+/// toggles agree on spelling -- both are case-insensitive and both
+/// accept `on`.
+fn parse_bool_env(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// Whether `ROUTECTL_LOG_REDACT_PROMPTS` is set to a truthy value.
 ///
 /// Read once on the FIRST CALL that fires (i.e., the first time TRACE
@@ -255,7 +268,27 @@ fn redact_enabled() -> bool {
     *REDACT.get_or_init(|| {
         std::env::var("ROUTECTL_LOG_REDACT_PROMPTS")
             .ok()
-            .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+            .map(|v| parse_bool_env(&v))
+            .unwrap_or(false)
+    })
+}
+
+/// Whether `ROUTECTL_TRACE_HEADERS` is set to a truthy value
+/// (`1`/`true`/`yes`, case-insensitive, trimmed; default false).
+///
+/// Read once on the FIRST CALL via `OnceLock` and frozen for the rest
+/// of the process. Same setup caveat as [`redact_enabled`]: set the
+/// env var BEFORE launching routectl; flipping it afterward has no
+/// effect. Default false makes the four `trace_*_headers` helpers a
+/// no-op unless the operator opts in -- header lines carry auth and
+/// other verbatim values and must not flow into logs by accident.
+/// [`log_header_trace_status`] emits a matching startup `info` line.
+pub fn header_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ROUTECTL_TRACE_HEADERS")
+            .ok()
+            .map(|v| parse_bool_env(&v))
             .unwrap_or(false)
     })
 }
@@ -275,6 +308,22 @@ pub fn log_redaction_status() {
         tracing::info!(
             redact_prompts = enabled,
             "ROUTECTL_LOG_REDACT_PROMPTS resolved (frozen for the rest of this process)"
+        );
+    });
+}
+
+/// Read the header-trace env var and emit a single `info` line so
+/// operators can confirm the resolved value at startup. Seeds the
+/// `OnceLock` with the boot-time value, making the "set the env var
+/// before launching" requirement observable. Mirror of
+/// [`log_redaction_status`] and [`log_trace_body_cap_status`].
+pub fn log_header_trace_status() {
+    static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let enabled = header_trace_enabled();
+    EMITTED.get_or_init(|| {
+        tracing::info!(
+            trace_headers = enabled,
+            "ROUTECTL_TRACE_HEADERS resolved (frozen for the rest of this process)"
         );
     });
 }
@@ -568,6 +617,161 @@ pub fn trace_egress_body(ingress: &str, body: &serde_json::Value) {
         ingress,
         body = %truncated,
         "egress response body"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Header tracing (4 directions). Opt-in via ROUTECTL_TRACE_HEADERS,
+// gated on TRACE, RAW (no redaction) so fixture captures see the real
+// auth / beta / version headers.
+//
+// PARSING CONTRACT (scripts/capture_fixtures.sh::extract_headers reads
+// these lines back into per-request fixtures):
+//   1. The four canonical message strings are the `HDR_MSG_*` consts
+//      below. extract_headers greps the log for these EXACT strings;
+//      renaming one here means updating the script's needles to match.
+//   2. On every emitted line, `headers` MUST be the LAST structured
+//      field (its JSON value runs to end-of-line). The script takes
+//      everything after the first `headers=` to the line end. Keep the
+//      `message = HDR_MSG_*` field FIRST and `headers = ...` LAST in
+//      each trace! call so this holds regardless of subscriber field
+//      ordering.
+//   3. Values are emitted verbatim and the JSON is a single compact
+//      string (serde_json escapes \n / \r), so a header value cannot
+//      forge a second log line.
+// ---------------------------------------------------------------------
+
+/// Canonical dir-1 (client -> routectl) header-trace message. Part of
+/// the parsing contract documented above and mirrored by
+/// scripts/capture_fixtures.sh::extract_headers.
+pub const HDR_MSG_INGRESS: &str = "ingress request headers";
+/// Canonical dir-2 (routectl -> upstream) header-trace message. See the
+/// header-trace section contract above.
+pub const HDR_MSG_OUTGOING: &str = "outgoing request headers";
+/// Canonical dir-3 (upstream -> routectl) header-trace message. See the
+/// header-trace section contract above.
+pub const HDR_MSG_UPSTREAM: &str = "upstream response headers";
+/// Canonical dir-4 (routectl -> client) header-trace message. See the
+/// header-trace section contract above.
+pub const HDR_MSG_EGRESS: &str = "egress response headers";
+
+/// Pure gate decision shared by the four `trace_*_headers` emitters:
+/// emit only when header tracing is opted in AND the subscriber has
+/// TRACE enabled. Extracted as a pure fn (no env reads, no global
+/// state) so both arms are unit-testable without touching the
+/// process-frozen [`header_trace_enabled`] `OnceLock` or installing a
+/// shared tracing subscriber.
+fn header_trace_should_emit(header_trace_on: bool, trace_level_on: bool) -> bool {
+    header_trace_on && trace_level_on
+}
+
+/// Build a JSON ARRAY of `[name, value]` two-element arrays from a
+/// sequence of header pairs. An array (not an object) so iteration
+/// ORDER and DUPLICATE names (`set-cookie`, repeated `via`, ...)
+/// survive the round-trip; a JSON object would silently collapse
+/// duplicates and reorder keys. Values decode with
+/// `String::from_utf8_lossy` so a non-UTF-8 byte (rare but legal on
+/// the wire) becomes the replacement char rather than dropping the
+/// header.
+///
+/// Call sites pass plain `&str` / `&[u8]` (e.g.
+/// `map.iter().map(|(k, v)| (k.as_str(), v.as_bytes()))`), which keeps
+/// core decoupled from the axum / reqwest `http` crate version --
+/// only the standard-library types cross the boundary.
+pub fn headers_to_json<'a>(
+    pairs: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        pairs
+            .into_iter()
+            .map(|(name, value)| {
+                serde_json::Value::Array(vec![
+                    serde_json::Value::String(name.to_string()),
+                    serde_json::Value::String(String::from_utf8_lossy(value).into_owned()),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// Emit a `tracing::trace!` line carrying the ingress request headers
+/// (direction 1: client -> routectl). Opt-in via
+/// `ROUTECTL_TRACE_HEADERS=1` and gated on TRACE so the default `info`
+/// level pays nothing. RAW -- names and values are emitted verbatim
+/// (no redaction) so fixture captures see the real auth / beta /
+/// version headers. The JSON is emitted as a single compact string
+/// (`serde_json` escapes `\n`/`\r`, so the value stays single-line and
+/// cannot forge log lines) and is the LAST field on the line.
+pub fn trace_ingress_headers(ingress: &str, headers: &serde_json::Value) {
+    if !header_trace_should_emit(
+        header_trace_enabled(),
+        tracing::event_enabled!(tracing::Level::TRACE),
+    ) {
+        return;
+    }
+    tracing::trace!(
+        message = HDR_MSG_INGRESS,
+        ingress,
+        headers = %serde_json::to_string(headers).unwrap_or_default(),
+    );
+}
+
+/// Emit a `tracing::trace!` line carrying the outgoing request headers
+/// for a given provider (direction 2: routectl -> upstream), INCLUDING
+/// auth. Opt-in via `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. See
+/// [`trace_ingress_headers`] for the single-line / no-redaction
+/// rationale. `headers` is the LAST field on the line.
+pub fn trace_outgoing_headers(provider_kind: &str, id: &str, headers: &serde_json::Value) {
+    if !header_trace_should_emit(
+        header_trace_enabled(),
+        tracing::event_enabled!(tracing::Level::TRACE),
+    ) {
+        return;
+    }
+    tracing::trace!(
+        message = HDR_MSG_OUTGOING,
+        provider_kind,
+        provider = id,
+        headers = %serde_json::to_string(headers).unwrap_or_default(),
+    );
+}
+
+/// Emit a `tracing::trace!` line carrying the upstream response headers
+/// (direction 3: upstream -> routectl). Opt-in via
+/// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. See
+/// [`trace_ingress_headers`] for the single-line / no-redaction
+/// rationale. `headers` is the LAST field on the line.
+pub fn trace_upstream_response_headers(provider_kind: &str, id: &str, headers: &serde_json::Value) {
+    if !header_trace_should_emit(
+        header_trace_enabled(),
+        tracing::event_enabled!(tracing::Level::TRACE),
+    ) {
+        return;
+    }
+    tracing::trace!(
+        message = HDR_MSG_UPSTREAM,
+        provider_kind,
+        provider = id,
+        headers = %serde_json::to_string(headers).unwrap_or_default(),
+    );
+}
+
+/// Emit a `tracing::trace!` line carrying the egress response headers
+/// (direction 4: routectl -> client). Opt-in via
+/// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. See
+/// [`trace_ingress_headers`] for the single-line / no-redaction
+/// rationale. `headers` is the LAST field on the line.
+pub fn trace_egress_headers(ingress: &str, headers: &serde_json::Value) {
+    if !header_trace_should_emit(
+        header_trace_enabled(),
+        tracing::event_enabled!(tracing::Level::TRACE),
+    ) {
+        return;
+    }
+    tracing::trace!(
+        message = HDR_MSG_EGRESS,
+        ingress,
+        headers = %serde_json::to_string(headers).unwrap_or_default(),
     );
 }
 

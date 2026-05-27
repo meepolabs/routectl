@@ -159,6 +159,17 @@ Step-by-step example: "OpenAI launches o5-mini on OpenRouter."
 
 4. Run the live matrix gate. Done.
 
+## Adding a new egress provider
+
+A new egress implements `routectl_core::Provider` in
+`routectl-providers`. Beyond the body traces, it MUST wire dir-2
+(outgoing) and dir-3 (upstream -- on BOTH the `complete()` AND
+`stream()` paths) header tracing via
+`routectl_providers::header_trace::{outgoing, upstream}`; both helpers
+are gated on `ROUTECTL_TRACE_HEADERS` (build nothing when off) and the
+fixture capture in `scripts/capture_fixtures.sh` depends on dir-3
+firing on the stream path too.
+
 ## Style notes
 
 - ASCII-only in code, comments, and commit messages. No em-dashes,
