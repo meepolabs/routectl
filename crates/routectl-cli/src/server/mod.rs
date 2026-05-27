@@ -93,6 +93,10 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
     // traffic fixtures can see whether the override took effect
     // before any traced body fires.
     routectl_core::log_trace_body_cap_status();
+    // Same shape for ROUTECTL_TRACE_HEADERS: announce whether
+    // opt-in header tracing is on so a fixture-capture operator
+    // can confirm the four header-trace directions will emit.
+    routectl_core::log_header_trace_status();
 
     let token_set = resolve_listener_tokens(&config).await?;
 

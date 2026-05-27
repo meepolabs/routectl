@@ -346,6 +346,15 @@ impl Provider for BedrockProvider {
         }
 
         signing::apply_auth(&mut request, &self.resolved, &self.cfg.region).await?;
+        // Dir 2: outgoing request headers. The SigV4 Authorization /
+        // x-amz-* (or Bearer) headers were applied to `request` by
+        // signing::apply_auth above, so auth IS visible here -- it is
+        // not signed downstream. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            request.headers(),
+        );
 
         let resp = self
             .client
@@ -364,6 +373,13 @@ impl Provider for BedrockProvider {
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
 
+        // Dir 3: upstream response headers, read BEFORE resp.json()
+        // consumes the body. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            resp.headers(),
+        );
         let raw_body: Value = resp
             .json()
             .await
@@ -458,6 +474,13 @@ impl Provider for BedrockProvider {
         }
 
         signing::apply_auth(&mut request, &self.resolved, &self.cfg.region).await?;
+        // Dir 2: outgoing request headers (incl. signed auth) for the
+        // stream path. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            request.headers(),
+        );
 
         let resp = self
             .client
@@ -475,6 +498,16 @@ impl Provider for BedrockProvider {
             .await;
             return Err(Error::upstream(&self.cfg.id, status, msg));
         }
+
+        // Dir 3: upstream response headers, read BEFORE `resp` is moved
+        // into the eventstream byte stream below. The stream path had no
+        // dir-3 capture before; this closes the gap so it matches
+        // complete(). Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            resp.headers(),
+        );
 
         let provider_id = self.cfg.id.clone();
         let byte_stream = resp.bytes_stream();
