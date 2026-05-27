@@ -25,6 +25,8 @@
 //! - cache_control::validate runs before serialization (debug_assert
 //!   only; keeps non-debug builds fast).
 
+use std::borrow::Cow;
+
 use serde_json::{json, Value};
 
 use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
@@ -462,24 +464,39 @@ fn translate_tool_choice(tc: Option<&Value>, has_tools: bool) -> Option<Value> {
 // Content blocks
 // ---------------------------------------------------------------------------
 
-/// Translate one canonical ContentPart into a wire ContentBlock.
-/// Forward-compat: ContentPart::Other passes through verbatim as
-/// ContentBlock::Other so the Anthropic-in / Anthropic-out path keeps
-/// working when Anthropic ships a new block type.
-/// Walk the canonical `ChatRequest` and reject malformed multi-turn
-/// shapes that the translation helpers would otherwise paper over
-/// with empty-string fallbacks. Anthropic's wire requires:
+/// Walk the canonical `ChatRequest` messages and:
 ///
-/// - Every `Thinking` content part carries a `signature` for replay.
-///   Without it Anthropic / Bedrock 400 with a confusing error;
-///   surfacing the missing signature here gives operators the
-///   precise field to fix.
-/// - Every tool_result message (canonical `Role::Tool`) carries a
-///   `tool_call_id` matching the preceding `tool_use.id`. Without
-///   it Anthropic 400 with "tool_use ids were found without
-///   tool_result blocks immediately after" or a similar error
-///   that doesn't name the bad message.
-fn validate_replay_invariants(id: &str, req: &ChatRequest) -> Result<()> {
+/// - Hard-reject (Err) any tool_result message (`Role::Tool`) that
+///   lacks a `tool_call_id`. Anthropic 400s on such a body and the
+///   upstream error doesn't name the bad message; surfacing it locally
+///   gives operators a precise field to fix.
+/// - STRIP any `Thinking` content block whose `signature` is missing
+///   or empty from each message's `Parts` content. Cross-provider
+///   fallback (a prior turn handled by deepseek which signs with its
+///   own uuid format, then the next turn falls back to Anthropic) and
+///   SDKs that fail to round-trip the signature field would otherwise
+///   400 the request with a confusing upstream error. Strip drops just
+///   the offending block; signed thinking blocks pass through unchanged
+///   and so does every other block type.
+/// - When stripping leaves a message with no content blocks AND no
+///   `reasoning_details` AND no `tool_calls`, drop the whole message.
+///   Anthropic's wire spec rejects `content: []`; emitting the empty
+///   message would just trade one 400 for another. The
+///   `build_assistant_content` path still fills the wire content array
+///   from `reasoning_details` / `tool_calls` when those are present,
+///   so we keep the message in that case.
+///
+/// One structured WARN fires per request when stripping occurs,
+/// carrying the provider id, the count of dropped blocks, and the
+/// affected message indices. Block content is never logged (could be
+/// reasoning over sensitive data).
+///
+/// Returns `Cow::Borrowed(&req.messages)` on the no-strip-needed
+/// common path so unmodified requests don't pay a clone.
+fn normalize_replay_invariants<'a>(id: &str, req: &'a ChatRequest) -> Result<Cow<'a, [Message]>> {
+    // Tool-result tool_call_id check stays a hard fail. Anthropic 400s
+    // a multi-turn body with tool_use ids that lack matching
+    // tool_results.
     for (i, msg) in req.messages.iter().enumerate() {
         if matches!(msg.role, Role::Tool) && msg.tool_call_id.as_deref().unwrap_or("").is_empty() {
             return Err(Error::normalize_request(
@@ -490,24 +507,96 @@ fn validate_replay_invariants(id: &str, req: &ChatRequest) -> Result<()> {
                 ),
             ));
         }
-        if let MessageContent::Parts(parts) = &msg.content {
-            for (j, p) in parts.iter().enumerate() {
-                if let ContentPart::Known(KnownContentPart::Thinking { signature, .. }) = p {
-                    if signature.as_deref().unwrap_or("").is_empty() {
-                        return Err(Error::normalize_request(
-                            id,
-                            format!(
-                                "messages[{i}].content[{j}] is a thinking block without \
-                                 signature; Anthropic requires the upstream-supplied \
-                                 signature to replay thinking on a multi-turn request",
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
     }
-    Ok(())
+
+    // Pre-scan: do we need to strip anything? No -> return Borrowed
+    // (no clone). Yes -> rebuild on the second pass.
+    let needs_strip = req.messages.iter().any(message_has_unsigned_thinking);
+    if !needs_strip {
+        return Ok(Cow::Borrowed(&req.messages));
+    }
+
+    // Rebuild path: walk every message; for Parts, retain non-unsigned-
+    // thinking blocks. Drop the message wholesale when stripping leaves
+    // nothing the wire can serialize.
+    let mut out: Vec<Message> = Vec::with_capacity(req.messages.len());
+    let mut dropped_blocks: usize = 0;
+    let mut affected_messages: Vec<usize> = Vec::new();
+    for (i, msg) in req.messages.iter().enumerate() {
+        let MessageContent::Parts(parts) = &msg.content else {
+            // Text / Null content cannot carry a Thinking block.
+            out.push(msg.clone());
+            continue;
+        };
+        let original_len = parts.len();
+        let kept: Vec<ContentPart> = parts
+            .iter()
+            .filter(|p| !is_unsigned_thinking_part(p))
+            .cloned()
+            .collect();
+        let stripped_here = original_len.saturating_sub(kept.len());
+        if stripped_here > 0 {
+            dropped_blocks += stripped_here;
+            affected_messages.push(i);
+        }
+        let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
+        let has_reasoning = !msg.reasoning_details.is_empty();
+        if kept.is_empty() && !has_tool_calls && !has_reasoning {
+            // Stripping emptied this message and there's no other
+            // content source. Anthropic's wire spec rejects
+            // content: [] for both user and assistant roles; emit
+            // nothing rather than trade one 400 for another.
+            continue;
+        }
+        out.push(Message {
+            role: msg.role.clone(),
+            content: MessageContent::Parts(kept),
+            reasoning: msg.reasoning.clone(),
+            reasoning_details: msg.reasoning_details.clone(),
+            name: msg.name.clone(),
+            tool_call_id: msg.tool_call_id.clone(),
+            tool_calls: msg.tool_calls.clone(),
+        });
+    }
+
+    // One structured WARN per request. Block content stays OUT of the
+    // log line (could be reasoning over sensitive data); only counts
+    // and indices reach the operator. Provider id is always present
+    // so an operator triaging a noisy upstream can grep by it.
+    tracing::warn!(
+        provider = id,
+        dropped_blocks,
+        affected_messages = ?affected_messages,
+        "stripping unsigned thinking blocks from outgoing request: \
+         Anthropic requires a signature on replayed Thinking blocks. \
+         Cross-provider fallback or SDKs that fail to round-trip the \
+         signature field would otherwise 400 the request. Routectl \
+         drops just the unsigned blocks; signed thinking blocks and \
+         other content pass through unchanged."
+    );
+
+    Ok(Cow::Owned(out))
+}
+
+/// True iff `p` is a `Thinking` block whose `signature` is missing
+/// or empty. Pulled out so the pre-scan and the rebuild walk share a
+/// single predicate.
+fn is_unsigned_thinking_part(p: &ContentPart) -> bool {
+    matches!(
+        p,
+        ContentPart::Known(KnownContentPart::Thinking { signature, .. })
+            if signature.as_deref().unwrap_or("").is_empty()
+    )
+}
+
+/// True iff any `Parts` content block on `msg` is an unsigned
+/// `Thinking` block.
+fn message_has_unsigned_thinking(msg: &Message) -> bool {
+    if let MessageContent::Parts(parts) = &msg.content {
+        parts.iter().any(is_unsigned_thinking_part)
+    } else {
+        false
+    }
 }
 
 fn translate_content_part(p: &ContentPart) -> ContentBlock {
@@ -1016,12 +1105,15 @@ pub fn normalize(
     adaptive_thinking: bool,
     allowed_betas: &[String],
 ) -> Result<Value> {
-    // Anthropic's wire requires (a) every Thinking block carry a
-    // `signature` for multi-turn, (b) every tool_result carry the
-    // `tool_use_id` of the tool_use it answers. Validate up front so
-    // routectl doesn't emit empty-string fallbacks that 400 vaguely
-    // upstream.
-    validate_replay_invariants(id, req)?;
+    // Anthropic's wire requires every tool_result carry the
+    // `tool_use_id` of the tool_use it answers; missing ids are
+    // rejected upfront. Thinking blocks must carry a `signature` for
+    // multi-turn replay, but cross-provider fallback (e.g. deepseek
+    // -> Anthropic) and SDKs that don't round-trip the signature
+    // field can produce unsigned blocks; those are STRIPPED here so
+    // routectl forwards a body Anthropic accepts rather than 400ing
+    // the whole request.
+    let messages = normalize_replay_invariants(id, req)?;
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let thinking = build_thinking(req, adaptive_thinking);
@@ -1035,7 +1127,7 @@ pub fn normalize(
         .map(translate_system)
         .or_else(|| lift_legacy_system(&req.messages));
 
-    let anthropic_messages = translate_messages(id, &req.messages)?;
+    let anthropic_messages = translate_messages(id, &messages)?;
 
     // tool_choice="none" forbids tool use; Anthropic has no native
     // equivalent for the bare-string OpenAI form, so strip BOTH the
@@ -1344,6 +1436,114 @@ mod multi_turn_tool_use_tests {
     use routectl_core::{ChatRequest, Message, Role};
     use serde_json::json;
 
+    /// Minimal in-process tracing capture used by
+    /// `emits_warn_when_stripping_occurs` to assert structured fields
+    /// without taking on a `tracing-test` dev-dependency. Scoped via
+    /// `tracing::subscriber::with_default` so concurrent unit tests do
+    /// not leak captured state across threads.
+    mod test_capture {
+        // TODO(consolidation): this is the third copy of the same in-process
+        // tracing-capture pattern. The other two live at:
+        //   - crates/routectl-cli/tests/anthropic_forward_compat_stream.rs
+        //     (lines 175-269): async with_capture for #[tokio::test].
+        //   - crates/routectl-core/tests/common/mod.rs:
+        //     synchronous capture_events with a TRACE level hint.
+        // Next person to touch any of these three: extract a shared helper
+        // (likely in routectl-core/tests/common/) that supports both sync
+        // and async closures plus an opt-in TRACE level hint, then collapse
+        // the copies. Keeping the inline copy for now because each consumer
+        // wants a slightly different shape and full extraction is a larger
+        // refactor than the original strip-instead-of-reject change.
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+
+        #[derive(Debug, Clone)]
+        #[allow(dead_code)]
+        pub struct CapturedEvent {
+            pub level: tracing::Level,
+            pub target: String,
+            pub message: String,
+            pub fields: Vec<(String, String)>,
+        }
+
+        #[derive(Default)]
+        struct Collector {
+            message: String,
+            fields: Vec<(String, String)>,
+        }
+
+        impl Visit for Collector {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "message" {
+                    self.message = value.to_string();
+                } else {
+                    self.fields.push((field.name().into(), value.into()));
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let s = format!("{value:?}");
+                if field.name() == "message" {
+                    self.message = s.trim_matches('"').to_string();
+                } else {
+                    self.fields.push((field.name().into(), s));
+                }
+            }
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                self.fields.push((field.name().into(), value.to_string()));
+            }
+            fn record_i64(&mut self, field: &Field, value: i64) {
+                self.fields.push((field.name().into(), value.to_string()));
+            }
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                self.fields.push((field.name().into(), value.to_string()));
+            }
+        }
+
+        struct CaptureSubscriber {
+            captured: Arc<Mutex<Vec<CapturedEvent>>>,
+        }
+
+        impl tracing::Subscriber for CaptureSubscriber {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let meta = event.metadata();
+                let mut visitor = Collector::default();
+                event.record(&mut visitor);
+                let captured_event = CapturedEvent {
+                    level: *meta.level(),
+                    target: meta.target().to_string(),
+                    message: visitor.message,
+                    fields: visitor.fields,
+                };
+                if let Ok(mut guard) = self.captured.lock() {
+                    guard.push(captured_event);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        /// Run `f` with the capture subscriber installed as the
+        /// thread-local default. Returns the captured events.
+        pub fn with_capture<F: FnOnce()>(f: F) -> Vec<CapturedEvent> {
+            let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = CaptureSubscriber {
+                captured: captured.clone(),
+            };
+            let _guard = tracing::subscriber::set_default(subscriber);
+            f();
+            let events = captured.lock().expect("capture lock poisoned").clone();
+            events
+        }
+    }
+
     fn user_msg(text: &str) -> Message {
         Message {
             role: Role::User,
@@ -1418,6 +1618,332 @@ mod multi_turn_tool_use_tests {
     }
 
     #[test]
+    fn strips_unsigned_thinking_block_keeps_other_blocks() {
+        // Multi-turn input with [text, signed_thinking, unsigned_thinking,
+        // tool_use] -> outgoing assistant content has [text,
+        // signed_thinking, tool_use]. The unsigned block is dropped;
+        // every other content part survives unmodified.
+        use routectl_core::{ContentPart, KnownContentPart};
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                user_msg("compute 2+2"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Known(KnownContentPart::Text {
+                            text: "Let me think.".into(),
+                            cache_control: None,
+                        }),
+                        ContentPart::Known(KnownContentPart::Thinking {
+                            thinking: "signed analysis".into(),
+                            signature: Some("sig_abc".into()),
+                        }),
+                        ContentPart::Known(KnownContentPart::Thinking {
+                            thinking: "unsigned analysis".into(),
+                            signature: None,
+                        }),
+                        ContentPart::Known(KnownContentPart::ToolUse {
+                            id: "toolu_1".into(),
+                            name: "calc".into(),
+                            input: json!({"expr": "2+2"}),
+                            cache_control: None,
+                        }),
+                    ]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+            .expect("assistant message present");
+        let blocks = assistant
+            .get("content")
+            .and_then(|v| v.as_array())
+            .expect("assistant content is Blocks form");
+
+        let types: Vec<&str> = blocks
+            .iter()
+            .filter_map(|b| b.get("type").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            types,
+            vec!["text", "thinking", "tool_use"],
+            "expected unsigned thinking dropped, others preserved; got {types:?}"
+        );
+
+        // The signed thinking block survives with its signature intact.
+        let signed = blocks
+            .iter()
+            .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("thinking"))
+            .unwrap();
+        assert_eq!(signed["signature"], "sig_abc");
+
+        // Other survivors keep their fields.
+        let tool_use = blocks
+            .iter()
+            .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
+            .unwrap();
+        assert_eq!(tool_use["id"], "toolu_1");
+        assert_eq!(tool_use["name"], "calc");
+    }
+
+    #[test]
+    fn passes_through_when_all_thinking_signed() {
+        // No mutation when every thinking block carries a signature.
+        // Pin: signed-only histories must produce the same body the
+        // pre-strip code produced.
+        use routectl_core::{ContentPart, KnownContentPart};
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                user_msg("hi"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Known(KnownContentPart::Thinking {
+                            thinking: "first".into(),
+                            signature: Some("sig_one".into()),
+                        }),
+                        ContentPart::Known(KnownContentPart::Text {
+                            text: "answer".into(),
+                            cache_control: None,
+                        }),
+                        ContentPart::Known(KnownContentPart::Thinking {
+                            thinking: "second".into(),
+                            signature: Some("sig_two".into()),
+                        }),
+                    ]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let assistant = body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+            })
+            .unwrap();
+        let blocks = assistant.get("content").and_then(|v| v.as_array()).unwrap();
+        let types: Vec<&str> = blocks
+            .iter()
+            .filter_map(|b| b.get("type").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            types,
+            vec!["thinking", "text", "thinking"],
+            "all blocks pass through unchanged when every thinking is signed"
+        );
+        assert_eq!(blocks[0]["signature"], "sig_one");
+        assert_eq!(blocks[2]["signature"], "sig_two");
+    }
+
+    #[test]
+    fn drops_assistant_message_when_only_block_was_unsigned_thinking() {
+        // When stripping leaves the assistant message with content: []
+        // AND the message has no reasoning_details / tool_calls to fill
+        // the wire content array, drop the whole message. Anthropic's
+        // wire spec rejects content: []; emitting it would just trade
+        // one 400 for another.
+        use routectl_core::{ContentPart, KnownContentPart};
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                user_msg("hello"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![ContentPart::Known(
+                        KnownContentPart::Thinking {
+                            thinking: "let me think".into(),
+                            signature: None,
+                        },
+                    )]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                user_msg("any update?"),
+            ],
+            ..Default::default()
+        };
+
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
+        // The empty-after-strip assistant message is gone; only the
+        // two user messages remain.
+        assert_eq!(
+            messages.len(),
+            2,
+            "empty-after-strip assistant message must be dropped, got: {messages:?}"
+        );
+        let assistant_present = messages
+            .iter()
+            .any(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"));
+        assert!(
+            !assistant_present,
+            "no assistant message must remain when its only block was an unsigned thinking, \
+             got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
+        // Pin the corner: stripping leaves Parts empty BUT the message
+        // carries tool_calls. The wire content array still gets blocks
+        // from `emit_tool_use_blocks_from_calls`, so the message must
+        // be kept (don't drop the tool_calls along with the empty Parts).
+        use routectl_core::{ContentPart, KnownContentPart};
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                user_msg("hi"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![ContentPart::Known(
+                        KnownContentPart::Thinking {
+                            thinking: "let me think".into(),
+                            signature: None,
+                        },
+                    )]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Some(vec![json!({
+                        "id": "toolu_xyz",
+                        "type": "function",
+                        "function": {"name": "calc", "arguments": "{\"x\":1}"}
+                    })]),
+                },
+            ],
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+            .expect("assistant message must survive when tool_calls fill content");
+        let blocks = assistant.get("content").and_then(|v| v.as_array()).unwrap();
+        let has_tool_use = blocks
+            .iter()
+            .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"));
+        assert!(
+            has_tool_use,
+            "tool_use block must reach the wire from tool_calls; got: {blocks:?}"
+        );
+        // Pin id + name so a translation regression that emits a
+        // tool_use block with the wrong identity still fails.
+        let tool_block = blocks.iter().find(|b| b["type"] == "tool_use").unwrap();
+        assert_eq!(tool_block["id"], "toolu_xyz");
+        assert_eq!(tool_block["name"], "calc");
+        // No thinking block leaks through; the unsigned was dropped.
+        let has_thinking = blocks
+            .iter()
+            .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("thinking"));
+        assert!(
+            !has_thinking,
+            "unsigned thinking must not appear; got: {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn emits_warn_when_stripping_occurs() {
+        // Capture the WARN log emitted during normalize and assert:
+        // - structured fields `provider`, `dropped_blocks`,
+        //   `affected_messages` are present
+        // - block content (the `thinking` text) is NEVER logged --
+        //   could be reasoning over sensitive data.
+        use routectl_core::{ContentPart, KnownContentPart};
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                user_msg("hi"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Known(KnownContentPart::Text {
+                            text: "answer".into(),
+                            cache_control: None,
+                        }),
+                        ContentPart::Known(KnownContentPart::Thinking {
+                            thinking: "TOPSECRET-REASONING-PAYLOAD".into(),
+                            signature: None,
+                        }),
+                    ]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let captured = test_capture::with_capture(|| {
+            normalize("provider-x", &req, false, &[]).expect("normalize succeeds");
+        });
+
+        let strip_event = captured
+            .iter()
+            .find(|e| e.message.contains("stripping unsigned thinking blocks"))
+            .unwrap_or_else(|| panic!("expected strip WARN, got events: {captured:?}"));
+        assert_eq!(strip_event.level, tracing::Level::WARN);
+
+        // Structured fields present.
+        let field_keys: Vec<&str> = strip_event.fields.iter().map(|(k, _)| k.as_str()).collect();
+        for key in &["provider", "dropped_blocks", "affected_messages"] {
+            assert!(
+                field_keys.contains(key),
+                "expected field `{key}` in WARN, got fields: {:?}",
+                strip_event.fields
+            );
+        }
+        let provider_value = strip_event
+            .fields
+            .iter()
+            .find(|(k, _)| k == "provider")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert_eq!(provider_value, "provider-x");
+
+        // Block content must not appear anywhere in the captured events.
+        for evt in &captured {
+            assert!(
+                !evt.message.contains("TOPSECRET-REASONING-PAYLOAD"),
+                "thinking block content leaked into log message: {evt:?}"
+            );
+            for (_, v) in &evt.fields {
+                assert!(
+                    !v.contains("TOPSECRET-REASONING-PAYLOAD"),
+                    "thinking block content leaked into log fields: {evt:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tool_message_without_tool_call_id_is_rejected() {
         // Anthropic requires `tool_result` to reference the
         // `tool_use.id` it answers. An empty / missing
@@ -1446,35 +1972,58 @@ mod multi_turn_tool_use_tests {
     }
 
     #[test]
-    fn thinking_part_without_signature_is_rejected() {
-        // KnownContentPart::Thinking with `signature: None` previously
-        // emitted an empty-string signature to upstream which fails
-        // multi-turn replay with a vague Anthropic 400. Reject
-        // locally with a precise NormalizeRequest error.
+    fn unsigned_thinking_block_is_stripped_not_rejected() {
+        // Regression: prior behavior was a HTTP 400
+        // ("thinking block without signature"). New behavior STRIPS
+        // the unsigned block from the outgoing body and forwards the
+        // rest. Cross-provider fallback (deepseek -> Anthropic) and
+        // SDKs that fail to round-trip the signature field rely on
+        // this -- a hard reject would 400 every multi-turn after
+        // such a turn.
         use routectl_core::{ContentPart, KnownContentPart};
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
-            messages: vec![Message {
-                role: Role::Assistant,
-                content: MessageContent::Parts(vec![ContentPart::Known(
-                    KnownContentPart::Thinking {
-                        thinking: "let me think".into(),
-                        signature: None,
-                    },
-                )]),
-                reasoning: None,
-                reasoning_details: vec![],
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }],
+            messages: vec![
+                user_msg("hi"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(vec![
+                        ContentPart::Known(KnownContentPart::Text {
+                            text: "answer".into(),
+                            cache_control: None,
+                        }),
+                        ContentPart::Known(KnownContentPart::Thinking {
+                            thinking: "let me think".into(),
+                            signature: None,
+                        }),
+                    ]),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            ],
             ..Default::default()
         };
-        let err = normalize("test-anthropic", &req, false, &[]).unwrap_err();
-        assert!(
-            err.to_string().contains("thinking block without signature"),
-            "must mention signature; got: {err}"
+        // Must NOT error: the new behavior is to strip the unsigned
+        // block, not reject the request.
+        let body = normalize("test-anthropic", &req, false, &[]).expect(
+            "normalize must accept the request and strip the unsigned block; \
+             a hard reject would regress the cross-provider fallback path",
         );
+        let assistant = body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("assistant"))
+            })
+            .unwrap();
+        let blocks = assistant.get("content").and_then(|v| v.as_array()).unwrap();
+        // Only the text block survives; the unsigned thinking is dropped.
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
     }
 
     #[test]
