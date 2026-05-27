@@ -149,6 +149,7 @@ listed at the bottom of each crate.
 - `src/store.rs` -- `SecretStore` async trait (get/set/delete) for credential providers
 - `src/secret_ref.rs` -- `SecretRef` enum (`env://`, `file://`, `literal:`) plus URI parser
 - `src/memory_store.rs` -- default in-process `SecretStore` resolving env/file/literal references at read-time
+- `src/oauth/providers/codex.rs` -- OpenAI ChatGPT/Codex OAuth 2.0 PKCE flow (public client, JWT-derived expiry, lazy refresh-token rotation)
 - `src/session.rs` -- v0.2 cookie-session capture trait + `Cookie` / `CapturedSession` types (deferred)
 
 ### Tests

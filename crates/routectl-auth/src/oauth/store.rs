@@ -149,6 +149,23 @@ impl OAuthStore {
             .ok_or_else(|| OAuthError::NotLoggedIn(provider.to_string()))
     }
 
+    /// Read the stable account id recorded for `provider`, if any.
+    /// Read-only: no expiry check, no refresh, no network. Returns
+    /// `None` when the provider has no stored record (not logged in)
+    /// OR when the record carries no `account_id` (some token-endpoint
+    /// responses omit it). The `chatgpt_account_id` is stable across
+    /// token rotations, so the openai-responses factory reads it once
+    /// at build time to populate `OpenAiResponsesConfig.account_id`
+    /// when the operator omits `account_id_ref` on an `oauth://` ref.
+    pub async fn peek_account_id(&self, provider: &str) -> Option<String> {
+        self.inner
+            .file
+            .read()
+            .await
+            .get(provider)
+            .and_then(|rec| rec.account.account_id.clone())
+    }
+
     /// Persist a token record atomically. Disk write happens FIRST,
     /// off a clone of the current in-memory state; the in-memory cache
     /// only commits on a successful save. This way a failed disk write
@@ -382,6 +399,18 @@ impl SecretStore for OAuthStore {
             }
         };
         self.force_refresh(provider).await.map(|_| ())
+    }
+
+    async fn account_id(&self, secret_ref: &SecretRef) -> Result<Option<String>> {
+        let provider = match secret_ref {
+            SecretRef::OAuth { provider } => provider,
+            other => {
+                return Err(Error::Auth(format!(
+                    "OAuthStore only handles oauth:// refs, got {other}",
+                )));
+            }
+        };
+        Ok(self.peek_account_id(provider).await)
     }
 }
 

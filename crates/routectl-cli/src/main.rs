@@ -18,7 +18,18 @@ use std::sync::Arc;
 
 use routectl_cli::{commands, server};
 
+use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
+
+/// Build a clap value-parser that accepts exactly the OAuth provider ids
+/// the auth registry knows about. Driven by
+/// `routectl_auth::oauth::known_provider_ids()` so `login` / `logout` /
+/// `refresh` stay in lockstep with the registry: a new provider added in
+/// routectl-auth is accepted here with zero edits, and an unknown value is
+/// rejected by clap with the valid set listed in the error.
+fn provider_value_parser() -> PossibleValuesParser {
+    PossibleValuesParser::new(routectl_auth::oauth::known_provider_ids())
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -49,13 +60,13 @@ enum Cmd {
         #[arg(long)]
         unsafe_public: bool,
     },
-    /// Log into a managed OAuth provider (claude.ai for now; codex
-    /// in PR3). Spawns a local callback server, opens the browser to
-    /// the provider's auth URL, and persists tokens to
-    /// `~/.config/routectl/credentials.json`.
+    /// Log into a managed OAuth provider (`anthropic` for claude.ai,
+    /// `codex` for OpenAI ChatGPT/Codex). Spawns a local callback
+    /// server, opens the browser to the provider's auth URL, and
+    /// persists tokens to `~/.config/routectl/credentials.json`.
     Login {
         /// Which provider to log into.
-        #[arg(value_parser = ["anthropic"])]
+        #[arg(value_parser = provider_value_parser())]
         provider: String,
         /// Print the auth URL to stdout and read the redirect from
         /// stdin instead of launching a browser. For SSH/headless.
@@ -70,7 +81,7 @@ enum Cmd {
     /// error.
     Logout {
         /// Which provider to log out of.
-        #[arg(value_parser = ["anthropic"])]
+        #[arg(value_parser = provider_value_parser())]
         provider: String,
     },
     /// Force a token refresh for a provider through the per-provider
@@ -78,7 +89,7 @@ enum Cmd {
     /// has been revoked server-side or before a long-running session.
     Refresh {
         /// Which provider to refresh.
-        #[arg(value_parser = ["anthropic"])]
+        #[arg(value_parser = provider_value_parser())]
         provider: String,
     },
     /// Print the OAuth provider state from the routectl credentials

@@ -34,6 +34,7 @@ pub(crate) mod store;
 pub mod types;
 
 pub use login::{run as run_login, LoginOptions};
+pub use providers::known_provider_ids;
 pub use store::OAuthStore;
 pub use types::{unix_now, AccountInfo, CredentialsFile, SecretToken, TokenRecord, SCHEMA_VERSION};
 
@@ -46,7 +47,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum OAuthError {
-    #[error("unknown oauth provider `{0}` (known: anthropic)")]
+    #[error("unknown oauth provider `{0}` (known: anthropic, codex)")]
     UnknownProvider(String),
 
     #[error("no credentials for `{0}`; run `routectl login {0}` first")]
