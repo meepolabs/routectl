@@ -145,7 +145,7 @@ use parse::translate_request;
 use render::render_messages_response;
 use stream::{
     anthropic_state_mut, close_open_block, emit_message_delta, emit_message_stop,
-    flush_tool_blocks, render_chunk_internal,
+    flush_tool_blocks, render_chunk_internal, render_error_eos_internal,
 };
 
 /// Reverse of `routectl_providers::anthropic_api::response::map_stop_reason`.
@@ -246,6 +246,14 @@ impl IngressAdapter for AnthropicIngress {
             emit_message_stop(s, &mut events);
         }
         events
+    }
+
+    fn render_error_eos(
+        &self,
+        state: &mut dyn IngressStreamState,
+        error: &dyn std::fmt::Display,
+    ) -> Vec<SseEvent> {
+        render_error_eos_internal(anthropic_state_mut(state), error)
     }
 }
 
