@@ -52,6 +52,14 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
         opts.disable_fallbacks = header_truthy(&headers, DISABLE_FALLBACKS_HEADER);
     }
 
+    // Trace-level ingress request headers (direction 1: client ->
+    // routectl). Opt-in via ROUTECTL_TRACE_HEADERS. Single call site
+    // here covers both dialects and both the stream + non-stream
+    // paths below; inherits the request_id span like trace_ingress_body.
+    // The guarded wrapper builds zero header JSON unless the toggle and
+    // TRACE are both on (mirrors routectl_providers::header_trace).
+    trace_ingress_headers_of(adapter.id(), &headers);
+
     let streaming = req.stream == Some(true);
     if streaming {
         stream_response(state, req, opts, adapter).await
@@ -114,7 +122,13 @@ async fn complete_response<A: IngressAdapter>(
                 // because every non-streaming response funnels through
                 // here after canonical -> wire serialization.
                 routectl_core::trace_egress_body(adapter.id(), &body);
-                (StatusCode::OK, Json(body)).into_response()
+                let resp = (StatusCode::OK, Json(body)).into_response();
+                // Dir 4: egress response headers, captured from the
+                // built response so the trace reflects what the client
+                // receives. Read before returning (no borrow conflict;
+                // the helper only reads `resp.headers()`).
+                trace_egress_headers_of(adapter.id(), &resp);
+                resp
             }
             Err(e) => map_error(envelope, e),
         },
@@ -147,6 +161,10 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // `request_id=<id>` would lose the streaming-error trail.
     let parent_span = tracing::Span::current();
     let ingress_id = adapter.id().to_string();
+    // Clone for the post-spawn dir-4 egress-headers trace; `ingress_id`
+    // itself moves into the spawned render task (EgressStreamSummary),
+    // as does `adapter`, so neither is reachable after the spawn.
+    let egress_id = ingress_id.clone();
     tokio::spawn(
         async move {
             let mut upstream = upstream;
@@ -222,9 +240,14 @@ async fn stream_response<A: IngressAdapter + 'static>(
     );
 
     let receiver_stream = ReceiverStream::new(rx);
-    Sse::new(receiver_stream)
+    let resp = Sse::new(receiver_stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
-        .into_response()
+        .into_response();
+    // Dir 4 (streaming egress): capture the SSE response headers
+    // (content-type: text/event-stream, keep-alive, ...) before
+    // returning. Uses the pre-spawn `egress_id` clone.
+    trace_egress_headers_of(&egress_id, &resp);
+    resp
 }
 
 fn sse_to_axum(ev: SseEvent) -> Event {
@@ -233,6 +256,55 @@ fn sse_to_axum(ev: SseEvent) -> Event {
         e = e.event(name);
     }
     e
+}
+
+/// True only when an axum-side header trace should be BUILT here: the
+/// operator opted in via ROUTECTL_TRACE_HEADERS. Cheap env-toggle check
+/// that skips the `headers_to_json` allocation on the default path.
+///
+/// The TRACE-LEVEL gate is intentionally NOT checked here:
+/// `event_enabled!` resolves against THIS module's target
+/// (`routectl_cli::*`, which runs at `info` under the usual filter), so
+/// a level check here would always be false and suppress every header
+/// trace. The core `trace_*_headers` emitters re-check TRACE against the
+/// `routectl_core::log_safe` target where it is actually enabled. Kept
+/// CLI-side so routectl-core stays decoupled from the axum / http
+/// `HeaderMap` type.
+fn header_trace_enabled_here() -> bool {
+    routectl_core::header_trace_enabled()
+}
+
+/// Trace dir-1 ingress request headers (client -> routectl) from the
+/// inbound axum `HeaderMap`. No-op, and no allocation, unless header
+/// tracing is on. Single call site covers both dialects and the
+/// stream + non-stream paths.
+fn trace_ingress_headers_of(ingress_id: &str, headers: &HeaderMap) {
+    if !header_trace_enabled_here() {
+        return;
+    }
+    routectl_core::trace_ingress_headers(
+        ingress_id,
+        &routectl_core::headers_to_json(headers.iter().map(|(k, v)| (k.as_str(), v.as_bytes()))),
+    );
+}
+
+/// Trace dir-4 egress response headers (routectl -> client) from a
+/// built `Response`. No-op, and no allocation, unless header tracing
+/// is on. Shared by the non-streaming and streaming egress paths so
+/// both emit an `egress response headers` line alongside the `egress
+/// response body` trace.
+fn trace_egress_headers_of(ingress_id: &str, resp: &Response) {
+    if !header_trace_enabled_here() {
+        return;
+    }
+    routectl_core::trace_egress_headers(
+        ingress_id,
+        &routectl_core::headers_to_json(
+            resp.headers()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_bytes())),
+        ),
+    );
 }
 
 pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {

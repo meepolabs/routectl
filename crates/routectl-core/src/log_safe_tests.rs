@@ -858,3 +858,111 @@ fn extract_structural_summary_uses_input_for_responses_shape() {
     let s = super::extract_structural_summary(&body);
     assert_eq!(s.messages_len, 2);
 }
+
+// ---------------------------------------------------------------------
+// header trace helpers (headers_to_json)
+// ---------------------------------------------------------------------
+
+#[test]
+fn headers_to_json_preserves_order_duplicates_and_lossy_decodes() {
+    // The wire shape is an ARRAY of [name, value] pairs, not an
+    // object: header ORDER and DUPLICATE names (set-cookie, repeated
+    // via) must survive. A JSON object would collapse / reorder them.
+    // A non-UTF-8 byte value is lossy-decoded, not dropped.
+    let pairs: Vec<(&str, &[u8])> = vec![
+        ("set-cookie", b"a=1".as_slice()),
+        ("x-order", b"second".as_slice()),
+        ("set-cookie", b"b=2".as_slice()),
+        ("x-binary", &[0xffu8, 0xfe][..]),
+    ];
+
+    let got = super::headers_to_json(pairs);
+
+    let arr = got.as_array().expect("top-level array");
+    assert_eq!(arr.len(), 4);
+    // Order preserved.
+    assert_eq!(arr[0], json!(["set-cookie", "a=1"]));
+    assert_eq!(arr[1], json!(["x-order", "second"]));
+    // Duplicate set-cookie kept as a distinct, later entry (not
+    // collapsed onto the first).
+    assert_eq!(arr[2], json!(["set-cookie", "b=2"]));
+    // Non-UTF-8 bytes lossy-decoded to the replacement char rather
+    // than dropping the header.
+    assert_eq!(arr[3][0], "x-binary");
+    assert!(arr[3][1]
+        .as_str()
+        .expect("value string")
+        .contains('\u{FFFD}'));
+}
+
+#[test]
+fn headers_to_json_value_with_newline_serializes_escaped() {
+    // A header value carrying a raw newline (a log-injection attempt)
+    // must serialize with an ESCAPED `\n`, never a literal newline, so
+    // the compact-string emit in the trace helpers cannot forge a
+    // second log line on a text-format subscriber.
+    let got = super::headers_to_json([("x-evil", "line1\nline2".as_bytes())]);
+
+    let serialized = serde_json::to_string(&got).expect("serialize");
+
+    assert!(
+        !serialized.contains('\n'),
+        "raw newline leaked into output: {serialized}"
+    );
+    assert!(
+        serialized.contains("\\n"),
+        "newline was not escaped: {serialized}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// header trace gate (pure predicates) + message-string contract
+// ---------------------------------------------------------------------
+
+#[test]
+fn parse_bool_env_accepts_truthy_spellings_case_insensitively() {
+    // The toggle decision behind ROUTECTL_TRACE_HEADERS and
+    // ROUTECTL_LOG_REDACT_PROMPTS, isolated from the process-frozen
+    // OnceLock so both arms are testable. All four spellings, any
+    // case, with surrounding whitespace, are truthy -- and the two
+    // toggles agree because they share this fn.
+    for v in [
+        "1", "true", "TRUE", "True", "yes", "YES", "on", "ON", "  on  ", "\ttrue\n",
+    ] {
+        assert!(super::parse_bool_env(v), "{v:?} should parse truthy");
+    }
+}
+
+#[test]
+fn parse_bool_env_rejects_everything_else() {
+    // Anything outside the truthy set -- empty, "0", near-misses -- is
+    // false, so a typo cannot silently enable raw-header logging.
+    for v in ["", "0", "false", "no", "off", "onn", "tru", "enable", "2"] {
+        assert!(!super::parse_bool_env(v), "{v:?} should parse falsey");
+    }
+}
+
+#[test]
+fn header_trace_should_emit_requires_toggle_and_trace() {
+    // The four trace_*_headers emitters fire ONLY when the operator
+    // opted in (toggle) AND the subscriber has TRACE on. Toggle off ->
+    // no emission at any level; toggle on -> emission tracks TRACE.
+    // Pure fn keeps both arms unit-testable without the frozen OnceLock
+    // or a shared tracing subscriber.
+    assert!(super::header_trace_should_emit(true, true));
+    assert!(!super::header_trace_should_emit(true, false));
+    assert!(!super::header_trace_should_emit(false, true));
+    assert!(!super::header_trace_should_emit(false, false));
+}
+
+#[test]
+fn header_trace_message_consts_match_capture_script_needles() {
+    // These exact strings are the parsing contract with
+    // scripts/capture_fixtures.sh::extract_headers. Changing one here
+    // without updating the script's needles would silently break
+    // fixture capture, so pin all four.
+    assert_eq!(super::HDR_MSG_INGRESS, "ingress request headers");
+    assert_eq!(super::HDR_MSG_OUTGOING, "outgoing request headers");
+    assert_eq!(super::HDR_MSG_UPSTREAM, "upstream response headers");
+    assert_eq!(super::HDR_MSG_EGRESS, "egress response headers");
+}

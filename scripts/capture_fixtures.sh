@@ -19,12 +19,16 @@
 # Usage:
 #   scripts/capture_fixtures.sh [--log /tmp/routectl-trace.log] \
 #                               [--out crates/routectl-cli/tests/fixtures/captured] \
-#                               [--limit 4] [--force]
+#                               [--limit 4] [--force] [--allow-unsafe-out]
 #
 # `--limit N` caps the number of NEW requests captured this run
 # (the periodic hook passes 4 to mirror the heartbeat's window).
 # `--force` ignores the resume marker and re-captures from the start
 # of the log.
+# `--out` is confined to the default captured dir (which is gitignored)
+# because fixtures carry RAW headers -- auth included when the daemon
+# runs with ROUTECTL_TRACE_HEADERS. `--allow-unsafe-out` lifts that
+# guard for a deliberate out-of-tree capture.
 
 # set -e so a partial-fixture mid-write failure aborts the script
 # instead of silently writing a half-poisoned directory. set -u
@@ -40,17 +44,100 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/crates/routectl-cli/tests/fixtures/captured"
 LIMIT=0
 FORCE=0
+ALLOW_UNSAFE_OUT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --log) LOG="$2"; shift 2 ;;
-    --out) OUT="$2"; shift 2 ;;
-    --limit) LIMIT="$2"; shift 2 ;;
+    --log) [ $# -ge 2 ] || { echo "--log requires a value" >&2; exit 2; }; LOG="$2"; shift 2 ;;
+    --out) [ $# -ge 2 ] || { echo "--out requires a value" >&2; exit 2; }; OUT="$2"; shift 2 ;;
+    --limit) [ $# -ge 2 ] || { echo "--limit requires a value" >&2; exit 2; }; LIMIT="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
-    -h|--help) sed -n '1,32p' "$0"; exit 0 ;;
+    --allow-unsafe-out) ALLOW_UNSAFE_OUT=1; shift ;;
+    -h|--help) sed -n '1,36p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Lexically resolve a path to absolute, collapsing `.` and `..` without
+# touching the filesystem. Portable (no realpath / -m dependency) and
+# works for a not-yet-created directory. Symlinks are NOT followed: the
+# default captured tree has none and confinement only needs lexical
+# containment.
+abspath_lexical() {
+  case "$1" in
+    /*) _p="$1" ;;
+    *)  _p="$PWD/$1" ;;
+  esac
+  printf '%s\n' "$_p" | awk -F/ '
+    { n = 0
+      for (i = 1; i <= NF; i++) {
+        if ($i == "" || $i == ".") continue
+        if ($i == "..") { if (n > 0) n--; continue }
+        seg[++n] = $i
+      }
+      out = ""
+      for (i = 1; i <= n; i++) out = out "/" seg[i]
+      print (out == "" ? "/" : out)
+    }'
+}
+
+# Physically resolve a path to absolute, FOLLOWING symlinks, so a
+# symlinked component cannot disguise an out-of-tree destination as an
+# in-tree one. The path need not exist yet: walk up the RAW path (no
+# lexical `..` collapse first -- collapsing before symlink resolution is
+# unsafe, since `link/..` must resolve through the link, not cancel its
+# name) to the nearest EXISTING ancestor, resolve THAT with
+# `cd -P` / `pwd -P` (portable; no `realpath -m` dependency), then
+# re-append the non-existing tail. Tail components do not exist, so they
+# cannot be symlinks; a final lexical collapse of the combined path is
+# therefore physically faithful.
+abspath_physical() {
+  case "$1" in
+    /*) _p="$1" ;;
+    *)  _p="$PWD/$1" ;;
+  esac
+  _tail=""
+  while [ ! -e "$_p" ] && [ "$_p" != "/" ]; do
+    _tail="$(basename "$_p")${_tail:+/$_tail}"
+    _p="$(dirname "$_p")"
+  done
+  _phys="$(cd -P "$_p" 2>/dev/null && pwd -P)" || {
+    echo "cannot physically resolve path ancestor: $_p" >&2
+    exit 2
+  }
+  if [ -n "$_tail" ]; then
+    abspath_lexical "$_phys/$_tail"
+  else
+    printf '%s\n' "$_phys"
+  fi
+}
+
+# Confine --out to the default captured dir unless the operator
+# explicitly opts out. Fixtures carry RAW headers (auth included when
+# the daemon runs with ROUTECTL_TRACE_HEADERS) and the default tree is
+# gitignored; writing them into an arbitrary -- possibly git-tracked --
+# path risks committing secrets. OUT keeps its lexically-collapsed form
+# for the write path; the confinement test compares the PHYSICALLY
+# resolved (symlink-following) OUT against the physically resolved
+# default root. A purely lexical compare cannot see through a symlinked
+# subdir under the default tree, so `<default>/<symlink>/x` could escape
+# confinement -- resolving both sides physically closes that hole while
+# still normalizing `..` traversals such as `<default>/../../src`.
+OUT="$(abspath_lexical "$OUT")"
+DEFAULT_OUT_ABS="$(abspath_lexical "$ROOT/crates/routectl-cli/tests/fixtures/captured")"
+if [ "$ALLOW_UNSAFE_OUT" = 0 ]; then
+  out_phys="$(abspath_physical "$OUT")"
+  default_phys="$(abspath_physical "$DEFAULT_OUT_ABS")"
+  case "$out_phys" in
+    "$default_phys" | "$default_phys"/*) : ;;
+    *)
+      echo "refusing --out '$OUT': outside the default captured dir '$DEFAULT_OUT_ABS'." >&2
+      echo "fixtures contain raw headers (auth when ROUTECTL_TRACE_HEADERS is on)." >&2
+      echo "pass --allow-unsafe-out to write outside the default tree on purpose." >&2
+      exit 2
+      ;;
+  esac
+fi
 
 mkdir -p "$OUT"
 MARKER="$OUT/.last_capture_ts"
@@ -169,34 +256,63 @@ write_fixture() {
     total_tokens="$(echo "$ss" | grep -oE 'total_tokens=[0-9]+' | cut -d= -f2 || echo 0)"
   fi
 
-  # Body extraction. The tracing field layout is
+  # Body extraction. The tracing line layout is
   #
-  #   TS LEVEL spans: target: <message text> <fields...> body=<JSON> redact_prompts_enabled=<bool>
+  #   TS LEVEL spans: routectl_core::log_safe: <message> <fields...> body=<JSON> redact_prompts_enabled=<bool>
   #
-  # so the structural `body=` marker is always the FIRST `body=` on
-  # the line (any earlier "body" in spans/message text lacks the
-  # `=`). The previous `sed -E 's/.*body=//'` was greedy and would
-  # match the LAST `body=` instead, corrupting any captured body
-  # whose JSON content itself contained the literal substring
-  # `body=` (e.g. a user prompt about log output). awk + index()
-  # gives us first-occurrence semantics. The trailing
-  # `redact_prompts_enabled=<bool>` field is stripped so the saved
-  # JSON has no log fields appended.
+  # We ANCHOR on the structural message position: find the first
+  # `routectl_core::log_safe: ` (the tracing target, emitted exactly once
+  # per line) and require the message immediately after it to START with
+  # the needle. This is what keeps capture correct even when the request
+  # BODY itself contains the needle text or a quoted routectl log line
+  # (e.g. a coding session about routectl's own logging): content copies
+  # live after `body=`, past the first target occurrence, so they can
+  # never select the wrong line. Within the matched message we take the
+  # FIRST `body=` (the real field -- the message text and the fields
+  # before it carry no `body=`) to end-of-line, then strip the trailing
+  # `redact_prompts_enabled=<bool>` field.
   extract_body() {
     local needle="$1"
-    # Pure awk pipeline (no `grep | head`) to avoid SIGPIPE on the
-    # producer when set -e is on. awk filters to lines containing
-    # the message-name needle, finds the FIRST `body=` field on
-    # the matched line, strips the trailing
-    # `redact_prompts_enabled=<bool>` field, and exits after the
-    # first match so only one body is emitted per needle.
-    echo "$lines" | awk -v needle="$needle" '
-      index($0, needle) {
-        i = index($0, "body=")
+    echo "$lines" | awk -v needle="$needle" -v target="routectl_core::log_safe: " '
+      {
+        p = index($0, target)
+        if (p == 0) next
+        mstart = p + length(target)
+        if (substr($0, mstart, length(needle)) != needle) next
+        rest = substr($0, mstart)
+        i = index(rest, "body=")
         if (i == 0) next
-        rest = substr($0, i + 5)
-        sub(/ redact_prompts_enabled=(true|false)$/, "", rest)
-        print rest
+        val = substr(rest, i + 5)
+        sub(/ redact_prompts_enabled=(true|false)$/, "", val)
+        print val
+        exit
+      }
+    '
+  }
+
+  # Header extraction. Reciprocal of the parsing contract documented in
+  # crates/routectl-core/src/log_safe.rs (the header-trace section): the
+  # four canonical needles are the HDR_MSG_* consts there, and `headers`
+  # is the LAST field on the line. Same structural anchoring as
+  # extract_body -- match the needle only at the message position right
+  # after the first `routectl_core::log_safe: `, so a header needle never
+  # selects a body line (or a body-content copy of the needle) -- then
+  # take everything after the first `headers=` to end-of-line (only a
+  # trailing space to strip; header lines carry no `redact_prompts_enabled`).
+  extract_headers() {
+    local needle="$1"
+    echo "$lines" | awk -v needle="$needle" -v target="routectl_core::log_safe: " '
+      {
+        p = index($0, target)
+        if (p == 0) next
+        mstart = p + length(target)
+        if (substr($0, mstart, length(needle)) != needle) next
+        rest = substr($0, mstart)
+        i = index(rest, "headers=")
+        if (i == 0) next
+        val = substr(rest, i + 8)
+        sub(/[[:space:]]+$/, "", val)
+        print val
         exit
       }
     '
@@ -212,6 +328,20 @@ write_fixture() {
   [ -n "$b_out" ] && echo "$b_out" > "$tmp/outgoing_request.json"
   [ -n "$b_uok" ] && echo "$b_uok" > "$tmp/upstream_response.json"
   [ -n "$b_egr" ] && echo "$b_egr" > "$tmp/egress_response.json"
+
+  # Header fixtures (opt-in via ROUTECTL_TRACE_HEADERS on the daemon).
+  # Each is written only when its trace line was present, mirroring
+  # the body files above.
+  local h_ing h_out h_uok h_egr
+  h_ing="$(extract_headers 'ingress request headers')"
+  h_out="$(extract_headers 'outgoing request headers')"
+  h_uok="$(extract_headers 'upstream response headers')"
+  h_egr="$(extract_headers 'egress response headers')"
+
+  [ -n "$h_ing" ] && echo "$h_ing" > "$tmp/ingress_request.headers.json"
+  [ -n "$h_out" ] && echo "$h_out" > "$tmp/outgoing_request.headers.json"
+  [ -n "$h_uok" ] && echo "$h_uok" > "$tmp/upstream_response.headers.json"
+  [ -n "$h_egr" ] && echo "$h_egr" > "$tmp/egress_response.headers.json"
 
   # Structural summary lines (two: ingress + outgoing direction).
   echo "$lines" | grep 'structural summary' | head -2 > "$tmp/structural.txt" || true
@@ -234,7 +364,11 @@ write_fixture() {
   "has_ingress_body": $([ -n "$b_ing" ] && echo true || echo false),
   "has_outgoing_body": $([ -n "$b_out" ] && echo true || echo false),
   "has_upstream_response": $([ -n "$b_uok" ] && echo true || echo false),
-  "has_egress_response": $([ -n "$b_egr" ] && echo true || echo false)
+  "has_egress_response": $([ -n "$b_egr" ] && echo true || echo false),
+  "has_ingress_headers": $([ -n "$h_ing" ] && echo true || echo false),
+  "has_outgoing_headers": $([ -n "$h_out" ] && echo true || echo false),
+  "has_upstream_headers": $([ -n "$h_uok" ] && echo true || echo false),
+  "has_egress_headers": $([ -n "$h_egr" ] && echo true || echo false)
 }
 META
 
@@ -268,9 +402,14 @@ while IFS=$'\t' read -r ts id pkind; do
   fi
 done < <(in_scope_ids)
 
-# Update resume marker only if we captured something.
+# Update resume marker only if we captured something. Write to a temp
+# file inside $OUT and rename over the marker so an interrupt mid-write
+# cannot leave an empty/partial marker that would force a full rescan
+# (mirrors the fixture-dir tmp -> dst promotion in write_fixture).
 if [ -n "$latest_ts" ]; then
-  echo "$latest_ts" > "$MARKER"
+  marker_tmp="$(mktemp "$OUT/.last_capture_ts.XXXXXX")"
+  echo "$latest_ts" > "$marker_tmp"
+  mv "$marker_tmp" "$MARKER"
 fi
 
 echo "captured=$captured since=$since latest=$latest_ts out=$OUT"

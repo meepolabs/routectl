@@ -392,11 +392,19 @@ impl Provider for AnthropicApiProvider {
         // value (including the v0.7+ refresh path landing in PR2).
         let token = self.cfg.auth.token().await?;
 
-        let resp = self
+        let request = self
             .build_headers(self.client.post(self.messages_url()), &req, &token)
             .header("content-type", "application/json")
             .json(&body)
-            .send()
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Dir 2: outgoing request headers (incl. auth) from the built
+        // request -- auth is only present after build_headers applies
+        // the resolved token. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -441,6 +449,10 @@ impl Provider for AnthropicApiProvider {
             return Err(err);
         }
 
+        // Dir 3: upstream response headers, read BEFORE the body
+        // consume (resp.json() takes ownership). Opt-in via
+        // ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
         let raw_body: Value = resp
             .json()
             .await
@@ -468,11 +480,18 @@ impl Provider for AnthropicApiProvider {
 
         let token = self.cfg.auth.token().await?;
 
-        let resp = self
+        let request = self
             .build_headers(self.client.post(self.messages_url()), &req, &token)
             .header("content-type", "application/json")
             .json(&body)
-            .send()
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Dir 2: outgoing request headers (incl. auth) for the stream
+        // path. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -502,6 +521,12 @@ impl Provider for AnthropicApiProvider {
             }
             return Err(err);
         }
+
+        // Dir 3: upstream response headers, read BEFORE `resp` is moved
+        // into the SSE byte stream. The stream path had no dir-3 capture
+        // before; this closes the gap so it matches the complete() path.
+        // Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
         let provider_id = self.cfg.id.clone();
         let byte_stream = resp.bytes_stream();
@@ -596,11 +621,18 @@ impl Provider for AnthropicApiProvider {
 
         let token = self.cfg.auth.token().await?;
 
-        let resp = self
+        let request = self
             .build_headers(self.client.post(self.count_tokens_url()), &req, &token)
             .header("content-type", "application/json")
             .json(&body)
-            .send()
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        // Dir 2: outgoing request headers (incl. auth) for the
+        // count_tokens probe. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
             .await
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
 
@@ -636,6 +668,9 @@ impl Provider for AnthropicApiProvider {
             return Err(err);
         }
 
+        // Dir 3: upstream response headers, read BEFORE the body
+        // consume. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
         let raw_body: Value = resp
             .json()
             .await
