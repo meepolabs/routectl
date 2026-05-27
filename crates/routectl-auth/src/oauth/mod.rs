@@ -30,6 +30,7 @@ pub(crate) mod file_io;
 pub(crate) mod login;
 pub(crate) mod pkce;
 pub(crate) mod providers;
+pub(crate) mod rate_limit;
 pub(crate) mod store;
 pub mod types;
 

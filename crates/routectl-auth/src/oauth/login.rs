@@ -15,10 +15,11 @@
 //! live only as stack/heap variables in this driver and are dropped
 //! when `run` returns.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::get;
@@ -28,6 +29,7 @@ use tokio::sync::oneshot;
 
 use crate::oauth::pkce::{constant_time_eq, Pkce};
 use crate::oauth::providers::{self, AuthParams, OAuthFlow};
+use crate::oauth::rate_limit::{Decision, RateLimitTracker};
 use crate::oauth::store::OAuthStore;
 use crate::oauth::{OAuthError, OAuthResult};
 
@@ -220,6 +222,7 @@ fn spawn_callback_server(
         expected_state,
         tx: tokio::sync::Mutex::new(Some(code_tx)),
         shutdown: tokio::sync::Mutex::new(Some(shutdown_tx)),
+        rate_limit: std::sync::Mutex::new(RateLimitTracker::default()),
     });
 
     let app = Router::new()
@@ -227,11 +230,18 @@ fn spawn_callback_server(
         .with_state(app_state);
 
     let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await;
+        // `into_make_service_with_connect_info::<SocketAddr>()` is what
+        // makes the per-request `ConnectInfo<SocketAddr>` extractor
+        // populated; without it, the rate-limit branch of the handler
+        // panics at extraction time.
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
+        .await;
     });
     (code_rx, server)
 }
@@ -348,6 +358,10 @@ struct CallbackState {
     expected_state: String,
     tx: tokio::sync::Mutex<Option<oneshot::Sender<CallbackResult>>>,
     shutdown: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
+    // Per-source-port rejection tracker. `std::sync::Mutex` (not the
+    // tokio one) because the operations are short, synchronous, and
+    // never held across an `.await`.
+    rate_limit: std::sync::Mutex<RateLimitTracker>,
 }
 
 #[derive(Debug)]
@@ -364,6 +378,7 @@ struct CallbackQuery {
 }
 
 async fn callback_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<CallbackState>>,
     Query(q): Query<CallbackQuery>,
 ) -> (StatusCode, Html<&'static str>) {
@@ -380,7 +395,22 @@ async fn callback_handler(
     // This gate applies to BOTH branches (`error=...` and `code=...`):
     // both must echo `state` to be acknowledged.
     if !state_matches(&q, &state.expected_state) {
-        return (StatusCode::BAD_REQUEST, Html(REJECTED_HTML));
+        // Sustained-rejection rate limit. State-valid hits never enter
+        // this branch, so legitimate browser traffic bypasses the
+        // tracker entirely; only co-resident noise contributes. The
+        // rate limit escalates from 400 to 429 on the same response
+        // shape (no `state.tx`/`state.shutdown` touch), so an abusive
+        // port still cannot abort the wait.
+        let decision = state
+            .rate_limit
+            .lock()
+            .expect("rate limit mutex poisoned")
+            .record_rejection(addr.port(), Instant::now());
+        let status = match decision {
+            Decision::Admitted => StatusCode::BAD_REQUEST,
+            Decision::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        };
+        return (status, Html(REJECTED_HTML));
     }
 
     let result = decode_callback(state.provider_id, &state.expected_state, q);
@@ -749,3 +779,11 @@ mod tests {
         }
     }
 }
+
+// Handler-level tests for the per-source-port rate limit. Split into
+// a sibling file so login.rs stays under the 800-line cap; the
+// `#[path]` mod declaration keeps it a child of `login`, so private
+// items remain accessible from the test code.
+#[cfg(test)]
+#[path = "login_rate_limit_tests.rs"]
+mod rate_limit_tests;
