@@ -329,3 +329,161 @@ async fn memory_store_get_rejects_oauth_with_composite_hint() {
         "provider name should appear in the error: {msg}"
     );
 }
+
+// --- OAuthStore: oauth://codex end-to-end resolution ---
+//
+// Mirrors `routectl_auth::oauth::store::tests::get_returns_token_when_fresh`
+// (which exercises the same path for `anthropic` via the in-crate
+// `cfg(test)` refresh-flow seam) at the public crate surface for the
+// codex provider: seed credentials.json on disk, open `OAuthStore`
+// through the public constructor, resolve `oauth://codex` via the
+// `SecretStore` trait, and assert the seeded access token comes back
+// via the production `providers::lookup` registry. Expiry is set 1h
+// in the future so no refresh POST fires -- the test never touches
+// the network.
+
+#[cfg(feature = "oauth")]
+fn seed_credentials_file(
+    path: &std::path::Path,
+    provider: &str,
+    access_token: &str,
+    expires_at_unix: u64,
+) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let creds = serde_json::json!({
+        "schema_version": 1,
+        "providers": {
+            provider: {
+                "access_token": access_token,
+                "refresh_token": format!("seeded-refresh-{provider}"),
+                "token_type": "Bearer",
+                "expires_at_unix": expires_at_unix,
+                "scopes": ["openid", "offline_access"],
+                "account": {
+                    "email": "dev@example.com",
+                    "account_id": format!("acct-{provider}")
+                },
+                "obtained_at_unix": now
+            }
+        }
+    });
+    std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir creds parent");
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&creds).expect("serialize creds"),
+    )
+    .expect("write creds");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod 0600");
+    }
+}
+
+#[cfg(feature = "oauth")]
+fn unix_now_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[cfg(feature = "oauth")]
+#[tokio::test]
+async fn oauth_store_resolves_oauth_codex_to_seeded_access_token() {
+    use routectl_auth::OAuthStore;
+
+    // Arrange: seed credentials.json with a future-expiry codex record.
+    // The 1h-future expiry skips the near-expiry branch so the
+    // resolution path stays in-memory (no network).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("credentials.json");
+    seed_credentials_file(
+        &path,
+        "codex",
+        "codex-seeded-jwt-token",
+        unix_now_secs() + 3600,
+    );
+    let store = OAuthStore::open(&path).await.expect("open store");
+
+    // Act: ask for oauth://codex through the public SecretStore trait.
+    let token = store
+        .get(&SecretRef::OAuth {
+            provider: "codex".into(),
+        })
+        .await
+        .expect("resolve oauth://codex");
+
+    // Assert: the on-disk access token is returned verbatim. A
+    // regression that forgets to register codex in `providers::lookup`,
+    // routes oauth:// to the wrong arm, or short-circuits the read
+    // would all surface here.
+    assert_eq!(token, "codex-seeded-jwt-token");
+}
+
+#[cfg(feature = "oauth")]
+#[tokio::test]
+async fn oauth_store_codex_account_id_is_readable_from_seeded_record() {
+    use routectl_auth::OAuthStore;
+    use routectl_auth::SecretStore as _;
+
+    // Arrange: same seed shape, but the assertion is against the
+    // openai-responses factory's read path -- `account_id()` returns
+    // the stable chatgpt account id without exposing the access token.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("credentials.json");
+    seed_credentials_file(&path, "codex", "codex-jwt-2", unix_now_secs() + 3600);
+    let store = OAuthStore::open(&path).await.expect("open store");
+
+    // Act
+    let acct = store
+        .account_id(&SecretRef::OAuth {
+            provider: "codex".into(),
+        })
+        .await
+        .expect("read codex account_id");
+
+    // Assert: the seeded "acct-codex" string round-trips through the
+    // SecretStore::account_id surface that the openai-responses
+    // factory reads at build time.
+    assert_eq!(acct.as_deref(), Some("acct-codex"));
+}
+
+#[cfg(feature = "oauth")]
+#[tokio::test]
+async fn oauth_store_returns_unknown_provider_error_for_typo_codex_id() {
+    use routectl_auth::OAuthStore;
+
+    // Arrange: an empty store with no credentials -- the provider
+    // typo must be caught at the registry-lookup step regardless of
+    // disk state.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("credentials.json");
+    let store = OAuthStore::open(&path).await.expect("open store");
+
+    // Act
+    let err = store
+        .get(&SecretRef::OAuth {
+            provider: "codeex-typo".into(),
+        })
+        .await
+        .expect_err("unknown oauth provider must error");
+
+    // Assert: the registry's "unknown oauth provider" message must
+    // surface, not a NotLoggedIn miss. The provider name is included
+    // so an operator can map the error to the misconfigured TOML.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown oauth provider"),
+        "expected unknown-provider message: {msg}"
+    );
+    assert!(
+        msg.contains("codeex-typo"),
+        "expected provider name in error: {msg}"
+    );
+}

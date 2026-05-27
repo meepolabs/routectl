@@ -63,9 +63,10 @@ fn config_with(server_url: &str) -> Config {
 
 #[tokio::test]
 async fn login_unknown_provider_errors_clearly() {
-    // The login flow should fail-fast on an unknown provider name
-    // BEFORE binding any sockets or opening browsers. (PR1 only ships
-    // anthropic; codex lands in PR3.)
+    // The login flow should fail-fast on an unknown provider name BEFORE
+    // binding any sockets or opening browsers. (clap normally rejects
+    // unknown values first; this guards the command body's own
+    // registry-lookup path, which must list every known provider.)
     match commands::login::run("made-up-provider", false, None).await {
         Err(routectl_core::Error::Auth(msg)) => {
             assert!(
@@ -73,8 +74,8 @@ async fn login_unknown_provider_errors_clearly() {
                 "expected unknown-provider message, got: {msg}",
             );
             assert!(
-                msg.contains("anthropic"),
-                "expected known-providers list to mention anthropic, got: {msg}",
+                msg.contains("anthropic") && msg.contains("codex"),
+                "expected known-providers list to mention anthropic and codex, got: {msg}",
             );
         }
         Ok(_) => panic!("expected error for unknown provider"),
@@ -452,5 +453,250 @@ async fn test_command_resolves_oauth_ref_when_logged_in() {
     assert!(
         result.is_ok(),
         "test::run should resolve oauth://anthropic via CompositeStore: {result:?}"
+    );
+}
+
+// ---------------- codex OAuth CLI surface ----------------
+
+/// Write a `<xdg>/routectl/credentials.json` holding one record per
+/// `(provider, email)` entry, with the `0o600` hygiene `OAuthStore::open`
+/// enforces (it rejects group/other-readable files). The
+/// `TokenRecord`/`AccountInfo` structs are `#[non_exhaustive]`, so tests
+/// seed via raw JSON matching the v1 schema rather than struct literals --
+/// the same approach the in-tree `test_command_resolves_oauth_ref_*` test
+/// uses.
+fn seed_credentials(xdg: &std::path::Path, providers: &[(&str, &str)]) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut provider_map = serde_json::Map::new();
+    for (provider, email) in providers {
+        provider_map.insert(
+            (*provider).to_string(),
+            json!({
+                "access_token": format!("seeded-access-{provider}"),
+                "refresh_token": format!("seeded-refresh-{provider}"),
+                "token_type": "Bearer",
+                "expires_at_unix": now + 3600,
+                "scopes": ["openid", "offline_access"],
+                "account": { "email": email, "account_id": format!("acct-{provider}") },
+                "obtained_at_unix": now
+            }),
+        );
+    }
+    let creds_json = json!({ "schema_version": 1, "providers": provider_map });
+    let creds_path = xdg.join("routectl").join("credentials.json");
+    std::fs::create_dir_all(creds_path.parent().unwrap()).expect("mkdir creds parent");
+    std::fs::write(
+        &creds_path,
+        serde_json::to_vec_pretty(&creds_json).expect("serialize creds"),
+    )
+    .expect("write creds");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0600");
+    }
+}
+
+#[tokio::test]
+async fn login_codex_print_url_is_refused_with_browser_only_message() {
+    // Codex has no headless paste-the-code landing page, so --print-url
+    // must fail fast (before opening the store or binding a socket) with
+    // the browser-only guidance. Exit-non-zero is enforced by main.rs;
+    // here we assert the command body returns the Auth error.
+    let err = commands::login::run("codex", /* print_url */ true, None)
+        .await
+        .expect_err("codex --print-url must be refused");
+    match err {
+        routectl_core::Error::Auth(msg) => {
+            assert!(
+                msg.contains("--print-url"),
+                "expected --print-url refusal, got: {msg}"
+            );
+            assert!(
+                msg.contains("browser"),
+                "expected browser-flow guidance, got: {msg}"
+            );
+            assert!(
+                msg.contains("1455"),
+                "expected port-forward hint (1455), got: {msg}"
+            );
+        }
+        other => panic!("expected Auth error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn logout_codex_removes_seeded_record() {
+    // logout operates entirely on the local credentials file (no
+    // network), so a seeded codex record can be removed deterministically.
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    seed_credentials(tmp.path(), &[("codex", "dev@example.com")]);
+
+    commands::logout::run("codex")
+        .await
+        .expect("logout codex should succeed against a seeded record");
+
+    // The record must be gone: a second logout reports nothing to remove,
+    // and whoami no longer sees any provider.
+    commands::logout::run("codex")
+        .await
+        .expect("second logout codex is a no-op, not an error");
+    let code = commands::whoami::run().await.expect("whoami ok");
+    assert_eq!(code, 2, "store should be empty after logging out of codex");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn refresh_codex_without_record_reports_not_logged_in() {
+    // `refresh codex` against an empty store must route through the
+    // generic refresh path (proving codex is accepted, not rejected as an
+    // unknown provider) and fail-fast with the actionable "login first"
+    // hint BEFORE any network call -- force_refresh validates the
+    // provider id, then short-circuits on the missing record.
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+
+    let err = commands::refresh::run("codex")
+        .await
+        .expect_err("refresh codex with no record must error");
+    match err {
+        routectl_core::Error::Auth(msg) => {
+            assert!(
+                !msg.contains("unknown oauth provider"),
+                "codex must be a known provider, not rejected: {msg}"
+            );
+            assert!(
+                msg.contains("routectl login codex"),
+                "expected login-first guidance for codex, got: {msg}"
+            );
+        }
+        other => panic!("expected Auth error, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn whoami_lists_both_anthropic_and_codex_when_present() {
+    // whoami is provider-id-generic: with both records seeded it must
+    // exit 0 (at least one provider logged in) and surface each provider
+    // from the store. The email + account_id rendering is covered by the
+    // command body; here we pin the multi-provider exit contract.
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    seed_credentials(
+        tmp.path(),
+        &[
+            ("anthropic", "alice@example.com"),
+            ("codex", "bob@example.com"),
+        ],
+    );
+
+    let code = commands::whoami::run()
+        .await
+        .expect("whoami should not error with two providers seeded");
+    assert_eq!(code, 0, "whoami must exit 0 when providers are logged in");
+
+    // Cross-check the store sees both ids (whoami iterates exactly this
+    // list). Re-opening via the same sandboxed XDG path is deterministic.
+    let store = routectl_auth::OAuthStore::open_default()
+        .await
+        .expect("open seeded store");
+    let ids: Vec<String> = store.list().await.into_iter().map(|(p, _)| p).collect();
+    assert!(ids.contains(&"anthropic".to_string()), "got: {ids:?}");
+    assert!(ids.contains(&"codex".to_string()), "got: {ids:?}");
+}
+
+// ---------------- clap-layer provider validation ----------------
+//
+// These spawn the real `routectl` binary so the assertions exercise the
+// clap `value_parser` wired off `known_provider_ids()` -- that validator
+// lives in `main`, not in any `commands::*` function. Cargo exposes the
+// freshly-built binary path via `CARGO_BIN_EXE_routectl`, so no extra
+// dev-dependency (assert_cmd etc.) is needed.
+
+/// Run `routectl <args...>` with a sandboxed (empty) XDG dir and return
+/// `(exit_code, stderr)`. The sandbox keeps the spawned process from
+/// reading the developer's real credentials.json.
+fn run_routectl(args: &[&str]) -> (i32, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
+        .args(args)
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .output()
+        .expect("spawn routectl binary");
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    (code, stderr)
+}
+
+#[test]
+fn clap_rejects_unknown_login_provider_listing_valid_set() {
+    // A made-up provider must be rejected by clap (exit 2) with an error
+    // that lists the valid set -- both anthropic AND codex -- so the
+    // operator sees every option, not a stale single entry.
+    let (code, stderr) = run_routectl(&["login", "made-up-provider"]);
+    assert_ne!(
+        code, 0,
+        "clap must reject an unknown provider; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("invalid value"),
+        "expected clap invalid-value error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("anthropic") && stderr.contains("codex"),
+        "expected valid set to list anthropic and codex, got: {stderr}"
+    );
+}
+
+#[test]
+fn clap_accepts_codex_then_login_refuses_print_url() {
+    // `login codex --print-url` must parse cleanly at the clap layer
+    // (codex is an accepted value -- NO "invalid value" error) and then
+    // exit non-zero from the runtime refusal with the browser-only
+    // message. One spawn pins both contracts and stays fast (the refusal
+    // fires before any socket/browser/network work).
+    let (code, stderr) = run_routectl(&["login", "codex", "--print-url"]);
+    assert!(
+        !stderr.contains("invalid value"),
+        "codex must be accepted by clap, not rejected: {stderr}"
+    );
+    assert_ne!(
+        code, 0,
+        "codex --print-url must exit non-zero; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("--print-url") && stderr.contains("browser"),
+        "expected browser-only refusal message, got: {stderr}"
+    );
+}
+
+#[test]
+fn clap_accepts_codex_for_logout_and_refresh() {
+    // logout/refresh must also accept codex at the clap layer. logout
+    // against an empty store is a clean no-op (exit 0); refresh against an
+    // empty store fails fast with a runtime error -- but neither is a clap
+    // "invalid value" rejection, which is what this test pins.
+    let (logout_code, logout_err) = run_routectl(&["logout", "codex"]);
+    assert!(
+        !logout_err.contains("invalid value"),
+        "logout must accept codex: {logout_err}"
+    );
+    assert_eq!(
+        logout_code, 0,
+        "logout of empty store is a no-op: {logout_err}"
+    );
+
+    let (_refresh_code, refresh_err) = run_routectl(&["refresh", "codex"]);
+    assert!(
+        !refresh_err.contains("invalid value"),
+        "refresh must accept codex: {refresh_err}"
     );
 }

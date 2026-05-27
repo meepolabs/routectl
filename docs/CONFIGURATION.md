@@ -522,3 +522,61 @@ What each family does (one line each):
 | `CLAUDE_CODE_ATTRIBUTION_HEADER` | `0` | omit prompt-fingerprint block; better cache hit rate per the gateway doc |
 | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | unset | only set to `1` as an emergency exit if a beta flag is causing 400s upstream |
 | `ENABLE_TOOL_SEARCH` | `true` (optional) | enable claude-code's tool-search beta; routectl forwards the `tool_reference` blocks correctly |
+
+## ChatGPT / Codex provider
+
+routectl can route to OpenAI's Responses API on the ChatGPT subscription
+backend (`https://chatgpt.com/backend-api/codex`) using a ChatGPT OAuth
+bearer JWT. Two ways to supply that bearer: routectl-managed OAuth
+(recommended) or a static bearer file (kept for backwards-compat with
+operators who already manage the JWT externally).
+
+### routectl-managed OAuth (recommended)
+
+Run `routectl login codex` once. routectl spawns a local callback server
+on port 1455 (the codex public PKCE client registers fixed redirect URIs
+against that port), opens the browser to OpenAI's auth flow, exchanges
+the authorization code for an access + refresh token pair, and persists
+them to `~/.config/routectl/credentials.json` (atomic write, mode 0600
+on Unix; same hygiene as the `file://` secret-ref path).
+
+The login flow is browser-only -- `routectl login codex --print-url`
+is rejected, because the OpenAI auth flow has no headless paste-back
+landing page. SSH / headless operators should port-forward 1455 to the
+local box and use the default browser flow.
+
+Then in `~/.config/routectl/config.toml`:
+
+```toml
+[providers.codex]
+kind        = "openai-responses"
+auth_kind   = "chatgpt-oauth"
+api_key_ref = "oauth://codex"
+# account_id_ref omitted: routectl reads `chatgpt_account_id` off the
+# OAuth-session JWT and injects it as the `ChatGPT-Account-Id` header.
+```
+
+The `oauth://codex` ref resolves at request time against the credentials
+store; rotation is picked up live without restarting routectl. When the
+upstream marks the refresh token expired, reused, or invalidated,
+routectl surfaces a "re-run `routectl login codex`" error -- re-run the
+login and traffic resumes.
+
+### Static bearer (backwards-compat)
+
+If you already manage the JWT externally -- rotated by another tool, or
+extracted from a separate codex session -- point routectl at the file or
+env var and supply the account UUID explicitly:
+
+```toml
+[providers.codex-static]
+kind           = "openai-responses"
+auth_kind      = "chatgpt-oauth"
+api_key_ref    = "env://OPENAI_JWT"
+account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
+```
+
+`account_id_ref` is REQUIRED on this path: there is no OAuth session for
+routectl to derive the UUID from. `env://`, `file://`, and `literal:`
+refs all work for both fields. routectl never refreshes a static bearer;
+rotation is the operator's job.

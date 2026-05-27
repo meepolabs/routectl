@@ -35,5 +35,9 @@ crates/routectl-cli/tests/fixtures/captured/
 # meepoctl per-task worktrees + runtime state
 .meepoctl/
 
+# Claude Code per-project session state (scheduled tasks, local
+# settings, transient scratch). Never commit -- machine-specific.
+.claude/
+
 # Local research scratch -- personal notes, config references, experiments.
 scratch/
