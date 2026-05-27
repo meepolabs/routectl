@@ -146,6 +146,24 @@ impl SecretStore for CompositeStore {
             _ => self.fallback.on_auth_failure(secret_ref).await,
         }
     }
+
+    async fn account_id(&self, secret_ref: &SecretRef) -> Result<Option<String>> {
+        match secret_ref {
+            // Route oauth:// account-id reads to the OAuth arm so the
+            // openai-responses factory can derive the chatgpt account id
+            // from a logged-in session. When the OAuth arm is absent
+            // (no HOME/XDG) there is no record to read; return Ok(None)
+            // so the factory falls through to its actionable
+            // "run `routectl login`" guidance rather than failing here.
+            SecretRef::OAuth { .. } => match &self.oauth {
+                Some(oauth) => oauth.account_id(secret_ref).await,
+                None => Ok(None),
+            },
+            // env:// / file:// / literal: carry no account metadata;
+            // the MemoryStore default returns Ok(None).
+            _ => self.fallback.account_id(secret_ref).await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +213,158 @@ mod tests {
         assert!(
             err.to_string().contains("no credentials"),
             "expected OAuthStore NotLoggedIn, got: {err}"
+        );
+    }
+
+    /// Seed a credentials.json under `path` with one provider record.
+    /// Mirrors the v1 `CredentialsFile` schema and applies the 0o600
+    /// hygiene `OAuthStore::open` enforces on Unix. `expires_at_unix` is
+    /// the caller's responsibility -- a future value avoids triggering a
+    /// refresh roundtrip; a past value would force one (and a
+    /// network-stub-less test must therefore use a future value).
+    fn seed_credentials_file(
+        path: &std::path::Path,
+        provider: &str,
+        access_token: &str,
+        expires_at_unix: u64,
+    ) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let creds = serde_json::json!({
+            "schema_version": 1,
+            "providers": {
+                provider: {
+                    "access_token": access_token,
+                    "refresh_token": format!("seeded-refresh-{provider}"),
+                    "token_type": "Bearer",
+                    "expires_at_unix": expires_at_unix,
+                    "scopes": ["openid", "offline_access"],
+                    "account": {
+                        "email": null,
+                        "account_id": format!("acct-{provider}")
+                    },
+                    "obtained_at_unix": now
+                }
+            }
+        });
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir creds parent");
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&creds).expect("serialize creds"),
+        )
+        .expect("write creds");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 0600");
+        }
+    }
+
+    /// `oauth://codex` resolves end-to-end through CompositeStore: a
+    /// TokenRecord seeded on disk is returned through the OAuth arm
+    /// without triggering a refresh roundtrip (expiry is 1h in the
+    /// future, well past `REFRESH_LEAD_SECS`). Pins the codex provider
+    /// dispatch path -- a regression that loses the codex registry
+    /// entry, drops the OAuth arm, or routes oauth:// to the
+    /// MemoryStore would all fail this test.
+    ///
+    /// Single-flight coverage: the inner OAuthStore enforces a
+    /// per-provider single-flight refresh mutex (see
+    /// `routectl_auth::oauth::store::tests::concurrent_get_calls_collapse_to_single_refresh`).
+    /// CompositeStore is a thin dispatcher with no extra concurrency
+    /// state of its own, so concurrent oauth:// reads through the
+    /// composite inherit that guarantee from the inner store; a
+    /// duplicated single-flight assertion at the composite layer
+    /// would only re-test the inner store.
+    #[tokio::test]
+    async fn dispatches_oauth_codex_resolves_seeded_token_via_composite() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        seed_credentials_file(&path, "codex", "codex-seeded-access-token", now + 3600);
+        let store = CompositeStore::open_at(&path).await.unwrap();
+
+        // Act
+        let token = store
+            .get(&SecretRef::OAuth {
+                provider: "codex".into(),
+            })
+            .await
+            .expect("oauth://codex should resolve via composite");
+
+        // Assert
+        assert_eq!(token, "codex-seeded-access-token");
+    }
+
+    /// `file://` references must fall through to the MemoryStore arm,
+    /// not the OAuth arm. Pins the dispatch table for the file://
+    /// scheme (a regression that routes all non-oauth refs to the
+    /// OAuth store would surface as "OAuthStore only handles oauth://
+    /// refs" here).
+    #[tokio::test]
+    async fn dispatches_file_to_memory_store() {
+        // Arrange: write a secret file under tempdir + 0o600 perms so
+        // the MemoryStore's permission check accepts it on Unix.
+        let dir = tempfile::tempdir().unwrap();
+        let creds_path = dir.path().join("credentials.json");
+        let secret_path = dir.path().join("secret-key");
+        std::fs::write(&secret_path, "sk-from-file\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 0600");
+        }
+        let store = CompositeStore::open_at(&creds_path).await.unwrap();
+
+        // Act
+        let value = store
+            .get(&SecretRef::File(secret_path))
+            .await
+            .expect("file:// should resolve via memory store");
+
+        // Assert: trimmed contents match what MemoryStore would return
+        // standalone -- the trailing newline is stripped.
+        assert_eq!(value, "sk-from-file");
+    }
+
+    /// `oauth://<unknown-provider>` returns a clear, operator-actionable
+    /// error -- not a panic, not a stringly-typed default, not a
+    /// NotLoggedIn miss. The error must name the unknown provider so
+    /// an operator can correlate the misconfigured TOML entry.
+    #[tokio::test]
+    async fn dispatches_oauth_unknown_provider_returns_clear_error() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let store = CompositeStore::open_at(&path).await.unwrap();
+
+        // Act
+        let err = store
+            .get(&SecretRef::OAuth {
+                provider: "made-up-provider".into(),
+            })
+            .await
+            .expect_err("unknown oauth provider must error, not panic");
+
+        // Assert: the error must mention the unknown-provider category
+        // and include the offending name for operator correlation.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown oauth provider"),
+            "expected unknown-provider category in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("made-up-provider"),
+            "expected provider name in error, got: {msg}"
         );
     }
 

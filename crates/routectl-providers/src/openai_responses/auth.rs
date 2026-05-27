@@ -45,12 +45,19 @@ pub(crate) fn default_user_agent() -> String {
 }
 
 /// Apply auth headers to an in-flight `RequestBuilder` per
-/// `cfg.auth_kind`. Returns the modified builder on success or an
-/// Error for the deferred variants.
-pub(crate) fn apply(rb: RequestBuilder, cfg: &OpenAiResponsesConfig) -> Result<RequestBuilder> {
+/// `cfg.auth_kind`. The bearer is resolved by the caller (once per
+/// upstream request via `cfg.auth.token().await`) and passed in here
+/// so a routectl-managed OAuth source can rotate without a daemon
+/// restart. Returns the modified builder on success or an Error for
+/// the deferred variants.
+pub(crate) fn apply(
+    rb: RequestBuilder,
+    cfg: &OpenAiResponsesConfig,
+    bearer: &str,
+) -> Result<RequestBuilder> {
     match cfg.auth_kind {
-        AuthKind::ChatgptOauth => Ok(apply_chatgpt_oauth(rb, cfg)),
-        AuthKind::ApiKey => Ok(apply_api_key(rb, cfg)),
+        AuthKind::ChatgptOauth => Ok(apply_chatgpt_oauth(rb, cfg, bearer)),
+        AuthKind::ApiKey => Ok(apply_api_key(rb, bearer)),
         AuthKind::BedrockMantle => Err(Error::Auth(format!(
             "openai-responses provider `{}`: bedrock-mantle auth_kind not yet supported (the relevant stage)",
             cfg.id
@@ -67,9 +74,13 @@ pub(crate) fn apply(rb: RequestBuilder, cfg: &OpenAiResponsesConfig) -> Result<R
 /// `OpenAiResponsesProvider::new()`, matching the anthropic_api
 /// pattern. Per-request UA injection is intentionally absent here so
 /// the single source of truth for the UA is the client level.
-fn apply_chatgpt_oauth(rb: RequestBuilder, cfg: &OpenAiResponsesConfig) -> RequestBuilder {
+fn apply_chatgpt_oauth(
+    rb: RequestBuilder,
+    cfg: &OpenAiResponsesConfig,
+    bearer: &str,
+) -> RequestBuilder {
     let mut rb = rb
-        .header("authorization", format!("Bearer {}", cfg.api_key))
+        .header("authorization", format!("Bearer {bearer}"))
         .header(
             "originator",
             cfg.originator.as_deref().unwrap_or(DEFAULT_ORIGINATOR),
@@ -89,20 +100,23 @@ fn apply_chatgpt_oauth(rb: RequestBuilder, cfg: &OpenAiResponsesConfig) -> Reque
 /// `validate_openai_responses_account_id` already rejects an
 /// `account_id_ref` paired with `auth_kind = "api-key"`, so we never
 /// see `cfg.account_id` set on this path. User-Agent is set at the
-/// client level (mirrors the chatgpt-oauth path).
-fn apply_api_key(rb: RequestBuilder, cfg: &OpenAiResponsesConfig) -> RequestBuilder {
-    rb.header("authorization", format!("Bearer {}", cfg.api_key))
+/// client level (mirrors the chatgpt-oauth path). The bearer is
+/// resolved by the caller and passed in (see `apply`).
+fn apply_api_key(rb: RequestBuilder, bearer: &str) -> RequestBuilder {
+    rb.header("authorization", format!("Bearer {bearer}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use reqwest::Client;
+    use routectl_core::{StaticToken, TokenSource};
+    use std::sync::Arc;
 
     fn base_cfg(auth_kind: AuthKind) -> OpenAiResponsesConfig {
         OpenAiResponsesConfig {
             id: "openai-responses:test".into(),
-            api_key: "test-jwt".into(),
+            auth: Arc::new(StaticToken::new("test-jwt")) as Arc<dyn TokenSource>,
             account_id: Some("acct-uuid".into()),
             base_url: "https://chatgpt.com/backend-api/codex".into(),
             auth_kind,
@@ -129,7 +143,7 @@ mod tests {
         let rb = client.post("https://chatgpt.com/backend-api/codex/responses");
 
         // Act
-        let rb = apply(rb, &cfg).expect("apply");
+        let rb = apply(rb, &cfg, "test-jwt").expect("apply");
         let req = rb.build().expect("build");
 
         // Assert: per-request headers only. UA is set at client level
@@ -170,7 +184,7 @@ mod tests {
         let rb = client.post("https://example.test");
 
         // Act
-        let rb = apply(rb, &cfg).expect("apply");
+        let rb = apply(rb, &cfg, "test-jwt").expect("apply");
         let req = rb.build().expect("build");
 
         // Assert
@@ -186,7 +200,7 @@ mod tests {
         let rb = client.post("https://example.test");
 
         // Act
-        let rb = apply(rb, &cfg).expect("apply");
+        let rb = apply(rb, &cfg, "test-jwt").expect("apply");
         let req = rb.build().expect("build");
 
         // Assert
@@ -199,12 +213,12 @@ mod tests {
         // invariant (factory rejects the combination).
         let mut cfg = base_cfg(AuthKind::ApiKey);
         cfg.account_id = None;
-        cfg.api_key = "sk-test-123".into();
         let client = Client::new();
         let rb = client.post("https://api.openai.com/v1/responses");
 
-        // Act
-        let rb = apply(rb, &cfg).expect("apply");
+        // Act: the caller resolves the bearer from `cfg.auth` and
+        // passes it in; `apply_api_key` no longer reads the config.
+        let rb = apply(rb, &cfg, "sk-test-123").expect("apply");
         let req = rb.build().expect("build");
 
         // Assert: Bearer auth present; ChatGPT-OAuth-specific headers
@@ -236,8 +250,8 @@ mod tests {
         let client = Client::new();
         let rb = client.post("https://bedrock-mantle.us-east-1.api.aws/openai/v1/responses");
 
-        // Act
-        let err = apply(rb, &cfg).expect_err("expected Err");
+        // Act: BedrockMantle errors before the bearer is consumed.
+        let err = apply(rb, &cfg, "").expect_err("expected Err");
 
         // Assert
         match err {

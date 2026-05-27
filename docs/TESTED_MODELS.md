@@ -225,6 +225,7 @@ Wire-shape notes for the chatgpt-oauth surface:
 | `gpt-5.3-codex` | complete + stream | PASS | Default codex CLI model |
 | `gpt-5.4` | complete + stream | PASS | General-purpose flagship |
 | `gpt-5.4-mini` | complete + stream | PASS | Faster/cheaper variant |
+| `gpt-5.4-mini` | complete (oauth://codex) | PASS | Bearer resolved through `OAuthStore` (tempdir credentials.json); ChatGPT account id auto-derived from the JWT `chatgpt_account_id` claim (no `account_id_ref`). Skipped when `OPENAI_OAUTH_ACCESS_TOKEN` is unset. |
 
 ## Adding a new model
 

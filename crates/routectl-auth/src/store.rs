@@ -18,4 +18,18 @@ pub trait SecretStore: Send + Sync {
     async fn on_auth_failure(&self, _secret_ref: &SecretRef) -> Result<()> {
         Ok(())
     }
+
+    /// Best-effort read of a stable account identifier associated with
+    /// a credential, without exposing the secret itself. Returns
+    /// `Ok(None)` by default: env://, file://, and literal: refs carry
+    /// no account metadata. The OAuth store overrides this to return
+    /// the `chatgpt_account_id` recorded at login (stable across token
+    /// rotations), so the openai-responses factory can derive the
+    /// account id from a logged-in `oauth://codex` session instead of
+    /// requiring the operator to repeat it in TOML. Reading a provider
+    /// with no stored record yields `Ok(None)` (treated by the caller
+    /// as "not derivable -- run `routectl login`"), not an error.
+    async fn account_id(&self, _secret_ref: &SecretRef) -> Result<Option<String>> {
+        Ok(None)
+    }
 }

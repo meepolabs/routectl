@@ -35,5 +35,9 @@ crates/routectl-cli/tests/fixtures/captured/
 # local-tooling per-task worktrees + runtime state
 .local-tooling/
 
+# Claude Code per-project session state (scheduled tasks, local
+# settings, transient scratch). Never commit -- machine-specific.
+.claude/
+
 # Local research scratch -- personal notes, config references, experiments.
 scratch/

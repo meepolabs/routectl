@@ -32,6 +32,8 @@
 //! Both auth surfaces share the same SSE drain extracting the
 //! `response` field from `response.completed`.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::{BoxStream, StreamExt};
@@ -42,6 +44,7 @@ use serde_json::Value;
 use routectl_core::{
     debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
     trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    StaticToken, TokenSource,
 };
 
 pub(crate) mod auth;
@@ -88,14 +91,20 @@ pub enum AuthKind {
 /// Resolved configuration for one Responses provider entry. The
 /// factory builds this from the TOML `ProviderEntry::OpenaiResponses`
 /// variant after resolving secret references.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiResponsesConfig {
     /// Stable id used in errors and on `routectl_provider` response
     /// fields. Format: `openai-responses:<table-key>`.
     pub id: String,
-    /// Resolved auth secret (JWT for ChatgptOauth; API key for
-    /// ApiKey; ignored for BedrockMantle which uses SigV4).
-    pub api_key: String,
+    /// Source of the bearer token (JWT for ChatgptOauth; API key for
+    /// ApiKey; ignored for BedrockMantle which uses SigV4). For
+    /// env/file/literal secret refs this is a `StaticToken` resolved
+    /// once at construction. For `oauth://<provider>` refs the factory
+    /// passes a per-request resolver that re-reads the credentials
+    /// store, so ChatGPT-OAuth token rotation is picked up live
+    /// without restarting routectl. Resolved once per upstream request
+    /// via `auth.token().await` in `complete()` / `stream()`.
+    pub auth: Arc<dyn TokenSource>,
     /// Resolved ChatGPT account ID. Required for ChatgptOauth;
     /// must be None for the other variants (enforced by the factory).
     pub account_id: Option<String>,
@@ -120,11 +129,41 @@ pub struct OpenAiResponsesConfig {
     pub originator: Option<String>,
 }
 
+impl std::fmt::Debug for OpenAiResponsesConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Hand-rolled Debug elides the auth source so a derived
+        // `{:?}` on the config (or any struct embedding it) can never
+        // print the bearer/JWT. `StaticToken`'s own Debug already
+        // redacts; this is the second line of defense mirroring
+        // `AnthropicApiConfig`.
+        f.debug_struct("OpenAiResponsesConfig")
+            .field("id", &self.id)
+            .field("auth", &"[REDACTED]")
+            .field("account_id", &self.account_id)
+            .field("base_url", &self.base_url)
+            .field("auth_kind", &self.auth_kind)
+            .field("header_extras_len", &self.header_extras.len())
+            .field("user_agent", &self.user_agent)
+            .field("originator", &self.originator)
+            .finish()
+    }
+}
+
 impl OpenAiResponsesConfig {
+    /// Construct with a static bearer string. The token is wrapped in
+    /// `StaticToken` so the provider's resolution call site is uniform
+    /// across static and managed sources. Existing callers that pass a
+    /// resolved key keep their signatures unchanged.
     pub fn new(id: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self::new_with_auth(id, Arc::new(StaticToken::new(api_key)))
+    }
+
+    /// Construct with a custom `TokenSource`. Used by the factory when
+    /// wiring `oauth://<provider>` to a per-request resolver.
+    pub fn new_with_auth(id: impl Into<String>, auth: Arc<dyn TokenSource>) -> Self {
         Self {
             id: id.into(),
-            api_key: api_key.into(),
+            auth,
             account_id: None,
             base_url: "https://chatgpt.com/backend-api/codex".into(),
             auth_kind: AuthKind::ChatgptOauth,
@@ -166,8 +205,9 @@ impl OpenAiResponsesProvider {
         &self,
         rb: reqwest::RequestBuilder,
         req: &ChatRequest,
+        bearer: &str,
     ) -> Result<reqwest::RequestBuilder> {
-        let mut rb = auth::apply(rb, &self.cfg)?;
+        let mut rb = auth::apply(rb, &self.cfg, bearer)?;
         // Prefer the router-composed map (provider + model merged at
         // dispatch) if present; fall back to `self.cfg.header_extras`
         // for library consumers that built the provider directly.
@@ -230,7 +270,14 @@ impl Provider for OpenAiResponsesProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let rb = self.build_headers(self.client.post(self.responses_url()), &req)?;
+        // Per-request token resolution: for static refs this hits the
+        // in-memory `StaticToken` cache; for `oauth://<provider>` refs
+        // this re-reads the credentials store so rotation is picked up
+        // without a daemon restart. Resolved once here, then threaded
+        // into `build_headers` -> `auth::apply`.
+        let token = self.cfg.auth.token().await?;
+
+        let rb = self.build_headers(self.client.post(self.responses_url()), &req, &token)?;
         let resp = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
@@ -407,7 +454,10 @@ impl Provider for OpenAiResponsesProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let rb = self.build_headers(self.client.post(self.responses_url()), &req)?;
+        // Per-request token resolution; see the note in `complete()`.
+        let token = self.cfg.auth.token().await?;
+
+        let rb = self.build_headers(self.client.post(self.responses_url()), &req, &token)?;
         let resp = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
@@ -494,6 +544,16 @@ impl Provider for OpenAiResponsesProvider {
             self.cfg.id.clone(),
         ))
     }
+
+    /// Forward upstream-401 to the underlying token source so an
+    /// `oauth://` ref can force-refresh through the OAuth store's
+    /// per-provider single-flight gate. Static-auth providers
+    /// (`env://`, `file://`, `literal:`) inherit the no-op default
+    /// from `TokenSource::on_auth_failure`. Mirrors the anthropic_api
+    /// egress.
+    async fn on_auth_failure(&self) -> Result<()> {
+        self.cfg.auth.on_auth_failure().await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -511,7 +571,7 @@ mod e2e_tests {
     fn make_provider(base_url: &str) -> OpenAiResponsesProvider {
         let cfg = OpenAiResponsesConfig {
             id: "openai-responses:test".into(),
-            api_key: "test-jwt".into(),
+            auth: Arc::new(StaticToken::new("test-jwt")) as Arc<dyn TokenSource>,
             account_id: Some("acct-uuid".into()),
             base_url: base_url.to_string(),
             auth_kind: AuthKind::ChatgptOauth,
@@ -790,5 +850,88 @@ mod e2e_tests {
         assert_eq!(chunks[1].choices[0].delta.content.as_deref(), Some("hi"));
         let final_c = chunks.last().unwrap();
         assert_eq!(final_c.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth-wiring tests (TokenSource delegation + Debug redaction)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod auth_wiring_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A `TokenSource` that counts `on_auth_failure` invocations so we
+    /// can assert the provider delegates to it. `token()` returns a
+    /// fixed value; the counter proves the delegation wiring.
+    #[derive(Default)]
+    struct CountingTokenSource {
+        on_auth_failure_calls: AtomicUsize,
+    }
+
+    impl std::fmt::Debug for CountingTokenSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("CountingTokenSource").finish()
+        }
+    }
+
+    #[async_trait]
+    impl TokenSource for CountingTokenSource {
+        async fn token(&self) -> Result<String> {
+            Ok("counting-jwt".into())
+        }
+
+        async fn on_auth_failure(&self) -> Result<()> {
+            self.on_auth_failure_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// `Provider::on_auth_failure` must delegate to the underlying
+    /// `TokenSource::on_auth_failure` so an `oauth://` source can
+    /// force-refresh. Verified by a fake source that counts calls.
+    #[tokio::test]
+    async fn on_auth_failure_delegates_to_token_source() {
+        // Arrange
+        let source = Arc::new(CountingTokenSource::default());
+        let mut cfg = OpenAiResponsesConfig::new("openai-responses:test", "unused");
+        cfg.auth = source.clone();
+        let provider = OpenAiResponsesProvider::new(cfg);
+
+        // Act
+        provider
+            .on_auth_failure()
+            .await
+            .expect("on_auth_failure ok");
+        provider
+            .on_auth_failure()
+            .await
+            .expect("on_auth_failure ok");
+
+        // Assert: each Provider-level call reached the token source.
+        assert_eq!(source.on_auth_failure_calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Debug for `OpenAiResponsesConfig` must redact the auth source:
+    /// the inner token must never appear, and a `[REDACTED]` marker
+    /// must be present in its place.
+    #[test]
+    fn config_debug_redacts_auth_token() {
+        // Arrange
+        let cfg = OpenAiResponsesConfig::new("openai-responses:test", "super-secret-jwt");
+
+        // Act
+        let dbg = format!("{cfg:?}");
+
+        // Assert
+        assert!(
+            !dbg.contains("super-secret-jwt"),
+            "Debug must not leak the auth token; got: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "Debug must mark the auth field redacted; got: {dbg}"
+        );
     }
 }

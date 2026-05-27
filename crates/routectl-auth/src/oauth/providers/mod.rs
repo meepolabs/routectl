@@ -11,6 +11,7 @@
 //! and need code-review discipline when they shift.
 
 pub(crate) mod anthropic;
+pub(crate) mod codex;
 
 use async_trait::async_trait;
 use url::Url;
@@ -41,6 +42,17 @@ pub(crate) trait OAuthFlow: Send + Sync {
     /// Path the local callback server listens on (`/callback`).
     fn callback_path(&self) -> &'static str {
         "/callback"
+    }
+
+    /// Fixed local callback port this provider's redirect URIs are
+    /// registered against, if any. `None` (the default) means the login
+    /// driver binds a kernel-assigned ephemeral port -- the Anthropic
+    /// behavior, where the public client allows any `localhost:<port>`
+    /// redirect. `Some(port)` means the upstream registered a specific
+    /// port (codex: 1455, with a fallback handled by the login driver),
+    /// so an ephemeral port would be rejected at the authorize step.
+    fn preferred_callback_port(&self) -> Option<u16> {
+        None
     }
 
     /// URL the upstream displays to operators using the headless
@@ -83,20 +95,20 @@ pub(crate) trait OAuthFlow: Send + Sync {
 pub(crate) fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
     match provider_id {
         "anthropic" => Ok(&anthropic::Anthropic),
-        // "codex" provider lands in a prior change (see ROADMAP v0.7).
+        "codex" => Ok(&codex::Codex),
         other => Err(OAuthError::UnknownProvider(other.to_string())),
     }
 }
 
 /// All known provider ids. Used by the in-crate consistency test below
-/// (and, post-a prior change, by the codex login arg-validator). Kept as a single
-/// source of truth alongside the `lookup` match above so the two stay
-/// in sync. Marked `pub(crate)` because the surface is internal: the
-/// CLI hardcodes `anthropic` in clap, and the operator-visible
-/// "unknown oauth provider" text is built from `OAuthError::Display`.
-#[allow(dead_code)] // wired in a prior change when codex registers
-pub(crate) fn known_provider_ids() -> &'static [&'static str] {
-    &["anthropic"]
+/// and by the login arg-validator. Kept as a single source of truth
+/// alongside the `lookup` match above so the two stay in sync. Re-exported
+/// at the `oauth` module root (`oauth::known_provider_ids`) so the CLI can
+/// build its clap allowed-provider set from this list, keeping the accepted
+/// set in lockstep with the registry. The operator-visible "unknown oauth
+/// provider" text is built from `OAuthError::Display`.
+pub fn known_provider_ids() -> &'static [&'static str] {
+    &["anthropic", "codex"]
 }
 
 /// Truncate a string for inclusion in error/log messages without

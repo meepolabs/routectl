@@ -289,29 +289,37 @@ async fn build_provider_inner(
             originator,
             runtime: _,
         } => {
-            validate_openai_responses_account_id(name, *auth_kind, account_id_ref)?;
-            let api_key = resolve(&*secrets, api_key_ref).await?;
-            let account_id = match account_id_ref {
-                Some(uri) => Some(resolve(&*secrets, uri).await?),
-                None => None,
-            };
+            let bearer_is_oauth =
+                matches!(SecretRef::parse(api_key_ref), Ok(SecretRef::OAuth { .. }));
+            validate_openai_responses_account_id(
+                name,
+                *auth_kind,
+                bearer_is_oauth,
+                account_id_ref,
+            )?;
+            // OAuth-aware bearer resolution, mirroring the anthropic-api
+            // arm: `oauth://<provider>` yields a refreshing
+            // `ManagedToken`; env / file / literal yield a one-shot
+            // `StaticToken`. The provider resolves `auth.token()` per
+            // request, so OAuth rotation is picked up without restart.
+            let auth = resolve_token_source(&secrets, api_key_ref).await?;
+            let account_id =
+                resolve_responses_account_id(&secrets, api_key_ref, account_id_ref, name).await?;
             let resolved_base_url = base_url
                 .clone()
                 .unwrap_or_else(|| default_responses_base(*auth_kind));
             validate_base_url_scheme(name, &resolved_base_url)?;
-            let cfg = OpenAiResponsesConfig {
-                id: format!("openai-responses:{name}"),
-                api_key,
-                account_id,
-                base_url: resolved_base_url,
-                auth_kind: *auth_kind,
-                header_extras: header_extras
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-                user_agent: user_agent.clone(),
-                originator: originator.clone(),
-            };
+            let mut cfg =
+                OpenAiResponsesConfig::new_with_auth(format!("openai-responses:{name}"), auth);
+            cfg.account_id = account_id;
+            cfg.base_url = resolved_base_url;
+            cfg.auth_kind = *auth_kind;
+            cfg.header_extras = header_extras
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            cfg.user_agent = user_agent.clone();
+            cfg.originator = originator.clone();
             Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
         }
         #[cfg(feature = "bedrock")]
@@ -522,6 +530,47 @@ impl routectl_core::TokenSource for ManagedToken {
     /// masking dead credentials by walking the fallback chain.
     async fn on_auth_failure(&self) -> Result<()> {
         self.store.on_auth_failure(&self.secret_ref).await
+    }
+}
+
+/// Resolve the ChatGPT account id for an openai-responses provider.
+///
+/// Precedence:
+///   1. An operator-supplied `account_id_ref` always wins -- resolved
+///      one-shot through the `SecretStore` (env / file / literal /
+///      oauth). This is the explicit override escape hatch.
+///   2. Otherwise, for an `oauth://<provider>` bearer, derive the id
+///      from the logged-in session via `SecretStore::account_id` (the
+///      `chatgpt_account_id` recorded at `routectl login`, stable
+///      across token rotations). A missing session yields a clean
+///      `Error::Config` pointing the operator at `routectl login
+///      <provider>` rather than a confusing upstream 403 later.
+///   3. Otherwise `None`. The validator has already guaranteed this
+///      case only arises for non-ChatgptOauth surfaces (where the id
+///      must be absent), so `None` is correct.
+#[cfg(feature = "openai-responses")]
+async fn resolve_responses_account_id(
+    secrets: &Arc<dyn SecretStore>,
+    api_key_ref: &str,
+    account_id_ref: &Option<String>,
+    name: &str,
+) -> Result<Option<String>> {
+    if let Some(uri) = account_id_ref {
+        return Ok(Some(resolve(&**secrets, uri).await?));
+    }
+    let SecretRef::OAuth { provider } = SecretRef::parse(api_key_ref)? else {
+        return Ok(None);
+    };
+    let secret_ref = SecretRef::OAuth {
+        provider: provider.clone(),
+    };
+    match secrets.account_id(&secret_ref).await? {
+        Some(id) => Ok(Some(id)),
+        None => Err(routectl_core::Error::Config(format!(
+            "openai-responses provider `{name}`: no ChatGPT account id found for \
+             `oauth://{provider}`. Run `routectl login {provider}` first, or set \
+             `account_id_ref` explicitly."
+        ))),
     }
 }
 
@@ -895,31 +944,60 @@ fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
     }
 }
 
-/// Validate the `account_id_ref` invariant: required for ChatgptOauth,
-/// forbidden for the other variants. A misconfigured TOML surfaces
-/// here as a clean `Error::Config` rather than a confusing upstream
-/// 401/403 at first request time.
+/// Validate the `account_id_ref` invariant for an openai-responses
+/// entry. A misconfigured TOML surfaces here as a clean `Error::Config`
+/// rather than a confusing upstream 401/403 at first request time.
+///
+/// Rules:
+///   - ChatgptOauth + `oauth://<provider>` bearer: `account_id_ref` is
+///     OPTIONAL. When omitted, the factory derives the account id from
+///     the logged-in OAuth session (the `chatgpt_account_id` recorded
+///     at `routectl login`). An explicit `account_id_ref` is still
+///     accepted and wins as an override.
+///   - ChatgptOauth + static bearer (`env://`/`file://`/`literal:`):
+///     `account_id_ref` is REQUIRED. There is no OAuth session to read
+///     the account id from, so the operator must supply it -- this is
+///     the legacy chatgpt-oauth workflow, kept unchanged.
+///   - ApiKey / BedrockMantle: `account_id_ref` is FORBIDDEN (the
+///     account id is a ChatGPT-OAuth-only concept).
+///
+/// `bearer_is_oauth` mirrors `matches!(SecretRef::parse(api_key_ref),
+/// Ok(SecretRef::OAuth { .. }))`; the caller computes it once and passes
+/// it in so the validator and the downstream resolver do not each
+/// reparse the same URI.
 #[cfg(feature = "openai-responses")]
 fn validate_openai_responses_account_id(
     name: &str,
     auth_kind: OpenaiResponsesAuthKind,
+    bearer_is_oauth: bool,
     account_id_ref: &Option<String>,
 ) -> Result<()> {
     use routectl_core::Error;
 
     let has_account = account_id_ref.is_some();
-    let needs_account = matches!(auth_kind, OpenaiResponsesAuthKind::ChatgptOauth);
-    match (needs_account, has_account) {
-        (true, true) | (false, false) => Ok(()),
-        (true, false) => Err(Error::Config(format!(
-            "openai-responses provider `{name}`: auth_kind = \"chatgpt-oauth\" \
-             requires `account_id_ref` (the ChatGPT account UUID)"
-        ))),
-        (false, true) => Err(Error::Config(format!(
-            "openai-responses provider `{name}`: `account_id_ref` is only valid \
-             when auth_kind = \"chatgpt-oauth\"; remove it for {auth_kind:?}"
-        ))),
+    let is_chatgpt_oauth = matches!(auth_kind, OpenaiResponsesAuthKind::ChatgptOauth);
+    if !is_chatgpt_oauth {
+        // ApiKey / BedrockMantle: account_id is a ChatGPT-OAuth-only
+        // concept; reject it for the other surfaces.
+        if has_account {
+            return Err(Error::Config(format!(
+                "openai-responses provider `{name}`: `account_id_ref` is only valid \
+                 when auth_kind = \"chatgpt-oauth\"; remove it for {auth_kind:?}"
+            )));
+        }
+        return Ok(());
     }
+
+    // ChatgptOauth path. `oauth://` bearers may omit account_id_ref
+    // (derived from the session); static bearers must supply it.
+    if bearer_is_oauth || has_account {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "openai-responses provider `{name}`: auth_kind = \"chatgpt-oauth\" with a \
+         static bearer requires `account_id_ref` (the ChatGPT account UUID). Use an \
+         `oauth://<provider>` bearer to derive it from a logged-in session instead."
+    )))
 }
 
 /// Routectl-mandatory body fields: keys routectl writes into every
@@ -2131,6 +2209,193 @@ mod managed_token_tests {
             counting.calls(),
             1,
             "StaticToken caches; store hit only at construction"
+        );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "openai-responses")]
+mod openai_responses_account_id_tests {
+    //! Pin the managed-OAuth account-id derivation for the
+    //! openai-responses factory arm:
+    //!   (a) `oauth://codex` + no `account_id_ref` + populated store
+    //!       -> account id taken from the stored TokenRecord; build ok.
+    //!   (b) `oauth://codex` + no `account_id_ref` + empty store
+    //!       -> clean Error mentioning `routectl login codex`.
+    //!   (c) `env://X` + no `account_id_ref` (legacy chatgpt-oauth)
+    //!       -> existing "requires account_id_ref" Error preserved.
+    //!   (d) `oauth://codex` + explicit `account_id_ref`
+    //!       -> the operator value wins (override).
+
+    use super::*;
+    use async_trait::async_trait;
+    use routectl_auth::{MemoryStore, OAuthStore, SecretRef};
+    use std::sync::Arc;
+
+    /// Minimal stand-in for the production `CompositeStore` (which lives
+    /// in the CLI crate and is out of scope here). Routes `oauth://`
+    /// refs -- including the `account_id` read -- to the OAuthStore, and
+    /// everything else (`literal:`, `env://`, `file://`) to MemoryStore.
+    /// Lets these router-level tests exercise the operator-override path
+    /// (`account_id_ref = "literal:..."`) alongside the JWT-derived path
+    /// without depending on the CLI crate.
+    struct CompositeTestStore {
+        oauth: OAuthStore,
+        fallback: MemoryStore,
+    }
+
+    #[async_trait]
+    impl SecretStore for CompositeTestStore {
+        async fn get(&self, sr: &SecretRef) -> Result<String> {
+            match sr {
+                SecretRef::OAuth { .. } => self.oauth.get(sr).await,
+                _ => self.fallback.get(sr).await,
+            }
+        }
+        async fn set(&self, sr: &SecretRef, v: &str) -> Result<()> {
+            self.fallback.set(sr, v).await
+        }
+        async fn delete(&self, sr: &SecretRef) -> Result<()> {
+            self.fallback.delete(sr).await
+        }
+        async fn account_id(&self, sr: &SecretRef) -> Result<Option<String>> {
+            match sr {
+                SecretRef::OAuth { .. } => self.oauth.account_id(sr).await,
+                _ => self.fallback.account_id(sr).await,
+            }
+        }
+    }
+
+    /// Write a `credentials.json` seeded with a `codex` record (when
+    /// `account_id` is `Some`) or leave the store empty, then open an
+    /// `OAuthStore` over it. Returns the tempdir guard (kept alive for
+    /// the test's duration) and the store as `Arc<dyn SecretStore>`.
+    ///
+    /// The record is written as raw JSON rather than constructed from
+    /// `TokenRecord` because that struct is `#[non_exhaustive]` and
+    /// cannot be built with a struct literal from this crate. Writing
+    /// the on-disk shape also exercises the real `OAuthStore::open`
+    /// load path.
+    async fn oauth_store_with_codex(
+        account_id: Option<&str>,
+    ) -> (tempfile::TempDir, Arc<dyn SecretStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        if let Some(id) = account_id {
+            let json = format!(
+                r#"{{
+                    "schema_version": 1,
+                    "providers": {{
+                        "codex": {{
+                            "access_token": "tok-codex",
+                            "refresh_token": "rtok-codex",
+                            "token_type": "Bearer",
+                            "expires_at_unix": 9999999999,
+                            "scopes": ["openid"],
+                            "account": {{ "email": "u@example.com", "account_id": "{id}" }},
+                            "obtained_at_unix": 0
+                        }}
+                    }}
+                }}"#
+            );
+            std::fs::write(&path, json).unwrap();
+            // OAuthStore::open refuses group/other-readable credential
+            // files (it wants chmod 600). tempfile defaults to 644, so
+            // tighten the mode before opening.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        let store = CompositeTestStore {
+            oauth: OAuthStore::open(&path).await.unwrap(),
+            fallback: MemoryStore::new(),
+        };
+        (dir, Arc::new(store) as Arc<dyn SecretStore>)
+    }
+
+    fn chatgpt_oauth_entry(api_key_ref: &str) -> ProviderEntry {
+        ProviderEntry::openai_responses(api_key_ref)
+            .with_openai_responses_auth_kind(OpenaiResponsesAuthKind::ChatgptOauth)
+    }
+
+    #[tokio::test]
+    async fn oauth_no_account_id_ref_derives_from_stored_token() {
+        // (a) populated store -> account id derived; provider builds.
+        let (_dir, store) = oauth_store_with_codex(Some("acct-from-jwt")).await;
+
+        let derived = resolve_responses_account_id(&store, "oauth://codex", &None, "codex-pro")
+            .await
+            .expect("derivation should succeed");
+        assert_eq!(derived, Some("acct-from-jwt".to_string()));
+
+        let entry = chatgpt_oauth_entry("oauth://codex");
+        let provider = build_provider("codex-pro", &entry, store.clone()).await;
+        assert!(
+            provider.is_ok(),
+            "provider should build from a logged-in session: {:?}",
+            provider.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_no_account_id_ref_empty_store_errors_with_login_hint() {
+        // (b) empty store -> clean Error mentioning `routectl login codex`.
+        let (_dir, store) = oauth_store_with_codex(None).await;
+
+        let err = resolve_responses_account_id(&store, "oauth://codex", &None, "codex-pro")
+            .await
+            .expect_err("empty store must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("routectl login codex"),
+            "expected login hint, got: {msg}"
+        );
+
+        // The full build arm must surface the same error. `Arc<dyn
+        // Provider>` is not `Debug`, so match instead of `expect_err`.
+        let entry = chatgpt_oauth_entry("oauth://codex");
+        match build_provider("codex-pro", &entry, store.clone()).await {
+            Ok(_) => panic!("build must fail with no session"),
+            Err(e) => assert!(
+                e.to_string().contains("routectl login codex"),
+                "build error should carry the login hint, got: {e}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_static_chatgpt_oauth_still_requires_account_id_ref() {
+        // (c) env:// bearer (legacy chatgpt-oauth) + no account_id_ref
+        // -> the validator rejects it (existing operator workflow).
+        let err = validate_openai_responses_account_id(
+            "legacy",
+            OpenaiResponsesAuthKind::ChatgptOauth,
+            false, // env://OPENAI_JWT is a static bearer, not oauth://
+            &None,
+        )
+        .expect_err("static chatgpt-oauth without account_id_ref must error");
+        let msg = err.to_string();
+        assert!(msg.contains("requires `account_id_ref`"), "got: {msg}");
+        assert!(msg.contains("legacy"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn explicit_account_id_ref_wins_over_stored_token() {
+        // (d) operator-supplied account_id_ref overrides the JWT-derived
+        // one even when the store has a (different) stored account id.
+        let (_dir, store) = oauth_store_with_codex(Some("acct-from-jwt")).await;
+
+        let override_ref = Some("literal:acct-operator-override".to_string());
+        let derived =
+            resolve_responses_account_id(&store, "oauth://codex", &override_ref, "codex-pro")
+                .await
+                .expect("override should resolve");
+        assert_eq!(
+            derived,
+            Some("acct-operator-override".to_string()),
+            "operator-supplied account_id_ref must win over the stored token"
         );
     }
 }
