@@ -322,6 +322,40 @@ upstream = "us.anthropic.claude-haiku-4-5-v1:0"
 # inherits provider's 60s; no per-model override
 ```
 
+## history_reasoning (reasoning echo-back)
+
+`history_reasoning` on `[models.X]` controls whether routectl echoes a
+model's own prior reasoning back to the upstream on multi-turn replay.
+Three values:
+
+- `auto` (the unset default) -- the egress decides. For openai-compat
+  this follows the per-dialect default; for the anthropic-api egress it
+  strips unsigned `thinking` blocks (real-Anthropic-safe: Anthropic
+  signs thinking and 400s an unsigned replay).
+- `strip` -- always drop reasoning from outgoing history.
+- `preserve` -- always keep reasoning on the wire.
+
+`preserve` governs BOTH egresses:
+
+- **openai-compat** -- keeps assistant `reasoning_content` in outgoing
+  history (DeepSeek v4+, recent vLLM that 400 without echo-back).
+- **anthropic-api** -- keeps UNSIGNED `thinking` blocks on replay
+  instead of stripping them. DeepSeek's `/anthropic` endpoint
+  (`kind = "anthropic-api"`, base_url `https://api.deepseek.com/anthropic`)
+  emits thinking without a signature yet 400s the next turn unless it is
+  echoed back: `The content[].thinking in the thinking mode must be
+  passed back to the API.` Set `preserve` for those models.
+
+Default (`auto` / unset) still strips for the anthropic-api egress,
+which is correct for real Anthropic (`api.anthropic.com`): replayed
+thinking there must carry the signature Anthropic issued. Set `preserve`
+ONLY for Anthropic-compatible endpoints that require echo-back, never
+for real Anthropic. The tool_result / `tool_use_id` validation is
+independent of this knob and always applies.
+
+See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for full per-upstream
+recipes.
+
 ## Validating config
 
 ```bash
