@@ -24,6 +24,14 @@ pub mod openai;
 /// field directly to pin routing to a specific configured alias.
 pub const ALIAS_HEADER: &str = "x-routectl-alias";
 
+/// Wire `error.type` value used by both ingress dialects when emitting
+/// a terminal error event for a mid-stream upstream failure. Matches
+/// the Anthropic SSE `error.type` vocabulary
+/// (`api_error` / `overloaded_error` / ...) which both OpenAI and
+/// Anthropic clients tolerate. Routed through one constant so the
+/// dialect impls and their tests cannot drift on the magic string.
+pub(crate) const STREAM_ERROR_TYPE: &str = "api_error";
+
 /// Read the `x-routectl-alias` header. Returns the trimmed header
 /// value when present and non-empty; otherwise `None`. The ingress
 /// uses this to override the wire `model` field when the client
@@ -160,4 +168,44 @@ pub trait IngressAdapter: Send + Sync {
     /// emits `[DONE]`; Anthropic may emit a final `message_stop` if
     /// the stream ended without an explicit stop event.
     fn render_eos(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent>;
+
+    /// Final SSE events to emit when an upstream stream errored
+    /// mid-stream. Returns dialect-specific TERMINAL ERROR events so
+    /// SDK consumers see a clean failure rather than network
+    /// truncation. This is NOT the same as `render_eos`: that emits a
+    /// SUCCESS terminator (`[DONE]` / `message_stop`) which would
+    /// falsely signal a clean completion. The error variant emits a
+    /// FAILURE terminator that the SDK can distinguish.
+    ///
+    /// `error` carries a sanitized client-safe summary of the failure.
+    /// The caller in `handlers::ingress_handle` strips provider names,
+    /// upstream response bodies, and tokens before passing it here,
+    /// but adapters MUST further filter via
+    /// `routectl_core::sanitize_for_log` to drop control characters
+    /// that would otherwise break SSE wire framing or forge log lines
+    /// on text-format subscribers downstream.
+    ///
+    /// Wire shapes:
+    ///
+    /// - Anthropic: one `event: error` named SSE event with payload
+    ///   `{"type":"error","error":{"type":"api_error","message":...}}`.
+    ///   The error event is itself terminal in the Anthropic SSE
+    ///   format -- no further events follow.
+    /// - OpenAI: one bare `data: {"error":{...}}` chunk followed by
+    ///   one bare `data: [DONE]` chunk. OpenAI clients consume
+    ///   `[DONE]` as the universal stream terminator; the preceding
+    ///   error chunk tells the SDK the stream failed cleanly.
+    fn render_error_eos(
+        &self,
+        _state: &mut dyn IngressStreamState,
+        _error: &dyn std::fmt::Display,
+    ) -> Vec<SseEvent> {
+        // Default no-op so a third-party adapter that does not yet have
+        // a dialect-specific error envelope can compile against the
+        // trait. The handler in `handlers::ingress_handle` falls back
+        // to a network-truncation close (the Drop summary still emits
+        // `finish_reason=truncated`) when an adapter returns no events.
+        // First-party adapters (`openai.rs`, `anthropic/`) override.
+        Vec::new()
+    }
 }
