@@ -1333,6 +1333,15 @@ pub struct RetryPolicy {
     /// provider in the chain is tried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
+
+    /// Requests with `max_tokens` <= this are treated as availability
+    /// probes (Claude Code sends `max_tokens=1`); on a rate-limit /
+    /// overload (429/529) they skip retry+fallback and return the
+    /// status immediately, since walking the chain is futile and the
+    /// probe output is unused. `0` disables. Real requests (max_tokens
+    /// above this) are unaffected.
+    #[serde(default = "default_probe_max_tokens")]
+    pub probe_max_tokens: u32,
 }
 
 impl Default for RetryPolicy {
@@ -1349,6 +1358,7 @@ impl Default for RetryPolicy {
             retry_on_network: None,
             request_timeout_ms: None,
             stream_first_byte_timeout_ms: None,
+            probe_max_tokens: default_probe_max_tokens(),
         }
     }
 }
@@ -1912,6 +1922,10 @@ fn default_max_attempts() -> u32 {
     2
 }
 
+fn default_probe_max_tokens() -> u32 {
+    1
+}
+
 fn default_backoff_ms() -> u64 {
     250
 }
@@ -2070,5 +2084,37 @@ retry_denylist = [422]
         // Default config (empty allowlist, None denylist) must validate.
         let cfg4 = Config::default();
         validate_retry_policy(&cfg4).expect("default config must validate");
+    }
+
+    #[test]
+    fn probe_max_tokens_defaults_to_one_when_omitted() {
+        // A `[retry]` block that omits `probe_max_tokens` defaults to 1
+        // (Claude Code's max_tokens=1 probe is detected out of the box).
+        use crate::config::Config;
+        let toml_text = r#"
+[retry]
+max_attempts = 3
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(cfg.retry.probe_max_tokens, 1);
+        assert_eq!(cfg.retry.max_attempts, 3, "other fields unaffected");
+    }
+
+    #[test]
+    fn probe_max_tokens_zero_parses_to_disable() {
+        // `probe_max_tokens = 0` is the disable sentinel and round-trips.
+        use crate::config::Config;
+        let toml_text = r#"
+[retry]
+probe_max_tokens = 0
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(cfg.retry.probe_max_tokens, 0);
+    }
+
+    #[test]
+    fn default_retry_policy_has_probe_max_tokens_one() {
+        // The Default impl (no `[retry]` block at all) also yields 1.
+        assert_eq!(RetryPolicy::default().probe_max_tokens, 1);
     }
 }
