@@ -64,6 +64,52 @@ pub struct Config {
     /// references entries by nickname. See the v0.6.0-rc.1 changelog.
     #[serde(default)]
     pub models: BTreeMap<String, ModelEntry>,
+
+    /// Operator-facing `[log]` block. Each field is an optional
+    /// fallback consulted by the runtime log-safe knobs when the
+    /// matching env var is unset. Env always wins over config; missing
+    /// block keeps the pre-`[log]` env-only-or-hardcoded behavior. The
+    /// env-filter directive (`ROUTECTL_LOG`) is intentionally NOT part
+    /// of this block -- it stays env-only.
+    #[serde(default)]
+    pub log: LogConfig,
+}
+
+/// Operator-facing `[log]` config block. Each field mirrors a
+/// well-known env var:
+///
+///   - `trace_headers` -> `ROUTECTL_TRACE_HEADERS`
+///   - `trace_body_bytes` -> `ROUTECTL_TRACE_BODY_BYTES`
+///   - `redact_prompts` -> `ROUTECTL_LOG_REDACT_PROMPTS`
+///
+/// Per-knob resolution: env wins when set; otherwise the field below
+/// (when `Some(_)`); otherwise the hardcoded default. All fields are
+/// optional. A missing `[log]` block leaves current behavior
+/// unchanged.
+///
+/// The env-filter directive (`ROUTECTL_LOG`, e.g.
+/// `routectl=info,routectl_core::log_safe=trace`) is intentionally
+/// out of scope here. It stays env-only because it must reach the
+/// tracing subscriber BEFORE any config load runs; introducing a
+/// config-side fallback would require reordering boot, which trades
+/// one ergonomic win for a silent-on-bad-config gotcha.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogConfig {
+    /// Opt-in for the four `trace_*_headers` directions (raw, no
+    /// redaction). Default off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_headers: Option<bool>,
+    /// Cap on the serialized body emitted at TRACE level by the four
+    /// body-trace helpers. Zero or missing falls through to the
+    /// hardcoded 16 KB default (matches the env-var path's behavior:
+    /// non-numeric, missing, and `0` all collapse to the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_body_bytes: Option<usize>,
+    /// Opt-in for prompt redaction in TRACE-level body logs. Default
+    /// off (verbatim bodies in TRACE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redact_prompts: Option<bool>,
 }
 
 /// One row in the `[models]` table. Carries the nickname-to-upstream
@@ -1850,6 +1896,84 @@ stream_first_byte_timeout_ms = 300000
         let m = ModelEntry::new("p", "u").with_thinking(ThinkingChoice::Bool(false));
         let d = m.reasoning_defaults_view();
         assert_eq!(d.enabled, Some(false));
+    }
+
+    /// A config without a `[log]` block parses cleanly and yields a
+    /// default `LogConfig` with every field `None`. Missing block ==
+    /// "current behavior unchanged" (env-only or hardcoded default).
+    #[test]
+    fn log_block_absent_yields_all_none() {
+        let toml_text = r#"
+[server]
+host = "127.0.0.1"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse default");
+        assert!(cfg.log.trace_headers.is_none());
+        assert!(cfg.log.trace_body_bytes.is_none());
+        assert!(cfg.log.redact_prompts.is_none());
+    }
+
+    /// A `[log]` block carrying only `redact_prompts` parses with the
+    /// other two fields left as `None`. Round-trips through serde so
+    /// the operator's partial config survives a serialize/deserialize
+    /// loop (e.g. `config show`).
+    #[test]
+    fn log_block_partial_redact_only_round_trips() {
+        let toml_text = r#"
+[log]
+redact_prompts = true
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse partial");
+        assert!(cfg.log.trace_headers.is_none());
+        assert!(cfg.log.trace_body_bytes.is_none());
+        assert_eq!(cfg.log.redact_prompts, Some(true));
+
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let cfg_out: Config = toml::from_str(&serialized).expect("re-parse");
+        assert!(cfg_out.log.trace_headers.is_none());
+        assert!(cfg_out.log.trace_body_bytes.is_none());
+        assert_eq!(cfg_out.log.redact_prompts, Some(true));
+    }
+
+    /// Every `[log]` field present parses, every value reaches the
+    /// `LogConfig`, and the round-trip stays stable across one
+    /// serialize/deserialize loop. Pins field-name spelling so a
+    /// rename here surfaces against `docs/CONFIGURATION.md`.
+    #[test]
+    fn log_block_full_round_trips() {
+        let toml_text = r#"
+[log]
+trace_headers = true
+trace_body_bytes = 32768
+redact_prompts = true
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse full");
+        assert_eq!(cfg.log.trace_headers, Some(true));
+        assert_eq!(cfg.log.trace_body_bytes, Some(32768));
+        assert_eq!(cfg.log.redact_prompts, Some(true));
+
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let cfg_out: Config = toml::from_str(&serialized).expect("re-parse");
+        assert_eq!(cfg_out.log.trace_headers, cfg.log.trace_headers);
+        assert_eq!(cfg_out.log.trace_body_bytes, cfg.log.trace_body_bytes);
+        assert_eq!(cfg_out.log.redact_prompts, cfg.log.redact_prompts);
+    }
+
+    /// Unknown fields in `[log]` reject at parse time so a typo
+    /// (`trace_body_byte` vs `trace_body_bytes`) surfaces at startup
+    /// rather than silently dropping the override.
+    #[test]
+    fn log_block_rejects_unknown_field() {
+        let toml_text = r#"
+[log]
+trace_body_byte = 1024
+"#;
+        let err = toml::from_str::<Config>(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("trace_body_byte") || msg.contains("unknown field"),
+            "expected unknown-field error; got: {msg}"
+        );
     }
 }
 
