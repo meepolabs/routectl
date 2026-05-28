@@ -200,13 +200,15 @@ fn truncate_json_for_log(body: &serde_json::Value, cap: usize) -> String {
 
 /// Resolved trace body cap. Reads `ROUTECTL_TRACE_BODY_BYTES` once
 /// from the env on first use and freezes the value via `OnceLock`.
-/// Falls back to [`MAX_TRACE_BODY_BYTES`] (16 KB) when the env var
-/// is unset, non-numeric, or zero.
+/// Resolution order: env value (when set, numeric, and `> 0`); else
+/// the [`init_log_overrides`]-seeded `[log]` config override (when
+/// set and `> 0`); else [`MAX_TRACE_BODY_BYTES`] (16 KB).
 ///
 /// Same setup caveat as [`redact_enabled`]: set the env var BEFORE
 /// launching routectl. The resolved value is announced once at
-/// startup via [`log_trace_body_cap_status`] so operators can confirm
-/// the override took effect.
+/// startup via the (module-private) `log_trace_body_cap_status`,
+/// invoked by [`init_log_overrides`] so operators can confirm the
+/// override took effect.
 pub fn trace_body_cap() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
@@ -214,6 +216,7 @@ pub fn trace_body_cap() -> usize {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|&n| n > 0)
+            .or_else(|| OVERRIDE_TRACE_BODY_BYTES.get().copied().filter(|&n| n > 0))
             .unwrap_or(MAX_TRACE_BODY_BYTES)
     })
 }
@@ -221,8 +224,9 @@ pub fn trace_body_cap() -> usize {
 /// Read the cap env var and emit a single `info` line so operators
 /// can confirm the resolved value at startup. Calling this also
 /// seeds the `OnceLock` with the value present at process boot.
-/// Mirror of [`log_redaction_status`].
-pub fn log_trace_body_cap_status() {
+/// Mirror of `log_redaction_status`. Module-private: invoked from
+/// [`init_log_overrides`] so the seed-then-status order is atomic.
+fn log_trace_body_cap_status() {
     static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let cap = trace_body_cap();
     EMITTED.get_or_init(|| {
@@ -255,20 +259,25 @@ fn parse_bool_env(v: &str) -> bool {
 /// before the first traced body is sufficient; flipping it afterward
 /// has no effect.
 ///
+/// When the env var is unset, the resolution falls through to the
+/// [`init_log_overrides`]-seeded `[log]` config fallback before
+/// landing on the hardcoded default (false).
+///
 /// Practical implication: operators MUST set
 /// `ROUTECTL_LOG_REDACT_PROMPTS=1` BEFORE launching routectl (or
 /// before flipping TRACE for the first time). The cached-false case
 /// (env var set after the first call) silently disables redaction
 /// even though the operator believes they enabled it. There is a
-/// matching `info`-level startup line in
-/// [`log_redaction_status`] so operators can confirm the resolved
-/// value once at server boot.
+/// matching `info`-level startup line in (module-private)
+/// `log_redaction_status`, fired by [`init_log_overrides`], so
+/// operators can confirm the resolved value once at server boot.
 fn redact_enabled() -> bool {
     static REDACT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *REDACT.get_or_init(|| {
         std::env::var("ROUTECTL_LOG_REDACT_PROMPTS")
             .ok()
             .map(|v| parse_bool_env(&v))
+            .or_else(|| OVERRIDE_REDACT_PROMPTS.get().copied())
             .unwrap_or(false)
     })
 }
@@ -277,18 +286,23 @@ fn redact_enabled() -> bool {
 /// (`1`/`true`/`yes`, case-insensitive, trimmed; default false).
 ///
 /// Read once on the FIRST CALL via `OnceLock` and frozen for the rest
-/// of the process. Same setup caveat as [`redact_enabled`]: set the
-/// env var BEFORE launching routectl; flipping it afterward has no
-/// effect. Default false makes the four `trace_*_headers` helpers a
-/// no-op unless the operator opts in -- header lines carry auth and
-/// other verbatim values and must not flow into logs by accident.
-/// [`log_header_trace_status`] emits a matching startup `info` line.
+/// of the process. When env is unset, falls through to the
+/// [`init_log_overrides`]-seeded `[log]` config fallback before
+/// landing on the hardcoded default (false). Same setup caveat as
+/// [`redact_enabled`]: set the env var BEFORE launching routectl;
+/// flipping it afterward has no effect. Default false makes the four
+/// `trace_*_headers` helpers a no-op unless the operator opts in --
+/// header lines carry auth and other verbatim values and must not
+/// flow into logs by accident. The matching startup `info` line is
+/// emitted by the (module-private) `log_header_trace_status`, fired
+/// by [`init_log_overrides`].
 pub fn header_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("ROUTECTL_TRACE_HEADERS")
             .ok()
             .map(|v| parse_bool_env(&v))
+            .or_else(|| OVERRIDE_TRACE_HEADERS.get().copied())
             .unwrap_or(false)
     })
 }
@@ -300,8 +314,9 @@ pub fn header_trace_enabled() -> bool {
 /// "set the env var before launching" requirement observable. Safe
 /// to call multiple times: the underlying value is frozen by
 /// [`redact_enabled`] and the `info` line emits at most once per
-/// process.
-pub fn log_redaction_status() {
+/// process. Module-private: invoked from [`init_log_overrides`] so
+/// the seed-then-status order is atomic.
+fn log_redaction_status() {
     static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let enabled = redact_enabled();
     EMITTED.get_or_init(|| {
@@ -316,8 +331,10 @@ pub fn log_redaction_status() {
 /// operators can confirm the resolved value at startup. Seeds the
 /// `OnceLock` with the boot-time value, making the "set the env var
 /// before launching" requirement observable. Mirror of
-/// [`log_redaction_status`] and [`log_trace_body_cap_status`].
-pub fn log_header_trace_status() {
+/// `log_redaction_status` and `log_trace_body_cap_status`.
+/// Module-private: invoked from [`init_log_overrides`] so the
+/// seed-then-status order is atomic.
+fn log_header_trace_status() {
     static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let enabled = header_trace_enabled();
     EMITTED.get_or_init(|| {
@@ -1234,6 +1251,74 @@ pub fn debug_upstream_error_body(provider_kind: &str, provider_id: &str, status:
         body = %cleaned,
         "upstream error body"
     );
+}
+
+// Config-side fallback seeds for the three `[log]` knobs. None until
+// `init_log_overrides` populates them; consulted by the matching
+// reader's OnceLock-init closure in the env-unset branch (env wins,
+// then override, then hardcoded default).
+static OVERRIDE_TRACE_HEADERS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static OVERRIDE_TRACE_BODY_BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static OVERRIDE_REDACT_PROMPTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Single entrypoint: seed the config-side fallback for each
+/// `Some(_)` knob, then fire the three status emitters so every
+/// reader's OnceLock freezes on the resolved value AND the
+/// confirmation `info` line lands at startup. `None` skips the seed
+/// for that knob -- "no config-side fallback; env or hardcoded
+/// default wins" -- but the matching status line still emits, so an
+/// operator always sees one `info` line per knob at boot.
+///
+/// Atomic seam: callers do not separately invoke the (now
+/// module-private) `log_*_status` helpers; calling this once per
+/// process is sufficient. Idempotent per OnceLock -- a second call
+/// with a different `Some(_)` value emits a single `debug!` line
+/// per knob (the value seeded at first call wins).
+///
+/// Resolution rule per knob: env wins when set; otherwise the seeded
+/// override; otherwise the hardcoded default (false / 16 KB / false).
+pub fn init_log_overrides(
+    trace_headers: Option<bool>,
+    trace_body_bytes: Option<usize>,
+    redact_prompts: Option<bool>,
+) {
+    if let Some(v) = trace_headers {
+        if let Err(existing) = OVERRIDE_TRACE_HEADERS.set(v) {
+            tracing::debug!(
+                knob = "trace_headers",
+                existing = existing,
+                new = v,
+                "init_log_overrides: knob already frozen; ignoring new value"
+            );
+        }
+    }
+    if let Some(v) = trace_body_bytes {
+        if let Err(existing) = OVERRIDE_TRACE_BODY_BYTES.set(v) {
+            tracing::debug!(
+                knob = "trace_body_bytes",
+                existing = existing,
+                new = v,
+                "init_log_overrides: knob already frozen; ignoring new value"
+            );
+        }
+    }
+    if let Some(v) = redact_prompts {
+        if let Err(existing) = OVERRIDE_REDACT_PROMPTS.set(v) {
+            tracing::debug!(
+                knob = "redact_prompts",
+                existing = existing,
+                new = v,
+                "init_log_overrides: knob already frozen; ignoring new value"
+            );
+        }
+    }
+    // After seeding: emit the three status lines. Each call freezes
+    // the matching reader's OnceLock to env-or-override-or-default
+    // and emits the operator-facing `info` confirmation exactly once
+    // per process.
+    log_redaction_status();
+    log_trace_body_cap_status();
+    log_header_trace_status();
 }
 
 #[cfg(test)]
