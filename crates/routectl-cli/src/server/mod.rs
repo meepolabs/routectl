@@ -82,21 +82,25 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
         "routectl listening on http://{bound}"
     );
 
-    // Resolve the redaction env var once at server boot so the
-    // `info`-level confirmation lands in the log before any TRACE
-    // request fires. Without this, the OnceLock initializes at the
-    // first traced body, which means an operator who set the var
-    // after launching routectl would silently get unredacted traces.
-    routectl_core::log_redaction_status();
-    // Same shape for ROUTECTL_TRACE_BODY_BYTES: announce the
-    // resolved cap once at boot so an operator capturing live-
-    // traffic fixtures can see whether the override took effect
-    // before any traced body fires.
-    routectl_core::log_trace_body_cap_status();
-    // Same shape for ROUTECTL_TRACE_HEADERS: announce whether
-    // opt-in header tracing is on so a fixture-capture operator
-    // can confirm the four header-trace directions will emit.
-    routectl_core::log_header_trace_status();
+    // Resolve the three runtime log knobs (redact_prompts,
+    // trace_body_bytes, trace_headers) once at server boot so the
+    // matching `info` confirmation lines land before any TRACE
+    // request fires. Without this, each reader's OnceLock initializes
+    // at the first call from a body/header trace helper, which means
+    // an operator who set the env var or `[log]` config after launch
+    // would silently get the wrong policy.
+    //
+    // Per-knob resolution: env wins when set; otherwise the matching
+    // `[log]` config field (when `Some(_)`); otherwise the hardcoded
+    // default. The single `init_log_overrides` entrypoint seeds the
+    // config-side fallbacks AND fires the three status emitters in
+    // one atomic step, closing the seed-then-status ordering window
+    // by structure (one public seeder, no second-seeder path).
+    routectl_core::init_log_overrides(
+        config.log.trace_headers,
+        config.log.trace_body_bytes,
+        config.log.redact_prompts,
+    );
 
     let token_set = resolve_listener_tokens(&config).await?;
 
