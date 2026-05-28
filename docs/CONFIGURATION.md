@@ -31,6 +31,12 @@ sections:
 
 [bedrock]             # global Bedrock allowlists (allowed_betas,
                       # allowed_body_fields). Optional.
+
+[log]                 # operator-configurable runtime log knobs
+                      # (trace_headers, trace_body_bytes,
+                      # redact_prompts). Optional. The env-filter
+                      # directive ROUTECTL_LOG is intentionally
+                      # env-only and is NOT part of this block.
 ```
 
 A working end-to-end example lives at
@@ -368,6 +374,59 @@ independent of this knob and always applies.
 
 See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for full per-upstream
 recipes.
+
+## Log knobs (`[log]`)
+
+The optional `[log]` block carries operator-facing fallbacks for the
+three runtime log-safe knobs:
+
+```toml
+[log]
+trace_headers    = false    # ROUTECTL_TRACE_HEADERS fallback
+trace_body_bytes = 16384    # ROUTECTL_TRACE_BODY_BYTES fallback (16 KB default)
+redact_prompts   = false    # ROUTECTL_LOG_REDACT_PROMPTS fallback
+```
+
+Per-knob resolution: env wins when set; otherwise the matching
+`[log]` field (when `Some`); otherwise the hardcoded default
+(`false` / `16384` / `false`, where `16384` matches
+`MAX_TRACE_BODY_BYTES` in `routectl-core`). All fields are optional.
+A missing `[log]` block leaves current behavior unchanged (env-only
+or hardcoded default for each knob).
+
+What each knob does:
+
+- `trace_headers` -- opt-in for the four `trace_*_headers`
+  directions (raw, no redaction). Default off. See
+  [LOGGING.md](LOGGING.md) for the per-direction emit contract.
+- `trace_body_bytes` -- cap on the serialized body emitted at
+  TRACE level by the four body-trace helpers (ingress, outgoing,
+  upstream success, egress). Default 16 KB. Bump to ~1 MB
+  (`1048576`) when capturing live-traffic fixtures so full
+  conversation history with cache_control breakpoints is not
+  truncated.
+- `redact_prompts` -- opt-in for prompt redaction in TRACE-level
+  body logs. Strips known user-content fields (text blocks,
+  tool_use input, instructions, refusal blocks, image data URIs,
+  Bedrock Converse `toolUse.input`) and replaces them with
+  `<redacted len=N>` while preserving structural fields (model,
+  tools, sampling params, finish_reason, usage). Default off
+  (verbatim bodies in TRACE).
+
+Caveat -- the env-filter directive (`ROUTECTL_LOG`, e.g.
+`routectl=info,routectl_core::log_safe=trace`) is intentionally
+NOT part of `[log]`. It stays env-only because it must reach the
+tracing subscriber BEFORE any config load runs. To raise log level
+for one process, export `ROUTECTL_LOG` in the environment that
+launches `routectl serve`.
+
+Caveat -- like every routectl log-safe knob, the resolved value
+freezes at process startup. Flipping the env var or editing
+`[log]` after launch has no effect until the next restart. The
+seeder fires a single `info` line per knob at boot
+(`ROUTECTL_LOG_REDACT_PROMPTS resolved`,
+`ROUTECTL_TRACE_BODY_BYTES resolved`, `ROUTECTL_TRACE_HEADERS
+resolved`) so operators can confirm the effective value once.
 
 ## Validating config
 
