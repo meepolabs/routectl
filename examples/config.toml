@@ -9,8 +9,9 @@
 #                 Bedrock, header_extras, runtime gates, ...)
 #
 # [models.X]      A model declaration. Points at one provider, names
-#                 the upstream model id, owns its reasoning defaults
-#                 (thinking, enabled, adaptive_thinking, ...).
+#                 the upstream model id, owns its reasoning capability
+#                 declaration (supports_adaptive_thinking, effort_levels,
+#                 max_thinking_budget).
 #
 # [aliases]       Wire-string -> model nickname routing. One flat
 #                 table, single value or list (chain) per key.
@@ -18,10 +19,10 @@
 #                 Keys ending in `*` are suffix globs, e.g.
 #                 `"claude-opus-*" = "opus-heavy"`.
 #
-# Caller request shape > model defaults > provider/internal defaults.
-# An incoming `reasoning.effort = "minimal"` always wins over an
-# operator-configured `[models.X] thinking = "high"`. Use models'
-# defaults to set a floor when the caller is silent.
+# Caller intent flows through directly: the egress emits whatever the
+# caller sent for reasoning.effort. Use effort_levels to declare which
+# values this model accepts; use supports_adaptive_thinking to select
+# the wire shape.
 
 [server]
 host = "127.0.0.1"
@@ -45,11 +46,9 @@ base_url    = "https://openrouter.ai/api/v1"
 api_key_ref = "env://OPENROUTER_API_KEY"
 
 [providers.deepseek]
-kind              = "openai-compat"
-base_url          = "https://api.deepseek.com/v1"
-api_key_ref       = "env://DEEPSEEK_API_KEY"
-reasoning_dialect = "deepseek"
-history_reasoning = "preserve"     # deepseek v4+ requires reasoning echo-back.
+kind        = "openai-compat"
+base_url    = "https://api.deepseek.com/v1"
+api_key_ref = "env://DEEPSEEK_API_KEY"
 
 # Anthropic Messages API direct.
 [providers.anthropic]
@@ -80,53 +79,78 @@ creds  = { kind = "default-chain" }
 # api_shape = "invoke"            # default; use "converse" for vendor-neutral.
 # anthropic_beta = ["context-1m-2025-08-07"]   # account-scoped beta floor.
 
-# ---- Models (provider + upstream + reasoning) ----
+# ---- Models (provider + upstream + reasoning capability) ----
 # Each model picks its provider, names the upstream wire model id,
-# and owns its reasoning defaults. Two models may share a provider;
-# Bedrock builds a separate provider instance per model so each gets
-# its own circuit breaker.
+# and declares its reasoning capabilities. Two models may share a
+# provider; Bedrock builds a separate provider instance per model so
+# each gets its own circuit breaker.
 
-# Heavy-tier reasoning on Codex.
-[models.codex-deep]
-provider = "codex"
-upstream = "gpt-5.4"
-thinking = "high"
-
-# Cost-tier reasoning on Codex (same provider, different effort).
-[models.codex-fast]
-provider = "codex"
-upstream = "gpt-5.4"
-thinking = "low"
-
-# Anthropic direct, Opus 4.7 with adaptive thinking + max effort.
+# Adaptive-thinking model on Anthropic direct (Opus 4.7+).
+# supports_adaptive_thinking = true selects the adaptive wire shape:
+#   { "thinking": { "type": "adaptive" }, "output_config": { "effort": "..." } }
+# Declare all effort levels the model accepts so egresses can clamp
+# caller intent to a valid value; empty list = pass-through.
 [models.opus-direct]
-provider          = "anthropic-oauth"
-upstream          = "claude-opus-4-7-20260301"
-thinking          = "xhigh"
-adaptive_thinking = true
+provider                   = "anthropic-oauth"
+upstream                   = "claude-opus-4-7-20260301"
+# Adaptive thinking wire shape (Opus 4.7+ only).
+supports_adaptive_thinking = true
+# Full vocabulary unlocked: minimal through max.
+effort_levels              = ["minimal", "low", "medium", "high", "xhigh", "max"]
 
-# Bedrock-hosted Sonnet 4.5 (legacy thinking shape, no adaptive).
+# Bedrock-hosted Sonnet 4.5 (legacy fixed-budget thinking shape).
+# supports_adaptive_thinking defaults to false: egress emits
+#   { "thinking": { "type": "enabled", "budget_tokens": N } }
+# max_thinking_budget caps the budget the egress may allocate.
 [models.sonnet-bedrock]
-provider = "bedrock"
-upstream = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-thinking = "medium"
+provider                   = "bedrock"
+upstream                   = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+# Legacy thinking shape; adaptive not supported on this model.
+supports_adaptive_thinking = false
+# Mid-range effort levels; xhigh/max not declared for this tier.
+effort_levels              = ["low", "medium", "high"]
+# Hard cap on thinking budget (tokens); 0 = no cap / use egress default.
+max_thinking_budget        = 16000
 
-# Bedrock-hosted Haiku 4.5 with reasoning pinned off (cost ceiling).
+# Bedrock-hosted Haiku 4.5 -- cost-optimized, no reasoning tier.
+# effort_levels defaults to ["low","medium","high"]; override to empty
+# to pass caller effort through verbatim (OpenRouter-style pass-through).
 [models.haiku-bedrock-cheap]
-provider = "bedrock"
-upstream = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-thinking = "none"
+provider      = "bedrock"
+upstream      = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 # Reasoning-tier model on DeepSeek.
-[models.deepseek-reasoner]
-provider = "deepseek"
-upstream = "deepseek-reasoner"
-thinking = "high"
+[models.deepseek-r]
+provider          = "deepseek"
+upstream          = "deepseek-reasoner"
+# deepseek v4+ requires reasoning echo-back on multi-turn history.
+history_reasoning = "preserve"
+# DeepSeek uses its own reasoning_content field, not standard effort.
+reasoning_dialect = "deepseek"
+# DeepSeek's reasoning endpoint understands high/xhigh effort.
+effort_levels     = ["low", "medium", "high", "xhigh"]
 
-# OpenRouter passthrough -- specific Anthropic build, no reasoning floor.
+# OpenRouter passthrough -- no effort clamping; OpenRouter decides
+# its own effort translation. Empty effort_levels = pass-through.
 [models.opus-or]
-provider = "openrouter"
-upstream = "anthropic/claude-opus-4-7-20260301"
+provider      = "openrouter"
+upstream      = "anthropic/claude-opus-4-7-20260301"
+# Empty list: OpenRouter translates effort itself; do not clamp.
+effort_levels = []
+
+# Heavy-tier on Codex (OpenAI Responses API, OpenAI-shape egress).
+# effort_levels clamping applies on OpenAI-shape egresses: a caller
+# that sends "xhigh" is clamped down to "high" for this model.
+[models.codex-deep]
+provider      = "codex"
+upstream      = "gpt-5.4"
+effort_levels = ["low", "medium", "high"]
+
+# Cost-tier on Codex (same provider, narrower effort range).
+[models.codex-fast]
+provider      = "codex"
+upstream      = "gpt-5.4"
+effort_levels = ["low", "medium"]
 
 # ---- Aliases (wire-string -> model nickname) ----
 # A single key with a string value resolves to one model. A list value
@@ -150,7 +174,7 @@ heavy = ["opus-direct", "sonnet-bedrock"]
 "claude-haiku-*" = "haiku-bedrock-cheap"
 
 # Specific exact match -- wins over any glob that also matches.
-"deepseek-reasoner" = "deepseek-reasoner"
+"deepseek-reasoner" = "deepseek-r"
 
 # Default: any wire model that doesn't match exact or glob lands here.
 default = "codex-deep"
