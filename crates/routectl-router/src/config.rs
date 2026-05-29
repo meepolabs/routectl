@@ -144,10 +144,10 @@ pub struct ModelEntry {
     pub selectable: bool,
 
     /// Whether this model supports the Anthropic adaptive thinking shape
-    /// (Opus 4.7+). When `true`, the factory wires
-    /// `AnthropicApiConfig::adaptive_thinking = Some(true)` so the
-    /// egress emits the adaptive wire shape. `false` (the default)
-    /// uses the standard fixed-budget shape or no thinking at all.
+    /// (Opus 4.7+). Projected via apply_layered_overlays into
+    /// RoutectlInternal.supports_adaptive_thinking; the AnthropicApi
+    /// egress reads it at request time. `false` (the default) uses the
+    /// standard fixed-budget shape or no thinking at all.
     #[serde(default)]
     pub supports_adaptive_thinking: bool,
 
@@ -247,9 +247,9 @@ impl ModelEntry {
     }
 
     /// Set whether this model supports the Anthropic adaptive thinking
-    /// shape. Drives `AnthropicApiConfig::adaptive_thinking` in the
-    /// factory so each adaptive-thinking model gets its own provider
-    /// instance.
+    /// shape. Projected via apply_layered_overlays into
+    /// RoutectlInternal.supports_adaptive_thinking; the AnthropicApi
+    /// egress reads it at request time.
     pub fn with_supports_adaptive_thinking(mut self, b: bool) -> Self {
         self.supports_adaptive_thinking = b;
         self
