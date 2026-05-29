@@ -27,6 +27,7 @@ use routectl_core::ChatRequest;
 
 use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
 use super::AuthKind;
+use crate::effort::clamp_effort_to_supported;
 
 /// Set `request.reasoning` from `req.reasoning`. Effort maps to the
 /// `effort` field; the `summary` mode is hardcoded to "auto" to match
@@ -48,7 +49,10 @@ pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest)
         );
     }
 
-    let effort = r.effort.clone();
+    let effort = r
+        .effort
+        .as_deref()
+        .map(|e| clamp_effort_to_supported(e, &req.routectl_internal.effort_levels).into_owned());
     let enabled = r.enabled;
 
     // If reasoning is explicitly disabled and no effort is set, leave

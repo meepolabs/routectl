@@ -33,7 +33,6 @@ mod tests {
             auth_kind: AuthKind::ApiKey,
             header_extras: Vec::new(),
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
         };
@@ -1199,7 +1198,6 @@ mod tests {
             auth_kind: AuthKind::OauthBearer,
             header_extras: vec![("anthropic-beta".into(), "context-1m-2025-08-07".into())],
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
         };
@@ -1234,7 +1232,6 @@ mod tests {
             auth_kind: AuthKind::ApiKey,
             header_extras: vec![("anthropic-beta".into(), expected_beta.into())],
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
         };
@@ -1262,7 +1259,6 @@ mod tests {
             auth_kind: AuthKind::ApiKey,
             header_extras: Vec::new(),
             user_agent: Some("claude-code/1.2.3".into()),
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
         };
@@ -1299,7 +1295,6 @@ mod tests {
             // body) for count_tokens.
             header_extras: vec![("anthropic-beta".into(), "context-1m-2025-08-07".into())],
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
         };

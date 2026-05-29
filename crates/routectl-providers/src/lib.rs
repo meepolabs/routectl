@@ -15,6 +15,11 @@ pub mod model_profile;
 
 pub(crate) mod http_client;
 
+// Shared effort-clamping helper for OpenAI-shape egresses. Unconditional
+// (no feature gate) because both openai-compat and openai-responses egresses
+// use it and both pull in reqwest anyway.
+pub(crate) mod effort;
+
 // Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Unconditional
 // like `http_client` (both lean on `reqwest`, which any provider feature
 // pulls in); every provider calls into it, so there is no dead code in a
