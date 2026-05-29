@@ -51,7 +51,10 @@ pub struct ResolvedModel {
     /// Operator-declared effort levels for this model (e.g.
     /// `["minimal", "low", "medium", "high"]`). Projected from
     /// `[models.X] effort_levels`. Empty when not configured.
-    pub effort_levels: Vec<String>,
+    ///
+    /// `Arc<[String]>` so cloning at dispatch time is a refcount bump
+    /// rather than a heap allocation.
+    pub effort_levels: Arc<[String]>,
     /// Maximum thinking budget in tokens. `0` means no explicit cap
     /// configured. Projected from `[models.X] max_thinking_budget`.
     pub max_thinking_budget: u32,
@@ -95,7 +98,7 @@ impl ResolvedModel {
             provider,
             upstream: upstream.into(),
             supports_adaptive_thinking: false,
-            effort_levels: Vec::new(),
+            effort_levels: Arc::default(),
             max_thinking_budget: 0,
             reasoning_dialect: None,
             history_reasoning: None,
@@ -112,7 +115,7 @@ impl ResolvedModel {
     }
 
     pub fn with_effort_levels(mut self, levels: Vec<String>) -> Self {
-        self.effort_levels = levels;
+        self.effort_levels = Arc::from(levels.as_slice());
         self
     }
 
@@ -254,7 +257,7 @@ mod tests {
             .with_effort_levels(levels.clone())
             .with_max_thinking_budget(16000);
         assert!(m.supports_adaptive_thinking);
-        assert_eq!(m.effort_levels, levels);
+        assert_eq!(&*m.effort_levels, levels.as_slice());
         assert_eq!(m.max_thinking_budget, 16000);
     }
 

@@ -135,7 +135,10 @@ struct DispatchTarget {
     /// `ResolvedModel.effort_levels`. Empty means passthrough (emit
     /// caller's effort verbatim). Non-empty: OpenAI-shape egresses
     /// clamp `req.reasoning.effort` to the nearest supported level.
-    effort_levels: Vec<String>,
+    ///
+    /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
+    /// bump rather than a heap allocation.
+    effort_levels: std::sync::Arc<[String]>,
     /// Model nickname for tracing.
     nickname: Option<String>,
     /// Per-model `header_extras`. Merged with the provider's
@@ -152,6 +155,11 @@ struct DispatchTarget {
     history_reasoning: Option<HistoryReasoning>,
     /// Per-model `stream_first_byte_timeout_ms`.
     stream_first_byte_timeout_ms: Option<u64>,
+    /// Operator-declared maximum thinking-token budget for this model.
+    /// Threaded from `ResolvedModel.max_thinking_budget`. Zero means no
+    /// operator cap; `apply_layered_overlays` writes this to
+    /// `RoutectlInternal.max_thinking_budget` for the egress to read.
+    max_thinking_budget: u32,
 }
 
 impl Router {
@@ -1149,6 +1157,7 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     internal.claude_code_headers = captured_claude_code_headers;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
+    internal.max_thinking_budget = target.max_thinking_budget;
     req.routectl_internal = internal;
 }
 
@@ -1427,6 +1436,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
+        max_thinking_budget: m.max_thinking_budget,
     }
 }
 

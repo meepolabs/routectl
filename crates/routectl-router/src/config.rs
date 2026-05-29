@@ -308,44 +308,6 @@ impl ModelEntry {
         self.stream_first_byte_timeout_ms = Some(ms);
         self
     }
-
-    /// True when the model opts into the Anthropic adaptive thinking
-    /// shape. Read by the AnthropicApi factory path so each
-    /// adaptive-thinking model gets its own `AnthropicApiProvider`
-    /// instance with `cfg.adaptive_thinking = Some(true)`.
-    pub fn is_adaptive_thinking(&self) -> bool {
-        self.supports_adaptive_thinking
-    }
-}
-
-/// Validated reasoning-effort vocabulary. v0.6.0 introduces a closed
-/// enum at the config layer; unknown values reject at TOML parse with a
-/// clear error. The egress side still passes the effort STRING through
-/// verbatim so vendors can add new levels without a routectl release --
-/// when that day comes, add a new variant here and route it through
-/// `as_str`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EffortLevel {
-    Minimal,
-    Low,
-    Medium,
-    High,
-    Xhigh,
-    Max,
-}
-
-impl EffortLevel {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EffortLevel::Minimal => "minimal",
-            EffortLevel::Low => "low",
-            EffortLevel::Medium => "medium",
-            EffortLevel::High => "high",
-            EffortLevel::Xhigh => "xhigh",
-            EffortLevel::Max => "max",
-        }
-    }
 }
 
 fn default_true() -> bool {
@@ -1414,7 +1376,6 @@ max_thinking_budget = 8000
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         let m = cfg.models.get("opus").expect("opus entry");
         assert!(m.supports_adaptive_thinking);
-        assert!(m.is_adaptive_thinking());
         assert_eq!(
             m.effort_levels,
             vec![
@@ -1704,7 +1665,6 @@ selectable = false
             .with_effort_levels(vec!["low".into(), "high".into(), "max".into()])
             .with_max_thinking_budget(16000);
         assert!(m.supports_adaptive_thinking);
-        assert!(m.is_adaptive_thinking());
         assert_eq!(
             m.effort_levels,
             vec!["low".to_string(), "high".to_string(), "max".to_string()]

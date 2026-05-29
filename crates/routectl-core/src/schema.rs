@@ -169,7 +169,21 @@ pub struct RoutectlInternal {
     /// OpenAI-shape egresses clamp `req.reasoning.effort` to the nearest
     /// supported level before emitting. Empty means passthrough -- emit
     /// whatever the caller sent without validation.
-    pub effort_levels: Vec<String>,
+    ///
+    /// `Arc<[String]>` so cloning (once per dispatch attempt) is a
+    /// refcount bump rather than a heap allocation. The default empty
+    /// case uses `Arc::default()`, which is also zero-allocation.
+    pub effort_levels: std::sync::Arc<[String]>,
+    /// Maximum thinking-token budget the operator allows for this model,
+    /// in tokens. Zero means no operator cap -- the egress applies only
+    /// Anthropic's own `[1024, max_tokens-1]` window. Non-zero values
+    /// are forwarded as the ceiling for the legacy `Enabled` budget
+    /// negotiation; the budget is clamped DOWN to this value before
+    /// Anthropic's window clamp runs.
+    ///
+    /// Threaded through from `[models.X] max_thinking_budget` via
+    /// `ResolvedModel` -> `DispatchTarget`.
+    pub max_thinking_budget: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
