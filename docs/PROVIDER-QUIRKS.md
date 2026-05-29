@@ -19,6 +19,7 @@ doc. If it 4xxs or behaves weirdly, find the matching row.
 | **NIM cold-start streaming** | `[providers.X] stream_first_byte_timeout_ms = 180000` (3 min) |
 | **Anthropic + 1M-context beta** | `[providers.X] header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }` |
 | **OAuth bearer to Anthropic** | `[providers.X] auth_kind = "oauth-bearer"` + the matching beta header |
+| **DeepSeek /anthropic endpoint + claude-code context-management** | `[providers.X] context_management = true` |
 
 ## Per-model config
 
@@ -330,9 +331,67 @@ deepseek-flash = ["ds-go", "ds-or", "ds-nim"]   # primary -> fallback -> fallbac
 
 Each provider's `history_reasoning` config applies independently -- the chain just picks who answers. The `routectl_provider` field on every response tells you which one actually answered.
 
-## Troubleshooting matrix
+## DeepSeek /anthropic and similar: context_management beta emulation
 
-When a request fails, the upstream's error body is the truth source. routectl logs a 200B-truncated `body_excerpt` at WARN on every 4xx/5xx; flip `ROUTECTL_LOG=routectl=debug` for the full body.
+claude-code 1.x sends two artefacts when the context-management beta is active:
+
+1. An `anthropic-beta: context-management-2025-06-27` request header.
+2. A `context_management` top-level body key containing an `edits` array with
+   a `clear_thinking_20251015` entry that tells the server which thinking blocks
+   to re-send with the response.
+
+Real Anthropic handles both natively. Non-Anthropic anthropic-api providers
+(DeepSeek `/anthropic`, vLLM, LM Studio, etc.) reject the beta header and/or
+the body key with a 400. They still require thinking echo-back for multi-turn
+continuity (see the `history_reasoning = "preserve"` row above), but they need
+to receive the thinking blocks directly in the message history -- not via the
+Anthropic-proprietary edit mechanism.
+
+**What routectl does when `context_management = true`:**
+
+- Strips `context-management-2025-06-27` from the outgoing `anthropic-beta`
+  header so the upstream never sees the beta it doesn't honour.
+- Strips the `context_management` top-level body key so the upstream does not
+  400 on an unknown field.
+- Re-injects the cached thinking blocks before each qualifying ToolUse block in
+  the outgoing assistant messages, emulating what the real Anthropic server would
+  have done. The injection follows the `keep` policy from the
+  `clear_thinking_20251015` edit:
+  - `"keep": "all"` -- inject into every assistant turn that has a ToolUse.
+  - `"keep": {"type": "thinking_turns", "value": N}` -- inject only the most
+    recent N turns (0 means no injection).
+  - Unknown shapes default to `"all"` with a debug log.
+- **Soft-fail on cache miss**: if the cache has no entry for a tool_use id
+  (cold-start or TTL eviction after 60 minutes), routectl strips the `thinking`
+  body key and emits a structured `WARN` log so the request completes without a
+  400. The operator can see the miss via `grep missed_tool_ids` in the logs.
+
+**Required config:**
+
+```toml
+[providers.deepseek-anthropic]
+kind               = "anthropic-api"
+base_url           = "https://api.deepseek.com"
+api_key_ref        = "env://DEEPSEEK_API_KEY"
+context_management = true
+history_reasoning  = "preserve"
+```
+
+Note: `history_reasoning = "preserve"` is still required (see the DeepSeek v4
+section above) because thinking echo-back and context-management emulation are
+complementary, not alternatives. `history_reasoning` controls how thinking
+tokens in the INCOMING ChatRequest history are forwarded; `context_management`
+controls how the outgoing request is shaped for the beta-aware edit workflow.
+
+**Troubleshooting:**
+
+| Symptom | Cause |
+|---|---|
+| `400 context_management is not allowed` | Provider rejects the body key -- set `context_management = true` |
+| `400 anthropic-beta header not recognised` | Provider rejects the beta header -- set `context_management = true` |
+| WARN `context_management: cache miss for tool_use ids` in logs | Cold-start or TTL gap; thinking was stripped for that turn. The next turn refills the cache and injection resumes. |
+
+## Troubleshooting matrix routectl logs a 200B-truncated `body_excerpt` at WARN on every 4xx/5xx; flip `ROUTECTL_LOG=routectl=debug` for the full body.
 
 | Symptom | Likely cause |
 |---|---|
@@ -341,6 +400,7 @@ When a request fails, the upstream's error body is the truth source. routectl lo
 | `stream first-byte timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
 | Empty `content` + non-zero `reasoning_tokens` | Model used full `max_tokens` budget on reasoning. Increase `max_tokens` |
 | `400 thinking enabled requires temperature 1.0` | Don't set `temperature` when reasoning is enabled (routectl auto-forces 1.0 if you do) |
+| `400 context_management is not allowed` or `400 anthropic-beta header not recognised` | Set `context_management = true` on the provider (DeepSeek /anthropic or similar) |
 
 ## When in doubt
 

@@ -428,6 +428,26 @@ independent of this knob and always applies.
 See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for full per-upstream
 recipes.
 
+## context_management (anthropic-api provider flag)
+
+`context_management` on `[providers.X]` (kind = "anthropic-api") tells routectl
+to emulate Anthropic's context-management-2025-06-27 beta server-side for that
+provider. Set it for non-Anthropic anthropic-api endpoints that do not honor the
+beta natively (e.g. DeepSeek's `/anthropic` surface). Default is `false`:
+routectl forwards the body verbatim and the real Anthropic server handles the
+beta itself.
+
+```toml
+# DeepSeek /anthropic provider: routectl emulates context management because
+# DeepSeek does not natively honor the beta header.
+[providers.deepseek-anthropic]
+kind               = "anthropic-api"
+base_url           = "https://api.deepseek.com/anthropic"
+api_key_ref        = "env://DS_KEY"
+auth_kind          = "oauth-bearer"
+context_management = true
+```
+
 ## Log knobs (`[log]`)
 
 The optional `[log]` block carries operator-facing fallbacks for the

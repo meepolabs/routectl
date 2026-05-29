@@ -45,7 +45,6 @@ use super::types::{
 };
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
-const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 /// Anthropic `tool_choice.type` values that force tool use. Pairing
 /// either with `thinking` causes a 400 (extended-thinking docs).
@@ -892,7 +891,7 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
     for detail in &sorted {
         match detail.kind {
             ReasoningDetailKind::Text => {
-                if detail.format.as_deref() != Some(ANTHROPIC_FORMAT) {
+                if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) {
                     continue;
                 }
                 let thinking = detail
@@ -922,7 +921,7 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
                 });
             }
             ReasoningDetailKind::Encrypted => {
-                if detail.format.as_deref() != Some(ANTHROPIC_FORMAT) {
+                if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) {
                     continue;
                 }
                 let data = detail
@@ -1176,11 +1175,15 @@ fn filter_anthropic_betas(
     kept
 }
 
-pub fn normalize(
+pub(crate) fn normalize(
     id: &str,
     req: &ChatRequest,
     adaptive: bool,
     allowed_betas: &[String],
+    context_management: bool,
+    thinking_cache: Option<
+        &std::sync::RwLock<crate::anthropic_api::context_management::ThinkingCache>,
+    >,
 ) -> Result<Value> {
     // Anthropic's wire requires every tool_result carry the
     // `tool_use_id` of the tool_use it answers; missing ids are
@@ -1217,7 +1220,26 @@ pub fn normalize(
         .map(translate_system)
         .or_else(|| lift_legacy_system(&req.messages));
 
-    let anthropic_messages = translate_messages(id, &messages)?;
+    let mut anthropic_messages = translate_messages(id, &messages)?;
+
+    // When context_management emulation is active, re-inject cached
+    // thinking blocks before ToolUse blocks per the clear_thinking_20251015
+    // edit spec. Collect any cache-miss ids for soft-fail below.
+    let clear_thinking_misses: Vec<String> = if context_management {
+        if let Some(tc) = thinking_cache {
+            let apply_result = crate::anthropic_api::context_management::apply_clear_thinking_edit(
+                &mut anthropic_messages,
+                req.provider_extras.as_ref(),
+                tc,
+                id,
+            );
+            apply_result.missed_tool_ids
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
 
     // tool_choice="none" forbids tool use; Anthropic has no native
     // equivalent for the bare-string OpenAI form, so strip BOTH the
@@ -1272,6 +1294,36 @@ pub fn normalize(
         serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
     merge_provider_extras(id, &mut body, req.provider_extras.as_ref());
+
+    // When context_management emulation is active we have already applied
+    // the edits above. Strip the `context_management` body key so it is
+    // never forwarded to the upstream (non-Anthropic providers reject it).
+    if context_management {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("context_management");
+        }
+    }
+
+    // Soft-fail: if cache misses occurred (cold-start or TTL eviction) and
+    // the body still has a `thinking` key, the upstream would receive a
+    // request that demands thinking tokens but no thinking blocks were
+    // injected into history. Non-Anthropic providers 400 on this shape.
+    // Strip `thinking` defensively and emit a structured warning so
+    // operators can diagnose the gap.
+    if !clear_thinking_misses.is_empty() {
+        if let Some(obj) = body.as_object_mut() {
+            if obj.contains_key("thinking") {
+                obj.remove("thinking");
+                tracing::warn!(
+                    provider = id,
+                    missed_tool_ids = ?clear_thinking_misses,
+                    "context_management: cache miss for tool_use ids; \
+                     stripped `thinking` from body to avoid upstream 400 \
+                     (cold-start or TTL eviction)"
+                );
+            }
+        }
+    }
     strip_unsupported_output_effort(&mut body, adaptive);
     strip_thinking_when_tool_choice_forces_use(id, &mut body);
     Ok(body)
@@ -1477,7 +1529,7 @@ mod allowlist_tests {
             "context-1m-2025-08-07".into(),
             "prompt-caching-2024-07-31".into(),
         ]);
-        let body = normalize("p", &req, false, &[]).unwrap();
+        let body = normalize("p", &req, false, &[], false, None).unwrap();
         assert_eq!(
             body["anthropic_beta"],
             json!(["context-1m-2025-08-07", "prompt-caching-2024-07-31"])
@@ -1496,7 +1548,7 @@ mod allowlist_tests {
             "context-1m-2025-08-07".to_string(),
             "prompt-caching-2024-07-31".to_string(),
         ];
-        let body = normalize("p", &req, false, &allowed).unwrap();
+        let body = normalize("p", &req, false, &allowed, false, None).unwrap();
         // Order preserved, unknown flag dropped.
         assert_eq!(
             body["anthropic_beta"],
@@ -1512,11 +1564,183 @@ mod allowlist_tests {
     fn allowlist_can_drop_all_requested() {
         let req = req_with_betas(vec!["totally-unknown".into()]);
         let allowed = vec!["context-1m-2025-08-07".to_string()];
-        let body = normalize("p", &req, false, &allowed).unwrap();
+        let body = normalize("p", &req, false, &allowed, false, None).unwrap();
         let got = &body["anthropic_beta"];
         assert!(
             got.is_null() || got.as_array().map(|a| a.is_empty()).unwrap_or(false),
             "expected absent or empty array, got: {got}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for context_management emulation in normalize()
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod context_management_normalize_tests {
+    use super::*;
+    use crate::anthropic_api::context_management::{
+        snapshot_to_cache, ThinkingCache, CLEAR_THINKING_EDIT_TYPE,
+    };
+    use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
+    use serde_json::json;
+    use std::num::NonZeroUsize;
+    use std::sync::{Arc, RwLock};
+
+    fn simple_req() -> ChatRequest {
+        ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn req_with_cm_extras() -> ChatRequest {
+        ChatRequest {
+            provider_extras: Some(json!({
+                "context_management": {
+                    "edits": [{"type": CLEAR_THINKING_EDIT_TYPE, "keep": "all"}]
+                }
+            })),
+            ..simple_req()
+        }
+    }
+
+    fn req_with_tool_use_history_and_cm() -> ChatRequest {
+        // Build a request whose messages contain an assistant turn with
+        // tool_calls so translate_messages produces an AnthropicMessage
+        // with a ToolUse block -- required for apply_clear_thinking_edit
+        // to find qualifying messages.
+        ChatRequest {
+            model: "claude-sonnet-4".into(),
+            max_tokens: Some(4096),
+            reasoning: Some(ReasoningConfig {
+                enabled: Some(true),
+                max_tokens: Some(2048),
+                effort: None,
+                exclude: None,
+            }),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Text("use the calc tool".into()),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Text("calling calc".into()),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Some(vec![json!({
+                        "id": "toolu_t1",
+                        "type": "function",
+                        "function": {"name": "calc", "arguments": "{}"}
+                    })]),
+                },
+                Message {
+                    role: Role::Tool,
+                    content: MessageContent::Text("42".into()),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: Some("toolu_t1".into()),
+                    tool_calls: None,
+                },
+            ],
+            provider_extras: Some(json!({
+                "context_management": {
+                    "edits": [{"type": CLEAR_THINKING_EDIT_TYPE, "keep": "all"}]
+                }
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn small_cache(cap: usize) -> RwLock<ThinkingCache> {
+        RwLock::new(lru::LruCache::new(NonZeroUsize::new(cap).expect("cap > 0")))
+    }
+
+    /// When context_management=true, the `context_management` body key
+    /// (which came from provider_extras) must be stripped before returning.
+    /// Non-Anthropic upstreams reject unknown top-level body keys.
+    #[test]
+    fn normalize_strips_context_management_body_key_when_flag_true() {
+        let req = req_with_cm_extras();
+        let body = normalize("test", &req, false, &[], true, None).expect("normalize must succeed");
+        assert!(
+            body.get("context_management").is_none(),
+            "context_management body key must be stripped when flag=true; got: {body}"
+        );
+    }
+
+    /// When context_management=false, the `context_management` body key
+    /// must be forwarded verbatim to the upstream (e.g. real Anthropic).
+    #[test]
+    fn normalize_keeps_context_management_body_key_when_flag_false() {
+        let req = req_with_cm_extras();
+        let body =
+            normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+        assert!(
+            body.get("context_management").is_some(),
+            "context_management body key must survive when flag=false; got: {body}"
+        );
+    }
+
+    /// Soft-fail: when context_management=true and the thinking cache has
+    /// no entry for the qualifying tool_use id (cold-start or TTL eviction),
+    /// the `thinking` key must be stripped from the outgoing body so the
+    /// upstream (which does not honour the beta) does not 400.
+    #[test]
+    fn normalize_soft_fail_strips_thinking_on_cache_miss() {
+        let req = req_with_tool_use_history_and_cm();
+        let cache = Arc::new(small_cache(8)); // nothing seeded
+        let body = normalize("test", &req, false, &[], true, Some(&cache))
+            .expect("normalize must succeed even on cache miss");
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be stripped on cache miss; got: {body}"
+        );
+    }
+
+    /// No soft-fail when the cache has an entry for the qualifying
+    /// tool_use id: the `thinking` key must remain in the outgoing body.
+    #[test]
+    fn normalize_no_soft_fail_when_cache_hits() {
+        let req = req_with_tool_use_history_and_cm();
+        let cache = Arc::new(small_cache(8));
+        // Seed the cache for the tool_use id used in req_with_tool_use_history_and_cm.
+        snapshot_to_cache(
+            &cache,
+            "test",
+            "toolu_t1",
+            vec![routectl_core::ReasoningDetail {
+                kind: routectl_core::ReasoningDetailKind::Text,
+                id: Some("rd-1".into()),
+                format: Some(super::super::ANTHROPIC_FORMAT.to_string()),
+                index: Some(0),
+                payload: json!({"text": "my reasoning", "signature": "sig"}),
+            }],
+        );
+        let body = normalize("test", &req, false, &[], true, Some(&cache))
+            .expect("normalize must succeed with cache hit");
+        assert!(
+            body.get("thinking").is_some(),
+            "thinking must NOT be stripped when cache has an entry; got: {body}"
         );
     }
 }
@@ -1688,7 +1912,7 @@ mod multi_turn_tool_use_tests {
             ..Default::default()
         };
 
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         let assistant = messages
             .iter()
@@ -1751,7 +1975,7 @@ mod multi_turn_tool_use_tests {
             ..Default::default()
         };
 
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         let assistant = messages
             .iter()
@@ -1824,7 +2048,7 @@ mod multi_turn_tool_use_tests {
             ..Default::default()
         };
 
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         let assistant = body
             .get("messages")
             .and_then(|v| v.as_array())
@@ -1878,7 +2102,7 @@ mod multi_turn_tool_use_tests {
             ..Default::default()
         };
 
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         // The empty-after-strip assistant message is gone; only the
         // two user messages remain.
@@ -1929,7 +2153,7 @@ mod multi_turn_tool_use_tests {
             ],
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         let assistant = messages
             .iter()
@@ -1993,7 +2217,7 @@ mod multi_turn_tool_use_tests {
         };
 
         let captured = test_capture::with_capture(|| {
-            normalize("provider-x", &req, false, &[]).expect("normalize succeeds");
+            normalize("provider-x", &req, false, &[], false, None).expect("normalize succeeds");
         });
 
         let strip_event = captured
@@ -2055,7 +2279,7 @@ mod multi_turn_tool_use_tests {
             }],
             ..Default::default()
         };
-        let err = normalize("test-anthropic", &req, false, &[]).unwrap_err();
+        let err = normalize("test-anthropic", &req, false, &[], false, None).unwrap_err();
         assert!(
             err.to_string().contains("tool_call_id"),
             "must mention tool_call_id; got: {err}"
@@ -2099,7 +2323,7 @@ mod multi_turn_tool_use_tests {
         };
         // Must NOT error: the new behavior is to strip the unsigned
         // block, not reject the request.
-        let body = normalize("test-anthropic", &req, false, &[]).expect(
+        let body = normalize("test-anthropic", &req, false, &[], false, None).expect(
             "normalize must accept the request and strip the unsigned block; \
              a hard reject would regress the cross-provider fallback path",
         );
@@ -2135,7 +2359,7 @@ mod multi_turn_tool_use_tests {
             )],
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
         let assistant = messages
             .iter()
@@ -2168,7 +2392,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[], false, None).unwrap();
 
         // thinking serializes to {"type":"adaptive"} -- no budget_tokens.
         let thinking = body.get("thinking").expect("thinking field present");
@@ -2206,7 +2430,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
 
         let thinking = body.get("thinking").expect("thinking field present");
         assert_eq!(thinking["type"], "enabled");
@@ -2243,7 +2467,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         let thinking = body.get("thinking").unwrap();
         assert_eq!(thinking["type"], "enabled");
         // 2000 * 0.99 = 1980
@@ -2268,7 +2492,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[], false, None).unwrap();
         let thinking = body.get("thinking").unwrap();
         assert_eq!(thinking["type"], "disabled");
         assert!(body.get("output_config").is_none());
@@ -2295,7 +2519,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "medium");
     }
@@ -2323,7 +2547,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "adaptive");
         // budget_tokens MUST NOT leak into the adaptive shape.
         assert!(
@@ -2356,7 +2580,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         assert!(
             body.get("thinking").is_none(),
             "thinking must be absent on probe-sized legacy requests, got {body:?}"
@@ -2383,7 +2607,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         assert!(body.get("thinking").is_none());
     }
 
@@ -2406,7 +2630,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, true, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, true, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "high");
     }
@@ -2432,7 +2656,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
     }
@@ -2455,7 +2679,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
     }
@@ -2481,7 +2705,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 1099);
         // Anthropic invariant: max_tokens > budget_tokens.
@@ -2509,7 +2733,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
     }
@@ -2533,7 +2757,7 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
-        let body = normalize("test-anthropic", &req, false, &[]).unwrap();
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "disabled");
     }
 
@@ -2549,7 +2773,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(json!("auto")),
             ..Default::default()
         };
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
         assert_eq!(body["tool_choice"], json!({"type":"auto"}));
     }
 
@@ -2561,7 +2785,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(json!("required")),
             ..Default::default()
         };
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
         assert_eq!(body["tool_choice"], json!({"type":"any"}));
     }
 
@@ -2573,7 +2797,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(json!("none")),
             ..Default::default()
         };
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
         assert!(
             body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
             "expected tool_choice dropped, got: {body:?}"
@@ -2607,7 +2831,7 @@ mod multi_turn_tool_use_tests {
             )]),
             ..Default::default()
         };
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
         assert!(
             body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
             "expected tool_choice dropped, got: {body:?}"
@@ -2626,7 +2850,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(json!({"type":"function","function":{"name":"get_weather"}})),
             ..Default::default()
         };
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
         assert_eq!(
             body["tool_choice"],
             json!({"type":"tool","name":"get_weather"})
@@ -2651,7 +2875,7 @@ mod multi_turn_tool_use_tests {
                 tool_choice: Some(tc.clone()),
                 ..Default::default()
             };
-            let body = normalize("test", &req, false, &[]).unwrap();
+            let body = normalize("test", &req, false, &[], false, None).unwrap();
             assert_eq!(body["tool_choice"], tc, "expected passthrough for {tc:?}");
         }
     }
@@ -2668,7 +2892,7 @@ mod multi_turn_tool_use_tests {
             tool_choice: Some(weird.clone()),
             ..Default::default()
         };
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
         assert_eq!(body["tool_choice"], weird);
     }
 
@@ -2693,7 +2917,7 @@ mod multi_turn_tool_use_tests {
             })),
             ..Default::default()
         };
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
     }
@@ -2714,7 +2938,7 @@ mod multi_turn_tool_use_tests {
             })),
             ..Default::default()
         };
-        let body = normalize("test", &req, /* adaptive= */ false, &[]).unwrap();
+        let body = normalize("test", &req, /* adaptive= */ false, &[], false, None).unwrap();
         // effort stripped; output_config now empty, so the whole
         // object is removed for wire cleanliness.
         assert!(
@@ -2745,7 +2969,7 @@ mod multi_turn_tool_use_tests {
             })),
             ..Default::default()
         };
-        let body = normalize("test", &req, /* adaptive= */ false, &[]).unwrap();
+        let body = normalize("test", &req, /* adaptive= */ false, &[], false, None).unwrap();
         let oc = body.get("output_config").expect("output_config preserved");
         assert!(oc.get("effort").is_none(), "effort stripped: {oc}");
         assert_eq!(oc["format"]["type"], "json_schema");
@@ -2767,7 +2991,7 @@ mod multi_turn_tool_use_tests {
             })),
             ..Default::default()
         };
-        let body = normalize("test", &req, /* adaptive= */ true, &[]).unwrap();
+        let body = normalize("test", &req, /* adaptive= */ true, &[], false, None).unwrap();
         let oc = body.get("output_config").expect("output_config preserved");
         assert_eq!(oc["effort"], "high");
     }
@@ -2814,7 +3038,7 @@ mod multi_turn_tool_use_tests {
         let req = req_with_thinking_and_tool_choice(Some(json!({"type": "any"})));
 
         // Act
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
 
         // Assert: thinking dropped, tool_choice preserved verbatim.
         assert!(
@@ -2831,7 +3055,7 @@ mod multi_turn_tool_use_tests {
             req_with_thinking_and_tool_choice(Some(json!({"type": "tool", "name": "web_search"})));
 
         // Act
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
 
         // Assert: thinking dropped, tool_choice preserved verbatim.
         assert!(
@@ -2852,7 +3076,7 @@ mod multi_turn_tool_use_tests {
 
         // translate_tool_choice normalizes bare "auto" -> {"type":"auto"}
         // before strip_thinking_when_tool_choice_forces_use runs.
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
 
         assert_eq!(body["tool_choice"], json!({"type": "auto"}));
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -2864,7 +3088,7 @@ mod multi_turn_tool_use_tests {
         // wire AND drops the tools array; thinking is unaffected.
         let req = req_with_thinking_and_tool_choice(Some(json!("none")));
 
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
 
         assert!(
             body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
@@ -2878,7 +3102,7 @@ mod multi_turn_tool_use_tests {
         // Regression guard: absent tool_choice never triggers the strip.
         let req = req_with_thinking_and_tool_choice(None);
 
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
 
         assert!(body.get("tool_choice").is_none() || body["tool_choice"].is_null());
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -2896,7 +3120,7 @@ mod multi_turn_tool_use_tests {
             ..Default::default()
         };
 
-        let body = normalize("test", &req, false, &[]).unwrap();
+        let body = normalize("test", &req, false, &[], false, None).unwrap();
 
         assert!(body.get("thinking").is_none());
         assert_eq!(body["tool_choice"], json!({"type": "any"}));
@@ -2992,7 +3216,9 @@ mod multi_turn_tool_use_tests {
         // WARN fires.
         let mut body = None;
         let captured = test_capture::with_capture(|| {
-            body = Some(normalize("deepseek", &req, false, &[]).expect("normalize succeeds"));
+            body = Some(
+                normalize("deepseek", &req, false, &[], false, None).expect("normalize succeeds"),
+            );
         });
         let body = body.expect("normalize ran");
 
@@ -3030,7 +3256,8 @@ mod multi_turn_tool_use_tests {
         );
 
         // Act.
-        let body = normalize("anthropic", &req, false, &[]).expect("normalize succeeds");
+        let body =
+            normalize("anthropic", &req, false, &[], false, None).expect("normalize succeeds");
 
         // Assert: unsigned thinking removed, text + tool_use survive.
         let blocks = assistant_blocks(&body);
@@ -3052,7 +3279,8 @@ mod multi_turn_tool_use_tests {
             let req = req_with_hr(hr, assistant_with_thinking(None));
 
             // Act.
-            let body = normalize("anthropic", &req, false, &[]).expect("normalize succeeds");
+            let body =
+                normalize("anthropic", &req, false, &[], false, None).expect("normalize succeeds");
 
             // Assert.
             let blocks = assistant_blocks(&body);
@@ -3074,7 +3302,8 @@ mod multi_turn_tool_use_tests {
             let req = req_with_hr(Some(hr), assistant_with_thinking(Some("sig_xyz")));
 
             // Act.
-            let body = normalize("anthropic", &req, false, &[]).expect("normalize succeeds");
+            let body =
+                normalize("anthropic", &req, false, &[], false, None).expect("normalize succeeds");
 
             // Assert.
             let blocks = assistant_blocks(&body);
@@ -3115,7 +3344,7 @@ mod multi_turn_tool_use_tests {
         };
         req.routectl_internal.history_reasoning = Some(CoreHistoryReasoning::Preserve);
 
-        let err = normalize("deepseek", &req, false, &[]).unwrap_err();
+        let err = normalize("deepseek", &req, false, &[], false, None).unwrap_err();
         assert!(
             err.to_string().contains("tool_call_id"),
             "must reject missing tool_call_id even under Preserve; got: {err}"
@@ -3150,6 +3379,8 @@ mod multi_turn_tool_use_tests {
             &req,
             req.routectl_internal.supports_adaptive_thinking,
             &[],
+            false,
+            None,
         )
         .expect("normalize must succeed");
 
@@ -3185,7 +3416,8 @@ mod multi_turn_tool_use_tests {
         // Operator cap of 2000 < caller's explicit 8000.
         req.routectl_internal.max_thinking_budget = 2000;
 
-        let body = normalize("test", &req, false, &[]).expect("normalize must succeed");
+        let body =
+            normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
         let thinking = body.get("thinking").expect("thinking field present");
         assert_eq!(thinking["type"], "enabled");
         assert_eq!(
@@ -3215,7 +3447,8 @@ mod multi_turn_tool_use_tests {
         // Zero = no operator cap.
         req.routectl_internal.max_thinking_budget = 0;
 
-        let body = normalize("test", &req, false, &[]).expect("normalize must succeed");
+        let body =
+            normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
         let thinking = body.get("thinking").expect("thinking field present");
         assert_eq!(thinking["type"], "enabled");
         // budget=3000 fits in [1024, 9999] unchanged.
@@ -3274,7 +3507,7 @@ mod anthropic_effort_clamp_tests {
         ]);
 
         // Act
-        let body = normalize("test", &req, true, &[]).expect("normalize must succeed");
+        let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
 
         // Assert: effort clamped from "max" down to "high" (operator cap).
         let oc = body
@@ -3308,7 +3541,7 @@ mod anthropic_effort_clamp_tests {
         req.routectl_internal.effort_levels = std::sync::Arc::from(Vec::<String>::new());
 
         // Act
-        let body = normalize("test", &req, true, &[]).expect("normalize must succeed");
+        let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
 
         // Assert: effort passes through unchanged.
         let oc = body
@@ -3347,7 +3580,8 @@ mod anthropic_effort_clamp_tests {
             std::sync::Arc::from(vec!["low".to_string(), "medium".to_string()]);
 
         // Act
-        let body = normalize("test", &req, false, &[]).expect("normalize must succeed");
+        let body =
+            normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
 
         // Assert: budget derived from "medium" (0.50 * 4096 = 2048), not
         // from "high" (0.80 * 4096 = 3276).

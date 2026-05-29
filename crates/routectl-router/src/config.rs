@@ -569,6 +569,15 @@ pub enum ProviderEntry {
         /// captured names actually go upstream.
         #[serde(default)]
         forward_client_headers: Vec<String>,
+        /// When true, routectl emulates Anthropic's
+        /// context-management-2025-06-27 beta server-side for this
+        /// provider. Set this for non-Anthropic anthropic-api providers
+        /// (e.g. DeepSeek's /anthropic surface) that do not honor the
+        /// beta natively. Default false: routectl forwards the body
+        /// verbatim and the real Anthropic server handles the beta
+        /// itself.
+        #[serde(default)]
+        context_management: bool,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -763,6 +772,7 @@ impl ProviderEntry {
             user_agent: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
+            context_management: false,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -2041,5 +2051,87 @@ probe_max_tokens = 0
     fn default_retry_policy_has_probe_max_tokens_one() {
         // The Default impl (no `[retry]` block at all) also yields 1.
         assert_eq!(RetryPolicy::default().probe_max_tokens, 1);
+    }
+
+    /// context_management = true round-trips through TOML deserialization.
+    #[test]
+    fn provider_entry_anthropic_api_context_management_round_trips_true() {
+        use crate::config::{Config, ProviderEntry};
+        // Arrange
+        let toml_text = r#"
+[providers.deepseek]
+kind = "anthropic-api"
+base_url = "https://api.deepseek.com/anthropic"
+api_key_ref = "env://DS_KEY"
+auth_kind = "oauth-bearer"
+context_management = true
+"#;
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let entry = cfg.providers.get("deepseek").expect("deepseek provider");
+
+        // Assert
+        match entry {
+            ProviderEntry::AnthropicApi {
+                context_management, ..
+            } => assert!(
+                *context_management,
+                "context_management = true must deserialize as true"
+            ),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+    }
+
+    /// context_management omitted from TOML defaults to false.
+    #[test]
+    fn provider_entry_anthropic_api_context_management_defaults_false() {
+        use crate::config::{Config, ProviderEntry};
+        // Arrange: no context_management key in TOML.
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+"#;
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let entry = cfg.providers.get("anthropic").expect("anthropic provider");
+
+        // Assert
+        match entry {
+            ProviderEntry::AnthropicApi {
+                context_management, ..
+            } => assert!(
+                !context_management,
+                "context_management must default to false when omitted; got {context_management}"
+            ),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+    }
+
+    /// context_management = false round-trips through TOML deserialization.
+    #[test]
+    fn provider_entry_anthropic_api_context_management_round_trips_false() {
+        use crate::config::{Config, ProviderEntry};
+        // Arrange
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+context_management = false
+"#;
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let entry = cfg.providers.get("anthropic").expect("anthropic provider");
+
+        // Assert
+        match entry {
+            ProviderEntry::AnthropicApi {
+                context_management, ..
+            } => assert!(
+                !context_management,
+                "context_management = false must deserialize as false"
+            ),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
     }
 }

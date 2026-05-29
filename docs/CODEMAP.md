@@ -39,7 +39,7 @@ listed at the bottom of each crate.
 
 ### anthropic_api
 
-- `src/anthropic_api/mod.rs` -- `AnthropicApiProvider` impl + `AuthKind` (ApiKey / OauthBearer); SSE drain
+- `src/anthropic_api/mod.rs` -- `AnthropicApiProvider` impl + `AnthropicApiConfig` (fields: `auth`, `base_url`, `anthropic_version`, `auth_kind`, `header_extras`, `user_agent`, `allowed_betas`, `forward_client_headers`, `context_management`) + `AuthKind` (ApiKey / OauthBearer); SSE drain
 - `src/anthropic_api/types.rs` -- Anthropic Messages wire types (`AnthropicRequest`, content blocks, system, thinking config, usage)
 - `src/anthropic_api/request.rs` -- canonical `ChatRequest` -> Anthropic wire body translation
 - `src/anthropic_api/response.rs` -- Anthropic response -> canonical `ChatResponse` (content-block walk, stop_reason map, usage cache stats)

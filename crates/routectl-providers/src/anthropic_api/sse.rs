@@ -20,8 +20,6 @@ use super::response::map_stop_reason;
 use super::sse_opaque::{OpaqueCapture, MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK};
 use super::types::SseEvent;
 
-const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
-
 /// Which kind of content block is currently open. Every variant
 /// carries the upstream `index` from its `content_block_start` so the
 /// state machine can validate that subsequent `content_block_delta`
@@ -117,6 +115,19 @@ pub struct SseState {
     /// `Some` while an `OpenBlockKind::Unknown` block is open; cleared
     /// on `content_block_stop`.
     pub(super) current_capture: Option<OpaqueCapture>,
+    /// Thinking blocks completed since the last tool_use block (or since
+    /// the start of the turn). Accumulates across `content_block_stop`
+    /// events for Thinking blocks; CLEARED at each `ContentBlockStart::ToolUse`
+    /// so each tool_use sees only the thinking that immediately preceded it
+    /// (non-cumulative). Cleared on `MessageStop`.
+    pub(super) completed_thinking: Vec<ReasoningDetail>,
+    /// `(tool_use_id, thinking_snapshot)` pairs ready for the
+    /// post-stream batch write into the thinking cache. Populated at
+    /// each `ContentBlockStart::ToolUse` with a clone of `completed_thinking`
+    /// at that point (non-cumulative: only thinking since the last
+    /// tool_use). Drained by `stream()` in `mod.rs` after the SSE
+    /// pipeline finishes -- NOT cleared here.
+    pub(super) pending_cache_writes: Vec<(String, Vec<ReasoningDetail>)>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -216,6 +227,17 @@ impl SseState {
                     SseContentBlockStart::ToolUse { id, name } => {
                         let ci = self.next_call_index;
                         self.next_call_index += 1;
+                        // Snapshot thinking preceding this tool_use for
+                        // context_management emulation. Non-cumulative:
+                        // each tool_use is paired only with the thinking
+                        // that immediately preceded it. Cleared here so
+                        // subsequent thinking blocks accumulate fresh for
+                        // the next tool_use in this response.
+                        if !id.is_empty() {
+                            self.pending_cache_writes
+                                .push((id.clone(), self.completed_thinking.clone()));
+                            self.completed_thinking.clear();
+                        }
                         self.open_block = Some(OpenBlockKind::ToolUse {
                             upstream_index: index,
                             id,
@@ -233,10 +255,16 @@ impl SseState {
                         let detail = ReasoningDetail {
                             kind: ReasoningDetailKind::Encrypted,
                             id: Some(Uuid::new_v4().to_string()),
-                            format: Some(ANTHROPIC_FORMAT.to_string()),
+                            format: Some(super::ANTHROPIC_FORMAT.to_string()),
                             index: Some(di),
                             payload: json!({"data": data}),
                         };
+                        // Mirror the non-streaming path in extract_tool_thinking:
+                        // accumulate RedactedThinking into completed_thinking so
+                        // a subsequent ToolUse block's pending_cache_writes entry
+                        // includes it. Without this push the streaming and
+                        // non-streaming paths diverge on redacted thinking.
+                        self.completed_thinking.push(detail.clone());
                         return Ok(Some(ChatChunk {
                             id: self.id.clone(),
                             model: self.model.clone(),
@@ -333,12 +361,37 @@ impl SseState {
                         if accumulated.is_empty() && signature.is_none() {
                             None
                         } else {
-                            Some(self.make_thinking_terminal_chunk(
-                                accumulated,
-                                signature,
-                                detail_id,
-                                detail_index,
-                            ))
+                            // Build the aggregated detail here so we can
+                            // clone it into completed_thinking before the
+                            // chunk consumes it. Mirrors the shape that
+                            // make_thinking_terminal_chunk produced before
+                            // this accumulator path was introduced.
+                            let detail = ReasoningDetail {
+                                kind: ReasoningDetailKind::Text,
+                                id: Some(detail_id),
+                                format: Some(super::ANTHROPIC_FORMAT.to_string()),
+                                index: Some(detail_index),
+                                payload: json!({
+                                    "text": accumulated,
+                                    "signature": signature.unwrap_or_default(),
+                                }),
+                            };
+                            self.completed_thinking.push(detail.clone());
+                            Some(ChatChunk {
+                                id: self.id.clone(),
+                                model: self.model.clone(),
+                                choices: vec![ChunkChoice {
+                                    index: 0,
+                                    delta: ChunkDelta {
+                                        reasoning_details: vec![detail],
+                                        ..Default::default()
+                                    },
+                                    finish_reason: None,
+                                    matched_stop_sequence: None,
+                                }],
+                                usage: None,
+                                opaque_events: Vec::new(),
+                            })
                         }
                     }
                     Some(OpenBlockKind::Unknown { .. }) => {
@@ -479,6 +532,11 @@ impl SseState {
             }
 
             SseEvent::MessageStop => {
+                // Reset the per-turn thinking accumulator. pending_cache_writes
+                // is intentionally NOT cleared here -- it is drained by the
+                // stream() caller after the SSE pipeline finishes so the
+                // post-stream cache-write tail can consume it.
+                self.completed_thinking.clear();
                 // Safety-net flush: if `pending_opaque` was never drained
                 // (no canonical chunk emitted between the unknown block
                 // closing and end-of-stream), emit a synthetic empty
@@ -560,50 +618,6 @@ impl SseState {
                 index: 0,
                 delta: ChunkDelta {
                     reasoning: Some(thinking),
-                    ..Default::default()
-                },
-                finish_reason: None,
-                matched_stop_sequence: None,
-            }],
-            usage: None,
-            opaque_events: Vec::new(),
-        }
-    }
-
-    /// Terminal chunk for one thinking block: emits ONE aggregated
-    /// `ReasoningDetail` carrying both `text` and `signature`. Mirrors
-    /// the non-streaming `response::walk_content_blocks` shape so
-    /// replay code at `request.rs::emit_reasoning_blocks` sees the
-    /// pair it expects.
-    fn make_thinking_terminal_chunk(
-        &self,
-        accumulated: String,
-        signature: Option<String>,
-        detail_id: String,
-        detail_index: u32,
-    ) -> ChatChunk {
-        // Build payload byte-shape-identical to the non-streaming
-        // aggregator. `signature` defaults to "" when missing so
-        // serde always serializes the field; replay tolerates an
-        // empty signature with a debug skip rather than erroring.
-        let detail = ReasoningDetail {
-            kind: ReasoningDetailKind::Text,
-            id: Some(detail_id),
-            format: Some(ANTHROPIC_FORMAT.to_string()),
-            index: Some(detail_index),
-            payload: json!({
-                "text": accumulated,
-                "signature": signature.unwrap_or_default(),
-            }),
-        };
-
-        ChatChunk {
-            id: self.id.clone(),
-            model: self.model.clone(),
-            choices: vec![ChunkChoice {
-                index: 0,
-                delta: ChunkDelta {
-                    reasoning_details: vec![detail],
                     ..Default::default()
                 },
                 finish_reason: None,
@@ -754,47 +768,12 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
     Ok(None)
 }
 
+// In-stream error and ping contract tests. Compiled as a child module
+// of `sse` (via `#[path]`) so they retain access to private items
+// while keeping this file under the project's 800-LOC ceiling.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Anthropic spec allows a 200 response to carry an in-band
-    /// `error` event mid-stream. Without explicit handling, the
-    /// parser silently consumed it as housekeeping (Ok(None)) and
-    /// the SSE wrapper happily emitted clean EOS to the client,
-    /// hiding upstream failures + breaking router circuit-breaker
-    /// health accounting. Pin the contract so a future change can't
-    /// regress.
-    #[test]
-    fn in_stream_error_event_surfaces_as_streaming_error() {
-        let mut state = SseState::default();
-        let payload =
-            r#"{"type":"error","error":{"type":"overloaded_error","message":"slow down"}}"#;
-        let err = state
-            .parse_event("test-anthropic", payload)
-            .expect_err("error event must surface as Err");
-        match err {
-            Error::Streaming(msg) => {
-                assert!(msg.contains("anthropic in-stream error"), "msg: {msg}");
-                assert!(msg.contains("overloaded_error"), "msg: {msg}");
-            }
-            other => panic!("expected Error::Streaming, got: {other:?}"),
-        }
-    }
-
-    /// Counterpart to the above: housekeeping events still produce
-    /// `Ok(None)`. Pinning this prevents a future change that
-    /// over-corrects the error-mapping fix into surfacing pings as
-    /// failures.
-    #[test]
-    fn ping_event_remains_ok_none() {
-        let mut state = SseState::default();
-        let got = state
-            .parse_event("test-anthropic", r#"{"type":"ping"}"#)
-            .unwrap();
-        assert!(got.is_none(), "ping must be Ok(None), got: {got:?}");
-    }
-}
+#[path = "sse_event_tests.rs"]
+mod sse_event_tests;
 
 // Larger usage-accounting tests live in `sse_usage_tests.rs` so this
 // file stays under the project's 800-LOC ceiling. Compiled as a child
@@ -803,3 +782,10 @@ mod tests {
 #[cfg(test)]
 #[path = "sse_usage_tests.rs"]
 mod sse_usage_tests;
+
+// Context-management SSE accumulator tests (T4). Drives SseState
+// through thinking + tool_use sequences and asserts pending_cache_writes
+// and completed_thinking invariants.
+#[cfg(test)]
+#[path = "sse_context_management_tests.rs"]
+mod sse_context_management_tests;

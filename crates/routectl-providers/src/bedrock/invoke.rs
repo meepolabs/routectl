@@ -44,6 +44,9 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         // on the assembled body); pass an empty allowlist here so the
         // anthropic-api egress's filter is a no-op pass-through.
         &[],
+        // Bedrock does not emulate context_management beta; no cache.
+        false,
+        None,
     )?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::NormalizeRequest(

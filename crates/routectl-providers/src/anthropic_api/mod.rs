@@ -25,6 +25,7 @@ use routectl_core::{
     StaticToken, TokenCount, TokenSource,
 };
 
+pub(crate) mod context_management;
 pub(crate) mod parts;
 pub mod request;
 pub mod response;
@@ -37,6 +38,11 @@ pub(crate) mod types_sse;
 /// Provider-kind discriminator string used in tracing fields. See
 /// the openai_compat module for the rationale.
 const PROVIDER_KIND: &str = "anthropic";
+
+/// Anthropic wire-format tag for reasoning details. A single canonical
+/// definition shared by all sub-modules (context_management, request,
+/// response, sse) via `super::ANTHROPIC_FORMAT` paths.
+pub(crate) const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 use sse::SseState;
 
@@ -100,6 +106,12 @@ pub struct AnthropicApiConfig {
     /// namespace-bounded so debug surface stays useful even when the
     /// allowlist is empty).
     pub forward_client_headers: Vec<String>,
+    /// When true, routectl emulates Anthropic's context-management-2025-06-27
+    /// beta server-side for this provider. Set this for non-Anthropic
+    /// anthropic-api providers (e.g. DeepSeek's /anthropic surface) that do
+    /// not honor the beta natively. Default false: routectl forwards the body
+    /// verbatim and the real Anthropic server handles the beta itself.
+    pub context_management: bool,
 }
 
 impl std::fmt::Debug for AnthropicApiConfig {
@@ -120,6 +132,7 @@ impl std::fmt::Debug for AnthropicApiConfig {
                 "forward_client_headers",
                 &format!("[{} entries]", self.forward_client_headers.len()),
             )
+            .field("context_management", &self.context_management)
             .finish()
     }
 }
@@ -147,6 +160,7 @@ impl AnthropicApiConfig {
             user_agent: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
+            context_management: false,
         }
     }
 }
@@ -154,12 +168,41 @@ impl AnthropicApiConfig {
 pub struct AnthropicApiProvider {
     cfg: AnthropicApiConfig,
     client: Client,
+    thinking_cache: std::sync::Arc<std::sync::RwLock<context_management::ThinkingCache>>,
 }
 
 impl AnthropicApiProvider {
     pub fn new(cfg: AnthropicApiConfig) -> Self {
         let client = crate::http_client::build(cfg.user_agent.as_deref());
-        Self { cfg, client }
+        let thinking_cache = std::sync::Arc::new(std::sync::RwLock::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(context_management::THINKING_CACHE_CAP)
+                .expect("THINKING_CACHE_CAP is non-zero"),
+        )));
+        Self {
+            cfg,
+            client,
+            thinking_cache,
+        }
+    }
+
+    /// Seed a thinking observation directly into the cache for integration
+    /// tests that need a pre-populated cache without driving a full SSE
+    /// response. Gated behind the `test-utils` Cargo feature so it is
+    /// absent from production builds. Integration tests that call this
+    /// must enable `--features test-utils` (or `bedrock,test-utils`).
+    #[cfg(feature = "test-utils")]
+    pub fn seed_thinking_for_test(
+        &self,
+        provider_id: &str,
+        tool_use_id: &str,
+        thinking: Vec<routectl_core::ReasoningDetail>,
+    ) {
+        context_management::snapshot_to_cache(
+            &self.thinking_cache,
+            provider_id,
+            tool_use_id,
+            thinking,
+        );
     }
 
     fn messages_url(&self) -> String {
@@ -216,6 +259,16 @@ impl AnthropicApiProvider {
                 merged_betas.push(t.to_string());
             }
         }
+
+        // When context_management emulation is active, strip the
+        // `context-management-2025-06-27` beta from the outgoing header.
+        // We handle the semantics ourselves (thinking injection, body key
+        // strip), so forwarding it to a non-Anthropic upstream that
+        // doesn't honour the beta would cause a 400.
+        if self.cfg.context_management {
+            merged_betas.retain(|b| b != context_management::CONTEXT_MANAGEMENT_BETA);
+        }
+
         if !merged_betas.is_empty() {
             rb = rb.header("anthropic-beta", merged_betas.join(","));
         }
@@ -337,6 +390,12 @@ impl Provider for AnthropicApiProvider {
             req,
             req.routectl_internal.supports_adaptive_thinking,
             &self.cfg.allowed_betas,
+            self.cfg.context_management,
+            if self.cfg.context_management {
+                Some(&*self.thinking_cache)
+            } else {
+                None
+            },
         )
     }
 
@@ -447,8 +506,36 @@ impl Provider for AnthropicApiProvider {
             .map_err(|e| Error::upstream(&self.cfg.id, status, e.to_string()))?;
         // Trace upstream success body pre-normalize.
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
+        // Clone the raw body before normalize consumes it. Only pay the
+        // allocation cost on the context_management emulation path; the
+        // default false path skips the clone entirely.
+        let raw_for_cache = if self.cfg.context_management {
+            Some(raw_body.clone())
+        } else {
+            None
+        };
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
+        // Context-management cache write. Extracts (tool_use_id, thinking)
+        // pairs from the upstream content blocks and inserts them into the
+        // shared thinking cache for re-injection on the next turn. The write
+        // lock is acquired synchronously here -- no .await after this point --
+        // so it is never held across an async yield.
+        if let Some(raw) = raw_for_cache {
+            let blocks: Vec<types::ContentBlock> = raw
+                .pointer("/content")
+                .and_then(|v| serde_json::from_value::<Vec<types::ContentBlock>>(v.clone()).ok())
+                .unwrap_or_default();
+            let pairs = context_management::extract_tool_thinking(&blocks);
+            for (tool_use_id, thinking) in pairs {
+                context_management::snapshot_to_cache(
+                    &self.thinking_cache,
+                    &self.cfg.id,
+                    &tool_use_id,
+                    thinking,
+                );
+            }
+        }
         Ok(chat_resp)
     }
 
@@ -519,6 +606,12 @@ impl Provider for AnthropicApiProvider {
         let provider_id = self.cfg.id.clone();
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
+        // Capture the context_management flag and a shared reference to
+        // the thinking cache so the post-stream write tail can drain
+        // pending_cache_writes synchronously without holding the lock
+        // across any await point.
+        let context_management_enabled = self.cfg.context_management;
+        let thinking_cache_for_stream = Arc::clone(&self.thinking_cache);
 
         let stream = async_stream::stream! {
             let mut state = SseState::new(&provider_id);
@@ -551,7 +644,7 @@ impl Provider for AnthropicApiProvider {
                                  OpenRouter's /v1/messages passthrough); \
                                  closing stream cleanly"
                             );
-                            return;
+                            break;
                         }
                         // Keepalive comment line or empty data field.
                         if trimmed.is_empty() {
@@ -566,6 +659,20 @@ impl Provider for AnthropicApiProvider {
                             Ok(None) => {}
                         }
                     }
+                }
+            }
+            // Post-stream cache-write tail for context_management emulation.
+            // Drains pending_cache_writes accumulated during SSE parsing into
+            // the thinking cache. Each call to snapshot_to_cache acquires and
+            // releases the write lock synchronously -- no await points here.
+            if context_management_enabled && !state.pending_cache_writes.is_empty() {
+                for (tool_use_id, thinking) in state.pending_cache_writes.drain(..) {
+                    context_management::snapshot_to_cache(
+                        &thinking_cache_for_stream,
+                        &provider_id,
+                        &tool_use_id,
+                        thinking,
+                    );
                 }
             }
         };
@@ -861,6 +968,7 @@ mod tests {
             user_agent: None,
             allowed_betas: Vec::new(),
             forward_client_headers,
+            context_management: false,
         }
     }
 
@@ -974,6 +1082,7 @@ mod tests {
             user_agent: None,
             allowed_betas: Vec::new(),
             forward_client_headers: vec!["x-claude-code-session-id".into()],
+            context_management: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "from-client")]);
