@@ -294,3 +294,91 @@ fn captures_x_claude_code_headers_inside_namespace() {
     assert!(!h.iter().any(|(n, _)| n == "x-routectl-alias"));
     assert!(!h.iter().any(|(n, _)| n == "authorization"));
 }
+
+/// claude-code 2.1.153 sends thinking={type:"adaptive"} and
+/// output_config={effort:"low"} as separate fields. Verify that effort
+/// is lifted into canonical req.reasoning.effort, that enabled stays
+/// Some(true) from the thinking field, and that output_config is
+/// preserved intact in provider_extras for Anthropic-API egress passthrough.
+#[test]
+fn parse_request_adaptive_thinking_lifts_effort() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "low"}
+    });
+    let req = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap();
+    let r = req.reasoning.as_ref().unwrap();
+    assert_eq!(
+        r.enabled,
+        Some(true),
+        "enabled must be Some(true) from adaptive thinking"
+    );
+    assert_eq!(
+        r.effort.as_deref(),
+        Some("low"),
+        "effort must be lifted from output_config"
+    );
+    // output_config must remain intact in provider_extras for egress passthrough.
+    let extras = req.provider_extras.as_ref().unwrap();
+    assert_eq!(extras["output_config"]["effort"], "low");
+}
+
+/// When output_config.effort is present but no thinking field is sent,
+/// the lift must still write req.reasoning.effort. enabled must be None
+/// because no thinking field set it -- the caller only requested an effort
+/// level, not a reasoning mode.
+#[test]
+fn parse_request_output_config_effort_no_thinking() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "output_config": {"effort": "high"}
+    });
+    let req = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap();
+    let r = req.reasoning.as_ref().unwrap();
+    assert_eq!(
+        r.effort.as_deref(),
+        Some("high"),
+        "effort must be lifted from output_config"
+    );
+    assert_eq!(
+        r.enabled, None,
+        "enabled must be None -- thinking field was absent"
+    );
+    // output_config must remain intact in provider_extras.
+    let extras = req.provider_extras.as_ref().unwrap();
+    assert_eq!(extras["output_config"]["effort"], "high");
+}
+
+/// When output_config contains only a format key (structured outputs schema)
+/// and no effort key, req.reasoning must be untouched and output_config must
+/// survive intact in provider_extras.
+#[test]
+fn parse_request_output_config_without_effort() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "output_config": {
+            "format": {"type": "json_schema", "json_schema": {"name": "reply"}}
+        }
+    });
+    let req = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap();
+    assert!(
+        req.reasoning.is_none(),
+        "reasoning must be None -- no thinking and no effort"
+    );
+    // output_config must remain intact in provider_extras.
+    let extras = req.provider_extras.as_ref().unwrap();
+    assert_eq!(extras["output_config"]["format"]["type"], "json_schema");
+}
