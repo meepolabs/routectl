@@ -11,8 +11,12 @@ description = "Provider implementations for routectl."
 [features]
 default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"]
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
-"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio"]
+"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru"]
 "openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:async-stream", "dep:uuid", "dep:tokio"]
+# Exposes test-only helpers (e.g. AnthropicApiProvider::seed_thinking_for_test)
+# that must not appear in production builds. Required when running integration
+# tests that pre-populate the thinking cache.
+"test-utils" = ["anthropic-api"]
 # Native AWS Bedrock provider (SigV4 signing + eventstream streaming).
 # Pulls in the AWS SDK credential / signing crates. ~1 MB binary growth.
 # Implies `anthropic-api`: the working Invoke body shape today is the
@@ -57,6 +61,7 @@ async-stream = { version = "0.3", optional = true }
 tokio = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
 regex = { version = "1", optional = true }
+lru = { workspace = true, optional = true }
 
 # AWS SDK / signing crates (used only by the `bedrock` feature). Pinned
 # to specific minor versions so cargo update churn is bounded.
