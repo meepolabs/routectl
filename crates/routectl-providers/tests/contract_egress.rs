@@ -36,7 +36,6 @@ fn anthropic_api_provider() -> AnthropicApiProvider {
         auth_kind: AuthKind::ApiKey,
         header_extras: Vec::new(),
         user_agent: None,
-        adaptive_thinking: None,
         allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
     })
@@ -408,7 +407,6 @@ mod forward_compat_pins {
             auth_kind: AuthKind::ApiKey,
             header_extras: vec![("anthropic-beta".into(), beta_in_header_extras.into())],
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
         })

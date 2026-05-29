@@ -21,6 +21,7 @@ use super::util::{
     preserve_history_reasoning_content,
 };
 use super::Dialect;
+use crate::effort::clamp_effort_to_supported;
 use crate::model_profile::profile_for;
 
 /// Budget threshold (tokens) above which `reasoning.max_tokens`
@@ -76,7 +77,11 @@ impl Dialect for DeepSeekDialect {
             drop_sampling_params(obj);
         }
         if let Some(effort) = derive_reasoning_effort(req) {
-            obj.insert("reasoning_effort".into(), Value::String(effort));
+            let clamped = clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels);
+            obj.insert(
+                "reasoning_effort".into(),
+                Value::String(clamped.into_owned()),
+            );
         }
         // History-reasoning shaping (strip vs preserve) is owned by
         // the egress runtime in `request::normalize`, gated by the
