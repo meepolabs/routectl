@@ -347,9 +347,9 @@ pub(crate) enum ThinkingConfig {
     /// like "low" | "medium" | "high" | "xhigh" | "max"). No
     /// `budget_tokens` field. Older Claude models (4.5/4.6 family)
     /// still want the `Enabled` shape, so this variant only ships
-    /// when `AnthropicApiConfig::adaptive_thinking` (or the Bedrock
-    /// equivalent) is `Some(true)` -- the request normalizer in
-    /// `request.rs` decides which variant to emit per-call.
+    /// when `req.routectl_internal.supports_adaptive_thinking` is `true`
+    /// -- the request normalizer in `request.rs` decides which variant
+    /// to emit per-call.
     Adaptive,
     Disabled,
 }
