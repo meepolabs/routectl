@@ -79,7 +79,7 @@ fn effort_ratio(effort: &str) -> f64 {
         // see it on a non-adaptive provider. 0.99 leaves 1% of
         // max_tokens for the visible response so the request is
         // accepted; in practice operators who want `max` should set
-        // `adaptive_thinking = true` on the provider.
+        // `supports_adaptive_thinking = true` on the model config.
         "max" => 0.99,
         "xhigh" => 0.95,
         "high" => 0.80,
@@ -108,13 +108,17 @@ fn derive_effort(req: &ChatRequest) -> String {
 /// returns the legacy `Enabled { budget_tokens }` shape; `Disabled`
 /// is always returned verbatim regardless of the flag.
 ///
+/// The `adaptive` flag comes from
+/// `req.routectl_internal.supports_adaptive_thinking`, set by the
+/// router from the operator-declared `[models.X]
+/// supports_adaptive_thinking` capability.
+///
 /// Note on `max_tokens` + adaptive: Anthropic's adaptive thinking wire
 /// shape has no field for an explicit budget -- the model picks its
 /// own from the effort string. If a caller sets both
-/// `reasoning.max_tokens` AND the provider has `adaptive_thinking =
-/// true`, the budget is dropped (with a tracing::warn at the call
-/// site). The caller's effort string still travels to
-/// `output_config.effort`.
+/// `reasoning.max_tokens` AND the model is adaptive, the budget is
+/// dropped (with a tracing::warn at the call site). The caller's
+/// effort string still travels to `output_config.effort`.
 pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
@@ -137,12 +141,12 @@ pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<Thinki
     if adaptive {
         // Opus 4.7+ wire shape. budget_tokens is gone; effort moves
         // to top-level output_config (handled by build_output_config).
-        // If the caller set both an explicit budget AND
-        // adaptive_thinking is on, the budget gets dropped because
-        // there's no wire field for it. Warn so an operator who set
-        // both fields routinely (e.g. a client library that always
-        // sends `reasoning.max_tokens`) can see the discard in logs
-        // and adjust to using `effort` instead.
+        // If the caller set both an explicit budget AND the model is
+        // adaptive, the budget gets dropped because there's no wire
+        // field for it. Warn so an operator who set both fields
+        // routinely (e.g. a client library that always sends
+        // `reasoning.max_tokens`) can see the discard in logs and
+        // adjust to using `effort` instead.
         if r.max_tokens.is_some() {
             tracing::warn!(
                 budget_tokens = r.max_tokens,
@@ -169,8 +173,8 @@ pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<Thinki
             reasoning_max_tokens = ?r.max_tokens,
             "anthropic legacy thinking shape requires max_tokens > 1024; \
              dropping thinking for this probe-sized request. Set \
-             adaptive_thinking=true on the provider for Opus 4.7+ to avoid \
-             the budget-vs-max_tokens coupling, or send max_tokens > 1024."
+             supports_adaptive_thinking=true on the model config for Opus 4.7+ \
+             to avoid the budget-vs-max_tokens coupling, or send max_tokens > 1024."
         );
         return None;
     }
@@ -1138,7 +1142,7 @@ fn filter_anthropic_betas(
 pub fn normalize(
     id: &str,
     req: &ChatRequest,
-    adaptive_thinking: bool,
+    adaptive: bool,
     allowed_betas: &[String],
 ) -> Result<Value> {
     // Anthropic's wire requires every tool_result carry the
@@ -1165,7 +1169,7 @@ pub fn normalize(
     let messages = normalize_replay_invariants(id, req, hr)?;
 
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-    let thinking = build_thinking(req, adaptive_thinking);
+    let thinking = build_thinking(req, adaptive);
     let output_config = build_output_config(req, &thinking);
 
     // Prefer canonical req.system; fall back to lifting Role::System
@@ -1231,7 +1235,7 @@ pub fn normalize(
         serde_json::to_value(&ar).map_err(|e| Error::normalize_request(id, e.to_string()))?;
 
     merge_provider_extras(id, &mut body, req.provider_extras.as_ref());
-    strip_unsupported_output_effort(&mut body, adaptive_thinking);
+    strip_unsupported_output_effort(&mut body, adaptive);
     strip_thinking_when_tool_choice_forces_use(id, &mut body);
     Ok(body)
 }
@@ -1308,8 +1312,8 @@ fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
 /// allowed through `provider_extras` for legitimate sub-fields like
 /// `output_config.format` (structured-output). The `output_config.effort`
 /// sub-field is stripped post-merge in `strip_unsupported_output_effort`
-/// when the provider lacks `adaptive_thinking=true` (Haiku, Sonnet --
-/// Anthropic 400s on `effort` for them).
+/// when the model does not have `supports_adaptive_thinking=true` (Haiku,
+/// Sonnet -- Anthropic 400s on `effort` for them).
 fn is_routectl_managed_key(key: &str) -> bool {
     is_canonical_request_key(key)
         || matches!(
@@ -1320,23 +1324,24 @@ fn is_routectl_managed_key(key: &str) -> bool {
         )
 }
 
-/// Post-merge sub-key strip: when the provider does NOT have
-/// `adaptive_thinking=true`, remove `body.output_config.effort` so
-/// non-Opus models (Sonnet 4.5, Haiku 4.5) don't 400 with
-/// `This model does not support the effort parameter.` cc emits
-/// `output_config: {effort: "high"}` on every request regardless of
-/// the routed model, and the forward-compat sweep through
-/// `provider_extras` puts it back in the outgoing body verbatim.
-/// This strip is the symmetric counterpart to `build_output_config`,
-/// which only emits the effort sub-key when adaptive is on.
+/// Post-merge sub-key strip: when the model does NOT support adaptive
+/// thinking (`supports_adaptive_thinking=false`), remove
+/// `body.output_config.effort` so non-Opus models (Sonnet 4.5,
+/// Haiku 4.5) don't 400 with `This model does not support the effort
+/// parameter.` cc emits `output_config: {effort: "high"}` on every
+/// request regardless of the routed model, and the forward-compat
+/// sweep through `provider_extras` puts it back in the outgoing body
+/// verbatim. This strip is the symmetric counterpart to
+/// `build_output_config`, which only emits the effort sub-key when
+/// adaptive is on.
 ///
 /// `output_config.format` (structured-output) and other sub-fields
 /// are preserved -- they're orthogonal to the effort beta and
 /// supported across the model family. If `effort` was the only
 /// sub-key, the now-empty `output_config` object is also removed
 /// so the wire body stays clean.
-fn strip_unsupported_output_effort(body: &mut Value, adaptive_thinking: bool) {
-    if adaptive_thinking {
+fn strip_unsupported_output_effort(body: &mut Value, adaptive: bool) {
+    if adaptive {
         return;
     }
     let Some(obj) = body.as_object_mut() else {
@@ -2107,12 +2112,12 @@ mod multi_turn_tool_use_tests {
         assert_eq!(tool_use["input"], json!({"_arguments": "this is not json"}));
     }
 
-    /// With `adaptive_thinking = true`, the wire shape is the
+    /// With `adaptive = true`, the wire shape is the
     /// Opus 4.7+ form -- `thinking: {type:"adaptive"}` (no
     /// `budget_tokens`) plus a top-level `output_config: {effort:...}`
     /// carrying the canonical `reasoning.effort` string verbatim.
     #[test]
-    fn adaptive_thinking_emits_adaptive_shape_with_output_config() {
+    fn adaptive_emits_adaptive_shape_with_output_config() {
         use routectl_core::ReasoningConfig;
         let req = ChatRequest {
             model: "claude-opus-4-7".into(),
@@ -2145,7 +2150,7 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["temperature"], 1.0);
     }
 
-    /// With `adaptive_thinking = false` (or absent), the wire
+    /// With `adaptive = false` (or absent), the wire
     /// shape is the legacy `Enabled { budget_tokens }` form. Older
     /// Claude models (4.5/4.6 family) still want this shape and would
     /// 400 on the adaptive form.
@@ -2239,7 +2244,7 @@ mod multi_turn_tool_use_tests {
     /// explicitly. (Without this test the default would silently
     /// drift if anyone changed `derive_effort`.)
     #[test]
-    fn adaptive_thinking_defaults_effort_to_medium_when_unset() {
+    fn adaptive_defaults_effort_to_medium_when_unset() {
         use routectl_core::ReasoningConfig;
         let req = ChatRequest {
             model: "claude-opus-4-7".into(),
@@ -2258,7 +2263,7 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["output_config"]["effort"], "medium");
     }
 
-    /// When `adaptive_thinking = true` AND the caller sets an
+    /// When `adaptive = true` AND the caller sets an
     /// explicit `reasoning.max_tokens`, the budget is dropped (the
     /// adaptive wire shape has no field for it) and a tracing::warn
     /// fires at normalize time. We can't easily assert the warn in a
@@ -2267,7 +2272,7 @@ mod multi_turn_tool_use_tests {
     /// effort string (or "medium" fallback), with no budget_tokens
     /// leaking into the wire.
     #[test]
-    fn adaptive_thinking_drops_max_tokens_silently() {
+    fn adaptive_drops_max_tokens_silently() {
         use routectl_core::ReasoningConfig;
         let req = ChatRequest {
             model: "claude-opus-4-7".into(),
@@ -2350,7 +2355,7 @@ mod multi_turn_tool_use_tests {
     /// the wire has no `budget_tokens` field and no Anthropic minimum
     /// to violate. Pins that the new gate is legacy-only.
     #[test]
-    fn small_max_tokens_keeps_adaptive_thinking() {
+    fn small_max_tokens_keeps_adaptive() {
         use routectl_core::ReasoningConfig;
         let req = ChatRequest {
             model: "claude-opus-4-7".into(),
@@ -2657,7 +2662,7 @@ mod multi_turn_tool_use_tests {
     }
 
     /// Review follow-up to Bug K: when the provider is NOT adaptive
-    /// (Sonnet, Haiku -- no `adaptive_thinking` capability), the
+    /// (Sonnet, Haiku -- no adaptive capability declared), the
     /// `output_config.effort` field set by cc must be stripped from
     /// the outgoing body. Anthropic 400s with "This model does not
     /// support the effort parameter" otherwise.
@@ -2672,7 +2677,7 @@ mod multi_turn_tool_use_tests {
             })),
             ..Default::default()
         };
-        let body = normalize("test", &req, /* adaptive_thinking= */ false, &[]).unwrap();
+        let body = normalize("test", &req, /* adaptive= */ false, &[]).unwrap();
         // effort stripped; output_config now empty, so the whole
         // object is removed for wire cleanliness.
         assert!(
@@ -2703,15 +2708,15 @@ mod multi_turn_tool_use_tests {
             })),
             ..Default::default()
         };
-        let body = normalize("test", &req, /* adaptive_thinking= */ false, &[]).unwrap();
+        let body = normalize("test", &req, /* adaptive= */ false, &[]).unwrap();
         let oc = body.get("output_config").expect("output_config preserved");
         assert!(oc.get("effort").is_none(), "effort stripped: {oc}");
         assert_eq!(oc["format"]["type"], "json_schema");
         assert_eq!(oc["format"]["schema"]["required"][0], "x");
     }
 
-    /// Adaptive providers (Opus 4.7 with adaptive_thinking=true) must
-    /// preserve `output_config.effort` -- the model accepts it. Pin
+    /// Adaptive providers (Opus 4.7 with supports_adaptive_thinking=true)
+    /// must preserve `output_config.effort` -- the model accepts it. Pin
     /// this so a future refactor doesn't accidentally strip on the
     /// adaptive path too.
     #[test]
@@ -2725,7 +2730,7 @@ mod multi_turn_tool_use_tests {
             })),
             ..Default::default()
         };
-        let body = normalize("test", &req, /* adaptive_thinking= */ true, &[]).unwrap();
+        let body = normalize("test", &req, /* adaptive= */ true, &[]).unwrap();
         let oc = body.get("output_config").expect("output_config preserved");
         assert_eq!(oc["effort"], "high");
     }
@@ -3077,6 +3082,111 @@ mod multi_turn_tool_use_tests {
         assert!(
             err.to_string().contains("tool_call_id"),
             "must reject missing tool_call_id even under Preserve; got: {err}"
+        );
+    }
+
+    /// Test 1 (spec): when `req.routectl_internal.supports_adaptive_thinking`
+    /// is `true` and `req.reasoning.effort` is "high", `normalize_request`
+    /// emits `thinking: {type:"adaptive"}` and `output_config: {effort:"high"}`.
+    /// The adaptive wire shape has no `budget_tokens` field.
+    #[test]
+    fn supports_adaptive_thinking_true_emits_adaptive_wire_shape() {
+        use routectl_core::ReasoningConfig;
+
+        // Arrange: model with adaptive thinking capability and a high effort.
+        let mut req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hello")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        req.routectl_internal.supports_adaptive_thinking = true;
+
+        // Act: normalize using the value from routectl_internal directly
+        // (mirroring the call in AnthropicApiProvider::normalize_request).
+        let body = normalize(
+            "test",
+            &req,
+            req.routectl_internal.supports_adaptive_thinking,
+            &[],
+        )
+        .expect("normalize must succeed");
+
+        // Assert: adaptive wire shape -- {type:"adaptive"}, no budget_tokens.
+        let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(
+            thinking["type"], "adaptive",
+            "supports_adaptive_thinking=true must emit adaptive wire shape; got {thinking:?}"
+        );
+        assert!(
+            thinking.get("budget_tokens").is_none(),
+            "adaptive shape must not carry budget_tokens; got {thinking:?}"
+        );
+
+        // output_config.effort carries the canonical effort string verbatim.
+        let oc = body.get("output_config").expect("output_config present");
+        assert_eq!(
+            oc["effort"], "high",
+            "output_config.effort must match reasoning.effort; got {oc:?}"
+        );
+    }
+
+    /// Test 2 (spec): when `req.routectl_internal.supports_adaptive_thinking`
+    /// is `false` and `req.reasoning` has effort="high" and max_tokens=5000,
+    /// `normalize_request` emits legacy `thinking: {type:"enabled",
+    /// budget_tokens: <clamped within [1024, req.max_tokens-1]>}`.
+    /// `req.max_tokens` is set to 8192 so budget 5000 fits
+    /// (5000 < 8192 and 5000 >= 1024).
+    #[test]
+    fn supports_adaptive_thinking_false_emits_legacy_enabled_wire_shape() {
+        use routectl_core::ReasoningConfig;
+
+        // Arrange: non-adaptive model. max_tokens=8192 so budget=5000 fits.
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![user_msg("hello")],
+            max_tokens: Some(8192),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: Some(5000),
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        req.routectl_internal.supports_adaptive_thinking = false;
+
+        // Act.
+        let body = normalize(
+            "test",
+            &req,
+            req.routectl_internal.supports_adaptive_thinking,
+            &[],
+        )
+        .expect("normalize must succeed");
+
+        // Assert: legacy Enabled shape.
+        let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(
+            thinking["type"], "enabled",
+            "supports_adaptive_thinking=false must emit legacy enabled shape; got {thinking:?}"
+        );
+        // budget_tokens=5000 is within [1024, 8191] so no clamping occurs.
+        assert_eq!(
+            thinking["budget_tokens"], 5000,
+            "legacy shape must carry caller's budget_tokens; got {thinking:?}"
+        );
+
+        // No output_config on the legacy path.
+        assert!(
+            body.get("output_config").is_none(),
+            "legacy shape must not emit output_config; got {body:?}"
         );
     }
 }
