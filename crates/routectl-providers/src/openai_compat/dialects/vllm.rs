@@ -20,6 +20,7 @@ use super::util::{
     lift_delta_reasoning_content, lift_reasoning_content_field, preserve_history_reasoning_content,
 };
 use super::Dialect;
+use crate::effort::clamp_effort_to_supported;
 
 /// Budget threshold (tokens) above which `reasoning.max_tokens`
 /// is mapped to "high" effort; below is "medium".
@@ -83,7 +84,11 @@ impl Dialect for VllmDialect {
             );
         }
         if let Some(effort) = derive_reasoning_effort(req) {
-            obj.insert("reasoning_effort".into(), Value::String(effort));
+            let clamped = clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels);
+            obj.insert(
+                "reasoning_effort".into(),
+                Value::String(clamped.into_owned()),
+            );
         }
         // History-reasoning shaping (strip vs preserve) is owned by
         // the egress runtime; see DeepSeekDialect::apply_request for

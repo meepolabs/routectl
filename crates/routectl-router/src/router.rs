@@ -131,6 +131,11 @@ struct DispatchTarget {
     /// `apply_layered_overlays` can set `RoutectlInternal` without
     /// reaching back into `ResolvedModel`.
     supports_adaptive_thinking: bool,
+    /// Operator-declared effort levels for this model. Threaded from
+    /// `ResolvedModel.effort_levels`. Empty means passthrough (emit
+    /// caller's effort verbatim). Non-empty: OpenAI-shape egresses
+    /// clamp `req.reasoning.effort` to the nearest supported level.
+    effort_levels: Vec<String>,
     /// Model nickname for tracing.
     nickname: Option<String>,
     /// Per-model `header_extras`. Merged with the provider's
@@ -1143,6 +1148,7 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     internal.history_reasoning = target.history_reasoning.map(|h| h.into());
     internal.claude_code_headers = captured_claude_code_headers;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
+    internal.effort_levels = target.effort_levels.clone();
     req.routectl_internal = internal;
 }
 
@@ -1414,6 +1420,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         upstream: m.upstream.clone(),
         provider: Some(m.provider.clone()),
         supports_adaptive_thinking: m.supports_adaptive_thinking,
+        effort_levels: m.effort_levels.clone(),
         nickname: Some(m.nickname.clone()),
         model_header_extras: m.header_extras.clone(),
         model_payload_extras: m.payload_extras.clone(),
