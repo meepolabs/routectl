@@ -1080,12 +1080,11 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
 /// Call once per process startup BEFORE building any providers.
 pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()> {
     use routectl_core::Error;
-
-    const VALID_EFFORT_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+    use routectl_providers::effort::VALID_EFFORT_TOKENS;
 
     for (nickname, entry) in &config.models {
         for level in &entry.effort_levels {
-            if !VALID_EFFORT_LEVELS.contains(&level.as_str()) {
+            if !VALID_EFFORT_TOKENS.contains(&level.as_str()) {
                 return Err(Error::Config(format!(
                     "[models.{nickname}] effort_levels contains unknown value {:?}; \
                      valid values are: minimal, low, medium, high, xhigh, max",
