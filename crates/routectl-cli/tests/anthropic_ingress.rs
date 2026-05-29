@@ -2174,14 +2174,10 @@ async fn cross_anthropic_explicit_effort_wins_over_derived_on_deepseek() {
     // ingress forwards to the egress via canonical `provider_extras`.
     // The DeepSeek dialect then reads `req.reasoning.effort` first.
     //
-    // Simpler direct path: use `capture_deepseek_egress_body` with a body
-    // that has BOTH `output_config.effort` and `thinking.budget_tokens`.
-    // The ingress lifts `thinking.budget_tokens` -> canonical
-    // `reasoning.max_tokens`; `output_config.effort` is forwarded opaquely
-    // and does NOT populate `reasoning.effort`. To test the canonical
-    // effort-wins path we must go through the openai_compat request
-    // normalizer unit tests (deepseek.rs::explicit_effort_wins_over_derived_from_max_tokens),
-    // which directly construct a ChatRequest with both fields set.
+    // This test exercises the budget-only path (no output_config.effort
+    // in the request body). When output_config.effort IS present, the
+    // ingress lifts it into canonical reasoning.effort -- see
+    // parse_request_adaptive_thinking_lifts_effort for that case.
     //
     // This integration test instead pins the simpler observable: when only
     // `thinking: {budget_tokens: 16000}` arrives via the Anthropic ingress,

@@ -6,6 +6,15 @@
 //! envelope). Handles streaming via the AWS eventstream binary frame
 //! format.
 //!
+//! ## Reasoning-shape note: static vs. per-request
+//!
+//! BedrockConfig.adaptive_thinking is a STATIC, build-time flag (egress
+//! reads from cfg at request emission). Contrast with the AnthropicApi
+//! path where supports_adaptive_thinking lives on ModelEntry and rides
+//! per-request via RoutectlInternal. Asymmetry is intentional per the
+//! reasoning-translation refactor scope (Bedrock's per-deployment static
+//! flag was kept as-is).
+//!
 //! ## Why not AWS SDK
 //!
 //! We could have pulled in `aws-sdk-bedrockruntime` whole. We don't,
@@ -218,13 +227,18 @@ pub struct BedrockConfig {
     /// `additionalModelRequestFields`.
     pub additional_model_request_fields: Option<Value>,
     /// Use the Opus 4.7+ adaptive thinking wire shape on this provider.
-    /// Same semantics as `AnthropicApiConfig::adaptive_thinking`. Set
-    /// this on Bedrock providers whose `model_id` is an opus-4-7+
-    /// inference profile (e.g. `global.anthropic.claude-opus-4-7-v1:0`);
-    /// the body normalizer rewrites `thinking: {type:"enabled",
-    /// budget_tokens:N}` to `thinking: {type:"adaptive"}` and lifts
-    /// effort into top-level `output_config.effort`. `None` and
-    /// `Some(false)` both keep the legacy shape.
+    /// When `true`, enables the adaptive thinking shape (`thinking:
+    /// {type:"adaptive"}` + `output_config.effort`) for Claude Opus 4.7+
+    /// inference profiles on this Bedrock provider. This flag is static --
+    /// baked at provider construction, takes effect on next server start.
+    ///
+    /// Note: the per-request equivalent for the AnthropicApi egress is
+    /// ModelEntry.supports_adaptive_thinking projected through
+    /// RoutectlInternal.supports_adaptive_thinking at dispatch time.
+    /// The Bedrock static flag was kept intentionally -- see module doc
+    /// for the asymmetry rationale.
+    ///
+    /// `None` and `Some(false)` both keep the legacy shape.
     pub adaptive_thinking: Option<bool>,
 }
 

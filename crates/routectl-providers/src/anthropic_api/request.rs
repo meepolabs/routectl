@@ -36,6 +36,8 @@ use routectl_core::{
     SystemContent, ToolDef,
 };
 
+use crate::effort::clamp_effort_to_supported;
+
 use super::parts::{parse_image_url_source, strip_text_after_tool_use};
 use super::types::{
     AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicRole, AnthropicSystem,
@@ -72,6 +74,10 @@ fn legacy_thinking_fits(req: &ChatRequest) -> bool {
 /// Only consulted on the legacy `ThinkingConfig::Enabled` path -- the
 /// adaptive-thinking path passes `effort` through verbatim into
 /// `output_config.effort` and never calls this.
+///
+/// Must stay in sync with VALID_EFFORT_TOKENS in
+/// routectl-providers/src/effort.rs. A new token added to that const
+/// without a corresponding arm here returns the default ratio silently.
 fn effort_ratio(effort: &str) -> f64 {
     match effort {
         // `max` arrived with the Opus 4.7+ adaptive thinking shape,
@@ -91,14 +97,19 @@ fn effort_ratio(effort: &str) -> f64 {
 }
 
 /// Effort string to use for top-level `output_config.effort`. Returns
-/// `req.reasoning.effort` verbatim when set; falls back to "medium"
-/// otherwise (Anthropic requires the field when adaptive thinking is
-/// active and validates the string).
+/// `req.reasoning.effort` clamped against `req.routectl_internal.effort_levels`
+/// when that slice is non-empty (operator cost cap); falls back to the
+/// raw effort string when effort_levels is empty (Anthropic pass-through
+/// default). Falls back to "medium" when no effort is set (Anthropic
+/// requires the field when adaptive thinking is active and validates
+/// the string).
 fn derive_effort(req: &ChatRequest) -> String {
-    req.reasoning
+    let raw = req
+        .reasoning
         .as_ref()
         .and_then(|r| r.effort.clone())
-        .unwrap_or_else(|| "medium".to_string())
+        .unwrap_or_else(|| "medium".to_string());
+    clamp_effort_to_supported(&raw, &req.routectl_internal.effort_levels).into_owned()
 }
 
 /// Decide which `ThinkingConfig` variant (if any) to emit. The
@@ -212,7 +223,8 @@ pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<Thinki
         });
     }
     if let Some(effort) = r.effort.as_deref() {
-        let budget = ((max as f64) * effort_ratio(effort)).max(1.0) as u32;
+        let clamped = clamp_effort_to_supported(effort, &req.routectl_internal.effort_levels);
+        let budget = ((max as f64) * effort_ratio(clamped.as_ref())).max(1.0) as u32;
         let budget = apply_operator_cap(budget, operator_cap);
         return Some(ThinkingConfig::Enabled {
             budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
@@ -3211,5 +3223,184 @@ mod multi_turn_tool_use_tests {
             thinking["budget_tokens"], 3000,
             "max_thinking_budget=0 must not alter the budget; got {thinking:?}"
         );
+    }
+}
+
+// -----------------------------------------------------------------
+// Anthropic effort clamping: operator-declared effort_levels must
+// cap the caller's effort on the Anthropic-shape egress (adaptive
+// and legacy) matching the existing OpenAI-shape behavior.
+// -----------------------------------------------------------------
+#[cfg(test)]
+mod anthropic_effort_clamp_tests {
+    use super::*;
+    use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
+
+    fn user_msg(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Operator declares effort_levels = ["low","medium","high"] on an
+    /// Anthropic adaptive model. Caller sends effort="max". The outgoing
+    /// output_config.effort must be "high" (clamped down to the operator
+    /// cap), not "max".
+    #[test]
+    fn adaptive_clamps_effort_to_operator_cap() {
+        // Arrange
+        let mut req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("max".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        req.routectl_internal.effort_levels = std::sync::Arc::from(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ]);
+
+        // Act
+        let body = normalize("test", &req, true, &[]).expect("normalize must succeed");
+
+        // Assert: effort clamped from "max" down to "high" (operator cap).
+        let oc = body
+            .get("output_config")
+            .expect("output_config present on adaptive path");
+        assert_eq!(
+            oc["effort"], "high",
+            "effort must clamp from max to high against operator-declared effort_levels; got: {oc}"
+        );
+    }
+
+    /// Operator declares effort_levels = [] (empty). Caller sends
+    /// effort="max". The outgoing output_config.effort must be "max"
+    /// (pass-through; current Anthropic behavior).
+    #[test]
+    fn adaptive_passthrough_when_effort_levels_empty() {
+        // Arrange
+        let mut req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("max".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        // Empty = pass-through semantics (default).
+        req.routectl_internal.effort_levels = std::sync::Arc::from(Vec::<String>::new());
+
+        // Act
+        let body = normalize("test", &req, true, &[]).expect("normalize must succeed");
+
+        // Assert: effort passes through unchanged.
+        let oc = body
+            .get("output_config")
+            .expect("output_config present on adaptive path");
+        assert_eq!(
+            oc["effort"], "max",
+            "empty effort_levels must not clamp; got: {oc}"
+        );
+    }
+
+    /// Operator declares effort_levels = ["low","medium"] on an
+    /// Anthropic legacy (non-adaptive) model. Caller sends effort="high".
+    /// The legacy budget must be derived from "medium" (clamped down to
+    /// the operator cap), not "high".
+    ///
+    /// Concretely: max_tokens=4096, effort_ratio("medium")=0.50 ->
+    /// budget_tokens=2048. If the clamp were absent, effort_ratio("high")
+    /// would yield 0.80*4096=3276.
+    #[test]
+    fn legacy_clamps_effort_to_operator_cost_cap() {
+        // Arrange
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(4096),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        req.routectl_internal.effort_levels =
+            std::sync::Arc::from(vec!["low".to_string(), "medium".to_string()]);
+
+        // Act
+        let body = normalize("test", &req, false, &[]).expect("normalize must succeed");
+
+        // Assert: budget derived from "medium" (0.50 * 4096 = 2048), not
+        // from "high" (0.80 * 4096 = 3276).
+        let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(thinking["type"], "enabled");
+        assert_eq!(
+            thinking["budget_tokens"], 2048,
+            "legacy path must clamp effort from high to medium against operator cap; got: {thinking}"
+        );
+    }
+}
+
+// -----------------------------------------------------------------
+// effort_ratio parity test: every token in VALID_EFFORT_TOKENS must
+// have a non-default arm in effort_ratio. Guards against a new token
+// being added to the const without a matching arm, which would
+// silently return the 0.50 default ratio.
+// -----------------------------------------------------------------
+#[cfg(test)]
+mod effort_ratio_parity_tests {
+    use super::effort_ratio;
+    use crate::effort::VALID_EFFORT_TOKENS;
+
+    /// Assert that every token listed in VALID_EFFORT_TOKENS returns a
+    /// ratio distinct from the default fallback arm (0.50). The only
+    /// token that should legitimately equal 0.50 is "medium". All
+    /// others must have a dedicated arm.
+    ///
+    /// If a new token is added to VALID_EFFORT_TOKENS without a
+    /// matching arm in effort_ratio, it will silently receive 0.50
+    /// (the default). This test surfaces that gap.
+    #[test]
+    fn every_valid_effort_token_has_non_default_ratio_or_is_medium() {
+        // Tokens that are EXPECTED to map to 0.50 (the default ratio).
+        // Only "medium" is intentional.
+        const EXPECTED_DEFAULT: &[&str] = &["medium"];
+
+        for &token in &VALID_EFFORT_TOKENS {
+            let ratio = effort_ratio(token);
+            if EXPECTED_DEFAULT.contains(&token) {
+                // "medium" is intentionally 0.50.
+                assert_eq!(
+                    ratio, 0.50,
+                    "token \"{token}\" expected 0.50 but got {ratio}"
+                );
+            } else {
+                // All other tokens must have a dedicated arm (not the 0.50 default).
+                assert_ne!(
+                    ratio, 0.50,
+                    "token \"{token}\" maps to the default ratio 0.50; \
+                     add a dedicated arm to effort_ratio for this token"
+                );
+            }
+        }
     }
 }
