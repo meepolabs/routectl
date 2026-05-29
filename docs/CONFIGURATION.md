@@ -95,7 +95,9 @@ the CLI.
 | `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only                                                          |
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
 | `runtime` (RPM, breaker, timeouts, `unsupported_features`) | `[providers.X]` | provider-only                                                          |
-| `allowed_betas`                | `[providers.X]` Anthropic / `[bedrock]` global | provider-only                              |
+| `allowed_betas`                | `[providers.X]` AnthropicApi    | provider-only; allowlist for `anthropic_beta` flags to `api.anthropic.com`; empty = pass-through |
+| `allowed_betas`                | `[bedrock]` global              | global filter for Bedrock-accepted `anthropic_beta` values; empty = pass-through (see `[bedrock]`) |
+| `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor always sent, bypasses `[bedrock] allowed_betas`            |
 
 ## header_extras merge
 
@@ -331,13 +333,13 @@ effort the caller supplied without operator-side filtering. This is the
 correct default for OpenRouter-style providers that perform their own
 effort translation.
 
-Clamping applies only on OpenAI-shape egresses: when a caller supplies an
-effort value not in the model's `effort_levels`, the egress clamps to the
-nearest supported level (rounding toward the most capable supported level
-when the requested level is above the declared maximum, and to the least
-capable when it is below the minimum). Anthropic-shape egresses accept the
-full vocabulary verbatim -- the declared `effort_levels` is informational
-only on those paths.
+Clamping applies on ALL egresses when `effort_levels` is non-empty: when a
+caller supplies an effort value not in the model's `effort_levels`, the egress
+clamps to the nearest supported level (rounding toward the most capable
+supported level when the requested level is above the declared maximum, and to
+the least capable when it is below the minimum). When `effort_levels` is empty,
+the egress emits whatever effort the caller supplied without operator-side
+filtering.
 
 **`max_thinking_budget` (u32, default 0)**
 
@@ -350,21 +352,15 @@ strings and has no budget field.
 
 Two other per-model overrides live on `[models.X]`:
 
-- `anthropic_beta = [...]` -- lifted onto `req.anthropic_beta` at
-  dispatch time, deduplicated against client-supplied entries
-  (client wins on order). Use when a provider serves multiple
-  Claude models and only some support a given beta (e.g.
-  `context-1m-2025-08-07` works on opus/sonnet but is rejected
-  for haiku) -- saves duplicating the entire provider config.
-  IMPORTANT: the merge is **additive**. A model entry's
-  `anthropic_beta = []` does NOT suppress a beta the provider
-  already sets via `header_extras["anthropic-beta"]` or
-  `[providers.X] anthropic_beta`. To make a model opt OUT of a
-  provider-shipped beta, REMOVE the beta from the provider config
-  and add it back to each `[models.X] anthropic_beta` that needs
-  it. Comparison is exact-string (case sensitive) to match
-  Anthropic's beta-name semantics; a casing typo propagates so
-  the upstream's 400 surfaces the misconfig.
+- `header_extras = { "anthropic-beta" = "..." }` -- per-model beta gates.
+  Use when a provider serves multiple Claude models and only some support a
+  given beta (e.g. `context-1m-2025-08-07` works on opus/sonnet but is
+  rejected for haiku) -- saves duplicating the entire provider config.
+  The `anthropic-beta` key runs through the comma-split-union-rejoin post-pass
+  (see "header_extras merge" above) so provider-level and model-level betas
+  union onto one wire header. To have a model omit a beta that the provider
+  sets: move the beta off the provider block and add it to each `[models.X]
+  header_extras` that needs it.
 
 - `stream_first_byte_timeout_ms = N` -- per-model > per-provider >
   global resolution. Pin opus xhigh adaptive thinking at 300s
@@ -384,7 +380,7 @@ provider                     = "bedrock"
 upstream                     = "us.anthropic.claude-opus-4-7-v1:0"
 supports_adaptive_thinking   = true
 effort_levels                = ["low", "medium", "high", "xhigh", "max"]
-anthropic_beta               = ["context-1m-2025-08-07"]
+header_extras                = { "anthropic-beta" = "context-1m-2025-08-07" }
 stream_first_byte_timeout_ms = 300000         # opus override
 
 [models.haiku45]
@@ -398,6 +394,10 @@ upstream = "us.anthropic.claude-haiku-4-5-v1:0"
 
 `history_reasoning` on `[models.X]` controls whether routectl echoes a
 model's own prior reasoning back to the upstream on multi-turn replay.
+
+> **NOTE:** Moved from `[providers.X]` to `[models.X]` in v0.6.0;
+> provider-level placement now rejects at config-parse time.
+
 Three values:
 
 - `auto` (the unset default) -- the egress decides. For openai-compat

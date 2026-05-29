@@ -175,7 +175,7 @@ fn response_unknown_output_item_passes_through_as_other() {
     // mcp_call, custom_tool_call) must not break the response. We
     // surface it as ContentPart::Other in Parts so downstream
     // egresses that know the type can re-emit it. The actual
-    // upstream `type` tag is preserved verbatim (see MED-5 fix).
+    // upstream `type` tag is preserved verbatim.
     let body = json!({
         "status": "completed",
         "output": [

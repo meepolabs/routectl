@@ -18,6 +18,11 @@ Every change must keep two things green:
 # Unit + integration tests across the whole workspace.
 cargo test --workspace --features bedrock --release
 
+# Some context-management integration tests are gated on
+# `#[cfg(feature = "test-utils")]` to keep the production API surface
+# clean. To include them:
+cargo test --workspace --features bedrock,test-utils --release
+
 # Live matrix against real providers. Requires OPENROUTER_API_KEY,
 # OPENCODE_GO_API_KEY, NIM_API_KEY in env (skips per-provider when
 # missing). 5/5 tests must pass; per-provider PASS counts must match
@@ -47,7 +52,7 @@ final gate, not a tight inner loop.
    ```
 
 2. **Inspect what the egress sent upstream** with
-   `RUST_LOG=routectl_providers=debug` or by running the
+   `ROUTECTL_LOG=routectl_providers=debug` or by running the
    `anthropic_ingress` integration test against a wiremock that
    captures the body. The failing dimension is usually one of:
    - cache_control dropped on a position routectl doesn't yet handle
@@ -65,14 +70,14 @@ final gate, not a tight inner loop.
 
 3. **Pick the right fix site**:
    - Body translation issue (Anthropic Messages -> canonical):
-     `routectl-cli/src/ingress/anthropic.rs::translate_request`.
+     `routectl-cli/src/ingress/anthropic/parse.rs::translate_request`.
    - Content-block translation (canonical -> Anthropic wire):
      `routectl-providers/src/anthropic_api/request.rs::translate_content_part`.
    - Missing wire field on the response side: extend
      `routectl-providers/src/anthropic_api/types.rs::AnthropicResponse`
      and `walk_content_blocks`.
    - SSE event ordering (e.g. Anthropic emits a new event type):
-     `routectl-cli/src/ingress/anthropic.rs::render_chunk_internal`
+     `routectl-cli/src/ingress/anthropic/stream.rs::render_chunk_internal`
      state machine; mirror the wire decoder in
      `routectl-providers/src/anthropic_api/sse.rs::SseState`.
 
@@ -91,7 +96,7 @@ final gate, not a tight inner loop.
 2. **Run the matrix** and capture the failing row:
 
    ```bash
-   RUST_LOG=routectl_providers=debug cargo test -p routectl-cli \
+   ROUTECTL_LOG=routectl_providers=debug cargo test -p routectl-cli \
      --features live-integration --release --test live_matrix \
      <test_name> -- --nocapture --test-threads=1
    ```
