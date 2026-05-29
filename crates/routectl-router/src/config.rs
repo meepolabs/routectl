@@ -348,52 +348,6 @@ impl EffortLevel {
     }
 }
 
-/// Internal reasoning defaults carried on a resolved model. No longer
-/// projected from per-model `thinking`/`effort` knobs (removed in the
-/// same refactor); retained as a type for `ResolvedModel.reasoning` and
-/// `merge_reasoning_defaults_into` until the router/resolved merge
-/// helpers are updated in the next task.
-///
-/// An empty `ReasoningDefaults` (both fields `None`) is the normal post-
-/// refactor state -- the field exists on `ResolvedModel` for structural
-/// compat while the merge helpers are still in place.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ReasoningDefaults {
-    /// Maps to ChatRequest.reasoning.effort. None in the normal post-
-    /// refactor state where model defaults no longer inject effort.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
-    /// Maps to ChatRequest.reasoning.enabled. None in the normal post-
-    /// refactor state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-}
-
-impl ReasoningDefaults {
-    /// Construct an empty `ReasoningDefaults`.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the thinking (effort) value.
-    pub fn with_thinking(mut self, thinking: impl Into<String>) -> Self {
-        self.thinking = Some(thinking.into());
-        self
-    }
-
-    /// Set the enabled flag.
-    pub fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = Some(enabled);
-        self
-    }
-
-    /// True when neither field is set. Used by the router to skip the
-    /// merge step when no operator defaults apply.
-    pub fn is_empty(&self) -> bool {
-        self.thinking.is_none() && self.enabled.is_none()
-    }
-}
-
 fn default_true() -> bool {
     true
 }

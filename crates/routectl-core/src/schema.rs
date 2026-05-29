@@ -155,6 +155,14 @@ pub struct RoutectlInternal {
     /// are sent in inbound order. Empty when no matching headers were
     /// supplied; non-Anthropic ingresses (openai-compat) leave it empty.
     pub claude_code_headers: Vec<(String, String)>,
+    /// Whether the dispatched model supports adaptive (extended)
+    /// thinking. Threaded through from `[models.X]
+    /// supports_adaptive_thinking` via `ResolvedModel` ->
+    /// `DispatchTarget`. Egresses that need to choose between a budget-
+    /// tokens path and a flat enable/disable read this field.
+    /// Defaults to `false` so library consumers constructing
+    /// `ChatRequest` directly never see an unexpected budget-tokens path.
+    pub supports_adaptive_thinking: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
