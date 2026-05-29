@@ -23,8 +23,10 @@
 # 2026-05-12, derived from direct boto3 traffic against
 # `bedrock-runtime.us-west-2.amazonaws.com` (haiku-4-5 / sonnet-4-6 /
 # opus-4-7 -- identical results across all three; Bedrock has one
-# allowlist, not per-model). See `issues.md::INV-6` and `INV-7` for
-# the full table and rationale per rejected entry.
+# allowlist, not per-model). Fields absent from the lists below (e.g.
+# mcp_servers, diagnostics, context_hint, speed) were either rejected
+# with a 400 by the Bedrock runtime or are Anthropic-ingress-only
+# forward-compat fields that AWS has not implemented.
 
 [bedrock]
 

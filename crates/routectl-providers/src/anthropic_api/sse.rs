@@ -783,7 +783,7 @@ mod sse_event_tests;
 #[path = "sse_usage_tests.rs"]
 mod sse_usage_tests;
 
-// Context-management SSE accumulator tests (T4). Drives SseState
+// Context-management SSE accumulator tests. Drives SseState
 // through thinking + tool_use sequences and asserts pending_cache_writes
 // and completed_thinking invariants.
 #[cfg(test)]

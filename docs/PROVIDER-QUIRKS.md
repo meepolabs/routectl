@@ -11,9 +11,9 @@ doc. If it 4xxs or behaves weirdly, find the matching row.
 
 | If you're using... | Set on... |
 |---|---|
-| **Claude Opus 4.7+ / Sonnet 4.7+** | `[models.X] adaptive_thinking = true` |
+| **Claude Opus 4.7+ / Sonnet 4.7+** | `[models.X] supports_adaptive_thinking = true` |
 | **Any thinking model + high-effort latency** | `[providers.X] stream_first_byte_timeout_ms = 300000` (every alias hitting this provider inherits) |
-| **DeepSeek v4 / v4.1 (any host)** | `[providers.X] history_reasoning = "preserve"` |
+| **DeepSeek v4 / v4.1 (any host)** | `[models.X] history_reasoning = "preserve"` |
 | **DeepSeek v3 / older vLLM** | (default `history_reasoning = "auto"` strips for you) |
 | **NVIDIA NIM hosting DeepSeek** | callers must send `reasoning_effort = "high"` per request (the operator-side `default_extras` knob is deferred -- callers can still set effort via wire `reasoning.effort`) |
 | **NIM cold-start streaming** | `[providers.X] stream_first_byte_timeout_ms = 180000` (3 min) |
@@ -38,8 +38,8 @@ creds  = { kind = "default-chain" }
 [models.opus47]
 provider          = "bedrock"
 upstream          = "us.anthropic.claude-opus-4-7-v1:0"
-adaptive_thinking = true        # rewrites to {type:"adaptive"} + output_config.effort
-thinking          = "high"
+supports_adaptive_thinking = true        # rewrites to {type:"adaptive"} + output_config.effort
+effort_levels     = ["low", "medium", "high", "xhigh", "max"]
 ```
 
 **Recommended when using `reasoning.effort = "high"` / `"xhigh"` / `"max"`:** Opus 4.7 + max-effort regularly takes 60-90 seconds before first SSE byte. Bump the timeouts on the parent provider so every model routing through it inherits:
@@ -68,6 +68,10 @@ DeepSeek v4 inverted v3's contract on multi-turn echo-back. v3: 400 if you echo 
 kind = "openai-compat"
 base_url = "https://opencode.ai/zen/go/v1"
 api_key_ref = "env://OPENCODE_GO_API_KEY"
+
+[models.ds-v4]
+provider          = "example-deepseek-host"
+upstream          = "deepseek-v4-flash"
 reasoning_dialect = "deepseek"          # so response reasoning lifts correctly
 history_reasoning = "preserve"          # echoes reasoning_content back to upstream
 ```
@@ -89,11 +93,15 @@ vLLM 0.7+ matches DeepSeek v4's echo-back contract. Same fix:
 kind = "openai-compat"
 base_url = "http://localhost:8000/v1"
 api_key_ref = "literal:not-needed"
+
+[models.my-vllm-model]
+provider          = "my-vllm"
+upstream          = "Qwen3-32B"
 reasoning_dialect = "vllm"
 history_reasoning = "preserve"          # for vLLM 0.7+
 ```
 
-For older vLLM (≤ 0.6) leave `history_reasoning` unset (defaults to strip).
+For older vLLM (<= 0.6) leave `history_reasoning` unset (defaults to strip).
 
 ### NVIDIA NIM (integrate.api.nvidia.com)
 
@@ -111,6 +119,10 @@ forwards it as `reasoning_effort` to NIM.
 kind              = "openai-compat"
 base_url          = "https://integrate.api.nvidia.com/v1"
 api_key_ref       = "env://NIM_API_KEY"
+
+[models.ds-nim-flash]
+provider          = "nim"
+upstream          = "deepseek-ai/deepseek-v4-flash"
 reasoning_dialect = "openai"
 ```
 
@@ -184,7 +196,7 @@ identifier via `header_extras` if they want a static value.
 
 Both `api_shape = "invoke"` (Anthropic Messages body) and
 `api_shape = "converse"` (AWS Converse) are wired for Anthropic
-models on Sonnet/Haiku/Opus. Set `adaptive_thinking = true` on Opus
+models on Sonnet/Haiku/Opus. Set `supports_adaptive_thinking = true` on Opus
 4.7+ models regardless of api_shape.
 
 **Bedrock allowlist (optional, recommended in production).** AWS
@@ -227,8 +239,8 @@ creds     = { kind = "default-chain" }
 [models.opus47]
 provider          = "bedrock"
 upstream          = "us.anthropic.claude-opus-4-7-v1:0"
-adaptive_thinking = true
-thinking          = "high"
+supports_adaptive_thinking = true
+effort_levels     = ["low", "medium", "high", "xhigh", "max"]
 ```
 
 ### OpenRouter
@@ -240,11 +252,15 @@ Default works. Two niceties to set:
 kind = "openai-compat"
 base_url = "https://openrouter.ai/api/v1"
 api_key_ref = "env://OPENROUTER_API_KEY"
-reasoning_dialect = "openrouter"
 header_extras = {
   "HTTP-Referer" = "https://github.com/your/project",
   "X-Title" = "your-project-name"
 }
+
+[models.ds-or]
+provider          = "openrouter"
+upstream          = "deepseek/deepseek-v4-flash"
+reasoning_dialect = "openrouter"
 ```
 
 The HTTP-Referer / X-Title headers improve OpenRouter's analytics and can affect rate limits on free tiers.
@@ -258,6 +274,10 @@ Default works. The OpenAI dialect maps canonical `reasoning.effort` -> wire `rea
 kind = "openai-compat"
 base_url = "https://api.openai.com/v1"
 api_key_ref = "env://OPENAI_API_KEY"
+
+[models.o3]
+provider          = "openai"
+upstream          = "o3"
 reasoning_dialect = "openai"
 ```
 
@@ -275,10 +295,11 @@ Default is 10s (set in `[retry]`). Fine for most non-thinking models, too aggres
 | Thinking-capable, max effort | 300000-600000 |
 | NIM cold-start (any model) | 180000+ |
 
-**Resolution priority** (provider > global):
+**Resolution priority** (model > provider > global):
 
-1. `[providers.Y] stream_first_byte_timeout_ms` -- per-provider default (use when an upstream is uniformly slow; every model routing through it inherits)
-2. `[retry] stream_first_byte_timeout_ms` -- workspace default (keep tight to surface real timeouts on routine calls)
+1. `[models.X] stream_first_byte_timeout_ms` -- per-model override (pin opus xhigh without forcing haiku to wait 5 min on a dead upstream)
+2. `[providers.Y] stream_first_byte_timeout_ms` -- per-provider default (use when an upstream is uniformly slow; every model routing through it inherits)
+3. `[retry] stream_first_byte_timeout_ms` -- workspace default (keep tight to surface real timeouts on routine calls)
 
 Per-route timeouts: split into separate `[providers.X]` entries with their own runtime knobs and route each `[models.X]` accordingly.
 
@@ -329,7 +350,7 @@ upstream = "deepseek-ai/deepseek-v4-flash"
 deepseek-flash = ["ds-go", "ds-or", "ds-nim"]   # primary -> fallback -> fallback
 ```
 
-Each provider's `history_reasoning` config applies independently -- the chain just picks who answers. The `routectl_provider` field on every response tells you which one actually answered.
+Each model's `history_reasoning` config applies independently -- the chain just picks who answers. The `routectl_provider` field on every response tells you which one actually answered.
 
 ## DeepSeek /anthropic and similar: context_management beta emulation
 
@@ -371,17 +392,22 @@ Anthropic-proprietary edit mechanism.
 ```toml
 [providers.deepseek-anthropic]
 kind               = "anthropic-api"
-base_url           = "https://api.deepseek.com"
+base_url           = "https://api.deepseek.com/anthropic"
 api_key_ref        = "env://DEEPSEEK_API_KEY"
 context_management = true
-history_reasoning  = "preserve"
+
+[models.ds-claude]
+provider          = "deepseek-anthropic"
+upstream          = "deepseek-reasoner"
+history_reasoning = "preserve"
 ```
 
-Note: `history_reasoning = "preserve"` is still required (see the DeepSeek v4
-section above) because thinking echo-back and context-management emulation are
-complementary, not alternatives. `history_reasoning` controls how thinking
-tokens in the INCOMING ChatRequest history are forwarded; `context_management`
-controls how the outgoing request is shaped for the beta-aware edit workflow.
+Note: `history_reasoning = "preserve"` is still required on the `[models.X]`
+entry (see the DeepSeek v4 section above) because thinking echo-back and
+context-management emulation are complementary, not alternatives.
+`history_reasoning` controls how thinking tokens in the INCOMING ChatRequest
+history are forwarded; `context_management` controls how the outgoing request
+is shaped for the beta-aware edit workflow.
 
 **Troubleshooting:**
 
@@ -395,7 +421,7 @@ controls how the outgoing request is shaped for the beta-aware edit workflow.
 
 | Symptom | Likely cause |
 |---|---|
-| `400 thinking.type.enabled is not supported` | Need `adaptive_thinking = true` on `[models.X]` (Opus 4.7+) |
+| `400 thinking.type.enabled is not supported` | Need `supports_adaptive_thinking = true` on `[models.X]` (Opus 4.7+) |
 | `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on `[providers.X]` (DeepSeek v4) |
 | `stream first-byte timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
 | Empty `content` + non-zero `reasoning_tokens` | Model used full `max_tokens` budget on reasoning. Increase `max_tokens` |
