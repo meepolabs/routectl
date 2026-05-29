@@ -14,8 +14,8 @@ pub mod runtime_state;
 
 pub use config::{
     AliasValue, Config, EffortLevel, HistoryReasoning, LegacyCompat, LogConfig, ModelEntry,
-    ProviderEntry, ProviderKind, ProviderRuntimePolicy, ReasoningDefaults, ReasoningDialect,
-    RetryPolicy, ServerAuth, ServerConfig, ThinkingChoice,
+    ProviderEntry, ProviderKind, ProviderRuntimePolicy, ReasoningDialect, RetryPolicy, ServerAuth,
+    ServerConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
