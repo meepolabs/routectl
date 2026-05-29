@@ -62,11 +62,13 @@ weirdness already encountered in the wild see
   ingress dialects in `src/ingress/`:
   - `openai.rs` -- `POST /v1/chat/completions`, canonical wire shape
     pass-through behind the `IngressAdapter` trait.
-  - `anthropic.rs` -- `POST /v1/messages`. Translates Anthropic
-    Messages bodies to canonical, runs cache_control validation up
-    front, renders Anthropic SSE events (`message_start`,
-    `content_block_*`, `message_delta`, `message_stop`) through a
-    stateful block-index machine.
+  - `anthropic/` -- `POST /v1/messages` split across four files:
+    `mod.rs` (`AnthropicIngress` + streaming state types `AnthropicStreamState`
+    / `OpenBlockKind`), `parse.rs` (Anthropic body -> canonical `ChatRequest`;
+    forward-compat sweep into `provider_extras`), `render.rs` (canonical
+    `ChatResponse` -> Anthropic Messages response body shape), `stream.rs`
+    (canonical `ChatChunk` -> Anthropic SSE events with monotonic
+    terminal-state guard).
   - `mod.rs` -- `IngressAdapter` trait, `SseEvent`, and
     `read_alias_header` (the `x-routectl-alias` override surface; the
     alias resolver lives on the router as

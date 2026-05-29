@@ -2,11 +2,11 @@
 //!
 //! Shape reference: <https://openrouter.ai/docs/guides/best-practices/reasoning-tokens>
 //!
-//! Key design choice (DEC-001): routectl's outward schema mirrors OpenRouter so
+//! Key design choice: routectl's outward schema mirrors OpenRouter so
 //! any client that speaks OpenRouter speaks routectl. Reasoning is first-class:
 //! `reasoning` config in request, `reasoning_details` array in response.
 //!
-//! v0.4.0 extension (DEC-002): the canonical now carries Anthropic-shape
+//! v0.4.0 extension: the canonical now carries Anthropic-shape
 //! features (cache_control on every block, top-level system, anthropic_beta,
 //! cache usage stats) so an Anthropic-in / Anthropic-out and Anthropic-in /
 //! Bedrock-Invoke-out request round-trips losslessly. Typed `ContentPart`,

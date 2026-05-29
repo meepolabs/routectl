@@ -525,7 +525,7 @@ fn store_provider_extras_override_ignored_for_chatgpt_oauth() {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH-1: user image content
+// user image content
 // ---------------------------------------------------------------------------
 
 fn user_image_base64(media_type: &str, data: &str) -> Message {
@@ -624,7 +624,7 @@ fn user_image_unknown_source_kind_warns_and_drops() {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH-2: tool result with image parts
+// tool result with image parts
 // ---------------------------------------------------------------------------
 
 fn tool_message_parts(call_id: &str, parts: Vec<ContentPart>) -> Message {
@@ -720,7 +720,7 @@ fn tool_role_mixed_text_and_image_emits_items_array() {
 }
 
 // ---------------------------------------------------------------------------
-// MED-1: client_metadata passthrough
+// client_metadata passthrough
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -742,7 +742,7 @@ fn provider_extras_client_metadata_forwards() {
 }
 
 // ---------------------------------------------------------------------------
-// CRIT-1: multi-turn reasoning replay round-trip
+// multi-turn reasoning replay round-trip
 //
 // These tests prove that an assistant turn carrying response-side
 // reasoning_details (with the openai-responses-v1 format tag) survives

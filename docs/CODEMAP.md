@@ -34,12 +34,13 @@ listed at the bottom of each crate.
 ### Top-level
 
 - `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`
-- `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, requires_reasoning_effort, adaptive_thinking, etc.)
+- `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, requires_reasoning_effort, uses_chat_template_kwargs, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin and User-Agent override
 
 ### anthropic_api
 
 - `src/anthropic_api/mod.rs` -- `AnthropicApiProvider` impl + `AnthropicApiConfig` (fields: `auth`, `base_url`, `anthropic_version`, `auth_kind`, `header_extras`, `user_agent`, `allowed_betas`, `forward_client_headers`, `context_management`) + `AuthKind` (ApiKey / OauthBearer); SSE drain
+- `src/anthropic_api/context_management.rs` -- LRU+TTL thinking-block store for context-management beta emulation; exports `ThinkingCache`, `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA`, `CLEAR_THINKING_EDIT_TYPE`, `THINKING_CACHE_CAP`, `THINKING_CACHE_TTL`, `snapshot_to_cache`, `lookup_thinking`, `extract_tool_thinking`, `apply_clear_thinking_edit`
 - `src/anthropic_api/types.rs` -- Anthropic Messages wire types (`AnthropicRequest`, content blocks, system, thinking config, usage)
 - `src/anthropic_api/request.rs` -- canonical `ChatRequest` -> Anthropic wire body translation
 - `src/anthropic_api/response.rs` -- Anthropic response -> canonical `ChatResponse` (content-block walk, stop_reason map, usage cache stats)
@@ -120,6 +121,7 @@ listed at the bottom of each crate.
 
 - `tests/common/mod.rs` -- shared canonical-`ChatRequest` scenario builders mirrored with `routectl-cli/tests/common/mod.rs`
 - `tests/anthropic_api.rs` -- wiremock-based complete + stream tests for Anthropic Messages API egress
+- `tests/context_management.rs` -- wiremock-driven complete() + streaming end-to-end for context-management emulation; asserts beta-header strip, context_management body-key strip, and thinking-block injection; gated on `#[cfg(feature = "anthropic-api")]` (run with `--features test-utils` to exercise helpers that pre-populate the thinking cache)
 - `tests/openai_compat.rs` -- wiremock-based complete + stream tests for openai-compat egress (DeepSeek multi-turn, etc.)
 - `tests/contract_egress.rs` -- canonical -> Anthropic+openai-compat wire body snapshots via insta
 - `tests/contract_egress_bedrock_invoke.rs` -- canonical -> Bedrock-Invoke (Anthropic-shape) body snapshots
@@ -202,6 +204,5 @@ listed at the bottom of each crate.
 - `tests/contract_response_ingress.rs` -- canonical `ChatResponse` -> Anthropic wire body via `render_response`
 - `tests/contract_stream_ingress.rs` -- canonical chunk sequences -> Anthropic SSE events (Bug B class ordering)
 - `tests/e2e_reasoning.rs` -- end-to-end reasoning round-trip across DeepSeek / vLLM / Anthropic dialects
-- `tests/reasoning_defaults_ingress.rs` -- per-model `[models.X] thinking`/`enabled` operator-side reasoning defaults
 - `tests/live_matrix.rs` -- live provider matrix (OpenRouter / opencode-go / NIM); requires API keys, gated by feature flag
 - `tests/live_anthropic_oauth.rs` -- live OAuth-bearer test against `api.anthropic.com`; gated by env token file

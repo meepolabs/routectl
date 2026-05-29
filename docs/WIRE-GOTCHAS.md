@@ -73,7 +73,7 @@ this doc first for similar patterns. For operator-facing config recipes see
   callers (and the Claude-Code legacy SDK path) still send a
   top-level `output_format` field; serde on `ChatRequest` does not
   know that name and would silently drop it. `merge_output_format`
-  in `crates/routectl-cli/src/ingress/anthropic.rs` rewrites the
+  in `crates/routectl-cli/src/ingress/anthropic/parse.rs` rewrites the
   legacy field into `output_config.format` (preserving any existing
   `output_config.effort`); when both shapes arrive on one request it
   prefers the nested form and WARNs, mirroring claude-code's own
@@ -92,7 +92,7 @@ this doc first for similar patterns. For operator-facing config recipes see
   egress's `merge_provider_extras` forwards them upstream verbatim.
   When canonical adds a new field, also add it to the
   `CANONICAL_CHAT_REQUEST_WIRE_FIELDS` const in
-  `crates/routectl-cli/src/ingress/anthropic.rs`.
+  `crates/routectl-cli/src/ingress/anthropic/parse.rs`.
 
 - **Inbound `anthropic-beta` HTTP header lift.** The
   `@anthropic-ai/sdk` Beta API translates the SDK option `betas:

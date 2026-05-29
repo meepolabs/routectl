@@ -25,7 +25,7 @@ pub(crate) struct ThinkingCacheEntry {
     /// followed the tool_use block identified by the cache key.
     pub(crate) thinking: Vec<ReasoningDetail>,
     /// Wall-clock expiry. The store evicts entries that are past this
-    /// instant on the next access attempt (checked by the reader in T3).
+    /// instant on the next access attempt (checked by the reader).
     pub(crate) expires_at: std::time::Instant,
 }
 
@@ -40,7 +40,7 @@ pub(crate) type ThinkingCache = lru::LruCache<ThinkingCacheKey, ThinkingCacheEnt
 pub(crate) const THINKING_CACHE_CAP: usize = 1000;
 
 /// TTL for cached thinking entries. Entries older than 60 minutes are
-/// treated as stale and discarded on next read (logic lands in T3).
+/// treated as stale and discarded on next read.
 /// 60 minutes matches the typical maximum agentic session length before
 /// context rotation.
 pub(crate) const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
