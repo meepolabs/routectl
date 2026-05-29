@@ -82,8 +82,9 @@ the CLI.
 | `provider`                     | `[models.X]`        | required; refs a `[providers]` key                                     |
 | `upstream`                     | `[models.X]`        | required                                                               |
 | `selectable`                   | `[models.X]`        | default true                                                           |
-| `thinking` (bool or "adaptive")| `[models.X]`        | model-only; caller `reasoning.enabled=false` always wins               |
-| `effort` (enum)                | `[models.X]`        | model-only; caller `reasoning.effort` always wins                      |
+| `supports_adaptive_thinking`   | `[models.X]`        | bool, default false; selects adaptive vs legacy thinking wire shape    |
+| `effort_levels`                | `[models.X]`        | array<string>, default ["low","medium","high"]; empty = pass-through   |
+| `max_thinking_budget`          | `[models.X]`        | u32, default 0 (no cap); declared model budget ceiling in tokens       |
 | `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
@@ -95,11 +96,6 @@ the CLI.
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
 | `runtime` (RPM, breaker, timeouts, `unsupported_features`) | `[providers.X]` | provider-only                                                          |
 | `allowed_betas`                | `[providers.X]` Anthropic / `[bedrock]` global | provider-only                              |
-
-Caller request shape > model defaults > provider/internal defaults. An
-incoming `reasoning.effort = "minimal"` always wins over an
-operator-configured `[models.X] thinking = "high"`. Use model defaults
-to set a floor when the caller is silent.
 
 ## header_extras merge
 
@@ -296,7 +292,63 @@ rather than loosening the global.
 
 ## Per-model knobs
 
-Two per-model overrides live on `[models.X]`:
+### Reasoning capability declaration
+
+Three fields on `[models.X]` declare what reasoning a model supports.
+The router and egresses read them at dispatch time; callers never set
+these fields directly.
+
+**`supports_adaptive_thinking` (bool, default false)**
+
+When `true`, the Anthropic-API and Bedrock egresses emit the adaptive
+thinking wire shape:
+
+```json
+{ "thinking": { "type": "adaptive" }, "output_config": { "effort": "high" } }
+```
+
+When `false`, they emit the legacy fixed-budget shape:
+
+```json
+{ "thinking": { "type": "enabled", "budget_tokens": 16000 } }
+```
+
+Set `true` only for models that accept the adaptive shape (Anthropic
+Opus 4.7+). Non-adaptive models sent the adaptive shape receive a 400.
+
+**`effort_levels` (array of strings, default ["low","medium","high"])**
+
+Ordered list of effort levels the operator declares this model accepts.
+Every element must be one of the full vocabulary:
+
+```
+minimal | low | medium | high | xhigh | max
+```
+
+The validator at config-load rejects tokens outside that set. An empty
+list (`effort_levels = []`) means pass-through: the egress emits whatever
+effort the caller supplied without operator-side filtering. This is the
+correct default for OpenRouter-style providers that perform their own
+effort translation.
+
+Clamping applies only on OpenAI-shape egresses: when a caller supplies an
+effort value not in the model's `effort_levels`, the egress clamps to the
+nearest supported level (rounding toward the most capable supported level
+when the requested level is above the declared maximum, and to the least
+capable when it is below the minimum). Anthropic-shape egresses accept the
+full vocabulary verbatim -- the declared `effort_levels` is informational
+only on those paths.
+
+**`max_thinking_budget` (u32, default 0)**
+
+Declares the model's maximum thinking-token budget in tokens. `0` means
+"not a budget-capped model" -- the egress falls back to its own
+inference-time defaults. Non-zero values are forwarded as the ceiling
+for the egress's budget negotiation. Only relevant on the legacy
+`supports_adaptive_thinking = false` path; the adaptive path uses effort
+strings and has no budget field.
+
+Two other per-model overrides live on `[models.X]`:
 
 - `anthropic_beta = [...]` -- lifted onto `req.anthropic_beta` at
   dispatch time, deduplicated against client-supplied entries
@@ -330,8 +382,8 @@ stream_first_byte_timeout_ms = 60000          # provider default
 [models.opus47]
 provider                     = "bedrock"
 upstream                     = "us.anthropic.claude-opus-4-7-v1:0"
-adaptive_thinking            = true
-thinking                     = "high"
+supports_adaptive_thinking   = true
+effort_levels                = ["low", "medium", "high", "xhigh", "max"]
 anthropic_beta               = ["context-1m-2025-08-07"]
 stream_first_byte_timeout_ms = 300000         # opus override
 
@@ -339,6 +391,7 @@ stream_first_byte_timeout_ms = 300000         # opus override
 provider = "bedrock"
 upstream = "us.anthropic.claude-haiku-4-5-v1:0"
 # inherits provider's 60s; no per-model override
+# effort_levels defaults to ["low","medium","high"]
 ```
 
 ## history_reasoning (reasoning echo-back)
@@ -389,10 +442,9 @@ redact_prompts   = false    # ROUTECTL_LOG_REDACT_PROMPTS fallback
 
 Per-knob resolution: env wins when set; otherwise the matching
 `[log]` field (when `Some`); otherwise the hardcoded default
-(`false` / `16384` / `false`, where `16384` matches
-`MAX_TRACE_BODY_BYTES` in `routectl-core`). All fields are optional.
-A missing `[log]` block leaves current behavior unchanged (env-only
-or hardcoded default for each knob).
+(`false` / `16384` / `false`). All fields are optional. A missing
+`[log]` block leaves current behavior unchanged (env-only or
+hardcoded default for each knob).
 
 What each knob does:
 
