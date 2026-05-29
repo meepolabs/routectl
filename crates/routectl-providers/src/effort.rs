@@ -13,9 +13,18 @@
 
 use std::borrow::Cow;
 
-/// Standard effort rank order. Lower index = lower effort.
-/// Any string not in this list is "unknown" and triggers a warn.
-const RANK_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+/// The six canonical effort tokens, in rank order from lowest to
+/// highest. This is the single source of truth for the valid effort
+/// vocabulary; `validate_reasoning_defaults` in `routectl-router`
+/// imports this constant instead of maintaining a separate copy.
+pub const VALID_EFFORT_TOKENS: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Standard effort rank order. Identical to VALID_EFFORT_TOKENS --
+/// maintained as a separate slice reference so `clamp_effort_to_supported`
+/// can continue to work with a `&[&str]` reference and carry its
+/// rank-ordering semantics explicitly. Both must stay in sync; the
+/// unit test `effort_tokens_and_rank_order_in_sync` enforces that.
+const RANK_ORDER: &[&str] = &VALID_EFFORT_TOKENS;
 
 /// Clamp `requested` to the nearest supported level on the standard
 /// rank order:
@@ -52,7 +61,7 @@ pub(crate) fn clamp_effort_to_supported<'a>(
     // Locate the requested level in the canonical rank order.
     let requested_rank = RANK_ORDER.iter().position(|&r| r == requested);
 
-    if requested_rank.is_none() {
+    let Some(req_rank) = requested_rank else {
         // Unknown effort string: warn and fall back to the lowest supported.
         let lowest = lowest_supported(supported);
         tracing::warn!(
@@ -62,9 +71,7 @@ pub(crate) fn clamp_effort_to_supported<'a>(
             "effort string is not in the standard rank order; clamping to lowest supported"
         );
         return Cow::Owned(lowest.to_owned());
-    }
-
-    let req_rank = requested_rank.unwrap();
+    };
 
     // Find the highest supported level whose rank is <= requested rank.
     // Iterate RANK_ORDER in reverse (high to low) and pick the first
@@ -92,7 +99,15 @@ pub(crate) fn clamp_effort_to_supported<'a>(
 
 /// Return the lowest-ranked string in `supported` by the standard rank
 /// order. Falls back to the first element for strings not in the order.
+///
+/// Precondition: `supported` is non-empty. Callers must ensure this
+/// before invoking (every call site checks `supported.is_empty()`
+/// earlier and returns early).
 fn lowest_supported(supported: &[String]) -> &str {
+    debug_assert!(
+        !supported.is_empty(),
+        "lowest_supported called with empty slice -- precondition violated"
+    );
     supported
         .iter()
         .min_by_key(|s| {
@@ -102,12 +117,23 @@ fn lowest_supported(supported: &[String]) -> &str {
                 .unwrap_or(usize::MAX)
         })
         .map(|s| s.as_str())
-        .unwrap_or("")
+        .expect("supported is non-empty -- precondition violated")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_effort_to_supported;
+    use super::{clamp_effort_to_supported, RANK_ORDER, VALID_EFFORT_TOKENS};
+
+    // VALID_EFFORT_TOKENS and RANK_ORDER must stay in sync: same elements,
+    // same order. If either is updated, the other must follow.
+    #[test]
+    fn effort_tokens_and_rank_order_in_sync() {
+        assert_eq!(
+            VALID_EFFORT_TOKENS.as_slice(),
+            RANK_ORDER,
+            "VALID_EFFORT_TOKENS and RANK_ORDER must be identical slices"
+        );
+    }
 
     // Helper to build a Vec<String> from a slice of &str.
     fn levels(ls: &[&str]) -> Vec<String> {

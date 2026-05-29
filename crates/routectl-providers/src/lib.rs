@@ -17,8 +17,10 @@ pub(crate) mod http_client;
 
 // Shared effort-clamping helper for OpenAI-shape egresses. Unconditional
 // (no feature gate) because both openai-compat and openai-responses egresses
-// use it and both pull in reqwest anyway.
-pub(crate) mod effort;
+// use it and both pull in reqwest anyway. `pub` so `routectl-router` can
+// import `VALID_EFFORT_TOKENS` (the single source of truth for the valid
+// effort vocabulary).
+pub mod effort;
 
 // Shared, lazily-gated dir-2 / dir-3 header-trace helpers. Unconditional
 // like `http_client` (both lean on `reqwest`, which any provider feature
