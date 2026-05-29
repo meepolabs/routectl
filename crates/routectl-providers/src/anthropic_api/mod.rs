@@ -79,16 +79,6 @@ pub struct AnthropicApiConfig {
     /// policies that gate access on `aws:UserAgent` (e.g. Claude Code's
     /// Bedrock role). `None` keeps reqwest's default UA.
     pub user_agent: Option<String>,
-    /// Use the Opus 4.7+ adaptive thinking wire shape. When `Some(true)`,
-    /// `request::normalize` rewrites `thinking: {type:"enabled",
-    /// budget_tokens:N}` to `thinking: {type:"adaptive"}` and lifts
-    /// `reasoning.effort` (verbatim string) into top-level
-    /// `output_config.effort`. Older Claude models (4.5/4.6 family) keep
-    /// the legacy shape so the flag is opt-in per provider rather than a
-    /// compiled model-name match -- adaptive thinking is rolling out
-    /// gradually and there is no clean naming pattern to gate on.
-    /// `None` and `Some(false)` both mean "legacy shape".
-    pub adaptive_thinking: Option<bool>,
     /// Operator-supplied allowlist for `anthropic_beta` flags.
     /// Empty (default) is pass-through: every beta the client
     /// requests via the `anthropic-beta` HTTP header or body field
@@ -125,7 +115,6 @@ impl std::fmt::Debug for AnthropicApiConfig {
             .field("auth_kind", &self.auth_kind)
             .field("header_extras_len", &self.header_extras.len())
             .field("user_agent", &self.user_agent)
-            .field("adaptive_thinking", &self.adaptive_thinking)
             .field("allowed_betas_len", &self.allowed_betas.len())
             .field(
                 "forward_client_headers",
@@ -156,7 +145,6 @@ impl AnthropicApiConfig {
             auth_kind: AuthKind::ApiKey,
             header_extras: Vec::new(),
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
         }
@@ -347,7 +335,7 @@ impl Provider for AnthropicApiProvider {
         request::normalize(
             &self.cfg.id,
             req,
-            self.cfg.adaptive_thinking.unwrap_or(false),
+            req.routectl_internal.supports_adaptive_thinking,
             &self.cfg.allowed_betas,
         )
     }
@@ -871,7 +859,6 @@ mod tests {
             auth_kind: AuthKind::ApiKey,
             header_extras: Vec::new(),
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers,
         }
@@ -985,7 +972,6 @@ mod tests {
                 "from-operator-config".into(),
             )],
             user_agent: None,
-            adaptive_thinking: None,
             allowed_betas: Vec::new(),
             forward_client_headers: vec!["x-claude-code-session-id".into()],
         };
