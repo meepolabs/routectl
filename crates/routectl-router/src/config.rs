@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use routectl_providers::anthropic_api::AuthKind;
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -90,9 +90,9 @@ pub struct Config {
 /// The env-filter directive (`ROUTECTL_LOG`, e.g.
 /// `routectl=info,routectl_core::log_safe=trace`) is intentionally
 /// out of scope here. It stays env-only because it must reach the
-/// tracing subscriber BEFORE any config load runs; introducing a
-/// config-side fallback would require reordering boot, which trades
-/// one ergonomic win for a silent-on-bad-config gotcha.
+/// tracing subscriber BEFORE any config load runs, and the
+/// architect-validated design declines to reorder boot to introduce a
+/// config-side fallback for it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
@@ -102,8 +102,7 @@ pub struct LogConfig {
     pub trace_headers: Option<bool>,
     /// Cap on the serialized body emitted at TRACE level by the four
     /// body-trace helpers. Zero or missing falls through to the
-    /// hardcoded 16 KB default (matches the env-var path's behavior:
-    /// non-numeric, missing, and `0` all collapse to the default).
+    /// hardcoded 16 KB default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_body_bytes: Option<usize>,
     /// Opt-in for prompt redaction in TRACE-level body logs. Default
@@ -144,20 +143,34 @@ pub struct ModelEntry {
     #[serde(default = "default_true")]
     pub selectable: bool,
 
-    /// Thinking wire-shape selector (v0.6.0 rewrite of the legacy
-    /// `adaptive_thinking: bool` + effort-conflated `thinking: String`
-    /// pair). `false` -> reasoning off; `true` -> legacy enabled-shape
-    /// thinking; `"adaptive"` -> Opus 4.7+ adaptive shape. Caller
-    /// `reasoning.enabled = false` still wins.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingChoice>,
+    /// Whether this model supports the Anthropic adaptive thinking shape
+    /// (Opus 4.7+). When `true`, the factory wires
+    /// `AnthropicApiConfig::adaptive_thinking = Some(true)` so the
+    /// egress emits the adaptive wire shape. `false` (the default)
+    /// uses the standard fixed-budget shape or no thinking at all.
+    #[serde(default)]
+    pub supports_adaptive_thinking: bool,
 
-    /// Reasoning effort vocabulary. One of `minimal`, `low`, `medium`,
-    /// `high`, `xhigh`, `max`. Validated at parse time. Lifts to
-    /// `req.reasoning.effort` via the router's reasoning-defaults
-    /// merge (caller-supplied wire value wins).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<EffortLevel>,
+    /// Ordered list of effort levels the operator declares this model
+    /// accepts. Validated at startup: every element must be one of
+    /// `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the union
+    /// of the Anthropic-shape vocabulary and the OpenAI-shape
+    /// vocabulary; individual egresses clamp to their own subset).
+    ///
+    /// An empty list means pass-through -- the egress emits whatever
+    /// effort the caller supplied without operator-side filtering.
+    ///
+    /// Default: `["low", "medium", "high"]`.
+    #[serde(default = "default_effort_levels")]
+    pub effort_levels: Vec<String>,
+
+    /// Maximum thinking-token budget the operator allows for this
+    /// model, in tokens. `0` (the default) means no operator cap --
+    /// the egress uses whatever budget the caller requested or its own
+    /// default. Non-zero values are forwarded as the ceiling for the
+    /// egress budget negotiation.
+    #[serde(default)]
+    pub max_thinking_budget: u32,
 
     /// Per-model openai-compat reasoning dialect. Lives ONLY on
     /// `[models.X]` (no provider fallback) -- v0.6.0 moved the field
@@ -221,8 +234,9 @@ impl ModelEntry {
             provider: provider.into(),
             upstream: upstream.into(),
             selectable: true,
-            thinking: None,
-            effort: None,
+            supports_adaptive_thinking: false,
+            effort_levels: default_effort_levels(),
+            max_thinking_budget: 0,
             reasoning_dialect: None,
             history_reasoning: None,
             additional_request_fields: None,
@@ -232,13 +246,27 @@ impl ModelEntry {
         }
     }
 
-    pub fn with_thinking(mut self, t: ThinkingChoice) -> Self {
-        self.thinking = Some(t);
+    /// Set whether this model supports the Anthropic adaptive thinking
+    /// shape. Drives `AnthropicApiConfig::adaptive_thinking` in the
+    /// factory so each adaptive-thinking model gets its own provider
+    /// instance.
+    pub fn with_supports_adaptive_thinking(mut self, b: bool) -> Self {
+        self.supports_adaptive_thinking = b;
         self
     }
 
-    pub fn with_effort(mut self, e: EffortLevel) -> Self {
-        self.effort = Some(e);
+    /// Set the operator-declared effort-level allowlist for this model.
+    /// An empty vec means pass-through. Elements are validated at startup
+    /// by `validate_reasoning_defaults`.
+    pub fn with_effort_levels(mut self, levels: Vec<String>) -> Self {
+        self.effort_levels = levels;
+        self
+    }
+
+    /// Set the maximum thinking-token budget cap for this model.
+    /// `0` means no operator cap.
+    pub fn with_max_thinking_budget(mut self, budget: u32) -> Self {
+        self.max_thinking_budget = budget;
         self
     }
 
@@ -281,106 +309,12 @@ impl ModelEntry {
         self
     }
 
-    /// True when the model has any thinking / effort knob set. Drives
-    /// the router's reasoning-defaults merge (skip the work when both
-    /// fields are unset).
-    pub fn has_reasoning_overrides(&self) -> bool {
-        self.thinking.is_some() || self.effort.is_some()
-    }
-
-    /// True when the model opts into the Opus 4.7+ adaptive thinking
+    /// True when the model opts into the Anthropic adaptive thinking
     /// shape. Read by the AnthropicApi factory path so each
     /// adaptive-thinking model gets its own `AnthropicApiProvider`
     /// instance with `cfg.adaptive_thinking = Some(true)`.
     pub fn is_adaptive_thinking(&self) -> bool {
-        matches!(self.thinking, Some(ThinkingChoice::Adaptive))
-    }
-}
-
-/// v0.6.0 thinking wire-shape selector. Untagged so the TOML stays
-/// terse:
-///
-/// ```toml
-/// thinking = false        # reasoning off
-/// thinking = true         # legacy "enabled" shape
-/// thinking = "adaptive"   # Opus 4.7+ adaptive shape
-/// ```
-///
-/// Anything else (`"true"`, integers, unknown strings, `"on"`,
-/// `"enabled"`) rejects at parse time with a clear error so a typo
-/// surfaces at startup rather than at request time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThinkingChoice {
-    Bool(bool),
-    Adaptive,
-}
-
-impl<'de> Deserialize<'de> for ThinkingChoice {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::{Error as DeError, Unexpected};
-        let v = Value::deserialize(deserializer)?;
-        match &v {
-            Value::Bool(b) => Ok(ThinkingChoice::Bool(*b)),
-            Value::String(s) => {
-                if s == "adaptive" {
-                    Ok(ThinkingChoice::Adaptive)
-                } else {
-                    Err(D::Error::invalid_value(
-                        Unexpected::Str(s),
-                        &"`true`, `false`, or the string `\"adaptive\"`",
-                    ))
-                }
-            }
-            other => Err(D::Error::invalid_type(
-                serde_value_unexpected(other),
-                &"`true`, `false`, or the string `\"adaptive\"`",
-            )),
-        }
-    }
-}
-
-impl Serialize for ThinkingChoice {
-    // Custom serialize: emit a JSON-friendly shape that matches what
-    // Deserialize accepts. (Derived `Serialize` on the untagged enum
-    // would serialize `Adaptive` as `null`.)
-    //
-    // This is the active impl; the derived `Serialize` above is
-    // overridden via re-derivation suppression in the untagged
-    // discriminator. To keep the source readable we define the body
-    // here so future readers can see the wire shape directly.
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            ThinkingChoice::Bool(b) => serializer.serialize_bool(*b),
-            ThinkingChoice::Adaptive => serializer.serialize_str("adaptive"),
-        }
-    }
-}
-
-fn serde_value_unexpected(v: &Value) -> serde::de::Unexpected<'_> {
-    use serde::de::Unexpected;
-    match v {
-        Value::Null => Unexpected::Unit,
-        Value::Bool(b) => Unexpected::Bool(*b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Unexpected::Signed(i)
-            } else if let Some(u) = n.as_u64() {
-                Unexpected::Unsigned(u)
-            } else if let Some(f) = n.as_f64() {
-                Unexpected::Float(f)
-            } else {
-                Unexpected::Other("number")
-            }
-        }
-        Value::String(s) => Unexpected::Str(s),
-        Value::Array(_) => Unexpected::Seq,
-        Value::Object(_) => Unexpected::Map,
+        self.supports_adaptive_thinking
     }
 }
 
@@ -414,8 +348,62 @@ impl EffortLevel {
     }
 }
 
+/// Internal reasoning defaults carried on a resolved model. No longer
+/// projected from per-model `thinking`/`effort` knobs (removed in the
+/// same refactor); retained as a type for `ResolvedModel.reasoning` and
+/// `merge_reasoning_defaults_into` until the router/resolved merge
+/// helpers are updated in the next task.
+///
+/// An empty `ReasoningDefaults` (both fields `None`) is the normal post-
+/// refactor state -- the field exists on `ResolvedModel` for structural
+/// compat while the merge helpers are still in place.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReasoningDefaults {
+    /// Maps to ChatRequest.reasoning.effort. None in the normal post-
+    /// refactor state where model defaults no longer inject effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// Maps to ChatRequest.reasoning.enabled. None in the normal post-
+    /// refactor state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl ReasoningDefaults {
+    /// Construct an empty `ReasoningDefaults`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the thinking (effort) value.
+    pub fn with_thinking(mut self, thinking: impl Into<String>) -> Self {
+        self.thinking = Some(thinking.into());
+        self
+    }
+
+    /// Set the enabled flag.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// True when neither field is set. Used by the router to skip the
+    /// merge step when no operator defaults apply.
+    pub fn is_empty(&self) -> bool {
+        self.thinking.is_none() && self.enabled.is_none()
+    }
+}
+
 fn default_true() -> bool {
     true
+}
+
+/// Default effort-level allowlist for a model entry. The three
+/// mid-range values are the safe cross-provider baseline; operators
+/// extend the list to unlock `minimal`, `xhigh`, or `max` for
+/// specific models.
+fn default_effort_levels() -> Vec<String> {
+    vec!["low".into(), "medium".into(), "high".into()]
 }
 
 /// Value of one entry in the `[aliases]` table. Either a single model
@@ -530,87 +518,6 @@ pub struct BedrockGlobalConfig {
     /// incomplete list with a copy-paste hint.
     #[serde(default)]
     pub allowed_body_fields: Vec<String>,
-}
-
-/// Operator-side reasoning defaults. Folds into ChatRequest.reasoning
-/// per-attempt at the router; caller's non-None values always win.
-///
-/// Both fields are optional and default to None. Setting either populates
-/// the corresponding `ChatRequest.reasoning.{effort,enabled}` field on
-/// requests routing through this provider, but only when the caller did
-/// not already supply that field on the wire. The router never
-/// overwrites a caller-supplied value.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct ReasoningDefaults {
-    /// Maps to ChatRequest.reasoning.effort. Vocabulary is passthrough
-    /// (egresses interpret); empty string rejected at startup. Common
-    /// values: "minimal", "low", "medium", "high", "xhigh", "max",
-    /// "none". Unknown values pass through verbatim for forward
-    /// compatibility with vendor-specific levels.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
-    /// Maps to ChatRequest.reasoning.enabled. `Some(true)` opts into
-    /// reasoning by default for this provider; `Some(false)` pins it
-    /// off; `None` defers to whatever the caller and provider's own
-    /// defaults decide.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-}
-
-impl ReasoningDefaults {
-    /// Construct an empty `ReasoningDefaults`. Use the `with_thinking`
-    /// / `with_enabled` builders to populate fields. Builder pattern
-    /// matches the rest of the config surface.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the operator-side `thinking` (effort) value. Replaces any
-    /// previously-set value.
-    pub fn with_thinking(mut self, thinking: impl Into<String>) -> Self {
-        self.thinking = Some(thinking.into());
-        self
-    }
-
-    /// Set the operator-side `enabled` flag. Replaces any
-    /// previously-set value.
-    pub fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = Some(enabled);
-        self
-    }
-
-    /// True when neither `thinking` nor `enabled` is set. Used by the
-    /// router to skip the merge step entirely on providers without
-    /// configured defaults.
-    pub fn is_empty(&self) -> bool {
-        self.thinking.is_none() && self.enabled.is_none()
-    }
-}
-
-impl ModelEntry {
-    /// Project the per-model `thinking` + `effort` knobs into a
-    /// `ReasoningDefaults` so the router's existing
-    /// `merge_reasoning_defaults_into` helper can lift them onto
-    /// `req.reasoning` per attempt. Returns an empty
-    /// `ReasoningDefaults` when neither knob is set.
-    pub fn reasoning_defaults_view(&self) -> ReasoningDefaults {
-        let mut d = ReasoningDefaults::default();
-        if let Some(effort) = self.effort {
-            d.thinking = Some(effort.as_str().to_string());
-        }
-        match self.thinking {
-            Some(ThinkingChoice::Bool(b)) => d.enabled = Some(b),
-            // Adaptive means thinking is on; pair with effort. The
-            // egress consults `req.routectl_internal` / config to
-            // decide the wire shape (legacy vs adaptive); enabled = true
-            // here is the canonical "thinking on" signal regardless of
-            // wire shape.
-            Some(ThinkingChoice::Adaptive) => d.enabled = Some(true),
-            None => {}
-        }
-        d
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1500,15 +1407,20 @@ forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
 
 #[cfg(test)]
 mod v0_6_config_tests {
-    //! Tests for the v0.6.0 config shapes: `[models]` table and the
+    //! Tests for the v0.6.0+ config shapes: `[models]` table and the
     //! untagged `AliasValue` enum.
+    //!
+    //! Breaking change: `thinking` and `effort` fields were removed from
+    //! `ModelEntry`. TOMLs carrying those keys must fail at parse time.
+    //! The new capability fields are `supports_adaptive_thinking`,
+    //! `effort_levels`, and `max_thinking_budget`.
 
-    use super::{
-        AliasValue, Config, EffortLevel, HistoryReasoning, ModelEntry, ReasoningDialect,
-        ThinkingChoice,
-    };
+    use super::{AliasValue, Config, HistoryReasoning, ModelEntry, ReasoningDialect};
     use std::collections::BTreeMap;
 
+    /// A model entry with only the two required fields gets the correct
+    /// defaults: supports_adaptive_thinking=false,
+    /// effort_levels=["low","medium","high"], max_thinking_budget=0.
     #[test]
     fn model_entry_required_fields_only() {
         let toml_text = r#"
@@ -1521,111 +1433,80 @@ upstream = "claude-haiku-4-5-20251001"
         assert_eq!(m.provider, "anthropic");
         assert_eq!(m.upstream, "claude-haiku-4-5-20251001");
         assert!(m.selectable, "default selectable = true");
-        assert!(m.thinking.is_none());
-        assert!(m.effort.is_none());
+        assert!(!m.supports_adaptive_thinking, "default false");
+        assert_eq!(
+            m.effort_levels,
+            vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            "default effort_levels"
+        );
+        assert_eq!(m.max_thinking_budget, 0, "default max_thinking_budget");
         assert!(m.reasoning_dialect.is_none());
         assert!(m.history_reasoning.is_none());
         assert!(m.header_extras.is_empty());
         assert!(m.payload_extras.is_none());
     }
 
+    /// New capability fields parse correctly and round-trip through serde.
     #[test]
-    fn model_entry_thinking_bool_true_parses() {
+    fn model_entry_new_capability_fields_round_trip() {
         let toml_text = r#"
 [models.opus]
 provider = "anthropic"
 upstream = "claude-opus-4-7"
-thinking = true
-effort = "high"
+supports_adaptive_thinking = true
+effort_levels = ["low", "medium", "high", "xhigh"]
+max_thinking_budget = 8000
 "#;
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         let m = cfg.models.get("opus").expect("opus entry");
-        assert_eq!(m.thinking, Some(ThinkingChoice::Bool(true)));
-        assert_eq!(m.effort, Some(EffortLevel::High));
-    }
-
-    #[test]
-    fn model_entry_thinking_bool_false_parses() {
-        let toml_text = r#"
-[models.opus]
-provider = "anthropic"
-upstream = "claude-opus-4-7"
-thinking = false
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("parse");
-        let m = cfg.models.get("opus").expect("opus entry");
-        assert_eq!(m.thinking, Some(ThinkingChoice::Bool(false)));
-    }
-
-    #[test]
-    fn model_entry_thinking_adaptive_parses() {
-        let toml_text = r#"
-[models.opus]
-provider = "anthropic"
-upstream = "claude-opus-4-7"
-thinking = "adaptive"
-effort = "xhigh"
-"#;
-        let cfg: Config = toml::from_str(toml_text).expect("parse");
-        let m = cfg.models.get("opus").expect("opus entry");
-        assert_eq!(m.thinking, Some(ThinkingChoice::Adaptive));
-        assert_eq!(m.effort, Some(EffortLevel::Xhigh));
+        assert!(m.supports_adaptive_thinking);
         assert!(m.is_adaptive_thinking());
+        assert_eq!(
+            m.effort_levels,
+            vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string(),
+            ]
+        );
+        assert_eq!(m.max_thinking_budget, 8000);
     }
 
+    /// TOMLs carrying the old `thinking` key must fail at parse time.
+    /// `deny_unknown_fields` on `ModelEntry` surfaces the old key as a
+    /// parse error so misconfigurations are caught at startup.
     #[test]
-    fn model_entry_rejects_unknown_thinking_string() {
-        // `"true"` (string), `"on"`, `"enabled"`, anything that isn't
-        // the literal `"adaptive"` rejects.
-        for bad in ["\"true\"", "\"on\"", "\"enabled\"", "\"high\"", "42"] {
-            let toml_text = format!(
-                r#"
-[models.bad]
-provider = "p"
-upstream = "u"
-thinking = {bad}
-"#
-            );
-            let err = toml::from_str::<Config>(&toml_text).unwrap_err();
-            let msg = err.to_string();
-            assert!(
-                msg.contains("thinking") || msg.contains("adaptive"),
-                "expected error to mention thinking/adaptive for input {bad:?}; got: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn model_entry_rejects_unknown_effort_value() {
+    fn model_entry_rejects_old_thinking_field() {
         let toml_text = r#"
-[models.bad]
+[models.opus]
 provider = "p"
 upstream = "u"
-effort = "unknown"
+thinking = "adaptive"
 "#;
         let err = toml::from_str::<Config>(toml_text).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("effort") || msg.contains("unknown"),
-            "expected error to mention effort; got: {msg}"
+            msg.contains("thinking"),
+            "expected error to name the removed field 'thinking'; got: {msg}"
         );
     }
 
+    /// TOMLs carrying the old `effort` key must fail at parse time.
     #[test]
-    fn model_entry_accepts_all_effort_levels() {
-        for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
-            let toml_text = format!(
-                r#"
-[models.m]
+    fn model_entry_rejects_old_effort_field() {
+        let toml_text = r#"
+[models.opus]
 provider = "p"
 upstream = "u"
-effort = "{level}"
-"#
-            );
-            let cfg: Config = toml::from_str(&toml_text).expect("parse");
-            let m = cfg.models.get("m").expect("entry");
-            assert!(m.effort.is_some(), "effort = {level:?} should parse");
-        }
+effort = "high"
+"#;
+        let err = toml::from_str::<Config>(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("effort"),
+            "expected error to name the removed field 'effort'; got: {msg}"
+        );
     }
 
     #[test]
@@ -1844,12 +1725,37 @@ selectable = false
         assert!(!m.selectable);
     }
 
+    /// `ModelEntry::new` defaults match the TOML defaults: selectable=true,
+    /// supports_adaptive_thinking=false, effort_levels=["low","medium","high"],
+    /// max_thinking_budget=0.
     #[test]
-    fn model_entry_builder_helper_matches_required_only_parse() {
+    fn model_entry_builder_defaults_match_toml_defaults() {
         let m = ModelEntry::new("p", "u");
         assert_eq!(m.provider, "p");
         assert_eq!(m.upstream, "u");
         assert!(m.selectable);
+        assert!(!m.supports_adaptive_thinking);
+        assert_eq!(
+            m.effort_levels,
+            vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+        );
+        assert_eq!(m.max_thinking_budget, 0);
+    }
+
+    /// Builder methods for the new capability fields work correctly.
+    #[test]
+    fn model_entry_capability_builders() {
+        let m = ModelEntry::new("p", "u")
+            .with_supports_adaptive_thinking(true)
+            .with_effort_levels(vec!["low".into(), "high".into(), "max".into()])
+            .with_max_thinking_budget(16000);
+        assert!(m.supports_adaptive_thinking);
+        assert!(m.is_adaptive_thinking());
+        assert_eq!(
+            m.effort_levels,
+            vec!["low".to_string(), "high".to_string(), "max".to_string()]
+        );
+        assert_eq!(m.max_thinking_budget, 16000);
     }
 
     #[test]
@@ -1877,25 +1783,6 @@ stream_first_byte_timeout_ms = 300000
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         let m = cfg.models.get("opus").expect("opus entry");
         assert_eq!(m.stream_first_byte_timeout_ms, Some(300_000));
-    }
-
-    #[test]
-    fn reasoning_defaults_view_projects_thinking_and_effort() {
-        // The router lifts `thinking` + `effort` into ReasoningDefaults
-        // so the existing merge helper handles per-request injection.
-        let m = ModelEntry::new("p", "u")
-            .with_thinking(ThinkingChoice::Adaptive)
-            .with_effort(EffortLevel::Xhigh);
-        let d = m.reasoning_defaults_view();
-        assert_eq!(d.thinking.as_deref(), Some("xhigh"));
-        assert_eq!(d.enabled, Some(true));
-    }
-
-    #[test]
-    fn reasoning_defaults_view_thinking_false_disables() {
-        let m = ModelEntry::new("p", "u").with_thinking(ThinkingChoice::Bool(false));
-        let d = m.reasoning_defaults_view();
-        assert_eq!(d.enabled, Some(false));
     }
 
     /// A config without a `[log]` block parses cleanly and yields a
