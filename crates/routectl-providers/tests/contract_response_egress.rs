@@ -46,6 +46,7 @@ fn anthropic_api_provider() -> AnthropicApiProvider {
         user_agent: None,
         allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
+        context_management: false,
     })
 }
 

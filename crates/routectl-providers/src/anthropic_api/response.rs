@@ -23,8 +23,6 @@ use routectl_core::{
 
 use super::types::{AnthropicResponse, AnthropicUsage, ContentBlock};
 
-const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
-
 /// Map Anthropic stop_reason to OpenAI finish_reason.
 pub fn map_stop_reason(stop_reason: Option<&str>) -> Option<String> {
     let reason = match stop_reason? {
@@ -73,7 +71,7 @@ pub(crate) fn walk_content_blocks(
                 reasoning_details.push(ReasoningDetail {
                     kind: ReasoningDetailKind::Text,
                     id: Some(Uuid::new_v4().to_string()),
-                    format: Some(ANTHROPIC_FORMAT.to_string()),
+                    format: Some(super::ANTHROPIC_FORMAT.to_string()),
                     index: Some(detail_index),
                     payload: json!({"text": thinking, "signature": signature}),
                 });
@@ -83,7 +81,7 @@ pub(crate) fn walk_content_blocks(
                 reasoning_details.push(ReasoningDetail {
                     kind: ReasoningDetailKind::Encrypted,
                     id: Some(Uuid::new_v4().to_string()),
-                    format: Some(ANTHROPIC_FORMAT.to_string()),
+                    format: Some(super::ANTHROPIC_FORMAT.to_string()),
                     index: Some(detail_index),
                     payload: json!({"data": data}),
                 });

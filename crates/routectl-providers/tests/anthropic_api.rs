@@ -35,6 +35,7 @@ mod tests {
             user_agent: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
+            context_management: false,
         };
         AnthropicApiProvider::new(cfg)
     }
@@ -1200,6 +1201,7 @@ mod tests {
             user_agent: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
+            context_management: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1234,6 +1236,7 @@ mod tests {
             user_agent: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
+            context_management: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1261,6 +1264,7 @@ mod tests {
             user_agent: Some("claude-code/1.2.3".into()),
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
+            context_management: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1297,6 +1301,7 @@ mod tests {
             user_agent: None,
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
+            context_management: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = base_req("claude-3-opus", vec![user_msg("hello")]);
