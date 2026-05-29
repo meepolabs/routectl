@@ -76,6 +76,23 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
         req.reasoning = Some(translate_thinking(&t));
     }
 
+    // Lift output_config.effort into canonical req.reasoning.effort.
+    // claude-code 2.1.153+ sends thinking and output_config.effort as
+    // separate fields; cross-dialect egresses read req.reasoning.effort
+    // and would miss the value buried in provider_extras["output_config"]
+    // without this lift. output_config stays in extras so the Anthropic-API
+    // egress can forward the full object (including format and other beta
+    // fields) upstream unchanged.
+    if let Some(eff) = extras
+        .get("output_config")
+        .and_then(|oc| oc.get("effort"))
+        .and_then(|v| v.as_str())
+    {
+        req.reasoning
+            .get_or_insert_with(ReasoningConfig::default)
+            .effort = Some(eff.to_string());
+    }
+
     // Translate metadata.user_id AND preserve the full metadata
     // object so it round-trips to Anthropic-shape egresses verbatim.
     // Without the round-trip preservation, request attribution
