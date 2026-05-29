@@ -779,6 +779,15 @@ pub async fn build_resolved_models(
             provider,
             entry.upstream.clone(),
         );
+        if entry.supports_adaptive_thinking {
+            resolved = resolved.with_supports_adaptive_thinking(true);
+        }
+        if !entry.effort_levels.is_empty() {
+            resolved = resolved.with_effort_levels(entry.effort_levels.clone());
+        }
+        if entry.max_thinking_budget > 0 {
+            resolved = resolved.with_max_thinking_budget(entry.max_thinking_budget);
+        }
         if let Some(d) = entry.reasoning_dialect {
             resolved = resolved.with_reasoning_dialect(d);
         }

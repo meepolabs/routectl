@@ -8,8 +8,8 @@
 //!
 //!   - `nickname`, `provider_name`, `provider`, `upstream`: identity
 //!     + transport (see field docs for details).
-//!   - `reasoning`: per-model `ReasoningDefaults` projected from the
-//!     model's `thinking` + `effort` knobs.
+//!   - `supports_adaptive_thinking`, `effort_levels`, `max_thinking_budget`:
+//!     per-model capability knobs projected from `[models.X]`.
 //!   - `reasoning_dialect` / `history_reasoning`: per-model
 //!     openai-compat knobs (v0.6.0 moved off `[providers.X]`).
 //!   - `header_extras` / `payload_extras`: per-model overlays merged
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use routectl_core::Provider;
 use serde_json::Value;
 
-use crate::config::{HistoryReasoning, ReasoningDefaults, ReasoningDialect};
+use crate::config::{HistoryReasoning, ReasoningDialect};
 
 /// One fully-resolved model entry: a nickname bound to a concrete
 /// provider, an upstream string, and per-model knobs lifted off
@@ -43,10 +43,18 @@ pub struct ResolvedModel {
     pub provider: Arc<dyn Provider>,
     /// Wire value of the `model` field on outbound requests.
     pub upstream: String,
-    /// Operator-side reasoning defaults projected from `[models.X]
-    /// thinking` + `[models.X] effort`. Empty when neither knob was
-    /// set; the merge step short-circuits on empty.
-    pub reasoning: ReasoningDefaults,
+    /// Whether the model supports adaptive (extended) thinking. When
+    /// true, the egress may use `budget_tokens` to cap thinking tokens
+    /// instead of a flat enable/disable toggle. Projected from
+    /// `[models.X] supports_adaptive_thinking`.
+    pub supports_adaptive_thinking: bool,
+    /// Operator-declared effort levels for this model (e.g.
+    /// `["minimal", "low", "medium", "high"]`). Projected from
+    /// `[models.X] effort_levels`. Empty when not configured.
+    pub effort_levels: Vec<String>,
+    /// Maximum thinking budget in tokens. `0` means no explicit cap
+    /// configured. Projected from `[models.X] max_thinking_budget`.
+    pub max_thinking_budget: u32,
     /// Per-model openai-compat reasoning dialect (v0.6.0 moved off
     /// `[providers.X]`). `None` means fall back to the provider's
     /// existing default (`ReasoningDialect::OpenAi` today).
@@ -86,7 +94,9 @@ impl ResolvedModel {
             provider_name: provider_name.into(),
             provider,
             upstream: upstream.into(),
-            reasoning: ReasoningDefaults::default(),
+            supports_adaptive_thinking: false,
+            effort_levels: Vec::new(),
+            max_thinking_budget: 0,
             reasoning_dialect: None,
             history_reasoning: None,
             header_extras: BTreeMap::new(),
@@ -96,8 +106,18 @@ impl ResolvedModel {
         }
     }
 
-    pub fn with_reasoning(mut self, defaults: ReasoningDefaults) -> Self {
-        self.reasoning = defaults;
+    pub fn with_supports_adaptive_thinking(mut self, val: bool) -> Self {
+        self.supports_adaptive_thinking = val;
+        self
+    }
+
+    pub fn with_effort_levels(mut self, levels: Vec<String>) -> Self {
+        self.effort_levels = levels;
+        self
+    }
+
+    pub fn with_max_thinking_budget(mut self, budget: u32) -> Self {
+        self.max_thinking_budget = budget;
         self
     }
 
@@ -150,7 +170,12 @@ impl std::fmt::Debug for ResolvedModel {
             .field("provider_name", &self.provider_name)
             .field("provider_id", &self.provider.id())
             .field("upstream", &self.upstream)
-            .field("reasoning", &self.reasoning)
+            .field(
+                "supports_adaptive_thinking",
+                &self.supports_adaptive_thinking,
+            )
+            .field("effort_levels", &self.effort_levels)
+            .field("max_thinking_budget", &self.max_thinking_budget)
             .field("reasoning_dialect", &self.reasoning_dialect)
             .field("history_reasoning", &self.history_reasoning)
             .field(
@@ -212,18 +237,25 @@ mod tests {
         assert_eq!(m.nickname, "haiku");
         assert_eq!(m.provider_name, "anthropic");
         assert_eq!(m.upstream, "claude-haiku-4-5");
-        assert!(m.reasoning.is_empty());
+        assert!(!m.supports_adaptive_thinking);
+        assert!(m.effort_levels.is_empty());
+        assert_eq!(m.max_thinking_budget, 0);
         let d = format!("{m:?}");
         assert!(d.contains("haiku"));
         assert!(d.contains("stub-test"));
     }
 
     #[test]
-    fn with_reasoning_replaces_defaults() {
+    fn with_capability_fields_set_correctly() {
         let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
+        let levels = vec!["low".into(), "medium".into(), "high".into()];
         let m = ResolvedModel::new("x", "p", p, "u")
-            .with_reasoning(ReasoningDefaults::new().with_thinking("high"));
-        assert_eq!(m.reasoning.thinking.as_deref(), Some("high"));
+            .with_supports_adaptive_thinking(true)
+            .with_effort_levels(levels.clone())
+            .with_max_thinking_budget(16000);
+        assert!(m.supports_adaptive_thinking);
+        assert_eq!(m.effort_levels, levels);
+        assert_eq!(m.max_thinking_budget, 16000);
     }
 
     #[test]

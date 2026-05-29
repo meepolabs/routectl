@@ -11,14 +11,12 @@ use std::time::{Duration, Instant};
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
-    sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReasoningConfig,
-    Result, RoutectlInternal, TokenCount,
+    sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    RoutectlInternal, TokenCount,
 };
 use serde_json::Value;
 
-use crate::config::{
-    AliasValue, Config, HistoryReasoning, ReasoningDefaults, ReasoningDialect, RetryPolicy,
-};
+use crate::config::{AliasValue, Config, HistoryReasoning, ReasoningDialect, RetryPolicy};
 use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::{GateDecision, ProviderState};
@@ -128,8 +126,11 @@ struct DispatchTarget {
     upstream: String,
     /// Concrete provider instance.
     provider: Option<Arc<dyn Provider>>,
-    /// v0.6.0 per-model reasoning defaults.
-    reasoning: Option<ReasoningDefaults>,
+    /// Whether the model supports adaptive (extended) thinking.
+    /// Threaded from `ResolvedModel.supports_adaptive_thinking` so
+    /// `apply_layered_overlays` can set `RoutectlInternal` without
+    /// reaching back into `ResolvedModel`.
+    supports_adaptive_thinking: bool,
     /// Model nickname for tracing.
     nickname: Option<String>,
     /// Per-model `header_extras`. Merged with the provider's
@@ -526,17 +527,6 @@ impl Router {
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
-            // v0.6.0: per-model reasoning defaults come from the
-            // resolved table (`[models.X] thinking` + `[models.X]
-            // effort` projected via `reasoning_defaults_view`).
-            if let Some(defaults) = target.reasoning.as_ref() {
-                merge_reasoning_defaults_into(&mut attempt_req, defaults);
-                tracing::debug!(
-                    provider = provider_name,
-                    model = %target.nickname.as_deref().unwrap_or(""),
-                    "applied resolved-model reasoning defaults",
-                );
-            }
             // v0.6: layered config compose. The provider's
             // header_extras + payload_extras are looked up by
             // provider_name; the model's contribution lives on the
@@ -767,16 +757,12 @@ impl Router {
         }
 
         // Apply the same per-attempt overlays the messages path does
-        // so header_extras / payload_extras / reasoning defaults are
-        // consistent. This matters for `anthropic-beta` flags --
-        // count_tokens must observe the same beta surface as the
-        // messages endpoint or the upstream may reject a request
-        // that would have been accepted on /v1/messages.
+        // so header_extras / payload_extras are consistent. This matters
+        // for `anthropic-beta` flags -- count_tokens must observe the
+        // same beta surface as the messages endpoint or the upstream may
+        // reject a request that would have been accepted on /v1/messages.
         let mut attempt_req = req.clone();
         attempt_req.model = target.upstream.clone();
-        if let Some(defaults) = target.reasoning.as_ref() {
-            merge_reasoning_defaults_into(&mut attempt_req, defaults);
-        }
         apply_layered_overlays(&self.config, &target, &mut attempt_req);
 
         let mut auth_retry_attempted = false;
@@ -885,9 +871,6 @@ impl Router {
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
-            if let Some(defaults) = target.reasoning.as_ref() {
-                merge_reasoning_defaults_into(&mut attempt_req, defaults);
-            }
             apply_layered_overlays(&self.config, target, &mut attempt_req);
 
             let attempt_policy = self.compose_attempt_policy(
@@ -1159,6 +1142,7 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     internal.reasoning_dialect = target.reasoning_dialect.map(|d| d.into());
     internal.history_reasoning = target.history_reasoning.map(|h| h.into());
     internal.claude_code_headers = captured_claude_code_headers;
+    internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     req.routectl_internal = internal;
 }
 
@@ -1429,75 +1413,13 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         state_key: m.nickname.clone(),
         upstream: m.upstream.clone(),
         provider: Some(m.provider.clone()),
-        reasoning: if m.reasoning.is_empty() {
-            None
-        } else {
-            Some(m.reasoning.clone())
-        },
+        supports_adaptive_thinking: m.supports_adaptive_thinking,
         nickname: Some(m.nickname.clone()),
         model_header_extras: m.header_extras.clone(),
         model_payload_extras: m.payload_extras.clone(),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
-    }
-}
-
-/// Merge operator-side `ReasoningDefaults` into the per-attempt
-/// request's `reasoning` field. Caller's non-None values always win;
-/// this only fills in fields the caller left unset. No-op when both
-/// `defaults` fields are unset (`is_empty()`).
-///
-/// Precedence per field: caller (wire) > operator (TOML) > internal
-/// default. Composed orthogonally: if the caller supplied `effort`
-/// and the operator configured `enabled`, the resulting request
-/// carries both.
-///
-/// `enabled = false` in the TOML is a DEFAULT the caller can still
-/// override by sending `reasoning.enabled = true` on the wire. It
-/// is not a hard ceiling on reasoning use; operators wanting to
-/// pin reasoning off cannot rely on this knob alone.
-///
-/// Edge case: when the caller has explicitly set
-/// `req.reasoning.enabled == Some(false)`, the operator's
-/// `thinking` (effort) injection is suppressed. Without this
-/// short-circuit the merged result would be
-/// `{effort: Some("..."), enabled: Some(false)}`, which different
-/// egresses interpret inconsistently (some honor `enabled=false`
-/// only when `effort` is also unset, others forward `effort`
-/// regardless). Suppressing the effort fill keeps "caller pinned
-/// reasoning off" working uniformly across all egresses.
-///
-/// Why `effort` has an explicit `caller_disabled` guard but
-/// `enabled` doesn't: `enabled` injection is naturally guarded by
-/// the per-field `cfg.enabled.is_none()` check (a caller-set
-/// `enabled = Some(false)` short-circuits the fill on its own).
-/// The explicit `caller_disabled` check is needed only on `effort`
-/// because the per-field check (`cfg.effort.is_none()`) would
-/// otherwise allow operator's `thinking` to inject when the caller
-/// left `effort` unset, producing the inconsistent
-/// `{effort: Some(...), enabled: Some(false)}` state above. A
-/// future operator-side field that should respect the same
-/// "caller turned reasoning off" semantics needs the same explicit
-/// guard; per-field `is_none()` alone is not sufficient.
-pub fn merge_reasoning_defaults_into(req: &mut ChatRequest, defaults: &ReasoningDefaults) {
-    if defaults.is_empty() {
-        return;
-    }
-
-    let caller_disabled = req.reasoning.as_ref().and_then(|r| r.enabled) == Some(false);
-
-    let cfg = req.reasoning.get_or_insert_with(ReasoningConfig::default);
-
-    if cfg.effort.is_none() && !caller_disabled {
-        if let Some(t) = &defaults.thinking {
-            cfg.effort = Some(t.clone());
-        }
-    }
-    if cfg.enabled.is_none() {
-        if let Some(b) = defaults.enabled {
-            cfg.enabled = Some(b);
-        }
     }
 }
 
@@ -2557,143 +2479,115 @@ mod three_source_anthropic_beta_lift_tests {
 }
 
 #[cfg(test)]
-mod merge_reasoning_defaults_tests {
-    //! Tests for the per-attempt reasoning-defaults merge. v0.6.0
-    //! drives this from the resolved-model table; the merge logic
-    //! itself lives in the free `merge_reasoning_defaults_into`
-    //! function.
+mod reasoning_passthrough_tests {
+    //! Regression: `req.reasoning` passes through dispatch unchanged
+    //! when no operator overlay applies. The merge step is gone; the
+    //! caller's reasoning config must arrive at the egress unmodified.
     use super::*;
-    use crate::config::ReasoningDefaults;
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use routectl_core::{
+        ChatChunk, ChatRequest, ChatResponse, Choice, Message, Provider, ReasoningConfig,
+    };
+    use std::sync::{Arc, Mutex};
 
-    fn req_with_reasoning(reasoning: Option<ReasoningConfig>) -> ChatRequest {
-        ChatRequest {
-            model: "a".into(),
-            messages: vec![],
-            reasoning,
-            ..Default::default()
+    struct CapturingProvider {
+        captured: Arc<Mutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl Provider for CapturingProvider {
+        fn id(&self) -> &str {
+            "capturing"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("capturing", "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            self.captured.lock().unwrap().push(req);
+            Ok(ChatResponse {
+                id: "ok".into(),
+                model: "m".into(),
+                created: 0,
+                choices: vec![Choice {
+                    index: 0,
+                    message: Message {
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+            })
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!()
         }
     }
 
-    #[test]
-    fn merge_no_caller_no_defaults_leaves_none() {
-        // Provider has no defaults; caller didn't supply `reasoning`.
-        // Result must remain None -- the merge step must not synthesize
-        // an empty ReasoningConfig.
-        let mut req = req_with_reasoning(None);
-        merge_reasoning_defaults_into(&mut req, &ReasoningDefaults::default());
-        assert!(req.reasoning.is_none());
-    }
-
-    #[test]
-    fn merge_no_caller_with_defaults_inserts_full_config() {
-        let defaults = ReasoningDefaults::new()
-            .with_thinking("high")
-            .with_enabled(true);
-        let mut req = req_with_reasoning(None);
-        merge_reasoning_defaults_into(&mut req, &defaults);
-        let cfg = req.reasoning.expect("reasoning was inserted");
-        assert_eq!(cfg.effort.as_deref(), Some("high"));
-        assert_eq!(cfg.enabled, Some(true));
-    }
-
-    #[test]
-    fn merge_caller_effort_minimal_beats_defaults_high() {
-        let defaults = ReasoningDefaults::new().with_thinking("high");
-        let mut req = req_with_reasoning(Some(ReasoningConfig {
-            effort: Some("minimal".into()),
-            ..ReasoningConfig::default()
-        }));
-        merge_reasoning_defaults_into(&mut req, &defaults);
-        let cfg = req.reasoning.expect("reasoning preserved");
-        assert_eq!(cfg.effort.as_deref(), Some("minimal"));
-    }
-
-    #[test]
-    fn merge_caller_enabled_false_beats_defaults_true() {
-        // Caller pinned `enabled = false`; operator default is true.
-        // Caller wins. Some(false) must NOT collapse to None on the
-        // merge path.
-        let defaults = ReasoningDefaults::new().with_enabled(true);
-        let mut req = req_with_reasoning(Some(ReasoningConfig {
-            enabled: Some(false),
-            ..ReasoningConfig::default()
-        }));
-        merge_reasoning_defaults_into(&mut req, &defaults);
-        let cfg = req.reasoning.expect("reasoning preserved");
-        assert_eq!(cfg.enabled, Some(false));
-    }
-
-    #[test]
-    fn merge_caller_enabled_false_blocks_operator_thinking_fill() {
-        // Pin: when the caller has explicitly disabled reasoning via
-        // `enabled = false`, the operator's `thinking` (effort) must
-        // NOT be injected. Otherwise the merged request becomes
-        // `{effort: Some("high"), enabled: Some(false)}` which
-        // different egresses interpret inconsistently. Suppressing the
-        // effort fill keeps "caller pinned reasoning off" uniform
-        // across every egress.
-        let defaults = ReasoningDefaults::new().with_thinking("high");
-        let mut req = req_with_reasoning(Some(ReasoningConfig {
-            enabled: Some(false),
-            ..ReasoningConfig::default()
-        }));
-        merge_reasoning_defaults_into(&mut req, &defaults);
-        let cfg = req.reasoning.expect("reasoning preserved");
-        assert!(
-            cfg.effort.is_none(),
-            "operator thinking must NOT be injected when caller disabled reasoning; got effort={:?}",
-            cfg.effort,
+    fn router_with_capturing(provider: Arc<dyn Provider>) -> Router {
+        let cfg = Arc::new(Config::default());
+        let mut router = Router::new(cfg);
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m".to_string(),
+            Arc::new(ResolvedModel::new("m", "p", provider, "upstream-model")),
         );
-        assert_eq!(cfg.enabled, Some(false));
+        router.install_resolved_models(models);
+        router
     }
 
-    #[test]
-    fn merge_fills_both_when_caller_has_neither() {
-        // Caller carries an empty ReasoningConfig (e.g. the wire body
-        // had `reasoning: {}`); operator defaults supply both.
-        let defaults = ReasoningDefaults::new()
-            .with_thinking("medium")
-            .with_enabled(true);
-        let mut req = req_with_reasoning(Some(ReasoningConfig::default()));
-        merge_reasoning_defaults_into(&mut req, &defaults);
-        let cfg = req.reasoning.expect("reasoning present");
-        assert_eq!(cfg.effort.as_deref(), Some("medium"));
-        assert_eq!(cfg.enabled, Some(true));
-    }
+    #[tokio::test]
+    async fn caller_reasoning_passes_through_dispatch_unchanged() {
+        // When the caller supplies a ReasoningConfig and no operator
+        // merge step applies, the egress must see the caller's
+        // reasoning field verbatim. The merge step is gone; nothing
+        // in the dispatch path should modify req.reasoning.
+        let captured: Arc<Mutex<Vec<ChatRequest>>> = Arc::new(Mutex::new(vec![]));
+        let provider = Arc::new(CapturingProvider {
+            captured: captured.clone(),
+        });
+        let router = router_with_capturing(provider);
 
-    #[test]
-    fn merge_composes_orthogonal_fields() {
-        // Caller supplied `effort` only; operator configured `enabled`
-        // only. Result has both -- merge is per-field, not
-        // all-or-nothing.
-        let defaults = ReasoningDefaults::new().with_enabled(true);
-        let mut req = req_with_reasoning(Some(ReasoningConfig {
-            effort: Some("low".into()),
-            ..ReasoningConfig::default()
-        }));
-        merge_reasoning_defaults_into(&mut req, &defaults);
-        let cfg = req.reasoning.expect("reasoning present");
-        assert_eq!(cfg.effort.as_deref(), Some("low"));
-        assert_eq!(cfg.enabled, Some(true));
-    }
-
-    #[test]
-    fn merge_all_none_defaults_leaves_caller_unchanged() {
-        // Provider has no defaults configured. Caller supplied a fully
-        // populated ReasoningConfig. Merge must be a no-op.
-        let initial = ReasoningConfig {
+        let caller_reasoning = ReasoningConfig {
             effort: Some("medium".into()),
             enabled: Some(true),
-            max_tokens: Some(2048),
+            max_tokens: Some(4096),
             exclude: Some(false),
         };
-        let mut req = req_with_reasoning(Some(initial.clone()));
-        merge_reasoning_defaults_into(&mut req, &ReasoningDefaults::default());
-        let cfg = req.reasoning.expect("reasoning preserved");
-        assert_eq!(cfg.effort, initial.effort);
-        assert_eq!(cfg.enabled, initial.enabled);
-        assert_eq!(cfg.max_tokens, initial.max_tokens);
-        assert_eq!(cfg.exclude, initial.exclude);
+        let req = ChatRequest {
+            model: "m".into(),
+            messages: vec![],
+            reasoning: Some(caller_reasoning.clone()),
+            ..Default::default()
+        };
+        router.complete(req).await.expect("dispatch succeeded");
+
+        let calls = captured.lock().unwrap();
+        let upstream = calls.first().expect("one upstream call");
+        let got = upstream.reasoning.as_ref().expect("reasoning preserved");
+        assert_eq!(got.effort, caller_reasoning.effort, "effort unchanged");
+        assert_eq!(got.enabled, caller_reasoning.enabled, "enabled unchanged");
+        assert_eq!(
+            got.max_tokens, caller_reasoning.max_tokens,
+            "max_tokens unchanged"
+        );
+        assert_eq!(got.exclude, caller_reasoning.exclude, "exclude unchanged");
     }
 }
 
