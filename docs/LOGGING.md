@@ -78,7 +78,7 @@ ROUTECTL_LOG=routectl_providers::bedrock=debug ./routectl serve 2>&1 \
 ```
 
 What you get at debug:
-- Existing `body_excerpt=...` WARN on every 4xx/5xx (200B truncated,
+- Existing `body_excerpt=...` WARN on every 4xx/5xx (512-char truncated,
   scannable in `routectl-warn.log`)
 - New `body=...` DEBUG with the full upstream error body (4 KB cap,
   HTML-collapsed)
@@ -262,6 +262,6 @@ No secret values, ever:
 - The supplied `x-api-key` / `Authorization: Bearer` value on a
   rejected listener auth (we log only header presence).
 - Full upstream request/response bodies. Bodies are only excerpted to
-  256 chars on 4xx/5xx upstream paths, intentionally. Wire-level
-  body dump is a future opt-in (`ROUTECTL_DEBUG_BODIES=1`) with
-  header-redaction tests; it does not exist yet.
+  512 chars on 4xx/5xx upstream paths, intentionally. Full body
+  inspection is available at trace level -- see the Triage recipes
+  section above.

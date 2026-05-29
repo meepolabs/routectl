@@ -1,6 +1,6 @@
 //! Tests for the SSE state machine's thinking-accumulation and
 //! pending-cache-write logic added for context_management emulation
-//! (T4). Lives as a sibling file (declared on `sse` via
+//! Lives as a sibling file (declared on `sse` via
 //! `#[cfg(test)] #[path = ...]`) so `sse.rs` stays under the
 //! project's 800-LOC ceiling. Tests retain access to private items
 //! via `use super::*`.
