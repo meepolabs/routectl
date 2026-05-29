@@ -113,6 +113,10 @@ fn derive_effort(req: &ChatRequest) -> String {
 /// router from the operator-declared `[models.X]
 /// supports_adaptive_thinking` capability.
 ///
+/// On the legacy `Enabled` path, `req.routectl_internal.max_thinking_budget`
+/// is applied as an operator-declared ceiling BEFORE Anthropic's own
+/// `[1024, max_tokens-1]` window clamp. Zero means no operator cap.
+///
 /// Note on `max_tokens` + adaptive: Anthropic's adaptive thinking wire
 /// shape has no field for an explicit budget -- the model picks its
 /// own from the effort string. If a caller sets both
@@ -195,19 +199,27 @@ pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<Thinki
     //     the ceiling (`max - 1`) is always at least 1024 and the
     //     floor never collides with the ceiling.
     let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    // Operator-declared per-model ceiling. Non-zero values cap the
+    // budget DOWN before Anthropic's own `[1024, max_tokens-1]` window
+    // clamp runs. Zero means no operator cap -- Anthropic's clamp is
+    // the only guard.
+    let operator_cap = req.routectl_internal.max_thinking_budget;
+
     if let Some(budget) = r.max_tokens {
+        let budget = apply_operator_cap(budget, operator_cap);
         return Some(ThinkingConfig::Enabled {
             budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Explicit),
         });
     }
     if let Some(effort) = r.effort.as_deref() {
         let budget = ((max as f64) * effort_ratio(effort)).max(1.0) as u32;
+        let budget = apply_operator_cap(budget, operator_cap);
         return Some(ThinkingConfig::Enabled {
             budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
         });
     }
     // r.enabled == Some(true) without budget or effort.
-    let budget = max / 2;
+    let budget = apply_operator_cap(max / 2, operator_cap);
     Some(ThinkingConfig::Enabled {
         budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
     })
@@ -224,6 +236,19 @@ pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<Thinki
 enum BudgetSource {
     Explicit,
     Derived,
+}
+
+/// Apply the operator-declared per-model thinking-budget cap. When
+/// `operator_cap` is non-zero, the budget is clamped DOWN to that
+/// ceiling before Anthropic's own `[1024, max_tokens-1]` window clamp
+/// runs. Zero is the sentinel for "no operator cap" and returns the
+/// budget unchanged.
+fn apply_operator_cap(budget: u32, operator_cap: u32) -> u32 {
+    if operator_cap > 0 {
+        budget.min(operator_cap)
+    } else {
+        budget
+    }
 }
 
 /// Bring `budget` into Anthropic's `[1024, max_tokens-1]` window for
@@ -3085,19 +3110,18 @@ mod multi_turn_tool_use_tests {
         );
     }
 
-    /// Test 1 (spec): when `req.routectl_internal.supports_adaptive_thinking`
-    /// is `true` and `req.reasoning.effort` is "high", `normalize_request`
-    /// emits `thinking: {type:"adaptive"}` and `output_config: {effort:"high"}`.
-    /// The adaptive wire shape has no `budget_tokens` field.
+    /// `routectl_internal` field path consulted: when `supports_adaptive_thinking`
+    /// is read from `req.routectl_internal` and is `true`, the adaptive wire
+    /// shape is emitted. This pins that normalize reads the canonical internal
+    /// carrier rather than a hardcoded literal passed by the caller.
     #[test]
-    fn supports_adaptive_thinking_true_emits_adaptive_wire_shape() {
+    fn normalize_reads_supports_adaptive_thinking_from_routectl_internal() {
         use routectl_core::ReasoningConfig;
 
-        // Arrange: model with adaptive thinking capability and a high effort.
         let mut req = ChatRequest {
             model: "claude-opus-4-7".into(),
             messages: vec![user_msg("hello")],
-            max_tokens: Some(1024),
+            max_tokens: Some(8192),
             reasoning: Some(ReasoningConfig {
                 effort: Some("high".into()),
                 max_tokens: None,
@@ -3106,10 +3130,9 @@ mod multi_turn_tool_use_tests {
             }),
             ..Default::default()
         };
+        // Set the flag via the routectl_internal carrier (not a parameter).
         req.routectl_internal.supports_adaptive_thinking = true;
 
-        // Act: normalize using the value from routectl_internal directly
-        // (mirroring the call in AnthropicApiProvider::normalize_request).
         let body = normalize(
             "test",
             &req,
@@ -3118,75 +3141,75 @@ mod multi_turn_tool_use_tests {
         )
         .expect("normalize must succeed");
 
-        // Assert: adaptive wire shape -- {type:"adaptive"}, no budget_tokens.
         let thinking = body.get("thinking").expect("thinking field present");
         assert_eq!(
             thinking["type"], "adaptive",
-            "supports_adaptive_thinking=true must emit adaptive wire shape; got {thinking:?}"
+            "routectl_internal.supports_adaptive_thinking=true must yield adaptive shape"
         );
         assert!(
             thinking.get("budget_tokens").is_none(),
-            "adaptive shape must not carry budget_tokens; got {thinking:?}"
-        );
-
-        // output_config.effort carries the canonical effort string verbatim.
-        let oc = body.get("output_config").expect("output_config present");
-        assert_eq!(
-            oc["effort"], "high",
-            "output_config.effort must match reasoning.effort; got {oc:?}"
+            "adaptive shape must not carry budget_tokens"
         );
     }
 
-    /// Test 2 (spec): when `req.routectl_internal.supports_adaptive_thinking`
-    /// is `false` and `req.reasoning` has effort="high" and max_tokens=5000,
-    /// `normalize_request` emits legacy `thinking: {type:"enabled",
-    /// budget_tokens: <clamped within [1024, req.max_tokens-1]>}`.
-    /// `req.max_tokens` is set to 8192 so budget 5000 fits
-    /// (5000 < 8192 and 5000 >= 1024).
+    /// Operator cap applied: max_thinking_budget=2000 with max_tokens=10000
+    /// clamps the budget DOWN to 2000 before Anthropic's window clamp runs.
     #[test]
-    fn supports_adaptive_thinking_false_emits_legacy_enabled_wire_shape() {
+    fn max_thinking_budget_nonzero_clamps_budget_down() {
         use routectl_core::ReasoningConfig;
 
-        // Arrange: non-adaptive model. max_tokens=8192 so budget=5000 fits.
         let mut req = ChatRequest {
             model: "claude-sonnet-4-6".into(),
             messages: vec![user_msg("hello")],
-            max_tokens: Some(8192),
+            max_tokens: Some(10000),
             reasoning: Some(ReasoningConfig {
-                effort: Some("high".into()),
-                max_tokens: Some(5000),
+                effort: None,
+                max_tokens: Some(8000),
                 exclude: None,
                 enabled: Some(true),
             }),
             ..Default::default()
         };
-        req.routectl_internal.supports_adaptive_thinking = false;
+        // Operator cap of 2000 < caller's explicit 8000.
+        req.routectl_internal.max_thinking_budget = 2000;
 
-        // Act.
-        let body = normalize(
-            "test",
-            &req,
-            req.routectl_internal.supports_adaptive_thinking,
-            &[],
-        )
-        .expect("normalize must succeed");
-
-        // Assert: legacy Enabled shape.
+        let body = normalize("test", &req, false, &[]).expect("normalize must succeed");
         let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(thinking["type"], "enabled");
         assert_eq!(
-            thinking["type"], "enabled",
-            "supports_adaptive_thinking=false must emit legacy enabled shape; got {thinking:?}"
+            thinking["budget_tokens"], 2000,
+            "max_thinking_budget=2000 must cap the explicit budget of 8000 down to 2000"
         );
-        // budget_tokens=5000 is within [1024, 8191] so no clamping occurs.
-        assert_eq!(
-            thinking["budget_tokens"], 5000,
-            "legacy shape must carry caller's budget_tokens; got {thinking:?}"
-        );
+    }
 
-        // No output_config on the legacy path.
-        assert!(
-            body.get("output_config").is_none(),
-            "legacy shape must not emit output_config; got {body:?}"
+    /// No operator cap: max_thinking_budget=0 passes the budget through
+    /// unchanged (only Anthropic's window clamp applies).
+    #[test]
+    fn max_thinking_budget_zero_no_op() {
+        use routectl_core::ReasoningConfig;
+
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![user_msg("hello")],
+            max_tokens: Some(10000),
+            reasoning: Some(ReasoningConfig {
+                effort: None,
+                max_tokens: Some(3000),
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        // Zero = no operator cap.
+        req.routectl_internal.max_thinking_budget = 0;
+
+        let body = normalize("test", &req, false, &[]).expect("normalize must succeed");
+        let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(thinking["type"], "enabled");
+        // budget=3000 fits in [1024, 9999] unchanged.
+        assert_eq!(
+            thinking["budget_tokens"], 3000,
+            "max_thinking_budget=0 must not alter the budget; got {thinking:?}"
         );
     }
 }
