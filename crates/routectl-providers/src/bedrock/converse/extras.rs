@@ -15,6 +15,7 @@ use routectl_core::{is_canonical_request_key, ChatRequest};
 
 use crate::anthropic_api::request::build_thinking;
 use crate::anthropic_api::types::ThinkingConfig;
+use crate::effort::clamp_effort_to_supported;
 
 use super::super::betas::filter_bedrock_betas;
 use super::super::BedrockConfig;
@@ -143,11 +144,17 @@ fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String,
         bag.insert("thinking".to_string(), v);
     }
     if is_adaptive {
-        let effort = req
+        // Clamp effort against the operator-declared effort_levels cap
+        // before inserting into the bag. Empty effort_levels = pass-through
+        // (current Bedrock Converse default). Mirrors the Anthropic-API
+        // egress behavior in derive_effort.
+        let raw_effort = req
             .reasoning
             .as_ref()
             .and_then(|r| r.effort.clone())
             .unwrap_or_else(|| "medium".to_string());
+        let effort = clamp_effort_to_supported(&raw_effort, &req.routectl_internal.effort_levels)
+            .into_owned();
         bag.insert(
             "output_config".to_string(),
             serde_json::json!({"effort": effort}),
