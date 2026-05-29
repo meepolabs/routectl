@@ -778,8 +778,7 @@ pub async fn build_resolved_models(
             entry.provider.clone(),
             provider,
             entry.upstream.clone(),
-        )
-        .with_reasoning(entry.reasoning_defaults_view());
+        );
         if let Some(d) = entry.reasoning_dialect {
             resolved = resolved.with_reasoning_dialect(d);
         }
@@ -1135,21 +1134,39 @@ pub fn validate_bedrock_global_config(config: &crate::config::Config) -> Result<
     )
 }
 
-/// Validate the `[models.X] thinking` / `effort` knobs across every
+/// Validate the `[models.X] effort_levels` allowlist across every
 /// configured model.
 ///
-/// v0.6.0 collapsed the old free-form `thinking: String` field into
-/// two typed enums: `thinking: ThinkingChoice` (closed `Bool | Adaptive`)
-/// and `effort: EffortLevel` (closed lowercase enum). Both reject bad
-/// values at TOML parse time, so the heavy string validation that
-/// lived here pre-v0.6 is no longer needed. The function is kept as
-/// a stable startup-validation hook (called from `routectl-cli`
-/// `commands::config`, `commands::test`, and `server::start`) so the
-/// CLI surface keeps a single place to add semantic invariants if
-/// future shapes need them.
+/// Each element must be one of the six known effort vocabulary tokens
+/// (the union of the Anthropic-shape and OpenAI-shape vocabularies):
+/// `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Individual
+/// egresses clamp to their own subset at dispatch time; the validator
+/// here catches operator typos before any request is processed.
+///
+/// An empty `effort_levels` list is valid (means pass-through -- the
+/// egress accepts whatever effort the caller supplied).
+///
+/// Returns `Err(Error::Config(...))` on the first model entry that
+/// contains an unknown effort token, naming the model nickname and
+/// the offending token.
 ///
 /// Call once per process startup BEFORE building any providers.
-pub fn validate_reasoning_defaults(_config: &crate::config::Config) -> Result<()> {
+pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()> {
+    use routectl_core::Error;
+
+    const VALID_EFFORT_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+
+    for (nickname, entry) in &config.models {
+        for level in &entry.effort_levels {
+            if !VALID_EFFORT_LEVELS.contains(&level.as_str()) {
+                return Err(Error::Config(format!(
+                    "[models.{nickname}] effort_levels contains unknown value {:?}; \
+                     valid values are: minimal, low, medium, high, xhigh, max",
+                    level
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2396,6 +2413,129 @@ mod openai_responses_account_id_tests {
             derived,
             Some("acct-operator-override".to_string()),
             "operator-supplied account_id_ref must win over the stored token"
+        );
+    }
+}
+
+#[cfg(test)]
+mod validate_reasoning_defaults_tests {
+    //! Unit tests for `validate_reasoning_defaults`.
+    //! Covers: valid levels accepted, empty list accepted, invalid level
+    //! rejected (error names model and offending token), all six valid
+    //! tokens pass individually.
+
+    use super::validate_reasoning_defaults;
+    use crate::config::{Config, ModelEntry};
+
+    fn config_with_model(nickname: &str, entry: ModelEntry) -> Config {
+        let mut cfg = Config::default();
+        cfg.models.insert(nickname.to_string(), entry);
+        cfg
+    }
+
+    /// Empty effort_levels is valid (pass-through mode).
+    #[test]
+    fn accepts_empty_effort_levels() {
+        let entry = ModelEntry::new("p", "u").with_effort_levels(vec![]);
+        let cfg = config_with_model("m", entry);
+        assert!(
+            validate_reasoning_defaults(&cfg).is_ok(),
+            "empty effort_levels should be accepted"
+        );
+    }
+
+    /// Default effort_levels (["low","medium","high"]) is valid.
+    #[test]
+    fn accepts_default_effort_levels() {
+        let entry = ModelEntry::new("p", "u");
+        let cfg = config_with_model("m", entry);
+        assert!(
+            validate_reasoning_defaults(&cfg).is_ok(),
+            "default effort_levels must be valid"
+        );
+    }
+
+    /// All six valid vocabulary tokens are individually accepted.
+    #[test]
+    fn accepts_all_six_valid_levels() {
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+            let entry = ModelEntry::new("p", "u").with_effort_levels(vec![level.to_string()]);
+            let cfg = config_with_model("single", entry);
+            assert!(
+                validate_reasoning_defaults(&cfg).is_ok(),
+                "level {:?} should be accepted",
+                level
+            );
+        }
+    }
+
+    /// A mix of valid tokens all in one list is accepted.
+    #[test]
+    fn accepts_mixed_valid_levels() {
+        let entry = ModelEntry::new("p", "u").with_effort_levels(vec![
+            "minimal".into(),
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "xhigh".into(),
+            "max".into(),
+        ]);
+        let cfg = config_with_model("m", entry);
+        assert!(
+            validate_reasoning_defaults(&cfg).is_ok(),
+            "all six levels together should be valid"
+        );
+    }
+
+    /// An unknown token causes rejection with the model name and token in
+    /// the error message.
+    #[test]
+    fn rejects_invalid_level_names_model_and_token() {
+        let entry = ModelEntry::new("p", "u")
+            .with_effort_levels(vec!["low".into(), "invalid_level".into()]);
+        let cfg = config_with_model("my-model", entry);
+        let err =
+            validate_reasoning_defaults(&cfg).expect_err("invalid effort level should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("my-model"),
+            "error must name the model; got: {msg}"
+        );
+        assert!(
+            msg.contains("invalid_level"),
+            "error must name the offending token; got: {msg}"
+        );
+    }
+
+    /// The validator catches every entry: if multiple models have invalid
+    /// levels, the first offender is reported (not silently skipped).
+    #[test]
+    fn rejects_on_first_invalid_model_encountered() {
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "good".to_string(),
+            ModelEntry::new("p", "u").with_effort_levels(vec!["low".into(), "high".into()]),
+        );
+        cfg.models.insert(
+            "bad".to_string(),
+            ModelEntry::new("p", "u").with_effort_levels(vec!["high".into(), "turbo".into()]),
+        );
+        let err = validate_reasoning_defaults(&cfg)
+            .expect_err("should reject the config with an invalid level");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("turbo"),
+            "error must name the offending token; got: {msg}"
+        );
+    }
+
+    /// A config with no models at all passes validation.
+    #[test]
+    fn accepts_empty_models_table() {
+        let cfg = Config::default();
+        assert!(
+            validate_reasoning_defaults(&cfg).is_ok(),
+            "empty models table must be valid"
         );
     }
 }
