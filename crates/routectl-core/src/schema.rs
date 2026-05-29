@@ -163,6 +163,13 @@ pub struct RoutectlInternal {
     /// Defaults to `false` so library consumers constructing
     /// `ChatRequest` directly never see an unexpected budget-tokens path.
     pub supports_adaptive_thinking: bool,
+    /// Operator-declared effort levels for this model (e.g.
+    /// `["low", "medium", "high"]`). Threaded through from
+    /// `[models.X] effort_levels` via `ResolvedModel` -> `DispatchTarget`.
+    /// OpenAI-shape egresses clamp `req.reasoning.effort` to the nearest
+    /// supported level before emitting. Empty means passthrough -- emit
+    /// whatever the caller sent without validation.
+    pub effort_levels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

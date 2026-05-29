@@ -94,11 +94,11 @@ pub async fn build_provider_with_options(
 ) -> Result<Arc<dyn Provider>> {
     #[cfg(feature = "bedrock")]
     {
-        build_provider_inner(name, entry, secrets, opts, None, None, None).await
+        build_provider_inner(name, entry, secrets, opts, None, None).await
     }
     #[cfg(not(feature = "bedrock"))]
     {
-        build_provider_inner(name, entry, secrets, opts, None).await
+        build_provider_inner(name, entry, secrets, opts).await
     }
 }
 
@@ -126,18 +126,6 @@ pub(crate) struct CachedBedrockAuth {
     pub resolved: routectl_providers::bedrock::auth::ResolvedCreds,
 }
 
-/// Per-model overrides applied to a non-Bedrock provider build that
-/// need to fan out one provider instance per model. v0.6.0 moved
-/// `adaptive_thinking` from `[providers.X]` to `[models.X]` so the
-/// AnthropicApi provider needs a per-model build when the flag is
-/// set. OpenaiCompat / OpenaiResponses don't read adaptive_thinking
-/// today so they still share one cached `Arc<dyn Provider>` per
-/// `[providers.X]`.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct AnthropicModelOverrides {
-    pub adaptive_thinking: Option<bool>,
-}
-
 /// Variant that lets the caller override Bedrock model-specific fields
 /// on `BedrockConfig`. v0.6.0 moves the upstream model id, adaptive
 /// thinking flag, and additional request fields from
@@ -159,38 +147,7 @@ pub(crate) async fn build_provider_with_bedrock_model_override(
     bedrock_overrides: Option<BedrockModelOverrides>,
     cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
-    build_provider_inner(
-        name,
-        entry,
-        secrets,
-        opts,
-        bedrock_overrides,
-        None,
-        cached_auth,
-    )
-    .await
-}
-
-/// Variant that lets the caller override AnthropicApi model-specific
-/// fields. v0.6.0 moved `adaptive_thinking` to `[models.X]`, so each
-/// AnthropicApi model entry that opts into the adaptive shape needs
-/// its own `Arc<AnthropicApiProvider>` with `cfg.adaptive_thinking`
-/// set. The Bedrock override path is unaffected.
-pub(crate) async fn build_provider_with_anthropic_model_override(
-    name: &str,
-    entry: &ProviderEntry,
-    secrets: Arc<dyn SecretStore>,
-    opts: BuildOptions,
-    anthropic_overrides: Option<AnthropicModelOverrides>,
-) -> Result<Arc<dyn Provider>> {
-    #[cfg(feature = "bedrock")]
-    {
-        build_provider_inner(name, entry, secrets, opts, None, anthropic_overrides, None).await
-    }
-    #[cfg(not(feature = "bedrock"))]
-    {
-        build_provider_inner(name, entry, secrets, opts, anthropic_overrides).await
-    }
+    build_provider_inner(name, entry, secrets, opts, bedrock_overrides, cached_auth).await
 }
 
 #[tracing::instrument(skip_all, fields(provider = %name))]
@@ -200,7 +157,6 @@ async fn build_provider_inner(
     secrets: Arc<dyn SecretStore>,
     opts: BuildOptions,
     #[cfg(feature = "bedrock")] bedrock_overrides: Option<BedrockModelOverrides>,
-    anthropic_overrides: Option<AnthropicModelOverrides>,
     #[cfg(feature = "bedrock")] cached_auth: Option<CachedBedrockAuth>,
 ) -> Result<Arc<dyn Provider>> {
     match entry {
@@ -269,9 +225,6 @@ async fn build_provider_inner(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
                 user_agent: user_agent.clone(),
-                adaptive_thinking: anthropic_overrides
-                    .as_ref()
-                    .and_then(|o| o.adaptive_thinking),
                 allowed_betas: allowed_betas.clone(),
                 forward_client_headers: forward_client_headers.clone(),
             };
@@ -632,15 +585,6 @@ pub async fn build_resolved_models(
         #[cfg(not(feature = "bedrock"))]
         let is_bedrock = false;
 
-        // AnthropicApi with `[models.X] thinking = "adaptive"`:
-        // one Arc per model so each gets its own
-        // `AnthropicApiConfig::adaptive_thinking` value. v0.6.0 moved
-        // the flag from `[providers.X]` to `[models.X]`. AnthropicApi
-        // models that leave the flag at None still share one cached
-        // `Arc<dyn Provider>` per `[providers.X]`.
-        let is_anthropic_per_model = matches!(provider_entry, ProviderEntry::AnthropicApi { .. })
-            && entry.is_adaptive_thinking();
-
         let provider = if is_bedrock {
             #[cfg(feature = "bedrock")]
             {
@@ -677,7 +621,7 @@ pub async fn build_resolved_models(
 
                 let overrides = BedrockModelOverrides {
                     model_id: entry.upstream.clone(),
-                    adaptive_thinking: if entry.is_adaptive_thinking() {
+                    adaptive_thinking: if entry.supports_adaptive_thinking {
                         Some(true)
                     } else {
                         None
@@ -711,32 +655,6 @@ pub async fn build_resolved_models(
             #[cfg(not(feature = "bedrock"))]
             {
                 unreachable!("is_bedrock cannot be true without the bedrock feature");
-            }
-        } else if is_anthropic_per_model {
-            let overrides = AnthropicModelOverrides {
-                adaptive_thinking: Some(true),
-            };
-            match build_provider_with_anthropic_model_override(
-                &entry.provider,
-                provider_entry,
-                secrets.clone(),
-                opts.clone(),
-                Some(overrides),
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    let msg = e.to_string();
-                    tracing::warn!(
-                        provider = %entry.provider,
-                        model = %nickname,
-                        error = %msg,
-                        "skipping AnthropicApi model (build failed)",
-                    );
-                    failed.push((nickname.clone(), msg));
-                    continue;
-                }
             }
         } else if let Some(cached) = provider_cache.get(&entry.provider) {
             cached.clone()
