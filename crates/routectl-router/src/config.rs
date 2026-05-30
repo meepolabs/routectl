@@ -579,6 +579,17 @@ pub enum ProviderEntry {
         /// itself.
         #[serde(default)]
         context_management: bool,
+        /// Per-entry byte cap on thinking-cache writes used by the
+        /// `context_management` emulation path. Entries whose serialized
+        /// JSON byte length exceeds this value are rejected at write
+        /// time and a structured WARN is emitted; the cache-miss
+        /// recovery path strips the `thinking` body key on the next
+        /// turn the same way it would on a TTL eviction. `None`
+        /// resolves to the default
+        /// `AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES`
+        /// (256 KB).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_thinking_entry_bytes: Option<usize>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -774,6 +785,7 @@ impl ProviderEntry {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
+            max_thinking_entry_bytes: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }

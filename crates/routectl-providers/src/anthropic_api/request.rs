@@ -1735,6 +1735,8 @@ mod context_management_normalize_tests {
                 index: Some(0),
                 payload: json!({"text": "my reasoning", "signature": "sig"}),
             }],
+            super::super::context_management::MAX_THINKING_ENTRY_BYTES,
+            "test",
         );
         let body = normalize("test", &req, false, &[], true, Some(&cache))
             .expect("normalize must succeed with cache hit");
