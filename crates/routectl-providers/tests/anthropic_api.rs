@@ -1162,11 +1162,11 @@ mod tests {
     /// Drive an SSE stream that errors mid-flight (malformed JSON in a
     /// `content_block_start` payload, after a clean `message_start`)
     /// and confirm the stream surfaces an `Err` chunk to the caller.
-    /// Pins the post-CL-1 contract: a parse-time mid-stream failure
-    /// terminates the stream with a streaming Err rather than
-    /// silently swallowing the event. The accompanying DEBUG log on
-    /// the error path is emitted for triage but not asserted here
-    /// (no tracing-test dev-dep on this crate for log capture).
+    /// Pins the contract: a parse-time mid-stream failure terminates
+    /// the stream with a streaming Err rather than silently swallowing
+    /// the event. The accompanying DEBUG log on the error path is
+    /// emitted for triage but not asserted here (no tracing-test
+    /// dev-dep on this crate for log capture).
     #[tokio::test]
     async fn integration_stream_yields_err_on_midstream_parse_error() {
         let mock_server = MockServer::start().await;
