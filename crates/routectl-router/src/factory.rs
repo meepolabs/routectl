@@ -23,6 +23,15 @@ use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{Config, ProviderEntry};
 use crate::resolved::ResolvedModel;
 
+/// Documented ceiling on `[providers.X] max_thinking_entry_bytes`
+/// (anthropic-api kind). Values above this are clamped at provider
+/// build time with a startup WARN -- the cap is a memory-bound, and
+/// `THINKING_CACHE_CAP * MAX_REASONABLE_THINKING_ENTRY_BYTES` is the
+/// LRU's worst-case footprint. 4 MiB is generous (a 64K-token
+/// reasoning text block, well above any documented Anthropic budget
+/// today) while keeping the worst-case bounded at 4 GiB.
+const MAX_REASONABLE_THINKING_ENTRY_BYTES: usize = 4 * 1024 * 1024;
+
 /// Convenience wrapper that builds a provider with `BuildOptions::default()`.
 ///
 /// Note for Bedrock providers: `BuildOptions::default()` carries empty
@@ -230,8 +239,10 @@ async fn build_provider_inner(
                 allowed_betas: allowed_betas.clone(),
                 forward_client_headers: forward_client_headers.clone(),
                 context_management: *context_management,
-                max_thinking_entry_bytes: max_thinking_entry_bytes
-                    .unwrap_or(AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES),
+                max_thinking_entry_bytes: resolve_max_thinking_entry_bytes(
+                    name,
+                    *max_thinking_entry_bytes,
+                ),
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }
@@ -741,6 +752,39 @@ pub async fn build_resolved_models(
     }
 
     Ok((models, failed))
+}
+
+/// Resolve `[providers.X] max_thinking_entry_bytes` against the
+/// documented bounds. Falls back to
+/// `AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES` for `None`
+/// or `Some(0)` (a zero cap rejects every entry, which silently
+/// disables the cache; surface the misconfig + degrade gracefully).
+/// Clamps `Some(n > MAX_REASONABLE_THINKING_ENTRY_BYTES)` to the
+/// ceiling so an arbitrarily large value cannot defeat the LRU memory
+/// bound.
+fn resolve_max_thinking_entry_bytes(provider_name: &str, configured: Option<usize>) -> usize {
+    let default = AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES;
+    match configured {
+        None => default,
+        Some(0) => {
+            tracing::warn!(
+                provider = %provider_name,
+                default_bytes = default,
+                "max_thinking_entry_bytes must be > 0; using default"
+            );
+            default
+        }
+        Some(n) if n > MAX_REASONABLE_THINKING_ENTRY_BYTES => {
+            tracing::warn!(
+                provider = %provider_name,
+                configured_bytes = n,
+                ceiling_bytes = MAX_REASONABLE_THINKING_ENTRY_BYTES,
+                "max_thinking_entry_bytes exceeds documented ceiling; clamping"
+            );
+            MAX_REASONABLE_THINKING_ENTRY_BYTES
+        }
+        Some(n) => n,
+    }
 }
 
 /// Returns `true` when `entry` is `ProviderEntry::AnthropicApi { context_management: true, .. }`.

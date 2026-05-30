@@ -466,6 +466,13 @@ structured WARN; the next turn's cache-miss recovery strips the
 `thinking` body key just as it does for a TTL eviction, so the request
 still completes without a 400.
 
+Bounds: `>= 1` and `<= 4 MiB` (4 194 304 bytes). Values outside the
+range are clamped at provider build time with a startup WARN -- a
+configured `0` falls back to the 256 KB default (a zero cap silently
+disables the cache, which is never the intent), and any value above
+4 MiB clamps to the ceiling (the cap doubles as a memory bound; the
+LRU's worst case is `THINKING_CACHE_CAP * cap`).
+
 ```toml
 [providers.deepseek-anthropic]
 kind                      = "anthropic-api"

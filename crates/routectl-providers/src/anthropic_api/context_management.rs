@@ -82,13 +82,16 @@ pub(crate) fn snapshot_to_cache(
 ) {
     // Measure once. A failure here would mean serde_json couldn't
     // serialize a Vec<ReasoningDetail>, which the type's serde-derived
-    // impls rule out -- but we treat unmeasurable as 0 (accept) rather
-    // than fail-open-large, so a hypothetical future bug can't slip
-    // past this gate either.
+    // impls rule out. Entries whose size cannot be measured are accepted
+    // (fail-open) to avoid spurious cache-miss storms on a future serde
+    // regression. The trade-off is that such a regression would silently
+    // disable the cap for affected entries; if that becomes a concern,
+    // a fallback measurement path (e.g. summing payload byte lengths)
+    // can be added.
     let observed_bytes = serde_json::to_vec(&thinking).map(|v| v.len()).unwrap_or(0);
     if observed_bytes > max_entry_bytes {
         tracing::warn!(
-            provider = provider_id,
+            provider = %provider_id,
             tool_use_id,
             observed_bytes,
             cap_bytes = max_entry_bytes,
@@ -315,7 +318,7 @@ pub(crate) fn apply_clear_thinking_edit(
             std::option::Option::Some(n) => KeepPolicy::LastN(n as usize),
             std::option::Option::None => {
                 tracing::debug!(
-                    provider = provider_id,
+                    provider = %provider_id,
                     "non-integer bare keep value in clear_thinking edit; defaulting to all"
                 );
                 KeepPolicy::All
@@ -333,7 +336,7 @@ pub(crate) fn apply_clear_thinking_edit(
                 }
                 _ => {
                     tracing::debug!(
-                        provider = provider_id,
+                        provider = %provider_id,
                         ?v,
                         "unknown keep policy in clear_thinking edit; defaulting to all"
                     );
@@ -343,7 +346,7 @@ pub(crate) fn apply_clear_thinking_edit(
         }
         std::option::Option::None => {
             tracing::debug!(
-                provider = provider_id,
+                provider = %provider_id,
                 "missing keep field in clear_thinking edit; defaulting to all"
             );
             KeepPolicy::All
@@ -1222,7 +1225,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Per-entry byte-cap tests (CL-3)
+    // Per-entry byte-cap tests
     // ------------------------------------------------------------------
 
     /// Build a thinking detail vec whose serialized JSON is approximately
