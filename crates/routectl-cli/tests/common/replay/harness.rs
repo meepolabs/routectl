@@ -1,6 +1,7 @@
 //! Shared bits across the two replay test drivers (`replay_egress.rs`
 //! and `replay_ingress.rs`): the canon root locator, the loader-vector
-//! to `HeaderMap` bridge, and the per-fixture outcome enum.
+//! to `HeaderMap` bridge, the per-fixture outcome enum, and the Phase 1
+//! model-denylist + skip-reason helper.
 //!
 //! These were duplicated verbatim across both test files until they
 //! grew in lockstep one too many times. Hoisting them removes the
@@ -13,11 +14,13 @@ use std::path::PathBuf;
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 
+use super::loader::Fixture;
+
 /// Path (relative to the workspace root) to the hand-curated fixture
 /// corpus. `discover_fixtures` returns an empty vector when the
 /// directory contains only `.gitkeep` / `README.md`, which keeps the
 /// replay tests passing before the seed corpus lands.
-pub fn canon_root() -> PathBuf {
+pub(crate) fn canon_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/canon")
 }
 
@@ -27,7 +30,7 @@ pub fn canon_root() -> PathBuf {
 /// this is a fixture-authoring bug we want to surface, but failing the
 /// whole test on it would mask the comparator output that pinpoints
 /// the real wire-shape issue.
-pub fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
+pub(crate) fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in pairs {
         let parsed_name = match HeaderName::from_bytes(name.as_bytes()) {
@@ -60,7 +63,33 @@ pub fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
 /// Outcome of one fixture's run. `Skipped` carries a human-readable
 /// reason so the test driver can surface it as an info log rather than
 /// a failure. `Asserted` means the fixture was exercised end-to-end.
-pub enum FixtureOutcome {
+pub(crate) enum FixtureOutcome {
     Asserted,
     Skipped(String),
+}
+
+/// Substrings flagged as "needs router enrichment not yet wired into
+/// replay". A fixture whose `meta.model` contains any of these is
+/// skipped on both replay drivers; the constraint is documented in
+/// `docs/REPLAY-FIXTURES.md` "Phase 1 corpus scope". Matching is
+/// substring + case-insensitive so capture-rig variants
+/// (`claude-opus-4-7-...`, `deepseek-v4`, ...) all hit.
+pub(crate) const PHASE1_MODEL_DENYLIST: &[&str] = &["opus-4", "deepseek"];
+
+/// Phase-one denylist filter: drop fixtures whose model requires the
+/// router-side enrichment (adaptive thinking, DeepSeek
+/// `history_reasoning`) that the bare ingress -> egress path does not
+/// yet replay.
+pub(crate) fn phase1_skip_reason(fixture: &Fixture) -> Option<String> {
+    let model = fixture.meta.model.as_deref()?;
+    let lc = model.to_ascii_lowercase();
+    for needle in PHASE1_MODEL_DENYLIST {
+        if lc.contains(needle) {
+            return Some(format!(
+                "model `{model}` matches phase-one denylist substring `{needle}`; \
+                 needs router enrichment not yet wired into replay",
+            ));
+        }
+    }
+    None
 }

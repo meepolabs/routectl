@@ -37,17 +37,9 @@ use routectl_providers::openai_compat::{
 use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 
 use common::replay::{
-    assert_json_equal_structural, canon_root, discover_fixtures, headers_from_pairs, Fixture,
-    FixtureOutcome,
+    assert_json_equal_structural, canon_root, discover_fixtures, headers_from_pairs,
+    phase1_skip_reason, Fixture, FixtureOutcome,
 };
-
-/// Substrings flagged as "needs router enrichment not yet wired into
-/// replay". A fixture whose `meta.model` contains any of these is
-/// skipped on both replay drivers; the constraint is documented in
-/// `docs/REPLAY-FIXTURES.md` "Phase 1 corpus scope". Matching is
-/// substring + case-insensitive so capture-rig variants
-/// (`claude-opus-4-7-...`, `deepseek-v4`, ...) all hit.
-const PHASE1_MODEL_DENYLIST: &[&str] = &["opus-4", "deepseek"];
 
 fn anthropic_api_provider() -> AnthropicApiProvider {
     AnthropicApiProvider::new(AnthropicApiConfig {
@@ -148,24 +140,6 @@ fn ignore_paths_for_kind(kind: &str, stream: bool) -> Vec<&'static str> {
         _ => {}
     }
     paths
-}
-
-/// Phase-one denylist filter: drop fixtures whose model requires the
-/// router-side enrichment (adaptive thinking, DeepSeek
-/// `history_reasoning`) that the bare ingress -> egress path does not
-/// yet replay.
-fn phase1_skip_reason(fixture: &Fixture) -> Option<String> {
-    let model = fixture.meta.model.as_deref()?;
-    let lc = model.to_ascii_lowercase();
-    for needle in PHASE1_MODEL_DENYLIST {
-        if lc.contains(needle) {
-            return Some(format!(
-                "model `{model}` matches phase-one denylist substring `{needle}`; \
-                 needs router enrichment not yet wired into replay",
-            ));
-        }
-    }
-    None
 }
 
 /// Run the egress assertion for one fixture. Skips return with a
