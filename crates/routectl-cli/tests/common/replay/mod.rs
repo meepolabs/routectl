@@ -27,7 +27,9 @@ pub mod json_diff;
 pub mod loader;
 pub mod sse_diff;
 
-pub use harness::{canon_root, headers_from_pairs, FixtureOutcome};
+pub(crate) use harness::{
+    canon_root, headers_from_pairs, phase1_skip_reason, FixtureOutcome, PHASE1_MODEL_DENYLIST,
+};
 pub use json_diff::{
     assert_headers_equal, assert_json_equal_structural, DEFAULT_HEADER_ALLOW_SKIP,
 };

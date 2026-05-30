@@ -107,6 +107,14 @@ Skipped fixtures land in the `skipped` count of the test summary, not
 `failed`. Adaptive-thinking and DeepSeek replay will arrive in a
 later phase that threads router enrichment through the test setup.
 
+Additional Phase 1 corpus constraints:
+
+- Phase 1 fixtures must reflect a 2xx upstream response. Non-2xx
+  responses are out of scope and will be rejected by the loader.
+- Phase 1 fixtures must have `ingress_request.model == meta.model`
+  (i.e., no client-side alias resolution). Aliased fixtures need
+  router enrichment, which is not yet wired into the replay drivers.
+
 ## Redaction policy
 
 Fixtures live in source control. They must contain zero secrets and

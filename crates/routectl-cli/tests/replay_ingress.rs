@@ -43,21 +43,14 @@ use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider
 use routectl_providers::openai_compat::{
     HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
 };
-use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::replay::{
-    assert_json_equal_structural, canon_root, discover_fixtures, headers_from_pairs, Fixture,
-    FixtureOutcome,
+    assert_json_equal_structural, canon_root, discover_fixtures, headers_from_pairs,
+    phase1_skip_reason, Fixture, FixtureOutcome,
 };
-
-/// Substrings flagged as "needs router enrichment not yet wired into
-/// replay". Mirrors `replay_egress.rs::PHASE1_MODEL_DENYLIST`; both
-/// must agree because they describe the same scope constraint
-/// documented in `docs/REPLAY-FIXTURES.md`.
-const PHASE1_MODEL_DENYLIST: &[&str] = &["opus-4", "deepseek"];
 
 /// Description of which path + content-type the egress provider hits
 /// upstream. Wiremock matches on these to serve the captured response.
@@ -134,19 +127,8 @@ fn build_provider_for_kind(
                 disable_stream_include_usage: false,
             },
         )))),
-        // NOTE: `OpenAiResponsesConfig::new` hard-codes
-        // `auth_kind = AuthKind::ChatgptOauth` and `account_id = None`.
-        // Replay fixtures captured from a non-OAuth Responses session
-        // may diverge on store/account_id-gated body shape. This branch
-        // is unreachable in phase one (mount_for_kind returns None for
-        // openai-responses), but the builder is kept here so the
-        // future SSE-aware ingress replay can wire it without
-        // rediscovering the auth-config requirement.
-        "openai-responses" => {
-            let mut cfg = OpenAiResponsesConfig::new("openai-responses-replay", "test-key");
-            cfg.base_url = base_url;
-            Ok(Some(Box::new(OpenAiResponsesProvider::new(cfg))))
-        }
+        // FUTURE: replace with provider construction when SSE-aware ingress replay lands (see mount_for_kind comment).
+        "openai-responses" => Ok(None),
         "bedrock-invoke" | "bedrock-converse" => Ok(None),
         other => Err(format!("unknown provider_kind `{other}`")),
     }
@@ -175,24 +157,6 @@ fn parse_canonical(fixture: &Fixture) -> Result<ChatRequest, String> {
     AnthropicIngress
         .parse_request(&headers, fixture.ingress_request.clone())
         .map_err(|e| format!("anthropic ingress parse_request failed: {e}"))
-}
-
-/// Phase-one denylist filter: drop fixtures whose model requires the
-/// router-side enrichment (adaptive thinking, DeepSeek
-/// `history_reasoning`) that the bare ingress -> egress path does not
-/// yet replay. Mirrors `replay_egress.rs::phase1_skip_reason`.
-fn phase1_skip_reason(fixture: &Fixture) -> Option<String> {
-    let model = fixture.meta.model.as_deref()?;
-    let lc = model.to_ascii_lowercase();
-    for needle in PHASE1_MODEL_DENYLIST {
-        if lc.contains(needle) {
-            return Some(format!(
-                "model `{model}` matches phase-one denylist substring `{needle}`; \
-                 needs router enrichment not yet wired into replay",
-            ));
-        }
-    }
-    None
 }
 
 /// Drive one non-stream fixture end-to-end and compare the rendered
