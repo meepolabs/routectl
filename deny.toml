@@ -29,6 +29,10 @@ allow = [
     # but the bundle metadata uses CDLA. Required by hyper-rustls /
     # aws-smithy-http-client transitively.
     "CDLA-Permissive-2.0",
+    # foldhash (hashbrown -> lru transitive) ships under Zlib. OSI-
+    # approved, FSF-free, permissive (no source-distribution clause for
+    # binary releases). Treated equivalently to MIT/BSD here.
+    "Zlib",
 ]
 confidence-threshold = 0.93
 

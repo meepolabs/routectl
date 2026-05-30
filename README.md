@@ -9,14 +9,16 @@ A local LLM router. One Rust binary, listening on `127.0.0.1`, that proxies Open
 ## Features
 
 - **Two ingress dialects** -- OpenAI Chat Completions and Anthropic Messages, both feeding one canonical internal request shape.
-- **Three egress provider classes**:
+- **Four egress provider classes**:
   - `openai-compat` -- any host that speaks the OpenAI body shape (OpenAI, DeepSeek, OpenRouter, Groq, NIM, vLLM, llama.cpp, etc.).
   - `anthropic-api` -- native Anthropic Messages API with `x-api-key` or `Authorization: Bearer` auth.
   - `bedrock` -- native AWS Bedrock with SigV4 signing, full credential chain (env / static / profile / SSO / IRSA / IMDS) or short-term bearer keys; both InvokeModel and Converse body shapes for Anthropic models.
+  - `openai-responses` -- ChatGPT Codex (`chatgpt-oauth` bearer JWT, stream-only).
 - **Unified reasoning surface** -- OpenRouter-shape `reasoning_details[]` with provider-tagged `format`. Six dialects on the openai-compat side; Anthropic thinking blocks (with `signature`) preserved across multi-turn tool use.
 - **Cache control round-trip** -- Anthropic prompt-caching `cache_control` and `anthropic_beta` flags pass through losslessly on Anthropic-in -> Anthropic-out and Anthropic-in -> Bedrock-Invoke-out paths. Verified live: cache miss writes N tokens, cache hit reads the same N back.
-- **Reliability** -- per-error-class retry caps (429 / 5xx / network), per-attempt timeouts, jittered backoff, RPM token bucket per provider, passive circuit breaker with single-probe half-open.
-- **Secrets** -- `env://VAR`, `file:///abs/path` (chmod-600 / 400 enforced on Unix, TOCTOU-safe), `literal:value`. No keychain integration, no auto-discovery.
+- **claude-code as a gateway client** -- per Anthropic's [published gateway pattern](https://code.claude.com/docs/en/llm-gateway), with `forward_client_headers` for `x-claude-code-*` attribution, a `POST /v1/messages/count_tokens` proxy, per-dialect error-envelope shapes, and forward-compat for unknown Anthropic SSE block types. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) "claude-code as a gateway client" for setup; "Responsible use" below for the operating envelope.
+- **Reliability** -- per-error-class retry caps (429 / 5xx / network), per-attempt timeouts, jittered backoff, RPM token bucket per provider, passive circuit breaker with single-probe half-open. `retry_allowlist` / `retry_denylist` schema for fallback selection. `probe_max_tokens` fast-fails small availability probes on rate-limit instead of walking the chain.
+- **Secrets** -- `env://VAR`, `file:///abs/path` (chmod-600 / 400 enforced on Unix, TOCTOU-safe), `literal:value`, and `oauth://<provider>` (routectl-managed PKCE login for Anthropic and Codex with runtime refresh and 401 recovery). No OS-keychain integration, no auto-discovery.
 - **Local-first** -- binds to `127.0.0.1` by default; refuses non-loopback bind without explicit `--unsafe-public`.
 
 ## Install
@@ -147,12 +149,14 @@ upstream = "deepseek-chat"
 [models.heavy-bedrock]
 provider = "bedrock"
 upstream = "us.anthropic.claude-opus-4-20250514-v1:0"
-thinking = "high"
+supports_adaptive_thinking = true
+effort_levels = ["low", "medium", "high"]
 
 [models.heavy-anthropic]
 provider = "anthropic"
 upstream = "claude-opus-4-20250514"
-thinking = "high"
+supports_adaptive_thinking = true
+effort_levels = ["low", "medium", "high"]
 
 [aliases]
 fast  = "fast"
@@ -165,13 +169,30 @@ See [`examples/config.toml`](examples/config.toml) for the full surface, includi
 
 ### Secret references
 
-Routectl resolves credentials through one of three URI schemes per provider. There is no auto-discovery; you choose the source explicitly.
+Routectl resolves credentials through one of four URI schemes per provider. There is no auto-discovery; you choose the source explicitly.
 
 | Scheme | Meaning |
 |---|---|
 | `env://VAR_NAME` | Process env var. |
 | `file:///abs/path` | File contents (trailing whitespace trimmed). On Unix, refused if group/other have any permissions; `chmod 600` or `400` recommended. Compatible with sops, age, doppler-cli, vault-agent, etc. Windows skips the bit-check (use NTFS ACLs there). |
 | `literal:VALUE` | Inline plaintext. For placeholders like `literal:not-needed` (llama.cpp without auth) and tests. Avoid for real secrets in version-controlled config. |
+| `oauth://<provider>` | routectl-managed OAuth credential, populated by `routectl login <provider>` (Anthropic and Codex supported). Tokens persist in `~/.config/routectl/credentials.json` (chmod 0600); resolution checks near-expiry, refreshes under a per-provider single-flight mutex, and survives upstream 401 via `Provider::on_auth_failure`. See "Managed OAuth login" below. |
+
+### Managed OAuth login
+
+> Read [Responsible use](#responsible-use) below before pointing routectl-managed OAuth at production traffic. Per the Anthropic Agent SDK overview, claude.ai OAuth tokens may not be embedded in third-party products; the `oauth://anthropic` ref is for personal-use proxying with the operator's own subscription token.
+
+For Anthropic (claude.ai) and OpenAI Codex (ChatGPT), routectl owns the full OAuth lifecycle so the operator does not have to snapshot or rotate JWTs by hand:
+
+```bash
+routectl login anthropic        # opens browser, runs PKCE, persists tokens
+routectl login codex            # same, against the ChatGPT auth endpoint
+routectl whoami                 # prints stored expiry per provider
+routectl refresh anthropic      # force a refresh, regardless of expiry
+routectl logout anthropic       # remove tokens for one provider
+```
+
+Reference the credential in `[providers.X]` via `api_key_ref = "oauth://anthropic"` (or `"oauth://codex"`) plus `auth_kind = "oauth-bearer"`. Headless / SSH operators use `routectl login anthropic --print-url` (Anthropic only); Codex requires a browser-reachable callback and operators port-forward port 1455 instead. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) "claude-code as a gateway client" for the full operator setup including header packs and `forward_client_headers`.
 
 ## Provider classes
 
@@ -195,16 +216,21 @@ The `<think>` tag accumulator handles tags split across SSE chunk boundaries (st
 Hits `https://api.anthropic.com/v1/messages`. Two auth modes via `auth_kind`:
 
 - `api-key` (default) -- `x-api-key: <key>` header.
-- `oauth-bearer` -- `Authorization: Bearer <token>` header.
+- `oauth-bearer` -- `Authorization: Bearer <token>` header. Pair with `api_key_ref = "oauth://anthropic"` for routectl-managed login (see "Managed OAuth login" above).
 
-Beta gates (`anthropic-beta` flags for prompt caching, 1M context, extended thinking) are independent of `auth_kind`. Declare them via `extra_headers`:
+Beta gates (`anthropic-beta` flags for prompt caching, 1M context, extended thinking) are independent of `auth_kind`. Declare them via `header_extras`:
 
 ```toml
-[providers.anthropic.extra_headers]
-"anthropic-beta" = "context-1m-2025-08-07,prompt-caching-2024-07-31"
+[providers.anthropic]
+header_extras = { "anthropic-beta" = "context-1m-2025-08-07,prompt-caching-2024-07-31" }
 ```
 
-`extra_headers` cannot override auth-bearing headers (`authorization`, `x-api-key`, `host`); collisions are dropped with a `tracing::warn!`.
+`header_extras` cannot override auth-bearing headers (`authorization`, `x-api-key`, `host`); collisions are dropped with a `tracing::warn!`.
+
+Provider-level knobs relevant to claude-code-as-a-gateway use:
+
+- `forward_client_headers: Vec<String>` -- allowlist of incoming client headers (typically `x-claude-code-session-id`, `x-claude-code-agent-id`, `x-claude-code-parent-agent-id`) that pass through to the upstream. Defaults to empty (drop everything).
+- `context_management = true` -- routectl emulates Anthropic's `context-management-2025-06-27` beta server-side for upstreams that demand thinking-block echoback but do not implement the beta natively (e.g. DeepSeek `/anthropic`). Bounded LRU + TTL cache; strips the beta header and body field on egress. See [`docs/PROVIDER-QUIRKS.md`](docs/PROVIDER-QUIRKS.md) for when to flip it.
 
 ### `bedrock`
 
@@ -325,15 +351,23 @@ crates/
                          (ChatRequest, ChatResponse, ChatChunk, Message,
                           ContentPart, SystemContent, ToolDef, CacheControl)
   routectl-providers/    openai_compat (6 dialects)
-                         anthropic_api (api-key + oauth-bearer)
-                         bedrock (SigV4 + InvokeModel + eventstream)
+                         anthropic_api (api-key + oauth-bearer
+                                        + context_management emulation)
+                         bedrock (SigV4 + InvokeModel + Converse +
+                                  eventstream)
+                         openai_responses (ChatGPT Codex chatgpt-oauth)
   routectl-router/       alias resolution + fallback chain
                          + tier-1 retry (per-error-class caps, timeouts, jitter)
                          + tier-2 RPM bucket + circuit breaker
+                         + capability filter (unsupported_features)
                          + provider factory
-  routectl-auth/         SecretStore: env:// / file:// (TOCTOU-safe) / literal:
-  routectl-cli/          axum HTTP server (/v1/chat/completions + /v1/messages)
-                         + clap CLI (serve, test, config, login)
+  routectl-auth/         SecretStore: env:// / file:// (TOCTOU-safe) /
+                         literal: / oauth:// (PKCE login + atomic
+                         credentials.json + lazy refresh)
+  routectl-cli/          axum HTTP server (/v1/chat/completions + /v1/messages
+                                          + /v1/messages/count_tokens)
+                         + clap CLI (serve, login, logout, refresh,
+                         whoami, test, config)
                          + IngressAdapter trait (one file per ingress dialect)
 ```
 
@@ -347,8 +381,8 @@ cargo test --workspace --release
 
 # Live integration matrix (opt-in; skips per-provider when its env key is absent).
 export OPENROUTER_API_KEY=...
+export OPENCODE_GO_API_KEY=...
 export NIM_API_KEY=...
-export ANTHROPIC_API_KEY=...
 export AWS_BEARER_TOKEN_BEDROCK=...
 export AWS_REGION=us-east-1
 
@@ -369,7 +403,17 @@ If you need any of those, reach for [LiteLLM](https://github.com/BerriAI/litellm
 
 ## Responsible use
 
-routectl speaks several wire protocols and forwards whatever credentials you supply. It does not vouch for whether a particular credential is permitted to be used a particular way. Read the upstream provider's terms before pointing routectl at production traffic.
+routectl is a translation pipe. It speaks several wire protocols and forwards whatever credentials you supply, and it does not vouch for whether a particular credential is permitted to be used a particular way. **routectl does not support or condone gateway usage beyond what the upstream provider permits.** Read the upstream provider's terms before pointing routectl at production traffic.
+
+Specifically:
+
+- Anthropic publishes a gateway pattern at <https://code.claude.com/docs/en/llm-gateway> for first-party deployments. routectl's claude-code-as-a-gateway support implements that pattern.
+- Per the Anthropic Agent SDK overview, claude.ai OAuth tokens may NOT be embedded in third-party products. The `oauth://anthropic` ref is for personal-use proxying with the operator's own subscription token; do not deploy a routectl instance that resolves your `oauth://anthropic` ref under other users' requests.
+- Read Anthropic's [Acceptable Use Policy](https://www.anthropic.com/legal/aup) and [Usage Policy](https://www.anthropic.com/legal/usage-policy) (Anthropic API + Claude.ai) before production traffic.
+- For Codex / ChatGPT credentials, read OpenAI's [Terms of Use](https://openai.com/policies/terms-of-use) and [Service Terms](https://openai.com/policies/service-terms).
+- For Bedrock, the AWS service terms and the underlying foundation-model vendor's terms both apply.
+
+See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) "claude-code as a gateway client" for the full operating envelope and operator-setup checklist.
 
 ## Contributing
 

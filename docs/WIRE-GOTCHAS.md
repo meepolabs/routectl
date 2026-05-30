@@ -167,6 +167,34 @@ this doc first for similar patterns. For operator-facing config recipes see
   Mirrored in `bedrock/converse/eventstream.rs` for the Converse
   stream path.
 
+- **Forward-compat for unknown Anthropic SSE block types.**
+  Anthropic ships new `content_block.type` values whenever the
+  platform adds a feature (`server_tool_use` for `web_search`,
+  `web_search_tool_result` with `citations_delta` inside, etc.).
+  The egress used strict-tagged serde enums at three sites
+  (`SseEvent`, `SseContentBlockStart`, `SseDelta`) so an unknown
+  variant returned `Error::Streaming` and walked the router
+  fallback chain. Two-layer fix: (v1, continuity) `Other(Value)`
+  catchalls on the three enums via custom `Deserialize` plus
+  `OpenBlockKind::Unknown` in the SSE state machine
+  (`crates/routectl-providers/src/anthropic_api/sse_unknown.rs`,
+  `types_sse.rs`); index-invariant validation across all variants
+  WARNs and drops misattributed deltas. (v2, fidelity) a
+  `#[serde(skip)] opaque_events: Vec` carrier on `ChatChunk`
+  (transport-internal, never on the wire) captures each unknown
+  event's bytes; the matching Anthropic ingress reads the carrier
+  and re-emits `content_block_start` / `delta` / `stop` SSE
+  verbatim so strict clients (citation links, search-status UI)
+  see the full upstream wire. v2 is non-authoritative: bounded
+  caps in
+  `crates/routectl-providers/src/anthropic_api/sse_opaque.rs`
+  (256 KB bytes / 10000 deltas per block) downgrade overflowed
+  blocks to v1 silently with a WARN, and any replay-path failure
+  logs and skips that one event without terminating the stream.
+  Bedrock-Invoke inherits the v1 fix free (delegates to the same
+  `parse_event`); Bedrock-Converse streaming forward-compat is a
+  separate task.
+
 ## Bedrock surface
 
 - **Bedrock rejects unsupported `anthropic_beta` values + unknown
