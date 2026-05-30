@@ -717,6 +717,12 @@ pub async fn build_resolved_models(
         if let Some(h) = entry.history_reasoning {
             resolved = resolved.with_history_reasoning(h);
         }
+        warn_context_management_needs_preserve(
+            &entry.provider,
+            nickname,
+            provider_entry,
+            entry.history_reasoning,
+        );
         if !entry.header_extras.is_empty() {
             resolved = resolved.with_header_extras(entry.header_extras.clone());
         }
@@ -735,6 +741,60 @@ pub async fn build_resolved_models(
     }
 
     Ok((models, failed))
+}
+
+/// Returns `true` when `entry` is `ProviderEntry::AnthropicApi { context_management: true, .. }`.
+/// `false` for any other shape. Used by the model-binding warning
+/// path to scope the guard to the only provider kind where the
+/// `context_management` emulation flag exists.
+fn anthropic_api_uses_context_management(entry: &ProviderEntry) -> bool {
+    matches!(
+        entry,
+        ProviderEntry::AnthropicApi {
+            context_management: true,
+            ..
+        }
+    )
+}
+
+/// Emit a structured WARN when an anthropic-api provider declares
+/// `context_management = true` but the model's `history_reasoning`
+/// is missing or set to anything other than `Preserve`. The two
+/// settings are complementary: `context_management` controls the
+/// outgoing-request shaping for non-Anthropic anthropic-api endpoints
+/// (DeepSeek `/anthropic`, vLLM, LM Studio) while `history_reasoning =
+/// "preserve"` ensures thinking blocks ride back into the request
+/// history so multi-turn continuity is preserved upstream.
+///
+/// Silent for any other shape: `context_management = false`,
+/// `history_reasoning = Preserve`, or non-anthropic-api providers.
+/// The literal strings `context_management` and `history_reasoning`
+/// appear in the message body so operators can grep the runbook
+/// without hunting for the exact wording.
+fn warn_context_management_needs_preserve(
+    provider_name: &str,
+    nickname: &str,
+    entry: &ProviderEntry,
+    history_reasoning: Option<crate::config::HistoryReasoning>,
+) {
+    if !anthropic_api_uses_context_management(entry) {
+        return;
+    }
+    if matches!(
+        history_reasoning,
+        Some(crate::config::HistoryReasoning::Preserve)
+    ) {
+        return;
+    }
+    tracing::warn!(
+        provider = provider_name,
+        model = nickname,
+        "context_management = true on this anthropic-api provider but \
+         history_reasoning is not 'preserve' on the model; thinking \
+         echo-back is required for multi-turn continuity. See \
+         docs/PROVIDER-QUIRKS.md \"context_management\" for the \
+         recommended config."
+    );
 }
 
 /// Reject `http://` (cleartext) base_urls at build time so an
