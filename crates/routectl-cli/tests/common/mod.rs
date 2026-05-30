@@ -27,6 +27,8 @@
 
 #![allow(dead_code)]
 
+pub mod replay;
+
 use routectl_core::{
     cache_control::CacheControl,
     content_part::{ContentPart, KnownContentPart},
