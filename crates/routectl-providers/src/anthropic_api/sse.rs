@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use routectl_core::{
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
-    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, ReasoningDetailKind, Result,
+    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result,
 };
 
 use super::response::map_stop_reason;
@@ -252,18 +252,16 @@ impl SseState {
                         // None so the next block_start opens cleanly.
                         let di = self.next_detail_index;
                         self.next_detail_index += 1;
-                        let detail = ReasoningDetail {
-                            kind: ReasoningDetailKind::Encrypted,
-                            id: Some(Uuid::new_v4().to_string()),
-                            format: Some(super::ANTHROPIC_FORMAT.to_string()),
-                            index: Some(di),
-                            payload: json!({"data": data}),
-                        };
-                        // Mirror the non-streaming path in extract_tool_thinking:
-                        // accumulate RedactedThinking into completed_thinking so
-                        // a subsequent ToolUse block's pending_cache_writes entry
-                        // includes it. Without this push the streaming and
-                        // non-streaming paths diverge on redacted thinking.
+                        let detail = super::context_management::make_redacted_thinking_detail(
+                            Uuid::new_v4().to_string(),
+                            di,
+                            data,
+                        );
+                        // Accumulate into completed_thinking so a subsequent
+                        // ToolUse block's pending_cache_writes entry includes
+                        // it. The shared helper above is the structural
+                        // enforcement that the streaming detail shape matches
+                        // the non-streaming `extract_tool_thinking` output.
                         self.completed_thinking.push(detail.clone());
                         return Ok(Some(ChatChunk {
                             id: self.id.clone(),
@@ -361,21 +359,18 @@ impl SseState {
                         if accumulated.is_empty() && signature.is_none() {
                             None
                         } else {
-                            // Build the aggregated detail here so we can
-                            // clone it into completed_thinking before the
-                            // chunk consumes it. Mirrors the shape that
-                            // make_thinking_terminal_chunk produced before
-                            // this accumulator path was introduced.
-                            let detail = ReasoningDetail {
-                                kind: ReasoningDetailKind::Text,
-                                id: Some(detail_id),
-                                format: Some(super::ANTHROPIC_FORMAT.to_string()),
-                                index: Some(detail_index),
-                                payload: json!({
-                                    "text": accumulated,
-                                    "signature": signature.unwrap_or_default(),
-                                }),
-                            };
+                            // Build the aggregated detail via the shared
+                            // helper so the streaming terminal shape stays
+                            // structurally identical to the non-streaming
+                            // `extract_tool_thinking` output. We clone it
+                            // into completed_thinking before the chunk
+                            // consumes it.
+                            let detail = super::context_management::make_thinking_detail(
+                                detail_id,
+                                detail_index,
+                                accumulated,
+                                signature.unwrap_or_default(),
+                            );
                             self.completed_thinking.push(detail.clone());
                             Some(ChatChunk {
                                 id: self.id.clone(),
