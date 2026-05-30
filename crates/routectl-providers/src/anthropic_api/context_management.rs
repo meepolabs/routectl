@@ -141,6 +141,45 @@ pub(crate) fn lookup_thinking(
     })
 }
 
+/// Build a `Text`-kind `ReasoningDetail` carrying an Anthropic Thinking
+/// block's `(text, signature)` pair. Shared by the non-streaming
+/// extraction path (`extract_tool_thinking`) and the streaming
+/// aggregation terminal in `sse.rs` so both produce byte-identical
+/// detail shapes for replay.
+pub(crate) fn make_thinking_detail(
+    id: String,
+    index: u32,
+    text: String,
+    signature: String,
+) -> ReasoningDetail {
+    ReasoningDetail {
+        kind: ReasoningDetailKind::Text,
+        id: Some(id),
+        format: Some(super::ANTHROPIC_FORMAT.to_string()),
+        index: Some(index),
+        payload: serde_json::json!({"text": text, "signature": signature}),
+    }
+}
+
+/// Build an `Encrypted`-kind `ReasoningDetail` carrying an Anthropic
+/// RedactedThinking block's opaque `data` field. Shared by the
+/// non-streaming extraction path (`extract_tool_thinking`) and the
+/// streaming `redacted_thinking` block-start branch in `sse.rs` so both
+/// produce byte-identical detail shapes for replay.
+pub(crate) fn make_redacted_thinking_detail(
+    id: String,
+    index: u32,
+    data: String,
+) -> ReasoningDetail {
+    ReasoningDetail {
+        kind: ReasoningDetailKind::Encrypted,
+        id: Some(id),
+        format: Some(super::ANTHROPIC_FORMAT.to_string()),
+        index: Some(index),
+        payload: serde_json::json!({"data": data}),
+    }
+}
+
 /// Walk a flat content-block slice and return `(tool_use_id, thinking)`
 /// pairs for cache storage. Rules:
 /// - Thinking / RedactedThinking blocks accumulate into a running vec.
@@ -156,7 +195,6 @@ pub(crate) fn extract_tool_thinking(
     blocks: &[crate::anthropic_api::types::ContentBlock],
 ) -> Vec<(String, Vec<routectl_core::ReasoningDetail>)> {
     use crate::anthropic_api::types::ContentBlock;
-    use serde_json::json;
     use uuid::Uuid;
 
     let mut running: Vec<ReasoningDetail> = Vec::new();
@@ -170,23 +208,20 @@ pub(crate) fn extract_tool_thinking(
                 signature,
                 ..
             } => {
-                running.push(ReasoningDetail {
-                    kind: ReasoningDetailKind::Text,
-                    id: Some(Uuid::new_v4().to_string()),
-                    format: Some(super::ANTHROPIC_FORMAT.to_string()),
-                    index: Some(detail_index),
-                    payload: json!({"text": thinking, "signature": signature}),
-                });
+                running.push(make_thinking_detail(
+                    Uuid::new_v4().to_string(),
+                    detail_index,
+                    thinking.clone(),
+                    signature.clone(),
+                ));
                 detail_index += 1;
             }
             ContentBlock::RedactedThinking { data, .. } => {
-                running.push(ReasoningDetail {
-                    kind: ReasoningDetailKind::Encrypted,
-                    id: Some(Uuid::new_v4().to_string()),
-                    format: Some(super::ANTHROPIC_FORMAT.to_string()),
-                    index: Some(detail_index),
-                    payload: json!({"data": data}),
-                });
+                running.push(make_redacted_thinking_detail(
+                    Uuid::new_v4().to_string(),
+                    detail_index,
+                    data.clone(),
+                ));
                 detail_index += 1;
             }
             ContentBlock::ToolUse { id, .. } if !id.is_empty() => {
@@ -1311,5 +1346,61 @@ mod tests {
             lookup_thinking(&cache, "prov", "tool-tight").is_none(),
             "2 KB entry must be rejected when the per-call cap is 1 KB"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Shared ReasoningDetail constructor tests
+    // ------------------------------------------------------------------
+
+    /// `make_thinking_detail` must produce a `Text`-kind detail whose
+    /// payload carries the full `(text, signature)` pair under the
+    /// Anthropic format tag. This pins the wire shape both the
+    /// non-streaming (`extract_tool_thinking`) and streaming
+    /// (`sse.rs` aggregated terminal) paths emit so a future drift
+    /// produces a test failure rather than silent divergence.
+    #[test]
+    fn make_thinking_detail_pins_shape() {
+        let detail = make_thinking_detail(
+            "fixed-id".to_string(),
+            7,
+            "the thinking text".to_string(),
+            "the-signature".to_string(),
+        );
+        assert!(matches!(detail.kind, ReasoningDetailKind::Text));
+        assert_eq!(detail.id.as_deref(), Some("fixed-id"));
+        assert_eq!(
+            detail.format.as_deref(),
+            Some(super::super::ANTHROPIC_FORMAT)
+        );
+        assert_eq!(detail.index, Some(7));
+        assert_eq!(detail.payload["text"], "the thinking text");
+        assert_eq!(detail.payload["signature"], "the-signature");
+    }
+
+    /// Empty signature must serialize as the empty string (not null);
+    /// this is the streaming-aggregated branch's behaviour and the
+    /// non-streaming path tolerates either shape.
+    #[test]
+    fn make_thinking_detail_empty_signature_is_empty_string() {
+        let detail = make_thinking_detail("id".to_string(), 0, "t".to_string(), String::new());
+        assert_eq!(detail.payload["signature"], "");
+    }
+
+    /// `make_redacted_thinking_detail` must produce an `Encrypted`-kind
+    /// detail whose payload carries the opaque `data` field only. Pins
+    /// the wire shape for both the non-streaming and streaming
+    /// `redacted_thinking` emission paths.
+    #[test]
+    fn make_redacted_thinking_detail_pins_shape() {
+        let detail =
+            make_redacted_thinking_detail("redacted-id".to_string(), 3, "opaque-blob".to_string());
+        assert!(matches!(detail.kind, ReasoningDetailKind::Encrypted));
+        assert_eq!(detail.id.as_deref(), Some("redacted-id"));
+        assert_eq!(
+            detail.format.as_deref(),
+            Some(super::super::ANTHROPIC_FORMAT)
+        );
+        assert_eq!(detail.index, Some(3));
+        assert_eq!(detail.payload["data"], "opaque-blob");
     }
 }
