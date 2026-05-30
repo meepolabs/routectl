@@ -65,7 +65,7 @@ fn parse_sse_block(block: &str, event_index: usize) -> Result<Option<SseEventCmp
             continue;
         }
         if let Some(rest) = line.strip_prefix("event:") {
-            event_name = Some(rest.trim_start().to_string());
+            event_name = Some(rest.strip_prefix(' ').unwrap_or(rest).to_string());
         } else if let Some(rest) = line.strip_prefix("data:") {
             data_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
         }
@@ -198,5 +198,25 @@ mod tests {
         assert_eq!(p1, p2);
         assert_eq!(p2, p3);
         assert_eq!(p1.len(), 1);
+    }
+
+    #[test]
+    fn sse_parser_normalizes_crlf_to_lf() {
+        let crlf = sse("event: message_start\r\ndata: {\"x\":1}\r\n\r\nevent: message_stop\r\ndata: {\"y\":2}\r\n\r\n");
+        let lf = sse(
+            "event: message_start\ndata: {\"x\":1}\n\nevent: message_stop\ndata: {\"y\":2}\n\n",
+        );
+        let p_crlf = parse_sse_events(&crlf).unwrap();
+        let p_lf = parse_sse_events(&lf).unwrap();
+        assert_eq!(p_crlf, p_lf);
+        assert_eq!(p_crlf.len(), 2);
+    }
+
+    #[test]
+    fn sse_parser_handles_no_space_after_data_colon() {
+        let raw = sse("data:{\"x\":1}\n\n");
+        let parsed = parse_sse_events(&raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].data_parsed, json!({"x": 1}));
     }
 }
