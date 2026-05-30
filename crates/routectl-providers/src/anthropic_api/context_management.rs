@@ -45,14 +45,59 @@ pub(crate) const THINKING_CACHE_CAP: usize = 1000;
 /// context rotation.
 pub(crate) const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// Default per-entry byte cap on the thinking cache. The cap is applied
+/// at write time -- entries whose serialized JSON byte length exceeds
+/// this value are rejected (NOT truncated) so the rest of the pipeline's
+/// cache-miss recovery (request.rs strip-thinking-on-miss) handles them
+/// the same way as a TTL eviction.
+///
+/// Truncation would corrupt the opaque continuity signature on Anthropic
+/// thinking blocks; rejecting and letting the strip-on-miss path land
+/// the request without thinking is the behaviour-preserving choice.
+///
+/// Provider-configurable via `[providers.X] max_thinking_entry_bytes`
+/// (anthropic-api kind only). 256 KB is generous for ordinary agent
+/// thinking turns (typical sizes are 1-50 KB) while bounding the
+/// LRU's worst-case memory use to `THINKING_CACHE_CAP * cap`
+/// (1000 * 256 KB = ~256 MB ceiling) under adversarial inputs.
+pub(crate) const MAX_THINKING_ENTRY_BYTES: usize = 256 * 1024;
+
 /// Store a thinking observation into the cache under `(provider_id, tool_use_id)`.
 /// Overwrites any existing entry for the same key.
+///
+/// Rejects writes whose serialized JSON byte length exceeds
+/// `max_entry_bytes`. The serialization round-trip is cheap relative
+/// to the cache write itself and captures every payload field
+/// (text + signature + data). On rejection the LRU is NOT touched and
+/// a structured WARN is emitted so operators can grep for oversized
+/// inputs. `path` tags the call site ("complete" / "stream") in the
+/// log.
 pub(crate) fn snapshot_to_cache(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     tool_use_id: &str,
     thinking: Vec<routectl_core::ReasoningDetail>,
+    max_entry_bytes: usize,
+    path: &'static str,
 ) {
+    // Measure once. A failure here would mean serde_json couldn't
+    // serialize a Vec<ReasoningDetail>, which the type's serde-derived
+    // impls rule out -- but we treat unmeasurable as 0 (accept) rather
+    // than fail-open-large, so a hypothetical future bug can't slip
+    // past this gate either.
+    let observed_bytes = serde_json::to_vec(&thinking).map(|v| v.len()).unwrap_or(0);
+    if observed_bytes > max_entry_bytes {
+        tracing::warn!(
+            provider = provider_id,
+            tool_use_id,
+            observed_bytes,
+            cap_bytes = max_entry_bytes,
+            detail_count = thinking.len(),
+            path,
+            "thinking-cache entry exceeds per-entry byte cap; rejecting write"
+        );
+        return;
+    }
     let key = (provider_id.to_string(), tool_use_id.to_string());
     let entry = ThinkingCacheEntry {
         thinking,
@@ -566,13 +611,32 @@ mod tests {
         RwLock::new(lru::LruCache::new(NonZeroUsize::new(cap).expect("cap > 0")))
     }
 
+    /// Test helper: call `snapshot_to_cache` with the default per-entry
+    /// byte cap. Existing tests pre-date the cap parameter and don't
+    /// care about it; this wrapper keeps each call site one line.
+    fn snap(
+        cache: &RwLock<ThinkingCache>,
+        provider_id: &str,
+        tool_use_id: &str,
+        thinking: Vec<ReasoningDetail>,
+    ) {
+        snapshot_to_cache(
+            cache,
+            provider_id,
+            tool_use_id,
+            thinking,
+            MAX_THINKING_ENTRY_BYTES,
+            "test",
+        );
+    }
+
     /// snapshot_to_cache followed by lookup_thinking with the same key
     /// must return Some with the originally stored thinking vec.
     #[test]
     fn insert_and_lookup_hit() {
         let cache = small_cache(4);
         let thinking = make_thinking("hello world");
-        snapshot_to_cache(&cache, "provider-a", "tool-1", thinking.clone());
+        snap(&cache, "provider-a", "tool-1", thinking.clone());
         let result = lookup_thinking(&cache, "provider-a", "tool-1");
         assert!(result.is_some(), "expected Some but got None");
         let got = result.unwrap();
@@ -612,7 +676,7 @@ mod tests {
         const SMALL_CAP: usize = 4;
         let cache = small_cache(SMALL_CAP);
         for i in 0..=(SMALL_CAP) {
-            snapshot_to_cache(
+            snap(
                 &cache,
                 "prov",
                 &format!("tool-{i}"),
@@ -640,8 +704,8 @@ mod tests {
         let cache = small_cache(4);
         let first = make_thinking("first-thinking");
         let second = make_thinking("second-thinking");
-        snapshot_to_cache(&cache, "prov", "tool-x", first.clone());
-        snapshot_to_cache(&cache, "prov", "tool-x", second.clone());
+        snap(&cache, "prov", "tool-x", first.clone());
+        snap(&cache, "prov", "tool-x", second.clone());
         let result = lookup_thinking(&cache, "prov", "tool-x")
             .expect("entry should exist after second insert");
         assert_eq!(
@@ -693,7 +757,7 @@ mod tests {
     }
 
     fn seed_cache(cache: &RwLock<ThinkingCache>, tool_id: &str) {
-        snapshot_to_cache(cache, "prov", tool_id, make_thinking("my-thinking"));
+        snap(cache, "prov", tool_id, make_thinking("my-thinking"));
     }
 
     fn blocks_of(msg: &AnthropicMessage) -> &Vec<ContentBlock> {
@@ -901,7 +965,7 @@ mod tests {
             Some(super::super::ANTHROPIC_FORMAT),
             serde_json::json!({"text": "some thinking", "signature": ""}),
         );
-        snapshot_to_cache(&cache, "prov", "t-empty-sig", vec![detail]);
+        snap(&cache, "prov", "t-empty-sig", vec![detail]);
         let extras = extras_keep_all();
         let mut messages = vec![assistant_with_tool("t-empty-sig")];
 
@@ -930,7 +994,7 @@ mod tests {
             Some("some-other-format"),
             serde_json::json!({"text": "some thinking", "signature": "sig-valid"}),
         );
-        snapshot_to_cache(&cache, "prov", "t-wrong-fmt", vec![detail]);
+        snap(&cache, "prov", "t-wrong-fmt", vec![detail]);
         let extras = extras_keep_all();
         let mut messages = vec![assistant_with_tool("t-wrong-fmt")];
 
@@ -1001,8 +1065,8 @@ mod tests {
     #[test]
     fn apply_edit_two_tool_uses_no_duplicate_thinking() {
         let cache = small_cache(8);
-        snapshot_to_cache(&cache, "prov", "tu1", make_thinking("think-a"));
-        snapshot_to_cache(&cache, "prov", "tu2", make_thinking("think-b"));
+        snap(&cache, "prov", "tu1", make_thinking("think-a"));
+        snap(&cache, "prov", "tu2", make_thinking("think-b"));
         let extras = extras_keep_all();
         let mut messages = vec![AnthropicMessage {
             role: AnthropicRole::Assistant,
@@ -1044,9 +1108,9 @@ mod tests {
     #[test]
     fn apply_edit_some_empty_not_treated_as_miss() {
         let cache = small_cache(8);
-        snapshot_to_cache(&cache, "prov", "tA", make_thinking("think-alpha"));
+        snap(&cache, "prov", "tA", make_thinking("think-alpha"));
         // Empty vec: some-but-nothing-to-inject.
-        snapshot_to_cache(&cache, "prov", "tB", vec![]);
+        snap(&cache, "prov", "tB", vec![]);
         let extras = extras_keep_all();
         let mut messages = vec![AnthropicMessage {
             role: AnthropicRole::Assistant,
@@ -1154,6 +1218,95 @@ mod tests {
             blocks.len(),
             1,
             "must remain [ToolUse] -- no injection for keep=0"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Per-entry byte-cap tests (CL-3)
+    // ------------------------------------------------------------------
+
+    /// Build a thinking detail vec whose serialized JSON is approximately
+    /// `payload_bytes` long. We pad the `text` field with `'a'` characters
+    /// to control the size; the surrounding wire envelope adds ~120 bytes
+    /// of overhead which is negligible at the sizes we test against.
+    fn make_thinking_of_size(payload_bytes: usize) -> Vec<ReasoningDetail> {
+        let padding = "a".repeat(payload_bytes);
+        vec![ReasoningDetail {
+            kind: ReasoningDetailKind::Text,
+            id: Some("rd-cap".into()),
+            format: Some(super::super::ANTHROPIC_FORMAT.into()),
+            index: Some(0),
+            payload: serde_json::json!({"text": padding, "signature": "sig"}),
+        }]
+    }
+
+    /// Under-cap entry must be inserted normally and round-trip via
+    /// `lookup_thinking`.
+    #[test]
+    fn snapshot_to_cache_under_cap_inserts_and_round_trips() {
+        let cache = small_cache(4);
+        // ~100 KB payload, well under the 256 KB default cap.
+        let thinking = make_thinking_of_size(100 * 1024);
+        snapshot_to_cache(
+            &cache,
+            "prov",
+            "tool-under",
+            thinking.clone(),
+            MAX_THINKING_ENTRY_BYTES,
+            "complete",
+        );
+        let got =
+            lookup_thinking(&cache, "prov", "tool-under").expect("under-cap entry must round-trip");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, thinking[0].id);
+    }
+
+    /// Over-cap entry must be rejected: the LRU is unchanged and the
+    /// next lookup misses.
+    #[test]
+    fn snapshot_to_cache_over_cap_is_rejected() {
+        let cache = small_cache(4);
+        // ~300 KB payload, well over the 256 KB default cap.
+        let thinking = make_thinking_of_size(300 * 1024);
+        snapshot_to_cache(
+            &cache,
+            "prov",
+            "tool-over",
+            thinking,
+            MAX_THINKING_ENTRY_BYTES,
+            "stream",
+        );
+        assert!(
+            lookup_thinking(&cache, "prov", "tool-over").is_none(),
+            "over-cap entry must be rejected; lookup should miss"
+        );
+    }
+
+    /// A configurable cap (passed by callers from `[providers.X]
+    /// max_thinking_entry_bytes`) must be honored: a 1024-byte cap rejects
+    /// a 2 KB entry that would otherwise pass under the 256 KB default.
+    #[test]
+    fn snapshot_to_cache_honors_per_call_cap_override() {
+        let cache = small_cache(4);
+        let thinking = make_thinking_of_size(2 * 1024);
+        // 2 KB entry is well under the default 256 KB cap...
+        snapshot_to_cache(
+            &cache,
+            "prov",
+            "tool-default",
+            thinking.clone(),
+            MAX_THINKING_ENTRY_BYTES,
+            "complete",
+        );
+        assert!(
+            lookup_thinking(&cache, "prov", "tool-default").is_some(),
+            "2 KB entry must round-trip under the default cap"
+        );
+        // ...but rejected under a tightened 1024-byte cap.
+        snapshot_to_cache(&cache, "prov", "tool-tight", thinking, 1024, "complete");
+        assert!(
+            lookup_thinking(&cache, "prov", "tool-tight").is_none(),
+            "2 KB entry must be rejected when the per-call cap is 1 KB"
         );
     }
 }

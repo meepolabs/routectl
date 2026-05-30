@@ -204,6 +204,7 @@ async fn build_provider_inner(
             allowed_betas,
             forward_client_headers,
             context_management,
+            max_thinking_entry_bytes,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -229,6 +230,8 @@ async fn build_provider_inner(
                 allowed_betas: allowed_betas.clone(),
                 forward_client_headers: forward_client_headers.clone(),
                 context_management: *context_management,
+                max_thinking_entry_bytes: max_thinking_entry_bytes
+                    .unwrap_or(AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES),
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }

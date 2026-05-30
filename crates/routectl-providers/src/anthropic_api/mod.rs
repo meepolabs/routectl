@@ -112,6 +112,16 @@ pub struct AnthropicApiConfig {
     /// not honor the beta natively. Default false: routectl forwards the body
     /// verbatim and the real Anthropic server handles the beta itself.
     pub context_management: bool,
+    /// Per-entry byte cap on writes to the thinking cache used by the
+    /// `context_management` emulation path. Entries whose serialized JSON
+    /// representation exceeds this value are rejected at write time and a
+    /// structured WARN is emitted; the strip-thinking-on-miss recovery
+    /// in `request.rs` then handles the next turn the same way it would
+    /// a TTL eviction. Defaults to
+    /// `AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES`
+    /// (256 KB) -- generous for ordinary thinking turns while bounding
+    /// the LRU's worst-case footprint.
+    pub max_thinking_entry_bytes: usize,
 }
 
 impl std::fmt::Debug for AnthropicApiConfig {
@@ -133,11 +143,18 @@ impl std::fmt::Debug for AnthropicApiConfig {
                 &format!("[{} entries]", self.forward_client_headers.len()),
             )
             .field("context_management", &self.context_management)
+            .field("max_thinking_entry_bytes", &self.max_thinking_entry_bytes)
             .finish()
     }
 }
 
 impl AnthropicApiConfig {
+    /// Default per-entry byte cap on the thinking cache. Operators can
+    /// override per provider via `[providers.X] max_thinking_entry_bytes`
+    /// (anthropic-api kind). See the field docs for the rejection semantics.
+    pub const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize =
+        context_management::MAX_THINKING_ENTRY_BYTES;
+
     /// Construct with a static API-key string. The token is wrapped
     /// in `StaticToken` so the provider's resolution call site is
     /// uniform across static and managed sources. Existing callers
@@ -161,6 +178,7 @@ impl AnthropicApiConfig {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
+            max_thinking_entry_bytes: Self::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         }
     }
 }
@@ -202,6 +220,8 @@ impl AnthropicApiProvider {
             provider_id,
             tool_use_id,
             thinking,
+            self.cfg.max_thinking_entry_bytes,
+            "test-seed",
         );
     }
 
@@ -533,6 +553,8 @@ impl Provider for AnthropicApiProvider {
                     &self.cfg.id,
                     &tool_use_id,
                     thinking,
+                    self.cfg.max_thinking_entry_bytes,
+                    "complete",
                 );
             }
         }
@@ -612,6 +634,7 @@ impl Provider for AnthropicApiProvider {
         // across any await point.
         let context_management_enabled = self.cfg.context_management;
         let thinking_cache_for_stream = Arc::clone(&self.thinking_cache);
+        let max_thinking_entry_bytes_for_stream = self.cfg.max_thinking_entry_bytes;
 
         let stream = async_stream::stream! {
             let mut state = SseState::new(&provider_id);
@@ -672,6 +695,8 @@ impl Provider for AnthropicApiProvider {
                         &provider_id,
                         &tool_use_id,
                         thinking,
+                        max_thinking_entry_bytes_for_stream,
+                        "stream",
                     );
                 }
             }
@@ -969,6 +994,7 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers,
             context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         }
     }
 
@@ -1083,6 +1109,7 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers: vec!["x-claude-code-session-id".into()],
             context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "from-client")]);
