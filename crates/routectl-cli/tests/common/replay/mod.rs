@@ -3,7 +3,7 @@
 //! Replay tests load a hand-curated fixture from
 //! `crates/routectl-cli/tests/fixtures/canon/<scenario_name>/`, drive
 //! the relevant code path, and assert the result matches the on-disk
-//! bytes structurally. Phase 1 scope is egress-only (canonical
+//! bytes structurally. Initial scope is egress-only (canonical
 //! `ChatRequest` -> upstream-bound bytes); the actual replay tests
 //! arrive in a follow-up wave.
 //!

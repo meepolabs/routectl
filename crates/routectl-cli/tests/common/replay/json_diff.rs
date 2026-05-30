@@ -11,6 +11,11 @@ use super::DiffMessage;
 /// Compare two JSON values for structural equality. Object key order
 /// is irrelevant; array element order is significant. Subtrees whose
 /// dot-path matches one of `ignore_paths` are skipped.
+///
+/// Path syntax: root-level object keys are named without a leading dot
+/// (e.g. `"model"`); nested keys are joined with `.` (e.g.
+/// `"usage.input_tokens"`); array indices use bracket notation (e.g.
+/// `"messages[0].role"`).
 pub fn assert_json_equal_structural(
     actual: &Value,
     expected: &Value,
@@ -60,7 +65,11 @@ fn json_eq_objects(
         )));
     }
     for k in a_keys {
-        let next = format!("{}.{}", current_path, k);
+        let next = if current_path.is_empty() {
+            k.clone()
+        } else {
+            format!("{}.{}", current_path, k)
+        };
         json_eq_inner(&a[k], &e[k], &next, ignore_paths)?;
     }
     Ok(())
@@ -208,7 +217,7 @@ mod tests {
         let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("value mismatch"), "got: {}", msg);
-        assert!(msg.contains(".a"), "got: {}", msg);
+        assert!(msg.contains("at a:"), "got: {}", msg);
     }
 
     #[test]
@@ -224,7 +233,7 @@ mod tests {
     fn json_equal_skips_ignored_path() {
         let a = json!({"id": "abc", "data": 1});
         let e = json!({"id": "xyz", "data": 1});
-        assert!(assert_json_equal_structural(&a, &e, &[".id"]).is_ok());
+        assert!(assert_json_equal_structural(&a, &e, &["id"]).is_ok());
     }
 
     #[test]
@@ -233,7 +242,7 @@ mod tests {
         let e = json!({"outer": {"inner": [{"x": 1}, {"x": 99}]}});
         let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains(".outer.inner[1].x"), "got: {}", msg);
+        assert!(msg.contains("outer.inner[1].x"), "got: {}", msg);
     }
 
     // ---------- Headers ----------

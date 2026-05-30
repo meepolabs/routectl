@@ -13,7 +13,9 @@ matrix runs.
 
 For the loader and structural comparators (`load_fixture`,
 `assert_json_equal_structural`, `assert_sse_equal`, ...) see
-`crates/routectl-cli/tests/common/replay.rs`.
+`crates/routectl-cli/tests/common/replay/` -- the entry point is
+`mod.rs`, with `loader.rs`, `json_diff.rs`, and `sse_diff.rs` as
+sub-modules.
 
 ## Per-fixture directory layout
 
@@ -62,8 +64,8 @@ Fields:
   the upstream side, or response-only fixtures.
 - `router_overlay` -- `true` if the outgoing body reflects a
   dispatch-time `header_extras` / `payload_extras` overlay.
-  **Phase 1 hard requirement: false.** Overlay-aware replay is
-  deferred; the loader rejects `true` until then.
+  **Must be `false` for now.** Overlay-aware replay is deferred;
+  the loader rejects `true` until then.
 - `expected_unknown_block_count` -- forward-compat scenarios only.
   Pins the number of unknown content blocks the canonical pipeline
   must opaquely pass through.
