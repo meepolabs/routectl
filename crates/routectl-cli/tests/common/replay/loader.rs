@@ -27,10 +27,12 @@ pub enum ReplayError {
     },
     #[error("missing required file: {0}")]
     MissingFile(String),
-    #[error("router-overlay fixtures unsupported in Phase 1")]
+    #[error("router-overlay fixtures are not supported")]
     RouterOverlayUnsupported,
     #[error("invalid header file format in {path}: expected array of [name, value] pairs")]
     InvalidHeaderFormat { path: String },
+    #[error("unexpected file present (meta declared it absent): {path}")]
+    UnexpectedFilePresent { path: String },
 }
 
 /// Mirror of the `meta.json` schema documented in
@@ -42,7 +44,6 @@ pub struct FixtureMeta {
     pub has_upstream_response: bool,
     pub has_egress_response: bool,
     pub router_overlay: bool,
-    #[serde(default)]
     pub expected_unknown_block_count: Option<u32>,
 }
 
@@ -52,8 +53,6 @@ pub struct FixtureMeta {
 #[derive(Debug, Clone)]
 pub struct Fixture {
     pub name: String,
-    pub provider_kind: String,
-    pub stream: bool,
     pub ingress_request: Value,
     pub ingress_request_headers: Vec<(String, String)>,
     pub outgoing_request: Value,
@@ -109,8 +108,6 @@ pub fn load_fixture(dir: &Path) -> Result<Fixture, ReplayError> {
 
     Ok(Fixture {
         name,
-        provider_kind: meta.provider_kind.clone(),
-        stream: meta.stream,
         ingress_request,
         ingress_request_headers,
         outgoing_request,
@@ -189,6 +186,18 @@ fn read_optional_response(
     headers_name: &str,
 ) -> Result<(Vec<u8>, Vec<(String, String)>), ReplayError> {
     if !expected {
+        let body_path = dir.join(body_name);
+        if body_path.exists() {
+            return Err(ReplayError::UnexpectedFilePresent {
+                path: body_path.display().to_string(),
+            });
+        }
+        let headers_path = dir.join(headers_name);
+        if headers_path.exists() {
+            return Err(ReplayError::UnexpectedFilePresent {
+                path: headers_path.display().to_string(),
+            });
+        }
         return Ok((Vec::new(), Vec::new()));
     }
     let body_path = dir.join(body_name);
@@ -315,7 +324,8 @@ mod tests {
 
         let f = load_fixture(&dir).unwrap();
         assert_eq!(f.name, "scenario");
-        assert_eq!(f.provider_kind, "anthropic-api");
+        assert_eq!(f.meta.provider_kind, "anthropic-api");
+        assert!(!f.meta.stream);
         assert_eq!(f.ingress_request, json!({"model": "x"}));
         assert_eq!(f.outgoing_request, json!({"model": "y"}));
         assert_eq!(f.ingress_request_headers.len(), 1);
@@ -337,6 +347,54 @@ mod tests {
         assert!(f.upstream_response_headers.is_empty());
         assert!(f.egress_response_bytes.is_empty());
         assert!(f.egress_response_headers.is_empty());
+    }
+
+    #[test]
+    fn loader_rejects_stray_optional_response_when_meta_is_false() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_minimal_fixture(&dir, false, false);
+        // Stray body file left behind by a partial sanitization.
+        fs::write(dir.join(UPSTREAM_BODY), b"{\"id\":\"u\"}").unwrap();
+
+        let err = load_fixture(&dir).unwrap_err();
+        match &err {
+            ReplayError::UnexpectedFilePresent { path } => {
+                assert!(
+                    path.contains(UPSTREAM_BODY),
+                    "error did not name the stray file: {}",
+                    path
+                );
+            }
+            other => panic!("expected UnexpectedFilePresent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn loader_rejects_stray_optional_headers_when_meta_is_false() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        write_minimal_fixture(&dir, false, false);
+        // Stray headers file left behind by a partial sanitization.
+        fs::write(
+            dir.join(EGRESS_HEADERS),
+            serde_json::to_vec(&json!([["content-type", "application/json"]])).unwrap(),
+        )
+        .unwrap();
+
+        let err = load_fixture(&dir).unwrap_err();
+        match &err {
+            ReplayError::UnexpectedFilePresent { path } => {
+                assert!(
+                    path.contains(EGRESS_HEADERS),
+                    "error did not name the stray file: {}",
+                    path
+                );
+            }
+            other => panic!("expected UnexpectedFilePresent, got {:?}", other),
+        }
     }
 
     #[test]
@@ -374,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn loader_rejects_router_overlay_phase_1() {
+    fn loader_rejects_router_overlay_fixture() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("scenario");
         fs::create_dir(&dir).unwrap();
@@ -392,12 +450,7 @@ mod tests {
         .unwrap();
 
         let err = load_fixture(&dir).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("router-overlay fixtures unsupported in Phase 1"),
-            "expected the documented router-overlay error message, got: {}",
-            msg
-        );
+        assert!(matches!(err, ReplayError::RouterOverlayUnsupported));
     }
 
     #[test]
