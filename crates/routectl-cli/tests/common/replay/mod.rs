@@ -16,13 +16,18 @@
 //!   `discover_fixtures`.
 //! - [`json_diff`] -- structural JSON comparator + header comparator.
 //! - [`sse_diff`] -- SSE event-sequence parser + comparator.
+//! - [`harness`] -- shared scaffolding (canon root locator, header-vec
+//!   to `HeaderMap` bridge, per-fixture outcome enum) used by the
+//!   `replay_egress.rs` / `replay_ingress.rs` test drivers.
 
 #![allow(dead_code, unused_imports)]
 
+pub mod harness;
 pub mod json_diff;
 pub mod loader;
 pub mod sse_diff;
 
+pub use harness::{canon_root, headers_from_pairs, FixtureOutcome};
 pub use json_diff::{
     assert_headers_equal, assert_json_equal_structural, DEFAULT_HEADER_ALLOW_SKIP,
 };
