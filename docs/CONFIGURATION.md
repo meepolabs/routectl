@@ -448,6 +448,33 @@ auth_kind          = "oauth-bearer"
 context_management = true
 ```
 
+### `max_thinking_entry_bytes` (per-entry cap on the thinking cache)
+
+When `context_management = true`, routectl caches thinking blocks observed
+in upstream responses for re-injection on the next turn (see
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) "context_management beta emulation").
+The cache bounds entry-count via an LRU; `max_thinking_entry_bytes` bounds
+the per-entry serialized JSON size so a misbehaving upstream cannot push
+the cache memory footprint to the LRU-cap times the largest single
+response size.
+
+Default: 256 KB per entry. Override per provider when an upstream
+legitimately produces larger thinking turns (rare; typical sizes are
+1-50 KB) or when memory pressure dictates a tighter cap. Entries
+whose serialized bytes exceed the cap are rejected at write time with a
+structured WARN; the next turn's cache-miss recovery strips the
+`thinking` body key just as it does for a TTL eviction, so the request
+still completes without a 400.
+
+```toml
+[providers.deepseek-anthropic]
+kind                      = "anthropic-api"
+base_url                  = "https://api.deepseek.com/anthropic"
+api_key_ref               = "env://DS_KEY"
+context_management        = true
+max_thinking_entry_bytes  = 524288   # tighten or raise from the 256 KB default
+```
+
 ## Log knobs (`[log]`)
 
 The optional `[log]` block carries operator-facing fallbacks for the

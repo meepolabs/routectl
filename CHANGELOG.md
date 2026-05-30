@@ -4,6 +4,12 @@ All notable changes to routectl. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - YYYY-MM-DD
+
+### Security
+
+- Bound per-entry size on the anthropic-api thinking cache; oversized writes are rejected and observed via WARN log to prevent unbounded LRU memory use.
+
 ## [0.7.0] - 2026-05-30
 
 The v0.7 release: routectl-managed OAuth login (Anthropic + Codex)
