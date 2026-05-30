@@ -44,18 +44,22 @@ named in the error).
 ## meta.json schema
 
     {
-      "provider_kind": "anthropic-api" | "openai-compat" | "openai-responses",
+      "provider_kind": "anthropic" | "openai-compat" | "openai-responses",
       "stream": bool,
       "has_upstream_response": bool,
       "has_egress_response": bool,
       "router_overlay": bool,
-      "expected_unknown_block_count": Option<u32>
+      "expected_unknown_block_count": Option<u32>,
+      "model": Option<String>
     }
 
 Fields:
 
 - `provider_kind` -- which egress provider produced the outgoing
-  body. The replay test selects the matching translator.
+  body. The replay test selects the matching translator. The string
+  values match the in-code `PROVIDER_KIND` constants in
+  `routectl-providers` -- in particular `"anthropic"` (not
+  `"anthropic-api"`) for the api.anthropic.com client.
 - `stream` -- `true` for SSE-bytes responses, `false` for JSON
   bodies. Drives which comparator the replay test reaches for
   (`assert_sse_equal` vs `assert_json_equal_structural`).
@@ -69,6 +73,39 @@ Fields:
 - `expected_unknown_block_count` -- forward-compat scenarios only.
   Pins the number of unknown content blocks the canonical pipeline
   must opaquely pass through.
+- `model` -- post-alias provider model id from the trace. Optional
+  in the schema (older fixtures load without it), but the capture
+  rig always writes it. Used by the replay drivers to apply the
+  Phase 1 corpus scope below.
+
+## Phase 1 corpus scope
+
+The replay drivers exercise the bare ingress -> egress path:
+`AnthropicIngress::parse_request` produces a canonical `ChatRequest`
+with default `routectl_internal` (`supports_adaptive_thinking=false`,
+`history_reasoning=Auto`, `reasoning_dialect=None`,
+`max_thinking_budget=0`). In production the router overlays these
+fields from `model_profile.rs` and the dispatch-time merge BEFORE the
+egress sees the canonical. Phase 1 replay does not yet thread that
+enrichment, so any fixture whose model relies on it would diverge on
+the outgoing body.
+
+Practical effect:
+
+- `claude-haiku-*` and `claude-sonnet-*` capture rows are typically
+  in scope (their profile defaults match the bare canonical).
+- Fixtures from `claude-opus-4` and newer (adaptive thinking on) are
+  out of scope -- the egress applies adaptive-budget logic the bare
+  canonical does not carry.
+- Fixtures from DeepSeek (`history_reasoning=Preserve`) are out of
+  scope -- the egress preserves reasoning history that the bare
+  canonical drops.
+
+The replay drivers enforce this by skipping any fixture whose
+`meta.model` contains a denylisted substring (`opus-4`, `deepseek`).
+Skipped fixtures land in the `skipped` count of the test summary, not
+`failed`. Adaptive-thinking and DeepSeek replay will arrive in a
+later phase that threads router enrichment through the test setup.
 
 ## Redaction policy
 

@@ -226,6 +226,16 @@ The recipe below walks the day-to-day capture flow.
    - Inspect `meta.json`. Confirm `provider_kind`, `stream`, alias,
      and finish_reason match the scenario you intended to capture.
      Keep small, interesting cases.
+   - `provider_kind` is the in-code `PROVIDER_KIND` constant from
+     the relevant egress -- in particular `"anthropic"` (not
+     `"anthropic-api"`) for the api.anthropic.com client. The
+     capture rig writes it verbatim.
+   - Phase one replay drivers DO NOT yet exercise stream fixtures
+     end-to-end (the capture rig writes empty stream bodies and
+     `replay_ingress` skips them; `replay_egress` would also see
+     drift on the body `stream` key). Prefer non-stream fixtures
+     for the seed corpus. NOTE: revisit this caveat once
+     stream-replay support lands.
    - Open every `*.headers.json`. Replace the value of every
      `Authorization`, `x-api-key`, `x-amz-*`, `anthropic-api-key`,
      `proxy-authorization`, `cookie`, and `set-cookie` header with
@@ -262,9 +272,14 @@ The recipe below walks the day-to-day capture flow.
 9. **Commit and exercise the new fixture:**
 
    ```
-   cargo test -p routectl-cli --release --test replay_egress
-   cargo test -p routectl-cli --release --test replay_ingress
+   cargo test -p routectl-cli --release --test replay_egress -- --nocapture
+   cargo test -p routectl-cli --release --test replay_ingress -- --nocapture
    ```
+
+   `--nocapture` surfaces the `[replay_*]` summary plus per-fixture
+   skip reasons on stderr; without it cargo swallows them and you
+   only see the asserted/skipped/failed counts when something blows
+   up.
 
 ## Style notes
 
