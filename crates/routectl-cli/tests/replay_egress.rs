@@ -6,9 +6,18 @@
 //! matches the on-disk `outgoing_request.json` structurally.
 //!
 //! Phase one scope: anthropic ingress only. Egress providers covered
-//! are `anthropic-api`, `openai-compat`, and `openai-responses`.
-//! Bedrock is out of scope. Fixtures with unrecognized or skipped
-//! provider kinds are logged and bypassed without failing the test.
+//! are `anthropic` (the api.anthropic.com client; the in-code
+//! `PROVIDER_KIND` constant is `"anthropic"`), `openai-compat`, and
+//! `openai-responses`. Bedrock is out of scope.
+//!
+//! Fixtures with out-of-scope provider kinds (bedrock variants) are
+//! logged and bypassed; an unrecognized or misspelled `provider_kind`
+//! is treated as a fixture authoring error and fails the test.
+//!
+//! Phase one also bypasses fixtures whose model needs router-side
+//! enrichment (adaptive thinking, DeepSeek `history_reasoning`) that
+//! the bare ingress -> egress path does not yet replay -- see the
+//! "Phase 1 corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
 //! Zero fixtures is acceptable: when `canon/` holds no scenario
 //! directories the test passes silently with a single info log so it
@@ -16,10 +25,8 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::IngressAdapter;
 use routectl_core::{ChatRequest, Provider, StaticToken};
@@ -29,35 +36,18 @@ use routectl_providers::openai_compat::{
 };
 use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 
-use common::replay::{assert_json_equal_structural, discover_fixtures, Fixture};
+use common::replay::{
+    assert_json_equal_structural, canon_root, discover_fixtures, headers_from_pairs, Fixture,
+    FixtureOutcome,
+};
 
-/// Path (relative to the workspace root) to the hand-curated fixture
-/// corpus. `discover_fixtures` returns an empty vector when the
-/// directory contains only `.gitkeep` / `README.md`, which keeps this
-/// test passing before the seed corpus lands.
-fn canon_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/canon")
-}
-
-/// Build a `HeaderMap` from the `(name, value)` pairs persisted in a
-/// fixture's `*.headers.json`. Pairs whose name or value cannot be
-/// converted into the `http` types are skipped silently -- a fixture
-/// produced by the capture rig stores ASCII-clean headers, and this
-/// helper is a defensive bridge between the loader's
-/// `Vec<(String, String)>` and the ingress's `&HeaderMap`.
-fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
-    let mut out = HeaderMap::new();
-    for (name, value) in pairs {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(value) = HeaderValue::from_str(value) else {
-            continue;
-        };
-        out.insert(name, value);
-    }
-    out
-}
+/// Substrings flagged as "needs router enrichment not yet wired into
+/// replay". A fixture whose `meta.model` contains any of these is
+/// skipped on both replay drivers; the constraint is documented in
+/// `docs/REPLAY-FIXTURES.md` "Phase 1 corpus scope". Matching is
+/// substring + case-insensitive so capture-rig variants
+/// (`claude-opus-4-7-...`, `deepseek-v4`, ...) all hit.
+const PHASE1_MODEL_DENYLIST: &[&str] = &["opus-4", "deepseek"];
 
 fn anthropic_api_provider() -> AnthropicApiProvider {
     AnthropicApiProvider::new(AnthropicApiConfig {
@@ -89,6 +79,12 @@ fn openai_compat_provider() -> OpenAiCompatProvider {
     })
 }
 
+// NOTE: `OpenAiResponsesConfig::new` hard-codes
+// `auth_kind = AuthKind::ChatgptOauth` and `account_id = None`. Replay
+// fixtures captured from a non-OAuth Responses session may diverge on
+// store/account_id-gated body shape. The phase-one corpus is scoped
+// to ChatgptOauth-captured fixtures; if that ever changes, pin
+// `auth_kind` in `meta.json` and branch the builder here.
 fn openai_responses_provider() -> OpenAiResponsesProvider {
     OpenAiResponsesProvider::new(OpenAiResponsesConfig::new(
         "openai-responses-replay",
@@ -96,27 +92,27 @@ fn openai_responses_provider() -> OpenAiResponsesProvider {
     ))
 }
 
-/// Outcome of a per-fixture run. `Skipped` carries a human-readable
-/// reason so the test driver can surface it as an info log rather than
-/// a failure.
-enum FixtureOutcome {
-    Asserted,
-    Skipped(String),
-}
-
 /// Drive `normalize_request` for the egress matched by
 /// `meta.provider_kind`. Returns `Ok(None)` when the provider kind is
 /// recognized-but-skipped (bedrock variants); the caller emits a skip
 /// log. An unknown kind is treated as a fixture authoring bug.
+///
+/// NOTE: this match must stay in lockstep with
+/// `replay_ingress.rs::mount_for_kind` and
+/// `replay_ingress.rs::build_provider_for_kind` -- when adding or
+/// renaming a kind, edit all three.
 fn normalize_for_kind(
     kind: &str,
     canonical: &ChatRequest,
 ) -> Result<Option<serde_json::Value>, String> {
     match kind {
-        "anthropic-api" => anthropic_api_provider()
+        // The in-code constant in `routectl_providers::anthropic_api`
+        // is `"anthropic"`; the capture rig writes that verbatim, so
+        // the test side aligns to the source of truth.
+        "anthropic" => anthropic_api_provider()
             .normalize_request(canonical)
             .map(Some)
-            .map_err(|e| format!("anthropic-api normalize_request failed: {e}")),
+            .map_err(|e| format!("anthropic normalize_request failed: {e}")),
         "openai-compat" => openai_compat_provider()
             .normalize_request(canonical)
             .map(Some)
@@ -126,14 +122,59 @@ fn normalize_for_kind(
             .map(Some)
             .map_err(|e| format!("openai-responses normalize_request failed: {e}")),
         // Bedrock egress replay is out of scope for phase one.
-        "bedrock" | "bedrock-invoke" | "bedrock-converse" => Ok(None),
+        "bedrock-invoke" | "bedrock-converse" => Ok(None),
         other => Err(format!("unknown provider_kind `{other}`")),
     }
+}
+
+/// Per-provider `ignore_paths` for the structural body comparator.
+/// Each ignored key is a body field the egress flips AFTER
+/// `normalize_request` returns and BEFORE the trace-line capture, so
+/// the captured `outgoing_request.json` and the bare-`normalize_request`
+/// output diverge there by design:
+///
+/// - `stream`: anthropic-api `complete()` strips it, `stream()`
+///   inserts `true`; openai-compat `complete()` forces `false`,
+///   `stream()` forces `true`; openai-responses always forces `true`.
+/// - `anthropic_beta`: anthropic-api `complete()` and `stream()` both
+///   strip the body field (betas travel on the HTTP header instead).
+/// - `stream_options`: openai-compat `stream()` auto-injects
+///   `stream_options.include_usage = true`.
+fn ignore_paths_for_kind(kind: &str, stream: bool) -> Vec<&'static str> {
+    let mut paths = vec!["stream"];
+    match kind {
+        "anthropic" => paths.push("anthropic_beta"),
+        "openai-compat" if stream => paths.push("stream_options"),
+        _ => {}
+    }
+    paths
+}
+
+/// Phase-one denylist filter: drop fixtures whose model requires the
+/// router-side enrichment (adaptive thinking, DeepSeek
+/// `history_reasoning`) that the bare ingress -> egress path does not
+/// yet replay.
+fn phase1_skip_reason(fixture: &Fixture) -> Option<String> {
+    let model = fixture.meta.model.as_deref()?;
+    let lc = model.to_ascii_lowercase();
+    for needle in PHASE1_MODEL_DENYLIST {
+        if lc.contains(needle) {
+            return Some(format!(
+                "model `{model}` matches phase-one denylist substring `{needle}`; \
+                 needs router enrichment not yet wired into replay",
+            ));
+        }
+    }
+    None
 }
 
 /// Run the egress assertion for one fixture. Skips return with a
 /// reason; a real diff returns an `Err`.
 fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
+    if let Some(reason) = phase1_skip_reason(fixture) {
+        return Ok(FixtureOutcome::Skipped(reason));
+    }
+
     let headers = headers_from_pairs(&fixture.ingress_request_headers);
     let canonical = AnthropicIngress
         .parse_request(&headers, fixture.ingress_request.clone())
@@ -146,7 +187,8 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
         )));
     };
 
-    assert_json_equal_structural(&actual_body, &fixture.outgoing_request, &[])
+    let ignore = ignore_paths_for_kind(&fixture.meta.provider_kind, fixture.meta.stream);
+    assert_json_equal_structural(&actual_body, &fixture.outgoing_request, &ignore)
         .map_err(|e| format!("outgoing_request body mismatch: {e}"))?;
 
     Ok(FixtureOutcome::Asserted)
@@ -156,7 +198,7 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 fn egress_replay_all() {
     let root = canon_root();
     if !root.exists() {
-        println!(
+        eprintln!(
             "[replay_egress] canon/ root `{}` not present; nothing to assert.",
             root.display(),
         );
@@ -167,7 +209,7 @@ fn egress_replay_all() {
         Err(e) => panic!("failed to discover fixtures under {}: {e}", root.display()),
     };
     if fixtures.is_empty() {
-        println!("[replay_egress] 0 fixtures in canon/; nothing to assert.");
+        eprintln!("[replay_egress] 0 fixtures in canon/; nothing to assert.");
         return;
     }
 
@@ -178,7 +220,7 @@ fn egress_replay_all() {
         match run_egress_assertion(fixture) {
             Ok(FixtureOutcome::Asserted) => asserted += 1,
             Ok(FixtureOutcome::Skipped(reason)) => {
-                println!(
+                eprintln!(
                     "[replay_egress] skipping fixture `{}`: {reason}",
                     fixture.name,
                 );
@@ -188,7 +230,7 @@ fn egress_replay_all() {
         }
     }
 
-    println!(
+    eprintln!(
         "[replay_egress] {} fixture(s): {} asserted, {} skipped, {} failed",
         fixtures.len(),
         asserted,

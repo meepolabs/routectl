@@ -14,6 +14,19 @@
 //! log so the rest of the corpus still runs. Bedrock egress is also
 //! out of scope.
 //!
+//! Openai-responses ingress replay is deferred from phase one:
+//! `OpenAiResponsesProvider::complete()` always sets `stream:true`
+//! and consumes SSE, so a wiremock returning a captured
+//! post-extraction JSON body breaks the eventsource parser. Replay
+//! of that egress arrives once the capture rig writes a raw-SSE
+//! variant (or the test driver wraps the JSON in a synthetic event
+//! stream).
+//!
+//! Phase one also bypasses fixtures whose model needs router-side
+//! enrichment (adaptive thinking, DeepSeek `history_reasoning`) that
+//! the bare ingress -> egress path does not yet replay -- see the
+//! "Phase 1 corpus scope" section in `docs/REPLAY-FIXTURES.md`.
+//!
 //! Zero exercisable fixtures is acceptable: when `canon/` has none of
 //! the supported (non-stream + recognized provider) fixtures the test
 //! passes silently with a single info log so it can land before the
@@ -21,10 +34,8 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::IngressAdapter;
 use routectl_core::{ChatRequest, Provider, StaticToken};
@@ -37,36 +48,16 @@ use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use common::replay::{assert_json_equal_structural, discover_fixtures, Fixture};
+use common::replay::{
+    assert_json_equal_structural, canon_root, discover_fixtures, headers_from_pairs, Fixture,
+    FixtureOutcome,
+};
 
-/// Path (relative to the workspace root) to the hand-curated fixture
-/// corpus. Mirrors `replay_egress.rs::canon_root`.
-fn canon_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/canon")
-}
-
-/// Build a `HeaderMap` from the loader's `Vec<(String, String)>`. See
-/// the matching helper in `replay_egress.rs` for rationale.
-fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
-    let mut out = HeaderMap::new();
-    for (name, value) in pairs {
-        let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(value) = HeaderValue::from_str(value) else {
-            continue;
-        };
-        out.insert(name, value);
-    }
-    out
-}
-
-/// Outcome of one fixture's run. `Skipped` carries a human-readable
-/// reason; `Asserted` means the fixture was exercised end-to-end.
-enum FixtureOutcome {
-    Asserted,
-    Skipped(String),
-}
+/// Substrings flagged as "needs router enrichment not yet wired into
+/// replay". Mirrors `replay_egress.rs::PHASE1_MODEL_DENYLIST`; both
+/// must agree because they describe the same scope constraint
+/// documented in `docs/REPLAY-FIXTURES.md`.
+const PHASE1_MODEL_DENYLIST: &[&str] = &["opus-4", "deepseek"];
 
 /// Description of which path + content-type the egress provider hits
 /// upstream. Wiremock matches on these to serve the captured response.
@@ -75,59 +66,89 @@ struct EgressMount {
     path_str: &'static str,
 }
 
-fn mount_for_kind(kind: &str) -> Option<EgressMount> {
+/// Map a provider kind to its upstream wiremock route. Returns
+/// `Ok(None)` for kinds that are recognized but out of phase-one
+/// scope (bedrock variants, openai-responses); an unknown kind is
+/// treated as a fixture authoring bug and surfaces as an `Err`.
+///
+/// NOTE: this match must stay in lockstep with
+/// `build_provider_for_kind` below and
+/// `replay_egress.rs::normalize_for_kind` -- when adding or renaming
+/// a kind, edit all three.
+fn mount_for_kind(kind: &str) -> Result<Option<EgressMount>, String> {
     match kind {
-        "anthropic-api" => Some(EgressMount {
+        "anthropic" => Ok(Some(EgressMount {
             method_str: "POST",
             path_str: "/v1/messages",
-        }),
-        "openai-compat" => Some(EgressMount {
+        })),
+        "openai-compat" => Ok(Some(EgressMount {
             method_str: "POST",
             path_str: "/chat/completions",
-        }),
-        "openai-responses" => Some(EgressMount {
-            method_str: "POST",
-            path_str: "/responses",
-        }),
-        _ => None,
+        })),
+        // openai-responses ingress replay is deferred from phase one;
+        // see the module doc for the SSE-shape rationale.
+        "openai-responses" => Ok(None),
+        // Bedrock egress replay is out of scope for phase one.
+        "bedrock-invoke" | "bedrock-converse" => Ok(None),
+        other => Err(format!("unknown provider_kind `{other}`")),
     }
 }
 
 /// Build the egress provider for a given kind, pointed at the
-/// wiremock server. Returns `None` for kinds that are recognized but
-/// out of phase-one scope (bedrock variants).
-fn build_provider_for_kind(kind: &str, base_url: String) -> Option<Box<dyn Provider>> {
+/// wiremock server. Returns `Ok(None)` for kinds that are recognized
+/// but out of phase-one scope; an unknown kind surfaces as an `Err`
+/// and fails the test.
+///
+/// NOTE: keep in lockstep with `mount_for_kind` and
+/// `replay_egress.rs::normalize_for_kind`.
+fn build_provider_for_kind(
+    kind: &str,
+    base_url: String,
+) -> Result<Option<Box<dyn Provider>>, String> {
     match kind {
-        "anthropic-api" => Some(Box::new(AnthropicApiProvider::new(AnthropicApiConfig {
-            id: "anthropic-replay".into(),
-            auth: Arc::new(StaticToken::new("test-key")),
-            base_url,
-            anthropic_version: "2023-06-01".into(),
-            auth_kind: AuthKind::ApiKey,
-            header_extras: Vec::new(),
-            user_agent: None,
-            allowed_betas: Vec::new(),
-            forward_client_headers: Vec::new(),
-            context_management: false,
-        }))),
-        "openai-compat" => Some(Box::new(OpenAiCompatProvider::new(OpenAiCompatConfig {
-            id: "openai-compat-replay".into(),
-            base_url,
-            api_key: "test-key".into(),
-            header_extras: Vec::new(),
-            payload_extras: None,
-            reasoning_dialect: ReasoningDialect::OpenAi,
-            history_reasoning: HistoryReasoning::Auto,
-            user_agent: None,
-            strict_translation: false,
-            disable_stream_include_usage: false,
-        }))),
+        "anthropic" => Ok(Some(Box::new(AnthropicApiProvider::new(
+            AnthropicApiConfig {
+                id: "anthropic-replay".into(),
+                auth: Arc::new(StaticToken::new("test-key")),
+                base_url,
+                anthropic_version: "2023-06-01".into(),
+                auth_kind: AuthKind::ApiKey,
+                header_extras: Vec::new(),
+                user_agent: None,
+                allowed_betas: Vec::new(),
+                forward_client_headers: Vec::new(),
+                context_management: false,
+            },
+        )))),
+        "openai-compat" => Ok(Some(Box::new(OpenAiCompatProvider::new(
+            OpenAiCompatConfig {
+                id: "openai-compat-replay".into(),
+                base_url,
+                api_key: "test-key".into(),
+                header_extras: Vec::new(),
+                payload_extras: None,
+                reasoning_dialect: ReasoningDialect::OpenAi,
+                history_reasoning: HistoryReasoning::Auto,
+                user_agent: None,
+                strict_translation: false,
+                disable_stream_include_usage: false,
+            },
+        )))),
+        // NOTE: `OpenAiResponsesConfig::new` hard-codes
+        // `auth_kind = AuthKind::ChatgptOauth` and `account_id = None`.
+        // Replay fixtures captured from a non-OAuth Responses session
+        // may diverge on store/account_id-gated body shape. This branch
+        // is unreachable in phase one (mount_for_kind returns None for
+        // openai-responses), but the builder is kept here so the
+        // future SSE-aware ingress replay can wire it without
+        // rediscovering the auth-config requirement.
         "openai-responses" => {
             let mut cfg = OpenAiResponsesConfig::new("openai-responses-replay", "test-key");
             cfg.base_url = base_url;
-            Some(Box::new(OpenAiResponsesProvider::new(cfg)))
+            Ok(Some(Box::new(OpenAiResponsesProvider::new(cfg))))
         }
-        _ => None,
+        "bedrock-invoke" | "bedrock-converse" => Ok(None),
+        other => Err(format!("unknown provider_kind `{other}`")),
     }
 }
 
@@ -156,6 +177,24 @@ fn parse_canonical(fixture: &Fixture) -> Result<ChatRequest, String> {
         .map_err(|e| format!("anthropic ingress parse_request failed: {e}"))
 }
 
+/// Phase-one denylist filter: drop fixtures whose model requires the
+/// router-side enrichment (adaptive thinking, DeepSeek
+/// `history_reasoning`) that the bare ingress -> egress path does not
+/// yet replay. Mirrors `replay_egress.rs::phase1_skip_reason`.
+fn phase1_skip_reason(fixture: &Fixture) -> Option<String> {
+    let model = fixture.meta.model.as_deref()?;
+    let lc = model.to_ascii_lowercase();
+    for needle in PHASE1_MODEL_DENYLIST {
+        if lc.contains(needle) {
+            return Some(format!(
+                "model `{model}` matches phase-one denylist substring `{needle}`; \
+                 needs router enrichment not yet wired into replay",
+            ));
+        }
+    }
+    None
+}
+
 /// Drive one non-stream fixture end-to-end and compare the rendered
 /// ingress response against the captured `egress_response.json`.
 async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
@@ -170,7 +209,7 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
         ));
     }
 
-    let Some(mount) = mount_for_kind(&fixture.meta.provider_kind) else {
+    let Some(mount) = mount_for_kind(&fixture.meta.provider_kind)? else {
         return Ok(FixtureOutcome::Skipped(format!(
             "provider_kind `{}` out of phase-one scope",
             fixture.meta.provider_kind,
@@ -183,7 +222,7 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
         "application/json",
     )
     .await;
-    let Some(provider) = build_provider_for_kind(&fixture.meta.provider_kind, server.uri()) else {
+    let Some(provider) = build_provider_for_kind(&fixture.meta.provider_kind, server.uri())? else {
         return Ok(FixtureOutcome::Skipped(format!(
             "provider_kind `{}` lacks a phase-one builder",
             fixture.meta.provider_kind,
@@ -210,6 +249,9 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
 /// based on `meta.stream`. Stream fixtures are skipped pending the
 /// capture rig writing stream bodies (deferred from phase one).
 async fn run_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
+    if let Some(reason) = phase1_skip_reason(fixture) {
+        return Ok(FixtureOutcome::Skipped(reason));
+    }
     if fixture.meta.stream {
         return Ok(FixtureOutcome::Skipped(
             "stream fixture; stream-body capture deferred".into(),
@@ -222,7 +264,7 @@ async fn run_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 async fn ingress_replay_all() {
     let root = canon_root();
     if !root.exists() {
-        println!(
+        eprintln!(
             "[replay_ingress] canon/ root `{}` not present; nothing to assert.",
             root.display(),
         );
@@ -233,7 +275,7 @@ async fn ingress_replay_all() {
         Err(e) => panic!("failed to discover fixtures under {}: {e}", root.display()),
     };
     if fixtures.is_empty() {
-        println!("[replay_ingress] 0 fixtures in canon/; nothing to assert.");
+        eprintln!("[replay_ingress] 0 fixtures in canon/; nothing to assert.");
         return;
     }
 
@@ -244,7 +286,7 @@ async fn ingress_replay_all() {
         match run_fixture(fixture).await {
             Ok(FixtureOutcome::Asserted) => asserted += 1,
             Ok(FixtureOutcome::Skipped(reason)) => {
-                println!(
+                eprintln!(
                     "[replay_ingress] skipping fixture `{}`: {reason}",
                     fixture.name,
                 );
@@ -254,7 +296,7 @@ async fn ingress_replay_all() {
         }
     }
 
-    println!(
+    eprintln!(
         "[replay_ingress] {} fixture(s): {} asserted, {} skipped, {} failed",
         fixtures.len(),
         asserted,

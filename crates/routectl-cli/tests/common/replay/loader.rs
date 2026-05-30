@@ -36,7 +36,10 @@ pub enum ReplayError {
 }
 
 /// Mirror of the `meta.json` schema documented in
-/// `docs/REPLAY-FIXTURES.md`.
+/// `docs/REPLAY-FIXTURES.md`. `model` is the post-alias provider model
+/// id from the trace; the test drivers use it to skip fixtures whose
+/// model needs router-side enrichment that the bare ingress -> egress
+/// path does not yet replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixtureMeta {
     pub provider_kind: String,
@@ -45,6 +48,11 @@ pub struct FixtureMeta {
     pub has_egress_response: bool,
     pub router_overlay: bool,
     pub expected_unknown_block_count: Option<u32>,
+    /// Post-alias provider model id; populated by the capture rig.
+    /// Optional so older fixtures (and the loader's unit tests) load
+    /// without a forced rewrite.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// One loaded fixture. Body files are parsed as JSON for the request

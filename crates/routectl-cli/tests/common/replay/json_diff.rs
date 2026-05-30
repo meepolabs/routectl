@@ -52,8 +52,24 @@ fn json_eq_objects(
     current_path: &str,
     ignore_paths: &[&str],
 ) -> Result<(), DiffMessage> {
-    let a_keys: BTreeSet<&String> = a.keys().collect();
-    let e_keys: BTreeSet<&String> = e.keys().collect();
+    // Filter out keys whose dot-path matches an ignore entry. The
+    // semantics of `ignore_paths` are "this subtree is not part of the
+    // comparison" -- which has to apply to KEY MEMBERSHIP too, not
+    // just to descendant value comparison. Per-provider body flips
+    // (e.g. anthropic-api stripping `anthropic_beta`, openai-compat
+    // injecting `stream_options`) make a key appear on exactly one
+    // side of the diff; the test driver legitimately wants to ignore
+    // those without flagging the absence as a key mismatch.
+    let key_in_scope = |key: &str| -> bool {
+        let next = if current_path.is_empty() {
+            key.to_string()
+        } else {
+            format!("{}.{}", current_path, key)
+        };
+        !ignore_paths.contains(&next.as_str())
+    };
+    let a_keys: BTreeSet<&String> = a.keys().filter(|k| key_in_scope(k)).collect();
+    let e_keys: BTreeSet<&String> = e.keys().filter(|k| key_in_scope(k)).collect();
     if a_keys != e_keys {
         let only_actual: Vec<&String> = a_keys.difference(&e_keys).copied().collect();
         let only_expected: Vec<&String> = e_keys.difference(&a_keys).copied().collect();
@@ -234,6 +250,30 @@ mod tests {
         let a = json!({"id": "abc", "data": 1});
         let e = json!({"id": "xyz", "data": 1});
         assert!(assert_json_equal_structural(&a, &e, &["id"]).is_ok());
+    }
+
+    #[test]
+    fn json_equal_skips_ignored_key_present_in_only_one_side() {
+        // Per-provider body flip: actual carries an extra key (e.g.
+        // `anthropic_beta` before the post-normalize strip) that the
+        // captured outgoing body has lost. With the path ignored the
+        // comparator must not flag the asymmetric membership.
+        let a = json!({"model": "x", "anthropic_beta": ["foo"]});
+        let e = json!({"model": "x"});
+        assert!(assert_json_equal_structural(&a, &e, &["anthropic_beta"]).is_ok());
+
+        let a = json!({"model": "x"});
+        let e = json!({"model": "x", "stream": true});
+        assert!(assert_json_equal_structural(&a, &e, &["stream"]).is_ok());
+    }
+
+    #[test]
+    fn json_equal_still_fails_on_unrelated_unique_key() {
+        // Sanity: an ignored path must not silence ALL key mismatches.
+        let a = json!({"model": "x", "extra": 1});
+        let e = json!({"model": "x"});
+        let err = assert_json_equal_structural(&a, &e, &["stream"]).unwrap_err();
+        assert!(err.to_string().contains("key mismatch"), "got: {err}");
     }
 
     #[test]
