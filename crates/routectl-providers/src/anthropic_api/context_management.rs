@@ -323,10 +323,42 @@ pub(crate) fn apply_clear_thinking_edit(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
 ) -> ApplyResult {
-    use crate::anthropic_api::types::{AnthropicContent, AnthropicRole, ContentBlock};
+    use crate::anthropic_api::types::AnthropicContent;
 
-    // Step 1: find the first clear_thinking_20251015 edit.
-    let edit = extras
+    let Some(edit) = find_clear_thinking_edit(extras) else {
+        return ApplyResult {
+            missed_tool_ids: vec![],
+        };
+    };
+
+    let policy = parse_keep_policy(edit, provider_id);
+    let selected = select_target_message_indices(messages, &policy);
+    if selected.is_empty() {
+        return ApplyResult {
+            missed_tool_ids: vec![],
+        };
+    }
+
+    let mut missed_tool_ids: Vec<String> = Vec::new();
+    for msg_idx in &selected {
+        let msg = &mut messages[*msg_idx];
+        let blocks = match &mut msg.content {
+            AnthropicContent::Blocks(b) => b,
+            AnthropicContent::Text(_) => continue,
+        };
+        inject_thinking_into_message(blocks, cache, provider_id, &mut missed_tool_ids);
+    }
+
+    ApplyResult { missed_tool_ids }
+}
+
+/// Locate the first `clear_thinking_20251015` entry in
+/// `extras["context_management"]["edits"]`. Returns `None` when extras
+/// are absent, malformed, or contain no matching edit.
+fn find_clear_thinking_edit(
+    extras: std::option::Option<&serde_json::Value>,
+) -> std::option::Option<&serde_json::Value> {
+    extras
         .and_then(|e| e.get("context_management"))
         .and_then(|cm| cm.get("edits"))
         .and_then(|edits| edits.as_array())
@@ -335,17 +367,18 @@ pub(crate) fn apply_clear_thinking_edit(
                 e.get("type").and_then(serde_json::Value::as_str)
                     == std::option::Option::Some(CLEAR_THINKING_EDIT_TYPE)
             })
-        });
+        })
+}
 
-    let Some(edit) = edit else {
-        return ApplyResult {
-            missed_tool_ids: vec![],
-        };
-    };
-
-    // Step 2: parse the `keep` policy.
+/// Decode the `keep` field on a `clear_thinking_20251015` edit. Accepts:
+/// - `"all"` -> `KeepPolicy::All`
+/// - bare integer 0 / N -> `None` / `LastN(N)`
+/// - `{"type":"thinking_turns","value":n}` -> `None` / `LastN(N)`
+/// - missing or unknown shape -> defaults to `KeepPolicy::All` and emits
+///   a debug log so operators can spot malformed inputs.
+fn parse_keep_policy(edit: &serde_json::Value, provider_id: &str) -> KeepPolicy {
     let keep_val = edit.get("keep");
-    let policy = match keep_val {
+    match keep_val {
         std::option::Option::Some(serde_json::Value::String(s)) if s == "all" => KeepPolicy::All,
         // Bare integer: keep = 0 means None, keep = N means LastN(N).
         std::option::Option::Some(serde_json::Value::Number(n)) => match n.as_u64() {
@@ -386,9 +419,21 @@ pub(crate) fn apply_clear_thinking_edit(
             );
             KeepPolicy::All
         }
-    };
+    }
+}
 
-    // Step 3: collect indices of assistant messages that contain ToolUse.
+/// Choose which assistant-message indices receive injection under the
+/// given keep policy. Walks `messages` to find assistant messages that
+/// contain at least one `ToolUse` block, then narrows by policy:
+/// - `All` -> every qualifying index.
+/// - `LastN(n)` -> the last `n` qualifying indices.
+/// - `None` -> the empty set.
+fn select_target_message_indices(
+    messages: &[crate::anthropic_api::types::AnthropicMessage],
+    policy: &KeepPolicy,
+) -> std::collections::HashSet<usize> {
+    use crate::anthropic_api::types::{AnthropicContent, AnthropicRole, ContentBlock};
+
     let qualifying: Vec<usize> = messages
         .iter()
         .enumerate()
@@ -410,93 +455,116 @@ pub(crate) fn apply_clear_thinking_edit(
         })
         .collect();
 
-    // Apply policy to select which indices get injected.
-    let selected: std::collections::HashSet<usize> = match policy {
+    match policy {
         KeepPolicy::All => qualifying.iter().copied().collect(),
         KeepPolicy::LastN(n) => {
-            let start = qualifying.len().saturating_sub(n);
+            let start = qualifying.len().saturating_sub(*n);
             qualifying[start..].iter().copied().collect()
         }
         KeepPolicy::None => std::collections::HashSet::new(),
-    };
-
-    if selected.is_empty() {
-        return ApplyResult {
-            missed_tool_ids: vec![],
-        };
     }
+}
 
-    // Step 4: inject.
-    let mut missed_tool_ids: Vec<String> = Vec::new();
+/// Inject cached thinking before each `ToolUse` block in `blocks`.
+///
+/// Forward pass with offset tracking so each shift is O(n) in the
+/// content-block slice. Per tool_use:
+/// - Idempotency guard: if the immediately preceding block is already
+///   `Thinking` or `RedactedThinking`, skip without consulting the cache.
+/// - Otherwise delegate the lookup-and-insert to
+///   `try_inject_thinking_at` and bump the running offset by the number
+///   of blocks it inserted.
+fn inject_thinking_into_message(
+    blocks: &mut Vec<crate::anthropic_api::types::ContentBlock>,
+    cache: &std::sync::RwLock<ThinkingCache>,
+    provider_id: &str,
+    missed_tool_ids: &mut Vec<String>,
+) {
+    use crate::anthropic_api::types::ContentBlock;
 
-    for msg_idx in &selected {
-        let msg = &mut messages[*msg_idx];
-        let blocks = match &mut msg.content {
-            AnthropicContent::Blocks(b) => b,
-            AnthropicContent::Text(_) => continue,
-        };
-
-        // Collect (original_position, tool_use_id) pairs for this message.
-        let tool_use_pairs: Vec<(usize, String)> = blocks
-            .iter()
-            .enumerate()
-            .filter_map(|(j, b)| {
-                if let ContentBlock::ToolUse { id, .. } = b {
-                    std::option::Option::Some((j, id.clone()))
-                } else {
-                    std::option::Option::None
-                }
-            })
-            .collect();
-
-        // Forward pass with offset tracking. Each injection shifts
-        // subsequent positions by the number of blocks inserted.
-        let mut offset: usize = 0;
-        for (orig_j, id) in tool_use_pairs {
-            let current_j = orig_j + offset;
-            // Idempotency: skip if immediately preceded by thinking.
-            if current_j > 0
-                && matches!(
-                    &blocks[current_j - 1],
-                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
-                )
-            {
-                continue;
+    let tool_use_pairs: Vec<(usize, String)> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(j, b)| {
+            if let ContentBlock::ToolUse { id, .. } = b {
+                std::option::Option::Some((j, id.clone()))
+            } else {
+                std::option::Option::None
             }
-            match lookup_thinking(cache, provider_id, &id) {
-                std::option::Option::Some(details) => {
-                    if !details.is_empty() {
-                        let new_blocks: Vec<ContentBlock> = details
-                            .iter()
-                            .filter_map(reasoning_detail_to_thinking_block)
-                            .collect();
-                        if new_blocks.is_empty() {
-                            // All details were filtered (wrong format, empty
-                            // signature, or Summary kind). Treat as a miss so
-                            // the caller can soft-fail rather than silently
-                            // injecting nothing.
-                            missed_tool_ids.push(id);
-                        } else {
-                            let insert_count = new_blocks.len();
-                            for (k, block) in new_blocks.into_iter().enumerate() {
-                                blocks.insert(current_j + k, block);
-                            }
-                            offset += insert_count;
-                        }
-                    }
-                    // else: Some([]) -- upstream produced this tool_use with
-                    // no preceding thinking. Success with nothing to inject;
-                    // not a miss.
-                }
-                std::option::Option::None => {
-                    // Real cache miss (cold-start or TTL eviction).
-                    missed_tool_ids.push(id);
-                }
+        })
+        .collect();
+
+    let mut offset: usize = 0;
+    for (orig_j, id) in tool_use_pairs {
+        let current_j = orig_j + offset;
+        if current_j > 0
+            && matches!(
+                &blocks[current_j - 1],
+                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+            )
+        {
+            continue;
+        }
+        offset +=
+            try_inject_thinking_at(blocks, current_j, id, cache, provider_id, missed_tool_ids);
+    }
+}
+
+/// Look up cached thinking for `tool_use_id` and, on a usable hit,
+/// insert the resulting blocks at `current_j`. Returns the number of
+/// blocks inserted so the caller can advance its offset cursor.
+///
+/// - Cache hit with non-empty details: filter through
+///   `reasoning_detail_to_thinking_block`. If every detail is filtered
+///   (wrong format, empty signature, or Summary kind), record a miss so
+///   the caller can soft-fail; otherwise insert the survivors and
+///   return their count.
+/// - Cache hit with empty `Vec`: success with nothing to inject; not a
+///   miss; return 0.
+/// - Cache miss (cold-start or TTL eviction): record the tool_use id so
+///   the caller can strip the `thinking` body key; return 0.
+fn try_inject_thinking_at(
+    blocks: &mut Vec<crate::anthropic_api::types::ContentBlock>,
+    current_j: usize,
+    tool_use_id: String,
+    cache: &std::sync::RwLock<ThinkingCache>,
+    provider_id: &str,
+    missed_tool_ids: &mut Vec<String>,
+) -> usize {
+    use crate::anthropic_api::types::ContentBlock;
+
+    match lookup_thinking(cache, provider_id, &tool_use_id) {
+        std::option::Option::Some(details) => {
+            if details.is_empty() {
+                // Some([]) -- upstream produced this tool_use with no
+                // preceding thinking. Success with nothing to inject; not
+                // a miss.
+                return 0;
             }
+            let new_blocks: Vec<ContentBlock> = details
+                .iter()
+                .filter_map(reasoning_detail_to_thinking_block)
+                .collect();
+            if new_blocks.is_empty() {
+                // All details were filtered (wrong format, empty
+                // signature, or Summary kind). Treat as a miss so the
+                // caller can soft-fail rather than silently injecting
+                // nothing.
+                missed_tool_ids.push(tool_use_id);
+                return 0;
+            }
+            let insert_count = new_blocks.len();
+            for (k, block) in new_blocks.into_iter().enumerate() {
+                blocks.insert(current_j + k, block);
+            }
+            insert_count
+        }
+        std::option::Option::None => {
+            // Real cache miss (cold-start or TTL eviction).
+            missed_tool_ids.push(tool_use_id);
+            0
         }
     }
-
-    ApplyResult { missed_tool_ids }
 }
 
 #[cfg(test)]
