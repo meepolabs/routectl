@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -65,8 +65,10 @@ tokio-stream = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 
-# Bounded LRU cache (used by anthropic-api context_management emulation).
-lru = "0.12"
+# Bounded LRU cache (used by anthropic-api context_management
+# emulation). Pinned >=0.16 to avoid RUSTSEC-2026-0002 (Stacked
+# Borrows soundness in IterMut on lru < 0.16.3).
+lru = "0.16"
 
 # OAuth-adjacent crypto + secret hygiene
 sha2 = "0.11"

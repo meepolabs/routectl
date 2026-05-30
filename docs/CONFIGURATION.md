@@ -1,16 +1,19 @@
 # routectl Configuration Reference
 
-This doc covers routectl's TOML configuration schema -- what each knob
-does, how the layered overlays merge, and which keys are reserved. For
-per-upstream tuning recipes (DeepSeek echo-back, NIM cold-start, Bedrock
-allowlists, OpenRouter analytics headers) see
-[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md). For the rationale behind the
-two-layer split (provider vs model) and the hub-and-spoke contract see
-[ARCHITECTURE.md](ARCHITECTURE.md).
+TOML configuration schema reference: every knob, how the layered
+overlays merge, what's reserved.
+
+> **In a hurry:** copy [`examples/config.toml`](../examples/config.toml)
+> for a working end-to-end config, or jump to [Adding a
+> provider](#provider-block-providersx), [Adding a
+> model](#model-block-modelsx), [claude-code as a gateway
+> client](#claude-code-as-a-gateway-client), or
+> [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) for upstream-specific
+> tuning.
 
 ## Top-level shape
 
-A routectl config is a single TOML file with up to six top-level
+A routectl config is a single TOML file with up to seven top-level
 sections:
 
 ```toml
@@ -39,12 +42,10 @@ sections:
                       # env-only and is NOT part of this block.
 ```
 
-A working end-to-end example lives at
-[`examples/config.toml`](../examples/config.toml). The Bedrock-specific
-allowlist baseline (16 betas + 16 body fields, empirically verified
-against `bedrock-runtime.us-west-2.amazonaws.com` on 2026-05-12) lives
-at [`examples/bedrock.toml`](../examples/bedrock.toml). Copy and edit;
-do not re-derive.
+[`examples/config.toml`](../examples/config.toml) is a working
+end-to-end reference; [`examples/bedrock.toml`](../examples/bedrock.toml)
+ships an empirical Bedrock allowlist baseline (16 betas + 16 body
+fields). Copy and edit; do not re-derive.
 
 ## Listener auth + routing
 
@@ -286,10 +287,9 @@ disable (no request is ever treated as a probe). Real requests
 every 4xx (including a capability-rejection 400, which a sibling
 provider may accept) keep the normal retry+fallback behavior.
 
-Workspace defaults are tight on purpose -- surface real timeouts on
-routine calls. Bump per-provider for known-slow upstreams (see the
-`stream_first_byte_timeout_ms` table in
-[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#stream_first_byte_timeout_ms))
+Workspace defaults are tight; bump per-provider for known-slow
+upstreams via the `stream_first_byte_timeout_ms` table in
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#stream_first_byte_timeout_ms)
 rather than loosening the global.
 
 ## Per-model knobs
@@ -529,22 +529,19 @@ workflow -- see [LOGGING.md](LOGGING.md) for the full triage recipes.
 
 ### Why route claude-code through routectl
 
-routectl is a translation pipe: claude-code speaks Anthropic Messages
-on the wire and routectl forwards it unchanged to api.anthropic.com,
-or translates it into Bedrock Invoke / Converse, or (future) into
-OpenAI-compat shape. Pointing claude-code at routectl is the
-"LLM gateway" pattern that Anthropic explicitly endorses at
-<https://code.claude.com/docs/en/llm-gateway>:
+claude-code speaks Anthropic Messages on the wire and routectl
+forwards it unchanged to `api.anthropic.com`, translates it into
+Bedrock Invoke / Converse, or routes it across a fallback chain.
+Pointing claude-code at routectl implements the LLM gateway pattern
+Anthropic publishes at <https://code.claude.com/docs/en/llm-gateway>.
 
-> Your proxy receives plaintext HTTP requests, can inspect and modify
-> them (including injecting credentials), then forwards to the real
-> API.
-
-Caveat: per the Agent SDK overview, claude.ai OAuth tokens may not be
-embedded in third-party PRODUCTS. Personal-use proxying with the
-operator's own subscription token is the operating envelope; do not
-ship a routectl deployment to other users that resolves your
-`oauth://anthropic` ref under their requests.
+**Operating envelope.** Per the Anthropic Agent SDK overview,
+claude.ai OAuth tokens may not be embedded in third-party products.
+The `oauth://anthropic` ref is for personal-use proxying with the
+operator's own subscription token; do not deploy a routectl instance
+that resolves your token under other users' requests. routectl does
+not support or condone gateway usage beyond what the upstream
+provider permits -- see the README "Responsible use" section.
 
 ### Operator setup checklist
 
@@ -616,8 +613,8 @@ ship a routectl deployment to other users that resolves your
    "claude-opus-*"   = "anthropic-opus"
    ```
 
-4. Set claude-code env vars in `~/.bashrc` (or whichever shell
-   profile your terminal sources):
+4. Set claude-code env vars in your shell profile (`~/.bashrc`,
+   `~/.zshrc`, etc.):
 
    ```bash
    export ANTHROPIC_BASE_URL=http://127.0.0.1:9100
@@ -625,11 +622,8 @@ ship a routectl deployment to other users that resolves your
    export CLAUDE_CODE_ATTRIBUTION_HEADER=0    # documented as recommended for gateway use; better cache hit rate
    ```
 
-   IMPORTANT: do NOT put these in `~/.claude/settings.json` under the
-   `env` block. That block is read at claude-code startup and
-   overrides shell exports for every session, so flipping
-   `ANTHROPIC_BASE_URL` per shell becomes painful. Keep them in the
-   shell profile.
+   Put these in the shell profile, NOT in `~/.claude/settings.json`'s
+   `env` block -- the settings file overrides per-shell exports.
 
 5. Verify the round-trip:
 
@@ -742,9 +736,8 @@ login and traffic resumes.
 
 ### Static bearer (backwards-compat)
 
-If you already manage the JWT externally -- rotated by another tool, or
-extracted from a separate codex session -- point routectl at the file or
-env var and supply the account UUID explicitly:
+For operators who already manage the JWT externally, point routectl
+at the file or env var and supply the account UUID explicitly:
 
 ```toml
 [providers.codex-static]
@@ -754,7 +747,7 @@ api_key_ref    = "env://OPENAI_JWT"
 account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
 ```
 
-`account_id_ref` is REQUIRED on this path: there is no OAuth session for
-routectl to derive the UUID from. `env://`, `file://`, and `literal:`
-refs all work for both fields. routectl never refreshes a static bearer;
-rotation is the operator's job.
+`account_id_ref` is REQUIRED on this path -- there is no OAuth session
+for routectl to derive the UUID from. `env://`, `file://`, and
+`literal:` refs all work for both fields. routectl never refreshes a
+static bearer; rotation is the operator's job.

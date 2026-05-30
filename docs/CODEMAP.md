@@ -15,19 +15,26 @@ listed at the bottom of each crate.
 
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider trait, log helpers, and the canonical-key allowlist
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`, `ChatChunk`, `Message`, `ReasoningDetail`, `Usage`, `RoutectlInternal`
+- `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for unknown Anthropic SSE bytes (skip-serialized; preserves unknown content_block types verbatim through the canonical pipeline so Anthropic ingress can re-emit byte-for-byte)
 - `src/content_part.rs` -- typed `ContentPart` enum (text/image/document/tool_use/tool_result/thinking/Other) for `MessageContent::Parts`
 - `src/system_content.rs` -- typed top-level `system` field (flat string OR array of `SystemBlock` with per-block cache_control)
 - `src/tool_def.rs` -- typed `ToolDef::Custom(CustomTool)` + `ToolDef::Other(Value)` with `from_openai_function` interop
 - `src/cache_control.rs` -- Anthropic `CacheControl` type, breakpoint validator (4-cap, 1h-before-5m TTL ordering)
 - `src/reasoning_dialect.rs` -- crate-neutral `ReasoningDialect` + `HistoryReasoning` enums carried on `RoutectlInternal`
 - `src/reserved.rs` -- `is_canonical_request_key` allowlist guarding extras-merge from clobbering `ChatRequest` fields
-- `src/provider.rs` -- `Provider` trait every backend implements (normalize_request/response/chunk + complete + stream)
-- `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions), prompt redaction, structural-summary extractor
-- `src/error.rs` -- `Error` enum (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/...) and `Result` alias
+- `src/provider.rs` -- `Provider` trait every backend implements (normalize_request/response/chunk + complete + stream + on_auth_failure hook for 401 recovery)
+- `src/token_source.rs` -- `TokenSource` async trait (`Arc<dyn TokenSource>` per-provider) + `StaticToken` default impl; lets OAuth refresh rotate without daemon restart
+- `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions), prompt redaction, structural-summary extractor, `[log]`-block override seeding
+- `src/error.rs` -- `Error` enum (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...) and `Result` alias
 
 ### Tests
 
 - `tests/schema_roundtrip.rs` -- serde round-trip for `ChatRequest`/`ChatResponse`/`ChatChunk` against real wire fixtures
+- `tests/header_trace_emit_disabled.rs` -- emit-path coverage for the four header-trace emitters with tracing OFF; isolated test binary so `header_trace_enabled()` freezes to false in its own process
+- `tests/header_trace_emit_enabled.rs` -- emit-path coverage for `trace_ingress_headers` / `trace_outgoing_headers` / `trace_upstream_response_headers` / `trace_egress_headers` with tracing ENABLED; pairs with the disabled-path test
+- `tests/log_overrides_redact_prompts.rs` -- resolution-rule coverage for the `redact_prompts` knob (env > `[log]` > default); isolated binary so OnceLock state stays clean
+- `tests/log_overrides_trace_body_bytes.rs` -- resolution-rule coverage for `trace_body_bytes`; isolated binary
+- `tests/log_overrides_trace_headers.rs` -- resolution-rule coverage for `trace_headers`; isolated binary
 
 ## routectl-providers
 
@@ -36,6 +43,8 @@ listed at the bottom of each crate.
 - `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, requires_reasoning_effort, uses_chat_template_kwargs, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin and User-Agent override
+- `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller `reasoning.effort` against per-model `effort_levels` (rounds toward most-capable above max, least-capable below min); single source of truth across openai-compat, anthropic-api, bedrock, openai-responses
+- `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream -> routectl) emit sites
 
 ### anthropic_api
 
@@ -45,6 +54,9 @@ listed at the bottom of each crate.
 - `src/anthropic_api/request.rs` -- canonical `ChatRequest` -> Anthropic wire body translation
 - `src/anthropic_api/response.rs` -- Anthropic response -> canonical `ChatResponse` (content-block walk, stop_reason map, usage cache stats)
 - `src/anthropic_api/sse.rs` -- Anthropic SSE event state machine (`message_start`, `content_block_*`, `message_delta`, `message_stop`)
+- `src/anthropic_api/sse_opaque.rs` -- bounded opaque-event capture per unknown content block (256 KB / 10000 deltas per block; degrades to sink-drain on overflow with WARN); records bytes for the matching ingress to re-emit verbatim
+- `src/anthropic_api/sse_unknown.rs` -- forward-compat handling for unknown SSE content blocks plus the per-block-index invariant; opens `OpenBlockKind::Unknown`, drops misattributed deltas
+- `src/anthropic_api/types_sse.rs` -- forward-compat catchalls (`Other(Value)` arms) on the three strict-tagged Anthropic SSE enums (`SseEvent`, `SseContentBlockStart`, `SseDelta`); extracted from `types.rs` for the 800-LOC ceiling
 - `src/anthropic_api/parts.rs` -- image-source translation (data-URI -> base64) and trailing-Text-after-tool_use stripping
 
 ### openai_compat
@@ -128,7 +140,7 @@ listed at the bottom of each crate.
 - `tests/contract_egress_bedrock_converse.rs` -- canonical -> Bedrock-Converse vendor-neutral body snapshots
 - `tests/contract_egress_openai_responses.rs` -- canonical -> OpenAI Responses body snapshots; pins flat tool/tool_choice shapes
 - `tests/contract_response_egress.rs` -- canned upstream body -> canonical `ChatResponse` (Anthropic + openai-compat)
-- `tests/contract_stream_egress.rs` -- canned SSE bodies through `stream()` asserting canonical chunk sequence (Bug B / Bug G classes)
+- `tests/contract_stream_egress.rs` -- canned SSE bodies through `stream()` asserting canonical chunk sequence (catches stream-ordering and usage-merge regressions)
 
 ## routectl-router
 
@@ -139,6 +151,7 @@ listed at the bottom of each crate.
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`
 - `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch
 - `src/runtime_state.rs` -- per-provider token-bucket RPM limiter + circuit breaker state machine
+- `src/feature_keys.rs` -- feature-key derivation for the alias-chain pre-filter; strips date suffixes (e.g. `_20250305`) from request `tools[].name` so `unsupported_features` on `ProviderRuntimePolicy` can match capability-class regardless of vendor versioning
 
 ### Tests
 
@@ -147,10 +160,19 @@ listed at the bottom of each crate.
 
 ## routectl-auth
 
-- `src/lib.rs` -- crate root; re-exports `MemoryStore`, `SecretRef`, `SecretStore`, session types
+- `src/lib.rs` -- crate root; re-exports `MemoryStore`, `SecretRef`, `SecretStore`, session types; feature-gated re-exports of `LoginOptions`, `OAuthError`, `OAuthStore`, `SecretToken` under `oauth`
 - `src/store.rs` -- `SecretStore` async trait (get/set/delete) for credential providers
 - `src/secret_ref.rs` -- `SecretRef` enum (`env://`, `file://`, `literal:`) plus URI parser
 - `src/memory_store.rs` -- default in-process `SecretStore` resolving env/file/literal references at read-time
+- `src/oauth/mod.rs` -- crate-internal entry for the OAuth 2.0 PKCE subsystem; defines `OAuthError` and re-exports `OAuthStore`, `LoginOptions`, `run_login`, `known_provider_ids`, token types
+- `src/oauth/types.rs` -- on-disk schema: `CredentialsFile`, `TokenRecord`, `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug), `SCHEMA_VERSION`, `unix_now`
+- `src/oauth/file_io.rs` -- atomic load/save of `~/.config/routectl/credentials.json` (TOCTOU-safe fstat, `0o600` enforcement on Unix, tempfile + fsync + rename)
+- `src/oauth/pkce.rs` -- PKCE verifier / SHA-256 challenge / CSRF state; `OsRng`-sourced, Drop-zeroized, constant-time state compare
+- `src/oauth/login.rs` -- login flow driver: PKCE bundle, axum callback sub-app on loopback, `webbrowser` launch, `--print-url` headless fallback, 120s timeout
+- `src/oauth/rate_limit.rs` -- per-source-port + listener-wide sliding-window rate limit on the loopback callback server (turns sustained 400-spam into 429)
+- `src/oauth/store.rs` -- `OAuthStore` `SecretStore` impl; cached `CredentialsFile` + per-provider single-flight refresh mutex + atomic writeback; near-expiry and 401-recovery hooks
+- `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry + `known_provider_ids` (anthropic, codex); `AuthParams` and `truncate` helper
+- `src/oauth/providers/anthropic.rs` -- claude.ai OAuth flow: `claude.com/cai/oauth/authorize` + `platform.claude.com/v1/oauth/token`, `anthropic-beta: oauth-2025-04-20`, manual-paste redirect support
 - `src/oauth/providers/codex.rs` -- OpenAI ChatGPT/Codex OAuth 2.0 PKCE flow (public client, JWT-derived expiry, lazy refresh-token rotation)
 - `src/session.rs` -- v0.2 cookie-session capture trait + `Cookie` / `CapturedSession` types (deferred)
 
@@ -160,7 +182,7 @@ listed at the bottom of each crate.
 
 ## routectl-cli
 
-- `src/main.rs` -- clap CLI entry point; dispatches `serve` / `test` / `config` / `login` subcommands
+- `src/main.rs` -- clap CLI entry point; dispatches `serve` / `login` / `logout` / `refresh` / `whoami` / `test` / `config` subcommands
 - `src/lib.rs` -- library surface exposing `commands`, `handlers`, `ingress`, `server` modules to integration tests
 
 ### server
@@ -168,6 +190,7 @@ listed at the bottom of each crate.
 - `src/server/mod.rs` -- axum app construction; `serve_on_listener`, `check_bind_safety` loopback guard
 - `src/server/auth.rs` -- listener middleware enforcing `[server.auth].tokens` via constant-time comparison
 - `src/server/request_id.rs` -- request-id middleware (`x-request-id` echo + `tracing` span field with allowlist sanitization)
+- `src/server/secrets.rs` -- `CompositeStore` `SecretStore` dispatching `oauth://<provider>` to `OAuthStore` and `env://` / `file://` / `literal:` to `MemoryStore`; degrades gracefully when no `HOME` / `XDG_CONFIG_HOME`
 
 ### handlers
 
@@ -176,6 +199,7 @@ listed at the bottom of each crate.
 - `src/handlers/models.rs` -- `GET /v1/models` listing aliases + `[models]` keys (skips `default`, skips `selectable=false`)
 - `src/handlers/chat_completions.rs` -- `POST /v1/chat/completions` thin wrapper around `ingress_handle` with `OpenAiIngress`
 - `src/handlers/messages.rs` -- `POST /v1/messages` thin wrapper around `ingress_handle` with `AnthropicIngress`
+- `src/handlers/messages_count_tokens.rs` -- `POST /v1/messages/count_tokens` proxy through the FIRST provider in the dispatch chain only (no fallback walk; tokenizer-specific count must match the chosen model)
 - `src/handlers/ingress_handle.rs` -- generic ingress driver: parse + route + render; SSE streaming with cancellation
 
 ### ingress
@@ -189,10 +213,13 @@ listed at the bottom of each crate.
 
 ### commands
 
-- `src/commands/mod.rs` -- groups CLI subcommand entry points (test/config/login)
+- `src/commands/mod.rs` -- groups CLI subcommand entry points (test, config, login, logout, refresh, whoami; `serve` lives in `crate::server`)
 - `src/commands/config.rs` -- `routectl config check/show/example` (secret resolution, alias chain validation)
 - `src/commands/test.rs` -- `routectl test <target>` one-shot completion against an alias or model nickname
-- `src/commands/login.rs` -- `routectl login <provider>` stub returning a deferred-feature error
+- `src/commands/login.rs` -- `routectl login <provider>` runs the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via `OAuthStore`; `--print-url` headless flow guarded against providers without a paste-back landing page
+- `src/commands/logout.rs` -- `routectl logout <provider>` -- removes a provider's tokens from the credentials store; first-time logout reported but not an error
+- `src/commands/refresh.rs` -- `routectl refresh <provider>` -- forces a token refresh through the per-provider single-flight gate, regardless of expiry
+- `src/commands/whoami.rs` -- `routectl whoami` -- prints OAuth provider state from the credentials store; exits 0 when at least one provider is logged in, 2 otherwise
 
 ### Tests
 
@@ -202,7 +229,8 @@ listed at the bottom of each crate.
 - `tests/anthropic_ingress.rs` -- `/v1/messages` end-to-end (cache_control round-trip, forward-compat, listener auth)
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest` shape per ingress
 - `tests/contract_response_ingress.rs` -- canonical `ChatResponse` -> Anthropic wire body via `render_response`
-- `tests/contract_stream_ingress.rs` -- canonical chunk sequences -> Anthropic SSE events (Bug B class ordering)
+- `tests/contract_stream_ingress.rs` -- canonical chunk sequences -> Anthropic SSE events (asserts terminal-event ordering)
 - `tests/e2e_reasoning.rs` -- end-to-end reasoning round-trip across DeepSeek / vLLM / Anthropic dialects
 - `tests/live_matrix.rs` -- live provider matrix (OpenRouter / opencode-go / NIM); requires API keys, gated by feature flag
 - `tests/live_anthropic_oauth.rs` -- live OAuth-bearer test against `api.anthropic.com`; gated by env token file
+- `tests/anthropic_forward_compat_stream.rs` -- full-pipeline integration tests for the Anthropic SSE forward-compat opaque-events fix; hand-crafted SSE wire-byte fixtures driven egress -> canonical -> ingress, asserting verbatim re-emission of unknown content_block types

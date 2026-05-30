@@ -4,6 +4,256 @@ All notable changes to routectl. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-05-30
+
+The v0.7 release: routectl-managed OAuth login (Anthropic + Codex)
+with runtime refresh and one-shot 401 recovery, claude-code as a
+first-class gateway client, forward-compat for unknown Anthropic SSE
+block types, server-side emulation of the context-management beta
+for non-Anthropic anthropic-api endpoints, and a BREAKING refactor
+moving model reasoning capabilities from per-provider floors to
+declarative per-model fields.
+
+**Responsible use.** Anthropic publishes a gateway pattern at
+<https://code.claude.com/docs/en/llm-gateway> for first-party
+deployments. routectl's `oauth://anthropic` ref and gateway support
+are for personal-use proxying with the operator's own subscription
+token; per the Anthropic Agent SDK overview, claude.ai OAuth tokens
+may not be embedded in third-party products. routectl does not
+support or condone gateway usage beyond what the upstream provider
+permits and does not vouch for whether a particular credential is
+permitted to be used a particular way -- read the upstream
+provider's terms before pointing routectl at production traffic.
+See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) "claude-code as
+a gateway client" for the operator setup, and the README
+"Responsible use" section.
+
+### Added
+
+- **routectl-managed OAuth client** (Anthropic + Codex). `routectl
+  login <provider>` runs PKCE through a loopback callback, persists
+  tokens atomically to `~/.config/routectl/credentials.json` (chmod
+  0600, tempfile + fsync + rename). New `oauth://<provider>`
+  SecretRef resolves at request time through a `CompositeStore`.
+  `--print-url` headless flow on Anthropic; rejected for Codex
+  (no headless paste-back; SSH operators port-forward 1455).
+  `routectl whoami` reports stored token expiry. `SecretToken`
+  newtype zeroizes on drop with a redacted `Debug`.
+
+- **OAuth runtime refresh + 401 recovery.** Lazy refresh at egress:
+  `oauth://` resolution checks near-expiry (60s lead), acquires a
+  per-provider mutex, double-checks under the lock so concurrent
+  gets collapse to one refresh per window, persists atomically.
+  New `Provider::on_auth_failure` hook lets a 401 force-rotate the
+  token and retry the same provider once. New `routectl logout
+  <provider>` and `routectl refresh <provider>` ops subcommands.
+  Migration: replace `env://ROUTECTL_ANTHROPIC` with
+  `oauth://anthropic` after running `routectl login anthropic`
+  once.
+
+- **claude-code as a first-class gateway client.** Implements the
+  Anthropic-published gateway contract for Anthropic Messages, so
+  claude-code with `ANTHROPIC_BASE_URL=http://routectl` works
+  without silent capability downgrades. New per-provider
+  `forward_client_headers: Vec<String>` opt-in for `x-claude-code-*`
+  attribution headers (defaults to drop). New `POST
+  /v1/messages/count_tokens` proxy with an explicit 8-field body
+  allowlist (first-target-only dispatch -- tokenizer correctness;
+  no fallback walk). `GET /v1/models` skips alias keys with `*` so
+  the picker does not show unroutable globs. New per-dialect
+  `ErrorEnvelopeShape::{Anthropic, OpenAi}` so each ingress emits
+  its native error shape. New `Error::NotImplemented(provider, op)`
+  maps to 501 (covers `count_tokens` on Bedrock today).
+
+- **Server-side emulation of `context-management-2025-06-27`.**
+  New per-provider `context_management: bool` on `[providers.X]`
+  of kind `anthropic-api` (default false). When true, routectl
+  caches thinking blocks observed in upstream responses (bounded
+  LRU at 1000 entries + 60-minute TTL, keyed by `(provider_id,
+  tool_use_id)`), re-injects them on next-turn requests per the
+  `clear_thinking_20251015` keep policy, and strips the beta
+  header + body field on egress. Unblocks Anthropic-API-shaped
+  upstreams (e.g. DeepSeek `/anthropic`) that demand thinking
+  echoback but do not implement the beta natively. Composes with
+  `history_reasoning`: strip on canonical messages first, inject
+  on wire last.
+
+- **Forward-compat for unknown Anthropic SSE block types.**
+  `Other(Value)` catchalls on three strict-tagged enums
+  (`SseEvent`, `SseContentBlockStart`, `SseDelta`) plus
+  `OpenBlockKind::Unknown` in the SSE state machine, so an
+  unrecognized `content_block.type` no longer crashes the stream
+  and walks the fallback chain. A `#[serde(skip)] opaque_events`
+  carrier on `ChatChunk` captures verbatim bytes; the matching
+  Anthropic ingress re-emits them so strict clients (citation
+  links, search-status UI) see the full upstream wire. Bounded
+  caps (256 KB / 10000 deltas per block) downgrade overflow
+  silently with a WARN. Bedrock-Invoke inherits the fix free;
+  Bedrock-Converse streaming forward-compat is a separate task.
+
+- **Per-provider `unsupported_features` filter + cross-alias
+  resolution.** Operator-declared list on `ProviderRuntimePolicy`;
+  the router strips date suffixes from request `tools` to derive
+  feature keys and removes providers whose declared list intersects
+  request features BEFORE dispatch. Eliminates wasted Bedrock
+  round-trips for `web_search_*`-bearing requests; when the filter
+  eliminates every provider the request fails 501 instead of
+  cascading 400s. Cross-alias resolution lets a chain entry
+  reference another alias key (not just a model nickname); cycle
+  detection runs at startup with a runtime depth cap of 8.
+
+- **`probe_max_tokens` fast-fail on 429 / 529.** New `[retry]
+  probe_max_tokens` knob (default 1, 0 disables). claude-code's
+  `max_tokens=1` availability probes used to walk the full fallback
+  chain on rate-limit; a request with `max_tokens <=
+  probe_max_tokens` now skips retry AND fallback on 429/529 and
+  returns the status immediately. Other errors keep the normal
+  retry / fallback path; real requests above the threshold are
+  unaffected.
+
+- **`[log]` config block** for runtime knob fallbacks.
+  `trace_headers`, `trace_body_bytes`, `redact_prompts` gain a
+  config-side default. Resolution per knob: env wins when set,
+  then `[log]` if set, then the hardcoded default. `ROUTECTL_LOG`
+  stays env-only because it must reach the tracing subscriber
+  before config loads.
+
+- **Opt-in 4-direction HTTP header tracing**
+  (`ROUTECTL_TRACE_HEADERS=1`). Emit headers on all four hops --
+  ingress in/out, egress in/out -- routed through the existing
+  `log_safe` redaction so bearer JWTs and API keys are masked.
+  `scripts/capture_fixtures.sh` consumes the new format.
+  `docs/DEVELOPMENT.md` documents the toggle.
+
+- **Stream-error terminator emission.** When an egress stream
+  errored mid-stream, the ingress used to drop the SSE channel
+  without a terminator; multi-turn SDKs interpret the silent
+  disconnect as truncation and retry up to 5 times. Both ingress
+  dialects now emit a dialect-appropriate terminal event before
+  closing (Anthropic `event: error`; OpenAI `data: {"error":{...}}`
+  then `data: [DONE]`). Errors forwarded to clients are sanitized
+  via `sanitize_stream_error_for_client`: only `upstream stream
+  error (HTTP <status>)` reaches the wire so per-tenant existence
+  hints stay out of the client-visible payload.
+
+### Changed
+
+- **anthropic-api egress: STRIP unsigned `thinking` blocks instead
+  of REJECTing.** The 400-on-missing-signature check broke
+  cross-provider fallback (a turn handled by deepseek with its own
+  signature format, then a turn that walks to Anthropic) and SDKs
+  that drop `signature` on serialization.
+  `validate_replay_invariants` -> `normalize_replay_invariants`,
+  returning `Cow<'a, [Message]>` so unmodified requests pay zero
+  clone cost. `history_reasoning = "preserve"` opts a model out of
+  the strip (required for upstreams like DeepSeek `/anthropic`
+  that demand unsigned thinking echoback). One structured WARN
+  fires per request when stripping occurs; block content is never
+  logged.
+
+- **Effort clamping is now uniform across all egresses** when
+  `effort_levels` is non-empty. Anthropic-API and Bedrock now
+  consult the model's declared `effort_levels` and clamp the
+  caller's effort to the nearest supported value (rounding toward
+  the most capable when above the declared maximum, the least
+  capable when below the minimum). Empty list keeps the
+  pass-through default for OpenRouter-style providers that perform
+  their own effort translation. Shared `clamp_effort_to_supported`
+  helper in a new `routectl-providers::effort` module.
+
+### Fixed
+
+- **`thinking` stripped when `tool_choice` forces tool use.**
+  Anthropic Messages and Bedrock Converse reject `thinking` paired
+  with `tool_choice = {type:"any"|"tool"}`. Strip `thinking` (not
+  `tool_choice`) so caller intent to force a named tool is
+  preserved; `auto`, `none`, absent are unaffected.
+
+- **Stale `extra_headers` doc references renamed to
+  `header_extras`.** Field was renamed in v0.6.0; a few snippets
+  and the example config still referenced the legacy spelling.
+
+- **`cache_control` system-block drop demoted from WARN to
+  DEBUG.** OpenAI Responses has no equivalent surface; the strip
+  is correct, the WARN level just trained operators to ignore
+  real WARNs.
+
+- **CI clippy gate tightened to `--all-features`.** The clippy
+  steps in `ci.yml` and the local pre-commit hook were labeled
+  "all features" but omitted the flag, so feature-gated test files
+  never type-checked under the strict gate; tightening exposed
+  pre-existing breakages in `live_matrix.rs`.
+
+- **Doc-vs-code currency sweep.** `[providers.X]` / `[models.X]`
+  field placements, `adaptive_thinking` ->
+  `supports_adaptive_thinking` rename references, the
+  `stream_first_byte_timeout_ms` resolution table (now three
+  tiers: model > provider > global), DeepSeek `context_management`
+  example base URL with `/anthropic` suffix, the
+  `header_extras["anthropic-beta"]` mechanism, the corrected
+  `effort_levels` clamping description, the `anthropic.rs` ->
+  `anthropic/{mod,parse,render,stream}` directory split, the
+  corrected `MAX_LOG_BODY_EXCERPT` size in `LOGGING.md`. Cross-doc
+  links converted from bare backtick text to Markdown link syntax.
+
+### Removed (BREAKING)
+
+- **`thinking` and `effort` on `[models.X]`** -- replaced by three
+  declarative capability fields: `supports_adaptive_thinking`
+  (bool, selects the adaptive vs legacy thinking wire shape),
+  `effort_levels` (array, default `["low","medium","high"]`;
+  drives clamping; empty = pass-through), `max_thinking_budget`
+  (u32 tokens, default 0 = no cap). Migration: declare
+  capabilities explicitly on each `[models.X]` block per the
+  vendor docs. The `EffortLevel` enum and the
+  `merge_reasoning_defaults_into` helper are deleted.
+
+- **`adaptive_thinking` on `[providers.X]` of kind
+  `anthropic-api`** -- the egress now reads
+  `supports_adaptive_thinking` from `RoutectlInternal` per request.
+  `Bedrock-Invoke` and `Bedrock-Converse` keep the static
+  `adaptive_thinking` field on `BedrockConfig` because Bedrock
+  model IDs do not carry the same Anthropic-vs-Bedrock split.
+
+- **`fallback_on_status` on `[retry]`** -- replaced by the
+  two-field `retry_allowlist` / `retry_denylist` schema (mutually
+  exclusive at config-load). With both unset (the new default)
+  every 4xx / 5xx falls back, which is strictly more permissive
+  than the previous 15-code default and still covers Cloudflare
+  extended 5xx codes (520-527, 530); operators wanting the narrow
+  behavior set `retry_allowlist` explicitly. No back-compat shim:
+  configs using `fallback_on_status` need a one-line rename.
+
+### Security
+
+- **OAuth callback rate limiting** (two-window guard).
+  Per-source-port (30 hits / 10s) AND listener-wide (60 hits /
+  10s) on the loopback callback, so a co-resident process spraying
+  ephemeral ports cannot drown a legitimate browser callback during
+  the 120s login window. Memory bounded (256-entry LRU + capped
+  VecDeque). State-valid browser callbacks bypass the tracker
+  entirely.
+
+- **OAuth refresh hygiene.** The OAuth HTTP client disables
+  redirect-following so a 307/308 from the IdP cannot replay the
+  refresh-token POST to a different host. Refresh-flow errors and
+  JSON parse errors omit upstream body excerpts (some IdPs reflect
+  request fields in error envelopes; refresh bodies carry the
+  long-lived refresh token).
+
+- **Anthropic upstream-error body excerpts sanitized in WARN
+  logs.** The 4xx / 5xx WARN logs in `complete()` and `stream()`
+  used to emit `body_excerpt = %msg` directly from the upstream
+  message; an upstream returning CRLF in `error.message` could
+  forge log lines on text-format tracing subscribers.
+
+- **`capture_fixtures.sh --out` rejects symlink components.** A
+  dangling symlink under `captured/` could let fixture writes
+  (which carry raw upstream headers) land outside the gitignored
+  tree. A per-component `[ -L ]` walk now runs before physical
+  resolution. `--allow-unsafe-out` still bypasses the check for
+  legitimate symlink-traversal use cases.
+
 ## [0.6.0] - 2026-05-20
 
 The big v0.6 release: layered provider + model config, dispatch
@@ -522,6 +772,7 @@ Initial release.
 - Per-provider retry with exponential backoff.
 - TOML config in `~/.config/routectl/config.toml`.
 
+[0.7.0]: https://github.com/meepolabs/routectl/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/meepolabs/routectl/compare/v0.4.0...v0.6.0
 [0.4.0]: https://github.com/meepolabs/routectl/compare/v0.2.0...v0.4.0
 [0.2.0]: https://github.com/meepolabs/routectl/compare/v0.1.0...v0.2.0
