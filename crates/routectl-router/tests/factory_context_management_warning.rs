@@ -156,6 +156,33 @@ fn find_cm_history_warn(events: &[CapturedEvent]) -> Option<&CapturedEvent> {
     })
 }
 
+/// Assert the captured WARN carries the expected structured fields.
+/// Pins the operator-grep contract: the warn site emits `provider`
+/// and `model` fields with the configured nicknames so tail-side
+/// filtering (e.g. by provider) keeps working through future refactors.
+fn assert_warn_carries_provider_and_model(warn: &CapturedEvent, provider: &str, model: &str) {
+    let provider_field = warn
+        .fields
+        .iter()
+        .find(|(k, _)| k == "provider")
+        .unwrap_or_else(|| panic!("warn event missing structured `provider` field; got: {warn:?}"));
+    let model_field = warn
+        .fields
+        .iter()
+        .find(|(k, _)| k == "model")
+        .unwrap_or_else(|| panic!("warn event missing structured `model` field; got: {warn:?}"));
+    assert!(
+        provider_field.1.contains(provider),
+        "warn `provider` field must contain {provider:?}; got: {:?}",
+        provider_field.1
+    );
+    assert!(
+        model_field.1.contains(model),
+        "warn `model` field must contain {model:?}; got: {:?}",
+        model_field.1
+    );
+}
+
 /// cm=true + history=Strip -> WARN must fire exactly once.
 #[tokio::test]
 async fn cm_true_history_not_preserve_warns_once() {
@@ -182,6 +209,7 @@ async fn cm_true_history_not_preserve_warns_once() {
         "expected exactly one WARN naming both context_management and \
          history_reasoning; got: {matching:?}"
     );
+    assert_warn_carries_provider_and_model(matching[0], "anthropic", "claude");
 }
 
 /// cm=true + history=None (unset) -> WARN must fire (None != Preserve).
@@ -195,10 +223,10 @@ async fn cm_true_history_unset_warns() {
     let _ = result.expect("build");
 
     let warn = find_cm_history_warn(&events);
-    assert!(
-        warn.is_some(),
-        "expected WARN when history_reasoning is unset; got: {events:?}"
-    );
+    let warn = warn.unwrap_or_else(|| {
+        panic!("expected WARN when history_reasoning is unset; got: {events:?}")
+    });
+    assert_warn_carries_provider_and_model(warn, "anthropic", "claude");
 }
 
 /// cm=true + history=Preserve -> silent.
