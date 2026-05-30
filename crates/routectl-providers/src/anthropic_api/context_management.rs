@@ -146,7 +146,7 @@ pub(crate) fn lookup_thinking(
 /// extraction path (`extract_tool_thinking`) and the streaming
 /// aggregation terminal in `sse.rs` so both produce byte-identical
 /// detail shapes for replay.
-pub(crate) fn make_thinking_detail(
+pub(super) fn make_thinking_detail(
     id: String,
     index: u32,
     text: String,
@@ -166,7 +166,7 @@ pub(crate) fn make_thinking_detail(
 /// non-streaming extraction path (`extract_tool_thinking`) and the
 /// streaming `redacted_thinking` block-start branch in `sse.rs` so both
 /// produce byte-identical detail shapes for replay.
-pub(crate) fn make_redacted_thinking_detail(
+pub(super) fn make_redacted_thinking_detail(
     id: String,
     index: u32,
     data: String,
@@ -383,7 +383,9 @@ fn parse_keep_policy(edit: &serde_json::Value, provider_id: &str) -> KeepPolicy 
         // Bare integer: keep = 0 means None, keep = N means LastN(N).
         std::option::Option::Some(serde_json::Value::Number(n)) => match n.as_u64() {
             std::option::Option::Some(0) => KeepPolicy::None,
-            std::option::Option::Some(n) => KeepPolicy::LastN(n as usize),
+            std::option::Option::Some(n) => {
+                KeepPolicy::LastN(usize::try_from(n).unwrap_or(usize::MAX))
+            }
             std::option::Option::None => {
                 tracing::debug!(
                     provider = %provider_id,
@@ -400,7 +402,7 @@ fn parse_keep_policy(edit: &serde_json::Value, provider_id: &str) -> KeepPolicy 
                     KeepPolicy::None
                 }
                 (std::option::Option::Some("thinking_turns"), std::option::Option::Some(n)) => {
-                    KeepPolicy::LastN(n as usize)
+                    KeepPolicy::LastN(usize::try_from(n).unwrap_or(usize::MAX))
                 }
                 _ => {
                     tracing::debug!(
