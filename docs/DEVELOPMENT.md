@@ -170,6 +170,102 @@ are gated on `ROUTECTL_TRACE_HEADERS` (build nothing when off) and the
 fixture capture in `scripts/capture_fixtures.sh` depends on dir-3
 firing on the stream path too.
 
+## Adding a replay fixture from a real session
+
+The replay harness (`crates/routectl-cli/tests/replay_egress.rs` +
+`replay_ingress.rs`) drives wire-shape regression tests off
+hand-curated fixtures under `crates/routectl-cli/tests/fixtures/canon/`.
+For the per-fixture directory layout, the `meta.json` schema, and the
+full redaction policy, see [REPLAY-FIXTURES.md](REPLAY-FIXTURES.md).
+The recipe below walks the day-to-day capture flow.
+
+1. **Run routectl with body + header tracing** so the request you want
+   to capture lands in the log:
+
+   ```
+   ROUTECTL_LOG=routectl=info,routectl_core::log_safe=trace
+   ROUTECTL_TRACE_HEADERS=1
+   ROUTECTL_TRACE_BODY_BYTES=2097152
+   ```
+
+   The default service env file at `~/.config/routectl/routectl.env`
+   documents these flags. They are commented out by default; uncomment
+   them for the duration of a capture session.
+
+2. **Reproduce the request through routectl.** The daemon writes
+   TRACE lines to stdout (captured by systemd journal under
+   `routectl` for service installs, or directly to your terminal for a
+   foreground `routectl serve` run).
+
+3. **Bridge the journal to a flat log** if you are running under
+   systemd:
+
+   ```
+   journalctl --user -u routectl --since "10 minutes ago" \
+     --no-pager -o cat \
+     | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
+     > /tmp/routectl-trace.log
+   ```
+
+   The `sed` filter strips the ANSI color codes that the
+   tracing-subscriber emits.
+
+4. **Run the capture script:**
+
+   ```
+   scripts/capture_fixtures.sh --log /tmp/routectl-trace.log --limit 4
+   ```
+
+   Fixtures land under
+   `crates/routectl-cli/tests/fixtures/captured/<request_id>/`.
+   That directory is gitignored by design -- raw headers carry auth
+   tokens and the bodies may carry personal or internal info.
+
+5. **Sanitize.** For each fixture you want to keep:
+
+   - Inspect `meta.json`. Confirm `provider_kind`, `stream`, alias,
+     and finish_reason match the scenario you intended to capture.
+     Keep small, interesting cases.
+   - Open every `*.headers.json`. Replace the value of every
+     `Authorization`, `x-api-key`, `x-amz-*`, `anthropic-api-key`,
+     `proxy-authorization`, `cookie`, and `set-cookie` header with
+     the literal string `<REDACTED>`.
+   - Open `ingress_request.json` and `outgoing_request.json`. Replace
+     every prompt-content text with a deterministic stub
+     (e.g. `reply with: pong`). Replace any system-prompt /
+     assistant-history that contains personal or session info.
+   - Open `upstream_response.json` and `egress_response.json` (when
+     present). Replace response text with the matching stub.
+   - Add `"router_overlay": false` to `meta.json` (phase-one hard
+     requirement).
+   - Forward-compat scenarios may set
+     `"expected_unknown_block_count": <n>` so `replay_ingress.rs`
+     can later assert event counts.
+
+6. **Move the sanitized directory** to
+   `crates/routectl-cli/tests/fixtures/canon/<scenario_name>/`. Use a
+   meaningful name (e.g. `anthropic_api_stream_basic`,
+   `anthropic_api_complete_tools`).
+
+7. **Run gitleaks:**
+
+   ```
+   gitleaks detect --config .gitleaks.toml \
+     --source crates/routectl-cli/tests/fixtures/canon
+   ```
+
+   If anything is reported, scrub it before continuing.
+
+8. **Hand-review the diff** (`git diff`). Confirm zero auth tokens,
+   zero personal info, zero internal references.
+
+9. **Commit and exercise the new fixture:**
+
+   ```
+   cargo test -p routectl-cli --release --test replay_egress
+   cargo test -p routectl-cli --release --test replay_ingress
+   ```
+
 ## Style notes
 
 - ASCII-only in code, comments, and commit messages. No em-dashes,
