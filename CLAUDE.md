@@ -65,6 +65,7 @@ contributor workflow source of truth.
 | Triage a failing request (logs, env filter, redaction, request_id correlation, auth-failure shapes) | [docs/LOGGING.md](docs/LOGGING.md) |
 | Investigate an upstream wire-shape bug (does routectl already handle this? where in the code?) | [docs/WIRE-GOTCHAS.md](docs/WIRE-GOTCHAS.md) |
 | Verify against the known-good live-matrix baseline | [docs/TESTED_MODELS.md](docs/TESTED_MODELS.md) |
+| Add a replay fixture (sanitization recipe) | [docs/REPLAY-FIXTURES.md](docs/REPLAY-FIXTURES.md) |
 
 ## Style notes
 
