@@ -14,14 +14,16 @@ once; jump to the doc that matches your task.
   the `Provider` trait
 - `routectl-providers` -- concrete provider impls (`openai_compat`,
   `anthropic_api`, `bedrock`, `openai_responses`) plus the per-model
-  quirks table (`model_profile.rs`) and the per-dialect reasoning
-  files (`openai_compat/dialects/*.rs`)
+  quirks table (`model_profile.rs`), the per-dialect reasoning
+  files (`openai_compat/dialects/*.rs`), and the shared
+  `effort.rs` / `header_trace.rs` helpers
 - `routectl-router` -- alias resolution, fallback chain, retry
   policy, dispatch-time overlay merge
 - `routectl-auth` -- `SecretStore` trait + default resolver for
   `env://`, `file://`, and `literal:` references
 - `routectl-cli` -- axum HTTP server, clap subcommands
-  (serve / test / config / login), live matrix integration tests
+  (serve / login / logout / refresh / whoami / test / config),
+  live matrix integration tests
 
 For per-file detail see [docs/CODEMAP.md](docs/CODEMAP.md). For
 module-level architecture and the hub-and-spoke design see
@@ -46,29 +48,10 @@ one canonical `ChatRequest` and N egress providers:
 
 ## Verification gate
 
-Every change must keep these green:
-
-```bash
-# Unit + integration tests across the whole workspace.
-cargo test --workspace --features bedrock --release
-
-# Live matrix against real providers. Requires OPENROUTER_API_KEY,
-# OPENCODE_GO_API_KEY, NIM_API_KEY in env (skips per-provider when
-# missing). Per-provider PASS counts must match the baseline in
-# docs/TESTED_MODELS.md.
-cargo test -p routectl-cli --features live-integration --release \
-  --test live_matrix -- --nocapture --test-threads=1
-
-# Lean build for downstream library consumers who don't want the
-# AWS dependency tree:
-cargo check --workspace --no-default-features \
-  --features openai-compat,anthropic-api
-```
-
-The live matrix is slow (~30s) and costs cents per run. Use it as
-a final gate, not a tight inner loop. See
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the model-breaks
-debug runbook and how to add new models.
+Every change must keep the workspace tests, the lean-feature build,
+and the live matrix green. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+"Verification gate" for the exact commands; that doc is the
+contributor workflow source of truth.
 
 ## When something breaks: where to look
 
@@ -85,10 +68,5 @@ debug runbook and how to add new models.
 
 ## Style notes
 
-- ASCII-only in code, comments, and commit messages. No em-dashes,
-  curly quotes, emoji, or arrows. `--`, `->`, straight quotes.
-- Keep functions under 50 lines, files under 800.
-- Prefer one file per dialect, one row per quirk. The matrix proves
-  the wiring; tight files keep edits surgical.
-- Don't add backwards-compatibility shims. If a schema changes,
-  change it; the live matrix catches regressions.
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) "Style notes" -- ASCII-only,
+function/file size ceilings, no back-compat shims, one file per dialect.

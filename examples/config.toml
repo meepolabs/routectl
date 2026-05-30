@@ -257,3 +257,22 @@ stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 # "claude-haiku-*"  = "anthropic-haiku"
 # "claude-sonnet-*" = "anthropic-sonnet"
 # "claude-opus-*"   = "anthropic-opus"
+
+# ---- context_management emulation (DeepSeek /anthropic or similar) ----
+# When an upstream speaks Anthropic Messages but does not implement
+# context-management-2025-06-27 natively, set context_management = true
+# so routectl caches thinking blocks and re-injects them on tool turns.
+# Also requires history_reasoning = "preserve" on the MODEL so thinking
+# blocks echo back to the upstream intact.
+
+# [providers.deepseek-anthropic]
+# kind               = "anthropic-api"
+# base_url           = "https://api.deepseek.com/anthropic"
+# api_key_ref        = "env://DEEPSEEK_API_KEY"
+# context_management = true
+
+# [models.deepseek-r1]
+# provider          = "deepseek-anthropic"
+# upstream          = "deepseek-reasoner"
+# history_reasoning = "preserve"
+

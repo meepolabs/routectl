@@ -78,8 +78,9 @@ ROUTECTL_LOG=routectl_providers::bedrock=debug ./routectl serve 2>&1 \
 ```
 
 What you get at debug:
-- Existing `body_excerpt=...` WARN on every 4xx/5xx (512-char truncated,
-  scannable in `routectl-warn.log`)
+- Existing `body_excerpt=...` WARN on every 4xx/5xx (512-char
+  truncated; greppable from any tracing subscriber that records
+  WARN-level events)
 - New `body=...` DEBUG with the full upstream error body (4 KB cap,
   HTML-collapsed)
 

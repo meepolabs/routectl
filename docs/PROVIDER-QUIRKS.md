@@ -55,7 +55,7 @@ Need different timeouts for different models on the same upstream? Split into se
 
 Resolution priority: `[providers.X].X` > `[retry].X` > unset (no cap).
 
-**Why opt-in per model, not auto-detect by name:** Anthropic is rolling adaptive thinking out gradually with no clean naming pattern. `opus-4-7` matches today's model but misses `opus-5` / `sonnet-4-7`; `opus-4-` catches the still-legacy `4-5`/`4-6`. TOML opt-in lets you flip the day a new model lands.
+**Why opt-in per model, not auto-detect by name:** Anthropic's adaptive-thinking rollout has no clean naming pattern, so a TOML opt-in is more reliable than a regex match.
 
 ### DeepSeek v4 / v4.1 (api.deepseek.com, example-deepseek-host, NIM, vLLM-hosted, anywhere)
 
@@ -107,12 +107,11 @@ For older vLLM (<= 0.6) leave `history_reasoning` unset (defaults to strip).
 
 NIM's DeepSeek v4 Flash / Pro defaults to **non-thinking mode**. Thinking is enabled per request via top-level `reasoning_effort: "none" | "high" | "max"`. routectl's OpenAI dialect already maps canonical `reasoning.effort` -> `reasoning_effort`; clients that send `reasoning.effort` land thinking on the request.
 
-**To enable thinking on every NIM request:** the operator-side
-`default_extras` knob (which would unconditionally inject
-`reasoning_effort` into the body) is deferred to a future release.
-Until then, callers must send `reasoning.effort = "high"` (or set
-the equivalent on the client side); the OpenAI-dialect translator
-forwards it as `reasoning_effort` to NIM.
+**To enable thinking on every NIM request:** routectl does not yet
+inject `reasoning_effort` into the body unconditionally; callers must
+send `reasoning.effort = "high"` (or set the equivalent on the client
+side) and the OpenAI-dialect translator forwards it as
+`reasoning_effort` to NIM.
 
 ```toml
 [providers.nim]
@@ -417,12 +416,15 @@ is shaped for the beta-aware edit workflow.
 | `400 anthropic-beta header not recognised` | Provider rejects the beta header -- set `context_management = true` |
 | WARN `context_management: cache miss for tool_use ids` in logs | Cold-start or TTL gap; thinking was stripped for that turn. The next turn refills the cache and injection resumes. |
 
-## Troubleshooting matrix routectl logs a 200B-truncated `body_excerpt` at WARN on every 4xx/5xx; flip `ROUTECTL_LOG=routectl=debug` for the full body.
+## Troubleshooting matrix
+
+routectl logs a 200B-truncated `body_excerpt` at WARN on every
+4xx/5xx; flip `ROUTECTL_LOG=routectl=debug` for the full body.
 
 | Symptom | Likely cause |
 |---|---|
 | `400 thinking.type.enabled is not supported` | Need `supports_adaptive_thinking = true` on `[models.X]` (Opus 4.7+) |
-| `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on `[providers.X]` (DeepSeek v4) |
+| `400 reasoning_content in the thinking mode must be passed back to the API` | Need `history_reasoning = "preserve"` on `[models.X]` (DeepSeek v4) |
 | `stream first-byte timeout after 10000ms` on a thinking model | Bump `stream_first_byte_timeout_ms` per the table above |
 | Empty `content` + non-zero `reasoning_tokens` | Model used full `max_tokens` budget on reasoning. Increase `max_tokens` |
 | `400 thinking enabled requires temperature 1.0` | Don't set `temperature` when reasoning is enabled (routectl auto-forces 1.0 if you do) |
