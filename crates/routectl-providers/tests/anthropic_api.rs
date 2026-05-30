@@ -1159,6 +1159,60 @@ mod tests {
         );
     }
 
+    /// Drive an SSE stream that errors mid-flight (malformed JSON in a
+    /// `content_block_start` payload, after a clean `message_start`)
+    /// and confirm the stream surfaces an `Err` chunk to the caller.
+    /// Pins the post-CL-1 contract: a parse-time mid-stream failure
+    /// terminates the stream with a streaming Err rather than
+    /// silently swallowing the event. The accompanying DEBUG log on
+    /// the error path is emitted for triage but not asserted here
+    /// (no tracing-test dev-dep on this crate for log capture).
+    #[tokio::test]
+    async fn integration_stream_yields_err_on_midstream_parse_error() {
+        let mock_server = MockServer::start().await;
+
+        // Valid message_start, then a malformed content_block_start whose
+        // `data` is not valid JSON. The SSE state machine bails on the
+        // parse error and yields Err(Streaming(..)) to the caller.
+        let sse_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_err01\",\"model\":\"claude-3-opus\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {not valid json at all\n\n",
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .append_header("content-type", "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let provider = make_provider(&mock_server.uri());
+        let mut req = base_req("claude-3-opus", vec![user_msg("trigger parse error")]);
+        req.stream = Some(true);
+
+        use futures::StreamExt;
+        let mut stream = provider.stream(req).await.unwrap();
+        let mut saw_err = false;
+        while let Some(result) = stream.next().await {
+            if result.is_err() {
+                saw_err = true;
+                // Once the error fires the stream contract is to
+                // terminate; break so we don't keep polling a closed
+                // generator.
+                break;
+            }
+        }
+        assert!(
+            saw_err,
+            "expected the malformed mid-stream event to surface as Err to the caller"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // M1.2: decoupled anthropic-beta from auth_kind
     // -----------------------------------------------------------------------

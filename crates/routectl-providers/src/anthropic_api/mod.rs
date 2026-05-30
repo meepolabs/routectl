@@ -643,6 +643,15 @@ impl Provider for AnthropicApiProvider {
             while let Some(result) = event_stream.next().await {
                 match result {
                     Err(e) => {
+                        // Surface the cache-write count we are abandoning
+                        // so triage can correlate a torn stream with any
+                        // pending context_management snapshots that never
+                        // made it into the LRU.
+                        tracing::debug!(
+                            provider = %provider_id,
+                            pending_cache_writes_count = state.pending_cache_writes.len(),
+                            "anthropic-api stream: SSE event error; aborting before post-stream cache drain"
+                        );
                         yield Err(Error::Streaming(e.to_string()));
                         return;
                     }
@@ -675,6 +684,15 @@ impl Provider for AnthropicApiProvider {
                         }
                         match state.parse_event(&provider_id, &event.data) {
                             Err(e) => {
+                                // Same triage hint as the event-stream Err
+                                // arm above: log the abandoned cache-write
+                                // count before yielding so a parse failure
+                                // mid-stream is correlatable.
+                                tracing::debug!(
+                                    provider = %provider_id,
+                                    pending_cache_writes_count = state.pending_cache_writes.len(),
+                                    "anthropic-api stream: SSE parse error; aborting before post-stream cache drain"
+                                );
                                 yield Err(e);
                                 return;
                             }
