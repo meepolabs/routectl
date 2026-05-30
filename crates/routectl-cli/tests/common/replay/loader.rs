@@ -274,7 +274,7 @@ mod tests {
 
     fn write_minimal_fixture(dir: &Path, has_upstream: bool, has_egress: bool) {
         let meta = json!({
-            "provider_kind": "anthropic-api",
+            "provider_kind": "anthropic",
             "stream": false,
             "has_upstream_response": has_upstream,
             "has_egress_response": has_egress,
@@ -332,7 +332,7 @@ mod tests {
 
         let f = load_fixture(&dir).unwrap();
         assert_eq!(f.name, "scenario");
-        assert_eq!(f.meta.provider_kind, "anthropic-api");
+        assert_eq!(f.meta.provider_kind, "anthropic");
         assert!(!f.meta.stream);
         assert_eq!(f.ingress_request, json!({"model": "x"}));
         assert_eq!(f.outgoing_request, json!({"model": "y"}));
@@ -445,7 +445,7 @@ mod tests {
         let dir = tmp.path().join("scenario");
         fs::create_dir(&dir).unwrap();
         let meta = json!({
-            "provider_kind": "anthropic-api",
+            "provider_kind": "anthropic",
             "stream": false,
             "has_upstream_response": false,
             "has_egress_response": false,
