@@ -1,6 +1,6 @@
 //! Replay-driven egress contract test.
 //!
-//! Walks every fixture under `tests/fixtures/canon/`, drives the
+//! Walks every fixture under `tests/fixtures/captured/`, drives the
 //! captured ingress request through the matching egress provider's
 //! `normalize_request`, and asserts the upstream-bound JSON body
 //! matches the on-disk `outgoing_request.json` structurally.
@@ -19,9 +19,9 @@
 //! the bare ingress -> egress path does not yet replay -- see the
 //! "Phase 1 corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
-//! Zero fixtures is acceptable: when `canon/` holds no scenario
-//! directories the test passes silently with a single info log so it
-//! can land before the seed corpus is committed.
+//! Zero fixtures is acceptable: the captured/ corpus is per-contributor
+//! and gitignored, so a fresh checkout (or a checkout that has not yet
+//! captured anything) passes silently with a single info log.
 
 mod common;
 
@@ -37,7 +37,7 @@ use routectl_providers::openai_compat::{
 use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 
 use common::replay::{
-    assert_json_equal_structural, canon_root, discover_fixtures, headers_from_pairs,
+    assert_json_equal_structural, captured_root, discover_fixtures, headers_from_pairs,
     phase1_skip_reason, Fixture, FixtureOutcome,
 };
 
@@ -171,10 +171,10 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 
 #[test]
 fn egress_replay_all() {
-    let root = canon_root();
+    let root = captured_root();
     if !root.exists() {
         eprintln!(
-            "[replay_egress] canon/ root `{}` not present; nothing to assert.",
+            "[replay_egress] captured/ root `{}` not present; nothing to assert.",
             root.display(),
         );
         return;
@@ -184,7 +184,7 @@ fn egress_replay_all() {
         Err(e) => panic!("failed to discover fixtures under {}: {e}", root.display()),
     };
     if fixtures.is_empty() {
-        eprintln!("[replay_egress] 0 fixtures in canon/; nothing to assert.");
+        eprintln!("[replay_egress] 0 fixtures in captured/; nothing to assert.");
         return;
     }
 
