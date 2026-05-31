@@ -54,7 +54,6 @@ named in the error).
       "stream": bool,
       "has_upstream_response": bool,
       "has_egress_response": bool,
-      "router_overlay": bool,
       "expected_unknown_block_count": Option<u32>,
       "model": Option<String>,
       "routectl_version": Option<String>
@@ -78,10 +77,6 @@ Fields:
 - `has_upstream_response` / `has_egress_response` -- which response
   files are present. Useful for capture sets that did not record
   the upstream side, or response-only fixtures.
-- `router_overlay` -- `true` if the outgoing body reflects a
-  dispatch-time `header_extras` / `payload_extras` overlay.
-  **Must be `false` for now.** Overlay-aware replay is deferred;
-  the loader rejects `true` until then.
 - `expected_unknown_block_count` -- forward-compat scenarios only.
   Pins the number of unknown content blocks the canonical pipeline
   must opaquely pass through.
