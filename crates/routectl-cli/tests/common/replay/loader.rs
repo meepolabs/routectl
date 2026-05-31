@@ -27,8 +27,6 @@ pub enum ReplayError {
     },
     #[error("missing required file: {0}")]
     MissingFile(String),
-    #[error("router-overlay fixtures are not supported")]
-    RouterOverlayUnsupported,
     #[error("invalid header file format in {path}: expected array of [name, value] pairs")]
     InvalidHeaderFormat { path: String },
     #[error("unexpected file present (meta declared it absent): {path}")]
@@ -46,7 +44,7 @@ pub struct FixtureMeta {
     pub stream: bool,
     pub has_upstream_response: bool,
     pub has_egress_response: bool,
-    pub router_overlay: bool,
+    #[serde(default)]
     pub expected_unknown_block_count: Option<u32>,
     /// Post-alias provider model id; populated by the capture rig.
     /// Optional so older fixtures (and the loader's unit tests) load
@@ -101,10 +99,6 @@ pub fn load_fixture(dir: &Path) -> Result<Fixture, ReplayError> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let meta = read_meta(dir)?;
-
-    if meta.router_overlay {
-        return Err(ReplayError::RouterOverlayUnsupported);
-    }
 
     let ingress_request = read_required_json(dir, INGRESS_BODY)?;
     let ingress_request_headers = read_required_headers(dir, INGRESS_HEADERS)?;
@@ -283,7 +277,6 @@ mod tests {
             "stream": false,
             "has_upstream_response": has_upstream,
             "has_egress_response": has_egress,
-            "router_overlay": false,
         });
         fs::write(
             dir.join(META_JSON),
@@ -442,28 +435,6 @@ mod tests {
             "error did not name the missing file: {}",
             msg
         );
-    }
-
-    #[test]
-    fn loader_rejects_router_overlay_fixture() {
-        let tmp = tempdir().unwrap();
-        let dir = tmp.path().join("scenario");
-        fs::create_dir(&dir).unwrap();
-        let meta = json!({
-            "provider_kind": "anthropic",
-            "stream": false,
-            "has_upstream_response": false,
-            "has_egress_response": false,
-            "router_overlay": true,
-        });
-        fs::write(
-            dir.join(META_JSON),
-            serde_json::to_vec_pretty(&meta).unwrap(),
-        )
-        .unwrap();
-
-        let err = load_fixture(&dir).unwrap_err();
-        assert!(matches!(err, ReplayError::RouterOverlayUnsupported));
     }
 
     #[test]
