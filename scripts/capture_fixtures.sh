@@ -47,6 +47,12 @@ LIMIT=0
 FORCE=0
 ALLOW_UNSAFE_OUT=0
 
+# Workspace package version, stamped into every meta.json + manifest
+# entry for forward-compat. Pulled once at startup from the workspace
+# Cargo.toml so a version bump mid-run cannot mix versions across one
+# capture batch.
+ROUTECTL_VERSION="$(grep -E '^version = ' "$ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --log) [ $# -ge 2 ] || { echo "--log requires a value" >&2; exit 2; }; LOG="$2"; shift 2 ;;
@@ -395,6 +401,7 @@ write_fixture() {
 {
   "request_id": "$id",
   "captured_at_ts": "$ts",
+  "routectl_version": "${ROUTECTL_VERSION}",
   "alias": "${alias:-}",
   "model": "${model:-}",
   "ingress_kind": "${ikind}",
@@ -425,7 +432,7 @@ META
   # entry never points to a missing directory. One JSONL line per
   # request, append-only.
   cat >> "$OUT/manifest.jsonl" <<MANIFEST_LINE
-{"request_id":"$id","captured_at":"$ts","alias":"${alias:-}","model":"${model:-}","ingress_kind":"${ikind}","provider_kind":"${pkind}","stream":$stream_flag,"finish_reason":"${finish:-}","input_tokens":${input_tokens:-0},"output_tokens":${output_tokens:-0},"total_tokens":${total_tokens:-0}}
+{"request_id":"$id","captured_at":"$ts","routectl_version":"${ROUTECTL_VERSION}","alias":"${alias:-}","model":"${model:-}","ingress_kind":"${ikind}","provider_kind":"${pkind}","stream":$stream_flag,"finish_reason":"${finish:-}","input_tokens":${input_tokens:-0},"output_tokens":${output_tokens:-0},"total_tokens":${total_tokens:-0}}
 MANIFEST_LINE
 
   echo "$id"

@@ -1,24 +1,23 @@
 //! Replay-harness machinery: fixture loader + structural comparators.
 //!
-//! Replay tests load a hand-curated fixture from
-//! `crates/routectl-cli/tests/fixtures/canon/<scenario_name>/`, drive
+//! Replay tests load a fixture from
+//! `crates/routectl-cli/tests/fixtures/captured/<request_id>/`, drive
 //! the relevant code path, and assert the result matches the on-disk
-//! bytes structurally. Initial scope is egress-only (canonical
-//! `ChatRequest` -> upstream-bound bytes); the actual replay tests
-//! arrive in a follow-up wave.
+//! bytes structurally. The corpus is per-contributor, gitignored, and
+//! populated by `scripts/capture_fixtures.sh`; the repo ships the
+//! harness, never the data.
 //!
-//! For the per-fixture directory layout, the `meta.json` schema, the
-//! redaction policy, and the operator-facing sanitization recipe, see
-//! [`docs/REPLAY-FIXTURES.md`](../../../../../../docs/REPLAY-FIXTURES.md).
+//! For the per-fixture directory layout and the `meta.json` schema,
+//! see [`docs/REPLAY-FIXTURES.md`](../../../../../../docs/REPLAY-FIXTURES.md).
 //!
 //! Sub-modules:
 //! - [`loader`] -- on-disk fixture format + `load_fixture` /
 //!   `discover_fixtures`.
 //! - [`json_diff`] -- structural JSON comparator + header comparator.
 //! - [`sse_diff`] -- SSE event-sequence parser + comparator.
-//! - [`harness`] -- shared scaffolding (canon root locator, header-vec
-//!   to `HeaderMap` bridge, per-fixture outcome enum) used by the
-//!   `replay_egress.rs` / `replay_ingress.rs` test drivers.
+//! - [`harness`] -- shared scaffolding (captured root locator,
+//!   header-vec to `HeaderMap` bridge, per-fixture outcome enum) used
+//!   by the `replay_egress.rs` / `replay_ingress.rs` test drivers.
 
 #![allow(dead_code, unused_imports)]
 
@@ -28,7 +27,7 @@ pub mod loader;
 pub mod sse_diff;
 
 pub(crate) use harness::{
-    canon_root, headers_from_pairs, phase1_skip_reason, FixtureOutcome, PHASE1_MODEL_DENYLIST,
+    captured_root, headers_from_pairs, phase1_skip_reason, FixtureOutcome, PHASE1_MODEL_DENYLIST,
 };
 pub use json_diff::{
     assert_headers_equal, assert_json_equal_structural, DEFAULT_HEADER_ALLOW_SKIP,

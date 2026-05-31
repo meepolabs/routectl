@@ -1,7 +1,7 @@
 //! Shared bits across the two replay test drivers (`replay_egress.rs`
-//! and `replay_ingress.rs`): the canon root locator, the loader-vector
-//! to `HeaderMap` bridge, the per-fixture outcome enum, and the Phase 1
-//! model-denylist + skip-reason helper.
+//! and `replay_ingress.rs`): the captured root locator, the
+//! loader-vector to `HeaderMap` bridge, the per-fixture outcome enum,
+//! and the Phase 1 model-denylist + skip-reason helper.
 //!
 //! These were duplicated verbatim across both test files until they
 //! grew in lockstep one too many times. Hoisting them removes the
@@ -16,12 +16,13 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue};
 
 use super::loader::Fixture;
 
-/// Path (relative to the workspace root) to the hand-curated fixture
-/// corpus. `discover_fixtures` returns an empty vector when the
-/// directory contains only `.gitkeep` / `README.md`, which keeps the
-/// replay tests passing before the seed corpus lands.
-pub(crate) fn canon_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/canon")
+/// Default replay-fixture root. Per-contributor, local, gitignored at
+/// the repo policy level. Populated by `scripts/capture_fixtures.sh`.
+/// `discover_fixtures` returns an empty vector when the directory is
+/// empty, which keeps the replay tests passing on a fresh checkout
+/// before any fixtures have been captured.
+pub(crate) fn captured_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/captured")
 }
 
 /// Build a `HeaderMap` from the `(name, value)` pairs persisted in a
