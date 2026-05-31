@@ -53,6 +53,11 @@ pub struct FixtureMeta {
     /// without a forced rewrite.
     #[serde(default)]
     pub model: Option<String>,
+    /// Workspace package version stamped by `capture_fixtures.sh`.
+    /// Optional so older captures (and the loader's unit tests) load
+    /// without a forced rewrite.
+    #[serde(default)]
+    pub routectl_version: Option<String>,
 }
 
 /// One loaded fixture. Body files are parsed as JSON for the request

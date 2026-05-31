@@ -1,6 +1,6 @@
 //! Replay-driven ingress contract test.
 //!
-//! Walks every fixture under `tests/fixtures/canon/`, mounts the
+//! Walks every fixture under `tests/fixtures/captured/`, mounts the
 //! captured upstream response in a wiremock server, drives the
 //! matching egress provider's `complete()` against it, runs the
 //! resulting canonical `ChatResponse` through `AnthropicIngress::
@@ -27,10 +27,9 @@
 //! the bare ingress -> egress path does not yet replay -- see the
 //! "Phase 1 corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
-//! Zero exercisable fixtures is acceptable: when `canon/` has none of
-//! the supported (non-stream + recognized provider) fixtures the test
-//! passes silently with a single info log so it can land before the
-//! seed corpus is committed.
+//! Zero exercisable fixtures is acceptable: the captured/ corpus is
+//! per-contributor and gitignored, so a fresh checkout (or one with
+//! only out-of-scope captures) passes silently with a single info log.
 
 mod common;
 
@@ -48,7 +47,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::replay::{
-    assert_json_equal_structural, canon_root, discover_fixtures, headers_from_pairs,
+    assert_json_equal_structural, captured_root, discover_fixtures, headers_from_pairs,
     phase1_skip_reason, Fixture, FixtureOutcome,
 };
 
@@ -227,10 +226,10 @@ async fn run_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 
 #[tokio::test]
 async fn ingress_replay_all() {
-    let root = canon_root();
+    let root = captured_root();
     if !root.exists() {
         eprintln!(
-            "[replay_ingress] canon/ root `{}` not present; nothing to assert.",
+            "[replay_ingress] captured/ root `{}` not present; nothing to assert.",
             root.display(),
         );
         return;
@@ -240,7 +239,7 @@ async fn ingress_replay_all() {
         Err(e) => panic!("failed to discover fixtures under {}: {e}", root.display()),
     };
     if fixtures.is_empty() {
-        eprintln!("[replay_ingress] 0 fixtures in canon/; nothing to assert.");
+        eprintln!("[replay_ingress] 0 fixtures in captured/; nothing to assert.");
         return;
     }
 

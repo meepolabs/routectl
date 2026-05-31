@@ -28,9 +28,9 @@ issues.md
 # Captured live-traffic fixtures (raw, unsanitized bodies). Per-request
 # directories under crates/routectl-cli/tests/fixtures/captured/ get
 # auto-populated by scripts/capture_fixtures.sh from the TRACE log.
-# Bodies contain user prompts AND model outputs -- never commit. A
-# sanitized subset for CI ships separately under
-# crates/routectl-cli/tests/fixtures/canon/ (not gitignored).
+# Bodies contain user prompts AND model outputs -- never commit. The
+# corpus is per-contributor and local-only by design; the repo ships
+# the harness and the capture script, not the data.
 crates/routectl-cli/tests/fixtures/captured/
 # meepoctl per-task worktrees + runtime state
 .meepoctl/
