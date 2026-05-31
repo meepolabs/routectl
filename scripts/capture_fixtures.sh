@@ -7,9 +7,10 @@
 #
 # A request counts as "complete" when its trace carries either an
 # `upstream success body` line (non-stream path) OR a `stream summary`
-# line (stream path). The capture filters to the Anthropic ingress
-# only; egress provider is anthropic-api, openai-compat, or
-# openai-responses.
+# line (stream path). The capture covers any ingress dialect and any
+# egress provider routectl emits a provider_kind for. The captured
+# meta.json records both `ingress_kind` and `provider_kind` so a
+# downstream consumer can dispatch on either.
 #
 # State: the script writes the timestamp of the last seen completion
 # to `crates/routectl-cli/tests/fixtures/captured/.last_capture_ts`
@@ -205,19 +206,23 @@ stripped="$(mktemp)"
 trap 'rm -f "$stripped"' EXIT
 strip_ansi < "$LOG" > "$stripped"
 
-# Collect request_ids that have a completion marker after `since` AND
-# whose ingress span is anthropic AND whose provider_kind is one of
-# the three in scope. The completion line carries `request_id=...`
-# and a timestamp at the start of the line.
+# Collect request_ids that have a completion marker after `since` and
+# whose trace also carries an `ingress request body` and a
+# `provider_kind=` field. Any ingress dialect and any provider_kind
+# value is in scope. The completion line carries `request_id=...` and
+# a timestamp at the start of the line.
 in_scope_ids() {
   awk -v since="$since" '
-    /ingress request body ingress="anthropic"/ {
+    /ingress request body ingress="[^"]+"/ {
       if (match($0, /request_id=[0-9a-f-]+/)) {
         id = substr($0, RSTART+11, RLENGTH-11)
-        anthropic_in[id] = 1
+        ingress_seen[id] = 1
+        if (match($0, /ingress="[^"]+"/)) {
+          ingress_kind[id] = substr($0, RSTART+9, RLENGTH-10)
+        }
       }
     }
-    /(provider_kind="anthropic"|provider_kind="openai-compat"|provider_kind="openai-responses")/ {
+    /provider_kind="[^"]+"/ {
       if (match($0, /request_id=[0-9a-f-]+/)) {
         id = substr($0, RSTART+11, RLENGTH-11)
         if (match($0, /provider_kind="[^"]+"/)) {
@@ -242,8 +247,10 @@ in_scope_ids() {
     }
     END {
       for (id in completed) {
-        if (anthropic_in[id] && provider_kind[id]) {
-          print completed[id] "\t" id "\t" provider_kind[id]
+        if (ingress_seen[id] && provider_kind[id]) {
+          ik = ingress_kind[id]
+          if (ik == "") ik = "unknown"
+          print completed[id] "\t" id "\t" provider_kind[id] "\t" ik
         }
       }
     }
@@ -262,7 +269,7 @@ in_scope_ids() {
 # can be trusted. The manifest append happens AFTER the mv so a
 # dangling manifest entry never points to a missing directory.
 write_fixture() {
-  local id="$1" ts="$2" pkind="$3"
+  local id="$1" ts="$2" pkind="$3" ikind="${4:-unknown}"
   local dst="$OUT/$id"
   local tmp
   tmp="$(mktemp -d "$OUT/.tmp.$id.XXXXXX")"
@@ -390,6 +397,7 @@ write_fixture() {
   "captured_at_ts": "$ts",
   "alias": "${alias:-}",
   "model": "${model:-}",
+  "ingress_kind": "${ikind}",
   "provider_kind": "${pkind}",
   "stream": $stream_flag,
   "finish_reason": "${finish:-}",
@@ -417,7 +425,7 @@ META
   # entry never points to a missing directory. One JSONL line per
   # request, append-only.
   cat >> "$OUT/manifest.jsonl" <<MANIFEST_LINE
-{"request_id":"$id","captured_at":"$ts","alias":"${alias:-}","model":"${model:-}","provider_kind":"${pkind}","stream":$stream_flag,"finish_reason":"${finish:-}","input_tokens":${input_tokens:-0},"output_tokens":${output_tokens:-0},"total_tokens":${total_tokens:-0}}
+{"request_id":"$id","captured_at":"$ts","alias":"${alias:-}","model":"${model:-}","ingress_kind":"${ikind}","provider_kind":"${pkind}","stream":$stream_flag,"finish_reason":"${finish:-}","input_tokens":${input_tokens:-0},"output_tokens":${output_tokens:-0},"total_tokens":${total_tokens:-0}}
 MANIFEST_LINE
 
   echo "$id"
@@ -426,10 +434,10 @@ MANIFEST_LINE
 # Iterate over completions in chronological order, apply --limit if set.
 captured=0
 latest_ts=""
-while IFS=$'\t' read -r ts id pkind; do
+while IFS=$'\t' read -r ts id pkind ikind; do
   [ -z "$id" ] && continue
   [ -d "$OUT/$id" ] && continue          # already captured (defensive idempotency)
-  write_fixture "$id" "$ts" "$pkind" >/dev/null
+  write_fixture "$id" "$ts" "$pkind" "$ikind" >/dev/null
   captured=$((captured + 1))
   latest_ts="$ts"
   if [ "$LIMIT" -gt 0 ] && [ "$captured" -ge "$LIMIT" ]; then

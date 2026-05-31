@@ -44,7 +44,8 @@ named in the error).
 ## meta.json schema
 
     {
-      "provider_kind": "anthropic" | "openai-compat" | "openai-responses",
+      "ingress_kind": "anthropic" | "openai-chat-completions" | ...,
+      "provider_kind": "anthropic" | "openai-compat" | "openai-responses" | ...,
       "stream": bool,
       "has_upstream_response": bool,
       "has_egress_response": bool,
@@ -55,6 +56,11 @@ named in the error).
 
 Fields:
 
+- `ingress_kind` -- which ingress dialect parsed the inbound body.
+  The replay test selects the matching ingress adapter. Common
+  values: `"anthropic"` (`/v1/messages`), `"openai-chat-completions"`
+  (`/chat/completions`). The capture rig records whatever value the
+  trace carries; new dialects do not require a rig change.
 - `provider_kind` -- which egress provider produced the outgoing
   body. The replay test selects the matching translator. The string
   values match the in-code `PROVIDER_KIND` constants in
