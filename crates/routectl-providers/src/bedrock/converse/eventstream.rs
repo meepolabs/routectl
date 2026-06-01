@@ -38,7 +38,7 @@ use routectl_core::{
     ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result,
 };
 
-use super::response::map_stop_reason;
+use super::response::{lift_stop_sequence, map_stop_reason};
 use super::response_types::{
     ConverseUsage, StreamContentBlockDelta, StreamContentBlockStart,
     StreamContentBlockStartPayload, StreamContentBlockStop, StreamDelta, StreamMessageStart,
@@ -97,6 +97,12 @@ struct ConverseStreamState {
     /// until metadata flushes (or until end-of-stream if metadata
     /// never arrives).
     pending_stop_reason: Option<String>,
+    /// Matched stop sequence captured at messageStop when AWS stops
+    /// on `stop_sequence` AND the request opted into the
+    /// `/stop_sequence` response-field path. Mirrors the
+    /// non-streaming `extract_matched_stop_sequence` gate so streaming
+    /// canonical chunks carry the same `matched_stop_sequence` shape.
+    pending_stop_sequence: Option<String>,
 }
 
 /// Decode Bedrock ConverseStream frames into routectl `ChatChunk`s.
@@ -310,6 +316,15 @@ fn handle_converse_frame(
             let ev: StreamMessageStop = parse_payload(provider_id, payload, "messageStop")?;
             // Capture stop_reason for the metadata-or-EOS chunk. AWS
             // emits messageStop before metadata, so we hold it.
+            // Mirror the non-streaming gate: only lift `stop_sequence`
+            // out of additionalModelResponseFields when the upstream
+            // actually stopped on a matched sequence; debug-log if the
+            // gate is satisfied but the value is absent or non-string.
+            state.pending_stop_sequence = lift_stop_sequence(
+                provider_id,
+                ev.stop_reason.as_deref(),
+                ev.additional_model_response_fields.as_ref(),
+            );
             state.pending_stop_reason = ev.stop_reason;
             Ok(vec![])
         }
@@ -483,6 +498,7 @@ fn build_closing_chunk(
         .pending_stop_reason
         .take()
         .and_then(|s| map_stop_reason(Some(s.as_str())));
+    let matched_stop_sequence = state.pending_stop_sequence.take();
     let usage_delta = usage.map(|u| {
         let cache_write = u.cache_write_input_tokens.unwrap_or(0);
         let cache_read = u.cache_read_input_tokens.unwrap_or(0);
@@ -510,15 +526,7 @@ fn build_closing_chunk(
             index: 0,
             delta: ChunkDelta::default(),
             finish_reason,
-            // Same caveat as `converse/response.rs::translate`:
-            // Bedrock Converse stream events do not include the
-            // matched stop sequence on `messageStop`. AWS surfaces
-            // it via `additionalModelResponseFields` only when
-            // `additionalModelResponseFieldPaths` opted in on the
-            // request side. Tracked as a follow-up. Bedrock-Invoke
-            // (which delegates to `anthropic_api::sse::SseState`)
-            // already lifts the native field.
-            matched_stop_sequence: None,
+            matched_stop_sequence,
         }],
         usage: usage_delta,
         opaque_events: Vec::new(),

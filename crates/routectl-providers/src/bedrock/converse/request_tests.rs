@@ -810,3 +810,55 @@ fn cache_control_breakpoint_validation_runs_in_converse_path() {
         "expected breakpoint cap error; got: {err}"
     );
 }
+
+#[test]
+fn additional_model_response_field_paths_opts_in_to_stop_sequence_lift() {
+    // Arrange: routectl always asks AWS to surface
+    // `additionalModelResponseFields["stop_sequence"]` so the canonical
+    // `matched_stop_sequence` round-trips through Converse the same
+    // way it does through Invoke. AWS silently ignores absent JSON
+    // pointers, so the same opt-in is safe for non-Anthropic models.
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hi")],
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    let paths = body
+        .get("additionalModelResponseFieldPaths")
+        .expect("expected additionalModelResponseFieldPaths in body, got {body}")
+        .as_array()
+        .expect("expected array, got {body}");
+    assert_eq!(paths.len(), 1, "got {body}");
+    assert_eq!(paths[0], "/stop_sequence", "got {body}");
+}
+
+#[test]
+fn additional_model_response_field_paths_emitted_for_non_anthropic_model() {
+    // Arrange: a non-Anthropic Bedrock model id (e.g. Mistral on
+    // Bedrock). The response-fields opt-in is wired unconditionally;
+    // AWS docs guarantee absent JSON pointers are silently ignored so
+    // a non-Anthropic upstream that doesn't populate `/stop_sequence`
+    // simply omits the field on the response.
+    let mut cfg = fake_cfg();
+    cfg.model_id = "mistral.mistral-large-2407-v1:0".into();
+    cfg.id = "bedrock:test-mistral-converse".into();
+    let req = ChatRequest {
+        model: "mistral.mistral-large-2407-v1:0".into(),
+        messages: vec![user_msg("hi")],
+        ..Default::default()
+    };
+
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    let paths = body
+        .get("additionalModelResponseFieldPaths")
+        .expect("expected additionalModelResponseFieldPaths in body, got {body}")
+        .as_array()
+        .expect("expected array, got {body}");
+    assert_eq!(paths.len(), 1, "got {body}");
+    assert_eq!(paths[0], "/stop_sequence", "got {body}");
+}

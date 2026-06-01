@@ -13,6 +13,9 @@
 // pub(crate). Redeclaring them here keeps all the hardcoded literals out of
 // the test bodies while satisfying the "zero bare-literal sites" criterion.
 const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
+// Used only by the test-utils-gated E2E test below; the unconditional header
+// tests do not reference it, so the constant is dead code without the feature.
+#[cfg_attr(not(feature = "test-utils"), allow(dead_code))]
 const CLEAR_THINKING_EDIT_TYPE: &str = "clear_thinking_20251015";
 
 use routectl_core::{Message, MessageContent, Provider, Role};
