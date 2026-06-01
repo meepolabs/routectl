@@ -70,6 +70,16 @@ uuid = { version = "1", features = ["v4", "v7"] }
 # Borrows soundness in IterMut on lru < 0.16.3).
 lru = "0.16"
 
+# Filesystem watch + atomic Router hot-swap. `notify` is the
+# cross-platform fs-watch backend (inotify on Linux, FSEvents on
+# macOS, ReadDirectoryChangesW on Windows). `notify-debouncer-full`
+# coalesces a burst of events into one delivery. `arc-swap` is the
+# lock-free Arc<T> hot-swap primitive used to publish a freshly-built
+# Router to handlers without per-request locking.
+notify = "8"
+notify-debouncer-full = "0.6"
+arc-swap = "1"
+
 # OAuth-adjacent crypto + secret hygiene
 sha2 = "0.11"
 rand = "0.9"

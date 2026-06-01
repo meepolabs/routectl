@@ -52,7 +52,12 @@ pub async fn count_tokens(
         Err(e) => return map_error(envelope, e),
     };
 
-    match state.router.count_tokens(req).await {
+    // Snapshot the live Router once. Hot-reload-safe: if a swap
+    // happens between the snapshot and `count_tokens`, the request
+    // still uses the snapshot's routing surface, not a half-applied
+    // mix.
+    let router = state.router.load_full();
+    match router.count_tokens(req).await {
         Ok(tc) => {
             // Anthropic's wire shape is `{"input_tokens": N, ...}`.
             // `TokenCount` serializes back to that exact shape with
