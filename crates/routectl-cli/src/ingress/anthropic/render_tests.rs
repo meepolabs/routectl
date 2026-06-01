@@ -298,3 +298,170 @@ fn render_response_does_not_dedupe_other_tool_use_when_id_missing() {
         "tool_calls entry must still emit when Other has no id: {content:?}",
     );
 }
+
+/// Real Anthropic 400s on `signature: null` mid-conversation when the
+/// next provider in a switch is claude-sonnet replaying a prior turn's
+/// thinking block produced by a non-Anthropic upstream. A canonical
+/// `ReasoningDetail` whose payload has no `signature` key (or whose
+/// signature is null) must render to a thinking block with NO
+/// `signature` key on the wire -- not `signature: null`.
+#[test]
+fn render_response_omits_signature_key_when_payload_has_none() {
+    use routectl_core::{
+        schema::Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage,
+    };
+    let resp = ChatResponse {
+        id: "msg_no_sig".into(),
+        model: "deepseek-v4-pro".into(),
+        created: 0,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("answer".into()),
+                reasoning: None,
+                reasoning_details: vec![ReasoningDetail {
+                    kind: ReasoningDetailKind::Text,
+                    id: Some("rd_1".into()),
+                    format: Some("deepseek-v1".into()),
+                    index: Some(0),
+                    payload: json!({"text": "let me think"}),
+                }],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 10,
+            total_tokens: 15,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+    };
+    let v = AnthropicIngress.render_response(resp).unwrap();
+    let content = v["content"].as_array().expect("content is array");
+    let thinking = content
+        .iter()
+        .find(|b| b["type"] == "thinking")
+        .expect("thinking block present");
+    assert_eq!(thinking["thinking"], "let me think");
+    let obj = thinking
+        .as_object()
+        .expect("thinking block is a JSON object");
+    assert!(
+        !obj.contains_key("signature"),
+        "no signature key when payload has none, got: {thinking}"
+    );
+}
+
+/// Counterpart: an Anthropic-shape detail with a non-null signature
+/// must round-trip the signature verbatim. Pins that the omit logic
+/// only fires on absent / null signatures.
+#[test]
+fn render_response_emits_signature_verbatim_when_payload_has_one() {
+    use routectl_core::{
+        schema::Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage,
+    };
+    let resp = ChatResponse {
+        id: "msg_signed".into(),
+        model: "claude-opus-4-7".into(),
+        created: 0,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("answer".into()),
+                reasoning: None,
+                reasoning_details: vec![ReasoningDetail {
+                    kind: ReasoningDetailKind::Text,
+                    id: Some("rd_1".into()),
+                    format: Some("anthropic-claude-v1".into()),
+                    index: Some(0),
+                    payload: json!({"text": "let me think", "signature": "abc123"}),
+                }],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 10,
+            total_tokens: 15,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+    };
+    let v = AnthropicIngress.render_response(resp).unwrap();
+    let content = v["content"].as_array().expect("content is array");
+    let thinking = content
+        .iter()
+        .find(|b| b["type"] == "thinking")
+        .expect("thinking block present");
+    assert_eq!(thinking["signature"], "abc123");
+}
+
+/// Summary-kind details (OpenAI Responses per-step summaries) must
+/// follow the same contract: no `signature` key on the wire when the
+/// payload doesn't carry one.
+#[test]
+fn render_response_summary_kind_omits_signature_key_when_absent() {
+    use routectl_core::{
+        schema::Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage,
+    };
+    let resp = ChatResponse {
+        id: "msg_summary".into(),
+        model: "gpt-5".into(),
+        created: 0,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("answer".into()),
+                reasoning: None,
+                reasoning_details: vec![ReasoningDetail {
+                    kind: ReasoningDetailKind::Summary,
+                    id: Some("rd_1".into()),
+                    format: Some("openai-responses-v1".into()),
+                    index: Some(0),
+                    payload: json!({"text": "step summary"}),
+                }],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 10,
+            total_tokens: 15,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+    };
+    let v = AnthropicIngress.render_response(resp).unwrap();
+    let content = v["content"].as_array().expect("content is array");
+    let thinking = content
+        .iter()
+        .find(|b| b["type"] == "thinking")
+        .expect("Summary thinking block present");
+    assert_eq!(thinking["thinking"], "step summary");
+    let obj = thinking
+        .as_object()
+        .expect("thinking block is a JSON object");
+    assert!(
+        !obj.contains_key("signature"),
+        "no signature key on Summary thinking when payload has none, got: {thinking}"
+    );
+}

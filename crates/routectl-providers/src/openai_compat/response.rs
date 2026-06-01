@@ -29,7 +29,11 @@ use super::dialect::ReasoningDialect;
 ///     render emits `"role":"assistant"` from a hardcoded insert, not
 ///     via `extras`.
 ///   - `service_tier`: Anthropic-spec response field; must round-trip.
-const OPENAI_COMPAT_ENVELOPE_KEYS: &[&str] = &["object", "system_fingerprint", "cost"];
+///
+/// `pub` so cross-crate integration tests can pin against the same
+/// allow-list rather than mirroring it as a literal -- a mirror that
+/// silently goes stale the next time a key is added here.
+pub const OPENAI_COMPAT_ENVELOPE_KEYS: &[&str] = &["object", "system_fingerprint", "cost"];
 
 /// OpenAI/DeepSeek usage sub-bag keys that must NOT round-trip through
 /// `Usage.extras`. Two of them carry information canonical models in
@@ -38,7 +42,10 @@ const OPENAI_COMPAT_ENVELOPE_KEYS: &[&str] = &["object", "system_fingerprint", "
 /// either redundant (`prompt_cache_miss_tokens` = `prompt_tokens -
 /// cache_read`) or pure OpenAI-vendor detail that does not map to any
 /// canonical concept.
-const OPENAI_COMPAT_USAGE_SUBKEYS: &[&str] = &[
+///
+/// `pub` for the same cross-crate-test reason as
+/// `OPENAI_COMPAT_ENVELOPE_KEYS`.
+pub const OPENAI_COMPAT_USAGE_SUBKEYS: &[&str] = &[
     "prompt_cache_hit_tokens",
     "prompt_cache_miss_tokens",
     "prompt_tokens_details",
@@ -54,10 +61,27 @@ pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<Chat
         apply_dialect_to_message(id, &mut choice.message, dialect)?;
     }
 
-    if let Some(usage) = resp.usage.as_mut() {
-        lift_and_strip_usage_extras(usage);
+    let lifted_usage_subkeys = if let Some(usage) = resp.usage.as_mut() {
+        lift_and_strip_usage_extras(usage)
+    } else {
+        Vec::new()
+    };
+    let dropped_envelope_keys = strip_envelope_extras(&mut resp.extras);
+
+    // Surface a single DEBUG line per normalize call when at least one
+    // key was actually dropped or lifted, so an operator auditing
+    // foreign-shape sanitization can grep the openai-compat target
+    // instead of inferring success from the absence of fields. No-op
+    // calls (clean Anthropic-spec responses) stay silent.
+    if !dropped_envelope_keys.is_empty() || !lifted_usage_subkeys.is_empty() {
+        tracing::debug!(
+            target: "routectl::openai_compat",
+            id,
+            dropped_envelope_keys = ?dropped_envelope_keys,
+            lifted_usage_subkeys = ?lifted_usage_subkeys,
+            "openai-compat normalize: stripped vendor keys"
+        );
     }
-    strip_envelope_extras(&mut resp.extras);
 
     Ok(resp)
 }
@@ -78,7 +102,12 @@ pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<Chat
 /// DeepSeek's wins because it is the dialect for the host most likely
 /// to ship both. Either way the cumulative semantics align with
 /// Anthropic's `cache_read_input_tokens`.
-pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) {
+///
+/// Returns the list of `OPENAI_COMPAT_USAGE_SUBKEYS` that were
+/// actually present (and therefore stripped) on this call. The
+/// caller (`normalize`) uses the list for an audit DEBUG line; an
+/// empty Vec means no-op.
+pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) -> Vec<&'static str> {
     if usage.reasoning_tokens.is_none() {
         usage.reasoning_tokens = usage
             .extras
@@ -101,19 +130,28 @@ pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) {
             })
             .map(|n| n as u32);
     }
+    let mut stripped: Vec<&'static str> = Vec::new();
     for k in OPENAI_COMPAT_USAGE_SUBKEYS {
-        usage.extras.remove(*k);
+        if usage.extras.remove(*k).is_some() {
+            stripped.push(*k);
+        }
     }
+    stripped
 }
 
 /// Strip OpenAI-compat envelope keys from `ChatResponse.extras`.
 /// Anthropic-spec / Anthropic-beta fields (`service_tier`,
 /// `context_management`, `container`, ...) and any unknown forward-
-/// compat keys stay intact.
-fn strip_envelope_extras(extras: &mut serde_json::Map<String, Value>) {
+/// compat keys stay intact. Returns the list of keys actually
+/// removed so `normalize` can audit-log the strip.
+fn strip_envelope_extras(extras: &mut serde_json::Map<String, Value>) -> Vec<&'static str> {
+    let mut dropped: Vec<&'static str> = Vec::new();
     for k in OPENAI_COMPAT_ENVELOPE_KEYS {
-        extras.remove(*k);
+        if extras.remove(*k).is_some() {
+            dropped.push(*k);
+        }
     }
+    dropped
 }
 
 /// OpenAI-compat upstreams (DeepSeek, vLLM, OpenRouter, NIM, llama.cpp,
@@ -557,5 +595,82 @@ mod tests {
         });
         let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
         assert_eq!(resp.usage.unwrap().reasoning_tokens, Some(11));
+    }
+
+    /// Audit trail for foreign-shape sanitization: when the helpers
+    /// actually drop or lift a key, they return the affected names.
+    /// `normalize` then DEBUG-logs the lists so an operator triaging a
+    /// vendor upstream can grep `routectl::openai_compat` instead of
+    /// inferring success from the absence of fields. The logging
+    /// itself runs on a tracing subscriber and isn't asserted here;
+    /// pinning the helper return values gives the same coverage at
+    /// zero subscriber cost.
+    #[test]
+    fn strip_helpers_return_actually_removed_keys() {
+        // Arrange
+        let mut extras = serde_json::Map::new();
+        extras.insert("object".into(), json!("chat.completion"));
+        extras.insert("system_fingerprint".into(), json!("fp"));
+        extras.insert("service_tier".into(), json!("standard"));
+        let mut usage = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            extras: {
+                let mut m = serde_json::Map::new();
+                m.insert("prompt_cache_hit_tokens".into(), json!(80));
+                m.insert("prompt_tokens_details".into(), json!({"cached_tokens": 64}));
+                m
+            },
+            ..Default::default()
+        };
+
+        // Act
+        let dropped = strip_envelope_extras(&mut extras);
+        let lifted = lift_and_strip_usage_extras(&mut usage);
+
+        // Assert: only keys actually present are reported.
+        assert!(dropped.contains(&"object"), "got {dropped:?}");
+        assert!(dropped.contains(&"system_fingerprint"), "got {dropped:?}");
+        assert!(
+            !dropped.contains(&"cost"),
+            "cost was not in extras; must not be reported as dropped, got {dropped:?}"
+        );
+        assert!(
+            lifted.contains(&"prompt_cache_hit_tokens"),
+            "got {lifted:?}"
+        );
+        assert!(lifted.contains(&"prompt_tokens_details"), "got {lifted:?}");
+        // Anthropic-spec field stays.
+        assert!(extras.contains_key("service_tier"));
+    }
+
+    /// Counterpart: clean-upstream calls return empty Vecs so
+    /// `normalize` can no-op-skip the audit DEBUG line.
+    #[test]
+    fn strip_helpers_return_empty_when_nothing_to_strip() {
+        // Arrange: no envelope keys, no usage sub-bags.
+        let mut extras = serde_json::Map::new();
+        extras.insert("service_tier".into(), json!("priority"));
+        let mut usage = Usage {
+            prompt_tokens: 5,
+            completion_tokens: 10,
+            total_tokens: 15,
+            ..Default::default()
+        };
+
+        // Act
+        let dropped = strip_envelope_extras(&mut extras);
+        let lifted = lift_and_strip_usage_extras(&mut usage);
+
+        // Assert
+        assert!(
+            dropped.is_empty(),
+            "no envelope keys present; got {dropped:?}"
+        );
+        assert!(
+            lifted.is_empty(),
+            "no usage sub-bags present; got {lifted:?}"
+        );
     }
 }
