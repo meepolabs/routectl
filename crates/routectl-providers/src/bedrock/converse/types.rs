@@ -21,10 +21,10 @@ use serde_json::Value;
 
 /// Top-level Converse request body. The model id is in the URL path
 /// (`/model/{modelId}/converse`), not the body, so it is intentionally
-/// absent here. `additionalModelResponseFieldPaths` is the symmetric
-/// response-side accessor; we don't populate it on routectl-built
-/// requests today but keep the field optional so an operator-supplied
-/// extra in `additional_model_request_fields` can land it later.
+/// absent here. `additionalModelResponseFieldPaths` opts the response
+/// bag into surfacing `/stop_sequence` so the canonical
+/// `matched_stop_sequence` round-trips through Converse identically to
+/// the Bedrock-Invoke path.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConverseRequest {

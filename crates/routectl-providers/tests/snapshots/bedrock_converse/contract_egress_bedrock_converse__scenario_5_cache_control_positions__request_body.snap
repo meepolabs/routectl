@@ -1,5 +1,6 @@
 ---
 source: crates/routectl-providers/tests/contract_egress_bedrock_converse.rs
+assertion_line: 233
 expression: body
 ---
 {
@@ -9,6 +10,9 @@ expression: body
       "type": "ephemeral"
     }
   },
+  "additionalModelResponseFieldPaths": [
+    "/stop_sequence"
+  ],
   "inferenceConfig": {
     "maxTokens": 1024
   },

@@ -43,6 +43,14 @@ use super::system::build_system;
 use super::tools::{build_tool_config, collect_tool_cache_controls};
 use super::types::{ConverseRequest, InferenceConfig};
 
+/// JSON Pointer paths lifted out of the model-specific response bag
+/// onto `additionalModelResponseFields`. AWS silently ignores absent
+/// pointers, so sending the same set against every Converse-eligible
+/// model is safe even when only Anthropic actually populates
+/// `/stop_sequence`. Hoisted as a named const so the wire opt-in is
+/// reviewable in one place.
+const RESPONSE_FIELD_PATHS: &[&str] = &["/stop_sequence"];
+
 // ---------------------------------------------------------------------------
 // Top-level translate
 // ---------------------------------------------------------------------------
@@ -68,7 +76,9 @@ pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseReque
         inference_config,
         tool_config,
         additional_model_request_fields,
-        additional_model_response_field_paths: None,
+        additional_model_response_field_paths: Some(
+            RESPONSE_FIELD_PATHS.iter().map(|s| s.to_string()).collect(),
+        ),
     })
 }
 

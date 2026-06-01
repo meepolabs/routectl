@@ -1,8 +1,12 @@
 ---
 source: crates/routectl-providers/tests/contract_egress_bedrock_converse.rs
+assertion_line: 124
 expression: body
 ---
 {
+  "additionalModelResponseFieldPaths": [
+    "/stop_sequence"
+  ],
   "inferenceConfig": {
     "maxTokens": 1024
   },

@@ -17,7 +17,7 @@
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use tracing::warn;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use routectl_core::schema::CacheCreation;
@@ -67,6 +67,12 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         tool_calls,
     };
 
+    let matched_stop_sequence = lift_stop_sequence(
+        provider_id,
+        resp.stop_reason.as_deref(),
+        resp.additional_model_response_fields.as_ref(),
+    );
+
     Ok(ChatResponse {
         // Bedrock Converse responses don't carry an upstream message id.
         // Synthesize one so downstream OpenAI-SSE clients see the same
@@ -84,16 +90,7 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
             index: 0,
             message,
             finish_reason,
-            // Bedrock Converse does NOT echo the matched stop sequence
-            // on the top-level response. AWS surfaces it via
-            // `additionalModelResponseFields["stop_sequence"]` only
-            // when the request set `additionalModelResponseFieldPaths
-            // = ["/stop_sequence"]`. Wiring that opt-in path-set is
-            // tracked as a follow-up; the Bedrock-Invoke path (which
-            // delegates to `anthropic_api::response::normalize`) lifts
-            // the native field today, so all-Anthropic-on-Bedrock via
-            // Invoke is already covered.
-            matched_stop_sequence: None,
+            matched_stop_sequence,
         }],
         usage,
         routectl_provider: None,
@@ -103,6 +100,35 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         // through to the client without a routectl release.
         extras: resp.extras,
     })
+}
+
+/// Shared helper for the streaming and non-streaming lift sites. Both
+/// paths gate on `stop_reason == "stop_sequence"` and read a flat
+/// string under the camelCase `stop_sequence` key on the
+/// additionalModelResponseFields bag. A debug-level event fires when
+/// the gate is satisfied but the lift comes back empty so operators
+/// can spot schema drift on Converse hosts without burning warn-level
+/// noise on the happy path.
+pub(super) fn lift_stop_sequence(
+    provider_id: &str,
+    stop_reason: Option<&str>,
+    additional_fields: Option<&Value>,
+) -> Option<String> {
+    if stop_reason != Some("stop_sequence") {
+        return None;
+    }
+    let lifted = additional_fields
+        .and_then(|v| v.get("stop_sequence"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if lifted.is_none() {
+        debug!(
+            provider = provider_id,
+            additional_model_response_fields = ?additional_fields,
+            "converse: stop_reason=stop_sequence but additionalModelResponseFields.stop_sequence missing or non-string"
+        );
+    }
+    lifted
 }
 
 /// Walk Converse content blocks. Mirrors
@@ -673,5 +699,136 @@ mod tests {
         // Assert
         assert!(resp.usage.is_none());
         assert!(resp.choices[0].finish_reason.is_none());
+    }
+
+    #[test]
+    fn matched_stop_sequence_lifted_when_stop_reason_is_stop_sequence() {
+        // Arrange: AWS echoes the matched sequence back via
+        // additionalModelResponseFields when the request opted into
+        // /stop_sequence. The canonical ChatResponse must surface it
+        // identically to the Anthropic-API and Bedrock-Invoke paths.
+        let raw = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": "hello STOP"}]
+                }
+            },
+            "stopReason": "stop_sequence",
+            "additionalModelResponseFields": {"stop_sequence": "STOP"}
+        });
+
+        // Act
+        let resp = translate("test", &raw).unwrap();
+
+        // Assert
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(
+            resp.choices[0].matched_stop_sequence.as_deref(),
+            Some("STOP")
+        );
+    }
+
+    #[test]
+    fn matched_stop_sequence_gated_off_for_non_stop_sequence_reason() {
+        // Arrange: a stray `stop_sequence` value paired with a
+        // different stop_reason must NOT be lifted -- mirrors the
+        // anthropic_api egress so canonical `matched_stop_sequence`
+        // only fires when AWS actually stopped on a matched sequence.
+        let raw = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": "all done"}]
+                }
+            },
+            "stopReason": "end_turn",
+            "additionalModelResponseFields": {"stop_sequence": "STOP"}
+        });
+
+        // Act
+        let resp = translate("test", &raw).unwrap();
+
+        // Assert
+        assert!(resp.choices[0].matched_stop_sequence.is_none());
+    }
+
+    #[test]
+    fn matched_stop_sequence_absent_field_yields_none_no_panic() {
+        // Arrange: AWS reported stop_reason=stop_sequence but did not
+        // surface the field (provider quirk or schema drift). The lift
+        // must fall through to None without panicking; a debug-level
+        // diagnostic fires for operator visibility but is not asserted
+        // here (the project doesn't wire tracing_test into unit tests).
+        let raw = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": "hello"}]
+                }
+            },
+            "stopReason": "stop_sequence"
+        });
+
+        // Act
+        let resp = translate("test", &raw).unwrap();
+
+        // Assert
+        assert!(resp.choices[0].matched_stop_sequence.is_none());
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn matched_stop_sequence_parity_with_bedrock_invoke_path() {
+        // Arrange: Bedrock-Invoke delegates the response normalization
+        // to `anthropic_api::response::normalize`, which lifts the
+        // native top-level `stop_sequence` field. Bedrock-Converse
+        // lifts the same value out of
+        // `additionalModelResponseFields["stop_sequence"]`. Both must
+        // surface the identical canonical `matched_stop_sequence`
+        // string when the upstream stops on the same sequence with
+        // the same prompt + stop list.
+        let invoke_raw = json!({
+            "id": "msg_invoke_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5",
+            "content": [{"type": "text", "text": "hello STOP"}],
+            "stop_reason": "stop_sequence",
+            "stop_sequence": "STOP",
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        });
+        let converse_raw = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": "hello STOP"}]
+                }
+            },
+            "stopReason": "stop_sequence",
+            "additionalModelResponseFields": {"stop_sequence": "STOP"},
+            "usage": {"inputTokens": 5, "outputTokens": 3, "totalTokens": 8}
+        });
+
+        // Act
+        let invoke_resp =
+            crate::anthropic_api::response::normalize("bedrock-invoke", invoke_raw).unwrap();
+        let converse_resp = translate("bedrock-converse", &converse_raw).unwrap();
+
+        // Assert: the canonical matched_stop_sequence value matches
+        // across both Bedrock egress paths.
+        assert_eq!(
+            invoke_resp.choices[0].matched_stop_sequence,
+            converse_resp.choices[0].matched_stop_sequence,
+        );
+        assert_eq!(
+            converse_resp.choices[0].matched_stop_sequence.as_deref(),
+            Some("STOP"),
+        );
+        // And the finish_reason mapping agrees too.
+        assert_eq!(
+            invoke_resp.choices[0].finish_reason,
+            converse_resp.choices[0].finish_reason,
+        );
     }
 }

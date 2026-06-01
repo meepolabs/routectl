@@ -397,3 +397,130 @@ async fn stream_eof_after_message_stop_without_metadata_emits_closing_chunk() {
     let any_err = chunks.iter().any(|c| c.is_err());
     assert!(!any_err, "EOF after messageStop should not error");
 }
+
+#[test]
+fn matched_stop_sequence_lifts_onto_closing_chunk_when_stop_reason_is_stop_sequence() {
+    // Arrange: AWS streams messageStop with the lifted
+    // additionalModelResponseFields["stop_sequence"] then metadata.
+    // The closing chunk emitted on metadata must carry the matched
+    // sequence onto canonical `matched_stop_sequence`, identical to
+    // the non-streaming Converse path.
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let mid = run(
+        "messageStop",
+        r#"{"stopReason":"stop_sequence","additionalModelResponseFields":{"stop_sequence":"STOP"}}"#,
+        &mut state,
+    );
+    assert!(mid.is_empty());
+    let closing = run(
+        "metadata",
+        r#"{"usage":{"inputTokens":3,"outputTokens":2,"totalTokens":5}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert_eq!(closing.len(), 1);
+    assert_eq!(closing[0].choices[0].finish_reason.as_deref(), Some("stop"));
+    assert_eq!(
+        closing[0].choices[0].matched_stop_sequence.as_deref(),
+        Some("STOP")
+    );
+}
+
+#[test]
+fn matched_stop_sequence_gated_off_when_stop_reason_is_end_turn() {
+    // Arrange: a stray stop_sequence value paired with a different
+    // stop_reason must NOT be lifted -- mirrors the non-streaming
+    // gate so the canonical layer never mis-signals
+    // `matched_stop_sequence` on a normal end_turn.
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let _ = run(
+        "messageStop",
+        r#"{"stopReason":"end_turn","additionalModelResponseFields":{"stop_sequence":"STOP"}}"#,
+        &mut state,
+    );
+    let closing = run(
+        "metadata",
+        r#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert!(closing[0].choices[0].matched_stop_sequence.is_none());
+}
+
+#[test]
+fn matched_stop_sequence_absent_field_yields_none_no_error() {
+    // Arrange: stop_reason=stop_sequence but the response-field bag
+    // is missing entirely (provider quirk or schema drift). The
+    // closing chunk must carry None and the stream must not error;
+    // a debug-level diagnostic fires for operator visibility but is
+    // not asserted (no tracing_test wired).
+    let mut state = ConverseStreamState::default();
+
+    // Act
+    let _ = run(
+        "messageStop",
+        r#"{"stopReason":"stop_sequence"}"#,
+        &mut state,
+    );
+    let closing = run(
+        "metadata",
+        r#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#,
+        &mut state,
+    );
+
+    // Assert
+    assert_eq!(closing.len(), 1);
+    assert!(closing[0].choices[0].matched_stop_sequence.is_none());
+    assert_eq!(closing[0].choices[0].finish_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn matched_stop_sequence_lifts_on_eof_flush_path() {
+    // Arrange: messageStop with a lifted stop_sequence, then EOF
+    // before metadata arrives -- the synthetic closing chunk emitted
+    // by the stream() flush must still carry the matched sequence.
+    let frames: Vec<std::result::Result<Bytes, reqwest::Error>> = vec![
+        Ok(encode_frame("messageStart", r#"{"role":"assistant"}"#)),
+        Ok(encode_frame(
+            "contentBlockStart",
+            r#"{"contentBlockIndex":0}"#,
+        )),
+        Ok(encode_frame(
+            "contentBlockDelta",
+            r#"{"contentBlockIndex":0,"delta":{"text":"hi STOP"}}"#,
+        )),
+        Ok(encode_frame(
+            "contentBlockStop",
+            r#"{"contentBlockIndex":0}"#,
+        )),
+        Ok(encode_frame(
+            "messageStop",
+            r#"{"stopReason":"stop_sequence","additionalModelResponseFields":{"stop_sequence":"STOP"}}"#,
+        )),
+        // No metadata frame -- EOF flush path.
+    ];
+    let byte_stream = fstream::iter(frames);
+
+    // Act
+    let chunks: Vec<_> = stream("test".to_string(), byte_stream)
+        .collect::<Vec<_>>()
+        .await;
+
+    // Assert
+    let last = chunks
+        .last()
+        .expect("expected at least one chunk")
+        .as_ref()
+        .expect("EOF flush yielded an Err");
+    assert_eq!(last.choices[0].finish_reason.as_deref(), Some("stop"));
+    assert_eq!(
+        last.choices[0].matched_stop_sequence.as_deref(),
+        Some("STOP")
+    );
+}
