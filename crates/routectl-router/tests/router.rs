@@ -1551,3 +1551,143 @@ async fn stream_empty_first_provider_falls_back() {
     assert_eq!(p1.calls(), 1, "p1 must have been tried exactly once");
     assert!(p2.calls() >= 1, "p2 must have been called as fallback");
 }
+
+// ---------------------------------------------------------------------------
+// v0.8 max_output_tokens (per-model override) resolution
+// ---------------------------------------------------------------------------
+//
+// The router writes the per-model override (when set) to
+// `req.routectl_internal.max_output_tokens`. Sentinel `0` means "no
+// override"; the consuming Anthropic-shape egress falls through to its
+// hardcoded 64000 baseline. Other egresses (openai-compat,
+// openai-responses, bedrock-converse) ignore this field.
+
+mod max_output_tokens_resolution {
+    use super::*;
+    use routectl_router::ModelEntry;
+
+    /// Build a router around a `MockCaptureProvider` that snapshots the
+    /// `routectl_internal.max_output_tokens` value on each dispatch
+    /// attempt.
+    struct CaptureProvider {
+        id: String,
+        observed: std::sync::Mutex<Vec<u32>>,
+    }
+
+    impl CaptureProvider {
+        fn new(id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                id: id.into(),
+                observed: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn observed(&self) -> Vec<u32> {
+            self.observed.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CaptureProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            self.observed
+                .lock()
+                .unwrap()
+                .push(req.routectl_internal.max_output_tokens);
+            Ok(ChatResponse::default())
+        }
+
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!()
+        }
+    }
+
+    fn config_with_model_override(model_override: Option<u32>) -> Config {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "p1".into(),
+            ProviderEntry::openai_compat("http://example.invalid", "literal:x"),
+        );
+        let mut models = BTreeMap::new();
+        let mut entry = ModelEntry::new("p1", "u");
+        if let Some(t) = model_override {
+            entry = entry.with_max_output_tokens(t);
+        }
+        models.insert("m".into(), entry);
+        let mut aliases = BTreeMap::new();
+        aliases.insert("alias".into(), AliasValue::Single("m".into()));
+        Config {
+            providers,
+            aliases,
+            models,
+            ..Default::default()
+        }
+    }
+
+    fn router_with_override(model_override: u32) -> (Router, Arc<CaptureProvider>) {
+        let capture = CaptureProvider::new("p1");
+        let cfg = config_with_model_override(if model_override > 0 {
+            Some(model_override)
+        } else {
+            None
+        });
+        let mut router = Router::new(Arc::new(cfg));
+        let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        let mut rm = ResolvedModel::new("m", "p1", capture.clone() as Arc<dyn Provider>, "u");
+        if model_override > 0 {
+            rm = rm.with_max_output_tokens(model_override);
+        }
+        resolved.insert("m".into(), Arc::new(rm));
+        router.install_resolved_models(resolved);
+        (router, capture)
+    }
+
+    /// No per-model override means routectl_internal carries the `0`
+    /// sentinel; the consuming egress falls through to its hardcoded
+    /// baseline.
+    #[tokio::test]
+    async fn no_model_override_writes_zero_sentinel() {
+        let (router, capture) = router_with_override(0);
+        let mut r = req("alias");
+        r.max_tokens = None;
+        let _ = router.complete(r).await.expect("dispatch ok");
+        assert_eq!(capture.observed(), vec![0]);
+    }
+
+    /// Per-model `max_output_tokens` is projected onto routectl_internal.
+    #[tokio::test]
+    async fn model_override_lands_in_routectl_internal() {
+        let (router, capture) = router_with_override(16_000);
+        let mut r = req("alias");
+        r.max_tokens = None;
+        let _ = router.complete(r).await.expect("dispatch ok");
+        assert_eq!(capture.observed(), vec![16_000]);
+    }
+
+    /// req.max_tokens does not alter the carrier value -- the egress's
+    /// own `resolve_max_tokens` picks req.max_tokens first.
+    #[tokio::test]
+    async fn req_max_tokens_does_not_alter_routectl_internal() {
+        let (router, capture) = router_with_override(0);
+        let mut r = req("alias");
+        r.max_tokens = Some(1234);
+        let _ = router.complete(r).await.expect("dispatch ok");
+        assert_eq!(capture.observed(), vec![0]);
+    }
+}

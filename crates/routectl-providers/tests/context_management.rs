@@ -49,7 +49,6 @@ fn make_provider(base_url: &str, context_management: bool) -> AnthropicApiProvid
         allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management,
-        max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
     })
 }
 

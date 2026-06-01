@@ -18,6 +18,10 @@ pub use secrets::CompositeStore;
 pub struct AppState {
     pub router: Arc<Router>,
     pub strict_translation: bool,
+    /// Maximum incoming JSON body size (bytes). Sourced from
+    /// `[server] max_body_bytes`; the axum `DefaultBodyLimit` layer is
+    /// configured from this field at router-build time.
+    pub max_body_bytes: usize,
 }
 
 /// Validate that `host` is loopback or that `unsafe_public` has been set.
@@ -123,6 +127,7 @@ pub async fn serve_on_listener(config: Arc<Config>, listener: TcpListener) -> Re
     let state = Arc::new(AppState {
         router: Arc::new(router),
         strict_translation: config.server.strict_translation,
+        max_body_bytes: usize::try_from(config.server.max_body_bytes).unwrap_or(usize::MAX),
     });
 
     let app = build_axum_router(state, token_set);
@@ -249,15 +254,22 @@ async fn build_router_from_config(config: Arc<Config>) -> Result<Router> {
 }
 
 /// Maximum incoming JSON body size for `/v1/chat/completions` and
-/// `/v1/messages`. 4 MiB easily fits the largest legitimate
-/// Anthropic Messages request (long system prompt + tool defs +
-/// long history) while preventing trivial OOM-DoS via a multi-GB
-/// POST.
-const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// `/v1/messages`. Operator-configurable via `[server] max_body_bytes`
+/// (default 32 MiB; see `routectl_router::ServerConfig`). The hardcoded
+/// value here is the LIBRARY-CONSUMER fallback for callers that build
+/// an `AppState` outside `serve_on_listener`; `serve_on_listener`
+/// always populates `AppState::max_body_bytes` from config.
+const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 fn build_axum_router(state: Arc<AppState>, token_set: Arc<TokenSet>) -> AxumRouter {
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
+
+    let max_body_bytes = if state.max_body_bytes == 0 {
+        DEFAULT_MAX_BODY_BYTES
+    } else {
+        state.max_body_bytes
+    };
 
     // Public routes: /health is intentionally outside the auth layer
     // so external liveness probes work in --unsafe-public deployments.
@@ -279,7 +291,7 @@ fn build_axum_router(state: Arc<AppState>, token_set: Arc<TokenSet>) -> AxumRout
             "/v1/messages/count_tokens",
             post(handlers::messages_count_tokens::count_tokens),
         )
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES));
+        .layer(DefaultBodyLimit::max(max_body_bytes));
 
     // Mount the auth middleware only when tokens are configured.
     // Loopback dev (empty token list) gets the historical zero-auth

@@ -17,6 +17,15 @@ use super::{
 /// frames, never a named `error` event).
 const ANTHROPIC_ERROR_EVENT: &str = "error";
 
+/// Maximum permitted `tool_call.index` value the Anthropic ingress
+/// will allocate while translating an OpenAI-compat upstream stream
+/// into Anthropic content blocks. Caps the per-stream `tool_blocks`
+/// Vec growth so a malformed or adversarial upstream chunk carrying
+/// `index: 1_000_000` cannot allocate gigabytes per stream. 4096 is
+/// well above any legitimate parallel-tool-call breadth observed on
+/// agentic harnesses.
+const MAX_TOOL_CALL_INDEX: usize = 4096;
+
 pub(super) fn anthropic_state_mut(s: &mut dyn IngressStreamState) -> &mut AnthropicStreamState {
     s.as_any_mut()
         .downcast_mut::<AnthropicStreamState>()
@@ -419,13 +428,6 @@ fn emit_delta_events(
 
     Ok(())
 }
-
-/// Maximum permitted tool_call index in a streaming response. Caps
-/// `state.tool_blocks` Vec growth so a malicious or malformed upstream
-/// chunk with `index: 1_000_000` cannot allocate gigabytes per stream.
-/// Anthropic-API limits are far below this; openai-compat upstreams
-/// rarely exceed 16 parallel tool calls.
-const MAX_TOOL_CALL_INDEX: usize = 64;
 
 fn apply_tool_call_delta(
     tc: &Value,

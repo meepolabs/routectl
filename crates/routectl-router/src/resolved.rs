@@ -76,6 +76,13 @@ pub struct ResolvedModel {
     /// Per-model first-byte timeout for streaming responses. Wins
     /// over per-provider + global tiers when set.
     pub stream_first_byte_timeout_ms: Option<u64>,
+    /// Operator-declared per-model ceiling for the `max_tokens` value
+    /// the Anthropic-shape egresses (anthropic-api, bedrock-invoke)
+    /// inject on omitted-by-caller requests. `0` is the sentinel for
+    /// "no model override" -- the egress then falls through to its
+    /// hardcoded 64000 baseline. Projected from
+    /// `[models.X] max_output_tokens`.
+    pub max_output_tokens: u32,
     /// Source `SecretRef` used to resolve this model's primary auth
     /// credential at provider-build time. Retained on the resolved
     /// model so the router can wire 401 self-heal back through the
@@ -105,6 +112,7 @@ impl ResolvedModel {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
+            max_output_tokens: 0,
             auth_secret_ref: None,
         }
     }
@@ -157,6 +165,14 @@ impl ResolvedModel {
         self
     }
 
+    /// Set the per-model `max_output_tokens` ceiling. `0` is the
+    /// sentinel for "no model override" -- the consuming Anthropic-
+    /// shape egresses fall through to their hardcoded 64000 baseline.
+    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
+        self.max_output_tokens = tokens;
+        self
+    }
+
     /// Attach the source `SecretRef` that resolved this model's
     /// primary auth credential. Used by the 401 self-heal path so a
     /// refresh hook can run against the originating store.
@@ -190,6 +206,7 @@ impl std::fmt::Debug for ResolvedModel {
                 "stream_first_byte_timeout_ms",
                 &self.stream_first_byte_timeout_ms,
             )
+            .field("max_output_tokens", &self.max_output_tokens)
             .field(
                 "auth_secret_ref",
                 &self.auth_secret_ref.as_ref().map(|sr| sr.to_string()),

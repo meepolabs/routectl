@@ -881,3 +881,35 @@ fn sse_reasoning_round_trips_through_canonical_to_replay_request() {
     assert_eq!(reasoning["id"], "rs_1");
     assert_eq!(reasoning["encrypted_content"], "sig_xyz");
 }
+
+// ---------------------------------------------------------------------------
+// v0.8 max_tokens injection contract: openai-responses MUST NOT inject
+// ---------------------------------------------------------------------------
+
+/// The openai-responses egress MUST NOT inject `max_tokens` when the
+/// caller omits it. Mirrors the openai-compat negative-injection test
+/// (`openai_compat_does_not_inject_max_tokens_when_caller_omitted`).
+/// The good-translator principle: only inject where the upstream
+/// demands it (Anthropic-shape egresses). The
+/// `routectl_internal.max_output_tokens` carrier is Anthropic-shape
+/// territory and must NOT leak onto the openai-responses wire body
+/// regardless of its value.
+#[test]
+fn openai_responses_does_not_inject_max_tokens_when_caller_omitted() {
+    let mut req = req_with(vec![user_text("hi")]);
+    req.max_tokens = None;
+    // Pin: even when the router carrier carries a non-zero value
+    // (e.g. when a `[models.X].max_output_tokens` override sits on a
+    // model that happens to route through openai-responses), the
+    // egress must NOT lift it onto the wire body.
+    req.routectl_internal.max_output_tokens = 8000;
+    let v = translate_to_json(&cfg(), &req);
+    assert!(
+        v.get("max_tokens").is_none(),
+        "openai-responses egress must not inject max_tokens; got: {v}"
+    );
+    assert!(
+        v.get("max_output_tokens").is_none(),
+        "openai-responses egress must not inject max_output_tokens either; got: {v}"
+    );
+}

@@ -227,6 +227,24 @@ pub struct ModelEntry {
     /// wait 5 min on a dead upstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
+
+    /// Operator-declared per-model ceiling on the `max_tokens` value
+    /// the Anthropic-shape egresses (anthropic-api, bedrock-invoke)
+    /// inject when the caller omits the field. `None` (the default)
+    /// falls through to the hardcoded baseline of 64000.
+    ///
+    /// Set this for models whose upstream-documented ceiling is below
+    /// the baseline to avoid a 400 on the upstream's per-model
+    /// validation. Examples: Anthropic Opus 4 / 4.1 (32000), Sonnet 3.5
+    /// (8000), DeepSeek V3 anthropic-api surface (8000). See
+    /// docs/CONFIGURATION.md.
+    ///
+    /// Only consumed by Anthropic-shape egresses (anthropic-api +
+    /// bedrock-invoke); openai-compat, openai-responses, and
+    /// bedrock-converse forward omission cleanly (good-translator
+    /// principle: do not inject where the upstream already handles it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ModelEntry {
@@ -244,6 +262,7 @@ impl ModelEntry {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
+            max_output_tokens: None,
         }
     }
 
@@ -307,6 +326,21 @@ impl ModelEntry {
             "stream_first_byte_timeout_ms must be > 0; 0 would time out every stream",
         );
         self.stream_first_byte_timeout_ms = Some(ms);
+        self
+    }
+
+    /// Set the per-model `max_output_tokens` ceiling consumed by
+    /// Anthropic-shape egresses (anthropic-api, bedrock-invoke) when
+    /// the caller omits `max_tokens`. `None` falls through to the
+    /// hardcoded baseline of 64000. A value of 0 is operator error
+    /// (the egress would produce a body the upstream 400s); flagged
+    /// in debug builds.
+    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
+        debug_assert!(
+            tokens > 0,
+            "max_output_tokens must be > 0; 0 would 400 every anthropic-api request",
+        );
+        self.max_output_tokens = Some(tokens);
         self
     }
 }
@@ -468,10 +502,27 @@ pub struct ServerConfig {
     /// disable the gateway's HA story or probe per-provider health.
     #[serde(default = "default_allow_disable_fallbacks")]
     pub allow_disable_fallbacks: bool,
+
+    /// Maximum incoming JSON body size for `/v1/chat/completions` and
+    /// `/v1/messages`, in bytes. Defaults to 32 MiB -- comfortably above
+    /// the largest legitimate Anthropic Messages request (long system
+    /// prompt + many tool defs + long history with cache_control
+    /// breakpoints) while preventing trivial OOM-DoS via a multi-GB
+    /// POST. No server-side ceiling is enforced; axum's
+    /// `DefaultBodyLimit` and the OS allocator are the only guards.
+    /// Prefer values under 1 GiB for normal deployments.
+    /// Replaces the pre-v0.8 hardcoded `MAX_BODY_BYTES` (4 MiB) which
+    /// was too tight for live-traffic claude-code sessions.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: u32,
 }
 
 fn default_allow_disable_fallbacks() -> bool {
     true
+}
+
+fn default_max_body_bytes() -> u32 {
+    32 * 1024 * 1024
 }
 
 impl Default for ServerConfig {
@@ -482,6 +533,7 @@ impl Default for ServerConfig {
             auth: None,
             strict_translation: false,
             allow_disable_fallbacks: default_allow_disable_fallbacks(),
+            max_body_bytes: default_max_body_bytes(),
         }
     }
 }
@@ -579,17 +631,6 @@ pub enum ProviderEntry {
         /// itself.
         #[serde(default)]
         context_management: bool,
-        /// Per-entry byte cap on thinking-cache writes used by the
-        /// `context_management` emulation path. Entries whose serialized
-        /// JSON byte length exceeds this value are rejected at write
-        /// time and a structured WARN is emitted; the cache-miss
-        /// recovery path strips the `thinking` body key on the next
-        /// turn the same way it would on a TTL eviction. `None`
-        /// resolves to the default
-        /// `AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES`
-        /// (256 KB).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_thinking_entry_bytes: Option<usize>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -785,7 +826,6 @@ impl ProviderEntry {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -2146,5 +2186,78 @@ context_management = false
             ),
             other => panic!("expected AnthropicApi entry; got {other:?}"),
         }
+    }
+
+    // v0.8 cap-relaxation knobs: serde round-trip pins so a default,
+    // an explicit override, and a typo all surface correctly.
+
+    /// Server-level `max_body_bytes` defaults to the documented value
+    /// when omitted from `[server]`.
+    #[test]
+    fn server_cap_knobs_default_when_omitted() {
+        use crate::config::Config;
+        let toml_text = r#"
+[server]
+host = "127.0.0.1"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(cfg.server.max_body_bytes, 32 * 1024 * 1024);
+    }
+
+    /// Explicit value for the `[server] max_body_bytes` knob parses
+    /// and round-trips through serde.
+    #[test]
+    fn server_cap_knobs_explicit_values_round_trip() {
+        use crate::config::Config;
+        let toml_text = r#"
+[server]
+max_body_bytes = 67108864
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(cfg.server.max_body_bytes, 67_108_864);
+    }
+
+    /// Per-model `max_output_tokens` defaults to None when omitted and
+    /// round-trips when set.
+    #[test]
+    fn model_entry_max_output_tokens_round_trip() {
+        use crate::config::Config;
+        let toml_text = r#"
+[models.opus4]
+provider = "anthropic"
+upstream = "claude-opus-4"
+max_output_tokens = 32000
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let m = cfg.models.get("opus4").expect("entry");
+        assert_eq!(m.max_output_tokens, Some(32000));
+
+        let toml_default = r#"
+[models.haiku]
+provider = "anthropic"
+upstream = "claude-haiku-4-5"
+"#;
+        let cfg: Config = toml::from_str(toml_default).expect("parse");
+        let m = cfg.models.get("haiku").expect("entry");
+        assert!(m.max_output_tokens.is_none(), "default must be None");
+    }
+
+    /// A typo on the per-model `max_output_tokens` knob surfaces at
+    /// parse time (the per-model table opts into `deny_unknown_fields`).
+    #[test]
+    fn model_entry_rejects_typo_on_max_output_tokens() {
+        use crate::config::Config;
+        let toml_text = r#"
+[models.x]
+provider = "p"
+upstream = "u"
+max_output_token = 32000
+"#;
+        let err = toml::from_str::<Config>(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_output_token") || msg.contains("unknown field"),
+            "expected unknown-field error; got: {msg}"
+        );
     }
 }
