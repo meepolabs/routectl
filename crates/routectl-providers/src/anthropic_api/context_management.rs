@@ -30,19 +30,20 @@ pub(crate) struct ThinkingCacheEntry {
 }
 
 /// LRU map from `(provider_id, tool_use_id)` to a thinking observation.
-/// Bounded at `THINKING_CACHE_CAP` entries; oldest entries are evicted
+/// Bounded at `THINKING_CACHE_CAP` (10000); oldest entries are evicted
 /// when the cap is reached (standard LRU semantics).
 pub(crate) type ThinkingCache = lru::LruCache<ThinkingCacheKey, ThinkingCacheEntry>;
 
-/// Maximum number of `(provider_id, tool_use_id)` pairs held in the cache
-/// at once. Covers ~1 000 concurrent in-flight tool turns before the LRU
-/// starts evicting the oldest; this is generous for a single-process proxy.
-pub(crate) const THINKING_CACHE_CAP: usize = 1000;
+/// Maximum number of `(provider_id, tool_use_id)` entries the
+/// thinking-cache LRU will hold before evicting the oldest entry on
+/// the next write. `THINKING_CACHE_CAP * DEFAULT_MAX_THINKING_ENTRY_BYTES`
+/// is the LRU's worst-case memory footprint (`10_000 * 256 KB ~ 2.4 GiB`).
+pub(crate) const THINKING_CACHE_CAP: usize = 10_000;
 
-/// TTL for cached thinking entries. Entries older than 60 minutes are
-/// treated as stale and discarded on next read.
-/// 60 minutes matches the typical maximum agentic session length before
-/// context rotation.
+/// TTL on entries in the thinking cache used by the `context_management`
+/// emulation path. Entries older than this duration are treated as
+/// stale and discarded on the next read. 60 minutes matches the typical
+/// maximum agentic session length before context rotation.
 pub(crate) const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Default per-entry byte cap on the thinking cache. The cap is applied
@@ -55,12 +56,11 @@ pub(crate) const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::
 /// thinking blocks; rejecting and letting the strip-on-miss path land
 /// the request without thinking is the behaviour-preserving choice.
 ///
-/// Provider-configurable via `[providers.X] max_thinking_entry_bytes`
-/// (anthropic-api kind only). 256 KB is generous for ordinary agent
+/// Hardcoded; not configurable. 256 KB is generous for ordinary agent
 /// thinking turns (typical sizes are 1-50 KB) while bounding the
-/// LRU's worst-case memory use to `THINKING_CACHE_CAP * cap`
-/// (1000 * 256 KB = ~256 MB ceiling) under adversarial inputs.
-pub(crate) const MAX_THINKING_ENTRY_BYTES: usize = 256 * 1024;
+/// LRU's worst-case memory use to `THINKING_CACHE_CAP * cap` under
+/// adversarial inputs.
+pub(crate) const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize = 256 * 1024;
 
 /// Store a thinking observation into the cache under `(provider_id, tool_use_id)`.
 /// Overwrites any existing entry for the same key.
@@ -71,13 +71,15 @@ pub(crate) const MAX_THINKING_ENTRY_BYTES: usize = 256 * 1024;
 /// (text + signature + data). On rejection the LRU is NOT touched and
 /// a structured WARN is emitted so operators can grep for oversized
 /// inputs. `path` tags the call site ("complete" / "stream") in the
-/// log.
+/// log. `ttl` is the operator-configured TTL applied to this entry's
+/// `expires_at`.
 pub(crate) fn snapshot_to_cache(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     tool_use_id: &str,
     thinking: Vec<routectl_core::ReasoningDetail>,
     max_entry_bytes: usize,
+    ttl: std::time::Duration,
     path: &'static str,
 ) {
     // Measure once. A failure here would mean serde_json couldn't
@@ -104,7 +106,7 @@ pub(crate) fn snapshot_to_cache(
     let key = (provider_id.to_string(), tool_use_id.to_string());
     let entry = ThinkingCacheEntry {
         thinking,
-        expires_at: std::time::Instant::now() + THINKING_CACHE_TTL,
+        expires_at: std::time::Instant::now() + ttl,
     };
     cache
         .write()

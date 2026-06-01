@@ -128,6 +128,7 @@ mod tests {
         let state = Arc::new(AppState {
             router: Arc::new(router),
             strict_translation: false,
+            max_body_bytes: 32 * 1024 * 1024,
         });
 
         let Json(body) = list_models(State(state)).await;

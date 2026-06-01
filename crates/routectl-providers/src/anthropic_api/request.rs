@@ -44,7 +44,40 @@ use super::types::{
     AnthropicSystemBlock, AnthropicTool, ContentBlock, OutputConfig, ThinkingConfig,
 };
 
-const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// Hardcoded baseline `max_tokens` value injected on outbound
+/// Anthropic-shape requests when the caller omits the field AND the
+/// per-model `[models.X].max_output_tokens` override is unset. The
+/// Anthropic Messages API requires `max_tokens` and 400s on omission;
+/// 64000 is above the 64K ceiling of Sonnet 4.5/4.6 and Opus 4.5 and
+/// within Opus 4.7's 128K window.
+///
+/// Operators with known-low-cap models (Anthropic Opus 4 / 4.1 at
+/// 32000, Sonnet 3.5 / DeepSeek V3 at 8000) should set
+/// `[models.X].max_output_tokens` to avoid an upstream 400 on the
+/// per-model ceiling check. See docs/CONFIGURATION.md.
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 64_000;
+
+/// Resolve the outbound `max_tokens` value: caller's request wins;
+/// absent that, the router-supplied per-model override from
+/// `req.routectl_internal.max_output_tokens` (when non-zero) wins;
+/// absent that, the hardcoded `DEFAULT_MAX_OUTPUT_TOKENS` baseline
+/// (64000).
+///
+/// Consumed by Anthropic-shape egresses (anthropic-api +
+/// bedrock-invoke; bedrock-invoke delegates body construction to this
+/// module's `normalize`). Other egresses (openai-compat,
+/// openai-responses, bedrock-converse) forward `req.max_tokens` cleanly
+/// when None per the good-translator principle.
+fn resolve_max_tokens(req: &ChatRequest) -> u32 {
+    if let Some(v) = req.max_tokens {
+        return v;
+    }
+    let from_internal = req.routectl_internal.max_output_tokens;
+    if from_internal > 0 {
+        return from_internal;
+    }
+    DEFAULT_MAX_OUTPUT_TOKENS
+}
 
 /// Anthropic `tool_choice.type` values that force tool use. Pairing
 /// either with `thinking` causes a 400 (extended-thinking docs).
@@ -65,7 +98,7 @@ const ANTHROPIC_MIN_THINKING_BUDGET: u32 = 1024;
 /// of emitting a body that Anthropic would 400. The adaptive shape
 /// has no equivalent floor and is unaffected.
 fn legacy_thinking_fits(req: &ChatRequest) -> bool {
-    let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    let max = resolve_max_tokens(req);
     max > ANTHROPIC_MIN_THINKING_BUDGET
 }
 
@@ -208,7 +241,7 @@ pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<Thinki
     //     output token. The gate above guarantees `max > 1024`, so
     //     the ceiling (`max - 1`) is always at least 1024 and the
     //     floor never collides with the ceiling.
-    let max = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    let max = resolve_max_tokens(req);
     // Operator-declared per-model ceiling. Non-zero values cap the
     // budget DOWN before Anthropic's own `[1024, max_tokens-1]` window
     // clamp runs. Zero means no operator cap -- Anthropic's clamp is
@@ -1208,7 +1241,7 @@ pub(crate) fn normalize(
         .unwrap_or(CoreHistoryReasoning::Auto);
     let messages = normalize_replay_invariants(id, req, hr)?;
 
-    let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    let max_tokens = resolve_max_tokens(req);
     let thinking = build_thinking(req, adaptive);
     let output_config = build_output_config(req, &thinking);
 
@@ -1735,7 +1768,8 @@ mod context_management_normalize_tests {
                 index: Some(0),
                 payload: json!({"text": "my reasoning", "signature": "sig"}),
             }],
-            super::super::context_management::MAX_THINKING_ENTRY_BYTES,
+            super::super::context_management::DEFAULT_MAX_THINKING_ENTRY_BYTES,
+            super::super::context_management::THINKING_CACHE_TTL,
             "test",
         );
         let body = normalize("test", &req, false, &[], true, Some(&cache))

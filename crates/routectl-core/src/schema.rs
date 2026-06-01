@@ -184,6 +184,16 @@ pub struct RoutectlInternal {
     /// Threaded through from `[models.X] max_thinking_budget` via
     /// `ResolvedModel` -> `DispatchTarget`.
     pub max_thinking_budget: u32,
+    /// Operator-declared per-model `max_tokens` ceiling resolved by
+    /// the router from `[models.X].max_output_tokens`. Only consumed
+    /// by Anthropic-shape egresses (anthropic-api, bedrock-invoke);
+    /// other egresses forward `req.max_tokens` omission cleanly
+    /// (good-translator principle: do not inject where the upstream
+    /// already handles it).
+    ///
+    /// Sentinel `0` means "no per-model override"; the consuming
+    /// egress falls through to its hardcoded baseline (64000).
+    pub max_output_tokens: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

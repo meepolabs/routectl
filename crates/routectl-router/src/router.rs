@@ -160,6 +160,12 @@ struct DispatchTarget {
     /// operator cap; `apply_layered_overlays` writes this to
     /// `RoutectlInternal.max_thinking_budget` for the egress to read.
     max_thinking_budget: u32,
+    /// Operator-declared per-model `max_tokens` ceiling for the
+    /// anthropic-api egress. Threaded from
+    /// `ResolvedModel.max_output_tokens`. Zero means no model
+    /// override -- `apply_layered_overlays` falls through to the
+    /// server-side default.
+    max_output_tokens: u32,
 }
 
 impl Router {
@@ -1158,6 +1164,12 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
+    // Per-model `max_tokens` ceiling. Zero means no per-model override;
+    // Anthropic-shape egresses (anthropic-api, bedrock-invoke) read this
+    // and fall through to their hardcoded 64000 baseline when zero.
+    // Other egresses (openai-compat, openai-responses, bedrock-converse)
+    // ignore this field and forward `req.max_tokens` omission cleanly.
+    internal.max_output_tokens = target.max_output_tokens;
     req.routectl_internal = internal;
 }
 
@@ -1437,6 +1449,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         history_reasoning: m.history_reasoning,
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
         max_thinking_budget: m.max_thinking_budget,
+        max_output_tokens: m.max_output_tokens,
     }
 }
 

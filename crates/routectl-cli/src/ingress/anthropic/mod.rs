@@ -34,6 +34,7 @@ use super::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
 #[cfg(test)]
 const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
+/// Anthropic Messages ingress adapter.
 #[derive(Debug, Default)]
 pub struct AnthropicIngress;
 

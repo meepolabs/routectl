@@ -166,7 +166,8 @@ fn snap(
         provider_id,
         tool_use_id,
         thinking,
-        MAX_THINKING_ENTRY_BYTES,
+        DEFAULT_MAX_THINKING_ENTRY_BYTES,
+        crate::anthropic_api::context_management::THINKING_CACHE_TTL,
         "test",
     );
 }
@@ -791,7 +792,8 @@ fn snapshot_to_cache_under_cap_inserts_and_round_trips() {
         "prov",
         "tool-under",
         thinking.clone(),
-        MAX_THINKING_ENTRY_BYTES,
+        DEFAULT_MAX_THINKING_ENTRY_BYTES,
+        crate::anthropic_api::context_management::THINKING_CACHE_TTL,
         "complete",
     );
     let got =
@@ -812,7 +814,8 @@ fn snapshot_to_cache_over_cap_is_rejected() {
         "prov",
         "tool-over",
         thinking,
-        MAX_THINKING_ENTRY_BYTES,
+        DEFAULT_MAX_THINKING_ENTRY_BYTES,
+        crate::anthropic_api::context_management::THINKING_CACHE_TTL,
         "stream",
     );
     assert!(
@@ -821,20 +824,23 @@ fn snapshot_to_cache_over_cap_is_rejected() {
     );
 }
 
-/// A configurable cap (passed by callers from `[providers.X]
-/// max_thinking_entry_bytes`) must be honored: a 1024-byte cap rejects
-/// a 2 KB entry that would otherwise pass under the 256 KB default.
+/// `snapshot_to_cache` accepts a per-call cap argument; it must be
+/// honored even when the caller picks a value below the hardcoded
+/// 256 KB default. A 1024-byte cap rejects a 2 KB entry that would
+/// otherwise pass under the default.
 #[test]
 fn snapshot_to_cache_honors_per_call_cap_override() {
     let cache = small_cache(4);
     let thinking = make_thinking_of_size(2 * 1024);
+    let default_ttl = crate::anthropic_api::context_management::THINKING_CACHE_TTL;
     // 2 KB entry is well under the default 256 KB cap...
     snapshot_to_cache(
         &cache,
         "prov",
         "tool-default",
         thinking.clone(),
-        MAX_THINKING_ENTRY_BYTES,
+        DEFAULT_MAX_THINKING_ENTRY_BYTES,
+        default_ttl,
         "complete",
     );
     assert!(
@@ -842,10 +848,77 @@ fn snapshot_to_cache_honors_per_call_cap_override() {
         "2 KB entry must round-trip under the default cap"
     );
     // ...but rejected under a tightened 1024-byte cap.
-    snapshot_to_cache(&cache, "prov", "tool-tight", thinking, 1024, "complete");
+    snapshot_to_cache(
+        &cache,
+        "prov",
+        "tool-tight",
+        thinking,
+        1024,
+        default_ttl,
+        "complete",
+    );
     assert!(
         lookup_thinking(&cache, "prov", "tool-tight").is_none(),
         "2 KB entry must be rejected when the per-call cap is 1 KB"
+    );
+}
+
+/// `snapshot_to_cache` must honor the caller-supplied TTL: an entry
+/// written with a sub-second TTL must miss on lookup after a short
+/// sleep.
+#[test]
+fn snapshot_to_cache_honors_per_call_ttl_override() {
+    let cache = small_cache(4);
+    let thinking = make_thinking("ttl-test");
+    let short_ttl = std::time::Duration::from_millis(50);
+    snapshot_to_cache(
+        &cache,
+        "prov",
+        "tool-ttl",
+        thinking,
+        DEFAULT_MAX_THINKING_ENTRY_BYTES,
+        short_ttl,
+        "complete",
+    );
+    // Sleep past the TTL window so the entry expires.
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    assert!(
+        lookup_thinking(&cache, "prov", "tool-ttl").is_none(),
+        "entry must be treated as stale after its TTL expires"
+    );
+}
+
+/// The thinking-cache LRU bounds memory by capacity: writing
+/// `cap + 1` distinct entries must evict the oldest.
+#[test]
+fn cache_capacity_honors_per_provider_entries_cap() {
+    // Arrange: a tiny cap of 2.
+    let cache = small_cache(2);
+    let default_ttl = crate::anthropic_api::context_management::THINKING_CACHE_TTL;
+    for i in 0..3 {
+        snapshot_to_cache(
+            &cache,
+            "prov",
+            &format!("tool-{i}"),
+            make_thinking(&format!("thinking-{i}")),
+            DEFAULT_MAX_THINKING_ENTRY_BYTES,
+            default_ttl,
+            "complete",
+        );
+    }
+    // Assert: tool-0 was LRU; the cap-2 cache evicted it on the third
+    // write. The two newest remain.
+    assert!(
+        lookup_thinking(&cache, "prov", "tool-0").is_none(),
+        "entry 0 must be evicted under a cap-of-2"
+    );
+    assert!(
+        lookup_thinking(&cache, "prov", "tool-1").is_some(),
+        "entry 1 must remain"
+    );
+    assert!(
+        lookup_thinking(&cache, "prov", "tool-2").is_some(),
+        "entry 2 must remain"
     );
 }
 
