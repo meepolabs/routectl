@@ -11,6 +11,8 @@
 //! `match` on the `SecretRef` variant -- not a fallback chain --
 //! so each scheme has exactly one resolver responsible for it.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use routectl_auth::{MemoryStore, OAuthStore, SecretRef, SecretStore};
 use routectl_core::Result;
@@ -86,6 +88,19 @@ impl CompositeStore {
     /// because neither `HOME` nor `XDG_CONFIG_HOME` was set.
     pub fn oauth(&self) -> Option<&OAuthStore> {
         self.oauth.as_ref()
+    }
+
+    /// Owned `Arc<OAuthStore>` handle for the inner OAuth store, if
+    /// any. Used by the file-watch / SIGHUP coordinator so a reload
+    /// task can call `OAuthStore::reload_from_disk()` without holding
+    /// a borrow into the (possibly cloned) CompositeStore. Returns
+    /// `None` when the OAuth arm was dropped at construction. The
+    /// returned Arc shares the same `Inner` (and therefore the same
+    /// in-memory cache + per-provider single-flight mutexes) as every
+    /// other handle to this store -- a reload here is observable to
+    /// all in-flight `get()` callers.
+    pub fn oauth_store(&self) -> Option<Arc<OAuthStore>> {
+        self.oauth.as_ref().map(|s| Arc::new(s.clone()))
     }
 }
 

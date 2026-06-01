@@ -187,8 +187,9 @@ listed at the bottom of each crate.
 
 ### server
 
-- `src/server/mod.rs` -- axum app construction; `serve_on_listener`, `check_bind_safety` loopback guard
+- `src/server/mod.rs` -- axum app construction; `serve_on_listener`, `check_bind_safety` loopback guard; hot-reload coordination (file-watch + SIGHUP fan-in, parse/validate/build/swap of the live `Router` behind `ArcSwap`, and the restart-required diff against the previous `Config`)
 - `src/server/auth.rs` -- listener middleware enforcing `[server.auth].tokens` via constant-time comparison
+- `src/server/file_watch.rs` -- `notify-debouncer-full` fs-watch task; watches the parent dirs of `config.toml` / `credentials.json`, basename-routes events back to a `ReloadRequest::{Config,Credentials}` channel; debounce coalesces tempfile + rename bursts
 - `src/server/request_id.rs` -- request-id middleware (`x-request-id` echo + `tracing` span field with allowlist sanitization)
 - `src/server/secrets.rs` -- `CompositeStore` `SecretStore` dispatching `oauth://<provider>` to `OAuthStore` and `env://` / `file://` / `literal:` to `MemoryStore`; degrades gracefully when no `HOME` / `XDG_CONFIG_HOME`
 
