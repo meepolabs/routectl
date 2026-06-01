@@ -231,6 +231,34 @@ impl OAuthStore {
         self.refresh_under_lock(provider, &current, true).await
     }
 
+    /// Re-read the on-disk credentials file and overwrite the in-memory
+    /// cache from it. Used by the file-watch / SIGHUP coordinator to
+    /// pick up tokens minted by a sibling `routectl login` (or any
+    /// editor / external writer) without a daemon restart.
+    ///
+    /// Disk-first ordering invariant (matches `write_record`): the
+    /// in-memory cache is only overwritten after a successful disk
+    /// read. A parse error or IO failure leaves the existing cache
+    /// untouched, so a corrupt mid-write file (or a transiently
+    /// missing parent dir during a rename) does not destroy the
+    /// previously-loaded credentials.
+    ///
+    /// Concurrency: the per-provider single-flight refresh mutex is
+    /// independent of this lock; a concurrent `get()` that crossed
+    /// `near_expiry` may rotate a token while a reload is in flight.
+    /// The reload acquires the file `RwLock` exclusively and overwrites
+    /// the cache wholesale, so the worst case is "the swap-in cache
+    /// briefly forgets a freshly-rotated token". The next `get()` will
+    /// re-rotate through the same single-flight gate; the only cost is
+    /// at most one extra refresh per reload race, which is bounded by
+    /// the operator-driven reload cadence (minutes-to-hours).
+    pub async fn reload_from_disk(&self) -> OAuthResult<()> {
+        let cf = file_io::load(&self.inner.path).await?;
+        let mut guard = self.inner.file.write().await;
+        *guard = cf;
+        Ok(())
+    }
+
     /// Refresh `provider`'s record under the per-provider single-flight
     /// mutex. The `current` record is the snapshot the caller saw
     /// before contending for the lock; on the `force` path it is the
@@ -1032,6 +1060,108 @@ mod tests {
         assert_eq!(
             pre_cache, post_cache,
             "memory cache must not change when disk save fails"
+        );
+    }
+
+    /// `reload_from_disk` happy path: an external writer (sibling
+    /// `routectl login`, an editor) updated the credentials file. The
+    /// next reload must surface the new record via `list()`.
+    #[tokio::test]
+    async fn reload_from_disk_picks_up_external_mutation() {
+        // Arrange: open a store, then mutate the on-disk file from
+        // outside the store handle (mirroring a sibling `routectl
+        // login` that writes through its own OAuthStore instance).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        // First run: empty cache.
+        assert!(store.list().await.is_empty());
+        // External write through a fresh OAuthStore handle pinned to
+        // the same path.
+        let external = OAuthStore::open(&path).await.unwrap();
+        external
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        drop(external);
+        // The original handle's cache is still empty until reload.
+        assert!(store.list().await.is_empty());
+
+        // Act
+        store.reload_from_disk().await.unwrap();
+
+        // Assert: the freshly-loaded cache surfaces the new record.
+        let listed: Vec<String> = store.list().await.into_iter().map(|(k, _)| k).collect();
+        assert_eq!(listed, vec!["anthropic"]);
+    }
+
+    /// `reload_from_disk` against a corrupted file (garbage bytes
+    /// written between snapshots) must surface the parse error AND
+    /// leave the in-memory cache untouched. Mirrors the disk-first
+    /// ordering invariant of `write_record`.
+    #[tokio::test]
+    async fn reload_from_disk_corrupt_file_keeps_cache() {
+        // Arrange: seed a healthy record on disk and in memory.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        let pre: Vec<String> = store.list().await.into_iter().map(|(k, _)| k).collect();
+        assert_eq!(pre, vec!["anthropic"]);
+
+        // Overwrite the file with garbage that still passes the
+        // mode-600 hygiene check but fails JSON parse.
+        std::fs::write(&path, b"<<corrupt-json>>").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        // Act
+        let err = store.reload_from_disk().await.unwrap_err();
+
+        // Assert: error is a CorruptedFile, cache unchanged.
+        match err {
+            OAuthError::CorruptedFile { .. } => {}
+            other => panic!("expected CorruptedFile, got {other:?}"),
+        }
+        let post: Vec<String> = store.list().await.into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            pre, post,
+            "memory cache must not change when reload parse fails"
+        );
+    }
+
+    /// `reload_from_disk` against a missing file (deleted between
+    /// snapshots) must succeed with an empty cache -- callers treat
+    /// this as a degraded state but it is not a crash. Matches
+    /// `file_io::load`'s NotFound -> empty semantics.
+    #[tokio::test]
+    async fn reload_from_disk_missing_file_returns_empty_cache() {
+        // Arrange: seed, then delete the file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        // Act
+        store
+            .reload_from_disk()
+            .await
+            .expect("reload of missing file should succeed (empty cache)");
+
+        // Assert: cache reflects on-disk truth (nothing).
+        assert!(
+            store.list().await.is_empty(),
+            "missing file must yield empty cache"
         );
     }
 }

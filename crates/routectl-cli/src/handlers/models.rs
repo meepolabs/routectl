@@ -31,7 +31,10 @@ use crate::server::AppState;
 /// refuses to route to them.
 pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<Value> {
     let now = Utc::now().timestamp();
-    let config = &state.router.config;
+    // Snapshot the live Router once so a hot-swap mid-request does
+    // not mix old + new alias state in the response payload.
+    let router = state.router.load_full();
+    let config = &router.config;
 
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut entries: Vec<Value> = Vec::new();
@@ -126,9 +129,7 @@ mod tests {
         });
         let router = Router::new(config);
         let state = Arc::new(AppState {
-            router: Arc::new(router),
-            strict_translation: false,
-            max_body_bytes: 32 * 1024 * 1024,
+            router: Arc::new(arc_swap::ArcSwap::from_pointee(router)),
         });
 
         let Json(body) = list_models(State(state)).await;

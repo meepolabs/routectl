@@ -25,7 +25,7 @@ mod helpers {
         let base_url = format!("http://{addr}");
 
         tokio::spawn(async move {
-            routectl_cli::server::serve_on_listener(config, listener)
+            routectl_cli::server::serve_on_listener(config, listener, None)
                 .await
                 .expect("server failed");
         });
@@ -582,7 +582,7 @@ async fn server_fails_startup_when_referenced_provider_cannot_build() {
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let result = routectl_cli::server::serve_on_listener(config, listener).await;
+    let result = routectl_cli::server::serve_on_listener(config, listener, None).await;
     match result {
         Err(routectl_core::Error::Config(msg)) => {
             assert!(
@@ -636,7 +636,7 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = routectl_cli::server::serve_on_listener(config, listener).await;
+        let _ = routectl_cli::server::serve_on_listener(config, listener, None).await;
     });
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 

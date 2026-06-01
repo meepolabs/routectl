@@ -41,6 +41,11 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
         Err(e) => return map_error(envelope, e),
     };
 
+    // Snapshot the live Router once per request so a hot-swap mid-
+    // request does not mix old + new routing state. Every read after
+    // this point goes through `router`, not `state.router.load*`.
+    let router = state.router.load_full();
+
     let mut opts = RouterOptions::new();
     // Gate `x-routectl-disable-fallbacks` behind the server-side
     // `[server] allow_disable_fallbacks` knob (default true). When the
@@ -48,7 +53,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // header is silently ignored regardless of client intent so a
     // malicious client cannot disable HA fallbacks or probe per-
     // provider health.
-    if state.router.config.server.allow_disable_fallbacks {
+    if router.config.server.allow_disable_fallbacks {
         opts.disable_fallbacks = header_truthy(&headers, DISABLE_FALLBACKS_HEADER);
     }
 
@@ -62,9 +67,9 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
 
     let streaming = req.stream == Some(true);
     if streaming {
-        stream_response(state, req, opts, adapter).await
+        stream_response(router, req, opts, adapter).await
     } else {
-        complete_response(state, req, opts, adapter, envelope).await
+        complete_response(router, req, opts, adapter, envelope).await
     }
 }
 
@@ -108,13 +113,13 @@ pub(crate) fn render_json_rejection(
 }
 
 async fn complete_response<A: IngressAdapter>(
-    state: Arc<AppState>,
+    router: Arc<routectl_router::Router>,
     req: routectl_core::ChatRequest,
     opts: RouterOptions,
     adapter: A,
     envelope: ErrorEnvelopeShape,
 ) -> Response {
-    match state.router.complete_with_options(req, opts).await {
+    match router.complete_with_options(req, opts).await {
         Ok(resp) => match adapter.render_response(resp) {
             Ok(body) => {
                 // Trace-level egress body for triage. Single
@@ -137,13 +142,13 @@ async fn complete_response<A: IngressAdapter>(
 }
 
 async fn stream_response<A: IngressAdapter + 'static>(
-    state: Arc<AppState>,
+    router: Arc<routectl_router::Router>,
     req: routectl_core::ChatRequest,
     opts: RouterOptions,
     adapter: A,
 ) -> Response {
     let envelope = adapter.error_envelope_shape();
-    let stream_result = state.router.stream_with_options(req, opts).await;
+    let stream_result = router.stream_with_options(req, opts).await;
 
     let upstream = match stream_result {
         Ok(s) => s,

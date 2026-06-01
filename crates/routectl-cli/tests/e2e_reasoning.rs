@@ -24,7 +24,7 @@ async fn spawn(config: Arc<Config>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        routectl_cli::server::serve_on_listener(config, listener)
+        routectl_cli::server::serve_on_listener(config, listener, None)
             .await
             .expect("server failed");
     });

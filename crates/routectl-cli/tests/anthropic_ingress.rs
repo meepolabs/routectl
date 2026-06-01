@@ -36,7 +36,7 @@ mod helpers {
         let addr = listener.local_addr().unwrap();
         let base_url = format!("http://{addr}");
         tokio::spawn(async move {
-            routectl_cli::server::serve_on_listener(config, listener)
+            routectl_cli::server::serve_on_listener(config, listener, None)
                 .await
                 .expect("server failed");
         });

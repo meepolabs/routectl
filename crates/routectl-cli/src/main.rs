@@ -133,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             unsafe_public,
         } => {
+            let resolved_config_path = resolve_config_path(cli.config.as_deref());
             let config = load_config(cli.config.as_deref())?;
             let mut config = config;
 
@@ -147,7 +148,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let port = config.server.port;
             let config = Arc::new(config);
 
-            if let Err(e) = server::serve(config, &host, port, unsafe_public).await {
+            if let Err(e) = server::serve(
+                config,
+                &host,
+                port,
+                unsafe_public,
+                Some(resolved_config_path),
+            )
+            .await
+            {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -228,19 +237,7 @@ fn init_tracing() {
 fn load_config(
     explicit: Option<&std::path::Path>,
 ) -> Result<routectl_router::Config, Box<dyn std::error::Error>> {
-    let path = if let Some(p) = explicit {
-        p.to_path_buf()
-    } else {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(dirs::config_dir)
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".config")
-            });
-        base.join("routectl").join("config.toml")
-    };
+    let path = resolve_config_path(explicit);
 
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
@@ -249,4 +246,22 @@ fn load_config(
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
 
     Ok(cfg)
+}
+
+/// Resolve the config path the same way `load_config` does, but
+/// without reading or parsing. Used to register the file-watch
+/// target in `Cmd::Serve`.
+fn resolve_config_path(explicit: Option<&std::path::Path>) -> PathBuf {
+    if let Some(p) = explicit {
+        return p.to_path_buf();
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::config_dir)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config")
+        });
+    base.join("routectl").join("config.toml")
 }
