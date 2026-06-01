@@ -51,6 +51,7 @@ fn config_with(server_url: &str) -> Config {
             auth: None,
             strict_translation: false,
             allow_disable_fallbacks: true,
+            ..Default::default()
         },
         providers,
         aliases,

@@ -97,6 +97,7 @@ fn anthropic_proxy_config(
         auth: auth_tokens.map(|tokens| ServerAuth { tokens }),
         strict_translation: false,
         allow_disable_fallbacks: true,
+        ..Default::default()
     };
 
     Arc::new(Config {
@@ -626,13 +627,18 @@ async fn x_routectl_alias_header_overrides_aliases_map() {
 
 #[tokio::test]
 async fn body_exceeding_size_cap_rejected_with_413() {
-    // note: 4 MiB body cap on /v1/messages.
-    let config = anthropic_proxy_config("http://127.0.0.1:1", None, BTreeMap::new());
+    // note: body cap on /v1/messages. Configure a small 1 MiB
+    // cap so we don't have to ship a 33+ MiB payload to defeat the
+    // documented 32 MiB default.
+    let mut config_owned =
+        (*anthropic_proxy_config("http://127.0.0.1:1", None, BTreeMap::new())).clone();
+    config_owned.server.max_body_bytes = 1024 * 1024;
+    let config = std::sync::Arc::new(config_owned);
     let base = helpers::spawn(config).await;
 
-    // Build a >4 MiB body by inflating a single text block. Use 5 MiB
-    // of `a`s to clear the 4 MiB cap.
-    let huge = "a".repeat(5 * 1024 * 1024);
+    // Build a >1 MiB body by inflating a single text block. Use 2 MiB
+    // of `a`s to clear the configured 1 MiB cap.
+    let huge = "a".repeat(2 * 1024 * 1024);
     let body = json!({
         "model": "heavy",
         "max_tokens": 1,
@@ -1359,6 +1365,7 @@ fn openai_compat_proxy_config(upstream_base: &str) -> Arc<Config> {
         auth: None,
         strict_translation: false,
         allow_disable_fallbacks: true,
+        ..Default::default()
     };
     Arc::new(Config {
         server,
@@ -1996,6 +2003,7 @@ fn deepseek_dialect_config(upstream_base: &str) -> Arc<Config> {
             auth: None,
             strict_translation: false,
             allow_disable_fallbacks: true,
+            ..Default::default()
         },
         providers,
         aliases,
@@ -2026,6 +2034,7 @@ fn vllm_dialect_config(upstream_base: &str) -> Arc<Config> {
             auth: None,
             strict_translation: false,
             allow_disable_fallbacks: true,
+            ..Default::default()
         },
         providers,
         aliases,
@@ -2841,12 +2850,17 @@ async fn count_tokens_endpoint_listed_in_route_table_under_auth_layer() {
 /// status code on both /v1/messages and /v1/messages/count_tokens.
 #[tokio::test]
 async fn count_tokens_rejects_payload_too_large_with_413_anthropic_envelope() {
-    let config = anthropic_proxy_config("http://127.0.0.1:1", None, BTreeMap::new());
+    // Configure a small body cap so we test the limit without shipping
+    // a 33+ MiB payload to defeat the default 32 MiB.
+    let mut config_owned =
+        (*anthropic_proxy_config("http://127.0.0.1:1", None, BTreeMap::new())).clone();
+    config_owned.server.max_body_bytes = 1024 * 1024;
+    let config = std::sync::Arc::new(config_owned);
     let base = helpers::spawn(config).await;
 
-    // Build a >4 MiB body (server-side cap is 4 MiB). 5 MiB of `a`s
+    // Build a >1 MiB body (server-side cap is 1 MiB). 2 MiB of `a`s
     // overflows the cap so axum's DefaultBodyLimit fires.
-    let huge = "a".repeat(5 * 1024 * 1024);
+    let huge = "a".repeat(2 * 1024 * 1024);
     let body = json!({
         "model": "heavy",
         "messages": [{"role": "user", "content": huge}]
@@ -2919,6 +2933,7 @@ async fn count_tokens_path_unions_anthropic_beta_from_three_sources() {
             auth: None,
             strict_translation: false,
             allow_disable_fallbacks: true,
+            ..Default::default()
         },
         providers,
         aliases,
@@ -2969,5 +2984,91 @@ async fn count_tokens_path_unions_anthropic_beta_from_three_sources() {
     assert_eq!(
         sorted, dedup,
         "anthropic-beta header has duplicates: {beta_header}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v0.8 per-model max_output_tokens override (end-to-end)
+// ---------------------------------------------------------------------------
+
+/// Build a config that points an alias to a model with an explicit
+/// `[models.X].max_output_tokens` override. The model targets a
+/// wiremock acting as `api.anthropic.com`.
+fn anthropic_proxy_config_with_max_output_tokens(
+    upstream_base: &str,
+    max_output_tokens: u32,
+) -> Arc<Config> {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "anthropic-mock".to_string(),
+        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream_base.to_string()),
+    );
+
+    let mut models = BTreeMap::new();
+    models.insert(
+        "haiku".to_string(),
+        ModelEntry::new("anthropic-mock", "claude-haiku-4-5")
+            .with_max_output_tokens(max_output_tokens),
+    );
+
+    let mut aliases = BTreeMap::new();
+    aliases.insert("heavy".to_string(), AliasValue::Single("haiku".into()));
+
+    Arc::new(Config {
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    })
+}
+
+/// End-to-end: a request that omits `max_tokens` and routes through a
+/// model carrying an explicit `[models.X].max_output_tokens = N`
+/// override must produce an upstream wire body whose `max_tokens`
+/// reflects that override exactly.
+///
+/// Pins the full chain: router resolves the per-model override into
+/// `routectl_internal.max_output_tokens`, the anthropic-api egress
+/// reads it via `resolve_max_tokens`, and the JSON body that hits the
+/// wire carries `max_tokens=N`. Without this end-to-end test, a
+/// regression at any seam (router projection, internal carrier rename,
+/// egress consumption) could escape the split unit-level pins.
+#[tokio::test]
+async fn per_model_max_output_tokens_lands_in_upstream_wire_body() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+
+    // Operator-declared per-model ceiling: 8000 (matches DeepSeek V3
+    // anthropic-api surface ceiling, the canonical low-cap example).
+    let config = anthropic_proxy_config_with_max_output_tokens(&upstream.uri(), 8000);
+    let base = helpers::spawn(config).await;
+
+    // Caller omits `max_tokens` -- exercises the resolution chain end
+    // to end (req.max_tokens absent -> per-model override wins).
+    let req_body = json!({
+        "model": "heavy",
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "exactly one upstream request expected");
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        upstream_body.get("max_tokens"),
+        Some(&Value::Number(8000.into())),
+        "per-model max_output_tokens override must land in the upstream wire body; \
+         got: {upstream_body}"
     );
 }

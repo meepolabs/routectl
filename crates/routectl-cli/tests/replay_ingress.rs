@@ -110,7 +110,6 @@ fn build_provider_for_kind(
                 allowed_betas: Vec::new(),
                 forward_client_headers: Vec::new(),
                 context_management: false,
-                max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
             },
         )))),
         "openai-compat" => Ok(Some(Box::new(OpenAiCompatProvider::new(

@@ -36,7 +36,6 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         };
         AnthropicApiProvider::new(cfg)
     }
@@ -592,12 +591,46 @@ mod tests {
     }
 
     #[test]
-    fn max_tokens_defaults_to_4096_when_not_set() {
+    fn max_tokens_defaults_to_routectl_internal_when_not_set() {
+        // v0.8: when the caller omits `max_tokens` AND no per-model
+        // override is set on `routectl_internal.max_output_tokens`,
+        // the anthropic-api egress falls back to its hardcoded 64000
+        // baseline.
         let provider = make_provider("https://api.anthropic.com");
         let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
         req.max_tokens = None;
         let body = provider.normalize_request(&req).unwrap();
-        assert_eq!(body["max_tokens"], 4096u64);
+        assert_eq!(body["max_tokens"], 64_000u64);
+    }
+
+    /// When `req.max_tokens` is None but
+    /// `req.routectl_internal.max_output_tokens` is set by the
+    /// router from the per-model `[models.X].max_output_tokens`
+    /// override, the wire body's `max_tokens` field must reflect the
+    /// internal value. Pins the contract that the egress reads the
+    /// carrier rather than always landing the hardcoded baseline.
+    #[test]
+    fn max_tokens_reflects_routectl_internal_when_caller_omitted() {
+        let provider = make_provider("https://api.anthropic.com");
+        let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
+        req.max_tokens = None;
+        req.routectl_internal.max_output_tokens = 8000;
+        let body = provider.normalize_request(&req).unwrap();
+        assert_eq!(body["max_tokens"], 8000u64);
+    }
+
+    /// req.max_tokens wins over the routectl_internal value
+    /// (good-translator priority: the caller's explicit ask is
+    /// honored). The internal carrier is only consulted when
+    /// req.max_tokens is None.
+    #[test]
+    fn req_max_tokens_wins_over_routectl_internal() {
+        let provider = make_provider("https://api.anthropic.com");
+        let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
+        req.max_tokens = Some(1024);
+        req.routectl_internal.max_output_tokens = 8000;
+        let body = provider.normalize_request(&req).unwrap();
+        assert_eq!(body["max_tokens"], 1024u64);
     }
 
     #[test]
@@ -1257,7 +1290,6 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1293,7 +1325,6 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1322,7 +1353,6 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1360,7 +1390,6 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = base_req("claude-3-opus", vec![user_msg("hello")]);

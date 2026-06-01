@@ -39,7 +39,6 @@ fn anthropic_api_provider() -> AnthropicApiProvider {
         allowed_betas: Vec::new(),
         forward_client_headers: Vec::new(),
         context_management: false,
-        max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
     })
 }
 
@@ -412,7 +411,6 @@ mod forward_compat_pins {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
-            max_thinking_entry_bytes: AnthropicApiConfig::DEFAULT_MAX_THINKING_ENTRY_BYTES,
         })
     }
 

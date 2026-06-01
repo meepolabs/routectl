@@ -406,6 +406,34 @@ mod tests {
         assert!(body.get("provider_extras").is_none());
     }
 
+    /// v0.8: the openai-compat egress MUST NOT inject `max_tokens` when
+    /// the caller omitted it. The good-translator principle: only
+    /// inject where the upstream demands it (Anthropic-shape egresses).
+    /// Pins the resolution-policy guarantee for #35.
+    #[test]
+    fn openai_compat_does_not_inject_max_tokens_when_caller_omitted() {
+        let mut req = simple_req("gpt-4o");
+        req.max_tokens = None;
+        // Also set the router carrier to a non-zero value; the egress
+        // must STILL leave it out of the wire body. routectl_internal
+        // is Anthropic-shape territory only.
+        req.routectl_internal.max_output_tokens = 8000;
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenAi,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            body.get("max_tokens").is_none()
+                || body.get("max_tokens") == Some(&serde_json::Value::Null),
+            "openai-compat must leave max_tokens absent on omitted-by-caller requests; got: {body}"
+        );
+    }
+
     #[test]
     fn openai_drops_sampling_for_o_series() {
         let req = simple_req("o3-mini");

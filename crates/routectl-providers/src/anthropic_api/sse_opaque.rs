@@ -14,7 +14,7 @@
 //! transitions to a "degraded" sink-drain mode -- subsequent events
 //! on that block are dropped from capture while the canonical stream
 //! keeps flowing. The bounded-capture downgrade IS the kill switch;
-//! there is no config knob (architects' decision).
+//! there is no in-stream config knob (architects' decision).
 //!
 //! Fidelity note: `record_start` and `record_delta` re-serialize the
 //! held `serde_json::Value` to bytes rather than preserving the exact
@@ -28,15 +28,17 @@
 use routectl_core::OpaqueSseEvent;
 use serde_json::Value;
 
-/// Maximum total opaque bytes captured per unknown content block.
-/// Sum of the start payload plus every captured delta payload. Once
-/// crossed, the block degrades to sink-drain for the remainder of its
-/// life.
-pub(super) const MAX_OPAQUE_BYTES_PER_BLOCK: usize = 256 * 1024;
-
 /// Maximum number of opaque delta events captured per unknown content
 /// block. Same downgrade semantics as the byte cap.
 pub(super) const MAX_OPAQUE_DELTAS_PER_BLOCK: usize = 10_000;
+
+/// Per-block byte cap on the bounded opaque-event capture used when the
+/// anthropic-api SSE state machine opens an unknown content block. Once
+/// a block crosses this cap it degrades to sink-drain (capture stops;
+/// canonical stream keeps flowing). 256 KB is generous for any
+/// reasonable opaque content block while keeping per-stream memory
+/// bounded against an adversarial upstream.
+pub(super) const MAX_OPAQUE_BYTES_PER_BLOCK: usize = 256 * 1024;
 
 /// Per-block running totals for the bounded opaque-capture state.
 /// One instance lives on `SseState::current_capture` while an
@@ -431,7 +433,7 @@ mod tests {
             )
             .unwrap();
         // Each delta payload is roughly 1 KB; feeding 300 of them
-        // sums to ~300 KB, comfortably past the 256 KB cap.
+        // sums to ~300 KB, comfortably past the 256 KB default cap.
         let big_text: String = "x".repeat(1024);
 
         // Act
