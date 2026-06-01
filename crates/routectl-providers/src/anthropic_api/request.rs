@@ -2624,6 +2624,61 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["max_tokens"], 64, "caller's max_tokens preserved");
     }
 
+    /// Companion of the effort=high case for `effort="medium"` (ratio
+    /// 0.50): `max_tokens=64` derives `budget_tokens=32`, well below
+    /// the 1024 floor. routectl must drop thinking; caller's
+    /// `max_tokens` is preserved verbatim (the contract that motivated
+    /// rejecting clamp-and-raise).
+    #[test]
+    fn small_max_tokens_drops_legacy_thinking_effort_medium() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("medium".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be absent on effort=medium probe-sized legacy requests, got {body:?}"
+        );
+        assert_eq!(body["max_tokens"], 64, "caller's max_tokens preserved");
+    }
+
+    /// Companion for `effort="xhigh"` (ratio 0.95): `max_tokens=64`
+    /// derives `budget_tokens=60`, still well below the 1024 floor.
+    /// Even at the highest sub-`max` ratio the gate must fire and
+    /// the caller's `max_tokens` survives unchanged.
+    #[test]
+    fn small_max_tokens_drops_legacy_thinking_effort_xhigh() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4-5-20250929".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(64),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("xhigh".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be absent on effort=xhigh probe-sized legacy requests, got {body:?}"
+        );
+        assert_eq!(body["max_tokens"], 64, "caller's max_tokens preserved");
+    }
+
     /// Variant of the above with an explicit sub-1024 `reasoning
     /// .max_tokens`. Even an explicit caller budget must be dropped
     /// when `max_tokens` cannot carry it: emitting `Enabled

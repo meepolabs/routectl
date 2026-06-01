@@ -132,12 +132,10 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
                     .get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                let signature = d.payload.get("signature").cloned().unwrap_or(Value::Null);
-                blocks.push(json!({
-                    "type": "thinking",
-                    "thinking": text,
-                    "signature": signature,
-                }));
+                blocks.push(thinking_block_with_optional_signature(
+                    text,
+                    d.payload.get("signature"),
+                ));
             }
             routectl_core::ReasoningDetailKind::Encrypted => {
                 // Encrypted detail; field name on the wire differs by
@@ -169,11 +167,10 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 if !text.is_empty() {
-                    blocks.push(json!({
-                        "type": "thinking",
-                        "thinking": text,
-                        "signature": Value::Null,
-                    }));
+                    blocks.push(thinking_block_with_optional_signature(
+                        text,
+                        d.payload.get("signature"),
+                    ));
                 }
             }
         }
@@ -270,6 +267,27 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
     }
 
     blocks
+}
+
+/// Build an Anthropic `thinking` block, omitting the `signature` key
+/// entirely when the source payload has no signature (or it is null).
+/// Real Anthropic 400s on `signature: null` mid-conversation when a
+/// prior turn was handled by a non-Anthropic upstream (deepseek-pro,
+/// vLLM) that emits unsigned reasoning and the next turn lands on
+/// claude-sonnet replaying the block. Emitting only the keys the
+/// upstream accepts keeps the cross-provider switch path open. A
+/// non-null payload signature passes through verbatim so signed
+/// Anthropic blocks round-trip unchanged.
+fn thinking_block_with_optional_signature(text: &str, signature: Option<&Value>) -> Value {
+    let mut obj = Map::with_capacity(3);
+    obj.insert("type".into(), Value::String("thinking".into()));
+    obj.insert("thinking".into(), Value::String(text.to_string()));
+    if let Some(sig) = signature {
+        if !sig.is_null() {
+            obj.insert("signature".into(), sig.clone());
+        }
+    }
+    Value::Object(obj)
 }
 
 #[cfg(test)]

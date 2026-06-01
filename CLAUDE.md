@@ -18,7 +18,10 @@ once; jump to the doc that matches your task.
   files (`openai_compat/dialects/*.rs`), and the shared
   `effort.rs` / `header_trace.rs` helpers
 - `routectl-router` -- alias resolution, fallback chain, retry
-  policy, dispatch-time overlay merge
+  policy, dispatch-time overlay merge. Single-entry alias chains
+  (`AliasValue::Single` / one-element `Chain`) have no fallback by
+  design; pair a non-Anthropic primary with a fallback target if
+  availability matters.
 - `routectl-auth` -- `SecretStore` trait + default resolver for
   `env://`, `file://`, and `literal:` references
 - `routectl-cli` -- axum HTTP server, clap subcommands
