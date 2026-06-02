@@ -90,6 +90,7 @@ the CLI.
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
+| `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> 64000 baseline); anthropic-api + bedrock-invoke only |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
@@ -350,6 +351,40 @@ for the egress's budget negotiation. Only relevant on the legacy
 `supports_adaptive_thinking = false` path; the adaptive path uses effort
 strings and has no budget field.
 
+**`max_output_tokens` (Option<u32>, default None)**
+
+Per-model ceiling on the `max_tokens` value the Anthropic-shape egresses
+(`anthropic-api`, `bedrock-invoke`) inject when the caller omits the
+field. `None` (the default) falls through to a hardcoded baseline of
+`64000`.
+
+Resolution chain at dispatch:
+
+1. `request.max_tokens` -- caller-supplied value always wins.
+2. `[models.X].max_output_tokens` -- operator override.
+3. `64000` -- hardcoded baseline.
+
+Only consumed by Anthropic-shape egresses (`anthropic-api` and
+`bedrock-invoke`). The other egresses (`openai-compat`,
+`openai-responses`, `bedrock-converse`) forward caller omission cleanly
+without injection (good-translator principle: do not inject where the
+upstream already handles it).
+
+Set this when an Anthropic-shape egress points at a model whose
+upstream `max_tokens` cap is below `64000` -- otherwise a caller that
+omits `max_tokens` triggers a 400 from the upstream's per-model
+validation. Rare in practice; typical claude-code clients send
+`max_tokens` explicitly.
+
+```toml
+[models.opus-legacy]
+provider          = "anthropic-oauth"
+upstream          = "claude-opus-4"
+# Older Opus 4 caps max_tokens at 32000; lower the baseline so callers
+# omitting max_tokens do not 400.
+max_output_tokens = 32000
+```
+
 Two other per-model overrides live on `[models.X]`:
 
 - `header_extras = { "anthropic-beta" = "..." }` -- per-model beta gates.
@@ -458,20 +493,27 @@ the per-entry serialized JSON size so a misbehaving upstream cannot push
 the cache memory footprint to the LRU-cap times the largest single
 response size.
 
-Default: 256 KB per entry. Override per provider when an upstream
-legitimately produces larger thinking turns (rare; typical sizes are
-1-50 KB) or when memory pressure dictates a tighter cap. Entries
-whose serialized bytes exceed the cap are rejected at write time with a
-structured WARN; the next turn's cache-miss recovery strips the
-`thinking` body key just as it does for a TTL eviction, so the request
-still completes without a 400.
+Default: 1 MiB per entry. The default gives ~3x headroom over realistic
+worst-case Opus 4.6/4.7/4.8 reasoning turns at full 65k thinking-token
+budgets (~328 KB at ~5 bytes/token). Override per provider when memory
+pressure dictates a tighter cap, or when an upstream legitimately
+produces larger thinking turns. Entries whose serialized bytes exceed
+the cap are rejected at write time with a structured WARN; the next
+turn's cache-miss recovery strips the `thinking` body key just as it
+does for a TTL eviction, so the request still completes without a 400.
 
-Bounds: `>= 1` and `<= 4 MiB` (4 194 304 bytes). Values outside the
-range are clamped at provider build time with a startup WARN -- a
-configured `0` falls back to the 256 KB default (a zero cap silently
-disables the cache, which is never the intent), and any value above
-4 MiB clamps to the ceiling (the cap doubles as a memory bound; the
-LRU's worst case is `THINKING_CACHE_CAP * cap`).
+Bounds: `>= 1024` (1 KiB) and `<= 4 MiB` (4 194 304 bytes). Values
+outside the range are clamped at provider build time with a startup
+WARN -- a configured `0` falls back to the 1 MiB default (a zero cap
+silently disables the cache, which is never the intent), and any
+value above 4 MiB clamps to the ceiling.
+
+The cache LRU itself is bounded at `THINKING_CACHE_CAP = 10000`
+entries; the worst-case memory footprint is `THINKING_CACHE_CAP * cap`
+(10000 * 1 MiB ~ 10 GiB at the default). Operators on memory-
+constrained hosts should tune this knob down. The TTL is sliding
+(every hit refreshes `expires_at`); idle entries die after the
+hardcoded 60-minute window.
 
 ```toml
 [providers.deepseek-anthropic]
@@ -479,7 +521,7 @@ kind                      = "anthropic-api"
 base_url                  = "https://api.deepseek.com/anthropic"
 api_key_ref               = "env://DS_KEY"
 context_management        = true
-max_thinking_entry_bytes  = 524288   # tighten or raise from the 256 KB default
+max_thinking_entry_bytes  = 524288   # tighten or raise from the 1 MiB default
 ```
 
 ## Log knobs (`[log]`)

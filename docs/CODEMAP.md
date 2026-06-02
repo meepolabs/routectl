@@ -48,7 +48,7 @@ listed at the bottom of each crate.
 
 ### anthropic_api
 
-- `src/anthropic_api/mod.rs` -- `AnthropicApiProvider` impl + `AnthropicApiConfig` (fields: `auth`, `base_url`, `anthropic_version`, `auth_kind`, `header_extras`, `user_agent`, `allowed_betas`, `forward_client_headers`, `context_management`) + `AuthKind` (ApiKey / OauthBearer); SSE drain
+- `src/anthropic_api/mod.rs` -- `AnthropicApiProvider` impl + `AnthropicApiConfig` (fields: `auth`, `base_url`, `anthropic_version`, `auth_kind`, `header_extras`, `user_agent`, `allowed_betas`, `forward_client_headers`, `context_management`, `max_thinking_entry_bytes`) + `AuthKind` (ApiKey / OauthBearer); SSE drain
 - `src/anthropic_api/context_management.rs` -- LRU+TTL thinking-block store for context-management beta emulation; exports `ThinkingCache`, `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA`, `CLEAR_THINKING_EDIT_TYPE`, `THINKING_CACHE_CAP`, `THINKING_CACHE_TTL`, `snapshot_to_cache`, `lookup_thinking`, `extract_tool_thinking`, `apply_clear_thinking_edit`
 - `src/anthropic_api/types.rs` -- Anthropic Messages wire types (`AnthropicRequest`, content blocks, system, thinking config, usage)
 - `src/anthropic_api/request.rs` -- canonical `ChatRequest` -> Anthropic wire body translation
