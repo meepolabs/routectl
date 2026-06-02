@@ -112,6 +112,11 @@ pub struct AnthropicApiConfig {
     /// not honor the beta natively. Default false: routectl forwards the body
     /// verbatim and the real Anthropic server handles the beta itself.
     pub context_management: bool,
+    /// Per-entry byte cap on the thinking cache used by the
+    /// `context_management` emulation path. Resolved from the optional
+    /// `[providers.X].max_thinking_entry_bytes` TOML knob; falls back
+    /// to `DEFAULT_MAX_THINKING_ENTRY_BYTES` (1 MiB) when unset.
+    pub max_thinking_entry_bytes: usize,
 }
 
 impl std::fmt::Debug for AnthropicApiConfig {
@@ -133,19 +138,21 @@ impl std::fmt::Debug for AnthropicApiConfig {
                 &format!("[{} entries]", self.forward_client_headers.len()),
             )
             .field("context_management", &self.context_management)
+            .field("max_thinking_entry_bytes", &self.max_thinking_entry_bytes)
             .finish()
     }
 }
 
 impl AnthropicApiConfig {
-    /// Per-entry byte cap on the thinking cache used by the
-    /// `context_management` emulation path. Hardcoded; entries whose
-    /// serialized JSON byte length exceeds this value are rejected at
-    /// write time and a structured WARN is emitted. The strip-on-miss
-    /// recovery in `request.rs` handles the next turn the same way it
-    /// would for a TTL eviction. 256 KB is generous for ordinary
-    /// thinking turns (typical sizes are 1-50 KB) while bounding the
-    /// LRU's worst-case footprint.
+    /// Default per-entry byte cap on the thinking cache used by the
+    /// `context_management` emulation path. Falls back to this value
+    /// when the per-provider `max_thinking_entry_bytes` knob is unset.
+    /// Entries whose serialized JSON byte length exceeds the resolved
+    /// cap are rejected at write time and a structured WARN is emitted.
+    /// The strip-on-miss recovery in `request.rs` handles the next turn
+    /// the same way it would for a TTL eviction. 1 MiB gives ~3x
+    /// headroom over realistic worst-case Opus 4.6/4.7/4.8 reasoning
+    /// turns at full thinking-token budgets.
     pub const MAX_THINKING_ENTRY_BYTES: usize =
         context_management::DEFAULT_MAX_THINKING_ENTRY_BYTES;
 
@@ -172,6 +179,7 @@ impl AnthropicApiConfig {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
+            max_thinking_entry_bytes: Self::MAX_THINKING_ENTRY_BYTES,
         }
     }
 }
@@ -212,7 +220,7 @@ impl AnthropicApiProvider {
             provider_id,
             tool_use_id,
             thinking,
-            AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            self.cfg.max_thinking_entry_bytes,
             context_management::THINKING_CACHE_TTL,
             "test-seed",
         );
@@ -546,7 +554,7 @@ impl Provider for AnthropicApiProvider {
                     &self.cfg.id,
                     &tool_use_id,
                     thinking,
-                    AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+                    self.cfg.max_thinking_entry_bytes,
                     context_management::THINKING_CACHE_TTL,
                     "complete",
                 );
@@ -627,6 +635,7 @@ impl Provider for AnthropicApiProvider {
         // pending_cache_writes synchronously without holding the lock
         // across any await point.
         let context_management_enabled = self.cfg.context_management;
+        let max_thinking_entry_bytes = self.cfg.max_thinking_entry_bytes;
         let thinking_cache_for_stream = Arc::clone(&self.thinking_cache);
 
         let stream = async_stream::stream! {
@@ -706,7 +715,7 @@ impl Provider for AnthropicApiProvider {
                         &provider_id,
                         &tool_use_id,
                         thinking,
-                        AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+                        max_thinking_entry_bytes,
                         context_management::THINKING_CACHE_TTL,
                         "stream",
                     );
@@ -1006,6 +1015,7 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers,
             context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         }
     }
 
@@ -1120,6 +1130,7 @@ mod tests {
             allowed_betas: Vec::new(),
             forward_client_headers: vec!["x-claude-code-session-id".into()],
             context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "from-client")]);

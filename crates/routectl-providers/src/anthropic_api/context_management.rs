@@ -26,7 +26,15 @@ pub(crate) struct ThinkingCacheEntry {
     pub(crate) thinking: Vec<ReasoningDetail>,
     /// Wall-clock expiry. The store evicts entries that are past this
     /// instant on the next access attempt (checked by the reader).
+    /// Refreshed to `Instant::now() + ttl` on every successful hit
+    /// (sliding TTL).
     pub(crate) expires_at: std::time::Instant,
+    /// TTL applied at write time and reused on every hit to refresh
+    /// `expires_at`. Stored so a per-call TTL override (test or future
+    /// per-provider knob) keeps applying through the entry's lifetime
+    /// rather than silently snapping to the hardcoded constant on the
+    /// first hit.
+    pub(crate) ttl: std::time::Duration,
 }
 
 /// LRU map from `(provider_id, tool_use_id)` to a thinking observation.
@@ -37,7 +45,9 @@ pub(crate) type ThinkingCache = lru::LruCache<ThinkingCacheKey, ThinkingCacheEnt
 /// Maximum number of `(provider_id, tool_use_id)` entries the
 /// thinking-cache LRU will hold before evicting the oldest entry on
 /// the next write. `THINKING_CACHE_CAP * DEFAULT_MAX_THINKING_ENTRY_BYTES`
-/// is the LRU's worst-case memory footprint (`10_000 * 256 KB ~ 2.4 GiB`).
+/// is the LRU's worst-case memory footprint (`10_000 * 1 MiB ~ 10 GiB`).
+/// Operators sizing memory on memory-constrained hosts should tune the
+/// per-provider `max_thinking_entry_bytes` knob down.
 pub(crate) const THINKING_CACHE_CAP: usize = 10_000;
 
 /// TTL on entries in the thinking cache used by the `context_management`
@@ -56,11 +66,14 @@ pub(crate) const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::
 /// thinking blocks; rejecting and letting the strip-on-miss path land
 /// the request without thinking is the behaviour-preserving choice.
 ///
-/// Hardcoded; not configurable. 256 KB is generous for ordinary agent
-/// thinking turns (typical sizes are 1-50 KB) while bounding the
-/// LRU's worst-case memory use to `THINKING_CACHE_CAP * cap` under
-/// adversarial inputs.
-pub(crate) const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize = 256 * 1024;
+/// Default for the per-provider `max_thinking_entry_bytes` knob. 1 MiB
+/// gives ~3x headroom over the realistic worst case for Opus 4.6/4.7/4.8
+/// reasoning turns at full 65k thinking-token budgets (~328 KB at
+/// ~5 bytes/token). Operators on memory-constrained hosts can tune
+/// down via `[providers.X].max_thinking_entry_bytes`. The LRU's
+/// worst-case footprint is `THINKING_CACHE_CAP * cap` (10_000 * 1 MiB
+/// ~ 10 GiB at the default).
+pub(crate) const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize = 1024 * 1024;
 
 /// Store a thinking observation into the cache under `(provider_id, tool_use_id)`.
 /// Overwrites any existing entry for the same key.
@@ -107,6 +120,7 @@ pub(crate) fn snapshot_to_cache(
     let entry = ThinkingCacheEntry {
         thinking,
         expires_at: std::time::Instant::now() + ttl,
+        ttl,
     };
     cache
         .write()
@@ -120,27 +134,35 @@ pub(crate) fn snapshot_to_cache(
 /// Look up a cached thinking observation by `(provider_id, tool_use_id)`.
 /// Returns `None` if the key is absent or the entry has expired.
 ///
-/// Peek (rather than `get`) so a stale-but-not-yet-expired entry is not
-/// promoted to MRU and held past its natural eviction. Reasoning blocks
-/// may carry sensitive context; we want them to die on schedule, not be
-/// revived by reads.
+/// Sliding TTL: every hit refreshes the entry's `expires_at` to
+/// `ttl-from-now`, matching Anthropic and DeepSeek prompt-cache
+/// semantics. Idle entries die after the configured TTL window.
+/// `get` (rather than `peek`) also promotes the hit to MRU so cache
+/// pressure preferentially evicts unused entries first.
+///
+/// NOTE: takes a write lock rather than read because both LRU
+/// promotion (`get_mut`) and the `expires_at` refresh require
+/// mutable access. Acceptable under routectl's single-process
+/// local-machine target; revisit with `parking_lot::RwLock`
+/// upgradable-read or sharded storage if concurrent read pressure
+/// ever grows.
 pub(crate) fn lookup_thinking(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     tool_use_id: &str,
 ) -> Option<Vec<routectl_core::ReasoningDetail>> {
     let key = (provider_id.to_string(), tool_use_id.to_string());
-    let guard = cache.read().unwrap_or_else(|e| {
+    let mut guard = cache.write().unwrap_or_else(|e| {
         tracing::error!("thinking cache RwLock poisoned; recovered");
         e.into_inner()
     });
-    guard.peek(&key).and_then(|entry| {
-        if std::time::Instant::now() < entry.expires_at {
-            Some(entry.thinking.clone())
-        } else {
-            None
-        }
-    })
+    let entry = guard.get_mut(&key)?;
+    let now = std::time::Instant::now();
+    if now >= entry.expires_at {
+        return None;
+    }
+    entry.expires_at = now + entry.ttl;
+    Some(entry.thinking.clone())
 }
 
 /// Build a `Text`-kind `ReasoningDetail` carrying an Anthropic Thinking

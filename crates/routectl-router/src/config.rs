@@ -631,6 +631,19 @@ pub enum ProviderEntry {
         /// itself.
         #[serde(default)]
         context_management: bool,
+        /// Per-entry byte cap on the thinking cache used by the
+        /// `context_management` emulation path. Bounds: `>= 1024` (1
+        /// KiB) and `<= 4 * 1024 * 1024` (4 MiB). When unset the
+        /// runtime falls back to the
+        /// `DEFAULT_MAX_THINKING_ENTRY_BYTES` baseline (1 MiB).
+        /// Operators on memory-constrained hosts tune this down; the
+        /// LRU's worst-case footprint is `THINKING_CACHE_CAP * cap`
+        /// (10000 * 1 MiB ~ 10 GiB at the default).
+        ///
+        /// Setting `0` is treated as unset; a startup WARN is emitted and
+        /// the default applies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_thinking_entry_bytes: Option<u32>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -826,6 +839,7 @@ impl ProviderEntry {
             allowed_betas: Vec::new(),
             forward_client_headers: Vec::new(),
             context_management: false,
+            max_thinking_entry_bytes: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -977,6 +991,25 @@ impl ProviderEntry {
                 ..
             } => *forward_client_headers = v,
             _ => panic!("ProviderEntry::with_forward_client_headers only applies to anthropic-api"),
+        }
+        self
+    }
+
+    /// Set the AnthropicApi variant's `max_thinking_entry_bytes` knob
+    /// (per-entry byte cap on the `context_management` emulation
+    /// thinking cache). `None` falls through to
+    /// `AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES` at provider
+    /// build time. Panics on other variants -- the field is
+    /// AnthropicApi-only.
+    pub fn with_max_thinking_entry_bytes(mut self, bytes: Option<u32>) -> Self {
+        match &mut self {
+            Self::AnthropicApi {
+                max_thinking_entry_bytes,
+                ..
+            } => *max_thinking_entry_bytes = bytes,
+            _ => {
+                panic!("ProviderEntry::with_max_thinking_entry_bytes only applies to anthropic-api")
+            }
         }
         self
     }
@@ -1837,6 +1870,95 @@ trace_body_byte = 1024
         assert!(
             msg.contains("trace_body_byte") || msg.contains("unknown field"),
             "expected unknown-field error; got: {msg}"
+        );
+    }
+
+    /// `max_thinking_entry_bytes` round-trips through TOML and defaults
+    /// to `None` when omitted (the runtime falls back to the default
+    /// 1 MiB cap).
+    #[test]
+    fn anthropic_api_max_thinking_entry_bytes_round_trip() {
+        use crate::config::{Config, ProviderEntry};
+
+        // Default: omitted -> None.
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse default");
+        let entry = cfg.providers.get("anthropic").expect("anthropic provider");
+        match entry {
+            ProviderEntry::AnthropicApi {
+                max_thinking_entry_bytes,
+                ..
+            } => assert!(
+                max_thinking_entry_bytes.is_none(),
+                "default must be None; got: {max_thinking_entry_bytes:?}"
+            ),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+
+        // Explicit value round-trips through serde.
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+max_thinking_entry_bytes = 2097152
+"#;
+        let cfg_in: Config = toml::from_str(toml_text).expect("parse explicit");
+        match cfg_in.providers.get("anthropic").expect("anthropic") {
+            ProviderEntry::AnthropicApi {
+                max_thinking_entry_bytes,
+                ..
+            } => assert_eq!(*max_thinking_entry_bytes, Some(2_097_152)),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+        let serialized = toml::to_string(&cfg_in).expect("serialize");
+        let cfg_out: Config = toml::from_str(&serialized).expect("re-parse");
+        match cfg_out.providers.get("anthropic").expect("anthropic") {
+            ProviderEntry::AnthropicApi {
+                max_thinking_entry_bytes,
+                ..
+            } => assert_eq!(*max_thinking_entry_bytes, Some(2_097_152)),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+    }
+
+    /// When `max_thinking_entry_bytes` is unset on the TOML, the
+    /// runtime resolution lands on the
+    /// `AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES` baseline (1 MiB).
+    #[test]
+    fn anthropic_api_max_thinking_entry_bytes_unset_resolves_to_default() {
+        use crate::config::ProviderEntry;
+        use crate::factory::resolve_max_thinking_entry_bytes_for_test;
+        use routectl_providers::anthropic_api::AnthropicApiConfig;
+
+        let entry = ProviderEntry::anthropic_api("literal:sk-ant-test");
+        let configured = match &entry {
+            ProviderEntry::AnthropicApi {
+                max_thinking_entry_bytes,
+                ..
+            } => *max_thinking_entry_bytes,
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        };
+        assert!(configured.is_none(), "constructor must default to None");
+        let resolved = resolve_max_thinking_entry_bytes_for_test("test", configured);
+        assert_eq!(
+            resolved,
+            AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            "None must resolve to the 1 MiB default"
+        );
+        assert_eq!(resolved, 1024 * 1024, "default must be 1 MiB");
+    }
+
+    #[test]
+    fn max_thinking_entry_bytes_zero_resolves_to_default() {
+        let resolved = crate::factory::resolve_max_thinking_entry_bytes_for_test("test", Some(0));
+        assert_eq!(
+            resolved,
+            routectl_providers::anthropic_api::AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            "Some(0) must fall back to the default cap, not zero"
         );
     }
 }
