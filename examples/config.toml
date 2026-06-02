@@ -152,6 +152,17 @@ provider      = "codex"
 upstream      = "gpt-5.4"
 effort_levels = ["low", "medium"]
 
+# Per-model max_output_tokens override -- only consumed by the
+# Anthropic-shape egresses (anthropic-api, bedrock-invoke) when the
+# caller OMITS max_tokens. Default is None -> falls through to a 64000
+# baseline. Set when an Anthropic-shape egress points at a model whose
+# upstream max_tokens cap is below 64000, so callers that omit the
+# field don't 400 on the upstream's per-model validation.
+# [models.opus-legacy]
+# provider          = "anthropic-oauth"
+# upstream          = "claude-opus-4"
+# max_output_tokens = 32000              # older Opus 4 caps at 32000
+
 # ---- Aliases (wire-string -> model nickname) ----
 # A single key with a string value resolves to one model. A list value
 # is a fallback chain -- earlier entries try first.

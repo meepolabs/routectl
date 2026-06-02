@@ -6,6 +6,46 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.0] - YYYY-MM-DD
 
+### Added
+
+- Per-provider `max_thinking_entry_bytes` knob on `[providers.X]` of
+  `kind = "anthropic-api"` (1 KiB to 4 MiB; default 1 MiB). Tunes the
+  per-entry byte cap on the `context_management` emulation
+  thinking-cache. Out-of-range values are clamped at startup with a
+  WARN; unset falls through to the 1 MiB default. The docs already
+  advertised the field but the runtime rejected unknown keys; this
+  re-adds the field and resolves the doc/code drift.
+
+### Changed
+
+- Bumped per-entry byte cap on the `context_management` emulation
+  thinking-cache from 256 KB to 1 MiB. The 256 KB cap rejected cache
+  writes on full-budget Opus 4.6/4.7/4.8 reasoning turns (~328 KB at
+  65k thinking tokens); 1 MiB gives ~3x headroom. Operators on
+  memory-constrained hosts can tune down via the new
+  `max_thinking_entry_bytes` knob.
+- Switched the thinking-cache TTL from set-on-create to sliding:
+  every successful hit refreshes the entry's `expires_at` to
+  `ttl-from-now`, matching Anthropic and DeepSeek prompt-cache
+  semantics. Idle entries still die after the hardcoded 60-minute
+  window.
+
+### Fixed
+
+- The 0.7.0 changelog entry incorrectly stated the thinking-cache LRU
+  cap as 1000; actual value is 10000.
+
+### Documentation
+
+- Document the per-model `max_output_tokens` knob in
+  `docs/CONFIGURATION.md`. The field already shipped in earlier
+  commits; it caps the `max_tokens` value the Anthropic-shape
+  egresses (`anthropic-api`, `bedrock-invoke`) inject when the
+  caller omits the field. Resolution chain: `request.max_tokens`
+  -> `[models.X].max_output_tokens` -> hardcoded `64000` baseline.
+  The `openai-compat`, `openai-responses`, and `bedrock-converse`
+  egresses forward omission cleanly without injection.
+
 ### Security
 
 - Bound per-entry size on the anthropic-api thinking cache; oversized writes are rejected and observed via WARN log to prevent unbounded LRU memory use.

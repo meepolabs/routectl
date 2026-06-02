@@ -204,6 +204,7 @@ fn ttl_expiry_returns_none() {
     let entry = ThinkingCacheEntry {
         thinking: make_thinking("stale"),
         expires_at: Instant::now() - Duration::from_secs(1),
+        ttl: Duration::from_secs(3600),
     };
     cache.write().expect("lock").put(key, entry);
     let result = lookup_thinking(&cache, "provider-b", "tool-old");
@@ -785,8 +786,8 @@ fn make_thinking_of_size(payload_bytes: usize) -> Vec<ReasoningDetail> {
 #[test]
 fn snapshot_to_cache_under_cap_inserts_and_round_trips() {
     let cache = small_cache(4);
-    // ~100 KB payload, well under the 256 KB default cap.
-    let thinking = make_thinking_of_size(100 * 1024);
+    // ~512 KB payload, well under the 1 MiB default cap.
+    let thinking = make_thinking_of_size(512 * 1024);
     snapshot_to_cache(
         &cache,
         "prov",
@@ -807,8 +808,8 @@ fn snapshot_to_cache_under_cap_inserts_and_round_trips() {
 #[test]
 fn snapshot_to_cache_over_cap_is_rejected() {
     let cache = small_cache(4);
-    // ~300 KB payload, well over the 256 KB default cap.
-    let thinking = make_thinking_of_size(300 * 1024);
+    // ~1.5 MiB payload, well over the 1 MiB default cap.
+    let thinking = make_thinking_of_size(1536 * 1024);
     snapshot_to_cache(
         &cache,
         "prov",
@@ -826,14 +827,14 @@ fn snapshot_to_cache_over_cap_is_rejected() {
 
 /// `snapshot_to_cache` accepts a per-call cap argument; it must be
 /// honored even when the caller picks a value below the hardcoded
-/// 256 KB default. A 1024-byte cap rejects a 2 KB entry that would
+/// default. A 1024-byte cap rejects a 2 KB entry that would
 /// otherwise pass under the default.
 #[test]
 fn snapshot_to_cache_honors_per_call_cap_override() {
     let cache = small_cache(4);
     let thinking = make_thinking_of_size(2 * 1024);
     let default_ttl = crate::anthropic_api::context_management::THINKING_CACHE_TTL;
-    // 2 KB entry is well under the default 256 KB cap...
+    // 2 KB entry is well under the 1 MiB default cap...
     snapshot_to_cache(
         &cache,
         "prov",
@@ -885,6 +886,44 @@ fn snapshot_to_cache_honors_per_call_ttl_override() {
     assert!(
         lookup_thinking(&cache, "prov", "tool-ttl").is_none(),
         "entry must be treated as stale after its TTL expires"
+    );
+}
+
+/// Sliding TTL: every successful hit refreshes `expires_at` to
+/// `now + ttl`. An entry stays alive across multiple lookups as long
+/// as the gap between any two consecutive hits stays under the TTL,
+/// even when the cumulative wall-clock since insert exceeds it.
+#[test]
+fn lookup_thinking_refreshes_expires_at_on_hit() {
+    let cache = small_cache(4);
+    let thinking = make_thinking("sliding");
+    let ttl = std::time::Duration::from_millis(500);
+    snapshot_to_cache(
+        &cache,
+        "prov",
+        "tool-slide",
+        thinking,
+        DEFAULT_MAX_THINKING_ENTRY_BYTES,
+        ttl,
+        "complete",
+    );
+
+    // ~200ms in: still within the original TTL window. Hit must refresh.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        lookup_thinking(&cache, "prov", "tool-slide").is_some(),
+        "first hit at ~200ms must succeed"
+    );
+
+    // ~300ms after the first hit: within the refreshed window even
+    // though total wall-clock since insert is ~500ms (at the 500ms
+    // original TTL boundary). With sliding semantics the entry is
+    // still alive because the first hit pushed expires_at out by
+    // another full TTL.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        lookup_thinking(&cache, "prov", "tool-slide").is_some(),
+        "sliding TTL: second hit must succeed because the first hit refreshed expires_at"
     );
 }
 
