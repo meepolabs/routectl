@@ -947,7 +947,7 @@ async fn legacy_output_format_preserves_existing_output_config_effort() {
     );
     let oc = up.get("output_config").expect("output_config present");
     // `effort` is stripped on non-adaptive providers (haiku) -- the
-    // anthropic-api egress's `strip_unsupported_output_effort` keeps
+    // anthropic-api egress's `reconcile_output_config_effort` keeps
     // the wire clean of a field Anthropic 400s on. The structured-
     // output `format` survives because it's orthogonal to the effort
     // beta and supported across the model family.
