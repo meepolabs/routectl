@@ -123,6 +123,21 @@ pub struct TokenRecord {
     /// Absolute Unix timestamp of when this record was written.
     /// `routectl whoami` shows it. Diagnostic only.
     pub obtained_at_unix: u64,
+
+    /// Stable per-credential session id (UUIDv4) used in the
+    /// `session-id` HTTP header on outbound openai-responses requests
+    /// when the bearer is a chatgpt-oauth JWT. Mirrors codex CLI's
+    /// `ModelClientState::session_id` -- routectl stamps one value per
+    /// credential lifetime so the upstream upstream can correlate a
+    /// human's turns under one stable session.
+    ///
+    /// Generated lazily on first use (factory-driven backfill) for
+    /// records minted by routectl < v0.7.1 that pre-date this field;
+    /// regenerated only on a fresh `routectl login codex`. Optional in
+    /// the on-disk shape so older binaries continue to parse credentials
+    /// minted by newer ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 fn default_token_type() -> String {
@@ -200,6 +215,7 @@ mod tests {
             scopes: vec!["user:inference".into()],
             account: AccountInfo::default(),
             obtained_at_unix: 0,
+            session_id: None,
         }
     }
 
@@ -248,6 +264,7 @@ mod tests {
                     account_id: Some("acc-123".into()),
                 },
                 obtained_at_unix: 1_899_000_000,
+                session_id: None,
             },
         );
         let json = serde_json::to_string(&cf).unwrap();

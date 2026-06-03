@@ -125,12 +125,25 @@ pub struct OpenAiResponsesConfig {
     /// (`authorization`, `host`, `content-type`, ...) are rejected
     /// at apply-time to keep the auth contract intact.
     pub header_extras: Vec<(String, String)>,
-    /// Override the User-Agent. `None` -> default
-    /// `routectl/<version> codex-cli`.
+    /// Override the User-Agent. `None` -> codex CLI's UA shape
+    /// (`codex_cli_rs/<X.Y.Z> (...) <terminal>`) so the chatgpt.com
+    /// upstream does not flag the fingerprint as drifted.
     pub user_agent: Option<String>,
     /// Override the `originator` header sent on ChatgptOauth.
     /// `None` -> `codex_cli_rs` (codex's `DEFAULT_ORIGINATOR`).
     pub originator: Option<String>,
+    /// Stable per-credential session id (UUIDv4) used in the
+    /// `session-id` HTTP header on outbound chatgpt-oauth traffic.
+    /// `Some` only on ChatgptOauth; the factory reads / lazily mints
+    /// it from credentials.json. Mirrors codex's `ModelClient`
+    /// session_id.
+    pub session_id: Option<String>,
+    /// Stable per-install installation id (UUIDv4) used in the
+    /// `x-codex-installation-id` HTTP header on outbound chatgpt-oauth
+    /// traffic. `Some` only on ChatgptOauth; the factory reads /
+    /// lazily mints it from `~/.config/routectl/installation_id`.
+    /// Mirrors codex's installation_id, which survives login re-runs.
+    pub installation_id: Option<String>,
 }
 
 impl std::fmt::Debug for OpenAiResponsesConfig {
@@ -149,6 +162,8 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             .field("header_extras_len", &self.header_extras.len())
             .field("user_agent", &self.user_agent)
             .field("originator", &self.originator)
+            .field("session_id_present", &self.session_id.is_some())
+            .field("installation_id_present", &self.installation_id.is_some())
             .finish()
     }
 }
@@ -174,6 +189,8 @@ impl OpenAiResponsesConfig {
             header_extras: Vec::new(),
             user_agent: None,
             originator: None,
+            session_id: None,
+            installation_id: None,
         }
     }
 }
@@ -187,8 +204,8 @@ impl OpenAiResponsesProvider {
     pub fn new(cfg: OpenAiResponsesConfig) -> Self {
         // Always pass an explicit UA string so the client-level default
         // header carries the codex-derived value. Operator-supplied
-        // `cfg.user_agent` wins; otherwise fall back to the canonical
-        // "routectl/<version> codex-cli" string from auth::default_user_agent.
+        // `cfg.user_agent` wins; otherwise fall back to the codex CLI
+        // UA shape from auth::default_user_agent.
         let ua = cfg
             .user_agent
             .clone()
@@ -211,7 +228,12 @@ impl OpenAiResponsesProvider {
         req: &ChatRequest,
         bearer: &str,
     ) -> Result<reqwest::RequestBuilder> {
-        let mut rb = auth::apply(rb, &self.cfg, bearer)?;
+        let mut rb = auth::apply(
+            rb,
+            &self.cfg,
+            bearer,
+            routectl_core::codex_fingerprint::codex_window_id(),
+        )?;
         // Prefer the router-composed map (provider + model merged at
         // dispatch) if present; fall back to `self.cfg.header_extras`
         // for library consumers that built the provider directly.
@@ -605,6 +627,8 @@ mod e2e_tests {
             header_extras: Vec::new(),
             user_agent: None,
             originator: None,
+            session_id: None,
+            installation_id: None,
         };
         OpenAiResponsesProvider::new(cfg)
     }

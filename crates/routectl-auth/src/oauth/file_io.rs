@@ -244,6 +244,7 @@ mod tests {
                 account_id: None,
             },
             obtained_at_unix: 1_899_000_000,
+            session_id: None,
         }
     }
 

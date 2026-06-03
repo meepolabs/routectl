@@ -5,6 +5,7 @@
 //! `provider` for the per-backend trait.
 
 pub mod cache_control;
+pub mod codex_fingerprint;
 pub mod content_part;
 pub mod error;
 pub mod log_safe;
