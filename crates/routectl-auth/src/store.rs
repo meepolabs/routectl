@@ -32,4 +32,17 @@ pub trait SecretStore: Send + Sync {
     async fn account_id(&self, _secret_ref: &SecretRef) -> Result<Option<String>> {
         Ok(None)
     }
+
+    /// Best-effort read or lazy mint of the per-credential
+    /// `session_id` (UUIDv4) used in the codex `session-id` HTTP
+    /// header on outbound chatgpt-oauth traffic. Returns `Ok(None)`
+    /// by default: env://, file://, and literal: refs carry no
+    /// session metadata. The OAuth store overrides this to read from
+    /// (or lazily backfill into) credentials.json so the upstream
+    /// risk system sees the same session id across the credential's
+    /// lifetime. Reading a provider with no stored record yields
+    /// `Ok(None)`.
+    async fn session_id(&self, _secret_ref: &SecretRef) -> Result<Option<String>> {
+        Ok(None)
+    }
 }

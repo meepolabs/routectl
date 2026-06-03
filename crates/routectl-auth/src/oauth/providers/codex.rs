@@ -377,6 +377,16 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
 
+    // Fresh exchange (prior_refresh == None) mints a new session_id;
+    // a refresh leaves it None and the OAuth store preserves the
+    // prior session_id so it stays stable across the credential's
+    // lifetime. Mirrors codex CLI's per-credential session id, which
+    // the upstream risk system uses to correlate a human's turns.
+    let session_id = match prior_refresh {
+        None => Some(uuid::Uuid::new_v4().to_string()),
+        Some(_) => None,
+    };
+
     Ok(TokenRecord {
         access_token: SecretToken::new(access_token),
         refresh_token: SecretToken::new(refresh_token),
@@ -385,6 +395,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         scopes,
         account: AccountInfo { email, account_id },
         obtained_at_unix: unix_now(),
+        session_id,
     })
 }
 

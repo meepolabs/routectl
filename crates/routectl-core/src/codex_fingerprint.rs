@@ -1,0 +1,265 @@
+//! Codex CLI HTTP fingerprint shared between the openai-responses
+//! egress and the OAuth refresh client.
+//!
+//! Codex's risk system invalidates routectl-managed ChatGPT-OAuth
+//! sessions when the HTTP fingerprint of routectl-emitted requests
+//! drifts from what a real `codex_cli_rs` install would emit. The
+//! fingerprint covers: User-Agent shape, the `originator` header,
+//! the residency header, and the per-request identity headers
+//! (session-id, x-codex-installation-id, x-codex-window-id,
+//! thread-id, x-client-request-id, version).
+//!
+//! The User-Agent format mirrors codex's
+//! `login/src/auth/default_client.rs::get_codex_user_agent`:
+//!
+//!   `codex_cli_rs/<X.Y.Z> (<os_type> <os_version>; <arch>) <terminal_token>`
+//!
+//! - `<X.Y.Z>` is `PINNED_CODEX_VERSION`, the codex CLI version routectl
+//!   currently mimics. Bump this whenever the upstream codex CLI's
+//!   `[workspace.package].version` rolls forward; risk-system drift
+//!   detection is "current vs stale" so a stale literal here will start
+//!   getting flagged again.
+//! - `<os_type>` mirrors `os_info::OsType`'s display values: "Linux",
+//!   "Mac OS", "Windows".
+//! - `<os_version>` is the kernel release on Linux (`uname -r`-shape),
+//!   `sw_vers -productVersion` on macOS, and a best-effort version
+//!   string on Windows.
+//! - `<arch>` is `std::env::consts::ARCH` ("x86_64", "aarch64", ...).
+//! - `<terminal_token>` is `$TERM_PROGRAM`, falling back to `$TERM`,
+//!   defaulting to `"unknown"`.
+//!
+//! The default headers (`originator`, `x-openai-internal-codex-residency`)
+//! mirror `default_client.rs::default_headers`. They MUST appear on every
+//! routectl HTTP request that claims `originator: codex_cli_rs`,
+//! including the OAuth refresh POST -- the risk system inspects the
+//! token-endpoint roundtrip too.
+
+use std::sync::OnceLock;
+
+/// Codex CLI version routectl mimics on the wire. Update when
+/// upstream codex bumps `[workspace.package].version` past this on a
+/// stable release tag (`rust-vX.Y.Z`).
+pub const PINNED_CODEX_VERSION: &str = "0.136.0";
+
+/// `originator` header value for first-party codex CLI traffic.
+/// Mirrors codex's `DEFAULT_ORIGINATOR` in `default_client.rs:36`.
+pub const CODEX_ORIGINATOR: &str = "codex_cli_rs";
+
+/// `originator` HTTP header name. A const so call sites stay
+/// case-stable across the egress and refresh paths.
+pub const ORIGINATOR_HEADER_NAME: &str = "originator";
+
+/// US-only residency header name. Codex's
+/// `RESIDENCY_HEADER_NAME` in `default_client.rs:38`.
+pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";
+
+/// US residency value. Routectl pins to `us` to match codex's CLI
+/// default; the upstream rejects mismatched residency.
+pub const RESIDENCY_HEADER_VALUE: &str = "us";
+
+/// Returns the codex-style `User-Agent` string. Computed once per
+/// process; subsequent calls return a borrowed reference into a
+/// `OnceLock`.
+///
+/// Shape: `codex_cli_rs/<X.Y.Z> (<os_type> <os_version>; <arch>) <terminal_token>`.
+pub fn codex_user_agent() -> &'static str {
+    static UA: OnceLock<String> = OnceLock::new();
+    UA.get_or_init(build_codex_user_agent).as_str()
+}
+
+fn build_codex_user_agent() -> String {
+    let os_type = os_type();
+    let os_ver = os_version();
+    let arch = std::env::consts::ARCH;
+    let term = terminal_token();
+    format!("{CODEX_ORIGINATOR}/{PINNED_CODEX_VERSION} ({os_type} {os_ver}; {arch}) {term}",)
+}
+
+/// Display-name mapping that mirrors `os_info::OsType` for the three
+/// platforms routectl ships on. The value is wire-visible inside the UA;
+/// codex's `os_info::OsType` Display emits these literals so the strings
+/// here are load-bearing.
+fn os_type() -> &'static str {
+    match std::env::consts::OS {
+        "linux" => "Linux",
+        "macos" => "Mac OS",
+        "windows" => "Windows",
+        // Free/Net/OpenBSD and others are extremely rare for an
+        // interactive CLI; `os_info::OsType::Unknown` displays as
+        // "Unknown" so we follow suit rather than emit raw cfg strings.
+        _ => "Unknown",
+    }
+}
+
+/// Best-effort OS version string. Linux uses the kernel release
+/// (`uname -r` shape). macOS uses `sw_vers -productVersion`. Windows
+/// returns "unknown" since the standard library does not expose the
+/// build number and shelling out to `cmd /c ver` from a daemon is
+/// noisy. The risk system only inspects routectl traffic from
+/// chatgpt.com sessions, so a Windows-imperfect literal is acceptable
+/// until a real Windows operator surfaces.
+fn os_version() -> String {
+    match std::env::consts::OS {
+        "linux" => linux_kernel_release().unwrap_or_else(|| "unknown".to_string()),
+        "macos" => macos_product_version().unwrap_or_else(|| "unknown".to_string()),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn linux_kernel_release() -> Option<String> {
+    // /proc/sys/kernel/osrelease is the cheapest source: a single read
+    // of a virtual file populated by the kernel. No subprocess, no
+    // PATH lookup, no allocation beyond the read buffer.
+    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    // Fallback to `uname -r` for systems without /proc (extremely rare
+    // on Linux but defensible).
+    uname_release()
+}
+
+fn uname_release() -> Option<String> {
+    let output = std::process::Command::new("uname")
+        .arg("-r")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn macos_product_version() -> Option<String> {
+    let output = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Resolves the `<terminal_token>` segment. Mirrors codex's
+/// `codex_terminal_detection::user_agent`: prefer `$TERM_PROGRAM`,
+/// fall back to `$TERM`, default `"unknown"`.
+fn terminal_token() -> String {
+    if let Ok(v) = std::env::var("TERM_PROGRAM") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    if let Ok(v) = std::env::var("TERM") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    "unknown".to_string()
+}
+
+/// Returns the codex client-level default headers as `(name, value)`
+/// pairs that any HTTP client claiming `originator: codex_cli_rs`
+/// MUST attach. Both the openai-responses egress client and the OAuth
+/// refresh client consume this -- the risk system inspects both.
+///
+/// Authorization is intentionally absent: it is a per-request header
+/// injected by the auth dispatcher, not a client-level default.
+pub fn codex_default_headers() -> [(&'static str, &'static str); 2] {
+    [
+        (ORIGINATOR_HEADER_NAME, CODEX_ORIGINATOR),
+        (RESIDENCY_HEADER_NAME, RESIDENCY_HEADER_VALUE),
+    ]
+}
+
+/// Process-global codex window-id (one UUIDv4 minted per `routectl
+/// serve` process). Stamped in the `x-codex-window-id` header on every
+/// chatgpt-oauth request. Mirrors codex's
+/// `ModelClientState::window_generation`-derived window id, which is
+/// ephemeral and reset on each codex CLI process start.
+///
+/// The id MUST be process-global, not per-provider: a hot-reload of
+/// the router rebuilds providers in place, and a per-instance window
+/// id would rotate across reloads. The chatgpt.com risk system pins
+/// the window-id-vs-process linkage and flags drift; once minted, the
+/// value is stable until the routectl process exits.
+pub fn codex_window_id() -> &'static str {
+    static WINDOW_ID: OnceLock<String> = OnceLock::new();
+    WINDOW_ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_agent_starts_with_codex_cli_rs_and_pinned_version() {
+        let ua = codex_user_agent();
+        assert!(
+            ua.starts_with(&format!("{CODEX_ORIGINATOR}/{PINNED_CODEX_VERSION}")),
+            "unexpected UA prefix: {ua}",
+        );
+    }
+
+    #[test]
+    fn user_agent_contains_arch() {
+        let ua = codex_user_agent();
+        assert!(
+            ua.contains(std::env::consts::ARCH),
+            "UA should contain arch {} but was: {ua}",
+            std::env::consts::ARCH,
+        );
+    }
+
+    #[test]
+    fn user_agent_contains_os_type() {
+        let ua = codex_user_agent();
+        // os_type returns one of these wire literals.
+        let expected = match std::env::consts::OS {
+            "linux" => "Linux",
+            "macos" => "Mac OS",
+            "windows" => "Windows",
+            _ => "Unknown",
+        };
+        assert!(
+            ua.contains(expected),
+            "UA should contain os_type {expected:?} but was: {ua}",
+        );
+    }
+
+    #[test]
+    fn default_headers_carry_originator_and_residency() {
+        let headers = codex_default_headers();
+        let lookup = |name: &str| headers.iter().find_map(|(n, v)| (*n == name).then_some(*v));
+        assert_eq!(lookup(ORIGINATOR_HEADER_NAME), Some(CODEX_ORIGINATOR));
+        assert_eq!(lookup(RESIDENCY_HEADER_NAME), Some(RESIDENCY_HEADER_VALUE),);
+    }
+
+    #[test]
+    fn window_id_is_process_global_and_uuid_shape() {
+        // Two consecutive calls must return the same pointer (cached
+        // by OnceLock); a process-level rotation would crack the
+        // chatgpt.com impersonation contract.
+        let a = codex_window_id();
+        let b = codex_window_id();
+        assert_eq!(a, b, "window id must be stable across calls");
+        assert_eq!(
+            a.as_ptr(),
+            b.as_ptr(),
+            "window id must be backed by the same OnceLock allocation",
+        );
+        assert_eq!(a.len(), 36, "expected 36-char UUID, got {a:?}");
+    }
+}

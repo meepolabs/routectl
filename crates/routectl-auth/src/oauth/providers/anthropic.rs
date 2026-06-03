@@ -307,6 +307,7 @@ fn map_to_record(parsed: Resp) -> TokenRecord {
         scopes,
         account,
         obtained_at_unix: now,
+        session_id: None,
     }
 }
 

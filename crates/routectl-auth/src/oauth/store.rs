@@ -24,17 +24,19 @@ use crate::oauth::{OAuthError, OAuthResult};
 use crate::{SecretRef, SecretStore};
 
 /// Re-read window: a `get()` call within `near_expiry(REFRESH_LEAD_SECS)`
-/// of expiry triggers a refresh through `refresh_under_lock`. 60s is
-/// wide enough that the refresh POST + atomic disk write completes
-/// before expiry on a healthy network, and narrow enough that most
-/// requests serve from the in-memory cache without touching the token
-/// endpoint. The eight tokens-per-day amortized cost of an unnecessary
-/// early refresh is negligible compared to the user-visible latency
-/// of a 401 -> on_auth_failure -> retry round-trip if the lead is too
-/// short. Operators on flaky networks may want to widen this; pinned
-/// here as a const because no production driver has yet asked for
-/// per-deployment tuning.
-pub(crate) const REFRESH_LEAD_SECS: u64 = 60;
+/// of expiry triggers a refresh through `refresh_under_lock`. 300s
+/// matches codex CLI's 5-minute lead in
+/// `codex-rs/login/src/auth/manager.rs:87` -- routectl's chatgpt-oauth
+/// refresh path runs through the same risk-system gauntlet as a real
+/// codex CLI, so emitting refresh POSTs at the same expiry-window keeps
+/// the temporal fingerprint indistinguishable. Wide enough that the
+/// refresh POST + atomic disk write completes before expiry on a
+/// healthy network; narrow enough that most requests serve from the
+/// in-memory cache without touching the token endpoint. Operators on
+/// flaky networks may want to widen this; pinned here as a const
+/// because no production driver has yet asked for per-deployment
+/// tuning.
+pub(crate) const REFRESH_LEAD_SECS: u64 = 300;
 
 /// Routectl-managed OAuth credentials store. Cheap to clone; the
 /// inner state is `Arc`-shared so multiple `Provider` instances can
@@ -98,7 +100,35 @@ impl OAuthStore {
         // the IdP would replay that POST to the redirect target.
         // Treat any 3xx from the token endpoint as an upstream
         // failure rather than silently re-sending the secret.
+        //
+        // Default headers carry the codex CLI HTTP fingerprint
+        // (originator: codex_cli_rs, x-openai-internal-codex-residency:
+        // us, codex-style User-Agent). The chatgpt.com risk system
+        // inspects every routectl-emitted request claiming
+        // `originator: codex_cli_rs` -- including the OAuth refresh
+        // POST -- and invalidates sessions whose fingerprint drifts
+        // from a real codex install. Anthropic and any future non-codex
+        // OAuth provider see these too; the headers are inert for them
+        // (no impact on the Anthropic token endpoint) but pinning a
+        // single client keeps the refresh hot path simple.
+        let mut default_headers = reqwest::header::HeaderMap::new();
+        for (name, value) in routectl_core::codex_fingerprint::codex_default_headers() {
+            // The constants are valid header name/value pairs today.
+            // Promote any future regression that breaks them into a
+            // process-startup panic so a silent drop cannot crack the
+            // codex_cli_rs impersonation contract by removing the
+            // originator or residency header from the OAuth refresh
+            // client without operator-visible signal.
+            let header_name = name
+                .parse::<reqwest::header::HeaderName>()
+                .expect("codex_fingerprint constant must be a valid header name");
+            let header_value = reqwest::header::HeaderValue::from_str(value)
+                .expect("codex_fingerprint constant must be a valid header value");
+            default_headers.insert(header_name, header_value);
+        }
         let http = reqwest::Client::builder()
+            .user_agent(routectl_core::codex_fingerprint::codex_user_agent())
+            .default_headers(default_headers)
             .connect_timeout(std::time::Duration::from_secs(
                 Self::HTTP_CONNECT_TIMEOUT_SECS,
             ))
@@ -164,6 +194,57 @@ impl OAuthStore {
             .await
             .get(provider)
             .and_then(|rec| rec.account.account_id.clone())
+    }
+
+    /// Read or lazily backfill the stable per-credential `session_id`.
+    /// Mirrors codex CLI's per-credential session-id, used in the
+    /// `session-id` HTTP header on outbound chatgpt-oauth traffic so
+    /// the upstream risk system can correlate one human's turns under
+    /// one stable session.
+    ///
+    /// Lookup-and-backfill semantics: returns the existing session_id
+    /// when present; when the record exists but has no session_id
+    /// (records minted by routectl < v0.7.1), generates a fresh
+    /// UUIDv4, persists it atomically, and returns the new value. A
+    /// missing record yields `Ok(None)` -- the caller (factory) treats
+    /// "no credential yet" as "no session-id header" rather than
+    /// failing provider construction.
+    ///
+    /// Generation is one-way: once minted, the session_id is stable
+    /// for the credential's lifetime; only a fresh `routectl login`
+    /// rotates it (codex provider mints a new one on exchange_code).
+    pub async fn peek_or_create_session_id(&self, provider: &str) -> Result<Option<String>> {
+        // Fast path: read-only lookup.
+        if let Some(existing) = self
+            .inner
+            .file
+            .read()
+            .await
+            .get(provider)
+            .and_then(|rec| rec.session_id.clone())
+        {
+            return Ok(Some(existing));
+        }
+        // Slow path: missing record OR record without session_id. Take
+        // the write lock, double-check, and persist with a fresh UUID
+        // when needed.
+        let mut guard = self.inner.file.write().await;
+        let Some(rec) = guard.get(provider).cloned() else {
+            return Ok(None);
+        };
+        if let Some(existing) = rec.session_id.clone() {
+            return Ok(Some(existing));
+        }
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let mut updated = rec;
+        updated.session_id = Some(new_id.clone());
+        let mut staged = guard.clone();
+        staged.upsert(provider, updated);
+        file_io::save(&self.inner.path, &staged)
+            .await
+            .map_err(Error::from)?;
+        *guard = staged;
+        Ok(Some(new_id))
     }
 
     /// Persist a token record atomically. Disk write happens FIRST,
@@ -320,7 +401,7 @@ impl OAuthStore {
 
         // Step 3: actually refresh.
         let flow = self.resolve_flow(provider)?;
-        let new_rec = flow
+        let mut new_rec = flow
             .refresh_token(self.http(), rec.refresh_token.expose())
             .await
             .map_err(|e| {
@@ -329,6 +410,20 @@ impl OAuthStore {
                      re-run `routectl login {provider}`"
                 ))
             })?;
+
+        // Preserve the per-credential `session_id` across token
+        // rotation. The OAuthFlow trait has no slot for the prior
+        // record, so the codex flow always returns a record whose
+        // `session_id` is None on refresh; the upstream risk system
+        // expects one stable session-id across the credential's
+        // lifetime, so a refresh that flipped it would re-trigger
+        // step-up. Backfilling here also covers the v0.7.0 -> v0.7.1
+        // migration: pre-existing records have None; the next refresh
+        // (lazy or forced) does NOT mint a fresh session_id, leaving
+        // the per-provider factory path to fill it on first use.
+        if new_rec.session_id.is_none() {
+            new_rec.session_id = rec.session_id.clone();
+        }
 
         // Step 4: persist atomically. `write_record` already does the
         // disk-first ordering (temp + fsync + rename, then commit
@@ -440,6 +535,18 @@ impl SecretStore for OAuthStore {
         };
         Ok(self.peek_account_id(provider).await)
     }
+
+    async fn session_id(&self, secret_ref: &SecretRef) -> Result<Option<String>> {
+        let provider = match secret_ref {
+            SecretRef::OAuth { provider } => provider,
+            other => {
+                return Err(Error::Auth(format!(
+                    "OAuthStore only handles oauth:// refs, got {other}",
+                )));
+            }
+        };
+        self.peek_or_create_session_id(provider).await
+    }
 }
 
 #[cfg(test)]
@@ -462,6 +569,7 @@ mod tests {
             scopes: vec!["user:inference".into()],
             account: AccountInfo::default(),
             obtained_at_unix: 0,
+            session_id: None,
         }
     }
 
@@ -1163,5 +1271,157 @@ mod tests {
             store.list().await.is_empty(),
             "missing file must yield empty cache"
         );
+    }
+
+    /// The OAuth refresh client must carry the codex CLI HTTP
+    /// fingerprint on every request. The chatgpt.com risk system
+    /// inspects token-endpoint round-trips too: a refresh POST
+    /// missing originator + residency or with a non-codex UA
+    /// invalidates the session even though the bearer is fine.
+    #[tokio::test]
+    async fn refresh_client_carries_codex_fingerprint_headers() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        // Arrange: stand up an OAuthStore so its production client
+        // builder runs (default headers + UA wired from
+        // routectl_core::codex_fingerprint).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+
+        // Capture the headers of the next inbound request via a
+        // wiremock mock that records the body+headers and answers
+        // 200.
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+
+        // Act: drive a real request through `store.http()`.
+        let resp = store
+            .http()
+            .post(server.uri())
+            .send()
+            .await
+            .expect("request send");
+        assert_eq!(resp.status().as_u16(), 200);
+
+        // Assert: inspect the recorded request headers via wiremock.
+        let received: Vec<Request> = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1, "one request reached the mock");
+        let req = &received[0];
+        let header = |name: &str| -> Option<String> {
+            req.headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        assert_eq!(
+            header("originator").as_deref(),
+            Some("codex_cli_rs"),
+            "refresh client must claim codex_cli_rs originator",
+        );
+        assert_eq!(
+            header("x-openai-internal-codex-residency").as_deref(),
+            Some("us"),
+            "refresh client must pin US residency",
+        );
+        let ua = header("user-agent").expect("UA must be set");
+        assert!(
+            ua.starts_with("codex_cli_rs/"),
+            "refresh client UA must start with codex_cli_rs/, got: {ua}",
+        );
+    }
+
+    /// `session_id` round-trips through credentials.json. A fresh
+    /// `peek_or_create_session_id` mints a UUIDv4 and persists it; a
+    /// second call (across a fresh `OAuthStore::open`) returns the
+    /// same value.
+    #[tokio::test]
+    async fn credentials_json_round_trips_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+
+        // Seed a record with no session_id (the migration shape).
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("codex", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+
+        let first = store
+            .peek_or_create_session_id("codex")
+            .await
+            .unwrap()
+            .expect("session_id should be minted");
+        assert_eq!(
+            first.len(),
+            36,
+            "session_id should be a 36-char UUID, got: {first}"
+        );
+
+        // A second call on the same store returns the persisted id.
+        let same = store
+            .peek_or_create_session_id("codex")
+            .await
+            .unwrap()
+            .expect("session_id should be present");
+        assert_eq!(first, same, "second peek must return persisted id");
+
+        // A fresh `open` re-reads from disk and surfaces the same id.
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        let after_reopen = reopened
+            .peek_or_create_session_id("codex")
+            .await
+            .unwrap()
+            .expect("session_id should be present after reopen");
+        assert_eq!(
+            first, after_reopen,
+            "session_id must survive store reopen via disk persist"
+        );
+    }
+
+    /// Refresh preserves session_id across token rotation. The
+    /// OAuthFlow trait has no slot for the prior record; the store
+    /// backfills `session_id` from the in-memory `current` record
+    /// before persisting the freshly-minted one.
+    #[tokio::test]
+    async fn refresh_preserves_session_id_across_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        // Seed a record with a known session_id and a near-expiry
+        // access token so the lazy refresh path fires.
+        let seed = OAuthStore::open(&path).await.unwrap();
+        let mut seeded = rec_at(unix_now() + 10);
+        seeded.session_id = Some("seeded-session-uuid".into());
+        seed.write_record("anthropic", seeded).await.unwrap();
+        drop(seed);
+
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+            "tok-refreshed".into(),
+        )));
+        let store = open_with_flow(&path, flow.clone()).await;
+
+        // Trigger refresh through `get`.
+        let _ = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(flow.call_count(), 1, "exactly one refresh fired");
+
+        // The persisted record carries the original session_id.
+        let listed = store.list().await;
+        assert_eq!(listed.len(), 1);
+        let post = &listed[0].1;
+        assert_eq!(
+            post.session_id.as_deref(),
+            Some("seeded-session-uuid"),
+            "session_id must be preserved across token rotation",
+        );
+        assert_eq!(post.access_token.expose(), "tok-refreshed");
     }
 }

@@ -25,6 +25,7 @@ listed at the bottom of each crate.
 - `src/provider.rs` -- `Provider` trait every backend implements (normalize_request/response/chunk + complete + stream + on_auth_failure hook for 401 recovery)
 - `src/token_source.rs` -- `TokenSource` async trait (`Arc<dyn TokenSource>` per-provider) + `StaticToken` default impl; lets OAuth refresh rotate without daemon restart
 - `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions), prompt redaction, structural-summary extractor, `[log]`-block override seeding
+- `src/codex_fingerprint.rs` -- shared codex CLI HTTP fingerprint (UA, originator, residency); consumed by both the openai-responses egress client and the routectl-auth OAuth refresh client so token-endpoint round-trips do not drift from real codex traffic
 - `src/error.rs` -- `Error` enum (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...) and `Result` alias
 
 ### Tests
@@ -95,7 +96,7 @@ listed at the bottom of each crate.
 - `src/openai_responses/mod.rs` -- `OpenAiResponsesProvider`; force-streams `complete()`, drains to `response.completed`
 - `src/openai_responses/types.rs` -- request wire types: `ResponsesRequest`, `ResponseInputItem` union, `ResponsesTool` flat shape
 - `src/openai_responses/response_types.rs` -- response + SSE event wire types (`ResponsesResponse`, output-item union, stream events)
-- `src/openai_responses/auth.rs` -- header injection per `AuthKind` (ChatgptOauth Bearer+Account-Id+originator, ApiKey Bearer, BedrockMantle deferred)
+- `src/openai_responses/auth.rs` -- header injection per `AuthKind` (ChatgptOauth Bearer+Account-Id+originator + codex identity headers `version`/`session-id`/`x-codex-installation-id`/`x-codex-window-id`/`thread-id`/`x-client-request-id`/residency, ApiKey Bearer, BedrockMantle Bearer)
 - `src/openai_responses/request.rs` -- orchestrator: builds `ResponsesRequest` from `ChatRequest` via system/messages/tools/extras submodules
 - `src/openai_responses/system.rs` -- canonical `system` -> Responses `instructions` flat string (drops per-block cache_control with WARN)
 - `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items)
@@ -165,12 +166,13 @@ listed at the bottom of each crate.
 - `src/secret_ref.rs` -- `SecretRef` enum (`env://`, `file://`, `literal:`) plus URI parser
 - `src/memory_store.rs` -- default in-process `SecretStore` resolving env/file/literal references at read-time
 - `src/oauth/mod.rs` -- crate-internal entry for the OAuth 2.0 PKCE subsystem; defines `OAuthError` and re-exports `OAuthStore`, `LoginOptions`, `run_login`, `known_provider_ids`, token types
-- `src/oauth/types.rs` -- on-disk schema: `CredentialsFile`, `TokenRecord`, `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug), `SCHEMA_VERSION`, `unix_now`
+- `src/oauth/types.rs` -- on-disk schema: `CredentialsFile`, `TokenRecord` (incl. optional `session_id`), `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug), `SCHEMA_VERSION`, `unix_now`
 - `src/oauth/file_io.rs` -- atomic load/save of `~/.config/routectl/credentials.json` (TOCTOU-safe fstat, `0o600` enforcement on Unix, tempfile + fsync + rename)
+- `src/oauth/installation_id.rs` -- atomic load/lazy-generate of `~/.config/routectl/installation_id` (process-cached UUIDv4 for the codex `x-codex-installation-id` header; mode `0o600`)
 - `src/oauth/pkce.rs` -- PKCE verifier / SHA-256 challenge / CSRF state; `OsRng`-sourced, Drop-zeroized, constant-time state compare
 - `src/oauth/login.rs` -- login flow driver: PKCE bundle, axum callback sub-app on loopback, `webbrowser` launch, `--print-url` headless fallback, 120s timeout
 - `src/oauth/rate_limit.rs` -- per-source-port + listener-wide sliding-window rate limit on the loopback callback server (turns sustained 400-spam into 429)
-- `src/oauth/store.rs` -- `OAuthStore` `SecretStore` impl; cached `CredentialsFile` + per-provider single-flight refresh mutex + atomic writeback; near-expiry and 401-recovery hooks
+- `src/oauth/store.rs` -- `OAuthStore` `SecretStore` impl; cached `CredentialsFile` + per-provider single-flight refresh mutex + atomic writeback; near-expiry (300s lead) and 401-recovery hooks; refresh client carries codex CLI HTTP fingerprint headers; `peek_or_create_session_id` lazy-mints per-credential session ids
 - `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry + `known_provider_ids` (anthropic, codex); `AuthParams` and `truncate` helper
 - `src/oauth/providers/anthropic.rs` -- claude.ai OAuth flow: `claude.com/cai/oauth/authorize` + `platform.claude.com/v1/oauth/token`, `anthropic-beta: oauth-2025-04-20`, manual-paste redirect support
 - `src/oauth/providers/codex.rs` -- OpenAI ChatGPT/Codex OAuth 2.0 PKCE flow (public client, JWT-derived expiry, lazy refresh-token rotation)
