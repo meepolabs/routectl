@@ -2,18 +2,20 @@
 //!
 //! Three auth surfaces:
 //!
-//!   - `chatgpt-oauth` (CG.A, default): ChatGPT subscription surface
+//!   - `chatgpt-oauth` (default): ChatGPT subscription surface
 //!     at `https://chatgpt.com/backend-api/codex`. Uses
 //!     Authorization: Bearer <jwt> + ChatGPT-Account-Id + originator
 //!     headers (codex parity). Fully wired: `complete()` + `stream()`
 //!     both ship.
-//!   - `api-key` (CG.E): standard OpenAI surface at
+//!   - `api-key`: standard OpenAI surface at
 //!     `https://api.openai.com/v1`. Uses Authorization: Bearer
 //!     <api_key> only; `OpenAI-Organization` / `OpenAI-Project` can
 //!     be set via `extra_headers` if needed.
-//!   - `bedrock-mantle` (CG.D, deferred): AWS Mantle proxy at
-//!     `https://bedrock-mantle.<region>.api.aws/openai/v1`. Returns
-//!     a clean not-implemented Error from auth.rs today.
+//!   - `bedrock-mantle`: AWS Mantle proxy at
+//!     `https://bedrock-mantle.<region>.api.aws/openai/v1`. Uses
+//!     Authorization: Bearer <bearer> using the long-term Bedrock API
+//!     key (resolved via api_key_ref, typically
+//!     env://AWS_BEARER_TOKEN_BEDROCK).
 //!
 //! Wire shape: OpenAI Responses API.
 //!   - Request reference: `codex-rs/codex-api/src/common.rs::
@@ -83,8 +85,10 @@ pub enum AuthKind {
     /// Standard OpenAI API key against `api.openai.com/v1/responses`.
     /// Wired in CG.E.
     ApiKey,
-    /// AWS Bedrock Mantle proxy (OpenAI-shape over SigV4). Deferred
-    /// to CG.D.
+    /// AWS Bedrock Mantle proxy (OpenAI-shape):
+    /// `Authorization: Bearer <bearer>` using the long-term Bedrock API
+    /// key (resolved via api_key_ref, typically
+    /// env://AWS_BEARER_TOKEN_BEDROCK).
     BedrockMantle,
 }
 
@@ -97,7 +101,7 @@ pub struct OpenAiResponsesConfig {
     /// fields. Format: `openai-responses:<table-key>`.
     pub id: String,
     /// Source of the bearer token (JWT for ChatgptOauth; API key for
-    /// ApiKey; ignored for BedrockMantle which uses SigV4). For
+    /// ApiKey; long-term Bedrock API key for BedrockMantle). For
     /// env/file/literal secret refs this is a `StaticToken` resolved
     /// once at construction. For `oauth://<provider>` refs the factory
     /// passes a per-request resolver that re-reads the credentials

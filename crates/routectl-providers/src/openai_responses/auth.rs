@@ -21,13 +21,14 @@
 //!   needing `OpenAI-Organization` / `OpenAI-Project` set them via
 //!   `extra_headers`.
 //!
-//! - `BedrockMantle` (deferred to CG.D): the Mantle proxy at
-//!   `https://bedrock-mantle.<region>.api.aws/openai/v1`. Returns
-//!   NotImplemented.
+//! - `BedrockMantle`: the Mantle proxy at
+//!   `https://bedrock-mantle.<region>.api.aws/openai/v1`. Authorization:
+//!   Bearer <bearer> using the long-term Bedrock API key (resolved via
+//!   api_key_ref, typically env://AWS_BEARER_TOKEN_BEDROCK).
 
 use reqwest::RequestBuilder;
 
-use routectl_core::{Error, Result};
+use routectl_core::Result;
 
 use super::{AuthKind, OpenAiResponsesConfig};
 
@@ -48,8 +49,7 @@ pub(crate) fn default_user_agent() -> String {
 /// `cfg.auth_kind`. The bearer is resolved by the caller (once per
 /// upstream request via `cfg.auth.token().await`) and passed in here
 /// so a routectl-managed OAuth source can rotate without a daemon
-/// restart. Returns the modified builder on success or an Error for
-/// the deferred variants.
+/// restart. Returns the modified builder.
 pub(crate) fn apply(
     rb: RequestBuilder,
     cfg: &OpenAiResponsesConfig,
@@ -57,11 +57,7 @@ pub(crate) fn apply(
 ) -> Result<RequestBuilder> {
     match cfg.auth_kind {
         AuthKind::ChatgptOauth => Ok(apply_chatgpt_oauth(rb, cfg, bearer)),
-        AuthKind::ApiKey => Ok(apply_api_key(rb, bearer)),
-        AuthKind::BedrockMantle => Err(Error::Auth(format!(
-            "openai-responses provider `{}`: bedrock-mantle auth_kind not yet supported (CG.D)",
-            cfg.id
-        ))),
+        AuthKind::ApiKey | AuthKind::BedrockMantle => Ok(apply_api_key(rb, bearer)),
     }
 }
 
@@ -243,23 +239,38 @@ mod tests {
     }
 
     #[test]
-    fn bedrock_mantle_auth_returns_not_implemented() {
-        // Arrange
+    fn bedrock_mantle_auth_injects_bearer() {
+        // Arrange: BedrockMantle carries no account_id_ref by config-time
+        // invariant (factory rejects the combination). The bearer is the
+        // long-term AWS Bedrock API key (typically resolved from
+        // env://AWS_BEARER_TOKEN_BEDROCK by the caller).
         let mut cfg = base_cfg(AuthKind::BedrockMantle);
         cfg.account_id = None;
         let client = Client::new();
-        let rb = client.post("https://bedrock-mantle.us-east-1.api.aws/openai/v1/responses");
+        let rb = client.post("https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses");
 
-        // Act: BedrockMantle errors before the bearer is consumed.
-        let err = apply(rb, &cfg, "").expect_err("expected Err");
+        // Act: byte-identical Bearer auth to the api-key path.
+        let rb = apply(rb, &cfg, "bedrock-bearer-xyz").expect("apply");
+        let req = rb.build().expect("build");
 
-        // Assert
-        match err {
-            Error::Auth(msg) => {
-                assert!(msg.contains("bedrock-mantle"), "msg: {msg}");
-                assert!(msg.contains("CG.D"), "msg: {msg}");
-            }
-            other => panic!("expected Error::Auth, got {other:?}"),
-        }
+        // Assert: Bearer auth present; ChatGPT-OAuth-specific headers
+        // (ChatGPT-Account-Id, originator) are absent.
+        assert_eq!(
+            header(&req, "authorization").as_deref(),
+            Some("Bearer bedrock-bearer-xyz")
+        );
+        assert!(
+            header(&req, "chatgpt-account-id").is_none(),
+            "ChatGPT-Account-Id must not be set for bedrock-mantle"
+        );
+        assert!(
+            header(&req, "originator").is_none(),
+            "originator must not be set for bedrock-mantle"
+        );
+        // Per-request UA absent (client-level only).
+        assert!(
+            header(&req, "user-agent").is_none(),
+            "UA should not be set as a per-request header"
+        );
     }
 }
