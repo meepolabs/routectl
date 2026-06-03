@@ -111,6 +111,40 @@ pub fn known_provider_ids() -> &'static [&'static str] {
     &["anthropic", "codex"]
 }
 
+/// Test-only re-exports for the integration tests under
+/// `crates/routectl-auth/tests/`. Hidden from rustdoc and gated by
+/// `#[doc(hidden)]` so this is not part of the supported public API.
+#[doc(hidden)]
+pub mod testing {
+    use super::codex::{decode_token_response_traced, Codex};
+    use super::OAuthFlow;
+    use crate::oauth::types::TokenRecord;
+    use crate::oauth::OAuthResult;
+
+    /// Drive the codex provider's refresh-token leg. Wraps the
+    /// `OAuthFlow::refresh_token` call so the integration test can
+    /// invoke it without taking a dep on the crate-private trait.
+    pub async fn codex_refresh(
+        http: &reqwest::Client,
+        refresh_token: &str,
+    ) -> OAuthResult<TokenRecord> {
+        Codex.refresh_token(http, refresh_token).await
+    }
+
+    /// Drive the response-side of a refresh-token call through the
+    /// tracing-instrumented decoder. The integration test passes a
+    /// synthetic `reqwest::Response`, asserts on the captured events,
+    /// and uses the `Result` shape to confirm the error mapping is
+    /// preserved alongside the trace emission.
+    pub async fn decode_refresh_response_traced(
+        resp: reqwest::Response,
+        prior_refresh: Option<&str>,
+        prior_refresh_sha8: &str,
+    ) -> OAuthResult<TokenRecord> {
+        decode_token_response_traced(resp, prior_refresh, prior_refresh_sha8).await
+    }
+}
+
 /// Truncate a string for inclusion in error/log messages without
 /// dragging unbounded upstream payloads into routectl logs. Pure ASCII
 /// (re-encodes through `&str` byte slicing); guarantees the result is

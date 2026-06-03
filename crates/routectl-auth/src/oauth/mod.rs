@@ -40,6 +40,16 @@ pub use providers::known_provider_ids;
 pub use store::OAuthStore;
 pub use types::{unix_now, AccountInfo, CredentialsFile, SecretToken, TokenRecord, SCHEMA_VERSION};
 
+/// Test-only entry points into the OAuth provider surface. Not part of
+/// the supported public API -- the symbols here exist solely so the
+/// integration tests under `tests/` can drive private trace-emission
+/// helpers without spawning a full callback server. Hidden from rustdoc
+/// to keep this out of the published surface contract.
+#[doc(hidden)]
+pub mod testing {
+    pub use super::providers::testing::*;
+}
+
 use thiserror::Error;
 
 /// Errors specific to the OAuth subsystem. Bubbles up through

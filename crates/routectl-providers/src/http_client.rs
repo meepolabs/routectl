@@ -25,6 +25,31 @@ use reqwest::Client;
 /// `new()` to be fallible without giving callers anything useful to
 /// do at the failure site.
 pub fn build(user_agent: Option<&str>) -> Client {
+    common_builder(user_agent)
+        .build()
+        .expect("reqwest::Client::build failed (TLS init?); fatal at startup")
+}
+
+/// Build a `reqwest::Client` with an attached cookie provider. Used by
+/// the openai-responses provider to pin Cloudflare cookies across
+/// requests against `chatgpt.com/backend-api/codex` (mirrors codex
+/// CLI's `with_chatgpt_cloudflare_cookie_store`). The jar is shared
+/// via Arc so the caller can persist it on shutdown.
+#[cfg(feature = "openai-responses")]
+pub fn build_with_cookie_provider<S>(user_agent: Option<&str>, jar: std::sync::Arc<S>) -> Client
+where
+    S: reqwest::cookie::CookieStore + 'static,
+{
+    common_builder(user_agent)
+        .cookie_provider(jar)
+        .build()
+        .expect("reqwest::Client::build failed (TLS init?); fatal at startup")
+}
+
+/// Shared builder body: TLS-1.2 floor + optional UA. Centralized so
+/// `build` and `build_with_cookie_provider` cannot drift on the TLS /
+/// proxy / etc. defaults.
+fn common_builder(user_agent: Option<&str>) -> reqwest::ClientBuilder {
     let mut builder = Client::builder()
         // Defense-in-depth: every real provider endpoint enforces
         // TLS 1.2+, but pinning here closes any path where reqwest's
@@ -36,8 +61,6 @@ pub fn build(user_agent: Option<&str>) -> Client {
         builder = builder.user_agent(ua);
     }
     builder
-        .build()
-        .expect("reqwest::Client::build failed (TLS init?); fatal at startup")
 }
 
 /// Header names that carry the provider's auth secret. An entry in

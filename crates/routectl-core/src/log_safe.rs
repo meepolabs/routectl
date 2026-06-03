@@ -711,6 +711,82 @@ pub fn headers_to_json<'a>(
     )
 }
 
+/// Header names whose VALUES carry a bearer secret on the outgoing
+/// (routectl -> upstream) direction and MUST be redacted before any
+/// log emission. Compared case-insensitively.
+///
+/// `authorization`            -- `Bearer <jwt>` for OAuth-managed
+///                                providers (codex / chatgpt-oauth,
+///                                anthropic-oauth) and api-key bearer.
+/// `x-api-key`                -- Anthropic-API key.
+/// `proxy-authorization`      -- mirror of `authorization` for
+///                                proxy-tunneled requests.
+const REDACT_HEADER_NAMES: &[&str] = &["authorization", "x-api-key", "proxy-authorization"];
+
+/// True if the given header name carries a secret value that the
+/// outgoing-direction header trace MUST redact. Case-insensitive --
+/// `Authorization`, `AUTHORIZATION`, and `authorization` all match.
+fn is_redact_header(name: &str) -> bool {
+    let lc = name.to_ascii_lowercase();
+    REDACT_HEADER_NAMES.contains(&lc.as_str())
+}
+
+/// Replacement value for `Bearer <token>` Authorization headers. Keeps
+/// the scheme prefix so an operator reading the trace can confirm the
+/// scheme was set without exposing the token.
+const REDACTED_BEARER: &str = "Bearer [REDACTED]";
+
+/// Replacement value for any other secret-carrying header (raw api key,
+/// non-Bearer `Authorization`, etc.).
+const REDACTED_SECRET: &str = "[REDACTED]";
+
+/// Redact a single secret-carrying header value. Bearer-scheme
+/// `authorization` values keep the literal `"Bearer "` prefix so the
+/// scheme remains visible in traces; everything else collapses to a
+/// bare `[REDACTED]`. Pure fn -- no allocation when the input would
+/// echo back unchanged is NOT a goal; this only runs on the redaction
+/// path of the outgoing-headers trace, which is itself opt-in via
+/// `ROUTECTL_TRACE_HEADERS`.
+fn redact_header_value(value: &str) -> String {
+    // Match `Bearer <something>` case-insensitively on the scheme. We
+    // do NOT anchor on the trailing token because some upstreams
+    // accept `Bearer ` followed by either a JWT or an opaque key, and
+    // we want both shapes to redact identically.
+    let trimmed = value.trim_start();
+    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("Bearer ") {
+        return REDACTED_BEARER.to_string();
+    }
+    REDACTED_SECRET.to_string()
+}
+
+/// Walk a `[[name, value], ...]` JSON array (the shape produced by
+/// [`headers_to_json`]) and replace the `value` half of every pair
+/// whose `name` matches [`REDACT_HEADER_NAMES`] (case-insensitive).
+/// Mutates in place. Other entries (and any non-pair shape that slipped
+/// in) are left untouched.
+pub fn redact_outgoing_header_values(headers: &mut serde_json::Value) {
+    let Some(arr) = headers.as_array_mut() else {
+        return;
+    };
+    for entry in arr.iter_mut() {
+        let Some(pair) = entry.as_array_mut() else {
+            continue;
+        };
+        if pair.len() < 2 {
+            continue;
+        }
+        let name_is_secret = pair[0].as_str().is_some_and(is_redact_header);
+        if !name_is_secret {
+            continue;
+        }
+        let redacted = match pair[1].as_str() {
+            Some(v) => redact_header_value(v),
+            None => REDACTED_SECRET.to_string(),
+        };
+        pair[1] = serde_json::Value::String(redacted);
+    }
+}
+
 /// Emit a `tracing::trace!` line carrying the ingress request headers
 /// (direction 1: client -> routectl). Opt-in via
 /// `ROUTECTL_TRACE_HEADERS=1` and gated on TRACE so the default `info`
@@ -734,10 +810,15 @@ pub fn trace_ingress_headers(ingress: &str, headers: &serde_json::Value) {
 }
 
 /// Emit a `tracing::trace!` line carrying the outgoing request headers
-/// for a given provider (direction 2: routectl -> upstream), INCLUDING
-/// auth. Opt-in via `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. See
-/// [`trace_ingress_headers`] for the single-line / no-redaction
-/// rationale. `headers` is the LAST field on the line.
+/// for a given provider (direction 2: routectl -> upstream). Opt-in via
+/// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. Bearer JWTs and api keys
+/// in `authorization` / `x-api-key` / `proxy-authorization` are
+/// redacted before emission via [`redact_outgoing_header_values`] so
+/// `journalctl` / log archives never carry a live access token. Other
+/// headers (anthropic-beta, anthropic-version, originator, ...) emit
+/// verbatim since they are not secrets and the fixture-capture
+/// pipeline depends on the round-trip. `headers` is the LAST field on
+/// the line.
 pub fn trace_outgoing_headers(provider_kind: &str, id: &str, headers: &serde_json::Value) {
     if !header_trace_should_emit(
         header_trace_enabled(),
@@ -745,11 +826,13 @@ pub fn trace_outgoing_headers(provider_kind: &str, id: &str, headers: &serde_jso
     ) {
         return;
     }
+    let mut redacted = headers.clone();
+    redact_outgoing_header_values(&mut redacted);
     tracing::trace!(
         message = HDR_MSG_OUTGOING,
         provider_kind,
         provider = id,
-        headers = %serde_json::to_string(headers).unwrap_or_default(),
+        headers = %serde_json::to_string(&redacted).unwrap_or_default(),
     );
 }
 

@@ -50,6 +50,7 @@ use routectl_core::{
 };
 
 pub(crate) mod auth;
+pub(crate) mod cookies;
 pub(crate) mod extras;
 pub(crate) mod messages;
 pub(crate) mod request;
@@ -198,6 +199,16 @@ impl OpenAiResponsesConfig {
 pub struct OpenAiResponsesProvider {
     cfg: OpenAiResponsesConfig,
     client: Client,
+    /// Cloudflare cookie jar shared with the reqwest client. `Arc`d so
+    /// the provider can persist the jar to disk on Drop while reqwest
+    /// continues to read / write through it on every request. `None`
+    /// when persistence is intentionally disabled (no `HOME`,
+    /// `ROUTECTL_COOKIE_FILE` set to empty, etc.).
+    cookie_jar: Option<Arc<reqwest_cookie_store::CookieStoreMutex>>,
+    /// Persistence path for `cookie_jar`. Resolved at construction so
+    /// Drop can save without re-reading env vars (Drop runs late and
+    /// env mutations during teardown are race-prone).
+    cookie_path: Option<std::path::PathBuf>,
 }
 
 impl OpenAiResponsesProvider {
@@ -210,8 +221,28 @@ impl OpenAiResponsesProvider {
             .user_agent
             .clone()
             .unwrap_or_else(auth::default_user_agent);
-        let client = crate::http_client::build(Some(&ua));
-        Self { cfg, client }
+
+        // Cloudflare cookie jar (chatgpt-oauth path). Hydrate from
+        // disk on construction; reqwest reads / writes through the
+        // shared Arc on every request; Drop persists on shutdown.
+        // Falling back to the cookie-less client when no path is
+        // resolvable keeps tests / non-OAuth deploys working.
+        let cookie_path = cookies::default_cookie_path();
+        let (client, cookie_jar) = match cookie_path.as_deref() {
+            Some(path) => {
+                let jar = cookies::load_jar(path);
+                let client =
+                    crate::http_client::build_with_cookie_provider(Some(&ua), Arc::clone(&jar));
+                (client, Some(jar))
+            }
+            None => (crate::http_client::build(Some(&ua)), None),
+        };
+        Self {
+            cfg,
+            client,
+            cookie_jar,
+            cookie_path,
+        }
     }
 
     /// URL for the `/responses` endpoint. ChatgptOauth talks to the
@@ -261,6 +292,26 @@ impl OpenAiResponsesProvider {
             rb = rb.header(k.as_str(), v.as_str());
         }
         Ok(rb)
+    }
+}
+
+/// Persist the Cloudflare cookie jar on provider teardown so the next
+/// process boot does not pay the Cloudflare challenge cost from a
+/// cold cache. Soft-fail on I/O error -- a missing or unwritable
+/// persistence path must not poison shutdown.
+impl Drop for OpenAiResponsesProvider {
+    fn drop(&mut self) {
+        let (Some(jar), Some(path)) = (self.cookie_jar.as_ref(), self.cookie_path.as_ref()) else {
+            return;
+        };
+        if let Err(e) = cookies::save_jar(jar, path) {
+            tracing::debug!(
+                provider = %self.cfg.id,
+                path = %path.display(),
+                error = %e,
+                "openai-responses: cookie jar persist failed; continuing"
+            );
+        }
     }
 }
 
