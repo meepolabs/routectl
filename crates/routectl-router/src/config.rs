@@ -647,19 +647,21 @@ pub enum ProviderEntry {
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
-    /// OpenAI Responses API provider. Three auth surfaces (the relevant stage wires
-    /// the first; the relevant stage/E land the others):
+    /// OpenAI Responses API provider. Three auth surfaces:
     /// - `chatgpt-oauth`: ChatGPT subscription JWT.
     /// - `api-key`: standard OpenAI API key.
-    /// - `bedrock-mantle`: AWS Mantle proxy over SigV4.
+    /// - `bedrock-mantle`: Authorization: Bearer <bearer> using the
+    ///   long-term Bedrock API key (resolved via api_key_ref, typically
+    ///   env://AWS_BEARER_TOKEN_BEDROCK).
     ///
     /// `base_url` is optional: when unset, the factory picks the
     /// auth_kind-appropriate default at provider build time.
     #[cfg(feature = "openai-responses")]
     #[non_exhaustive]
     OpenaiResponses {
-        /// Resolves to the bearer JWT (ChatgptOauth) or API key
-        /// (ApiKey). Ignored for BedrockMantle which signs via SigV4.
+        /// Resolves to the bearer JWT (ChatgptOauth), API key (ApiKey),
+        /// or long-term Bedrock API key (BedrockMantle, typically
+        /// env://AWS_BEARER_TOKEN_BEDROCK).
         api_key_ref: String,
         /// ChatGPT account UUID. Required when `auth_kind =
         /// "chatgpt-oauth"`; must be absent for the other variants.
