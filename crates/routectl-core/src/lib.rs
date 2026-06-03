@@ -23,8 +23,8 @@ pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};
 pub use log_safe::{
     debug_upstream_error_body, extract_structural_summary, extract_upstream_message,
-    header_trace_enabled, headers_to_json, init_log_overrides, redact_prompts_in,
-    redact_prompts_with_flag, sanitize_for_log, sanitize_upstream_body,
+    header_trace_enabled, headers_to_json, init_log_overrides, redact_outgoing_header_values,
+    redact_prompts_in, redact_prompts_with_flag, sanitize_for_log, sanitize_upstream_body,
     sanitize_upstream_body_with_cap, trace_body_cap, trace_egress_body, trace_egress_headers,
     trace_ingress_body, trace_ingress_headers, trace_outgoing_body, trace_outgoing_headers,
     trace_stream_summary, trace_structural_summary, trace_upstream_response_headers,

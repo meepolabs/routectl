@@ -966,3 +966,100 @@ fn header_trace_message_consts_match_capture_script_needles() {
     assert_eq!(super::HDR_MSG_UPSTREAM, "upstream response headers");
     assert_eq!(super::HDR_MSG_EGRESS, "egress response headers");
 }
+
+#[test]
+fn redact_replaces_bearer_authorization_keeps_scheme_prefix() {
+    // A live access-token JWT in the `authorization` header must collapse
+    // to "Bearer [REDACTED]" so journald / log archives never carry the
+    // token (it embeds account_id, email, session_id, jti, plan_type).
+    let mut headers = super::headers_to_json([(
+        "authorization",
+        b"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig".as_slice(),
+    )]);
+    super::redact_outgoing_header_values(&mut headers);
+    let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+    assert_eq!(pair[0].as_str(), Some("authorization"));
+    assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
+}
+
+#[test]
+fn redact_handles_mixed_case_authorization_header_name() {
+    // `reqwest::HeaderMap::iter` lowercases names but operator-supplied
+    // header_extras and other code paths may pass `Authorization` /
+    // `AUTHORIZATION`. Match case-insensitively.
+    for name in ["Authorization", "AUTHORIZATION", "authorization"] {
+        let mut headers = super::headers_to_json([(name, b"Bearer XYZ".as_slice())]);
+        super::redact_outgoing_header_values(&mut headers);
+        let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+        assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
+    }
+}
+
+#[test]
+fn redact_replaces_bare_x_api_key_with_redacted() {
+    // Anthropic-API api keys ride on `x-api-key` rather than the
+    // Bearer scheme. Replace with the bare `[REDACTED]` (no scheme to
+    // preserve).
+    let mut headers =
+        super::headers_to_json([("x-api-key", b"sk-ant-api03-0123456789abcdef".as_slice())]);
+    super::redact_outgoing_header_values(&mut headers);
+    let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+    assert_eq!(pair[0].as_str(), Some("x-api-key"));
+    assert_eq!(pair[1].as_str(), Some("[REDACTED]"));
+}
+
+#[test]
+fn redact_preserves_non_secret_headers_verbatim() {
+    // Only secret-bearing names are redacted; anthropic-version /
+    // anthropic-beta / originator must round-trip unchanged so the
+    // fixture-capture pipeline (and the operator triage flow) still
+    // sees the real wire values.
+    let mut headers = super::headers_to_json([
+        ("authorization", b"Bearer secret-jwt".as_slice()),
+        ("anthropic-version", b"2023-06-01".as_slice()),
+        (
+            "anthropic-beta",
+            b"context-management-2026-05-29".as_slice(),
+        ),
+        ("originator", b"codex_cli_rs".as_slice()),
+    ]);
+    super::redact_outgoing_header_values(&mut headers);
+    let arr = headers.as_array().unwrap();
+    assert_eq!(arr[0][1].as_str(), Some("Bearer [REDACTED]"));
+    assert_eq!(arr[1][1].as_str(), Some("2023-06-01"));
+    assert_eq!(arr[2][1].as_str(), Some("context-management-2026-05-29"));
+    assert_eq!(arr[3][1].as_str(), Some("codex_cli_rs"));
+}
+
+#[test]
+fn redact_handles_authorization_value_without_bearer_prefix() {
+    // A non-Bearer `authorization` (e.g. a raw token from a
+    // misconfigured upstream) collapses to bare `[REDACTED]` -- we do
+    // not want to leak the scheme guess back to the operator.
+    let mut headers = super::headers_to_json([("authorization", b"Basic dXNlcjpwYXNz".as_slice())]);
+    super::redact_outgoing_header_values(&mut headers);
+    let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+    assert_eq!(pair[1].as_str(), Some("[REDACTED]"));
+}
+
+#[test]
+fn redact_proxy_authorization_header() {
+    // Same redaction surface as `authorization` for proxy-tunneled
+    // upstream connections.
+    let mut headers =
+        super::headers_to_json([("proxy-authorization", b"Bearer proxy-jwt".as_slice())]);
+    super::redact_outgoing_header_values(&mut headers);
+    let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+    assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
+}
+
+#[test]
+fn redact_is_idempotent_on_already_redacted_value() {
+    // A second pass over an already-redacted vector must be a no-op
+    // (same value -- still secret-shaped, still matches the rule).
+    let mut headers = super::headers_to_json([("authorization", b"Bearer [REDACTED]".as_slice())]);
+    super::redact_outgoing_header_values(&mut headers);
+    super::redact_outgoing_header_values(&mut headers);
+    let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+    assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
+}

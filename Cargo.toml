@@ -48,7 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 
 # HTTP
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "cookies"] }
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
@@ -60,6 +60,17 @@ url = "2"
 # Streaming
 eventsource-stream = "0.2"
 tokio-stream = "0.1"
+
+# ChatGPT-oauth Cloudflare cookie jar (openai-responses provider).
+# `cookie_store` is the in-memory jar; `reqwest_cookie_store` adapts it
+# to reqwest's `CookieStore` trait so it can plug into the per-provider
+# `reqwest::Client` builder. JSON serialize/deserialize is the
+# crate-recommended persistence format. Pinned to the
+# reqwest-0.12-compatible majors -- reqwest_cookie_store >=0.9 jumped
+# to reqwest 0.13, so 0.8.x is the right cut here. cookie_store 0.21
+# is the matching version.
+cookie_store = "0.21"
+reqwest_cookie_store = "0.8"
 
 # Time / ids (used in response shaping)
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

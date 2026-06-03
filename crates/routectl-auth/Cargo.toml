@@ -56,3 +56,6 @@ uuid.workspace = true
 tempfile = "3"
 serial_test = "3"
 wiremock.workspace = true
+http.workspace = true
+bytes.workspace = true
+base64 = "0.22"

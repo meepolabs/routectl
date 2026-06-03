@@ -12,7 +12,7 @@ description = "Provider implementations for routectl."
 default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"]
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
 "anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru"]
-"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:async-stream", "dep:uuid", "dep:tokio"]
+"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store"]
 # Exposes test-only helpers (e.g. AnthropicApiProvider::seed_thinking_for_test)
 # that must not appear in production builds. Required when running integration
 # tests that pre-populate the thinking cache.
@@ -63,6 +63,14 @@ tokio-stream = { workspace = true, optional = true }
 regex = { version = "1", optional = true }
 lru = { workspace = true, optional = true }
 
+# Persistent Cloudflare cookie jar for the openai-responses
+# (chatgpt-oauth) path. `cookie_store` is the in-memory jar with
+# JSON serde, `reqwest_cookie_store` adapts it to reqwest's
+# `CookieStore` trait. Both pulled in only when the
+# `openai-responses` feature is on.
+cookie_store = { workspace = true, optional = true }
+reqwest_cookie_store = { workspace = true, optional = true }
+
 # AWS SDK / signing crates (used only by the `bedrock` feature). Pinned
 # to specific minor versions so cargo update churn is bounded.
 aws-config = { version = "1.8", optional = true, default-features = false, features = ["behavior-version-latest", "rustls", "credentials-process", "sso"] }
@@ -80,3 +88,4 @@ wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 pretty_assertions = "1"
 insta.workspace = true
+tempfile = "3"

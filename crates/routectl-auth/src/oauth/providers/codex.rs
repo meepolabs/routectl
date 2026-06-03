@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::oauth::providers::{truncate, AuthParams, OAuthFlow};
@@ -147,13 +148,37 @@ impl OAuthFlow for Codex {
             "refresh_token": refresh_token,
             "client_id": CLIENT_ID,
         });
+
+        // Compute the prior refresh token's sha8 once and reuse on
+        // every event (pre-POST debug, success debug, failure error).
+        // This is the only correlation id operators have across the
+        // pre / post / error legs of a refresh attempt -- without it
+        // on the failure side, an operator cannot tell which
+        // credential triggered which 401 when refreshes interleave.
+        let prior_sha8 = sha8(refresh_token);
+
+        // Pre-POST: emit a debug line tagging this attempt by the SHA8
+        // of the refresh token. Operators correlating a refresh
+        // failure across logs can match the pre / post / error events
+        // by `refresh_token_sha8` without ever seeing the token VALUE.
+        tracing::debug!(
+            grant_type = "refresh_token",
+            refresh_token_sha8 = %prior_sha8,
+            "codex refresh request"
+        );
+
         let resp = http
             .post(TOKEN_URL)
             .json(&body)
             .send()
             .await
             .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
-        decode_token_response(resp, Some(refresh_token)).await
+
+        // Post-POST: emit success / error events through the
+        // tracing-instrumented decoder so the response shape (status,
+        // new_refresh_token_present, expires_in, error_kind) is visible
+        // without leaking token values.
+        decode_token_response_traced(resp, Some(refresh_token), &prior_sha8).await
     }
 }
 
@@ -235,6 +260,118 @@ async fn decode_token_response(
     check_status_error(status, &url, &body, prior_refresh.is_some())?;
     let parsed = parse_token_response_json(&body, prior_refresh.is_some())?;
     map_to_record(parsed, prior_refresh)
+}
+
+/// Refresh-only variant of [`decode_token_response`]. Wraps the same
+/// decoder pipeline with `tracing::debug!` / `tracing::error!` events
+/// keyed off [`sha8`] of the refresh token so operators can correlate
+/// a 401 across logs without ever seeing token VALUES.
+///
+/// Identical behavior to [`decode_token_response`] on the
+/// `Result`-shape; the only side effect is the emitted tracing
+/// events. `pub(super)` so the providers-module `testing` re-export
+/// can hand it to integration tests.
+///
+/// `prior_refresh_sha8` is the caller-computed SHA8 of the prior
+/// refresh token, threaded through so the failure-side
+/// `tracing::error!` can tag which credential triggered the failure
+/// without re-deriving (or, worse, embedding) the value here. The
+/// failure-side events deliberately do NOT echo any portion of the
+/// response body: token-endpoint error envelopes can echo the
+/// submitted refresh_token (or mint a new one), and logging the body
+/// verbatim would defeat the bearer-redaction contract that governs
+/// the rest of the auth layer. The structured fields below carry
+/// every operator-actionable signal (status, error_kind, prior sha8);
+/// the human-readable error string returned to the caller still
+/// carries the truncated body for non-refresh paths.
+pub(super) async fn decode_token_response_traced(
+    resp: reqwest::Response,
+    prior_refresh: Option<&str>,
+    prior_refresh_sha8: &str,
+) -> OAuthResult<TokenRecord> {
+    let status = resp.status();
+    let url = resp.url().to_string();
+    let body = read_capped_body(resp).await?;
+
+    if let Err(e) = check_status_error(status, &url, &body, prior_refresh.is_some()) {
+        let kind = error_kind_label(&e);
+        tracing::error!(
+            status = %status.as_u16(),
+            error_kind = %kind,
+            prior_refresh_token_sha8 = %prior_refresh_sha8,
+            "codex refresh failed"
+        );
+        return Err(e);
+    }
+
+    let parsed = match parse_token_response_json(&body, prior_refresh.is_some()) {
+        Ok(p) => p,
+        Err(e) => {
+            let kind = error_kind_label(&e);
+            tracing::error!(
+                status = %status.as_u16(),
+                error_kind = %kind,
+                prior_refresh_token_sha8 = %prior_refresh_sha8,
+                "codex refresh failed"
+            );
+            return Err(e);
+        }
+    };
+
+    // Pull tracing-relevant fields BEFORE we move `parsed` into
+    // `map_to_record`. `expires_in` is an alias for "seconds remaining
+    // on the new access_token JWT": parse `exp` out of the JWT and
+    // compute the delta from now, matching the operator's mental model
+    // even though OpenAI's response itself does not carry the field.
+    let new_refresh_present = parsed.refresh_token.is_some();
+    let new_refresh_sha8 = parsed.refresh_token.as_deref().map(sha8);
+    let access_token_clone = parsed.access_token.clone();
+
+    let record = map_to_record(parsed, prior_refresh)?;
+
+    let expires_in_secs = access_token_clone
+        .as_deref()
+        .and_then(|jwt| decode_jwt_payload::<JwtClaims>(jwt).ok())
+        .and_then(|c| c.exp)
+        .map(|exp| exp.saturating_sub(unix_now()));
+
+    tracing::debug!(
+        status = %status.as_u16(),
+        new_refresh_token_present = %new_refresh_present,
+        new_refresh_token_sha8 = %new_refresh_sha8.as_deref().unwrap_or("-"),
+        expires_in = %expires_in_secs.unwrap_or(0),
+        "codex refresh response"
+    );
+
+    Ok(record)
+}
+
+/// Short label for the error variant returned by the token endpoint.
+/// Used in the structured `error_kind` field on refresh-failure trace
+/// events so operators can grep for the failure mode without scraping
+/// the human-readable message.
+fn error_kind_label(e: &OAuthError) -> &'static str {
+    match e {
+        OAuthError::Network(_) => "network",
+        OAuthError::TokenEndpoint(_) => "token_endpoint",
+        OAuthError::RefreshExpired(_) => "refresh_expired",
+        _ => "other",
+    }
+}
+
+/// First 4 bytes of `SHA-256(token)` rendered as 8 lowercase hex
+/// chars. Stable, deterministic correlation id for refresh-flow trace
+/// events without leaking token VALUES. 4 bytes (32 bits) gives a
+/// collision probability that is fine for log correlation across a
+/// single operator's refresh history -- this is NOT a cryptographic
+/// commitment, just a logging tag.
+fn sha8(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    let mut out = String::with_capacity(8);
+    for b in &digest[..4] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 /// Pull the response body as UTF-8, capped at `MAX_TOKEN_BODY_BYTES`.
