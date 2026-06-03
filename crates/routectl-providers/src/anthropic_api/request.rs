@@ -1357,7 +1357,7 @@ pub(crate) fn normalize(
             }
         }
     }
-    strip_unsupported_output_effort(&mut body, adaptive);
+    reconcile_output_config_effort(&mut body, adaptive, &req.routectl_internal.effort_levels);
     strip_thinking_when_tool_choice_forces_use(id, &mut body);
     Ok(body)
 }
@@ -1433,7 +1433,7 @@ fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&Value>) {
 /// `output_config` is intentionally NOT here -- the full object is
 /// allowed through `provider_extras` for legitimate sub-fields like
 /// `output_config.format` (structured-output). The `output_config.effort`
-/// sub-field is stripped post-merge in `strip_unsupported_output_effort`
+/// sub-field is reconciled post-merge in `reconcile_output_config_effort`
 /// when the model does not have `supports_adaptive_thinking=true` (Haiku,
 /// Sonnet -- Anthropic 400s on `effort` for them).
 fn is_routectl_managed_key(key: &str) -> bool {
@@ -1446,24 +1446,58 @@ fn is_routectl_managed_key(key: &str) -> bool {
         )
 }
 
-/// Post-merge sub-key strip: when the model does NOT support adaptive
+/// Post-merge sub-key reconcile for `output_config.effort`.
+///
+/// Non-adaptive branch: when the model does NOT support adaptive
 /// thinking (`supports_adaptive_thinking=false`), remove
 /// `body.output_config.effort` so non-Opus models (Sonnet 4.5,
 /// Haiku 4.5) don't 400 with `This model does not support the effort
 /// parameter.` cc emits `output_config: {effort: "high"}` on every
 /// request regardless of the routed model, and the forward-compat
 /// sweep through `provider_extras` puts it back in the outgoing body
-/// verbatim. This strip is the symmetric counterpart to
+/// verbatim. This is the symmetric counterpart to
 /// `build_output_config`, which only emits the effort sub-key when
 /// adaptive is on.
 ///
-/// `output_config.format` (structured-output) and other sub-fields
-/// are preserved -- they're orthogonal to the effort beta and
-/// supported across the model family. If `effort` was the only
-/// sub-key, the now-empty `output_config` object is also removed
-/// so the wire body stays clean.
-fn strip_unsupported_output_effort(body: &mut Value, adaptive: bool) {
+/// Adaptive branch: re-clamp `body.output_config.effort` against the
+/// operator's `effort_levels` cap. `derive_effort` already clamped on
+/// the typed pre-merge struct, but `merge_provider_extras` may have
+/// overwritten the clamped value with a raw caller-supplied
+/// `output_config.effort` (claude-code 2.1.153+ sends
+/// `output_config: {effort: "max"}` on every request, and the ingress
+/// preserves the whole `output_config` object verbatim in
+/// `provider_extras` so orthogonal sub-keys like
+/// `output_config.format` pass through). Without this re-clamp the
+/// operator's cost cap is silently bypassed. Empty `effort_levels`
+/// means intentional pass-through and skips the re-clamp.
+///
+/// `output_config.format` (structured-output) and other sibling sub-
+/// fields are preserved on both branches -- they're orthogonal to the
+/// effort beta and supported across the model family. On the non-
+/// adaptive branch, if `effort` was the only sub-key, the now-empty
+/// `output_config` object is also removed so the wire body stays
+/// clean.
+fn reconcile_output_config_effort(body: &mut Value, adaptive: bool, effort_levels: &[String]) {
     if adaptive {
+        if effort_levels.is_empty() {
+            return;
+        }
+        let Some(obj) = body.as_object_mut() else {
+            return;
+        };
+        let Some(oc) = obj.get_mut("output_config").and_then(|v| v.as_object_mut()) else {
+            return;
+        };
+        let Some(effort_val) = oc.get_mut("effort") else {
+            return;
+        };
+        let Some(current) = effort_val.as_str() else {
+            return;
+        };
+        let clamped = clamp_effort_to_supported(current, effort_levels);
+        if clamped.as_ref() != current {
+            *effort_val = Value::String(clamped.into_owned());
+        }
         return;
     }
     let Some(obj) = body.as_object_mut() else {
@@ -3682,6 +3716,168 @@ mod anthropic_effort_clamp_tests {
             thinking["budget_tokens"], 2048,
             "legacy path must clamp effort from high to medium against operator cap; got: {thinking}"
         );
+    }
+
+    /// Companion to `adaptive_clamps_effort_to_operator_cap`: the clamp
+    /// must hold even when the caller's raw `output_config.effort`
+    /// arrives via `provider_extras`. claude-code 2.1.153+ sends
+    /// `output_config: {effort: "max"}` on every request; the Anthropic
+    /// ingress preserves the whole `output_config` object verbatim in
+    /// `provider_extras` so the orthogonal `output_config.format`
+    /// sub-key (structured-output) passes through. derive_effort clamps
+    /// "max" -> "high" on the typed struct, but merge_provider_extras
+    /// then overwrites the clamped wire value with the raw caller
+    /// value. Without a re-clamp on the adaptive branch of
+    /// reconcile_output_config_effort, the operator's effort_levels
+    /// cap is silently bypassed.
+    ///
+    /// The pre-existing `adaptive_clamps_effort_to_operator_cap` test
+    /// leaves `provider_extras=None` so `merge_provider_extras` early-
+    /// returns and the bug is masked; the
+    /// `output_config_effort_preserved_on_adaptive_provider` test has
+    /// empty `effort_levels` so there is no cap to violate. This test
+    /// pins both: non-empty `effort_levels` AND raw `output_config.effort`
+    /// in `provider_extras`.
+    #[test]
+    fn adaptive_clamps_effort_to_operator_cap_even_when_provider_extras_carries_raw() {
+        use serde_json::json;
+
+        // Arrange: caller asks for effort="max" both via the canonical
+        // lift (req.reasoning) and via the raw output_config that the
+        // ingress mirrored into provider_extras (claude-code shape);
+        // operator caps effort_levels at "high".
+        let mut req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("max".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            provider_extras: Some(json!({
+                "output_config": {"effort": "max"}
+            })),
+            ..Default::default()
+        };
+        req.routectl_internal.effort_levels = std::sync::Arc::from(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ]);
+
+        // Act
+        let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+
+        // Assert: effort clamped to "high" even though raw "max" was
+        // layered back in by merge_provider_extras.
+        let oc = body
+            .get("output_config")
+            .expect("output_config present on adaptive path");
+        assert_eq!(
+            oc["effort"], "high",
+            "effort_levels cap (high) must override caller-supplied output_config.effort=max \
+             even when carried via provider_extras; got: {oc}"
+        );
+    }
+
+    /// Companion: empty effort_levels = intentional pass-through, no
+    /// re-clamp. Even when provider_extras carries
+    /// `output_config.effort = "max"`, an operator who declared
+    /// `effort_levels = []` (or omitted it) wants the raw value to flow
+    /// through verbatim.
+    #[test]
+    fn adaptive_passes_through_provider_extras_effort_when_levels_empty() {
+        use serde_json::json;
+
+        // Arrange
+        let mut req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("max".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            provider_extras: Some(json!({
+                "output_config": {"effort": "max"}
+            })),
+            ..Default::default()
+        };
+        req.routectl_internal.effort_levels = std::sync::Arc::from(Vec::<String>::new());
+
+        // Act
+        let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+
+        // Assert
+        let oc = body
+            .get("output_config")
+            .expect("output_config present on adaptive path");
+        assert_eq!(
+            oc["effort"], "max",
+            "empty effort_levels must pass provider_extras output_config.effort through unchanged; got: {oc}"
+        );
+    }
+
+    /// Companion: `output_config.format` (structured-output) and other
+    /// sibling sub-keys inside `output_config` must continue to flow
+    /// through verbatim from provider_extras. The re-clamp must only
+    /// touch the `effort` sub-key, never `format`.
+    #[test]
+    fn adaptive_reclamp_preserves_sibling_output_config_keys() {
+        use serde_json::json;
+
+        // Arrange
+        let mut req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("max".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            provider_extras: Some(json!({
+                "output_config": {
+                    "effort": "max",
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {"type": "object", "required": ["x"]}
+                    }
+                }
+            })),
+            ..Default::default()
+        };
+        req.routectl_internal.effort_levels = std::sync::Arc::from(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ]);
+
+        // Act
+        let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+
+        // Assert: effort clamped, format preserved verbatim.
+        let oc = body
+            .get("output_config")
+            .expect("output_config present on adaptive path");
+        assert_eq!(oc["effort"], "high", "effort must clamp; got: {oc}");
+        assert_eq!(oc["format"]["type"], "json_schema");
+        assert_eq!(oc["format"]["schema"]["required"][0], "x");
+    }
+
+    #[test]
+    fn output_config_is_not_routectl_managed() {
+        // Pinning this invariant: output_config must remain a non-managed
+        // key so provider_extras-carried sub-fields like
+        // `output_config.format` flow through verbatim. The adaptive-branch
+        // re-clamp at reconcile_output_config_effort relies on output_config
+        // surviving merge_provider_extras intact.
+        assert!(!is_routectl_managed_key("output_config"));
     }
 }
 
