@@ -250,7 +250,6 @@ fn build_router_v6_full(
         providers: config_providers,
         aliases,
         retry,
-        legacy_compat: Default::default(),
         ..Default::default()
     };
     let mut router = Router::new(Arc::new(cfg));

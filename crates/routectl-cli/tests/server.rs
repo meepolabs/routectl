@@ -62,7 +62,6 @@ fn openai_compat_config(upstream_base: &str, provider_name: &str, alias: &str) -
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: routectl_router::LegacyCompat::Openrouter,
         models,
         ..Default::default()
     })
@@ -101,7 +100,6 @@ fn two_provider_config(first_base: &str, second_base: &str) -> Arc<Config> {
         providers,
         aliases,
         retry,
-        legacy_compat: routectl_router::LegacyCompat::Openrouter,
         models,
         ..Default::default()
     })
@@ -206,7 +204,6 @@ async fn models_includes_alias_keys_and_nicknames() {
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: routectl_router::LegacyCompat::Openrouter,
         models,
         ..Default::default()
     });
@@ -486,7 +483,6 @@ async fn chat_completions_unknown_model_routes_to_default_alias() {
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: routectl_router::LegacyCompat::Openrouter,
         models,
         ..Default::default()
     });
@@ -576,7 +572,6 @@ async fn server_fails_startup_when_referenced_provider_cannot_build() {
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: routectl_router::LegacyCompat::Openrouter,
         models,
         ..Default::default()
     });
@@ -628,7 +623,6 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: routectl_router::LegacyCompat::Openrouter,
         models,
         ..Default::default()
     });

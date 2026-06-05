@@ -105,7 +105,6 @@ fn anthropic_proxy_config(
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: routectl_router::LegacyCompat::Openrouter,
         models,
         ..Default::default()
     })

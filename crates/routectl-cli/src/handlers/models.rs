@@ -123,7 +123,6 @@ mod tests {
             providers,
             aliases,
             retry: RetryPolicy::default(),
-            legacy_compat: routectl_router::LegacyCompat::Openrouter,
             models,
             ..Default::default()
         });

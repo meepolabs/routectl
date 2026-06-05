@@ -3,9 +3,7 @@
 use std::collections::BTreeMap;
 
 use routectl_cli::commands;
-use routectl_router::{
-    AliasValue, Config, LegacyCompat, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig,
-};
+use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig};
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -56,7 +54,6 @@ fn config_with(server_url: &str) -> Config {
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: LegacyCompat::Openrouter,
         models,
         ..Default::default()
     }
@@ -105,7 +102,6 @@ async fn config_check_passes_for_valid_config() {
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
-        legacy_compat: LegacyCompat::Openrouter,
         ..Default::default()
     };
     config.providers.insert(
@@ -131,7 +127,6 @@ async fn config_check_fails_for_alias_pointing_at_unknown_nickname() {
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
-        legacy_compat: LegacyCompat::Openrouter,
         ..Default::default()
     };
     config
@@ -156,7 +151,6 @@ fn bare_config() -> Config {
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
-        legacy_compat: LegacyCompat::Openrouter,
         ..Default::default()
     }
 }
@@ -246,7 +240,6 @@ fn config_show_redacts_literal_secrets() {
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
-        legacy_compat: LegacyCompat::Openrouter,
         ..Default::default()
     };
     config.providers.insert(
@@ -282,7 +275,6 @@ fn config_show_keeps_env_uris_intact() {
         providers: BTreeMap::new(),
         aliases: BTreeMap::new(),
         retry: RetryPolicy::default(),
-        legacy_compat: LegacyCompat::Openrouter,
         ..Default::default()
     };
     config.providers.insert(
@@ -445,7 +437,6 @@ async fn test_command_resolves_oauth_ref_when_logged_in() {
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: LegacyCompat::Openrouter,
         models,
         ..Default::default()
     };
