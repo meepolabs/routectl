@@ -638,20 +638,38 @@ impl Router {
                                 attempt = attempts_made,
                                 "upstream 401; refreshing auth and retrying once",
                             );
-                            provider.on_auth_failure().await?;
+                            // A refresh failure means the OAuth identity is
+                            // dead; surface it without walking the chain. But
+                            // first release any half-open probe slot this
+                            // attempt claimed via the gate, or the breaker
+                            // stays locked open until restart.
+                            if let Err(refresh_err) = provider.on_auth_failure().await {
+                                self.release_probe_slot(state_key);
+                                return Err(refresh_err);
+                            }
+                            // Refresh succeeded. Release the half-open probe
+                            // slot this attempt claimed at the gate BEFORE the
+                            // `continue` re-enters the loop and re-runs
+                            // `gate_check`. While this caller still holds the
+                            // slot, the in-loop re-gate's `try_dispatch` sees
+                            // `half_open_in_flight` and returns CircuitOpen,
+                            // which would leave the breaker locked open until
+                            // restart. Releasing here lets the re-gate claim a
+                            // fresh slot (the per-attempt accounting the
+                            // in-loop gate promises).
+                            self.release_probe_slot(state_key);
                             continue;
                         }
                         let do_fallback = should_fallback(&e, &policy, is_probe);
                         // Probe fast-fail: a probe (max_tokens <=
                         // probe_max_tokens) that hit a rate-limit/overload
                         // (429/529) returns the status immediately via an
-                        // explicit early return -- no retry, no fallback.
-                        // The span below is a deliberate no-op for this
-                        // path: record_failure is gated on `do_fallback`
-                        // and the retry branch on `can_retry_here`, both of
-                        // which are false for a fast-failed probe. Returning
-                        // here is behavior-preserving today AND robust if
-                        // either predicate ever drifts.
+                        // explicit early return -- no retry, no fallback,
+                        // no breaker failure debit (record_failure is gated
+                        // on `do_fallback`, the retry branch on
+                        // `can_retry_here`, both false here). It does still
+                        // release the half-open slot it may have claimed at
+                        // the gate (see below).
                         let probe_fast_failed = if is_probe {
                             probe_fast_fail_status(&e)
                         } else {
@@ -664,12 +682,24 @@ impl Router {
                                 status,
                                 req.max_tokens,
                             );
+                            // Release the half-open slot this probe claimed
+                            // at the gate: a 429/529 probe fast-fail is a
+                            // transient upstream condition we deliberately do
+                            // NOT count as a provider fault (that is why
+                            // should_fallback is false here), so the slot
+                            // must be freed without a breaker debit.
+                            self.release_probe_slot(state_key);
                             return Err(e);
                         }
                         if do_fallback {
                             self.record_failure(state_key);
                         }
                         if opts.disable_fallbacks {
+                            // Terminal error exit: free any half-open probe
+                            // slot this attempt claimed. A no-op when
+                            // do_fallback already routed through
+                            // record_failure (which clears the slot).
+                            self.release_probe_slot(state_key);
                             return Err(e);
                         }
                         let can_retry_here = attempts_made < hard_cap
@@ -683,6 +713,14 @@ impl Router {
                                 "retrying same provider",
                             );
                             let _ = e;
+                            // Free the half-open probe slot this attempt
+                            // claimed before re-probing: the in-loop re-gate
+                            // re-runs `try_dispatch`, which would otherwise see
+                            // this caller's still-held slot as
+                            // `half_open_in_flight` and return CircuitOpen,
+                            // locking the breaker open forever (mirrors the
+                            // auth-retry Ok path).
+                            self.release_probe_slot(state_key);
                             continue;
                         }
                         // Done with this provider. Decide fallback vs propagate.
@@ -706,6 +744,10 @@ impl Router {
                             last_err = Some(e);
                             continue 'chain;
                         }
+                        // Terminal non-fallbackable error. Free any half-open
+                        // probe slot this attempt claimed so the breaker is
+                        // not left locked open.
+                        self.release_probe_slot(state_key);
                         return Err(e);
                     }
                 }
@@ -755,26 +797,6 @@ impl Router {
         let provider_name = target.provider_name.as_str();
         let model_label = target.nickname.as_deref().unwrap_or("");
 
-        // Gate: rate limit + circuit breaker. Mirrors
-        // `complete_with_options` and `stream_with_options` so a
-        // count_tokens probe cannot bypass operator rate limits.
-        // Unlike `complete_with_options`, count_tokens does NOT walk
-        // the fallback chain on a gate block (tokenizer correctness
-        // rules out walking the chain), so we propagate the gate
-        // error directly.
-        if let Some((gate_kind, gate_err)) =
-            self.gate_check(&target.state_key, &target.provider_name)
-        {
-            tracing::warn!(
-                provider = %target.provider_name,
-                model = %target.nickname.as_deref().unwrap_or(""),
-                gate_kind,
-                error = ?gate_err,
-                "count_tokens gate blocked",
-            );
-            return Err(gate_err);
-        }
-
         // Apply the same per-attempt overlays the messages path does
         // so header_extras / payload_extras are consistent. This matters
         // for `anthropic-beta` flags -- count_tokens must observe the
@@ -787,6 +809,30 @@ impl Router {
         let mut auth_retry_attempted = false;
         let mut attempts_made: u32 = 0;
         loop {
+            // Per-attempt gate: rate limit + circuit breaker. Lives
+            // INSIDE the loop (mirroring `complete_with_options`) so the
+            // auth-401 retry is gated + RPM-debited exactly like the
+            // first attempt -- per-attempt accounting is uniform across
+            // all three dispatch sites. The gate runs once per attempt,
+            // so the first attempt is debited exactly once.
+            //
+            // Unlike `complete_with_options`, count_tokens does NOT walk
+            // the fallback chain on a gate block (tokenizer correctness
+            // rules out walking the chain), so we propagate the gate
+            // error directly.
+            if let Some((gate_kind, gate_err)) =
+                self.gate_check(&target.state_key, &target.provider_name)
+            {
+                tracing::warn!(
+                    provider = %target.provider_name,
+                    model = %target.nickname.as_deref().unwrap_or(""),
+                    gate_kind,
+                    error = ?gate_err,
+                    "count_tokens gate blocked",
+                );
+                return Err(gate_err);
+            }
+
             let result = provider.count_tokens(attempt_req.clone()).await;
             attempts_made += 1;
             match result {
@@ -810,7 +856,23 @@ impl Router {
                             attempt = attempts_made,
                             "count_tokens 401; refreshing auth and retrying once",
                         );
-                        provider.on_auth_failure().await?;
+                        // Release any half-open probe slot this attempt
+                        // claimed before surfacing a dead OAuth identity,
+                        // or the breaker stays locked open until restart.
+                        if let Err(refresh_err) = provider.on_auth_failure().await {
+                            self.release_probe_slot(&target.state_key);
+                            return Err(refresh_err);
+                        }
+                        // Refresh succeeded. Release the half-open probe slot
+                        // this attempt claimed at the gate BEFORE the
+                        // `continue` re-enters the loop and re-runs
+                        // `gate_check`. While this caller still holds the slot,
+                        // the in-loop re-gate's `try_dispatch` sees
+                        // `half_open_in_flight` and returns CircuitOpen, which
+                        // count_tokens propagates as the gate error -- leaving
+                        // the breaker locked open until restart. Releasing here
+                        // lets the re-gate claim a fresh slot.
+                        self.release_probe_slot(&target.state_key);
                         continue;
                     }
                     // Mirror `complete_with_options::should_fallback`:
@@ -829,6 +891,12 @@ impl Router {
                     // keeps its existing breaker-accounting behavior.
                     if should_fallback(&e, &self.policy_for(&req.model), false) {
                         self.record_failure(&target.state_key);
+                    } else {
+                        // Non-fallbackable client error (NotImplemented,
+                        // 4xx): not counted against the breaker, but we
+                        // must release any half-open probe slot this
+                        // attempt claimed so the breaker is not locked.
+                        self.release_probe_slot(&target.state_key);
                     }
                     return Err(e);
                 }
@@ -871,23 +939,6 @@ impl Router {
                 continue;
             };
 
-            // Per-attempt gate: streams don't retry against the same
-            // provider, so this is also the "single attempt" gate.
-            if let Some((gate_kind, gate_err)) = self.gate_check(state_key, provider_name) {
-                tracing::warn!(
-                    provider = provider_name,
-                    model = %target.nickname.as_deref().unwrap_or(""),
-                    gate_kind,
-                    error = ?gate_err,
-                    "stream gate blocked",
-                );
-                last_err = Some(gate_err);
-                if opts.disable_fallbacks {
-                    break 'chain;
-                }
-                continue 'chain;
-            }
-
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
             apply_layered_overlays(&self.config, target, &mut attempt_req);
@@ -912,7 +963,30 @@ impl Router {
             // fallback chain over a dead OAuth identity.
             let mut auth_retry_attempted = false;
             let mut attempts_made: u32 = 0;
-            let attempt_outcome = loop {
+            loop {
+                // Per-attempt gate: rate limit + circuit breaker. Lives
+                // INSIDE the loop (mirroring `complete_with_options`) so
+                // the auth-401 retry is gated + RPM-debited exactly like
+                // the first attempt -- per-attempt accounting is uniform
+                // across all three dispatch sites. Streams don't retry on
+                // ordinary errors, so the only second iteration is the
+                // auth-recovery retry; the gate runs once per attempt, so
+                // the first attempt is debited exactly once.
+                if let Some((gate_kind, gate_err)) = self.gate_check(state_key, provider_name) {
+                    tracing::warn!(
+                        provider = provider_name,
+                        model = %target.nickname.as_deref().unwrap_or(""),
+                        gate_kind,
+                        error = ?gate_err,
+                        "stream gate blocked",
+                    );
+                    last_err = Some(gate_err);
+                    if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue 'chain;
+                }
+
                 let r = try_stream_with_first_chunk(
                     provider_name,
                     provider.clone(),
@@ -921,95 +995,127 @@ impl Router {
                 )
                 .await;
                 attempts_made += 1;
-                if let Err(ref err) = r {
-                    if !auth_retry_attempted && matches!(err, Error::Upstream { status: 401, .. }) {
-                        auth_retry_attempted = true;
-                        tracing::debug!(
-                            provider = provider_name,
-                            model = %target.nickname.as_deref().unwrap_or(""),
-                            attempt = attempts_made,
-                            "stream 401 pre-first-chunk; refreshing auth and retrying once",
-                        );
-                        provider.on_auth_failure().await?;
-                        continue;
+                match r {
+                    Ok(stream) => {
+                        let state = self.state.get(state_key).cloned();
+                        let cancel_is_failure = state
+                            .as_ref()
+                            .is_some_and(|st| st.lock().half_open_probe_in_flight());
+                        return Ok(wrap_with_breaker_accounting(
+                            stream,
+                            state,
+                            cancel_is_failure,
+                        ));
                     }
-                }
-                break r;
-            };
-            match attempt_outcome {
-                Ok(stream) => {
-                    let state = self.state.get(state_key).cloned();
-                    let cancel_is_failure = state
-                        .as_ref()
-                        .is_some_and(|st| st.lock().half_open_probe_in_flight());
-                    return Ok(wrap_with_breaker_accounting(
-                        stream,
-                        state,
-                        cancel_is_failure,
-                    ));
-                }
-                Err(e) => {
-                    let do_fallback = should_fallback(&e, &policy, is_probe);
-                    // Probe fast-fail: a probe that hit a rate-limit/overload
-                    // (429/529) returns the status immediately via an
-                    // explicit early return -- no fallback. The span below
-                    // is a deliberate no-op for this path: record_failure is
-                    // gated on `do_fallback`, which is false for a
-                    // fast-failed probe. Returning here is behavior-
-                    // preserving today AND robust if the predicate ever
-                    // drifts. (Streams never retry the same provider, so
-                    // there is no can_retry_here to guard.)
-                    let probe_fast_failed = if is_probe {
-                        probe_fast_fail_status(&e)
-                    } else {
-                        None
-                    };
-                    if let Some(status) = probe_fast_failed {
-                        log_probe_fast_fail(
-                            provider_name,
-                            target.nickname.as_deref().unwrap_or(""),
-                            status,
-                            req.max_tokens,
-                        );
-                        return Err(e);
-                    }
-                    if do_fallback {
-                        self.record_failure(state_key);
-                    }
-                    if opts.disable_fallbacks {
-                        return Err(e);
-                    }
-                    if do_fallback {
-                        let has_next = chain_idx + 1 < chain_len;
-                        if has_next {
-                            tracing::warn!(
+                    Err(e) => {
+                        // Auth-401 single-flight refresh + retry once
+                        // (pre-first-chunk only). A refresh failure means
+                        // the OAuth identity is dead; surface it without
+                        // walking the chain, but first release any half-open
+                        // probe slot this attempt claimed at the gate or the
+                        // breaker stays locked open until restart.
+                        if !auth_retry_attempted
+                            && matches!(&e, Error::Upstream { status: 401, .. })
+                        {
+                            auth_retry_attempted = true;
+                            tracing::debug!(
                                 provider = provider_name,
                                 model = %target.nickname.as_deref().unwrap_or(""),
-                                error = ?e,
-                                "stream fallback to next",
+                                attempt = attempts_made,
+                                "stream 401 pre-first-chunk; refreshing auth and retrying once",
                             );
-                        } else {
-                            // The previous shape WARNed "fallback to next"
-                            // with `provider=<self> model=<self>` because
-                            // we always log the SOURCE of the hop, not the
-                            // target. On a single-entry chain (or the
-                            // final entry of a longer chain) there is no
-                            // next target -- the loop exits and the
-                            // request fails. Log accordingly so an
-                            // operator triaging a misleading "fallback
-                            // happened" line sees what actually
-                            // happened.
-                            tracing::warn!(
-                                provider = provider_name,
-                                model = %target.nickname.as_deref().unwrap_or(""),
-                                error = ?e,
-                                "stream chain exhausted; no fallback target available; request will fail",
-                            );
+                            if let Err(refresh_err) = provider.on_auth_failure().await {
+                                self.release_probe_slot(state_key);
+                                return Err(refresh_err);
+                            }
+                            // Refresh succeeded. Release the half-open probe
+                            // slot this attempt claimed at the gate BEFORE the
+                            // `continue` re-enters the loop and re-runs
+                            // `gate_check`. While this caller still holds the
+                            // slot, the in-loop re-gate's `try_dispatch` sees
+                            // `half_open_in_flight` and returns CircuitOpen,
+                            // which would leave the breaker locked open until
+                            // restart. Releasing here lets the re-gate claim a
+                            // fresh slot.
+                            self.release_probe_slot(state_key);
+                            continue;
                         }
-                        last_err = Some(e);
-                        continue 'chain;
+                        let do_fallback = should_fallback(&e, &policy, is_probe);
+                        // Probe fast-fail: a probe that hit a rate-limit/
+                        // overload (429/529) returns the status immediately
+                        // -- no fallback, no breaker failure debit
+                        // (record_failure is gated on `do_fallback`, false
+                        // here). It does release the half-open slot it may
+                        // have claimed at the gate (see below). Streams never
+                        // retry the same provider, so there is no
+                        // can_retry_here to guard.
+                        let probe_fast_failed = if is_probe {
+                            probe_fast_fail_status(&e)
+                        } else {
+                            None
+                        };
+                        if let Some(status) = probe_fast_failed {
+                            log_probe_fast_fail(
+                                provider_name,
+                                target.nickname.as_deref().unwrap_or(""),
+                                status,
+                                req.max_tokens,
+                            );
+                            // Release the half-open slot this probe claimed
+                            // at the gate: a 429/529 probe fast-fail is a
+                            // transient upstream condition we deliberately do
+                            // NOT count as a provider fault, so free the slot
+                            // without a breaker debit.
+                            self.release_probe_slot(state_key);
+                            return Err(e);
+                        }
+                        if do_fallback {
+                            self.record_failure(state_key);
+                        }
+                        if opts.disable_fallbacks {
+                            // Terminal error exit: free any half-open probe
+                            // slot this attempt claimed. A no-op when
+                            // do_fallback already routed through
+                            // record_failure (which clears the slot).
+                            self.release_probe_slot(state_key);
+                            return Err(e);
+                        }
+                        if do_fallback {
+                            let has_next = chain_idx + 1 < chain_len;
+                            if has_next {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = %target.nickname.as_deref().unwrap_or(""),
+                                    error = ?e,
+                                    "stream fallback to next",
+                                );
+                            } else {
+                                // The previous shape WARNed "fallback to next"
+                                // with `provider=<self> model=<self>` because
+                                // we always log the SOURCE of the hop, not the
+                                // target. On a single-entry chain (or the
+                                // final entry of a longer chain) there is no
+                                // next target -- the loop exits and the
+                                // request fails. Log accordingly so an
+                                // operator triaging a misleading "fallback
+                                // happened" line sees what actually
+                                // happened.
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = %target.nickname.as_deref().unwrap_or(""),
+                                    error = ?e,
+                                    "stream chain exhausted; no fallback target available; request will fail",
+                                );
+                            }
+                            last_err = Some(e);
+                            continue 'chain;
+                        }
+                        // Terminal non-fallbackable error. Free any half-open
+                        // probe slot this attempt claimed so the breaker is
+                        // not left locked open.
+                        self.release_probe_slot(state_key);
+                        return Err(e);
                     }
-                    return Err(e);
                 }
             }
         }
@@ -1057,6 +1163,18 @@ impl Router {
     fn record_failure(&self, state_key: &str) {
         if let Some(state) = self.state.get(state_key) {
             state.lock().record_failure(Instant::now());
+        }
+    }
+
+    /// Release a half-open probe slot this attempt claimed via the gate
+    /// WITHOUT recording success or failure. Used on error paths the
+    /// router explicitly chose NOT to count against the breaker (probe
+    /// fast-fail on 429/529, auth-refresh failure, non-fallbackable
+    /// client error). A no-op when the breaker was not half-open (the
+    /// slot was never claimed).
+    fn release_probe_slot(&self, state_key: &str) {
+        if let Some(state) = self.state.get(state_key) {
+            state.lock().release_probe_slot();
         }
     }
 
@@ -3740,6 +3858,522 @@ mod auth_failure_recovery_tests {
             provider.on_auth_failure_calls.load(Ordering::SeqCst),
             1,
             "on_auth_failure fires once; the auth_retry_attempted flag blocks the second call",
+        );
+    }
+}
+
+#[cfg(test)]
+mod circuit_breaker_slot_release_tests {
+    //! Regression: a half-open probe that fast-fails on 429/529 must
+    //! release the slot it claimed at the gate. Before the fix the
+    //! probe-fast-fail early-return skipped record_success/record_failure,
+    //! leaving `half_open_in_flight = true` forever -- every later gate
+    //! check returned CircuitOpen and the breaker was permanently locked
+    //! open for that provider until process restart.
+    use super::*;
+    use crate::config::{ProviderEntry, ProviderRuntimePolicy};
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Provider that counts `complete()` calls and always 429s, so the
+    /// test can distinguish "gate granted a probe and reached the
+    /// upstream" (call count rises) from "gate returned CircuitOpen and
+    /// skipped the upstream" (call count flat).
+    struct Probe429Provider {
+        id: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for Probe429Provider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::upstream(&self.id, 429, "rate limited"))
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    /// Build a single-entry-chain Router around `provider` with a
+    /// threshold-1, zero-cooldown breaker. Zero cooldown: the breaker is
+    /// immediately half-open-eligible on the next dispatch, so the tests
+    /// need no wall-clock sleep to "advance past cooldown".
+    fn build_router_with_provider(provider: Arc<dyn Provider>) -> Router {
+        build_router_with_provider_and_retry(provider, RetryPolicy::default())
+    }
+
+    /// Like `build_router_with_provider` but lets the test pin the
+    /// top-level `[retry]` policy (`policy_for` returns `config.retry`).
+    fn build_router_with_provider_and_retry(
+        provider: Arc<dyn Provider>,
+        retry: RetryPolicy,
+    ) -> Router {
+        let mut config = Config {
+            retry,
+            ..Default::default()
+        };
+        config.providers.insert(
+            "p".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                user_agent: None,
+                runtime: ProviderRuntimePolicy {
+                    circuit_failures: Some(1),
+                    circuit_cooldown_ms: Some(0),
+                    ..Default::default()
+                },
+            },
+        );
+        let mut router = Router::new(Arc::new(config));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m".into(),
+            Arc::new(ResolvedModel::new("m", "p", provider, "u")),
+        );
+        router.install_resolved_models(models);
+        router
+    }
+
+    fn build_router(calls: Arc<AtomicUsize>) -> Router {
+        let provider: Arc<dyn Provider> = Arc::new(Probe429Provider {
+            id: "p".into(),
+            calls,
+        });
+        build_router_with_provider(provider)
+    }
+
+    fn probe_req() -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages: vec![],
+            // max_tokens <= probe_max_tokens (default 1) => probe-shaped.
+            max_tokens: Some(1),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_fast_fail_does_not_permanently_lock_breaker() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = build_router(calls.clone());
+
+        // Trip the breaker directly (threshold = 1 failure).
+        {
+            let st = router.state.get("m").expect("per-model state slot exists");
+            st.lock().record_failure(Instant::now());
+        }
+
+        // First probe after the trip: the breaker is half-open, the gate
+        // grants the single probe, the upstream 429s, and the probe
+        // fast-fail releases the slot.
+        let _ = router.complete(probe_req()).await.unwrap_err();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "first probe must reach the upstream (gate granted the half-open probe)",
+        );
+
+        // Second probe: if the slot had leaked, the gate would return
+        // CircuitOpen and the upstream would NOT be touched. With the
+        // slot released, the gate grants a fresh probe and the upstream
+        // is reached again.
+        let _ = router.complete(probe_req()).await.unwrap_err();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "second probe must also reach the upstream; a leaked half-open \
+             slot would have locked the breaker (CircuitOpen) and skipped it",
+        );
+    }
+
+    /// Multi-surface mock for the half-open-probe-gets-401-then-refresh-
+    /// succeeds path the slot-release fix targets. Each of `complete`,
+    /// `stream`, and `count_tokens` returns `Error::Upstream { status:
+    /// 401, .. }` on its FIRST call and a success on every subsequent call
+    /// (independent per-surface counters). `on_auth_failure` always
+    /// succeeds and bumps its own counter.
+    struct Recovering401MultiProvider {
+        id: String,
+        complete_calls: Arc<AtomicUsize>,
+        stream_calls: Arc<AtomicUsize>,
+        count_tokens_calls: Arc<AtomicUsize>,
+        on_auth_failure_calls: Arc<AtomicUsize>,
+        /// When true, `on_auth_failure` returns `Error::Auth` instead of
+        /// `Ok(())` -- the dead-OAuth-identity path.
+        refresh_fails: bool,
+    }
+
+    #[async_trait]
+    impl Provider for Recovering401MultiProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            let n = self.complete_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                return Err(Error::upstream(&self.id, 401, "stale token"));
+            }
+            Ok(ChatResponse {
+                id: format!("ok-{}", self.id),
+                model: req.model,
+                created: 0,
+                choices: vec![routectl_core::Choice {
+                    index: 0,
+                    message: routectl_core::Message {
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+            })
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            let n = self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                return Err(Error::upstream(&self.id, 401, "stale token"));
+            }
+            let chunk = ChatChunk {
+                id: format!("ok-{}", self.id),
+                ..Default::default()
+            };
+            Ok(futures::stream::once(async move { Ok(chunk) }).boxed())
+        }
+        async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+            let n = self.count_tokens_calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                return Err(Error::upstream(&self.id, 401, "stale token"));
+            }
+            Ok(TokenCount {
+                input_tokens: 7,
+                ..Default::default()
+            })
+        }
+        async fn on_auth_failure(&self) -> Result<()> {
+            self.on_auth_failure_calls.fetch_add(1, Ordering::SeqCst);
+            if self.refresh_fails {
+                Err(Error::Auth("oauth refresh failed; re-run login".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn build_recovering_router() -> (Router, Arc<Recovering401MultiProvider>) {
+        build_recovering_router_inner(false)
+    }
+
+    fn build_recovering_router_inner(
+        refresh_fails: bool,
+    ) -> (Router, Arc<Recovering401MultiProvider>) {
+        let provider = Arc::new(Recovering401MultiProvider {
+            id: "p".into(),
+            complete_calls: Arc::new(AtomicUsize::new(0)),
+            stream_calls: Arc::new(AtomicUsize::new(0)),
+            count_tokens_calls: Arc::new(AtomicUsize::new(0)),
+            on_auth_failure_calls: Arc::new(AtomicUsize::new(0)),
+            refresh_fails,
+        });
+        let router = build_router_with_provider(provider.clone() as Arc<dyn Provider>);
+        (router, provider)
+    }
+
+    /// A plain (non-max_tokens-probe) request so `is_probe` is false and
+    /// the only "probe" in play is the breaker's half-open probe slot.
+    fn plain_req() -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// Trip the threshold-1 breaker directly so the next dispatch is
+    /// half-open (zero cooldown).
+    fn trip_breaker(router: &Router) {
+        let st = router.state.get("m").expect("per-model state slot exists");
+        st.lock().record_failure(Instant::now());
+    }
+
+    fn slot_in_flight(router: &Router) -> bool {
+        let st = router.state.get("m").expect("per-model state slot exists");
+        st.lock().half_open_probe_in_flight()
+    }
+
+    #[tokio::test]
+    async fn complete_half_open_401_refresh_releases_slot() {
+        // FAILS without the slot-release fix: the half-open probe 401s,
+        // the refresh succeeds, and the Ok-path `continue` re-gates while
+        // this caller still holds the slot -> CircuitOpen -> single-entry
+        // chain exhausts -> Err with the slot stuck `true` forever. With
+        // the fix the slot is released first, the re-gate claims a fresh
+        // slot, the retry reaches the upstream and succeeds, and the probe
+        // success closes the breaker.
+        let (router, provider) = build_recovering_router();
+        trip_breaker(&router);
+
+        let resp = router
+            .complete(plain_req())
+            .await
+            .expect("half-open 401 -> refresh -> retry must land on the success branch");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("p"));
+        assert_eq!(
+            provider.complete_calls.load(Ordering::SeqCst),
+            2,
+            "complete must run twice: the 401 probe and the post-refresh retry",
+        );
+        assert_eq!(
+            provider.on_auth_failure_calls.load(Ordering::SeqCst),
+            1,
+            "on_auth_failure fires exactly once (the single 401 -> refresh)",
+        );
+        assert!(
+            !slot_in_flight(&router),
+            "half-open slot must be cleared after the recovered probe",
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_half_open_401_refresh_does_not_lock_breaker() {
+        // FAILS without the fix: count_tokens propagates the re-gate's
+        // CircuitOpen as its gate error and the slot stays `true` forever,
+        // so neither this dispatch nor any later one reaches the upstream.
+        let (router, provider) = build_recovering_router();
+        trip_breaker(&router);
+
+        let first = router.count_tokens(plain_req()).await;
+        let calls_after_first = provider.count_tokens_calls.load(Ordering::SeqCst);
+
+        // A leaked half-open slot would have locked the breaker; the
+        // second dispatch must still reach the upstream.
+        let second = router.count_tokens(plain_req()).await;
+        let calls_after_second = provider.count_tokens_calls.load(Ordering::SeqCst);
+
+        assert!(
+            first.is_ok(),
+            "first count_tokens must recover via refresh+retry, got: {first:?}",
+        );
+        assert!(
+            second.is_ok(),
+            "second count_tokens must not hit a permanently-locked breaker, got: {second:?}",
+        );
+        assert!(
+            calls_after_second > calls_after_first,
+            "second dispatch must reach the upstream; a leaked slot locks the \
+             breaker (CircuitOpen) and skips it: {calls_after_first} -> {calls_after_second}",
+        );
+        assert_eq!(
+            provider.on_auth_failure_calls.load(Ordering::SeqCst),
+            1,
+            "on_auth_failure fires exactly once (the single 401 -> refresh)",
+        );
+        assert!(
+            !slot_in_flight(&router),
+            "half-open slot must be released, not stuck open",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_half_open_401_refresh_does_not_lock_breaker() {
+        // FAILS without the fix: provider.stream() 401s pre-first-chunk,
+        // the refresh succeeds, the Ok-path `continue` re-gates while this
+        // caller still holds the slot -> CircuitOpen -> single-entry chain
+        // exhausts -> Err with the slot stuck `true` forever.
+        let (router, provider) = build_recovering_router();
+        trip_breaker(&router);
+
+        let first = router.stream(plain_req()).await;
+        let first_is_ok = first.is_ok();
+        // Drain the recovered stream to completion so the half-open probe's
+        // breaker accounting records success and closes the breaker. (When
+        // the fix is absent `first` is the CircuitOpen Err -- nothing to
+        // drain.)
+        if let Ok(mut s) = first {
+            while s.next().await.is_some() {}
+        }
+        let calls_after_first = provider.stream_calls.load(Ordering::SeqCst);
+
+        let second = router.stream(plain_req()).await;
+        let second_is_ok = second.is_ok();
+        if let Ok(mut s) = second {
+            while s.next().await.is_some() {}
+        }
+        let calls_after_second = provider.stream_calls.load(Ordering::SeqCst);
+
+        assert!(
+            first_is_ok,
+            "first stream must recover via refresh+retry, not fail with CircuitOpen",
+        );
+        assert!(
+            second_is_ok,
+            "second stream must not hit a permanently-locked breaker",
+        );
+        assert!(
+            calls_after_second > calls_after_first,
+            "second dispatch must reach the upstream; a leaked slot locks the \
+             breaker (CircuitOpen) and skips it: {calls_after_first} -> {calls_after_second}",
+        );
+        assert_eq!(
+            provider.on_auth_failure_calls.load(Ordering::SeqCst),
+            1,
+            "on_auth_failure fires exactly once (the single 401 -> refresh)",
+        );
+        assert!(
+            !slot_in_flight(&router),
+            "half-open slot must be released, not stuck open",
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_half_open_retry_without_fallback_does_not_lock_breaker() {
+        // Regression for the retry-without-fallback leak: a NON-probe
+        // request hits a half-open provider that returns 429. The
+        // operator's policy excludes 429 from the fallback allowlist
+        // (`do_fallback=false`) but still permits a same-provider 429
+        // retry (`retries_for_status(429)>=1`), so the dispatch lands on
+        // the `can_retry_here && !do_fallback` branch and its `continue`
+        // re-enters the loop. Without the slot-release fix the in-loop
+        // re-gate sees the still-held half_open slot, returns CircuitOpen,
+        // and the single-entry chain exhausts -- leaving the slot stuck
+        // `true` forever (permanent CircuitOpen). With the fix the slot is
+        // freed before each re-probe.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(Probe429Provider {
+            id: "p".into(),
+            calls: calls.clone(),
+        });
+        // retry_allowlist=[500] excludes 429 (so do_fallback=false);
+        // retry_on_429=2 makes retries_for_status(429)=2, so the first
+        // attempt (attempts_made=1 < 2) is can_retry_here, and the loop
+        // still terminates on the second attempt. Zero backoff/jitter keep
+        // the test instant.
+        let retry = RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            backoff_multiplier: 1.0,
+            jitter_ms: 0,
+            retry_allowlist: vec![500],
+            retry_on_429: Some(2),
+            ..RetryPolicy::default()
+        };
+        let router = build_router_with_provider_and_retry(provider, retry);
+        trip_breaker(&router);
+
+        // Non-probe: max_tokens above the probe threshold (default 1), so
+        // is_probe=false and the probe-fast-fail path is not taken.
+        let req = ChatRequest {
+            model: "m".into(),
+            messages: vec![],
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
+
+        let first = router.complete(req.clone()).await;
+        let calls_after_first = calls.load(Ordering::SeqCst);
+
+        // A leaked half-open slot would have locked the breaker; the second
+        // dispatch must still reach the upstream.
+        let second = router.complete(req.clone()).await;
+        let calls_after_second = calls.load(Ordering::SeqCst);
+
+        assert!(
+            calls_after_second > calls_after_first,
+            "second dispatch must reach the upstream; a leaked slot locks the \
+             breaker (CircuitOpen) and skips it: {calls_after_first} -> {calls_after_second}",
+        );
+        // Both dispatches must terminate in the upstream 429, never the
+        // gate's status-0 "circuit breaker open" error.
+        for (label, r) in [("first", &first), ("second", &second)] {
+            match r {
+                Err(Error::Upstream { status, .. }) => assert_eq!(
+                    *status, 429,
+                    "{label} dispatch must surface the upstream 429, not the \
+                     gate circuit-breaker error (status 0)",
+                ),
+                other => panic!("{label} dispatch expected Err(Upstream 429), got: {other:?}"),
+            }
+        }
+        assert!(
+            !slot_in_flight(&router),
+            "half-open slot must be released after the retry-without-fallback path",
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_half_open_401_refresh_failure_releases_slot() {
+        // Coverage for the auth-refresh-FAILURE release path: a half-open
+        // probe gets a 401, `on_auth_failure()` returns Err (dead OAuth
+        // identity), and the router must release the half-open slot before
+        // surfacing the error. If it did not, the breaker would be locked
+        // open forever; here we assert the slot is freed and a later
+        // dispatch can still probe.
+        let (router, provider) = build_recovering_router_inner(true);
+        trip_breaker(&router);
+
+        let first = router.complete(plain_req()).await;
+        let calls_after_first = provider.complete_calls.load(Ordering::SeqCst);
+        match &first {
+            Err(Error::Auth(msg)) => assert!(
+                msg.contains("oauth refresh failed"),
+                "expected the refresh-failure auth error, got: {msg}",
+            ),
+            other => panic!("expected Err(Auth), got: {other:?}"),
+        }
+        assert!(
+            !slot_in_flight(&router),
+            "half-open slot must be released when on_auth_failure errors",
+        );
+        assert_eq!(
+            provider.on_auth_failure_calls.load(Ordering::SeqCst),
+            1,
+            "on_auth_failure fires exactly once before the error propagates",
+        );
+
+        // Breaker is NOT locked: a second dispatch (zero cooldown) still
+        // claims a fresh probe and reaches the upstream.
+        let _ = router.complete(plain_req()).await;
+        let calls_after_second = provider.complete_calls.load(Ordering::SeqCst);
+        assert!(
+            calls_after_second > calls_after_first,
+            "second dispatch must reach the upstream; a leaked slot would lock \
+             the breaker (CircuitOpen) and skip it: {calls_after_first} -> {calls_after_second}",
         );
     }
 }
