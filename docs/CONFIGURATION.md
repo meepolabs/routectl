@@ -53,7 +53,9 @@ fields). Copy and edit; do not re-derive.
 [server]
 host = "127.0.0.1"
 port = 8787
-strict_translation = false   # set true for production CI
+strict_translation = false      # set true for production CI
+max_body_bytes = 33554432       # 32 MiB default; larger bodies are rejected with HTTP 413
+allow_disable_fallbacks = true  # set false for hardened multi-tenant deployments
 
 [server.auth]
 tokens = ["env://ROUTECTL_LISTENER_TOKEN", "literal:sk-routectl-dev"]
@@ -75,6 +77,39 @@ default           = "default"
 `tokens` entries are secret-refs (`env://`, `file://`, `literal:`)
 resolved at startup. Bind non-loopback only with `--unsafe-public` on
 the CLI.
+
+**`max_body_bytes`** (u32, default 33554432 -- 32 MiB)
+
+Caps the inbound HTTP body size for `/v1/messages` and
+`/v1/chat/completions`. Bodies exceeding the limit are rejected by
+axum's `DefaultBodyLimit` layer before routectl parses them; the client
+receives HTTP 413 Payload Too Large with a dialect-correct error
+envelope. The pre-v0.8 hardcoded ceiling was 4 MiB, which was too tight
+for live-traffic sessions carrying large multi-turn or multimodal
+payloads. Changing this knob takes effect only after a restart (the
+`DefaultBodyLimit` layer is wired at server startup, not per-reload).
+
+```toml
+[server]
+max_body_bytes = 67108864   # 64 MiB -- raise for multimodal or long-history sessions
+```
+
+**`allow_disable_fallbacks`** (bool, default true)
+
+When true (default), a client may send the request header
+`x-routectl-disable-fallbacks: 1` (also accepts `true` or `yes`) to
+pin a single request to the first provider in the alias chain with no
+fallback. This is useful for testing and per-provider triage. When set
+to false, the header is silently ignored so authenticated clients cannot
+bypass the gateway HA story or probe per-provider health. Set this to
+false for hardened multi-tenant deployments where listener auth is
+configured via `[server.auth].tokens`. The `x-routectl-alias` header
+(model routing) is not affected by this knob.
+
+```toml
+[server]
+allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass header
+```
 
 ## Field-assignment table
 
@@ -100,6 +135,8 @@ the CLI.
 | `allowed_betas`                | `[providers.X]` AnthropicApi    | provider-only; allowlist for `anthropic_beta` flags to `api.anthropic.com`; empty = pass-through |
 | `allowed_betas`                | `[bedrock]` global              | global filter for Bedrock-accepted `anthropic_beta` values; empty = pass-through (see `[bedrock]`) |
 | `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor always sent, bypasses `[bedrock] allowed_betas`            |
+| `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
+| `allow_disable_fallbacks`      | `[server]`                      | bool, default true; when false the `x-routectl-disable-fallbacks` per-request header is ignored   |
 
 ## header_extras merge
 
