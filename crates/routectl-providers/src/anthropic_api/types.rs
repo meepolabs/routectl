@@ -55,7 +55,8 @@ pub(crate) struct AnthropicRequest {
     /// validator reads from here), but the direct
     /// `api.anthropic.com` egress strips this from the wire body
     /// before sending and emits the `anthropic-beta` HTTP header
-    /// instead. See `AnthropicApiProvider::strip_body_anthropic_beta`.
+    /// instead. The strip is inlined in `complete()` and `stream()`
+    /// via `obj.remove("anthropic_beta")` in `mod.rs`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) anthropic_beta: Vec<String>,
 }
