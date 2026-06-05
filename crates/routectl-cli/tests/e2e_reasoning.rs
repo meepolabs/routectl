@@ -12,8 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use routectl_router::{
-    AliasValue, Config, LegacyCompat, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy,
-    ServerConfig,
+    AliasValue, Config, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy, ServerConfig,
 };
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -51,7 +50,6 @@ fn deepseek_alias_config(upstream_base: &str) -> Arc<Config> {
         providers,
         aliases,
         retry: RetryPolicy::default(),
-        legacy_compat: LegacyCompat::Openrouter,
         models,
         ..Default::default()
     })

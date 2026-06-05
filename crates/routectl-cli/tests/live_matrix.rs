@@ -342,7 +342,6 @@ async fn build_test_router(
         aliases,
         models,
         retry: Default::default(),
-        legacy_compat: Default::default(),
         ..Default::default()
     });
 
@@ -668,7 +667,6 @@ async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
         aliases,
         models,
         retry: Default::default(),
-        legacy_compat: Default::default(),
         ..Default::default()
     });
 
@@ -1078,7 +1076,6 @@ async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Rout
         aliases,
         models,
         retry: Default::default(),
-        legacy_compat: Default::default(),
         ..Default::default()
     });
 
@@ -1205,7 +1202,6 @@ async fn build_openai_responses_test_router(targets: &[&str]) -> Option<Arc<Rout
         aliases,
         models,
         retry: Default::default(),
-        legacy_compat: Default::default(),
         ..Default::default()
     });
 
@@ -1418,7 +1414,6 @@ mod oauth_codex {
             aliases,
             models,
             retry: Default::default(),
-            legacy_compat: Default::default(),
             ..Default::default()
         });
 

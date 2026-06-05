@@ -44,12 +44,6 @@ pub struct Config {
     #[serde(default)]
     pub retry: RetryPolicy,
 
-    /// Schema compatibility mode for the outward shape.
-    /// `openrouter` (default): full reasoning_details surface.
-    /// `openai`: strip routectl/openrouter extensions for paranoid clients.
-    #[serde(default)]
-    pub legacy_compat: LegacyCompat,
-
     /// Bedrock-wide settings that apply to every Bedrock provider.
     /// Carries the operator-supplied `allowed_betas` and
     /// `allowed_body_fields` lists -- routectl ships no defaults so
@@ -2044,14 +2038,6 @@ fn default_backoff_ms() -> u64 {
 
 fn default_backoff_multiplier() -> f64 {
     2.0
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LegacyCompat {
-    #[default]
-    Openrouter,
-    Openai,
 }
 
 #[cfg(test)]
