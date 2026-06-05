@@ -292,20 +292,21 @@ impl Provider for OpenAiCompatProvider {
             // WARN excerpt below stays for warn-log scannability.
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let sanitized = extract_upstream_message(&body_text);
+            let safe_excerpt = sanitize_for_log(&sanitized);
             // Extend the auth-only WARN to all 4xx/5xx so an operator
             // never has to guess WHY a request failed.
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
-                    body_excerpt = %sanitized,
+                    body_excerpt = %safe_excerpt,
                     "openai-compat upstream auth failed",
                 );
             } else {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
-                    body_excerpt = %sanitized,
+                    body_excerpt = %safe_excerpt,
                     "openai-compat upstream error",
                 );
             }
@@ -384,18 +385,19 @@ impl Provider for OpenAiCompatProvider {
             let body_text = resp.text().await.unwrap_or_default();
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let sanitized = extract_upstream_message(&body_text);
+            let safe_excerpt = sanitize_for_log(&sanitized);
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
-                    body_excerpt = %sanitized,
+                    body_excerpt = %safe_excerpt,
                     "openai-compat upstream auth failed",
                 );
             } else {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
-                    body_excerpt = %sanitized,
+                    body_excerpt = %safe_excerpt,
                     "openai-compat upstream error",
                 );
             }
@@ -559,6 +561,25 @@ fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
 mod helper_tests {
     use super::ensure_stream_options_include_usage;
     use serde_json::json;
+
+    #[test]
+    fn excerpt_sanitizes_crlf_and_ansi() {
+        let body = "boom\r\n[fake INFO] injected\x1b[31mred";
+        let sanitized = routectl_core::extract_upstream_message(body);
+        let safe_excerpt = routectl_core::sanitize_for_log(&sanitized);
+        assert!(
+            !safe_excerpt.contains('\r'),
+            "CR in excerpt: {safe_excerpt:?}"
+        );
+        assert!(
+            !safe_excerpt.contains('\n'),
+            "LF in excerpt: {safe_excerpt:?}"
+        );
+        assert!(
+            !safe_excerpt.contains('\x1b'),
+            "ESC in excerpt: {safe_excerpt:?}"
+        );
+    }
 
     #[test]
     fn injects_when_absent_and_not_disabled() {

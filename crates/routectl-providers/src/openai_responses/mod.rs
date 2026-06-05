@@ -374,26 +374,21 @@ impl Provider for OpenAiResponsesProvider {
         if status >= 400 {
             let body_text = resp.text().await.unwrap_or_default();
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
-            let msg = serde_json::from_str::<Value>(&body_text)
-                .ok()
-                .as_ref()
-                .and_then(|v| v.pointer("/error/message"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| sanitize_upstream_body(&body_text));
+            let msg = build_error_excerpt(&body_text);
+            let safe_excerpt = sanitize_for_log(&msg);
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
                     auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %msg,
+                    body_excerpt = %safe_excerpt,
                     "openai-responses upstream auth failed",
                 );
             } else {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
-                    body_excerpt = %msg,
+                    body_excerpt = %safe_excerpt,
                     "openai-responses upstream error",
                 );
             }
@@ -565,26 +560,21 @@ impl Provider for OpenAiResponsesProvider {
         if status >= 400 {
             let body_text = resp.text().await.unwrap_or_default();
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
-            let msg = serde_json::from_str::<Value>(&body_text)
-                .ok()
-                .as_ref()
-                .and_then(|v| v.pointer("/error/message"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| sanitize_upstream_body(&body_text));
+            let msg = build_error_excerpt(&body_text);
+            let safe_excerpt = sanitize_for_log(&msg);
             if status == 401 || status == 403 {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
                     auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %msg,
+                    body_excerpt = %safe_excerpt,
                     "openai-responses upstream auth failed",
                 );
             } else {
                 tracing::warn!(
                     provider = %self.cfg.id,
                     status,
-                    body_excerpt = %msg,
+                    body_excerpt = %safe_excerpt,
                     "openai-responses upstream error",
                 );
             }
@@ -654,6 +644,16 @@ impl Provider for OpenAiResponsesProvider {
     async fn on_auth_failure(&self) -> Result<()> {
         self.cfg.auth.on_auth_failure().await
     }
+}
+
+fn build_error_excerpt(body_text: &str) -> String {
+    serde_json::from_str::<Value>(body_text)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.pointer("/error/message"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| sanitize_upstream_body(body_text))
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +952,35 @@ mod e2e_tests {
         assert_eq!(chunks[1].choices[0].delta.content.as_deref(), Some("hi"));
         let final_c = chunks.last().unwrap();
         assert_eq!(final_c.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Excerpt-sanitization tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod excerpt_tests {
+    use super::build_error_excerpt;
+    use routectl_core::sanitize_for_log;
+
+    #[test]
+    fn excerpt_sanitizes_crlf_and_ansi() {
+        let body = "boom\r\n[fake INFO] injected\x1b[31mred";
+        let msg = build_error_excerpt(body);
+        let safe_excerpt = sanitize_for_log(&msg);
+        assert!(
+            !safe_excerpt.contains('\r'),
+            "CR in excerpt: {safe_excerpt:?}"
+        );
+        assert!(
+            !safe_excerpt.contains('\n'),
+            "LF in excerpt: {safe_excerpt:?}"
+        );
+        assert!(
+            !safe_excerpt.contains('\x1b'),
+            "ESC in excerpt: {safe_excerpt:?}"
+        );
     }
 }
 

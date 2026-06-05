@@ -603,20 +603,19 @@ async fn parse_upstream_error_body(
 /// Body excerpt is bounded to keep log lines scannable. Never logs
 /// credential material because Bedrock error bodies don't contain any.
 fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
-    // Sanitize: a Bedrock upstream error body that contains \n, \r, or
-    // ANSI escape sequences (a CDN-injected error page, a compromised
-    // upstream, a mocked test fixture) would otherwise forge fake log
-    // lines or scramble operator terminals. Mirror the openai_compat
-    // and anthropic_api providers which both run upstream excerpts
-    // through `sanitize_upstream_body_with_cap` before logging.
+    // sanitize_upstream_body_with_cap trims edges, collapses HTML pages to
+    // a short marker, and caps length. It does NOT filter mid-string control
+    // characters (\n, \r, ANSI escapes). sanitize_for_log applied next
+    // handles that separately.
     let excerpt =
         routectl_core::sanitize_upstream_body_with_cap(body, routectl_core::MAX_LOG_BODY_EXCERPT);
+    let safe_excerpt = sanitize_for_log(&excerpt);
     match status {
         401 => {
             tracing::warn!(
                 provider = %provider,
                 status,
-                body_excerpt = %excerpt,
+                body_excerpt = %safe_excerpt,
                 "bedrock upstream auth rejected",
             );
         }
@@ -632,7 +631,7 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
                 status,
                 action = ?action,
                 principal_present,
-                body_excerpt = %excerpt,
+                body_excerpt = %safe_excerpt,
                 "bedrock IAM access denied",
             );
         }
@@ -640,7 +639,7 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
             tracing::warn!(
                 provider = %provider,
                 status,
-                body_excerpt = %excerpt,
+                body_excerpt = %safe_excerpt,
                 "bedrock validation error",
             );
         }
@@ -648,7 +647,7 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
             tracing::warn!(
                 provider = %provider,
                 status = s,
-                body_excerpt = %excerpt,
+                body_excerpt = %safe_excerpt,
                 "bedrock upstream 5xx",
             );
         }
@@ -656,7 +655,7 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
             tracing::warn!(
                 provider = %provider,
                 status,
-                body_excerpt = %excerpt,
+                body_excerpt = %safe_excerpt,
                 "bedrock upstream error",
             );
         }
@@ -700,6 +699,28 @@ fn extract_iam_action(body: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excerpt_sanitizes_crlf_and_ansi() {
+        let body = "boom\r\n[fake INFO] injected\x1b[31mred";
+        let excerpt = routectl_core::sanitize_upstream_body_with_cap(
+            body,
+            routectl_core::MAX_LOG_BODY_EXCERPT,
+        );
+        let safe_excerpt = sanitize_for_log(&excerpt);
+        assert!(
+            !safe_excerpt.contains('\r'),
+            "CR in excerpt: {safe_excerpt:?}"
+        );
+        assert!(
+            !safe_excerpt.contains('\n'),
+            "LF in excerpt: {safe_excerpt:?}"
+        );
+        assert!(
+            !safe_excerpt.contains('\x1b'),
+            "ESC in excerpt: {safe_excerpt:?}"
+        );
+    }
 
     #[test]
     fn extract_iam_action_pulls_action_from_aws_403_body() {
