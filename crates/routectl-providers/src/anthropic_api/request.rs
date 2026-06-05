@@ -1185,13 +1185,13 @@ fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::Cac
 /// Otherwise, drop entries not in the list at DEBUG so operators
 /// triaging unexpected behavior can see WHICH flags got removed.
 /// Mirrors the Bedrock-egress `filter_bedrock_betas` shape.
-fn filter_anthropic_betas(
+pub(crate) fn filter_anthropic_betas<'a>(
     provider_id: &str,
-    requested: &[String],
+    requested: &'a [String],
     allowed: &[String],
-) -> Vec<String> {
+) -> Cow<'a, [String]> {
     if allowed.is_empty() {
-        return requested.to_vec();
+        return Cow::Borrowed(requested);
     }
     let mut kept = Vec::with_capacity(requested.len());
     for flag in requested {
@@ -1200,12 +1200,12 @@ fn filter_anthropic_betas(
         } else {
             tracing::debug!(
                 provider = provider_id,
-                flag = %flag,
+                flag = %routectl_core::sanitize_for_log(flag),
                 "dropping beta flag not in operator-supplied [providers.X] allowed_betas"
             );
         }
     }
-    kept
+    Cow::Owned(kept)
 }
 
 pub(crate) fn normalize(
@@ -1314,7 +1314,7 @@ pub(crate) fn normalize(
         tools,
         tool_choice: translate_tool_choice(req.tool_choice.as_ref(), has_tools),
         cache_control: req.cache_control.clone(),
-        anthropic_beta: filter_anthropic_betas(id, &req.anthropic_beta, allowed_betas),
+        anthropic_beta: filter_anthropic_betas(id, &req.anthropic_beta, allowed_betas).into_owned(),
     };
 
     // Belt-and-braces: validate in release too. The Anthropic ingress
