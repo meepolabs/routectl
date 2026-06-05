@@ -142,6 +142,19 @@ impl ProviderState {
         }
     }
 
+    /// Release a half-open probe slot claimed by `try_dispatch` WITHOUT
+    /// recording an outcome. Used when the dispatch path declines to
+    /// count an attempt as a provider fault (e.g. a probe fast-fail on a
+    /// transient 429/529, or a non-fallbackable client error) but must
+    /// still free the slot it claimed so the next probe can proceed
+    /// after cooldown. Deliberately does NOT touch
+    /// `consecutive_failures` or `circuit_opened_at`: releasing a
+    /// claimed slot is not a failure observation, so the breaker's trip
+    /// state and counter stay unchanged.
+    pub fn release_probe_slot(&mut self) {
+        self.half_open_in_flight = false;
+    }
+
     pub fn half_open_probe_in_flight(&self) -> bool {
         self.half_open_in_flight
     }
@@ -207,6 +220,52 @@ mod tests {
         // After cooldown a single probe is allowed.
         let t_after = t0 + Duration::from_millis(1_500);
         assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
+    }
+
+    #[test]
+    fn release_probe_slot_frees_slot_without_recording_outcome() {
+        // A probe fast-fail releases the claimed half-open slot WITHOUT
+        // counting a failure. The slot must clear, the failure counter
+        // and trip timestamp must stay put, and the next dispatch in the
+        // still-open window must be granted a fresh probe (proving the
+        // breaker is not locked).
+        let policy = ProviderRuntimePolicy {
+            circuit_failures: Some(1),
+            circuit_cooldown_ms: Some(500),
+            ..Default::default()
+        };
+        let mut s = ProviderState::new(&policy);
+        let t0 = Instant::now();
+        // Trip the breaker (threshold = 1).
+        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+        s.record_failure(t0);
+        assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+        // After cooldown, the first dispatch claims the half-open slot.
+        let t_after = t0 + Duration::from_millis(600);
+        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
+        assert!(s.half_open_probe_in_flight(), "probe slot must be claimed");
+        let failures_before = s.consecutive_failures;
+        let opened_before = s.circuit_opened_at;
+
+        // Release WITHOUT recording success/failure.
+        s.release_probe_slot();
+        assert!(
+            !s.half_open_probe_in_flight(),
+            "release_probe_slot must clear the half-open slot",
+        );
+        assert_eq!(
+            s.consecutive_failures, failures_before,
+            "release_probe_slot must NOT change the failure counter",
+        );
+        assert_eq!(
+            s.circuit_opened_at, opened_before,
+            "release_probe_slot must NOT change the trip timestamp",
+        );
+
+        // The breaker is NOT locked: the next dispatch in the still-open
+        // window is granted a fresh probe because the slot is free again.
+        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
+        assert!(s.half_open_probe_in_flight());
     }
 
     #[test]
