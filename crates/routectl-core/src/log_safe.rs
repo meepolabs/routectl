@@ -67,17 +67,13 @@
 /// bloating every log line.
 const MAX: usize = 256;
 
-/// Sanitize a client-controlled string for inclusion in a tracing
-/// field or log message. Replaces every non-printable-ASCII char with
-/// `?` and caps total length at [`MAX`] characters. Spaces are
-/// preserved (single-line log fields commonly contain them).
-///
-/// Returns an owned `String`; the caller passes it to tracing via
-/// `%sanitized` (Display) so the formatted output already carries
-/// the sanitized form.
-pub fn sanitize_for_log(s: &str) -> String {
-    let mut out = String::with_capacity(s.len().min(MAX));
-    for c in s.chars().take(MAX) {
+/// Core sanitizer: replace every non-printable-ASCII char with `?`,
+/// capped at `cap` characters. Spaces are preserved. Used by both
+/// [`sanitize_for_log`] (256-char cap) and [`debug_upstream_error_body`]
+/// (4 KB cap) so the control-char stripping logic lives in one place.
+fn sanitize_capped(s: &str, cap: usize) -> String {
+    let mut out = String::with_capacity(s.len().min(cap));
+    for c in s.chars().take(cap) {
         if c.is_ascii_graphic() || c == ' ' {
             out.push(c);
         } else {
@@ -87,6 +83,18 @@ pub fn sanitize_for_log(s: &str) -> String {
         }
     }
     out
+}
+
+/// Sanitize a client-controlled string for inclusion in a tracing
+/// field or log message. Replaces every non-printable-ASCII char with
+/// `?` and caps total length at [`MAX`] characters. Spaces are
+/// preserved (single-line log fields commonly contain them).
+///
+/// Returns an owned `String`; the caller passes it to tracing via
+/// `%sanitized` (Display) so the formatted output already carries
+/// the sanitized form.
+pub fn sanitize_for_log(s: &str) -> String {
+    sanitize_capped(s, MAX)
 }
 
 /// Trim and sanitize an upstream error body for inclusion in routectl's
@@ -1327,6 +1335,11 @@ pub fn debug_upstream_error_body(provider_kind: &str, provider_id: &str, status:
         return;
     }
     let cleaned = sanitize_upstream_body_with_cap(body, MAX_DEBUG_BODY_BYTES);
+    // Strip control chars (CR, LF, ANSI escapes) that sanitize_upstream_body_with_cap
+    // does NOT remove -- it only HTML-collapses + length-caps. Without this step a
+    // malicious/compromised upstream can forge fake log lines up to 4 KB on any
+    // text-format subscriber when the operator runs at DEBUG during triage.
+    let cleaned = sanitize_capped(&cleaned, MAX_DEBUG_BODY_BYTES);
     tracing::debug!(
         provider_kind,
         provider = provider_id,

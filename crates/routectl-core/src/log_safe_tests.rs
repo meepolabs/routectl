@@ -4,7 +4,10 @@
 //! `log_safe.rs`. `super::*` resolves to the `log_safe` module since
 //! this file is the body of `mod tests` declared inside `log_safe`.
 
-use super::{redact_prompts_with_flag, sanitize_for_log, sanitize_upstream_body};
+use super::{
+    redact_prompts_with_flag, sanitize_capped, sanitize_for_log, sanitize_upstream_body, MAX,
+    MAX_DEBUG_BODY_BYTES,
+};
 use serde_json::json;
 
 #[test]
@@ -1062,4 +1065,51 @@ fn redact_is_idempotent_on_already_redacted_value() {
     super::redact_outgoing_header_values(&mut headers);
     let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
     assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
+}
+
+// ---------------------------------------------------------------------
+// sanitize_capped / debug body control-char stripping
+// ---------------------------------------------------------------------
+
+#[test]
+fn sanitize_capped_strips_control_chars_at_debug_body_cap() {
+    // The debug-body path (debug_upstream_error_body) pipes the output
+    // of sanitize_upstream_body_with_cap through sanitize_capped so a
+    // malicious/compromised upstream cannot forge fake log lines at
+    // DEBUG via embedded CR/LF/ANSI escapes (up to 4 KB injection).
+    //
+    // This test pins three requirements in one pass:
+    //   1. CR, LF, ESC are stripped (no log-injection possible).
+    //   2. Output length EXCEEDS 256 chars (the 4 KB cap is honored, not
+    //      the 256-char sanitize_for_log cap -- proves no silent cap
+    //      regression from the refactor).
+    //   3. sanitize_for_log still caps at MAX (regression guard for the
+    //      sanitize_capped extraction refactor).
+    let input = format!("{}\r\n\x1b[31m{}", "A".repeat(300), "B".repeat(50));
+
+    let got = sanitize_capped(&input, MAX_DEBUG_BODY_BYTES);
+
+    // Requirement 1: no control chars survive.
+    assert!(!got.contains('\r'), "CR should be stripped from debug body");
+    assert!(!got.contains('\n'), "LF should be stripped from debug body");
+    assert!(
+        !got.contains('\x1b'),
+        "ESC should be stripped from debug body"
+    );
+
+    // Requirement 2: length exceeds the 256-char sanitize_for_log cap,
+    // confirming the 4 KB debug cap is in effect.
+    assert!(
+        got.chars().count() > 256,
+        "sanitize_capped at MAX_DEBUG_BODY_BYTES must NOT cap at 256; got len {}",
+        got.chars().count()
+    );
+
+    // Requirement 3: sanitize_for_log still caps at MAX (256).
+    let short = sanitize_for_log(&input);
+    assert_eq!(
+        short.chars().count(),
+        MAX,
+        "sanitize_for_log must still cap at MAX after refactor"
+    );
 }
