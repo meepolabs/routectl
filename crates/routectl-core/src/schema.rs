@@ -125,6 +125,17 @@ pub struct ChatRequest {
 /// adaptive-thinking flag) alongside any pure-transport state. See
 /// `ChatRequest::routectl_internal` for the contract.
 ///
+/// Hop 4 (final) of the per-model knob relay: a `[models.X]` value
+/// reaches the egress here after passing through `ModelEntry` ->
+/// `ResolvedModel` -> `DispatchTarget` in the `routectl-router` crate.
+/// The router's `apply_layered_overlays` populates these fields right
+/// before dispatch. Adding a knob the egress reads means editing all
+/// four definitions; the relay exists because this crate (wire-
+/// internal) and the config crate (TOML serde shape) stay decoupled,
+/// and `reasoning_dialect` / `history_reasoning` even change enum type
+/// at this boundary. The egress reads each field directly off this
+/// struct, so the fields are flat (no shared sub-struct) by design.
+///
 /// Every field is `Option` so an egress can fall back to its own
 /// `self.cfg.*` value when the carrier is empty (library consumers
 /// constructing a `ChatRequest` directly never set the carrier).
