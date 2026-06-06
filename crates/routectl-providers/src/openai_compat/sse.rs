@@ -44,6 +44,25 @@ pub fn parse_chunk(
     let mut val: Value = serde_json::from_str(trimmed)
         .map_err(|e| Error::Streaming(format!("provider `{id}`: SSE JSON: {e}")))?;
 
+    // Detect mid-stream error envelope before any normalization. Some
+    // upstreams (Azure content filter, OpenRouter overload, NIM auth-wall)
+    // emit a JSON error object inside a 200-OK SSE stream rather than a
+    // top-level HTTP error. Treating it as a bad ChatChunk deserialize
+    // would produce a misleading NormalizeResponse error.
+    if val.get("error").is_some() {
+        let status = val
+            .pointer("/error/code")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u16)
+            .unwrap_or(502);
+        let message = val
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("upstream error in stream")
+            .to_string();
+        return Err(Error::upstream(id, status, message));
+    }
+
     // Coalesce reasoning_content -> reasoning across all delta objects so
     // serde sees a single canonical key and dialect-specific lifters can
     // operate on a uniform shape.
@@ -82,6 +101,13 @@ fn lift_chunk_usage_subbags(val: &mut Value) {
         .and_then(|v| v.get("reasoning_tokens"))
         .and_then(|v| v.as_u64());
     if let Some(n) = reasoning_tokens {
+        // Drop a present `null` sentinel before `or_insert`: a top-level
+        // `reasoning_tokens: null` from the upstream would otherwise block
+        // the sub-bag lift because `entry().or_insert()` treats an occupied
+        // entry -- even one holding `null` -- as already set.
+        if matches!(usage.get("reasoning_tokens"), Some(Value::Null)) {
+            usage.remove("reasoning_tokens");
+        }
         usage.entry("reasoning_tokens").or_insert(Value::from(n));
     }
 
@@ -95,6 +121,10 @@ fn lift_chunk_usage_subbags(val: &mut Value) {
                 .and_then(|v| v.as_u64())
         });
     if let Some(n) = cache_read {
+        // Same null-sentinel guard as `reasoning_tokens` above.
+        if matches!(usage.get("cache_read_input_tokens"), Some(Value::Null)) {
+            usage.remove("cache_read_input_tokens");
+        }
         usage
             .entry("cache_read_input_tokens")
             .or_insert(Value::from(n));
@@ -231,10 +261,8 @@ impl ThinkTagAccumulator {
             let tool_calls = choice_val
                 .get("delta")
                 .and_then(|d| d.get("tool_calls"))
-                .cloned()
-                .and_then(|v| if v.is_null() { None } else { Some(v) })
-                .and_then(|v| v.as_array().cloned())
-                .map(|arr| arr.into_iter().collect::<Vec<_>>());
+                .filter(|v| !v.is_null())
+                .and_then(|v| v.as_array().cloned());
 
             let (outside_content, inside_reasoning) = self.split_think_tags(&delta_content);
 
@@ -786,5 +814,97 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(chunk.usage.unwrap().reasoning_tokens, Some(11));
+    }
+
+    /// Regression: when the upstream emits `reasoning_tokens: null` at
+    /// the top level (a present-but-null sentinel) the sub-bag lift from
+    /// `completion_tokens_details.reasoning_tokens` must still land.
+    /// Before the fix, `entry().or_insert()` treated the null-occupied
+    /// entry as already set and silently dropped the sub-bag value.
+    #[test]
+    fn terminal_chunk_null_sentinel_does_not_block_subbag_lift() {
+        let raw = terminal_chunk_with_usage(json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "total_tokens": 30,
+            "reasoning_tokens": null,
+            "completion_tokens_details": {"reasoning_tokens": 5}
+        }));
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            chunk.usage.unwrap().reasoning_tokens,
+            Some(5),
+            "null sentinel must be replaced by sub-bag value"
+        );
+    }
+
+    /// Regression: when the upstream emits `cache_read_input_tokens: null`
+    /// at the top level the sub-bag lift must still set the field.
+    #[test]
+    fn terminal_chunk_null_cache_sentinel_does_not_block_subbag_lift() {
+        let raw = terminal_chunk_with_usage(json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "cache_read_input_tokens": null,
+            "prompt_tokens_details": {"cached_tokens": 64}
+        }));
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            chunk.usage.unwrap().cache_read_input_tokens,
+            Some(64),
+            "null cache sentinel must be replaced by sub-bag value"
+        );
+    }
+
+    /// A mid-stream JSON error envelope (Azure content filter, OpenRouter
+    /// overload, NIM auth-wall) must produce `Error::Upstream`, not
+    /// `Error::NormalizeResponse("chunk deserialize: ...")`.
+    #[test]
+    fn mid_stream_error_envelope_returns_upstream_error() {
+        let raw = json!({
+            "error": {
+                "message": "content management policy violation",
+                "code": 403
+            }
+        })
+        .to_string();
+        let err = parse_chunk("test-provider", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
+        match err {
+            Error::Upstream {
+                provider,
+                status,
+                body,
+            } => {
+                assert_eq!(provider, "test-provider");
+                assert_eq!(status, 403);
+                assert!(
+                    body.contains("content management policy violation"),
+                    "error body must contain upstream message, got: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// When the error envelope has no numeric `code`, status defaults to 502.
+    #[test]
+    fn mid_stream_error_envelope_non_numeric_code_defaults_to_502() {
+        let raw = json!({
+            "error": {
+                "message": "service overloaded",
+                "code": "rate_limit_exceeded"
+            }
+        })
+        .to_string();
+        let err = parse_chunk("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
+        match err {
+            Error::Upstream { status, .. } => assert_eq!(status, 502),
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
     }
 }
