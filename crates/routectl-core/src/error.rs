@@ -26,8 +26,29 @@ pub enum Error {
     #[error("auth: {0}")]
     Auth(String),
 
+    /// A configuration value failed validation: malformed TOML, a
+    /// missing required field, an invalid alias/model/provider entry,
+    /// or a startup policy check (e.g. refusing a public bind without
+    /// listener tokens). Detected when parsing or building from
+    /// config, NOT during request processing. Surfaces as HTTP 500
+    /// `config_error` with the detail suppressed from the client body
+    /// (operators read the full message in logs). For unexpected
+    /// runtime failures (serialization bugs, IO, impossible states)
+    /// use `Internal` instead -- a client seeing `config_error` for a
+    /// serialization bug is misleading and unactionable.
     #[error("config: {0}")]
     Config(String),
+
+    /// An unexpected runtime failure that is neither caller error nor
+    /// an upstream/provider problem: a response/chunk serialization
+    /// bug, a socket bind / serve-loop / local_addr IO failure, or an
+    /// "impossible state" path that no better variant covers. Surfaces
+    /// as HTTP 500 `internal_error` with a generic client body -- the
+    /// detail is for operators (logs), never exposed to callers.
+    /// Distinct from `Config` (configuration validation) and `Io`
+    /// (a bare `std::io::Error` carried verbatim via `#[from]`).
+    #[error("internal: {0}")]
+    Internal(String),
 
     /// Request rejected because a body failed a static invariant.
     /// Produced both by ingress adapters (e.g. cache_control

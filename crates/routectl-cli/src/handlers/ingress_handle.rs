@@ -411,6 +411,10 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             tracing::error!(error = %e, "config error suppressed in HTTP response");
             "internal configuration error".to_string()
         }
+        Error::Internal(_) => {
+            tracing::error!(error = %e, "internal error suppressed in HTTP response");
+            "internal error".to_string()
+        }
         _ => e.to_string(),
     };
     error_response(shape, status, type_str, &public_message, type_str)
@@ -436,6 +440,7 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
         Error::Auth(_) => (StatusCode::SERVICE_UNAVAILABLE, "auth_error"),
         Error::Streaming(_) => (StatusCode::BAD_GATEWAY, "streaming_error"),
         Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
+        Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         Error::NotImplemented(_, _) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }

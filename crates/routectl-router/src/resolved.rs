@@ -28,6 +28,10 @@ use crate::config::{HistoryReasoning, ReasoningDialect};
 /// One fully-resolved model entry: a nickname bound to a concrete
 /// provider, an upstream string, and per-model knobs lifted off
 /// `[models.X]`. See module docs.
+///
+/// Hop 2 of 4 in the per-model knob relay -- see the `PER-MODEL KNOB
+/// RELAY` note on `crate::config::ModelEntry` before adding a field
+/// that the egress reads.
 #[derive(Clone)]
 pub struct ResolvedModel {
     /// The model entry's table key in `[models]`. Used as the

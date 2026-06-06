@@ -150,7 +150,7 @@ impl IngressAdapter for OpenAiIngress {
         // expect it and some SDKs error or forward it unexpectedly.
         let resp = strip_matched_stop_sequence_from_response(resp);
         serde_json::to_value(&resp)
-            .map_err(|e| Error::Config(format!("openai ingress: serialize response: {e}")))
+            .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))
     }
 
     fn new_stream_state(&self) -> Box<dyn IngressStreamState> {
@@ -175,7 +175,7 @@ impl IngressAdapter for OpenAiIngress {
         // streaming chunks.
         let chunk = strip_matched_stop_sequence_from_chunk(chunk);
         let data = serde_json::to_string(&chunk)
-            .map_err(|e| Error::Config(format!("openai ingress: serialize chunk: {e}")))?;
+            .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
         Ok(vec![SseEvent::unnamed(data)])
     }
 

@@ -114,6 +114,33 @@ pub struct LogConfig {
 /// Two fields, `header_extras` and `payload_extras`, live BOTH here and
 /// on every provider variant; the dispatch layer merges them per
 /// request (model wins on key collision; see `Router` merge helpers).
+///
+/// PER-MODEL KNOB RELAY (read before adding a knob here).
+/// A per-model value the egress reads passes through FOUR struct
+/// definitions, each a deliberate layer, not a redundant copy:
+///
+///   1. `ModelEntry`                (this struct, config.rs) -- TOML
+///      deserialization target; `#[serde(deny_unknown_fields)]`.
+///   2. `crate::resolved::ResolvedModel`   -- startup-resolved per
+///      nickname; adds the `Arc<dyn Provider>` and may transform the
+///      type (e.g. `Vec<String>` -> `Arc<[String]>` for `effort_levels`).
+///   3. `crate::router::DispatchTarget`    -- per-request dispatch hop;
+///      adds `state_key`, makes `provider` optional.
+///   4. `routectl_core::RoutectlInternal`  -- the transport-internal
+///      carrier on `ChatRequest`; the egress reads the value here.
+///      `apply_layered_overlays` (router.rs) copies it from the
+///      `DispatchTarget`.
+///
+/// Verbatim pass-through fields (`supports_adaptive_thinking`,
+/// `effort_levels`, `max_thinking_budget`, `max_output_tokens`) are
+/// relayed unchanged at each hop -- adding one means editing all four
+/// definitions plus the `factory.rs` `ModelEntry` -> `ResolvedModel`
+/// mapping and the `apply_layered_overlays` copy. The hop is the price
+/// of the config-crate (TOML serde shape) / core-crate (wire-internal)
+/// separation: `reasoning_dialect` / `history_reasoning` even change
+/// type at the core boundary (config-side enum -> `Core*` enum via the
+/// `From` impls below), so a single shared struct cannot span both
+/// crates without inverting the `core <- router` dependency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]

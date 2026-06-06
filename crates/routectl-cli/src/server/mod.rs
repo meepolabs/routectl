@@ -88,7 +88,7 @@ pub async fn serve(
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr)
         .await
-        .map_err(|e| Error::Config(format!("bind {addr}: {e}")))?;
+        .map_err(|e| Error::Internal(format!("bind {addr}: {e}")))?;
 
     serve_on_listener(config, listener, config_path).await
 }
@@ -120,7 +120,7 @@ pub async fn serve_on_listener(
 
     let bound = listener
         .local_addr()
-        .map_err(|e| Error::Config(format!("local_addr: {e}")))?;
+        .map_err(|e| Error::Internal(format!("local_addr: {e}")))?;
 
     let alias_list: Vec<&str> = config.aliases.keys().map(String::as_str).collect();
     tracing::info!(
@@ -191,7 +191,7 @@ pub async fn serve_on_listener(
 
     let serve_result = axum::serve(listener, app)
         .await
-        .map_err(|e| Error::Config(format!("serve: {e}")));
+        .map_err(|e| Error::Internal(format!("serve: {e}")));
 
     // Signal every reload-side task to shut down. Drop the handles
     // last so a hung task does not block server return; tokio

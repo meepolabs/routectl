@@ -106,8 +106,8 @@ pub fn show(config: &Config) -> Result<()> {
     for (_, entry) in redacted.providers.iter_mut() {
         redact_entry(entry);
     }
-    let s =
-        toml::to_string_pretty(&redacted).map_err(|e| Error::Config(format!("serialize: {e}")))?;
+    let s = toml::to_string_pretty(&redacted)
+        .map_err(|e| Error::Internal(format!("serialize: {e}")))?;
     println!("{s}");
     Ok(())
 }
