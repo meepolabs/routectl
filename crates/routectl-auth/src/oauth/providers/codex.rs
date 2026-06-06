@@ -27,7 +27,6 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
-use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::oauth::providers::{truncate, AuthParams, OAuthFlow};
@@ -155,7 +154,7 @@ impl OAuthFlow for Codex {
         // pre / post / error legs of a refresh attempt -- without it
         // on the failure side, an operator cannot tell which
         // credential triggered which 401 when refreshes interleave.
-        let prior_sha8 = sha8(refresh_token);
+        let prior_sha8 = super::sha8(refresh_token);
 
         // Pre-POST: emit a debug line tagging this attempt by the SHA8
         // of the refresh token. Operators correlating a refresh
@@ -324,7 +323,7 @@ pub(super) async fn decode_token_response_traced(
     // compute the delta from now, matching the operator's mental model
     // even though OpenAI's response itself does not carry the field.
     let new_refresh_present = parsed.refresh_token.is_some();
-    let new_refresh_sha8 = parsed.refresh_token.as_deref().map(sha8);
+    let new_refresh_sha8 = parsed.refresh_token.as_deref().map(super::sha8);
     let access_token_clone = parsed.access_token.clone();
 
     let record = map_to_record(parsed, prior_refresh)?;
@@ -357,21 +356,6 @@ fn error_kind_label(e: &OAuthError) -> &'static str {
         OAuthError::RefreshExpired(_) => "refresh_expired",
         _ => "other",
     }
-}
-
-/// First 4 bytes of `SHA-256(token)` rendered as 8 lowercase hex
-/// chars. Stable, deterministic correlation id for refresh-flow trace
-/// events without leaking token VALUES. 4 bytes (32 bits) gives a
-/// collision probability that is fine for log correlation across a
-/// single operator's refresh history -- this is NOT a cryptographic
-/// commitment, just a logging tag.
-fn sha8(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    let mut out = String::with_capacity(8);
-    for b in &digest[..4] {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
 }
 
 /// Pull the response body as UTF-8, capped at `MAX_TOKEN_BODY_BYTES`.
