@@ -40,9 +40,14 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
         AnthropicSystem::Text(t) => out.push(ConverseSystemBlock::Text(t)),
         AnthropicSystem::Blocks(blocks) => {
             for b in &blocks {
-                if !b.text.is_empty() {
-                    out.push(ConverseSystemBlock::Text(b.text.clone()));
+                // An empty-text system block can't anchor a cachePoint: AWS
+                // rejects a `{cachePoint}` with no preceding content block.
+                // Skip the whole entry so a verbatim-preserved empty block
+                // with cache_control doesn't emit a leading/orphan marker.
+                if b.text.is_empty() {
+                    continue;
                 }
+                out.push(ConverseSystemBlock::Text(b.text.clone()));
                 if let Some(cc) = b.cache_control.as_ref() {
                     out.push(ConverseSystemBlock::CachePoint(
                         CachePoint::default_with_ttl(Some(cc.effective_ttl().to_string())),
@@ -55,5 +60,101 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
         None
     } else {
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use routectl_core::{CacheControl, ChatRequest, SystemBlock, SystemContent};
+
+    fn block(text: &str, cc: Option<CacheControl>) -> SystemBlock {
+        SystemBlock {
+            kind: "text".into(),
+            text: text.into(),
+            cache_control: cc,
+            citations: None,
+        }
+    }
+
+    fn req_with_system(system: SystemContent) -> ChatRequest {
+        ChatRequest {
+            system: Some(system),
+            ..Default::default()
+        }
+    }
+
+    /// An empty-text system block carrying cache_control (preserved verbatim
+    /// by the Anthropic ingress) must NOT emit a leading/orphan cachePoint --
+    /// AWS rejects a `{cachePoint}` with no preceding content block.
+    #[test]
+    fn empty_text_block_with_cache_control_emits_no_orphan_cachepoint() {
+        // Arrange
+        let req = req_with_system(SystemContent::Blocks(vec![block(
+            "",
+            Some(CacheControl::ephemeral_5m()),
+        )]));
+
+        // Act
+        let out = build_system(&req);
+
+        // Assert
+        assert!(
+            out.is_none(),
+            "an empty-text block must produce neither Text nor an orphan \
+             cachePoint, got: {out:?}"
+        );
+    }
+
+    /// A non-empty system block with cache_control emits its Text block
+    /// followed by the anchored cachePoint -- regression guard that the
+    /// orphan fix didn't drop legitimate breakpoints.
+    #[test]
+    fn non_empty_block_with_cache_control_emits_text_then_cachepoint() {
+        // Arrange
+        let req = req_with_system(SystemContent::Blocks(vec![block(
+            "be helpful",
+            Some(CacheControl::ephemeral_5m()),
+        )]));
+
+        // Act
+        let out = build_system(&req).expect("non-empty system must produce blocks");
+
+        // Assert
+        assert_eq!(out.len(), 2, "expected a Text block then a cachePoint");
+        assert!(
+            matches!(&out[0], ConverseSystemBlock::Text(t) if t == "be helpful"),
+            "first block must be the system text, got: {:?}",
+            out[0]
+        );
+        assert!(
+            matches!(&out[1], ConverseSystemBlock::CachePoint(_)),
+            "cachePoint must follow the anchoring text block, got: {:?}",
+            out[1]
+        );
+    }
+
+    /// A leading empty block (with marker) followed by a real block must
+    /// drop only the empty entry; the real block and its cachePoint survive
+    /// and no orphan cachePoint leads the array.
+    #[test]
+    fn empty_block_before_real_block_drops_only_the_empty_entry() {
+        // Arrange
+        let req = req_with_system(SystemContent::Blocks(vec![
+            block("", Some(CacheControl::ephemeral_5m())),
+            block("real prompt", Some(CacheControl::ephemeral_1h())),
+        ]));
+
+        // Act
+        let out = build_system(&req).expect("the real block must survive");
+
+        // Assert
+        assert_eq!(out.len(), 2, "only the real block + its cachePoint remain");
+        assert!(
+            matches!(&out[0], ConverseSystemBlock::Text(t) if t == "real prompt"),
+            "the surviving array must start with the real text, got: {:?}",
+            out[0]
+        );
+        assert!(matches!(&out[1], ConverseSystemBlock::CachePoint(_)));
     }
 }
