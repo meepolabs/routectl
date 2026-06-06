@@ -137,7 +137,7 @@ impl ResponsesStreamState {
     ///     housekeeping events like in_progress/output_text.done)
     ///   - `Err(_)`: a fatal stream error -- `response.failed` or a
     ///     malformed event payload. The caller terminates the stream.
-    pub(crate) fn process_event(
+    pub(crate) fn parse_event(
         &mut self,
         provider_id: &str,
         event: ResponsesStreamEvent,

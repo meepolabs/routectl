@@ -57,13 +57,16 @@ pub struct ModelProfile {
     /// Translate `reasoning.effort` to the provider's effort param.
     /// Today the openai dialect always does this when `effort` is set;
     /// the flag is here to make the policy explicit and to support a
-    /// future provider that needs effort-only-when-allowed.
-    /// Read by `openai_compat::request`.
+    /// future provider that needs effort-only-when-allowed. Declared in
+    /// the table but not yet consumed by any provider's request path.
+    #[allow(dead_code)]
     pub requires_reasoning_effort: bool,
 
     /// Forward `chat_template_kwargs` (vLLM/DashScope/some NIM endpoints).
     /// Set on a per-model basis when the model is served by a thinking
-    /// model that needs `enable_thinking`. Read by `openai_compat::request`.
+    /// model that needs `enable_thinking`. Declared in the table but not
+    /// yet consumed by any provider's request path.
+    #[allow(dead_code)]
     pub uses_chat_template_kwargs: bool,
 }
 

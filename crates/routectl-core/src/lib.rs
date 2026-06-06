@@ -5,9 +5,9 @@
 //! `provider` for the per-backend trait.
 
 pub mod cache_control;
-pub mod codex_fingerprint;
 pub mod content_part;
 pub mod error;
+pub mod identity;
 pub mod log_safe;
 pub mod provider;
 pub mod reasoning_dialect;
@@ -22,21 +22,14 @@ pub use cache_control::{Breakpoint, BreakpointPosition, CacheControl};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};
 pub use log_safe::{
-    debug_upstream_error_body, extract_structural_summary, extract_upstream_message,
-    header_trace_enabled, headers_to_json, init_log_overrides, redact_outgoing_header_values,
-    redact_prompts_in, redact_prompts_with_flag, sanitize_for_log, sanitize_upstream_body,
+    debug_upstream_error_body, extract_upstream_message, header_trace_enabled, headers_to_json,
+    init_log_overrides, redact_prompts_in, sanitize_for_log, sanitize_upstream_body,
     sanitize_upstream_body_with_cap, trace_body_cap, trace_egress_body, trace_egress_headers,
     trace_ingress_body, trace_ingress_headers, trace_outgoing_body, trace_outgoing_headers,
     trace_stream_summary, trace_structural_summary, trace_upstream_response_headers,
     trace_upstream_success_body, wrap_stream_with_summary, StructuralSummary, HDR_MSG_EGRESS,
     HDR_MSG_INGRESS, HDR_MSG_OUTGOING, HDR_MSG_UPSTREAM, MAX_TRACE_BODY_BYTES,
 };
-// Re-export the deprecated alias from the crate root so downstream
-// consumers that imported the old name from `routectl_core::*` get a
-// `#[deprecated]` warning instead of a compile error. Kept until the
-// next breaking release.
-#[allow(deprecated)]
-pub use log_safe::MAX_TRACE_OUTGOING_BODY_BYTES;
 pub use provider::Provider;
 pub use reasoning_dialect::{
     HistoryReasoning as CoreHistoryReasoning, ReasoningDialect as CoreReasoningDialect,

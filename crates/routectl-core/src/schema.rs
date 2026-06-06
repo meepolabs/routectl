@@ -104,19 +104,25 @@ pub struct ChatRequest {
     /// wire. Never serialized -- `#[serde(skip)]` keeps the field
     /// invisible to TOML/JSON.
     ///
-    /// The router populates this from `ResolvedModel` right before
-    /// calling `provider.complete(req)` / `provider.stream(req)` so the
-    /// `Provider` trait signature stays stable across all five
-    /// concrete providers. Today the carrier ferries the openai-compat
-    /// reasoning_dialect + history_reasoning (moved from
-    /// `[providers.X]` to `[models.X]` in v0.6.0); future per-model
+    /// Despite the "transport-internal" framing, this also ferries
+    /// resolved per-model CONFIG values (the openai-compat
+    /// reasoning_dialect + history_reasoning, merged header_extras, the
+    /// adaptive-thinking flag, etc.) -- not just opaque transport state.
+    /// The router populates it from `ResolvedModel` right before calling
+    /// `provider.complete(req)` / `provider.stream(req)` so the
+    /// `Provider` trait signature stays stable across all five concrete
+    /// providers. The reasoning_dialect + history_reasoning knobs moved
+    /// from `[providers.X]` to `[models.X]` in v0.6.0; future per-model
     /// transport knobs land here too.
     #[serde(skip)]
     pub routectl_internal: RoutectlInternal,
 }
 
 /// Transport-internal carrier for resolved-model knobs the dispatch
-/// layer hands to the egress without bouncing through the wire. See
+/// layer hands to the egress without bouncing through the wire. In
+/// practice it carries resolved per-model CONFIG values (reasoning
+/// dialect, history-reasoning policy, merged header_extras,
+/// adaptive-thinking flag) alongside any pure-transport state. See
 /// `ChatRequest::routectl_internal` for the contract.
 ///
 /// Every field is `Option` so an egress can fall back to its own

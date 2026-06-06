@@ -13,7 +13,7 @@ fn parse(json_str: serde_json::Value) -> ResponsesStreamEvent {
 
 fn drive(state: &mut ResponsesStreamState, ev: serde_json::Value) -> Vec<ChatChunk> {
     state
-        .process_event("test", parse(ev))
+        .parse_event("test", parse(ev))
         .expect("event processing")
 }
 
@@ -345,7 +345,7 @@ fn sse_response_completed_emits_finish_and_usage() {
 #[test]
 fn sse_response_failed_emits_error_chunk() {
     let mut state = ResponsesStreamState::default();
-    let result = state.process_event(
+    let result = state.parse_event(
         "test",
         parse(json!({
             "type": "response.failed",
@@ -778,7 +778,7 @@ fn sse_response_cancelled_after_function_call_seen_emits_error_not_tool_calls() 
         drive(&mut state, ev);
     }
     // The cancelled event must now surface as Err::upstream, not a chunk.
-    let result = state.process_event(
+    let result = state.parse_event(
         "test",
         parse(json!({
             "type": "response.cancelled",
@@ -978,7 +978,7 @@ fn sse_response_cancelled_yields_upstream_error() {
     let mut state = ResponsesStreamState::default();
 
     // Act
-    let result = state.process_event(
+    let result = state.parse_event(
         "test",
         parse(json!({
             "type": "response.cancelled",
@@ -1008,7 +1008,7 @@ fn sse_response_completed_without_response_field_yields_upstream_error() {
     let mut state = ResponsesStreamState::default();
 
     // Act
-    let result = state.process_event("test", parse(json!({"type": "response.completed"})));
+    let result = state.parse_event("test", parse(json!({"type": "response.completed"})));
 
     // Assert: must be Err::Upstream.
     match result.expect_err("response.completed without response field must yield Err") {

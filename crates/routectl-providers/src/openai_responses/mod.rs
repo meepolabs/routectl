@@ -343,7 +343,7 @@ impl OpenAiResponsesProvider {
 /// release so the wire fingerprint stays current (the chatgpt.com risk
 /// system flags stale fingerprints).
 fn default_codex_identity_headers() -> [(&'static str, &'static str); 3] {
-    use routectl_core::codex_fingerprint::{
+    use routectl_core::identity::codex::{
         CODEX_ORIGINATOR, ORIGINATOR_HEADER_NAME, PINNED_CODEX_VERSION, RESIDENCY_HEADER_NAME,
         RESIDENCY_HEADER_VALUE,
     };
@@ -736,7 +736,7 @@ impl Provider for OpenAiResponsesProvider {
                                 return;
                             }
                         };
-                        match state.process_event(&provider_id, parsed) {
+                        match state.parse_event(&provider_id, parsed) {
                             Err(e) => {
                                 yield Err(e);
                                 return;
@@ -1449,7 +1449,7 @@ mod header_merge_tests {
     /// auth_kind + api_key_ref still emits a full codex fingerprint.
     #[test]
     fn defaults_appear_on_wire_with_empty_header_extras() {
-        use routectl_core::codex_fingerprint::{
+        use routectl_core::identity::codex::{
             CODEX_ORIGINATOR, PINNED_CODEX_VERSION, RESIDENCY_HEADER_VALUE,
         };
 

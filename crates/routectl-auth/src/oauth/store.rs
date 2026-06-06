@@ -123,7 +123,7 @@ impl OAuthStore {
         // (no impact on the Anthropic token endpoint) but pinning a
         // single client keeps the refresh hot path simple.
         let mut default_headers = reqwest::header::HeaderMap::new();
-        for (name, value) in routectl_core::codex_fingerprint::codex_default_headers() {
+        for (name, value) in routectl_core::identity::codex::codex_default_headers() {
             // The constants are valid header name/value pairs today.
             // Promote any future regression that breaks them into a
             // process-startup panic so a silent drop cannot crack the
@@ -138,7 +138,7 @@ impl OAuthStore {
             default_headers.insert(header_name, header_value);
         }
         let http = reqwest::Client::builder()
-            .user_agent(routectl_core::codex_fingerprint::codex_user_agent())
+            .user_agent(routectl_core::identity::codex::codex_user_agent())
             .default_headers(default_headers)
             .connect_timeout(std::time::Duration::from_secs(
                 Self::HTTP_CONNECT_TIMEOUT_SECS,
@@ -1287,7 +1287,7 @@ mod tests {
 
         // Arrange: stand up an OAuthStore so its production client
         // builder runs (default headers + UA wired from
-        // routectl_core::codex_fingerprint).
+        // routectl_core::identity::codex).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         let store = OAuthStore::open(&path).await.unwrap();

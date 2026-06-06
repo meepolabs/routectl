@@ -2,12 +2,10 @@ pub mod memory_store;
 #[cfg(feature = "oauth")]
 pub mod oauth;
 pub mod secret_ref;
-pub mod session;
 pub mod store;
 
 pub use memory_store::MemoryStore;
 pub use secret_ref::SecretRef;
-pub use session::{CapturedSession, Cookie, SessionCapture};
 pub use store::SecretStore;
 
 #[cfg(feature = "oauth")]

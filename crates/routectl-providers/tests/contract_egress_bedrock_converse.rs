@@ -37,7 +37,7 @@ use common::scenarios;
 /// Construct a `BedrockProvider` wired for the Converse shape with a
 /// bearer-key auth handle. The bearer-key path skips SigV4 entirely;
 /// `normalize_request` does not touch the resolved creds (signing
-/// happens in `signing::apply_auth` later in the pipeline), so the
+/// happens in `signing::apply` later in the pipeline), so the
 /// dummy key here is purely structural -- it never crosses any wire in
 /// these tests.
 ///

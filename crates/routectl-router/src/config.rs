@@ -1165,14 +1165,6 @@ fn default_anthropic_version() -> String {
     "2023-06-01".into()
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProviderKind {
-    #[default]
-    OpenaiCompat,
-    AnthropicApi,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReasoningDialect {

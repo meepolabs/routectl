@@ -30,7 +30,7 @@
 
 use reqwest::RequestBuilder;
 
-use routectl_core::codex_fingerprint::codex_user_agent;
+use routectl_core::identity::codex::codex_user_agent;
 use routectl_core::Result;
 
 use super::{AuthKind, OpenAiResponsesConfig};
@@ -99,7 +99,7 @@ fn apply_api_key(rb: RequestBuilder, bearer: &str) -> RequestBuilder {
 mod tests {
     use super::*;
     use reqwest::Client;
-    use routectl_core::codex_fingerprint::{CODEX_ORIGINATOR, PINNED_CODEX_VERSION};
+    use routectl_core::identity::codex::{CODEX_ORIGINATOR, PINNED_CODEX_VERSION};
     use routectl_core::{StaticToken, TokenSource};
     use std::sync::Arc;
 

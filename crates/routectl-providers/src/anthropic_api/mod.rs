@@ -26,7 +26,6 @@ use routectl_core::{
 };
 
 pub(crate) mod context_management;
-pub(crate) mod defaults;
 pub(crate) mod parts;
 pub mod request;
 pub mod response;
@@ -345,7 +344,8 @@ impl AnthropicApiProvider {
         // defaults (it is the raw-API surface, not the SDK client). Note
         // `anthropic-beta` is NOT among these -- it is composed above.
         if self.cfg.auth_kind == AuthKind::OauthBearer {
-            for (k, v) in defaults::default_claude_code_identity_headers() {
+            for (k, v) in routectl_core::identity::anthropic::default_claude_code_identity_headers()
+            {
                 insert_header(&mut header_map, &self.cfg.id, k, v);
             }
         }
@@ -413,7 +413,7 @@ fn resolve_user_agent(user_agent: Option<&str>, auth_kind: AuthKind) -> Option<S
     match (user_agent, auth_kind) {
         (Some(ua), _) => Some(ua.to_string()),
         (None, AuthKind::OauthBearer) => {
-            Some(defaults::default_claude_code_user_agent().to_string())
+            Some(routectl_core::identity::anthropic::default_claude_code_user_agent().to_string())
         }
         (None, AuthKind::ApiKey) => None,
     }
