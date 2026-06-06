@@ -752,19 +752,15 @@ fn sse_response_completed_with_empty_output_stays_stop_when_no_function_call_see
     assert_eq!(final_c.choices[0].finish_reason.as_deref(), Some("stop"));
 }
 
-/// Review follow-up to Bug F: when a stream observes a function_call
-/// and then receives `response.cancelled`, the terminal finish_reason
-/// must be `"error"` (cancelled semantics) -- NOT `"tool_calls"`.
-/// `map_finish_reason` already enforces this (it maps `"cancelled"`
-/// to `"error"` regardless of `has_function_call`), but pin the
-/// contract so a future refactor of the sticky-flag logic doesn't
-/// regress cancelled-after-tool-call streams into
-/// `finish_reason="tool_calls"`.
+/// Fix: `response.cancelled` now surfaces as `Err::upstream` (mirrors
+/// `response.failed`). Pin: when a function_call was observed before
+/// cancellation, the error still comes through correctly (not a chunk
+/// with `finish_reason="tool_calls"`).
 #[test]
 fn sse_response_cancelled_after_function_call_seen_emits_error_not_tool_calls() {
     let mut state = ResponsesStreamState::default();
-    let mut all_chunks: Vec<ChatChunk> = Vec::new();
-    let events = vec![
+    // Drive pre-cancellation events normally.
+    let pre_events = vec![
         json!({"type": "response.created", "response": {"id": "r", "model": "m"}}),
         json!({
             "type": "response.output_item.added",
@@ -777,9 +773,14 @@ fn sse_response_cancelled_after_function_call_seen_emits_error_not_tool_calls() 
                 "arguments": ""
             }
         }),
-        // Mid-stream cancellation -- common when the operator
-        // interrupts cc or the upstream's circuit-breaker fires.
-        json!({
+    ];
+    for ev in pre_events {
+        drive(&mut state, ev);
+    }
+    // The cancelled event must now surface as Err::upstream, not a chunk.
+    let result = state.process_event(
+        "test",
+        parse(json!({
             "type": "response.cancelled",
             "response": {
                 "id": "r",
@@ -787,17 +788,12 @@ fn sse_response_cancelled_after_function_call_seen_emits_error_not_tool_calls() 
                 "model": "m",
                 "output": []
             }
-        }),
-    ];
-    for ev in events {
-        all_chunks.extend(drive(&mut state, ev));
-    }
-    let final_c = all_chunks.last().unwrap();
-    assert_eq!(
-        final_c.choices[0].finish_reason.as_deref(),
-        Some("error"),
-        "cancelled status must map to 'error' even when a function_call was seen",
+        })),
     );
+    match result.expect_err("cancelled must surface as Err") {
+        Error::Upstream { .. } => {}
+        other => panic!("expected Upstream, got {other:?}"),
+    }
 }
 
 /// Review follow-up to Bug F: the bounded-growth cap-skip path in
@@ -970,4 +966,58 @@ fn sse_interleaved_two_text_blocks_route_to_correct_block() {
         chunks_2[0].choices[0].delta.content.as_deref(),
         Some("second")
     );
+}
+
+/// Pin (finding #2): a streamed `response.cancelled` event must surface
+/// as `Err::Upstream`, consistent with `response.failed` and with how
+/// `complete()` treats cancellation. Previously it returned Ok([chunk])
+/// with `finish_reason="error"`, hiding the cancellation behind a chunk.
+#[test]
+fn sse_response_cancelled_yields_upstream_error() {
+    // Arrange
+    let mut state = ResponsesStreamState::default();
+
+    // Act
+    let result = state.process_event(
+        "test",
+        parse(json!({
+            "type": "response.cancelled",
+            "response": {
+                "id": "r_cancelled",
+                "status": "cancelled",
+                "model": "m",
+                "output": []
+            }
+        })),
+    );
+
+    // Assert: must be Err::Upstream, not Ok(chunk).
+    match result.expect_err("response.cancelled must yield Err::Upstream") {
+        Error::Upstream { .. } => {}
+        other => panic!("expected Upstream error, got {other:?}"),
+    }
+}
+
+/// Pin (finding #3): a `response.completed` event that carries no
+/// `response` field must surface as `Err::Upstream` rather than
+/// silently producing an empty-output completion chunk. The previous
+/// `unwrap_or_default_resp()` call papered over the missing field.
+#[test]
+fn sse_response_completed_without_response_field_yields_upstream_error() {
+    // Arrange: `response.completed` with no `response` key.
+    let mut state = ResponsesStreamState::default();
+
+    // Act
+    let result = state.process_event("test", parse(json!({"type": "response.completed"})));
+
+    // Assert: must be Err::Upstream.
+    match result.expect_err("response.completed without response field must yield Err") {
+        Error::Upstream { body, .. } => {
+            assert!(
+                body.contains("response.completed without response payload"),
+                "expected descriptive message, got: {body}"
+            );
+        }
+        other => panic!("expected Upstream error, got {other:?}"),
+    }
 }
