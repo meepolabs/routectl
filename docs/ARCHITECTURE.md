@@ -20,8 +20,10 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
     OAuth-bearer); ships server-side `context-management-2025-06-27`
     beta emulation behind the per-provider `context_management` knob.
   - `bedrock` -- AWS Bedrock with SigV4 + InvokeModel + Converse.
-    Behind a `bedrock` Cargo feature; opt out with
-    `--no-default-features` for a lean build without the AWS SDK.
+    Behind a `bedrock` Cargo feature; the providers library can opt
+    out with `cargo check -p routectl-providers --no-default-features`
+    for an AWS-SDK-free build. The shipped `routectl` binary always
+    links the AWS SDK (routectl-cli hardcodes `bedrock`).
   - `openai_responses` -- OpenAI Responses API (chatgpt-oauth JWT,
     OpenAI api-key, or AWS bedrock-mantle bearer); `complete()`
     force-streams.

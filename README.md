@@ -67,13 +67,12 @@ cargo build --release
 ./target/release/routectl --help
 ```
 
-The release binary is ~6.5 MB stripped with default features (includes the AWS SDK dependency tree for Bedrock). For a lean build without AWS deps:
+The release binary is ~6.5 MB stripped with default features (includes the AWS SDK dependency tree for Bedrock). The shipped `routectl` binary always links the AWS SDK -- `routectl-cli` hardcodes the `bedrock` feature, and Cargo feature unification re-enables it across the whole workspace, so there is no AWS-free build of the binary itself. The lean command below builds the `routectl-providers` **library** without the AWS deps, for downstream embedders that depend on the crate directly:
 
 ```bash
-cargo build --release \
+cargo check -p routectl-providers \
   --no-default-features \
-  --features openai-compat,anthropic-api \
-  -p routectl-providers
+  --features openai-compat,anthropic-api
 ```
 
 ## Quick start
