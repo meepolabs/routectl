@@ -208,57 +208,6 @@ impl OAuthStore {
             .and_then(|rec| rec.account.account_id.clone())
     }
 
-    /// Read or lazily backfill the stable per-credential `session_id`.
-    /// Mirrors codex CLI's per-credential session-id, used in the
-    /// `session-id` HTTP header on outbound chatgpt-oauth traffic so
-    /// the upstream risk system can correlate one human's turns under
-    /// one stable session.
-    ///
-    /// Lookup-and-backfill semantics: returns the existing session_id
-    /// when present; when the record exists but has no session_id
-    /// (records minted by routectl < v0.7.1), generates a fresh
-    /// UUIDv4, persists it atomically, and returns the new value. A
-    /// missing record yields `Ok(None)` -- the caller (factory) treats
-    /// "no credential yet" as "no session-id header" rather than
-    /// failing provider construction.
-    ///
-    /// Generation is one-way: once minted, the session_id is stable
-    /// for the credential's lifetime; only a fresh `routectl login`
-    /// rotates it (codex provider mints a new one on exchange_code).
-    pub async fn peek_or_create_session_id(&self, provider: &str) -> Result<Option<String>> {
-        // Fast path: read-only lookup.
-        if let Some(existing) = self
-            .inner
-            .file
-            .read()
-            .await
-            .get(provider)
-            .and_then(|rec| rec.session_id.clone())
-        {
-            return Ok(Some(existing));
-        }
-        // Slow path: missing record OR record without session_id. Take
-        // the write lock, double-check, and persist with a fresh UUID
-        // when needed.
-        let mut guard = self.inner.file.write().await;
-        let Some(rec) = guard.get(provider).cloned() else {
-            return Ok(None);
-        };
-        if let Some(existing) = rec.session_id.clone() {
-            return Ok(Some(existing));
-        }
-        let new_id = uuid::Uuid::new_v4().to_string();
-        let mut updated = rec;
-        updated.session_id = Some(new_id.clone());
-        let mut staged = guard.clone();
-        staged.upsert(provider, updated);
-        file_io::save(&self.inner.path, &staged)
-            .await
-            .map_err(Error::from)?;
-        *guard = staged;
-        Ok(Some(new_id))
-    }
-
     /// Persist a token record atomically. Disk write happens FIRST,
     /// off a clone of the current in-memory state; the in-memory cache
     /// only commits on a successful save. This way a failed disk write
@@ -597,18 +546,6 @@ impl SecretStore for OAuthStore {
             }
         };
         Ok(self.peek_account_id(provider).await)
-    }
-
-    async fn session_id(&self, secret_ref: &SecretRef) -> Result<Option<String>> {
-        let provider = match secret_ref {
-            SecretRef::OAuth { provider } => provider,
-            other => {
-                return Err(Error::Auth(format!(
-                    "OAuthStore only handles oauth:// refs, got {other}",
-                )));
-            }
-        };
-        self.peek_or_create_session_id(provider).await
     }
 }
 
@@ -1397,54 +1334,6 @@ mod tests {
         assert!(
             ua.starts_with("codex_cli_rs/"),
             "refresh client UA must start with codex_cli_rs/, got: {ua}",
-        );
-    }
-
-    /// `session_id` round-trips through credentials.json. A fresh
-    /// `peek_or_create_session_id` mints a UUIDv4 and persists it; a
-    /// second call (across a fresh `OAuthStore::open`) returns the
-    /// same value.
-    #[tokio::test]
-    async fn credentials_json_round_trips_session_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("credentials.json");
-
-        // Seed a record with no session_id (the migration shape).
-        let store = OAuthStore::open(&path).await.unwrap();
-        store
-            .write_record("codex", rec_at(unix_now() + 3600))
-            .await
-            .unwrap();
-
-        let first = store
-            .peek_or_create_session_id("codex")
-            .await
-            .unwrap()
-            .expect("session_id should be minted");
-        assert_eq!(
-            first.len(),
-            36,
-            "session_id should be a 36-char UUID, got: {first}"
-        );
-
-        // A second call on the same store returns the persisted id.
-        let same = store
-            .peek_or_create_session_id("codex")
-            .await
-            .unwrap()
-            .expect("session_id should be present");
-        assert_eq!(first, same, "second peek must return persisted id");
-
-        // A fresh `open` re-reads from disk and surfaces the same id.
-        let reopened = OAuthStore::open(&path).await.unwrap();
-        let after_reopen = reopened
-            .peek_or_create_session_id("codex")
-            .await
-            .unwrap()
-            .expect("session_id should be present after reopen");
-        assert_eq!(
-            first, after_reopen,
-            "session_id must survive store reopen via disk persist"
         );
     }
 

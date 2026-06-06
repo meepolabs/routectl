@@ -130,21 +130,6 @@ pub struct OpenAiResponsesConfig {
     /// (`codex_cli_rs/<X.Y.Z> (...) <terminal>`) so the chatgpt.com
     /// risk system does not flag the fingerprint as drifted.
     pub user_agent: Option<String>,
-    /// Override the `originator` header sent on ChatgptOauth.
-    /// `None` -> `codex_cli_rs` (codex's `DEFAULT_ORIGINATOR`).
-    pub originator: Option<String>,
-    /// Stable per-credential session id (UUIDv4) used in the
-    /// `session-id` HTTP header on outbound chatgpt-oauth traffic.
-    /// `Some` only on ChatgptOauth; the factory reads / lazily mints
-    /// it from credentials.json. Mirrors codex's `ModelClient`
-    /// session_id.
-    pub session_id: Option<String>,
-    /// Stable per-install installation id (UUIDv4) used in the
-    /// `x-codex-installation-id` HTTP header on outbound chatgpt-oauth
-    /// traffic. `Some` only on ChatgptOauth; the factory reads /
-    /// lazily mints it from `~/.config/routectl/installation_id`.
-    /// Mirrors codex's installation_id, which survives login re-runs.
-    pub installation_id: Option<String>,
 }
 
 impl std::fmt::Debug for OpenAiResponsesConfig {
@@ -162,9 +147,6 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             .field("auth_kind", &self.auth_kind)
             .field("header_extras_len", &self.header_extras.len())
             .field("user_agent", &self.user_agent)
-            .field("originator", &self.originator)
-            .field("session_id_present", &self.session_id.is_some())
-            .field("installation_id_present", &self.installation_id.is_some())
             .finish()
     }
 }
@@ -189,9 +171,6 @@ impl OpenAiResponsesConfig {
             auth_kind: AuthKind::ChatgptOauth,
             header_extras: Vec::new(),
             user_agent: None,
-            originator: None,
-            session_id: None,
-            installation_id: None,
         }
     }
 }
@@ -199,6 +178,13 @@ impl OpenAiResponsesConfig {
 pub struct OpenAiResponsesProvider {
     cfg: OpenAiResponsesConfig,
     client: Client,
+    /// Per-provider codex window-id (UUIDv4), generated once in `new()`
+    /// and reused on every ChatgptOauth request as the
+    /// `x-codex-window-id` header. Stable for the life of this provider
+    /// instance so a single logical session keeps one window-id; a
+    /// router rebuild (hot-reload) mints a fresh one, which is
+    /// acceptable for the operator-driven header_extras model.
+    window_id: String,
     /// Cloudflare cookie jar shared with the reqwest client. `Arc`d so
     /// the provider can persist the jar to disk on Drop while reqwest
     /// continues to read / write through it on every request. `None`
@@ -242,6 +228,7 @@ impl OpenAiResponsesProvider {
         Self {
             cfg,
             client,
+            window_id: uuid::Uuid::new_v4().to_string(),
             cookie_jar,
             cookie_path,
         }
@@ -261,12 +248,29 @@ impl OpenAiResponsesProvider {
         req: &ChatRequest,
         bearer: &str,
     ) -> Result<reqwest::RequestBuilder> {
-        let mut rb = auth::apply(
-            rb,
-            &self.cfg,
-            bearer,
-            routectl_core::codex_fingerprint::codex_window_id(),
-        )?;
+        let mut rb = auth::apply(rb, &self.cfg, bearer)?;
+
+        // Build a per-request HeaderMap so the generated codex identity
+        // headers (below) can OVERRIDE any same-named header_extras
+        // entry. reqwest's `RequestBuilder::header()` APPENDS on
+        // collision; `HeaderMap::insert` replaces. The insertion order
+        // encodes the override precedence (later wins):
+        //   1. compiled codex identity defaults (ChatgptOauth only)
+        //   2. operator header_extras (overrides matching defaults)
+        //   3. per-request / per-provider UUIDs (always win)
+        let mut header_map = reqwest::header::HeaderMap::new();
+
+        // Compiled codex identity defaults. Fire by default on the
+        // ChatgptOauth path so a zero-config operator (auth_kind +
+        // api_key_ref only) still emits a full codex fingerprint. The
+        // header_extras loop below OVERRIDES any matching key. ApiKey /
+        // BedrockMantle get no defaults (no codex fingerprint).
+        if self.cfg.auth_kind == AuthKind::ChatgptOauth {
+            for (k, v) in default_codex_identity_headers() {
+                insert_header(&mut header_map, &self.cfg.id, k, v);
+            }
+        }
+
         // Prefer the router-composed map (provider + model merged at
         // dispatch) if present; fall back to `self.cfg.header_extras`
         // for library consumers that built the provider directly.
@@ -291,25 +295,96 @@ impl OpenAiResponsesProvider {
                 );
                 continue;
             }
-            // On the ChatgptOauth path, codex fingerprint headers are
-            // set precisely by auth::apply_chatgpt_oauth to mirror the
-            // codex CLI. Operator-supplied overrides would corrupt the
-            // fingerprint checked by chatgpt.com's risk system and can
-            // trigger session invalidation. Drop them silently here so
-            // the fingerprint value routectl chose is always the one
-            // on the wire.
-            if self.cfg.auth_kind == AuthKind::ChatgptOauth && is_codex_fingerprint_header(k) {
-                tracing::debug!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "dropping codex fingerprint header from header_extras on chatgpt-oauth path"
-                );
-                continue;
-            }
-            rb = rb.header(k.as_str(), v.as_str());
+            insert_header(&mut header_map, &self.cfg.id, k, v);
+        }
+
+        // On the ChatgptOauth path, inject the per-request and
+        // per-provider codex identity headers. These OVERRIDE any
+        // same-named header_extras entry (HeaderMap::insert replaces):
+        //   - thread-id / x-client-request-id: one fresh UUIDv4 per
+        //     request, shared between the two. Codex pairs them.
+        //   - x-codex-window-id: the per-provider UUID from
+        //     `self.window_id`, stable across requests on this instance.
+        if self.cfg.auth_kind == AuthKind::ChatgptOauth {
+            let thread_id = uuid::Uuid::new_v4().to_string();
+            insert_header(&mut header_map, &self.cfg.id, "thread-id", &thread_id);
+            insert_header(
+                &mut header_map,
+                &self.cfg.id,
+                "x-client-request-id",
+                &thread_id,
+            );
+            insert_header(
+                &mut header_map,
+                &self.cfg.id,
+                "x-codex-window-id",
+                &self.window_id,
+            );
+        }
+
+        if !header_map.is_empty() {
+            rb = rb.headers(header_map);
         }
         Ok(rb)
     }
+}
+
+/// Compiled codex identity-header defaults for the ChatgptOauth path.
+/// These ship with routectl and fire by default so a zero-config
+/// operator (auth_kind + api_key_ref only) emits a full codex
+/// fingerprint without hand-listing every header in `header_extras`.
+/// An operator `header_extras` entry for any of these keys OVERRIDES
+/// the default (the build_headers loop inserts after these). The
+/// per-request UUIDs (thread-id / x-client-request-id /
+/// x-codex-window-id) are NOT defaults -- they are generated per
+/// request and always win.
+///
+/// `version` tracks `PINNED_CODEX_VERSION`; bump that constant each
+/// release so the wire fingerprint stays current (the chatgpt.com risk
+/// system flags stale fingerprints).
+fn default_codex_identity_headers() -> [(&'static str, &'static str); 3] {
+    use routectl_core::codex_fingerprint::{
+        CODEX_ORIGINATOR, ORIGINATOR_HEADER_NAME, PINNED_CODEX_VERSION, RESIDENCY_HEADER_NAME,
+        RESIDENCY_HEADER_VALUE,
+    };
+    [
+        (ORIGINATOR_HEADER_NAME, CODEX_ORIGINATOR),
+        (RESIDENCY_HEADER_NAME, RESIDENCY_HEADER_VALUE),
+        ("version", PINNED_CODEX_VERSION),
+    ]
+}
+
+/// Insert a header name+value into a `HeaderMap`, replacing any
+/// existing entry with the same (case-insensitive) name. Skips the
+/// entry with a WARN if either the name or value cannot be parsed
+/// into the http-crate types -- an invalid value would otherwise
+/// poison `RequestBuilder::headers()`'s merge.
+fn insert_header(map: &mut reqwest::header::HeaderMap, provider_id: &str, name: &str, value: &str) {
+    let header_name = match reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_id,
+                header = %name,
+                error = %e,
+                "skipping malformed header name",
+            );
+            return;
+        }
+    };
+    let header_value = match reqwest::header::HeaderValue::from_str(value) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_id,
+                header = %name,
+                error = %e,
+                "skipping malformed header value",
+            );
+            return;
+        }
+    };
+    map.insert(header_name, header_value);
 }
 
 /// Persist the Cloudflare cookie jar on provider teardown so the next
@@ -696,29 +771,6 @@ impl Provider for OpenAiResponsesProvider {
     }
 }
 
-/// Returns true when `name` (case-insensitive) is one of the headers
-/// set by `auth::apply_chatgpt_oauth` to mirror the codex CLI
-/// fingerprint. On the `ChatgptOauth` path, operator-supplied
-/// `header_extras` entries matching these names are dropped before
-/// merging so they cannot corrupt the fingerprint that chatgpt.com's
-/// risk system validates on every request.
-fn is_codex_fingerprint_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "originator"
-            | "x-openai-internal-codex-residency"
-            | "version"
-            | "x-codex-window-id"
-            | "thread-id"
-            | "threadid"
-            | "x-client-request-id"
-            | "chatgpt-account-id"
-            | "session-id"
-            | "x-codex-installation-id"
-    )
-}
-
 fn build_error_excerpt(body_text: &str) -> String {
     serde_json::from_str::<Value>(body_text)
         .ok()
@@ -750,9 +802,6 @@ mod e2e_tests {
             auth_kind: AuthKind::ChatgptOauth,
             header_extras: Vec::new(),
             user_agent: None,
-            originator: None,
-            session_id: None,
-            installation_id: None,
         };
         OpenAiResponsesProvider::new(cfg)
     }
@@ -1141,27 +1190,24 @@ mod auth_wiring_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Fingerprint-header protection tests (finding #1)
+// Header-merge tests (header_extras passthrough + generated identity headers)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod fingerprint_tests {
+mod header_merge_tests {
     use super::*;
     use routectl_core::{ChatRequest, MessageContent, StaticToken, TokenSource};
     use std::sync::Arc;
 
     fn oauth_provider_with_extras(extras: Vec<(String, String)>) -> OpenAiResponsesProvider {
         let cfg = OpenAiResponsesConfig {
-            id: "openai-responses:fp-test".into(),
+            id: "openai-responses:hm-test".into(),
             auth: Arc::new(StaticToken::new("test-jwt")) as Arc<dyn TokenSource>,
             account_id: Some("acct-uuid".into()),
             base_url: "https://chatgpt.com/backend-api/codex".into(),
             auth_kind: AuthKind::ChatgptOauth,
             header_extras: extras,
             user_agent: None,
-            originator: None,
-            session_id: None,
-            installation_id: None,
         };
         OpenAiResponsesProvider::new(cfg)
     }
@@ -1183,15 +1229,22 @@ mod fingerprint_tests {
         }
     }
 
-    /// Pin (finding #1): when auth_kind == ChatgptOauth, an operator
-    /// `header_extras` entry for `originator` must be dropped; the
-    /// outbound request must carry routectl's fingerprint value
-    /// (`codex_cli_rs`), NOT the operator's value. Multiple values for
-    /// the same header would be equally wrong -- verify `operator-value`
-    /// is absent from every originator header value, and the fingerprint
-    /// value is present.
+    fn header_vals(request: &reqwest::Request, name: &str) -> Vec<String> {
+        request
+            .headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// On the ChatgptOauth path, an operator `header_extras` entry for
+    /// `originator` now FLOWS THROUGH to the wire (the old fingerprint
+    /// guard that dropped it is gone). Identity / fingerprint values are
+    /// the operator's responsibility via config.
     #[test]
-    fn chatgpt_oauth_header_extras_cannot_override_originator() {
+    fn chatgpt_oauth_header_extras_originator_reaches_wire() {
         // Arrange
         let provider = oauth_provider_with_extras(vec![(
             "originator".to_string(),
@@ -1205,44 +1258,28 @@ mod fingerprint_tests {
             .expect("build_headers ok");
         let request = rb.build().expect("build");
 
-        // Assert: "operator-value" must not appear in any originator
-        // header value; the fingerprint value must be present.
-        let all_originator: Vec<String> = request
-            .headers()
-            .get_all("originator")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .collect();
-
-        assert!(
-            !all_originator.iter().any(|v| v == "operator-value"),
-            "operator-value must be dropped; got: {all_originator:?}"
-        );
-        assert!(
-            all_originator
-                .iter()
-                .any(|v| v == routectl_core::codex_fingerprint::CODEX_ORIGINATOR),
-            "fingerprint originator value must be present; got: {all_originator:?}"
+        // Assert: the operator's originator value is on the wire.
+        assert_eq!(
+            header_vals(&request, "originator"),
+            vec!["operator-value".to_string()],
+            "operator originator from header_extras must reach the wire",
         );
     }
 
-    /// Counterpart: on the ApiKey path, `header_extras` that happen to
-    /// share a name with a codex fingerprint header (e.g., `version`)
-    /// must NOT be blocked -- the fingerprint filter is ChatgptOauth-only.
+    /// On the ApiKey path, `header_extras` pass through the normal
+    /// auth-guard merge. (There is no fingerprint filter anymore, so
+    /// this is just the standard `is_auth_header` / `is_managed_header`
+    /// behavior.)
     #[test]
     fn api_key_header_extras_not_blocked_by_fingerprint_filter() {
         let cfg = OpenAiResponsesConfig {
-            id: "openai-responses:fp-apikey".into(),
+            id: "openai-responses:hm-apikey".into(),
             auth: Arc::new(StaticToken::new("sk-test")) as Arc<dyn TokenSource>,
             account_id: None,
             base_url: "https://api.openai.com/v1".into(),
             auth_kind: AuthKind::ApiKey,
             header_extras: vec![("version".to_string(), "custom-1.0".to_string())],
             user_agent: None,
-            originator: None,
-            session_id: None,
-            installation_id: None,
         };
         let provider = OpenAiResponsesProvider::new(cfg);
         let rb = provider.client.post("https://api.openai.com/v1/responses");
@@ -1253,17 +1290,246 @@ mod fingerprint_tests {
         let request = rb.build().expect("build");
 
         // `version` header from extras must be present on api-key path.
-        let version_vals: Vec<String> = request
-            .headers()
-            .get_all("version")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .collect();
-
         assert!(
-            version_vals.iter().any(|v| v == "custom-1.0"),
-            "version extra must pass through on api-key path; got: {version_vals:?}"
+            header_vals(&request, "version")
+                .iter()
+                .any(|v| v == "custom-1.0"),
+            "version extra must pass through on api-key path; got: {:?}",
+            header_vals(&request, "version"),
+        );
+    }
+
+    /// thread-id rotates per request, and within a single request
+    /// thread-id == x-client-request-id.
+    #[test]
+    fn thread_id_rotates_per_request_and_matches_x_client_request_id() {
+        // Arrange
+        let provider = oauth_provider_with_extras(Vec::new());
+
+        // Act: two consecutive build_headers calls on the same provider.
+        let req_a = provider
+            .build_headers(
+                provider.client.post("https://chatgpt.test/responses"),
+                &base_req(),
+                "test-jwt",
+            )
+            .expect("build_headers ok")
+            .build()
+            .expect("build");
+        let req_b = provider
+            .build_headers(
+                provider.client.post("https://chatgpt.test/responses"),
+                &base_req(),
+                "test-jwt",
+            )
+            .expect("build_headers ok")
+            .build()
+            .expect("build");
+
+        // Assert: thread-id present, single-valued, rotates per request.
+        let tid_a = header_vals(&req_a, "thread-id");
+        let tid_b = header_vals(&req_b, "thread-id");
+        assert_eq!(tid_a.len(), 1, "thread-id must be single-valued: {tid_a:?}");
+        assert_eq!(tid_b.len(), 1, "thread-id must be single-valued: {tid_b:?}");
+        assert_ne!(tid_a[0], tid_b[0], "thread-id must rotate per request");
+
+        // Assert: within each request, thread-id == x-client-request-id.
+        assert_eq!(
+            header_vals(&req_a, "x-client-request-id"),
+            tid_a,
+            "x-client-request-id must equal thread-id within a request",
+        );
+        assert_eq!(
+            header_vals(&req_b, "x-client-request-id"),
+            tid_b,
+            "x-client-request-id must equal thread-id within a request",
+        );
+    }
+
+    /// x-codex-window-id is stable across two requests on the same
+    /// provider instance (generated once in `new()`).
+    #[test]
+    fn window_id_stable_across_requests_on_same_provider() {
+        // Arrange
+        let provider = oauth_provider_with_extras(Vec::new());
+
+        // Act
+        let req_a = provider
+            .build_headers(
+                provider.client.post("https://chatgpt.test/responses"),
+                &base_req(),
+                "test-jwt",
+            )
+            .expect("build_headers ok")
+            .build()
+            .expect("build");
+        let req_b = provider
+            .build_headers(
+                provider.client.post("https://chatgpt.test/responses"),
+                &base_req(),
+                "test-jwt",
+            )
+            .expect("build_headers ok")
+            .build()
+            .expect("build");
+
+        // Assert
+        let wid_a = header_vals(&req_a, "x-codex-window-id");
+        let wid_b = header_vals(&req_b, "x-codex-window-id");
+        assert_eq!(wid_a.len(), 1, "window-id must be single-valued: {wid_a:?}");
+        assert_eq!(
+            wid_a, wid_b,
+            "x-codex-window-id must be stable across requests on the same provider",
+        );
+    }
+
+    /// A `header_extras` entry named `thread-id` is OVERRIDDEN by the
+    /// generated per-request value (insert replaces, not appends).
+    #[test]
+    fn generated_thread_id_overrides_header_extras() {
+        // Arrange
+        let provider = oauth_provider_with_extras(vec![(
+            "thread-id".to_string(),
+            "operator-thread".to_string(),
+        )]);
+        let rb = provider.client.post("https://chatgpt.test/responses");
+
+        // Act
+        let rb = provider
+            .build_headers(rb, &base_req(), "test-jwt")
+            .expect("build_headers ok");
+        let request = rb.build().expect("build");
+
+        // Assert: single value, and it is NOT the operator's.
+        let tids = header_vals(&request, "thread-id");
+        assert_eq!(tids.len(), 1, "thread-id must be single-valued: {tids:?}");
+        assert_ne!(
+            tids[0], "operator-thread",
+            "generated thread-id must override the header_extras value",
+        );
+    }
+
+    /// On the ApiKey path the three codex identity headers
+    /// (thread-id, x-client-request-id, x-codex-window-id) are NOT
+    /// injected, even when ChatgptOauth-shaped header_extras are present.
+    #[test]
+    fn api_key_path_omits_generated_identity_headers() {
+        let cfg = OpenAiResponsesConfig {
+            id: "openai-responses:hm-apikey-id".into(),
+            auth: Arc::new(StaticToken::new("sk-test")) as Arc<dyn TokenSource>,
+            account_id: None,
+            base_url: "https://api.openai.com/v1".into(),
+            auth_kind: AuthKind::ApiKey,
+            header_extras: vec![("originator".to_string(), "codex_cli_rs".to_string())],
+            user_agent: None,
+        };
+        let provider = OpenAiResponsesProvider::new(cfg);
+        let rb = provider.client.post("https://api.openai.com/v1/responses");
+
+        let rb = provider
+            .build_headers(rb, &base_req(), "sk-test")
+            .expect("build_headers ok");
+        let request = rb.build().expect("build");
+
+        // Assert: the three generated identity headers are absent on the
+        // api-key path. (The originator header_extra DOES pass through --
+        // that is the normal merge -- but the generated identity trio
+        // must not be auto-injected here.)
+        for absent in ["thread-id", "x-client-request-id", "x-codex-window-id"] {
+            assert!(
+                header_vals(&request, absent).is_empty(),
+                "{absent:?} must NOT be injected on the api-key path",
+            );
+        }
+    }
+
+    /// With empty `header_extras`, the compiled codex identity defaults
+    /// (originator, residency, version) appear on the outgoing request.
+    /// This is the zero-config posture: an operator who sets only
+    /// auth_kind + api_key_ref still emits a full codex fingerprint.
+    #[test]
+    fn defaults_appear_on_wire_with_empty_header_extras() {
+        use routectl_core::codex_fingerprint::{
+            CODEX_ORIGINATOR, PINNED_CODEX_VERSION, RESIDENCY_HEADER_VALUE,
+        };
+
+        // Arrange
+        let provider = oauth_provider_with_extras(Vec::new());
+        let rb = provider.client.post("https://chatgpt.test/responses");
+
+        // Act
+        let rb = provider
+            .build_headers(rb, &base_req(), "test-jwt")
+            .expect("build_headers ok");
+        let request = rb.build().expect("build");
+
+        // Assert: each compiled default lands once with its default value.
+        assert_eq!(
+            header_vals(&request, "originator"),
+            vec![CODEX_ORIGINATOR.to_string()],
+            "originator default must appear with empty header_extras",
+        );
+        assert_eq!(
+            header_vals(&request, "x-openai-internal-codex-residency"),
+            vec![RESIDENCY_HEADER_VALUE.to_string()],
+            "residency default must appear with empty header_extras",
+        );
+        assert_eq!(
+            header_vals(&request, "version"),
+            vec![PINNED_CODEX_VERSION.to_string()],
+            "version default must appear with empty header_extras",
+        );
+    }
+
+    /// An operator `header_extras` entry for a default key OVERRIDES the
+    /// compiled default: the wire shows the operator value, not the
+    /// built-in one, and only once (insert replaces, not appends).
+    #[test]
+    fn header_extras_overrides_default_originator() {
+        // Arrange
+        let provider =
+            oauth_provider_with_extras(vec![("originator".to_string(), "custom".to_string())]);
+        let rb = provider.client.post("https://chatgpt.test/responses");
+
+        // Act
+        let rb = provider
+            .build_headers(rb, &base_req(), "test-jwt")
+            .expect("build_headers ok");
+        let request = rb.build().expect("build");
+
+        // Assert: the operator's value wins; the default is gone.
+        assert_eq!(
+            header_vals(&request, "originator"),
+            vec!["custom".to_string()],
+            "operator header_extras must override the compiled default",
+        );
+    }
+
+    /// The per-request UUIDs still override a `header_extras` `thread-id`
+    /// even though defaults now run before the header_extras loop. The
+    /// UUIDs fire LAST, so they win over both the defaults and any
+    /// operator-supplied value.
+    #[test]
+    fn per_request_uuid_overrides_header_extras_thread_id() {
+        // Arrange
+        let provider = oauth_provider_with_extras(vec![(
+            "thread-id".to_string(),
+            "operator-thread".to_string(),
+        )]);
+        let rb = provider.client.post("https://chatgpt.test/responses");
+
+        // Act
+        let rb = provider
+            .build_headers(rb, &base_req(), "test-jwt")
+            .expect("build_headers ok");
+        let request = rb.build().expect("build");
+
+        // Assert: single value, and it is NOT the operator's.
+        let tids = header_vals(&request, "thread-id");
+        assert_eq!(tids.len(), 1, "thread-id must be single-valued: {tids:?}");
+        assert_ne!(
+            tids[0], "operator-thread",
+            "generated thread-id must override the header_extras value",
         );
     }
 }

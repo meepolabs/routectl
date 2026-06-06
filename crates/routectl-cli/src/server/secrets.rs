@@ -179,20 +179,6 @@ impl SecretStore for CompositeStore {
             _ => self.fallback.account_id(secret_ref).await,
         }
     }
-
-    async fn session_id(&self, secret_ref: &SecretRef) -> Result<Option<String>> {
-        match secret_ref {
-            // Route oauth:// session-id reads to the OAuth arm so the
-            // openai-responses factory can stamp the codex `session-id`
-            // header on chatgpt-oauth requests. Same fallback policy
-            // as `account_id`: no HOME/XDG -> Ok(None).
-            SecretRef::OAuth { .. } => match &self.oauth {
-                Some(oauth) => oauth.session_id(secret_ref).await,
-                None => Ok(None),
-            },
-            _ => self.fallback.session_id(secret_ref).await,
-        }
-    }
 }
 
 #[cfg(test)]

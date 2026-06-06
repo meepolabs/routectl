@@ -246,7 +246,6 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             user_agent,
-            originator,
             runtime: _,
         } => {
             let bearer_is_oauth =
@@ -265,24 +264,6 @@ async fn build_provider_inner(
             let auth = resolve_token_source(&secrets, api_key_ref).await?;
             let account_id =
                 resolve_responses_account_id(&secrets, api_key_ref, account_id_ref, name).await?;
-            // session_id and installation_id are resolved once at provider
-            // construction time (on startup or on a ReloadRequest::Config
-            // rebuild). A ReloadRequest::Credentials reload only refreshes
-            // the in-memory OAuthStore; it does NOT rebuild the Router, so
-            // these values stay pinned to the session under which this
-            // provider was last constructed. For ChatgptOauth providers
-            // where a credential rotation should also rotate the session_id,
-            // the reload handler (crates/routectl-cli/src/server/mod.rs
-            // `handle_credentials_reload`) would need to trigger a full
-            // Router rebuild -- either by emitting ReloadRequest::Config
-            // alongside ReloadRequest::Credentials, or by widening
-            // ReloadRequest::Credentials to trigger a Router rebuild when
-            // any openai-responses provider has auth_kind = ChatgptOauth.
-            // Until that change lands, operators who rotate ChatgptOauth
-            // credentials must trigger a full config reload (SIGHUP or
-            // config file touch) to get a fresh session_id.
-            let (session_id, installation_id) =
-                resolve_responses_codex_identity(&secrets, api_key_ref, *auth_kind).await?;
             let resolved_base_url = base_url.clone().unwrap_or_else(|| {
                 let default = default_responses_base(*auth_kind);
                 if *auth_kind == OpenaiResponsesAuthKind::BedrockMantle {
@@ -314,9 +295,6 @@ async fn build_provider_inner(
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             cfg.user_agent = user_agent.clone();
-            cfg.originator = originator.clone();
-            cfg.session_id = session_id;
-            cfg.installation_id = installation_id;
             Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
         }
         #[cfg(feature = "bedrock")]
@@ -631,68 +609,6 @@ async fn resolve_responses_account_id(
              `account_id_ref` explicitly."
         ))),
     }
-}
-
-/// Resolve the codex identity headers (`session_id`,
-/// `installation_id`) for an openai-responses provider claiming
-/// `originator: codex_cli_rs`.
-///
-/// - `session_id`: stable per-credential UUIDv4. Read from credentials
-///   .json (lazily backfilled on first use). Only resolved when
-///   `auth_kind == ChatgptOauth` AND the bearer is `oauth://...`;
-///   non-OAuth bearers carry no session.
-/// - `installation_id`: stable per-install UUIDv4. Read from
-///   `~/.config/routectl/installation_id` (lazily generated on first
-///   use). Only resolved when `auth_kind == ChatgptOauth`; the
-///   public openai-api and bedrock-mantle paths do not claim
-///   `originator: codex_cli_rs` and ship neither header.
-///
-/// On any non-ChatgptOauth path, returns `(None, None)`. A missing
-/// credentials record yields `Ok((None, _))` so the factory does not
-/// fail on a fresh install (the operator has not yet run `routectl
-/// login codex`); subsequent provider construction after login will
-/// pick up the session-id.
-#[cfg(feature = "openai-responses")]
-async fn resolve_responses_codex_identity(
-    secrets: &Arc<dyn SecretStore>,
-    api_key_ref: &str,
-    auth_kind: OpenaiResponsesAuthKind,
-) -> Result<(Option<String>, Option<String>)> {
-    if !matches!(auth_kind, OpenaiResponsesAuthKind::ChatgptOauth) {
-        return Ok((None, None));
-    }
-    let session_id = match SecretRef::parse(api_key_ref)? {
-        SecretRef::OAuth { provider } => {
-            let secret_ref = SecretRef::OAuth {
-                provider: provider.clone(),
-            };
-            secrets.session_id(&secret_ref).await?
-        }
-        _ => None,
-    };
-    // The installation id is process-global; failing to mint one is a
-    // hard error (the chatgpt.com risk system requires it on every
-    // codex_cli_rs request). Surface as Error::Auth with the file path
-    // so the operator can fix permissions / disk-full conditions.
-    //
-    // The first-call path performs tempfile + write + fsync + rename,
-    // which blocks the tokio worker thread. OnceLock amortises every
-    // subsequent call, but the first one (fresh install) and any
-    // hot-reload-triggered rebuild that re-enters this code path
-    // would otherwise stall the runtime worker. spawn_blocking moves
-    // it onto the blocking pool.
-    let installation_id = tokio::task::spawn_blocking(
-        routectl_auth::oauth::installation_id::read_or_generate_default,
-    )
-    .await
-    .map_err(|e| routectl_core::Error::Auth(format!("installation_id task panicked: {e}")))?
-    .map(Some)
-    .map_err(|e| {
-        routectl_core::Error::Auth(format!(
-            "failed to read or mint x-codex-installation-id: {e}",
-        ))
-    })?;
-    Ok((session_id, installation_id))
 }
 
 /// Build the per-nickname `ResolvedModel` table from a `Config`. Walks

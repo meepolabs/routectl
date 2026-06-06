@@ -680,10 +680,6 @@ pub enum ProviderEntry {
         /// `routectl/<version> codex-cli`.
         #[serde(default)]
         user_agent: Option<String>,
-        /// Override the `originator` header on the ChatgptOauth surface.
-        /// None -> `codex_cli_rs` (codex's `DEFAULT_ORIGINATOR`).
-        #[serde(default)]
-        originator: Option<String>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -854,7 +850,6 @@ impl ProviderEntry {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
-            originator: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
