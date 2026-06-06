@@ -265,11 +265,44 @@ async fn build_provider_inner(
             let auth = resolve_token_source(&secrets, api_key_ref).await?;
             let account_id =
                 resolve_responses_account_id(&secrets, api_key_ref, account_id_ref, name).await?;
+            // session_id and installation_id are resolved once at provider
+            // construction time (on startup or on a ReloadRequest::Config
+            // rebuild). A ReloadRequest::Credentials reload only refreshes
+            // the in-memory OAuthStore; it does NOT rebuild the Router, so
+            // these values stay pinned to the session under which this
+            // provider was last constructed. For ChatgptOauth providers
+            // where a credential rotation should also rotate the session_id,
+            // the reload handler (crates/routectl-cli/src/server/mod.rs
+            // `handle_credentials_reload`) would need to trigger a full
+            // Router rebuild -- either by emitting ReloadRequest::Config
+            // alongside ReloadRequest::Credentials, or by widening
+            // ReloadRequest::Credentials to trigger a Router rebuild when
+            // any openai-responses provider has auth_kind = ChatgptOauth.
+            // Until that change lands, operators who rotate ChatgptOauth
+            // credentials must trigger a full config reload (SIGHUP or
+            // config file touch) to get a fresh session_id.
             let (session_id, installation_id) =
                 resolve_responses_codex_identity(&secrets, api_key_ref, *auth_kind).await?;
-            let resolved_base_url = base_url
-                .clone()
-                .unwrap_or_else(|| default_responses_base(*auth_kind));
+            let resolved_base_url = base_url.clone().unwrap_or_else(|| {
+                let default = default_responses_base(*auth_kind);
+                if *auth_kind == OpenaiResponsesAuthKind::BedrockMantle {
+                    // The OpenaiResponses config has no region field, so the
+                    // factory cannot substitute the configured AWS region into
+                    // the bedrock-mantle hostname. Operators on regions other
+                    // than us-east-1 MUST set base_url explicitly in their
+                    // provider entry, e.g.:
+                    //   base_url = "https://bedrock-mantle.<region>.api.aws/openai/v1"
+                    tracing::warn!(
+                        provider = name,
+                        default_base_url = %default,
+                        "bedrock-mantle provider has no base_url configured; \
+                         defaulting to the us-east-1 endpoint -- operators on \
+                         other AWS regions must set base_url explicitly, e.g. \
+                         https://bedrock-mantle.<region>.api.aws/openai/v1",
+                    );
+                }
+                default
+            });
             validate_base_url_scheme(name, &resolved_base_url)?;
             let mut cfg =
                 OpenAiResponsesConfig::new_with_auth(format!("openai-responses:{name}"), auth);
@@ -1058,10 +1091,12 @@ fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
     match auth_kind {
         OpenaiResponsesAuthKind::ChatgptOauth => "https://chatgpt.com/backend-api/codex".into(),
         OpenaiResponsesAuthKind::ApiKey => "https://api.openai.com/v1".into(),
-        // BedrockMantle URL is region-specific; the relevant stage wires in a
-        // region-aware default. The placeholder here forces the
-        // operator to set `base_url` explicitly today (the
-        // provider's NotImplemented auth would fire first anyway).
+        // BedrockMantle URL is region-specific. ProviderEntry::OpenaiResponses
+        // carries no region field, so the factory cannot substitute the
+        // configured AWS region here. This returns the us-east-1 endpoint as
+        // a fallback. The call site emits a WARN when this default fires so
+        // the operator is not silently misdirected to the wrong region.
+        // Operators on other regions must set base_url explicitly.
         OpenaiResponsesAuthKind::BedrockMantle => {
             "https://bedrock-mantle.us-east-1.api.aws/openai/v1".into()
         }
