@@ -74,12 +74,23 @@ fn common_builder(user_agent: Option<&str>) -> reqwest::ClientBuilder {
 /// allowing an `extra_headers["anthropic-version"]` override would
 /// desync from the body-schema versioning the egress assumes.
 ///
+/// `chatgpt-account-id` is included because the openai-responses
+/// ChatgptOauth egress derives it from the resolved account ref and
+/// sets it as part of the auth pair. A `header_extras` entry of the
+/// same name would collide with the auth-derived value, so it is
+/// reserved.
+///
 /// Note: the `x-amz-` prefix is handled by `is_auth_header` directly
 /// (not stored in this slice) because it is a prefix match rather than
 /// an exact match. Any `x-amz-*` header supplied via `header_extras`
 /// would desync the AWS SigV4 signature computed over the request
 /// before these headers are added, so the entire prefix is reserved.
-const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "anthropic-version"];
+const AUTH_HEADERS: &[&str] = &[
+    "authorization",
+    "x-api-key",
+    "anthropic-version",
+    "chatgpt-account-id",
+];
 
 /// Header names that routectl owns the value of for wire-shape
 /// correctness, but are NOT auth carriers. An operator setting one of
@@ -184,6 +195,13 @@ mod tests {
             "anthropic-version",
             "Anthropic-Version",
             "ANTHROPIC-VERSION",
+        ] {
+            assert!(is_auth_header(name), "{name:?} should classify as auth");
+        }
+        for name in [
+            "chatgpt-account-id",
+            "ChatGPT-Account-Id",
+            "CHATGPT-ACCOUNT-ID",
         ] {
             assert!(is_auth_header(name), "{name:?} should classify as auth");
         }

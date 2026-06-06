@@ -26,6 +26,7 @@ use routectl_core::{
 };
 
 pub(crate) mod context_management;
+pub(crate) mod defaults;
 pub(crate) mod parts;
 pub mod request;
 pub mod response;
@@ -192,7 +193,8 @@ pub struct AnthropicApiProvider {
 
 impl AnthropicApiProvider {
     pub fn new(cfg: AnthropicApiConfig) -> Self {
-        let client = crate::http_client::build(cfg.user_agent.as_deref());
+        let ua = resolve_user_agent(cfg.user_agent.as_deref(), cfg.auth_kind);
+        let client = crate::http_client::build(ua.as_deref());
         let cap = std::num::NonZeroUsize::new(context_management::THINKING_CACHE_CAP)
             .expect("THINKING_CACHE_CAP is non-zero");
         let thinking_cache = std::sync::Arc::new(std::sync::RwLock::new(lru::LruCache::new(cap)));
@@ -335,6 +337,19 @@ impl AnthropicApiProvider {
         // entries in `dst` keyed by the same name).
         let mut header_map = reqwest::header::HeaderMap::new();
 
+        // Compiled Claude Code SDK identity defaults. Fire by default on
+        // the OauthBearer path so a zero-config operator emits the
+        // Stainless SDK fingerprint without hand-listing every header.
+        // Inserted FIRST so the header_extras loop below OVERRIDES any
+        // matching key (HeaderMap::insert replaces). ApiKey gets no
+        // defaults (it is the raw-API surface, not the SDK client). Note
+        // `anthropic-beta` is NOT among these -- it is composed above.
+        if self.cfg.auth_kind == AuthKind::OauthBearer {
+            for (k, v) in defaults::default_claude_code_identity_headers() {
+                insert_header(&mut header_map, &self.cfg.id, k, v);
+            }
+        }
+
         // Prefer the router-composed map for non-beta headers; fall
         // back to `self.cfg.header_extras` for library consumers.
         let source = crate::http_client::effective_header_extras(
@@ -386,6 +401,21 @@ impl AnthropicApiProvider {
             rb = rb.headers(header_map);
         }
         rb
+    }
+}
+
+/// Resolve the client-level `User-Agent` for an anthropic-api provider.
+/// An operator override always wins. With no override, the OauthBearer
+/// surface falls back to the Claude Code SDK UA so a zero-config
+/// oauth-bearer provider emits the expected client fingerprint; the
+/// ApiKey surface keeps reqwest's default UA (`None`).
+fn resolve_user_agent(user_agent: Option<&str>, auth_kind: AuthKind) -> Option<String> {
+    match (user_agent, auth_kind) {
+        (Some(ua), _) => Some(ua.to_string()),
+        (None, AuthKind::OauthBearer) => {
+            Some(defaults::default_claude_code_user_agent().to_string())
+        }
+        (None, AuthKind::ApiKey) => None,
     }
 }
 
@@ -1328,6 +1358,126 @@ mod tests {
         assert!(
             !value.split(',').any(|s| s.trim() == "client-blocked"),
             "non-allowlisted client beta must be dropped; got {value}"
+        );
+    }
+
+    /// Build an oauth-bearer config with the given header_extras and a
+    /// `user_agent` override (None to exercise the SDK default).
+    fn oauth_cfg(
+        header_extras: Vec<(String, String)>,
+        user_agent: Option<String>,
+    ) -> AnthropicApiConfig {
+        AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("oat-token")),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::OauthBearer,
+            header_extras,
+            user_agent,
+            allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
+            context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+        }
+    }
+
+    /// On the OauthBearer path with empty `header_extras`, the compiled
+    /// Stainless SDK defaults appear on the outgoing request. Zero-config
+    /// posture: auth_kind + api_key_ref alone yields the full fingerprint.
+    #[test]
+    fn oauth_bearer_emits_stainless_defaults_with_empty_extras() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        let req = ChatRequest::default();
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-app").as_deref(),
+            Some("cli"),
+            "x-app default must appear on oauth-bearer",
+        );
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-stainless-lang").as_deref(),
+            Some("js"),
+            "x-stainless-lang default must appear on oauth-bearer",
+        );
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-stainless-timeout").as_deref(),
+            Some("600"),
+            "x-stainless-timeout default must appear on oauth-bearer",
+        );
+        // Dynamic entries present and mapped (not raw Rust cfg strings).
+        let arch = outbound_header_value(&provider, &req, "x-stainless-arch")
+            .expect("x-stainless-arch present");
+        assert_ne!(arch, "x86_64", "arch must be mapped to Node shape");
+        let os = outbound_header_value(&provider, &req, "x-stainless-os")
+            .expect("x-stainless-os present");
+        assert_ne!(os, "linux", "os must be mapped to capitalized shape");
+    }
+
+    /// An operator `header_extras` entry for a default key OVERRIDES the
+    /// compiled Stainless default (insert replaces; the loop runs after
+    /// the defaults).
+    #[test]
+    fn oauth_bearer_header_extras_overrides_stainless_default() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(
+            vec![("x-stainless-timeout".into(), "999".into())],
+            None,
+        ));
+        let req = ChatRequest::default();
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-stainless-timeout").as_deref(),
+            Some("999"),
+            "operator header_extras must override the compiled default",
+        );
+    }
+
+    /// On the ApiKey path, no Stainless SDK defaults are injected even
+    /// with empty `header_extras`. The api-key surface is the raw API,
+    /// not the SDK client, so it carries no SDK fingerprint.
+    #[test]
+    fn api_key_path_emits_no_stainless_defaults() {
+        let provider = AnthropicApiProvider::new(cfg_with_allowlist(Vec::new()));
+        let req = ChatRequest::default();
+        for absent in [
+            "x-app",
+            "x-stainless-lang",
+            "x-stainless-runtime",
+            "x-stainless-runtime-version",
+            "x-stainless-package-version",
+            "x-stainless-timeout",
+            "x-stainless-retry-count",
+            "x-stainless-arch",
+            "x-stainless-os",
+            "anthropic-dangerous-direct-browser-access",
+        ] {
+            assert!(
+                outbound_header_value(&provider, &req, absent).is_none(),
+                "{absent:?} must NOT be injected on the api-key path",
+            );
+        }
+    }
+
+    /// On OauthBearer with `user_agent = None`, the resolved client UA
+    /// falls back to the Claude Code SDK default. An operator override
+    /// always wins; the ApiKey surface keeps reqwest's default (`None`).
+    /// We assert the resolver directly: reqwest applies a client-level
+    /// default UA only at send time, not at `RequestBuilder::build()`,
+    /// so the value is not observable on a non-executed request.
+    #[test]
+    fn oauth_bearer_user_agent_defaults_to_claude_cli() {
+        assert_eq!(
+            resolve_user_agent(None, AuthKind::OauthBearer).as_deref(),
+            Some("claude-cli/2.1.167 (external, sdk-cli)"),
+            "oauth-bearer with no override must default to the Claude Code SDK UA",
+        );
+        assert_eq!(
+            resolve_user_agent(None, AuthKind::ApiKey),
+            None,
+            "api-key with no override must keep reqwest's default UA",
+        );
+        assert_eq!(
+            resolve_user_agent(Some("op-ua/9.9"), AuthKind::OauthBearer).as_deref(),
+            Some("op-ua/9.9"),
+            "operator override must win over the SDK default",
         );
     }
 }

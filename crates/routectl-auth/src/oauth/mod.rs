@@ -27,7 +27,6 @@
 //!   chatgpt.com in a prior change).
 
 pub(crate) mod file_io;
-pub mod installation_id;
 pub(crate) mod login;
 pub(crate) mod pkce;
 pub(crate) mod providers;
