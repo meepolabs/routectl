@@ -18,8 +18,8 @@ use std::any::Any;
 
 use axum::http::HeaderMap;
 use routectl_core::{
-    is_canonical_request_key, ChatChunk, ChatRequest, ChatResponse, Error, MessageContent, Result,
-    Role, SystemContent,
+    is_canonical_request_key, ChatChunk, ChatRequest, ChatResponse, ContentPart, Error,
+    KnownContentPart, MessageContent, Result, Role, SystemContent,
 };
 use serde_json::{Map, Value};
 
@@ -131,6 +131,12 @@ impl IngressAdapter for OpenAiIngress {
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<Value> {
+        // OpenAI-side mirror of the Anthropic ingress's tool_use dedup
+        // (see `strip_tool_use_parts_when_tool_calls_present`). Strip
+        // duplicate `tool_use` content blocks before the bare serde so
+        // OpenAI Chat-Completions clients see the tool call only on the
+        // `tool_calls` channel they understand.
+        let resp = strip_tool_use_parts_when_tool_calls_present(resp);
         serde_json::to_value(&resp)
             .map_err(|e| Error::Config(format!("openai ingress: serialize response: {e}")))
     }
@@ -144,6 +150,12 @@ impl IngressAdapter for OpenAiIngress {
         chunk: ChatChunk,
         _state: &mut dyn IngressStreamState,
     ) -> Result<Vec<SseEvent>> {
+        // No tool_use dedup needed on the streaming path: the canonical
+        // `ChunkDelta` has no `MessageContent::Parts` slot (`content` is
+        // `Option<String>`, tool calls ride `tool_calls`), so a streamed
+        // chunk can never carry a `tool_use` content block. The
+        // double-emission the non-streaming `render_response` guards
+        // against is structurally impossible here.
         let data = serde_json::to_string(&chunk)
             .map_err(|e| Error::Config(format!("openai ingress: serialize chunk: {e}")))?;
         Ok(vec![SseEvent::unnamed(data)])
@@ -343,11 +355,100 @@ fn lift_system_messages(req: &mut ChatRequest) {
     }
 }
 
+/// Strip duplicate `tool_use` content blocks from any assistant choice
+/// that also carries a non-empty `tool_calls`.
+///
+/// The Anthropic-shape egresses (anthropic-api, bedrock-converse,
+/// openai-responses) populate BOTH the canonical `tool_calls` field AND
+/// a `ContentPart::ToolUse` part for the same upstream tool call, so a
+/// bare serde of the canonical response would emit the call twice: once
+/// in `tool_calls` (the channel OpenAI clients read) and once as a
+/// `tool_use` content block. OpenAI Chat-Completions clients do not
+/// understand `tool_use` blocks on assistant messages -- many SDKs choke
+/// or silently drop the sibling text when they see one.
+///
+/// This is the OpenAI-side mirror of the Anthropic ingress's
+/// `parts_tool_use_ids` dedup (render.rs ~183), run in reverse: there,
+/// the `parts` ToolUse wins because it carries `cache_control`; here,
+/// `tool_calls` wins because it is the OpenAI-native channel and the
+/// `tool_use` part is the unrenderable duplicate. We strip the ToolUse
+/// parts and leave `tool_calls` untouched.
+///
+/// After the strip, the surviving content collapses the same way
+/// `select_message_content` (openai_responses/response.rs) builds it:
+/// all-text -> a `content` string; nothing left -> `content: null`
+/// (OpenAI's shape for an assistant turn that is purely tool calls); any
+/// non-text part remaining -> keep the parts array verbatim.
+fn strip_tool_use_parts_when_tool_calls_present(mut resp: ChatResponse) -> ChatResponse {
+    for choice in resp.choices.iter_mut() {
+        let has_tool_calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|tcs| !tcs.is_empty());
+        if !has_tool_calls {
+            continue;
+        }
+        let MessageContent::Parts(parts) = &choice.message.content else {
+            continue;
+        };
+        if !parts.iter().any(is_tool_use_part) {
+            continue;
+        }
+        let remaining: Vec<ContentPart> = parts
+            .iter()
+            .filter(|p| !is_tool_use_part(p))
+            .cloned()
+            .collect();
+        choice.message.content = collapse_after_tool_use_strip(remaining);
+    }
+    resp
+}
+
+/// True for a `tool_use` content block in either shape: the typed
+/// `KnownContentPart::ToolUse`, or the forward-compat `ContentPart::Other`
+/// whose `type` discriminant is `"tool_use"` (the variant a future
+/// tool_use sub-field would deserialize into). Mirrors the dual-shape
+/// scan in the Anthropic ingress dedup.
+fn is_tool_use_part(part: &ContentPart) -> bool {
+    match part {
+        ContentPart::Known(KnownContentPart::ToolUse { .. }) => true,
+        ContentPart::Other { type_tag, .. } => type_tag == "tool_use",
+        _ => false,
+    }
+}
+
+/// Collapse the content parts left after stripping tool_use blocks into
+/// the shape an OpenAI client expects: `null` when nothing meaningful
+/// remains, a plain text string when only text parts survive, otherwise
+/// the parts array verbatim. Matches `select_message_content`'s
+/// all-text-collapses-to-Text convention.
+fn collapse_after_tool_use_strip(parts: Vec<ContentPart>) -> MessageContent {
+    if parts.is_empty() {
+        return MessageContent::Null;
+    }
+    let only_text = parts
+        .iter()
+        .all(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })));
+    if !only_text {
+        return MessageContent::Parts(parts);
+    }
+    let text = parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Known(KnownContentPart::Text { text, .. }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    MessageContent::Text(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use routectl_core::{
-        ChunkChoice, ChunkDelta, MessageContent, ReasoningConfig, ReasoningDetailKind,
+        Choice, ChunkChoice, ChunkDelta, Message, MessageContent, ReasoningConfig,
+        ReasoningDetailKind,
     };
     use serde_json::json;
 
@@ -665,6 +766,236 @@ mod tests {
         assert_eq!(v["routectl_provider"], "test");
         // Suppress unused-import warnings.
         let _ = MessageContent::Text("".into());
+    }
+
+    /// Build a canonical assistant message shaped like an Anthropic-shape
+    /// egress output: a `tool_calls` entry AND a `ContentPart::ToolUse`
+    /// part carrying the same id, optionally preceded by a text part.
+    fn anthropic_shape_choice(text: Option<&str>, tool_id: &str) -> Choice {
+        let mut parts = Vec::new();
+        if let Some(t) = text {
+            parts.push(ContentPart::Known(KnownContentPart::Text {
+                text: t.into(),
+                cache_control: None,
+            }));
+        }
+        parts.push(ContentPart::Known(KnownContentPart::ToolUse {
+            id: tool_id.into(),
+            name: "get_weather".into(),
+            input: json!({ "city": "Paris" }),
+            cache_control: None,
+        }));
+        Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(parts),
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": tool_id,
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": "{\"city\":\"Paris\"}"
+                    }
+                })]),
+            },
+            finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
+        }
+    }
+
+    fn response_with_choices(choices: Vec<Choice>) -> ChatResponse {
+        ChatResponse {
+            id: "chatcmpl-1".into(),
+            model: "claude".into(),
+            created: 1700000000,
+            choices,
+            usage: None,
+            routectl_provider: Some("anthropic-api".into()),
+            extras: Default::default(),
+        }
+    }
+
+    /// Anthropic-shape egresses emit a tool call in BOTH `tool_calls` and
+    /// a `ContentPart::ToolUse` part. The OpenAI ingress must strip the
+    /// duplicate `tool_use` content block: OpenAI Chat-Completions
+    /// clients do not understand it and many SDKs choke or drop the
+    /// sibling text. This test FAILS before the dedup (the bare serde
+    /// emits the tool_use block) and PASSES after.
+    #[test]
+    fn render_response_strips_tool_use_block_when_tool_calls_present() {
+        // Arrange
+        let tool_id = "toolu_01";
+        let resp = response_with_choices(vec![anthropic_shape_choice(
+            Some("Checking weather."),
+            tool_id,
+        )]);
+
+        // Act
+        let v = OpenAiIngress.render_response(resp).unwrap();
+        let msg = &v["choices"][0]["message"];
+
+        // Assert: tool_calls survives untouched -- the OpenAI channel.
+        assert_eq!(msg["tool_calls"][0]["id"], tool_id);
+        assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_weather");
+        // Assert: no tool_use block survives anywhere in the message.
+        assert!(
+            !msg.to_string().contains("tool_use"),
+            "message must carry no tool_use content block: {msg}"
+        );
+        // The lone text part collapses to a plain content string.
+        assert_eq!(msg["content"], "Checking weather.");
+    }
+
+    /// When the assistant turn is purely a tool call (a ToolUse part and
+    /// nothing else alongside `tool_calls`), stripping leaves no content,
+    /// so the ingress emits `content: null` -- OpenAI's shape for a
+    /// tool-call-only assistant message.
+    #[test]
+    fn render_response_emits_null_content_when_only_tool_use_remains() {
+        // Arrange
+        let tool_id = "toolu_02";
+        let resp = response_with_choices(vec![anthropic_shape_choice(None, tool_id)]);
+
+        // Act
+        let v = OpenAiIngress.render_response(resp).unwrap();
+        let msg = &v["choices"][0]["message"];
+
+        // Assert
+        assert_eq!(msg["tool_calls"][0]["id"], tool_id);
+        assert!(
+            msg["content"].is_null(),
+            "tool-call-only message must emit content: null, got {}",
+            msg["content"]
+        );
+    }
+
+    /// Forward-compat shape: a future tool_use sub-field deserializes the
+    /// block into `ContentPart::Other { type_tag: "tool_use", .. }`
+    /// instead of the typed `ToolUse`. The strip must cover that shape
+    /// too (mirrors the Anthropic ingress's dual-shape scan), or the
+    /// duplicate block leaks back onto the OpenAI wire.
+    #[test]
+    fn render_response_strips_forward_compat_other_tool_use_block() {
+        // Arrange
+        let tool_id = "toolu_03";
+        let mut other_extras = serde_json::Map::new();
+        other_extras.insert("id".into(), json!(tool_id));
+        other_extras.insert("name".into(), json!("get_weather"));
+        other_extras.insert("input".into(), json!({ "city": "Paris" }));
+        other_extras.insert("future_field".into(), json!("v2"));
+        let choice = Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "Checking.".into(),
+                        cache_control: None,
+                    }),
+                    ContentPart::Other {
+                        type_tag: "tool_use".into(),
+                        cache_control: None,
+                        extras: other_extras,
+                    },
+                ]),
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({ "id": tool_id, "type": "function" })]),
+            },
+            finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
+        };
+        let resp = response_with_choices(vec![choice]);
+
+        // Act
+        let v = OpenAiIngress.render_response(resp).unwrap();
+        let msg = &v["choices"][0]["message"];
+
+        // Assert
+        assert!(
+            !msg.to_string().contains("tool_use"),
+            "forward-compat tool_use block must be stripped: {msg}"
+        );
+        assert_eq!(msg["content"], "Checking.");
+    }
+
+    /// Control: an assistant message with text content and NO tool_calls
+    /// renders its text unchanged -- the strip must never touch a message
+    /// that has no tool_calls.
+    #[test]
+    fn render_response_leaves_text_content_untouched_without_tool_calls() {
+        // Arrange
+        let resp = response_with_choices(vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("hello world".into()),
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }]);
+
+        // Act
+        let v = OpenAiIngress.render_response(resp).unwrap();
+
+        // Assert
+        assert_eq!(v["choices"][0]["message"]["content"], "hello world");
+        assert!(v["choices"][0]["message"]["tool_calls"].is_null());
+    }
+
+    /// Streaming analog. The canonical `ChunkDelta` cannot represent a
+    /// `tool_use` content block (its `content` is `Option<String>`, tool
+    /// calls ride `tool_calls`), so a tool-call chunk renders the
+    /// tool_calls channel only -- no tool_use block can ever appear on
+    /// the OpenAI streaming wire. Pins that structural invariant.
+    #[test]
+    fn render_chunk_with_tool_calls_emits_no_tool_use_block() {
+        // Arrange
+        let chunk = ChatChunk {
+            id: "chatcmpl-1".into(),
+            model: "claude".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    tool_calls: Some(vec![json!({
+                        "index": 0,
+                        "id": "toolu_04",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": ""}
+                    })]),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+        };
+        let mut state = OpenAiIngress.new_stream_state();
+
+        // Act
+        let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
+
+        // Assert
+        assert_eq!(events.len(), 1);
+        assert!(events[0].data.contains("\"tool_calls\""));
+        assert!(
+            !events[0].data.contains("tool_use"),
+            "streaming wire must carry no tool_use block: {}",
+            events[0].data
+        );
     }
 
     /// DeepSeek-style upstreams (and clients echoing them, like
