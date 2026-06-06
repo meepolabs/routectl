@@ -41,10 +41,16 @@ Inside the request directory, files are present only when
     egress_response.json
     egress_response.headers.json
 
-`meta.json` is always present. The four bodies and four header
-files are optional; the loader cross-checks presence against the
-`has_*` flags in `meta.json` and errors on mismatch (missing file
-named in the error).
+`meta.json` is always present. The two request halves --
+`ingress_request.json` + `ingress_request.headers.json` and
+`outgoing_request.json` + `outgoing_request.headers.json` -- are
+ALWAYS required; the loader errors (naming the missing file) if any
+of the four is absent. Only the two response halves are optional:
+`upstream_response.*` is gated by `has_upstream_response` and
+`egress_response.*` by `has_egress_response`. For each optional
+half the loader cross-checks both files against its flag and errors
+on mismatch -- a promised-but-missing file, or a stray file present
+when the flag is `false`.
 
 ## meta.json schema
 
@@ -62,23 +68,31 @@ named in the error).
 Fields:
 
 - `ingress_kind` -- which ingress dialect parsed the inbound body.
-  The replay test selects the matching ingress adapter. Common
-  values: `"anthropic"` (`/v1/messages`), `"openai-chat-completions"`
-  (`/chat/completions`). The capture rig records whatever value the
-  trace carries; new dialects do not require a rig change.
+  Recorded by the capture rig for forward use; the loader's
+  `FixtureMeta` does not deserialize it and neither replay driver
+  reads it. Phase 1 replay is anthropic-ingress-only: both drivers
+  hardcode `AnthropicIngress::parse_request` regardless of this
+  value. Common rig-written values: `"anthropic"` (`/v1/messages`),
+  `"openai-chat-completions"` (`/chat/completions`). Multi-dialect
+  ingress selection arrives in a later phase.
 - `provider_kind` -- which egress provider produced the outgoing
   body. The replay test selects the matching translator. The string
   values match the in-code `PROVIDER_KIND` constants in
   `routectl-providers` -- in particular `"anthropic"` (not
   `"anthropic-api"`) for the api.anthropic.com client.
 - `stream` -- `true` for SSE-bytes responses, `false` for JSON
-  bodies. Drives which comparator the replay test reaches for
-  (`assert_sse_equal` vs `assert_json_equal_structural`).
+  bodies. Stream fixtures are currently skipped by the replay
+  drivers (stream-body replay is deferred -- the capture rig does
+  not yet write stream bodies). `assert_sse_equal` exists as harness
+  scaffolding for that future phase and has no driver caller today;
+  the exercised non-stream path uses `assert_json_equal_structural`.
 - `has_upstream_response` / `has_egress_response` -- which response
   files are present. Useful for capture sets that did not record
   the upstream side, or response-only fixtures.
-- `expected_unknown_block_count` -- forward-compat scenarios only.
-  Pins the number of unknown content blocks the canonical pipeline
+- `expected_unknown_block_count` -- reserved, not yet enforced. The
+  loader deserializes it into `FixtureMeta`, but no replay driver
+  reads it today. Intended for a future forward-compat scenario that
+  pins the number of unknown content blocks the canonical pipeline
   must opaquely pass through.
 - `model` -- post-alias provider model id from the trace. Optional
   in the schema (older captures load without it), but the capture
@@ -118,11 +132,18 @@ Skipped fixtures land in the `skipped` count of the test summary, not
 `failed`. Adaptive-thinking and DeepSeek replay will arrive in a
 later phase that threads router enrichment through the test setup.
 
-Additional Phase 1 corpus constraints (still enforced against the
-local corpus, since the harness assumes them):
+Two further conventions hold for the Phase 1 corpus. These are
+capture-rig conventions, NOT loader- or driver-enforced -- the
+loader stores no HTTP status and performs no model comparison, so
+nothing rejects a fixture that violates them:
 
-- Phase 1 fixtures must reflect a 2xx upstream response. Non-2xx
-  responses are out of scope and will be rejected by the loader.
-- Phase 1 fixtures must have `ingress_request.model == meta.model`
-  (i.e., no client-side alias resolution). Aliased fixtures need
-  router enrichment, which is not yet wired into the replay drivers.
+- Phase 1 fixtures reflect a 2xx upstream response. The capture rig
+  only emits a fixture for a request whose trace carries an
+  `upstream success body` (or `stream summary`) line, so non-2xx
+  responses are not produced in the first place; the loader itself
+  does not inspect or reject on status.
+- Phase 1 fixtures carry no client-side alias resolution
+  (`ingress_request.model` matches the post-alias `meta.model`).
+  Aliased fixtures would need router enrichment that the replay
+  drivers do not yet thread; the capture rig does not produce them,
+  and the loader does not validate the relationship.

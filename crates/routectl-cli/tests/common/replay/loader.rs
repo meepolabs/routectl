@@ -129,7 +129,13 @@ pub fn load_fixture(dir: &Path) -> Result<Fixture, ReplayError> {
 
 /// Walk `canon_root` for fixture subdirectories, sorting by directory
 /// name for deterministic test ordering. Skips dotfiles and any
-/// non-directory entry (e.g. `README.md`, `.gitkeep`).
+/// non-directory entry (e.g. `README.md`, `.gitkeep`). A subdirectory
+/// that fails to load (malformed `meta.json`, missing required file,
+/// stray optional file) is logged to stderr (naming the directory and
+/// the error) and skipped rather than aborting the whole corpus, so one
+/// bad fixture cannot blind the run to every other fixture's regression
+/// signal. Filesystem-level errors reading `canon_root` itself still
+/// propagate as `Err`.
 pub fn discover_fixtures(canon_root: &Path) -> Result<Vec<Fixture>, ReplayError> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let read = fs::read_dir(canon_root).map_err(|e| ReplayError::Io {
@@ -155,7 +161,19 @@ pub fn discover_fixtures(canon_root: &Path) -> Result<Vec<Fixture>, ReplayError>
         dirs.push(path);
     }
     dirs.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-    dirs.into_iter().map(|d| load_fixture(&d)).collect()
+    let mut fixtures = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        match load_fixture(&dir) {
+            Ok(f) => fixtures.push(f),
+            Err(e) => {
+                eprintln!(
+                    "[replay] skipping unloadable fixture `{}`: {e}",
+                    dir.display(),
+                );
+            }
+        }
+    }
+    Ok(fixtures)
 }
 
 fn read_meta(dir: &Path) -> Result<FixtureMeta, ReplayError> {
@@ -455,5 +473,25 @@ mod tests {
             names,
             vec!["alpha_scenario", "mu_scenario", "zeta_scenario"]
         );
+    }
+
+    #[test]
+    fn discover_fixtures_skips_unloadable_fixture() {
+        let tmp = tempdir().unwrap();
+        // Two well-formed fixtures plus one whose required outgoing body
+        // is missing -- the bad one must be skipped, not abort the walk.
+        for name in ["good_a", "good_b"] {
+            let dir = tmp.path().join(name);
+            fs::create_dir(&dir).unwrap();
+            write_minimal_fixture(&dir, false, false);
+        }
+        let bad = tmp.path().join("bad_scenario");
+        fs::create_dir(&bad).unwrap();
+        write_minimal_fixture(&bad, false, false);
+        fs::remove_file(bad.join(OUTGOING_BODY)).unwrap();
+
+        let fixtures = discover_fixtures(tmp.path()).unwrap();
+        let names: Vec<_> = fixtures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["good_a", "good_b"]);
     }
 }
