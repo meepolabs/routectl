@@ -564,7 +564,7 @@ async fn handle_config_reload(
 
     let new_config = read_parse_validate_config(path).await?;
 
-    let new_router = match build_router_from_config(new_config.clone(), secrets).await {
+    let mut new_router = match build_router_from_config(new_config.clone(), secrets).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(
@@ -574,6 +574,11 @@ async fn handle_config_reload(
             return None;
         }
     };
+
+    // Carry over per-nickname runtime state (circuit-breaker counters,
+    // RPM token buckets) from the outgoing Router so a hot-reload does
+    // not reset gates that took time to build up.
+    new_router.carry_over_runtime_state_from(&router_swap.load_full());
 
     router_swap.store(Arc::new(new_router));
     tracing::info!(
@@ -622,6 +627,13 @@ async fn read_parse_validate_config(path: &PathBuf) -> Option<Arc<Config>> {
     };
     let new_config = Arc::new(new_config);
 
+    // Unix-only: WARN when the config file is group/world-readable
+    // and carries sensitive values. Non-fatal so dev setups with
+    // literal: secrets still start; the operator is informed and can
+    // restrict permissions when it matters.
+    #[cfg(unix)]
+    warn_if_config_world_readable(path, &new_config, &text);
+
     if let Err(e) = routectl_router::validate_bedrock_global_config(&new_config) {
         tracing::warn!(error = %e, "config reload rejected by validate_bedrock_global_config; keeping previous config");
         return None;
@@ -640,6 +652,40 @@ async fn read_parse_validate_config(path: &PathBuf) -> Option<Arc<Config>> {
     }
 
     Some(new_config)
+}
+
+/// Emit a one-time WARN when `path` is group/world-readable AND the
+/// config text carries listener auth tokens or `literal:` secrets.
+/// Non-fatal: the caller keeps the config regardless so dev setups
+/// that store credentials in plain TOML still start. Operators running
+/// in shared environments should restrict the file to `0600`.
+#[cfg(unix)]
+fn warn_if_config_world_readable(path: &PathBuf, config: &Config, raw_text: &str) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let mode = meta.mode();
+    // Group-read (0o040) or world-read (0o004).
+    if (mode & 0o044) == 0 {
+        return;
+    }
+    let has_server_tokens = config
+        .server
+        .auth
+        .as_ref()
+        .is_some_and(|a| !a.tokens.is_empty());
+    let has_literal_secret = raw_text.contains("literal:");
+    if has_server_tokens || has_literal_secret {
+        tracing::warn!(
+            path = %path.display(),
+            mode = format!("{:04o}", mode & 0o777),
+            "config file is group/world-readable and carries secrets \
+             ([server.auth].tokens or literal: values); restrict to 0600 \
+             to prevent credential exposure",
+        );
+    }
 }
 
 /// Diff the previous config against the new one and return the

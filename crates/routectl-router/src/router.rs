@@ -257,6 +257,24 @@ impl Router {
         }
     }
 
+    /// Carry over per-nickname runtime state from a previous Router.
+    /// For each key in `previous.state` that also exists in `self.state`,
+    /// replaces the fresh-allocated `Arc` with the prior one so that
+    /// circuit-breaker counters and RPM token buckets survive a hot-reload.
+    /// Nicknames present only in `self` (genuinely new models) keep their
+    /// fresh-allocated state unchanged.
+    ///
+    /// Called by the hot-reload coordinator in routectl-cli immediately
+    /// after building a replacement Router and before swapping it in, to
+    /// avoid resetting gates that took time to build up across reloads.
+    pub fn carry_over_runtime_state_from(&mut self, previous: &Router) {
+        for (key, state) in &previous.state {
+            if self.state.contains_key(key.as_str()) {
+                self.state.insert(key.clone(), state.clone());
+            }
+        }
+    }
+
     /// Look up a model nickname in the resolved table.
     fn resolve_nickname(&self, nickname: &str) -> Option<Arc<ResolvedModel>> {
         self.resolved_models.get(nickname).cloned()
@@ -2007,6 +2025,58 @@ mod tests {
             ..RetryPolicy::default()
         };
         assert!(should_fallback(&err, &policy_deny, false));
+    }
+
+    #[test]
+    fn carry_over_runtime_state_from_preserves_existing_state_arcs() {
+        // Arrange: build two fresh Routers; insert named state entries
+        // directly to simulate pre-loaded model nicknames without requiring
+        // real Provider impls.
+        use crate::config::ProviderRuntimePolicy;
+        use crate::runtime_state::ProviderState;
+
+        let config = Arc::new(Config::default());
+        let policy = ProviderRuntimePolicy::default();
+
+        let mut old = Router::new(config.clone());
+        // "model-a" exists in both routers -- state must be carried over.
+        let old_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
+        old.state.insert("model-a".to_string(), old_arc.clone());
+        // "model-x" exists only in the old router -- must NOT be injected.
+        let old_only_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
+        old.state
+            .insert("model-x".to_string(), old_only_arc.clone());
+
+        let mut new = Router::new(config.clone());
+        let fresh_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
+        new.state.insert("model-a".to_string(), fresh_arc.clone());
+        // "model-new" exists only in the new router -- must remain unchanged.
+        let new_only_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
+        new.state
+            .insert("model-new".to_string(), new_only_arc.clone());
+
+        // Act
+        new.carry_over_runtime_state_from(&old);
+
+        // Assert: "model-a" holds the old Arc, not the fresh one.
+        let after_a = new.state.get("model-a").cloned().unwrap();
+        assert!(
+            Arc::ptr_eq(&after_a, &old_arc),
+            "carry_over must reuse the old Arc for nicknames present in both routers",
+        );
+
+        // Assert: "model-new" (new-only) is unchanged.
+        let after_new = new.state.get("model-new").cloned().unwrap();
+        assert!(
+            Arc::ptr_eq(&after_new, &new_only_arc),
+            "carry_over must not replace entries absent from the old router",
+        );
+
+        // Assert: "model-x" (old-only) is NOT injected into the new router.
+        assert!(
+            !new.state.contains_key("model-x"),
+            "carry_over must not inject old-only nicknames into the new router",
+        );
     }
 }
 
