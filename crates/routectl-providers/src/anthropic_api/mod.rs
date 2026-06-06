@@ -291,6 +291,18 @@ impl AnthropicApiProvider {
                 merged_betas.push(t.to_string());
             }
         }
+        // Operator-configured model-level betas, composed by the router
+        // from `[models.X] header_extras["anthropic-beta"]`. Like the
+        // provider-level `config_betas` floor above, these bypass the
+        // `allowed_betas` allowlist unconditionally -- that allowlist
+        // gates only client-requested betas, never operator-pinned ones.
+        // Empty for library consumers that bypass the router.
+        for entry in req.routectl_internal.operator_betas.iter() {
+            let t = entry.trim();
+            if !t.is_empty() && beta_seen.insert(t.to_string()) {
+                merged_betas.push(t.to_string());
+            }
+        }
 
         // When context_management emulation is active, strip the
         // `context-management-2025-06-27` beta from the outgoing header.
@@ -1266,6 +1278,56 @@ mod tests {
         assert!(
             value.split(',').any(|s| s.trim() == "beta-two"),
             "beta-two must pass through with empty allowlist; got {value}"
+        );
+    }
+
+    /// Model-level operator betas (composed by the router onto
+    /// `routectl_internal.operator_betas`) bypass the allowlist
+    /// unconditionally, while non-allowlisted client betas folded into
+    /// `req.anthropic_beta` are still dropped. This pins the invariant:
+    /// `allowed_betas` gates only client-requested betas, never the
+    /// betas an operator pinned in `[models.X] header_extras`.
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn model_level_operator_beta_bypasses_allowlist() {
+        let cfg = AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("test-key")),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::ApiKey,
+            header_extras: Vec::new(),
+            user_agent: None,
+            allowed_betas: vec!["req-allowed".into()],
+            forward_client_headers: Vec::new(),
+            context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+        };
+        let provider = AnthropicApiProvider::new(cfg);
+        let mut req = ChatRequest::default();
+        // The router folds the model-level beta into the full union on
+        // `req.anthropic_beta` AND records it as an operator floor on
+        // `operator_betas`. The allowlist filter drops it from the union,
+        // but the floor re-adds it unconditionally.
+        req.anthropic_beta = vec![
+            "req-allowed".into(),
+            "client-blocked".into(),
+            "ctx-1m".into(),
+        ];
+        req.routectl_internal.operator_betas = vec!["ctx-1m".into()];
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        assert!(
+            value.split(',').any(|s| s.trim() == "ctx-1m"),
+            "model-level operator beta must bypass allowlist and reach the header; got {value}"
+        );
+        assert!(
+            value.split(',').any(|s| s.trim() == "req-allowed"),
+            "allowlisted client beta must reach the header; got {value}"
+        );
+        assert!(
+            !value.split(',').any(|s| s.trim() == "client-blocked"),
+            "non-allowlisted client beta must be dropped; got {value}"
         );
     }
 }
