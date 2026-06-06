@@ -89,11 +89,13 @@ pub struct AnthropicStreamState {
     pending_matched_stop_sequence: Option<String>,
     /// Opaque-block index mapping: upstream_index -> ingress_index.
     /// Anthropic egresses surface unknown `content_block` types
-    /// verbatim via `chunk.opaque_events`; the ingress replays those
-    /// bytes byte-for-byte but allocates fresh ingress indexes from
-    /// `next_index` so canonical and opaque blocks share a single
-    /// coherent index sequence on the wire. BTreeMap (not HashMap) for
-    /// deterministic iteration order during debug logging.
+    /// via `chunk.opaque_events`; the ingress replays those events
+    /// value-preserving (semantically lossless for valid JSON -- the
+    /// captured `serde_json::Value` is re-serialized, not echoed as
+    /// the exact upstream byte slice) but allocates fresh ingress
+    /// indexes from `next_index` so canonical and opaque blocks share
+    /// a single coherent index sequence on the wire. BTreeMap (not
+    /// HashMap) for deterministic iteration order during debug logging.
     opaque_index_map: BTreeMap<u32, usize>,
     /// Resolved model from the originating request. Used as fallback
     /// in `message_start` when upstream chunks carry no model string.

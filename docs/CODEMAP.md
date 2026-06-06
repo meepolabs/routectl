@@ -99,7 +99,7 @@ listed at the bottom of each crate.
 - `src/openai_responses/auth.rs` -- header injection per `AuthKind` (ChatgptOauth Bearer+Account-Id+originator + codex identity headers `version`/`session-id`/`x-codex-installation-id`/`x-codex-window-id`/`thread-id`/`x-client-request-id`/residency, ApiKey Bearer, BedrockMantle Bearer)
 - `src/openai_responses/cookies.rs` -- persistent Cloudflare cookie jar (allowlist-pinned to non-secret cookie names)
 - `src/openai_responses/request.rs` -- orchestrator: builds `ResponsesRequest` from `ChatRequest` via system/messages/tools/extras submodules
-- `src/openai_responses/system.rs` -- canonical `system` -> Responses `instructions` flat string (drops per-block cache_control with WARN)
+- `src/openai_responses/system.rs` -- canonical `system` -> Responses `instructions` flat string (drops per-block cache_control with DEBUG)
 - `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items)
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses `{type,name,description,parameters}` shape; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key provider_extras allowlist; ChatgptOauth `store=false` lock
@@ -152,7 +152,7 @@ listed at the bottom of each crate.
 - `src/glob.rs` -- `[aliases]` table suffix-glob parser + longest-prefix lookup index (`AliasPattern`, `PrefixIndex`)
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`
 - `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch
-- `src/runtime_state.rs` -- per-provider token-bucket RPM limiter + circuit breaker state machine
+- `src/runtime_state.rs` -- per-model (nickname-keyed) token-bucket RPM limiter + circuit breaker state machine
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date suffixes (e.g. `_20250305`) so `unsupported_features` on `ProviderRuntimePolicy` can match capability-class regardless of vendor versioning; `ToolDef::Custom` (user-defined tools) does not contribute feature keys
 
 ### Tests

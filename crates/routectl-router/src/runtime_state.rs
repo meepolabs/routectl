@@ -1,8 +1,9 @@
-//! Per-provider runtime gates: token-bucket rate limiter + passive
+//! Per-model runtime gates: token-bucket rate limiter + passive
 //! circuit breaker. The `Router` holds one `ProviderState` per
-//! configured provider name; both the rate limiter and the breaker
-//! are read+updated under a single Mutex so the router's chain walk
-//! can ask "should I dispatch to this provider right now?" atomically.
+//! model nickname (one `[models.X]` entry); both the rate limiter
+//! and the breaker are read+updated under a single Mutex so the
+//! router's chain walk can ask "should I dispatch to this model
+//! right now?" atomically.
 
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,7 @@ use crate::config::ProviderRuntimePolicy;
 const DEFAULT_CIRCUIT_COOLDOWN_MS: u64 = 30_000;
 const RPM_WINDOW_MS: u64 = 60_000;
 
-/// Runtime gate for a single provider name. Created from a config
+/// Runtime gate for a single model nickname. Created from a config
 /// `ProviderRuntimePolicy`; if all knobs are unset, the gate is a
 /// transparent no-op.
 ///

@@ -32,6 +32,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Bedrock Converse now completes the `stop_sequence` round-trip: the
+  request opts in via `additionalModelResponseFieldPaths`, and the
+  matched sequence is lifted onto the canonical response on both the
+  non-streaming and streaming (`messageStop`) paths, gated on
+  `stop_reason == "stop_sequence"`.
 - The 0.7.0 changelog entry incorrectly stated the thinking-cache LRU
   cap as 1000; actual value is 10000.
 
@@ -131,8 +136,9 @@ a gateway client" for the operator setup, and the README
   `OpenBlockKind::Unknown` in the SSE state machine, so an
   unrecognized `content_block.type` no longer crashes the stream
   and walks the fallback chain. A `#[serde(skip)] opaque_events`
-  carrier on `ChatChunk` captures verbatim bytes; the matching
-  Anthropic ingress re-emits them so strict clients (citation
+  carrier on `ChatChunk` captures the upstream event bytes
+  (value-preserving / semantically lossless for valid JSON); the
+  matching Anthropic ingress re-emits them so strict clients (citation
   links, search-status UI) see the full upstream wire. Bounded
   caps (256 KB / 10000 deltas per block) downgrade overflow
   silently with a WARN. Bedrock-Invoke inherits the fix free;

@@ -35,9 +35,12 @@ pub struct ResolvedModel {
     /// which model the operator configured, not just which provider
     /// answered.
     pub nickname: String,
-    /// The provider's table key in `[providers]`. Used for runtime-
-    /// gate lookups (RPM bucket, circuit breaker) which are keyed by
-    /// provider name.
+    /// The provider's table key in `[providers]`. Used for the
+    /// providers-map mirror, the runtime-policy lookup (which
+    /// `ProviderRuntimePolicy` to seed this model's gate from), and
+    /// the operator-facing error label. The runtime gate STATE itself
+    /// (RPM bucket, circuit breaker) is keyed by nickname (`state_key`),
+    /// not by provider name.
     pub provider_name: String,
     /// The concrete provider instance.
     pub provider: Arc<dyn Provider>,

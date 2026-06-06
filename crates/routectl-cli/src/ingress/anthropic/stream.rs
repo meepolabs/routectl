@@ -148,13 +148,14 @@ pub(super) fn render_chunk_internal(
 
 /// Replay opaque SSE events captured by the Anthropic-API egress.
 ///
-/// Each event carries the raw upstream bytes for an unknown
+/// Each event carries the captured upstream bytes for an unknown
 /// `content_block` type (e.g. `server_tool_use`,
-/// `web_search_tool_result`). We re-emit those bytes verbatim as the
-/// SSE `data:` payload's `content_block` / `delta` field rather than
-/// round-tripping through serde_json -- re-serialization would lose
-/// byte-for-byte fidelity for any nested types this codebase does
-/// not yet model.
+/// `web_search_tool_result`). We re-emit those bytes as the SSE
+/// `data:` payload's `content_block` / `delta` field. The result is
+/// value-preserving (semantically lossless for valid JSON) rather
+/// than literally byte-for-byte: the egress already captured the
+/// parsed `serde_json::Value`, so the re-emitted bytes are a clean
+/// re-serialization, not the exact upstream byte slice.
 ///
 /// Index allocation: each `ContentBlockStart` consumes one fresh
 /// `state.next_index` value and records the upstream->ingress mapping

@@ -133,10 +133,11 @@ this doc first for similar patterns. For operator-facing config recipes see
   naturally ends mid-thought (without emitting the sequence) WILL
   get `stop_sequence` instead of `end_turn` -- a known residual
   seam, since the openai-compat wire carries no signal to
-  disambiguate. Bedrock Converse is not yet covered: AWS surfaces
-  the matched sequence via `additionalModelResponseFields` only when
-  the request opts in via `additionalModelResponseFieldPaths`.
-  Tracked as a follow-up.
+  disambiguate. Bedrock Converse IS covered: the request opts in via
+  `additionalModelResponseFieldPaths=["/stop_sequence"]`, and the
+  egress lifts the matched value on both the non-streaming response
+  path and the streaming `messageStop` path, gated on
+  `stop_reason == "stop_sequence"`.
 
 - **Anthropic streaming reasoning replay residual.** Strategy A
   buffers `thinking_delta` text and `signature_delta` on the open
@@ -184,8 +185,10 @@ this doc first for similar patterns. For operator-facing config recipes see
   (transport-internal, never on the wire) captures each unknown
   event's bytes; the matching Anthropic ingress reads the carrier
   and re-emits `content_block_start` / `delta` / `stop` SSE
-  verbatim so strict clients (citation links, search-status UI)
-  see the full upstream wire. v2 is non-authoritative: bounded
+  value-preserving (semantically lossless for valid JSON -- the
+  captured `serde_json::Value` is re-serialized, not echoed as the
+  exact upstream byte slice) so strict clients (citation links,
+  search-status UI) see the full upstream wire. v2 is non-authoritative: bounded
   caps in
   `crates/routectl-providers/src/anthropic_api/sse_opaque.rs`
   (256 KB bytes / 10000 deltas per block) downgrade overflowed

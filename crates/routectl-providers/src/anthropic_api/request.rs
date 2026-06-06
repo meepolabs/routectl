@@ -22,8 +22,10 @@
 //!   defer_loading, strict, optional type_tag); ToolDef::Other ->
 //!   AnthropicTool::Builtin (passthrough Value).
 //! - Top-level cache_control and anthropic_beta are set on the body.
-//! - cache_control::validate runs before serialization (debug_assert
-//!   only; keeps non-debug builds fast).
+//! - cache_control::validate runs before serialization
+//!   unconditionally (release builds too): it protects direct /
+//!   library callers without an ingress from cap/ordering
+//!   violations, in all build modes.
 
 use std::borrow::Cow;
 
