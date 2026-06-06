@@ -29,10 +29,13 @@ pub enum Error {
     #[error("config: {0}")]
     Config(String),
 
-    /// Request rejected before reaching an upstream provider. Produced by
-    /// ingress adapters when a request body fails a static invariant
-    /// (e.g. cache_control 4-breakpoint cap, TTL ordering). HTTP handlers
-    /// surface this as 400 Bad Request.
+    /// Request rejected because a body failed a static invariant.
+    /// Produced both by ingress adapters (e.g. cache_control
+    /// 4-breakpoint cap, TTL ordering) and by egress translation in
+    /// `routectl-providers` (e.g. an openai-compat wire-lift that hits
+    /// an untranslatable canonical-only shape under
+    /// `strict_translation`). HTTP handlers surface this as 400 Bad
+    /// Request.
     #[error("validation: {0}")]
     Validation(String),
 

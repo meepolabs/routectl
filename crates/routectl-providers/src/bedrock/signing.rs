@@ -1,6 +1,6 @@
 //! SigV4 signing for Bedrock-runtime requests.
 //!
-//! `apply_auth` is the single entry point. Given a fully-built
+//! `apply` is the single entry point. Given a fully-built
 //! `reqwest::Request` (method, URL, headers, body) and the resolved
 //! credentials, it either:
 //!
@@ -30,11 +30,7 @@ use super::auth::ResolvedCreds;
 /// For `Bearer` -- attaches `Authorization: Bearer <key>`.
 /// For `Sigv4`  -- fetches the latest credentials from the provider,
 /// SigV4-signs the request, and merges the auth headers into `req`.
-pub async fn apply_auth(
-    req: &mut reqwest::Request,
-    creds: &ResolvedCreds,
-    region: &str,
-) -> Result<()> {
+pub async fn apply(req: &mut reqwest::Request, creds: &ResolvedCreds, region: &str) -> Result<()> {
     match creds {
         ResolvedCreds::Bearer { key } => {
             tracing::debug!(auth_kind = "Bearer", region = %region, "applying bedrock auth");
@@ -224,7 +220,7 @@ mod tests {
             .build()
             .unwrap();
 
-        apply_auth(&mut req, &resolved, "us-west-2").await.unwrap();
+        apply(&mut req, &resolved, "us-west-2").await.unwrap();
         assert_eq!(
             req.headers()
                 .get(AUTHORIZATION)
@@ -253,7 +249,7 @@ mod tests {
             .build()
             .unwrap();
 
-        apply_auth(&mut req, &resolved, "us-west-2").await.unwrap();
+        apply(&mut req, &resolved, "us-west-2").await.unwrap();
 
         // Authorization must be present and start with the SigV4 algo.
         let auth = req
@@ -302,7 +298,7 @@ mod tests {
         let bad_value = HeaderValue::from_bytes(b"\xC0\xC1 oops").expect("constructable");
         req.headers_mut().insert("x-routectl-bad", bad_value);
 
-        let err = apply_auth(&mut req, &resolved, "us-west-2")
+        let err = apply(&mut req, &resolved, "us-west-2")
             .await
             .expect_err("non-ASCII header must error explicitly");
         let msg = err.to_string();
@@ -333,7 +329,7 @@ mod tests {
             .build()
             .unwrap();
 
-        apply_auth(&mut req, &resolved, "us-west-2").await.unwrap();
+        apply(&mut req, &resolved, "us-west-2").await.unwrap();
         let token = req
             .headers()
             .get("x-amz-security-token")

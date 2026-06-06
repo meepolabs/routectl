@@ -1,13 +1,13 @@
 //! SSE chunk parsing and per-chunk normalization.
 //!
-//! `parse_chunk` is stateless: it handles one `data: ...` line and returns
+//! `parse_event` is stateless: it handles one `data: ...` line and returns
 //! `Ok(None)` for `[DONE]` / keepalives, or `Ok(Some(ChatChunk))` for
 //! content chunks. Reasoning is lifted where the upstream field is simple
 //! (DeepSeek, vLLM, OpenAI, OpenRouter).
 //!
 //! The `<think>` tag state machine for `RawThinkTag` is NOT stateless, so it
 //! lives in `ThinkTagAccumulator` which the `stream()` caller owns across
-//! chunks. Call `ThinkTagAccumulator::process` instead of `parse_chunk` when
+//! chunks. Call `ThinkTagAccumulator::process` instead of `parse_event` when
 //! the dialect is `RawThinkTag`.
 
 use serde_json::Value;
@@ -30,7 +30,7 @@ use super::util::build_reasoning_detail;
 /// `reasoning_index` is a per-stream, monotonically incrementing counter
 /// owned by the streaming caller (see `stream()`); dialects that lift
 /// streamed reasoning thread it into each emitted detail's `index`.
-pub fn parse_chunk(
+pub fn parse_event(
     id: &str,
     raw: &str,
     dialect: ReasoningDialect,
@@ -437,15 +437,15 @@ mod tests {
 
     #[test]
     fn done_returns_none() {
-        assert!(parse_chunk("t", "[DONE]", ReasoningDialect::OpenAi, &mut 0)
+        assert!(parse_event("t", "[DONE]", ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .is_none());
         assert!(
-            parse_chunk("t", "  [DONE]  ", ReasoningDialect::OpenAi, &mut 0)
+            parse_event("t", "  [DONE]  ", ReasoningDialect::OpenAi, &mut 0)
                 .unwrap()
                 .is_none()
         );
-        assert!(parse_chunk("t", "", ReasoningDialect::OpenAi, &mut 0)
+        assert!(parse_event("t", "", ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .is_none());
     }
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn openai_basic_delta() {
         let raw = delta_chunk(Some("hello"), None);
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn deepseek_lifts_reasoning_content_in_delta() {
         let raw = delta_chunk(Some("answer"), Some("chain of thought"));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::DeepSeek, &mut 0)
             .unwrap()
             .unwrap();
         let details = &chunk.choices[0].delta.reasoning_details;
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn vllm_lifts_reasoning_content_in_delta() {
         let raw = delta_chunk(None, Some("vllm trace"));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::Vllm, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::Vllm, &mut 0)
             .unwrap()
             .unwrap();
         let details = &chunk.choices[0].delta.reasoning_details;
@@ -486,7 +486,7 @@ mod tests {
     }
 
     /// Pin the streaming reasoning-index contract: successive DeepSeek
-    /// reasoning chunks driven through `parse_chunk` with a single shared
+    /// reasoning chunks driven through `parse_event` with a single shared
     /// per-stream counter (exactly as `stream()` threads it) must carry
     /// `index` 0, 1, 2, ... -- NOT all 0. Before the fix the lifter
     /// hardcoded index 0, collapsing every streamed delta onto one block.
@@ -495,7 +495,7 @@ mod tests {
         let mut reasoning_index: u32 = 0;
         for expected in [0u32, 1, 2] {
             let raw = delta_chunk(Some("answer"), Some("step"));
-            let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek, &mut reasoning_index)
+            let chunk = parse_event("t", &raw, ReasoningDialect::DeepSeek, &mut reasoning_index)
                 .unwrap()
                 .unwrap();
             let details = &chunk.choices[0].delta.reasoning_details;
@@ -515,7 +515,7 @@ mod tests {
     fn vllm_streaming_reasoning_index_skips_non_reasoning_chunks() {
         let mut reasoning_index: u32 = 0;
 
-        let c0 = parse_chunk(
+        let c0 = parse_event(
             "t",
             &delta_chunk(None, Some("first")),
             ReasoningDialect::Vllm,
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(c0.choices[0].delta.reasoning_details[0].index, Some(0));
 
         // Plain content chunk: no reasoning -> counter unchanged.
-        let c1 = parse_chunk(
+        let c1 = parse_event(
             "t",
             &delta_chunk(Some("visible"), None),
             ReasoningDialect::Vllm,
@@ -536,7 +536,7 @@ mod tests {
         .unwrap();
         assert!(c1.choices[0].delta.reasoning_details.is_empty());
 
-        let c2 = parse_chunk(
+        let c2 = parse_event(
             "t",
             &delta_chunk(None, Some("second")),
             ReasoningDialect::Vllm,
@@ -756,7 +756,7 @@ mod tests {
             "total_tokens": 30,
             "completion_tokens_details": {"reasoning_tokens": 7}
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         let usage = chunk.usage.expect("terminal usage present");
@@ -774,7 +774,7 @@ mod tests {
             "prompt_cache_hit_tokens": 80,
             "prompt_cache_miss_tokens": 20
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::DeepSeek, &mut 0)
             .unwrap()
             .unwrap();
         let usage = chunk.usage.expect("terminal usage present");
@@ -791,7 +791,7 @@ mod tests {
             "total_tokens": 120,
             "prompt_tokens_details": {"cached_tokens": 64}
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         let usage = chunk.usage.expect("terminal usage present");
@@ -810,7 +810,7 @@ mod tests {
             "reasoning_tokens": 11,
             "completion_tokens_details": {"reasoning_tokens": 99}
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         assert_eq!(chunk.usage.unwrap().reasoning_tokens, Some(11));
@@ -830,7 +830,7 @@ mod tests {
             "reasoning_tokens": null,
             "completion_tokens_details": {"reasoning_tokens": 5}
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -851,7 +851,7 @@ mod tests {
             "cache_read_input_tokens": null,
             "prompt_tokens_details": {"cached_tokens": 64}
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
+        let chunk = parse_event("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -873,7 +873,7 @@ mod tests {
             }
         })
         .to_string();
-        let err = parse_chunk("test-provider", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
+        let err = parse_event("test-provider", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
         match err {
             Error::Upstream {
                 provider,
@@ -901,7 +901,7 @@ mod tests {
             }
         })
         .to_string();
-        let err = parse_chunk("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
+        let err = parse_event("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
         match err {
             Error::Upstream { status, .. } => assert_eq!(status, 502),
             other => panic!("expected Error::Upstream, got: {other:?}"),

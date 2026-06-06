@@ -156,7 +156,7 @@ fn build_tool_message(id: &str, part: &Value) -> Result<Option<Value>> {
         .get("content")
         .cloned()
         .unwrap_or(Value::String(String::new()));
-    let content = normalize_tool_result_content(content);
+    let content = translate_tool_result_content(content);
     Ok(Some(serde_json::json!({
         "role": "tool",
         "tool_call_id": tool_use_id,
@@ -164,13 +164,13 @@ fn build_tool_message(id: &str, part: &Value) -> Result<Option<Value>> {
     })))
 }
 
-/// Normalize a tool_result content payload for OpenAI:
+/// Translate a tool_result content payload for OpenAI:
 /// - String -> string
 /// - Array of blocks -> array, with Anthropic image shapes lifted to
 ///   image_url shape (mirrors the `content` lift, which doesn't
 ///   recurse into tool_result).
 /// - Object / scalar -> stringified JSON
-fn normalize_tool_result_content(content: Value) -> Value {
+fn translate_tool_result_content(content: Value) -> Value {
     match content {
         Value::String(_) => content,
         Value::Array(arr) => {

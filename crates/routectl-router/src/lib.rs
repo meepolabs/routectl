@@ -13,7 +13,7 @@ pub mod router;
 pub mod runtime_state;
 
 pub use config::{
-    AliasValue, Config, HistoryReasoning, LogConfig, ModelEntry, ProviderEntry, ProviderKind,
+    AliasValue, Config, HistoryReasoning, LogConfig, ModelEntry, ProviderEntry,
     ProviderRuntimePolicy, ReasoningDialect, RetryPolicy, ServerAuth, ServerConfig,
 };
 #[cfg(feature = "bedrock")]

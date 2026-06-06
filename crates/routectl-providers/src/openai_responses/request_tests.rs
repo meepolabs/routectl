@@ -831,7 +831,7 @@ fn sse_reasoning_round_trips_through_canonical_to_replay_request() {
     use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 
     // Arrange: synthesize a streaming session by feeding events
-    // through process_event, then collect the emitted reasoning_details
+    // through parse_event, then collect the emitted reasoning_details
     // into a synthetic assistant message. The replay request must then
     // carry the same encrypted_content signature.
     let events = vec![
@@ -858,7 +858,7 @@ fn sse_reasoning_round_trips_through_canonical_to_replay_request() {
     let mut all_details: Vec<ReasoningDetail> = Vec::new();
     for ev in events {
         let typed = serde_json::from_value(ev).unwrap();
-        for chunk in state.process_event("test", typed).unwrap() {
+        for chunk in state.parse_event("test", typed).unwrap() {
             all_details.extend(chunk.choices[0].delta.reasoning_details.clone());
         }
     }

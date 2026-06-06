@@ -276,7 +276,7 @@ impl BedrockProvider {
     ///    skipping auth-reserved names (including the `x-amz-` prefix)
     ///    and routectl-managed names.
     /// 4. Apply SigV4 signing (or BearerKey passthrough) via
-    ///    `signing::apply_auth`.
+    ///    `signing::apply`.
     /// 5. Emit the dir-2 outgoing header trace.
     async fn build_signed_request(
         &self,
@@ -344,10 +344,10 @@ impl BedrockProvider {
             request.headers_mut().insert(name, value);
         }
 
-        signing::apply_auth(&mut request, &self.resolved, &self.cfg.region).await?;
+        signing::apply(&mut request, &self.resolved, &self.cfg.region).await?;
         // Dir 2: outgoing request headers. The SigV4 Authorization /
         // x-amz-* (or Bearer) headers were applied to `request` by
-        // signing::apply_auth above, so auth IS visible here. The
+        // signing::apply above, so auth IS visible here. The
         // user-agent is also visible here because it was explicitly
         // inserted above. Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::outgoing(

@@ -5,7 +5,7 @@
 //!
 //! `BedrockProvider` has no `base_url` override, so a full wiremock HTTP
 //! test driving `BedrockProvider::stream()` is impossible from a `tests/`
-//! file without editing `src/`. Similarly, `signing::apply_auth` requires
+//! file without editing `src/`. Similarly, `signing::apply` requires
 //! a `reqwest::Request`, and `eventstream::invoke_stream` requires
 //! `aws-smithy-types` + `aws-smithy-eventstream` frame builders -- both
 //! of which are optional `[dependencies]` that are NOT in
@@ -13,7 +13,7 @@
 //! integration test binaries.
 //!
 //! The inline unit tests already cover those paths thoroughly:
-//!   - `src/bedrock/signing.rs` tests `apply_auth` with Static, Bearer,
+//!   - `src/bedrock/signing.rs` tests `apply` with Static, Bearer,
 //!     session-token, and non-ASCII-header cases, pinning the
 //!     `AWS4-HMAC-SHA256` prefix + credential scope.
 //!   - `src/bedrock/eventstream.rs` tests `invoke_stream` with prelude-

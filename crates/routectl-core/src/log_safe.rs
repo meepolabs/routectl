@@ -156,7 +156,7 @@ pub fn sanitize_upstream_body_with_cap(body: &str, cap: usize) -> String {
 /// Bedrock / Anthropic / OpenAI returns in practice, while still
 /// bounded so a malicious or compromised upstream can't drive log
 /// volume by returning megabyte-sized error pages.
-pub const MAX_DEBUG_BODY_BYTES: usize = 4096;
+pub(crate) const MAX_DEBUG_BODY_BYTES: usize = 4096;
 
 /// Default cap on the serialized body emitted at TRACE level by all
 /// four body trace helpers (`trace_ingress_body`,
@@ -173,17 +173,6 @@ pub const MAX_DEBUG_BODY_BYTES: usize = 4096;
 /// rule. The const name is kept for downstream consumers that read
 /// the default at compile time.
 pub const MAX_TRACE_BODY_BYTES: usize = 16 * 1024;
-
-/// Backward-compatible alias for the old name. Prefer
-/// [`MAX_TRACE_BODY_BYTES`] -- the rename clarifies that this cap
-/// applies to all four body-trace directions, not only the outgoing
-/// one. Kept so downstream consumers do not break on rename.
-#[deprecated(
-    since = "0.5.0",
-    note = "renamed to MAX_TRACE_BODY_BYTES (cap applies to all four body trace helpers)"
-)]
-#[allow(non_upper_case_globals)]
-pub const MAX_TRACE_OUTGOING_BODY_BYTES: usize = MAX_TRACE_BODY_BYTES;
 
 /// Truncate a JSON value to its compact-stringified form, capped at `cap`
 /// bytes with a `... [truncated at <cap> bytes]` tail. Used by the four
@@ -371,7 +360,10 @@ pub fn redact_prompts_in(body: &serde_json::Value) -> serde_json::Value {
 /// Test-friendly variant of [`redact_prompts_in`] that takes the flag
 /// explicitly, sidestepping the process-global `OnceLock` so unit
 /// tests can pin both branches deterministically.
-pub fn redact_prompts_with_flag(body: &serde_json::Value, enabled: bool) -> serde_json::Value {
+pub(crate) fn redact_prompts_with_flag(
+    body: &serde_json::Value,
+    enabled: bool,
+) -> serde_json::Value {
     if !enabled {
         return body.clone();
     }
@@ -772,7 +764,7 @@ fn redact_header_value(value: &str) -> String {
 /// whose `name` matches [`REDACT_HEADER_NAMES`] (case-insensitive).
 /// Mutates in place. Other entries (and any non-pair shape that slipped
 /// in) are left untouched.
-pub fn redact_outgoing_header_values(headers: &mut serde_json::Value) {
+pub(crate) fn redact_outgoing_header_values(headers: &mut serde_json::Value) {
     let Some(arr) = headers.as_array_mut() else {
         return;
     };
@@ -940,7 +932,7 @@ pub struct StructuralSummary {
 /// Tolerates missing keys (returns the type's default). Tolerates
 /// type-mismatch (e.g. `model: 5` rather than a string) by returning
 /// None for that field.
-pub fn extract_structural_summary(body: &serde_json::Value) -> StructuralSummary {
+pub(crate) fn extract_structural_summary(body: &serde_json::Value) -> StructuralSummary {
     let obj = match body.as_object() {
         Some(o) => o,
         None => return StructuralSummary::default(),

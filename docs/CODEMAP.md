@@ -25,7 +25,9 @@ listed at the bottom of each crate.
 - `src/provider.rs` -- `Provider` trait every backend implements (normalize_request/response/chunk + complete + stream + on_auth_failure hook for 401 recovery)
 - `src/token_source.rs` -- `TokenSource` async trait (`Arc<dyn TokenSource>` per-provider) + `StaticToken` default impl; lets OAuth refresh rotate without daemon restart
 - `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions), prompt redaction, structural-summary extractor, `[log]`-block override seeding
-- `src/codex_fingerprint.rs` -- shared codex CLI HTTP fingerprint (UA, originator, residency); consumed by both the openai-responses egress client and the routectl-auth OAuth refresh client so token-endpoint round-trips do not drift from real codex traffic
+- `src/identity/mod.rs` -- provider identity-header module root; one canonical home for the compiled HTTP-fingerprint constants and default-header builders (`pub mod codex; pub mod anthropic;`)
+- `src/identity/codex.rs` -- shared codex CLI HTTP fingerprint (UA, originator, residency) + `default_identity_headers()` (originator/residency/version trio); consumed by both the openai-responses egress client and the routectl-auth OAuth refresh client so token-endpoint round-trips do not drift from real codex traffic
+- `src/identity/anthropic.rs` -- compiled Claude Code SDK (Stainless) identity-header defaults (`default_claude_code_identity_headers`, `default_claude_code_user_agent`); consumed by the anthropic-api egress on the OauthBearer path so a zero-config provider emits the Claude Code fingerprint
 - `src/error.rs` -- `Error` enum (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...) and `Result` alias
 
 ### Tests
@@ -177,7 +179,6 @@ listed at the bottom of each crate.
 - `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry + `known_provider_ids` (anthropic, codex); `AuthParams` and `truncate` helper
 - `src/oauth/providers/anthropic.rs` -- claude.ai OAuth flow: `claude.com/cai/oauth/authorize` + `platform.claude.com/v1/oauth/token`, `anthropic-beta: oauth-2025-04-20`, manual-paste redirect support
 - `src/oauth/providers/codex.rs` -- OpenAI ChatGPT/Codex OAuth 2.0 PKCE flow (public client, JWT-derived expiry, lazy refresh-token rotation)
-- `src/session.rs` -- v0.2 cookie-session capture trait + `Cookie` / `CapturedSession` types (deferred)
 
 ### Tests
 

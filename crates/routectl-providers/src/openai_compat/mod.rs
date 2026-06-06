@@ -11,7 +11,7 @@
 //!     tags for RawThinkTag).
 //!   - `normalize_chunk`: stateless per-frame parsing (see NOTE below).
 //!   - `stream`: owns a `ThinkTagAccumulator` for RawThinkTag state; all other
-//!     dialects delegate to the stateless `parse_chunk`.
+//!     dialects delegate to the stateless `parse_event`.
 //!
 //! NOTE on `normalize_chunk` vs `stream` statefulness:
 //!   The `Provider` trait exposes `normalize_chunk(&self, raw: &str)` which is
@@ -255,7 +255,7 @@ impl Provider for OpenAiCompatProvider {
         // The real streaming path is `stream()`, which threads a
         // persistent per-stream counter.
         let mut reasoning_index = 0u32;
-        sse::parse_chunk(
+        sse::parse_event(
             &self.cfg.id,
             raw,
             self.cfg.reasoning_dialect,
@@ -439,7 +439,7 @@ impl Provider for OpenAiCompatProvider {
             let mut think_acc = ThinkTagAccumulator::new();
             // Per-stream, monotonically incrementing reasoning detail
             // index for the stateless dialects (DeepSeek/Vllm). Threaded
-            // into `parse_chunk` so successive streamed reasoning deltas
+            // into `parse_event` so successive streamed reasoning deltas
             // carry distinct `index` values instead of collapsing onto 0.
             // RawThinkTag threads its own counter inside ThinkTagAccumulator.
             let mut reasoning_index: u32 = 0;
@@ -475,7 +475,7 @@ impl Provider for OpenAiCompatProvider {
                 let result = if dialect == ReasoningDialect::RawThinkTag {
                     think_acc.process(&provider_id, &data)
                 } else {
-                    sse::parse_chunk(&provider_id, &data, dialect, &mut reasoning_index)
+                    sse::parse_event(&provider_id, &data, dialect, &mut reasoning_index)
                 };
 
                 match result {

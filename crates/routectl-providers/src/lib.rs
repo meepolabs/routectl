@@ -11,7 +11,7 @@
 //! "use adaptive thinking for Opus 4.7+") live in [`model_profile`] as a
 //! single declarative table consumed by every provider.
 
-pub mod model_profile;
+pub(crate) mod model_profile;
 
 pub(crate) mod http_client;
 

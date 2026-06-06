@@ -250,3 +250,33 @@ script are the shared contract; the corpus is yours.
   the wiring; tight files keep edits surgical.
 - Don't add backwards-compatibility shims. If a schema changes,
   change it; the live matrix catches regressions.
+- Inline `#[cfg(test)] mod tests` for unit tests; `tests/*.rs` for
+  integration tests that need the crate's public API or external
+  services.
+- Extract a sidecar test file (`*_tests.rs` imported from the parent)
+  when inline tests exceed ~200 LOC.
+- Feature-gate tests that depend on optional features with
+  `#[cfg(feature = "X")]` at the module level, not per-function.
+
+## Provider internal convention
+
+Every provider follows the same seam layout:
+
+| Seam | Name | File |
+|---|---|---|
+| Request entry (trait) | `normalize_request` | `mod.rs` |
+| Per-shape request mappers | `translate_*` | `request.rs` |
+| Response entry (trait) | `normalize_response` | `mod.rs` |
+| Per-shape response mappers | `translate_*` | `response.rs` |
+| SSE decoder entry | `parse_event` | `sse.rs` |
+| Auth/signing attach | `apply` | `auth.rs` or `signing.rs` |
+| Header construction (returns HeaderMap) | `build_headers` | `mod.rs` |
+
+Two naming layers:
+- Contract layer (trait + error variants): `normalize_*`
+- Structural layer (per-shape canonical<->wire): `translate_*`
+
+Providers with two API surfaces (e.g. Bedrock invoke/converse): each
+sub-module exposes the same seam names; the parent `mod.rs` dispatches.
+Dialects (e.g. openai_compat DeepSeek/vLLM reasoning quirks) are a
+separate `Dialect` strategy trait, not a request/response fork.
