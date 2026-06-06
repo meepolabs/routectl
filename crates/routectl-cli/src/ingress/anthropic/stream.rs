@@ -47,7 +47,7 @@ pub(super) fn render_chunk_internal(
     if state.finished {
         tracing::warn!(
             "anthropic ingress: dropping chunk arriving after message_stop \
-             (chunk_id={}, has_delta={}, has_finish={}, has_usage={})",
+             (chunk_id={}, has_delta={}, has_finish={}, has_usage={}, has_opaque_events={})",
             chunk.id,
             !chunk.choices.is_empty(),
             chunk
@@ -56,6 +56,7 @@ pub(super) fn render_chunk_internal(
                 .and_then(|c| c.finish_reason.as_deref())
                 .is_some(),
             chunk.usage.is_some(),
+            !chunk.opaque_events.is_empty(),
         );
         return Ok(events);
     }
@@ -301,7 +302,9 @@ fn emit_message_start(state: &AnthropicStreamState, events: &mut Vec<SseEvent>) 
             "type": "message",
             "role": "assistant",
             "content": [],
-            "model": state.msg_model.clone().unwrap_or_default(),
+            "model": state.msg_model.clone()
+                .or_else(|| state.req_model.clone())
+                .unwrap_or_default(),
             "stop_reason": Value::Null,
             "stop_sequence": Value::Null,
             "usage": {"input_tokens": 0, "output_tokens": 0},
@@ -604,12 +607,17 @@ pub(super) fn emit_message_delta(
         // `input_tokens` on message_delta mirroring the message_start
         // value, and downstream consumers need it because routectl's
         // emit_message_start hardcodes {input_tokens:0, output_tokens:0}.
-        if let Some(prompt) = u.prompt_tokens {
-            let raw_input = prompt
-                .saturating_sub(u.cache_creation_input_tokens.unwrap_or(0))
-                .saturating_sub(u.cache_read_input_tokens.unwrap_or(0));
-            wire_usage.insert("input_tokens".into(), json!(raw_input));
-        }
+        //
+        // Fix #1: always emit `input_tokens` on the closing delta.
+        // Anthropic requires the field; when the upstream UsageDelta
+        // carries no `prompt_tokens`, default the raw value to 0 rather
+        // than omitting the key entirely.
+        let raw_input = u
+            .prompt_tokens
+            .unwrap_or(0)
+            .saturating_sub(u.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_sub(u.cache_read_input_tokens.unwrap_or(0));
+        wire_usage.insert("input_tokens".into(), json!(raw_input));
         if let Some(n) = u.completion_tokens {
             wire_usage.insert("output_tokens".into(), json!(n));
         }
@@ -629,7 +637,13 @@ pub(super) fn emit_message_delta(
             }
             wire_usage.insert("cache_creation".into(), Value::Object(cc));
         }
-        payload.insert("usage".into(), Value::Object(wire_usage));
+        // Fix #2: only attach `usage` to the payload when the map carries
+        // at least one key. After fix #1, `input_tokens` is always
+        // present, so this guard is defensive -- it prevents a degenerate
+        // empty `usage: {}` object should the construction logic change.
+        if !wire_usage.is_empty() {
+            payload.insert("usage".into(), Value::Object(wire_usage));
+        }
     }
 
     events.push(SseEvent::named(
@@ -667,6 +681,15 @@ pub(super) fn render_error_eos_internal(
     state: &mut AnthropicStreamState,
     error: &dyn std::fmt::Display,
 ) -> Vec<SseEvent> {
+    // Fix #5: a late error arriving after a normal clean finish (e.g.
+    // an upstream transport error that fires after message_stop has
+    // already been emitted) must not push a second terminal event.
+    // Anthropic clients treat the `event: error` frame as terminal and
+    // a duplicate after message_stop would violate the SSE protocol
+    // invariant that no events follow message_stop.
+    if state.finished {
+        return Vec::new();
+    }
     state.finished = true;
     let msg = routectl_core::sanitize_for_log(&error.to_string());
     let payload = json!({
@@ -686,6 +709,22 @@ pub(super) fn render_error_eos_internal(
 // ---------------------------------------------------------------------------
 // IngressAdapter impl
 // ---------------------------------------------------------------------------
+
+/// Construct an `AnthropicStreamState` pre-populated with the resolved
+/// request model. When `req.model` is available at the call site (e.g.
+/// a future variant of `new_stream_state` that accepts a `&ChatRequest`),
+/// use this constructor so `message_start` can emit the correct model id
+/// even when the upstream stream's first chunk carries an empty model
+/// field. The current `IngressAdapter::new_stream_state` has no `req`
+/// parameter; this constructor is wired up for that future path and for
+/// tests that verify the fallback behavior.
+#[cfg(test)]
+pub(super) fn new_state_with_req_model(req_model: Option<String>) -> AnthropicStreamState {
+    AnthropicStreamState {
+        req_model,
+        ..Default::default()
+    }
+}
 
 #[cfg(test)]
 #[path = "stream_tests.rs"]

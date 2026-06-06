@@ -95,6 +95,15 @@ pub struct AnthropicStreamState {
     /// coherent index sequence on the wire. BTreeMap (not HashMap) for
     /// deterministic iteration order during debug logging.
     opaque_index_map: BTreeMap<u32, usize>,
+    /// Resolved model from the originating request. Used as fallback
+    /// in `message_start` when upstream chunks carry no model string.
+    /// Populated when the state is constructed via
+    /// `stream::new_state_with_req_model`; defaults to None on the
+    /// `Default` path (the `new_stream_state` trait method cannot yet
+    /// receive the canonical model -- the full plumbing would require
+    /// the `IngressAdapter::new_stream_state` signature to accept a
+    /// `&ChatRequest`).
+    pub(super) req_model: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
