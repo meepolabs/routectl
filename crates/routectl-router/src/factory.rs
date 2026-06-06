@@ -756,6 +756,17 @@ pub async fn build_resolved_models(
         let provider = if is_bedrock {
             #[cfg(feature = "bedrock")]
             {
+                // A sibling model already failed cred resolution for
+                // this provider: reuse the recorded error and skip
+                // without re-probing SSO. Mirrors the non-Bedrock
+                // `provider_failed` guard below so the SSO probe /
+                // aws-config chain build is attempted at most once per
+                // [providers.X] entry on the failure path, matching the
+                // success-path dedup carried by `bedrock_auth_cache`.
+                if let Some(prior_err) = provider_failed.get(&entry.provider) {
+                    failed.push((nickname.clone(), prior_err.clone()));
+                    continue;
+                }
                 // Cache the resolved creds per provider name so the
                 // SSO probe / aws-config chain build only fires once
                 // per [providers.X] entry, regardless of how many
@@ -1951,6 +1962,87 @@ mod build_resolved_models_tests {
         // compiles. The end-to-end behavior is exercised by the
         // live Bedrock tests in routectl-cli.
         let _f = build_provider_with_bedrock_model_override;
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn bedrock_creds_failure_resolves_at_most_once_for_sibling_models() {
+        // Dedup invariant on the failure path: when a Bedrock
+        // provider's cred resolution fails on its first model, the
+        // failure is recorded in `provider_failed` and every sibling
+        // model on the same provider is skipped WITHOUT re-attempting
+        // resolution (no repeat SSO / aws-config probe). With two
+        // models on one provider, the secret store is hit exactly
+        // once -- the second model short-circuits via the
+        // `provider_failed` guard at the top of the Bedrock branch.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingFailStore {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl SecretStore for CountingFailStore {
+            async fn get(&self, _secret_ref: &SecretRef) -> routectl_core::Result<String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(routectl_core::Error::Auth("simulated cred failure".into()))
+            }
+            async fn set(
+                &self,
+                _secret_ref: &SecretRef,
+                _value: &str,
+            ) -> routectl_core::Result<()> {
+                Err(routectl_core::Error::Auth("read-only".into()))
+            }
+            async fn delete(&self, _secret_ref: &SecretRef) -> routectl_core::Result<()> {
+                Err(routectl_core::Error::Auth("read-only".into()))
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store: Arc<dyn SecretStore> = Arc::new(CountingFailStore {
+            calls: calls.clone(),
+        });
+
+        let bedrock = ProviderEntry::Bedrock {
+            region: "us-east-1".to_string(),
+            api_shape: BedrockApiShapeConfig::default(),
+            creds: BedrockCredsConfig::BearerKey {
+                key_ref: "literal:unused".to_string(),
+            },
+            user_agent: None,
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
+            anthropic_beta: Vec::new(),
+            runtime: Default::default(),
+        };
+        let cfg = config_with_models(
+            vec![("br", bedrock)],
+            vec![
+                ("opus", ModelEntry::new("br", "anthropic.claude-opus")),
+                ("sonnet", ModelEntry::new("br", "anthropic.claude-sonnet")),
+            ],
+        );
+
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+
+        assert!(
+            models.is_empty(),
+            "no model should resolve when provider creds fail"
+        );
+        assert_eq!(
+            failed.len(),
+            2,
+            "both sibling models must be reported failed: {failed:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "cred resolution must run at most once per provider; the sibling \
+             model should be skipped via provider_failed, not re-probed"
+        );
     }
 
     #[tokio::test]
