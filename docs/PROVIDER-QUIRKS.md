@@ -349,7 +349,17 @@ Per-route timeouts: split into separate `[providers.X]` entries with their own r
 
 ### `request_timeout_ms`
 
-Default is unset (no cap; relies on reqwest's default). Same provider > global resolution as the first-byte timeout. Bump alongside the first-byte timeout for long-thinking responses:
+Default is unset (no cap; relies on reqwest's default). Supports **two tiers
+only** -- per-model override is NOT supported for this knob:
+
+1. `[providers.Y] request_timeout_ms` -- per-provider ceiling; fills in when
+   the global tier left the field unset.
+2. `[retry] request_timeout_ms` -- workspace global; lowest priority.
+
+There is no `[models.X] request_timeout_ms` field. To vary the request timeout
+per model, route those models through separate `[providers.X]` entries with
+distinct `runtime.request_timeout_ms` values. Bump alongside
+`stream_first_byte_timeout_ms` for long-thinking responses:
 
 ```toml
 [providers.bedrock]

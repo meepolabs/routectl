@@ -1326,18 +1326,16 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
 ///      so downstream readers (e.g. Bedrock's `filter_bedrock_betas`)
 ///      see the same fully-composed list.
 ///
-/// The merged headers replace the provider's `header_extras` slot on
-/// the request's resolved config view via... actually, the providers
-/// crate egresses read `self.cfg.header_extras` (snapshot at construct
-/// time) NOT a per-request slot. So this merge ALSO writes the
-/// composed `anthropic-beta` back into `req.anthropic_beta` so the
-/// Anthropic-API egress (which reads canonical for the wire header)
-/// and Bedrock's beta filter (same canonical read) both see the
-/// unioned set. Other merged headers are emitted via a per-request
-/// canonical channel that future egresses can read; today the
-/// per-model `header_extras` on non-`anthropic-beta` keys is reserved
-/// for forward use -- this helper still composes it for the log and
-/// for `anthropic-beta` correctness.
+/// The merged headers are published via `req.routectl_internal.header_extras`
+/// and consumed by all four egresses (anthropic-api, openai-compat, bedrock,
+/// openai-responses) at request-build time through
+/// `crate::http_client::effective_header_extras`. The `anthropic-beta`
+/// list-valued header is additionally written back to `req.anthropic_beta` so
+/// the Anthropic-API egress (canonical field read) and Bedrock's beta filter
+/// both see the fully-unioned set. Library consumers that construct a
+/// `ChatRequest` without the router leave `header_extras` as `None`; the
+/// egresses fall back to their construction-time `self.cfg.header_extras`
+/// snapshot in that case.
 pub fn merge_header_extras(
     provider_name: &str,
     provider_extras: Option<&BTreeMap<String, String>>,
