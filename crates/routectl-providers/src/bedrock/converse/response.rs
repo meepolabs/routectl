@@ -17,7 +17,7 @@
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use tracing::{debug, warn};
+use tracing::debug;
 use uuid::Uuid;
 
 use routectl_core::schema::CacheCreation;
@@ -46,15 +46,9 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
     let finish_reason = map_stop_reason(resp.stop_reason.as_deref());
     let usage = resp.usage.as_ref().map(translate_usage);
 
-    let role = if resp.output.message.role == "assistant" {
-        Role::Assistant
-    } else {
-        // AWS only emits "assistant" today on the response side; if a
-        // future model returns something else, surface the literal so
-        // we don't lie to the client. Falling back to Assistant
-        // preserves OpenAI-compat semantics on ChatResponse.
-        Role::Assistant
-    };
+    // Converse responses always carry role "assistant"; no other value
+    // is defined on the response side.
+    let role = Role::Assistant;
 
     let content = select_message_content(text, parts);
     let message = Message {
@@ -94,11 +88,13 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         }],
         usage,
         routectl_provider: None,
-        // Forward-compat: carry AWS-Converse top-level extras
-        // verbatim. The Anthropic egress's wire-render iterates
-        // these out, so any new Converse top-level field flows
-        // through to the client without a routectl release.
-        extras: resp.extras,
+        // Converse top-level extras beyond output/stopReason/usage/
+        // metrics/additionalModelResponseFields are not forwarded;
+        // routectl pulls the meaningful fields explicitly via the
+        // typed ConverseResponse fields. The Anthropic ingress's
+        // response wire-render only needs the fields surfaced on
+        // the canonical ChatResponse.
+        extras: Default::default(),
     })
 }
 
@@ -203,10 +199,10 @@ fn walk_content_blocks(
             }
             ConverseResponseContentBlock::Other(v) => {
                 let (tag, extras) = extract_other_tag_and_extras(v);
-                warn!(
+                debug!(
                     provider = provider_id,
                     block_type = %tag,
-                    "unknown converse content block dropped from flat-text output"
+                    "unrecognized converse content block preserved as ContentPart::Other on canonical response"
                 );
                 parts.push(ContentPart::Other {
                     type_tag: tag,
@@ -505,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_block_type_is_dropped_with_warn_not_error() {
+    fn unknown_block_type_preserved_as_content_part_other_with_debug_log() {
         // Arrange: a future AWS block type. Forward compat means we
         // preserve it as ContentPart::Other in Parts emission rather
         // than failing or silently dropping. The tag and inner fields

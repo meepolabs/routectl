@@ -51,16 +51,6 @@ pub(crate) struct ConverseResponse {
     /// doesn't surface it on canonical `ChatResponse`.
     #[serde(default)]
     pub(crate) additional_model_response_fields: Option<Value>,
-    /// Forward-compat catchall for any other top-level field AWS
-    /// adds. Mirrors `AnthropicResponse::extras`. Forwarded into
-    /// `ChatResponse.extras` by `converse/response.rs::translate`,
-    /// which surfaces them on the canonical response so ingresses
-    /// can render them on the client wire body. The Converse egress
-    /// itself doesn't re-emit AWS Converse wire shape -- clients
-    /// only see the translated egress (OpenAI / Anthropic
-    /// Messages).
-    #[serde(flatten)]
-    pub(crate) extras: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -516,5 +506,31 @@ mod tests {
         assert_eq!(d.text.as_deref(), Some("thinking..."));
         assert!(d.signature.is_none());
         assert!(d.redacted_content.is_none());
+    }
+
+    #[test]
+    fn response_unknown_top_level_fields_are_silently_dropped() {
+        // Arrange: unknown top-level fields (e.g. a future AWS key)
+        // must not cause a deserialization error now that the
+        // flattened extras catch-all has been removed. serde's default
+        // behavior for named structs is to ignore unknown keys.
+        let raw = json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"text": "hi"}]
+                }
+            },
+            "stopReason": "end_turn",
+            "unknownFutureField": {"some": "data"},
+            "anotherNewField": 42
+        });
+
+        // Act: must not panic or error on unknown top-level fields.
+        let resp: ConverseResponse = serde_json::from_value(raw).unwrap();
+
+        // Assert: known fields still parse cleanly.
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(resp.output.message.role, "assistant");
     }
 }
