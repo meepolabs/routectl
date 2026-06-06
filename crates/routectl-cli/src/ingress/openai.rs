@@ -76,6 +76,14 @@ impl IngressAdapter for OpenAiIngress {
         // `openai_compat::response.rs` -- same prefer-non-null
         // semantics applied at parse time.
         coalesce_message_reasoning_keys(&mut body);
+        // o-series / gpt-5+ clients send `max_completion_tokens`
+        // instead of `max_tokens`. `is_canonical_request_key`
+        // returns true for it (reserved.rs), so the forward-compat
+        // sweep below leaves it in the body -- but `ChatRequest` has
+        // no such field and no serde alias, so serde silently drops
+        // it. Rename it to `max_tokens` here, before deserialization,
+        // so the per-request token cap is never lost.
+        normalize_max_completion_tokens(&mut body);
 
         // Forward-compat sweep: pull every top-level key NOT on
         // `ChatRequest` into `provider_extras` so OpenAI clients
@@ -253,6 +261,33 @@ fn coalesce_message_reasoning_keys(body: &mut Value) {
             }
         }
     }
+}
+
+/// Normalize the o-series / gpt-5+ `max_completion_tokens` field to
+/// the canonical `max_tokens` before serde deserialization.
+///
+/// Rules:
+/// - Only `max_completion_tokens` present: rename it to `max_tokens`.
+/// - Both present: keep `max_tokens` (wins), remove
+///   `max_completion_tokens` so it neither overwrites nor lingers as
+///   an unknown canonical key that the forward-compat sweep skips.
+/// - Only `max_tokens`: no-op.
+fn normalize_max_completion_tokens(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let has_mct = obj.contains_key("max_completion_tokens");
+    if !has_mct {
+        return;
+    }
+    let mct_val = obj.remove("max_completion_tokens");
+    if !obj.contains_key("max_tokens") {
+        if let Some(v) = mct_val {
+            obj.insert("max_tokens".into(), v);
+        }
+    }
+    // If `max_tokens` was already present we just removed
+    // `max_completion_tokens` above; `max_tokens` stays unchanged.
 }
 
 /// If any `Role::System` messages are in `req.messages`, concatenate
@@ -699,5 +734,52 @@ mod tests {
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         assert!(req.messages[0].reasoning.is_none());
+    }
+
+    /// o-series / gpt-5+ clients send `max_completion_tokens` instead
+    /// of `max_tokens`. The ingress must rename it before serde so the
+    /// per-request token cap is not silently dropped.
+    #[test]
+    fn ingress_normalizes_max_completion_tokens_only() {
+        let body = json!({
+            "model": "o3",
+            "messages": [{"role":"user","content":"hi"}],
+            "max_completion_tokens": 8000
+        });
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        assert_eq!(req.max_tokens, Some(8000));
+    }
+
+    /// When a client sends both keys, `max_tokens` wins and the request
+    /// still parses cleanly (no unknown-key error, no overwrite).
+    #[test]
+    fn ingress_normalizes_max_completion_tokens_max_tokens_wins_on_conflict() {
+        let body = json!({
+            "model": "o3",
+            "messages": [{"role":"user","content":"hi"}],
+            "max_tokens": 100,
+            "max_completion_tokens": 8000
+        });
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        assert_eq!(req.max_tokens, Some(100));
+    }
+
+    /// Control: only `max_tokens` present -- no normalization, value
+    /// passes through unchanged.
+    #[test]
+    fn ingress_normalizes_max_completion_tokens_noop_when_only_max_tokens() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role":"user","content":"hi"}],
+            "max_tokens": 512
+        });
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        assert_eq!(req.max_tokens, Some(512));
     }
 }
