@@ -97,8 +97,14 @@ pub trait Dialect: Send + Sync {
     /// Mutate one parsed SSE chunk JSON in place. Called once per
     /// chunk after generic shape coalescing but before final
     /// deserialization into `ChatChunk`.
-    fn apply_chunk(&self, id: &str, val: &mut Value) -> Result<()> {
-        let _ = (id, val);
+    ///
+    /// `reasoning_index` is a per-stream, monotonically incrementing
+    /// counter owned by the streaming caller. Dialects that lift
+    /// streamed reasoning into `reasoning_details` thread it into the
+    /// detail's `index` so successive deltas stay distinct; dialects
+    /// that emit no reasoning leave it untouched.
+    fn apply_chunk(&self, id: &str, val: &mut Value, reasoning_index: &mut u32) -> Result<()> {
+        let _ = (id, val, reasoning_index);
         Ok(())
     }
 }

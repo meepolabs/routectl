@@ -26,7 +26,16 @@ use super::util::build_reasoning_detail;
 ///
 /// `raw` is the value portion after `data: `, e.g. `{"id":"...","choices":[...]}`.
 /// Returns `Ok(None)` for `[DONE]`, empty lines, and comment lines.
-pub fn parse_chunk(id: &str, raw: &str, dialect: ReasoningDialect) -> Result<Option<ChatChunk>> {
+///
+/// `reasoning_index` is a per-stream, monotonically incrementing counter
+/// owned by the streaming caller (see `stream()`); dialects that lift
+/// streamed reasoning thread it into each emitted detail's `index`.
+pub fn parse_chunk(
+    id: &str,
+    raw: &str,
+    dialect: ReasoningDialect,
+    reasoning_index: &mut u32,
+) -> Result<Option<ChatChunk>> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed == "[DONE]" || trimmed.starts_with(':') {
         return Ok(None);
@@ -49,7 +58,7 @@ pub fn parse_chunk(id: &str, raw: &str, dialect: ReasoningDialect) -> Result<Opt
     // .cached_tokens` would never reach canonical.
     lift_chunk_usage_subbags(&mut val);
 
-    apply_chunk_dialect(id, &mut val, dialect)?;
+    apply_chunk_dialect(id, &mut val, dialect, reasoning_index)?;
 
     let chunk: ChatChunk = serde_json::from_value(val)
         .map_err(|e| Error::normalize_response(id, format!("chunk deserialize: {e}")))?;
@@ -118,8 +127,13 @@ fn coalesce_chunk_reasoning_keys(val: &mut Value) {
     }
 }
 
-fn apply_chunk_dialect(id: &str, val: &mut Value, dialect: ReasoningDialect) -> Result<()> {
-    dialect.as_dyn().apply_chunk(id, val)
+fn apply_chunk_dialect(
+    id: &str,
+    val: &mut Value,
+    dialect: ReasoningDialect,
+    reasoning_index: &mut u32,
+) -> Result<()> {
+    dialect.as_dyn().apply_chunk(id, val, reasoning_index)
 }
 
 // ---------------------------------------------------------------------------
@@ -395,13 +409,15 @@ mod tests {
 
     #[test]
     fn done_returns_none() {
-        assert!(parse_chunk("t", "[DONE]", ReasoningDialect::OpenAi)
+        assert!(parse_chunk("t", "[DONE]", ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .is_none());
-        assert!(parse_chunk("t", "  [DONE]  ", ReasoningDialect::OpenAi)
-            .unwrap()
-            .is_none());
-        assert!(parse_chunk("t", "", ReasoningDialect::OpenAi)
+        assert!(
+            parse_chunk("t", "  [DONE]  ", ReasoningDialect::OpenAi, &mut 0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_chunk("t", "", ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .is_none());
     }
@@ -409,7 +425,7 @@ mod tests {
     #[test]
     fn openai_basic_delta() {
         let raw = delta_chunk(Some("hello"), None);
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi)
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
@@ -419,7 +435,7 @@ mod tests {
     #[test]
     fn deepseek_lifts_reasoning_content_in_delta() {
         let raw = delta_chunk(Some("answer"), Some("chain of thought"));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek)
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek, &mut 0)
             .unwrap()
             .unwrap();
         let details = &chunk.choices[0].delta.reasoning_details;
@@ -433,12 +449,74 @@ mod tests {
     #[test]
     fn vllm_lifts_reasoning_content_in_delta() {
         let raw = delta_chunk(None, Some("vllm trace"));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::Vllm)
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::Vllm, &mut 0)
             .unwrap()
             .unwrap();
         let details = &chunk.choices[0].delta.reasoning_details;
         assert_eq!(details.len(), 1);
         assert_eq!(details[0].format.as_deref(), Some("vllm-reasoning-v1"));
+    }
+
+    /// Pin the streaming reasoning-index contract: successive DeepSeek
+    /// reasoning chunks driven through `parse_chunk` with a single shared
+    /// per-stream counter (exactly as `stream()` threads it) must carry
+    /// `index` 0, 1, 2, ... -- NOT all 0. Before the fix the lifter
+    /// hardcoded index 0, collapsing every streamed delta onto one block.
+    #[test]
+    fn deepseek_streaming_reasoning_detail_index_increments() {
+        let mut reasoning_index: u32 = 0;
+        for expected in [0u32, 1, 2] {
+            let raw = delta_chunk(Some("answer"), Some("step"));
+            let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek, &mut reasoning_index)
+                .unwrap()
+                .unwrap();
+            let details = &chunk.choices[0].delta.reasoning_details;
+            assert_eq!(details.len(), 1);
+            assert_eq!(
+                details[0].index,
+                Some(expected),
+                "streamed reasoning detail index must increment per chunk"
+            );
+        }
+    }
+
+    /// A chunk with no reasoning content must NOT advance the counter, so
+    /// the index stays aligned to actual reasoning deltas (0, then 1 after
+    /// the gap -- not 0 then 2).
+    #[test]
+    fn vllm_streaming_reasoning_index_skips_non_reasoning_chunks() {
+        let mut reasoning_index: u32 = 0;
+
+        let c0 = parse_chunk(
+            "t",
+            &delta_chunk(None, Some("first")),
+            ReasoningDialect::Vllm,
+            &mut reasoning_index,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(c0.choices[0].delta.reasoning_details[0].index, Some(0));
+
+        // Plain content chunk: no reasoning -> counter unchanged.
+        let c1 = parse_chunk(
+            "t",
+            &delta_chunk(Some("visible"), None),
+            ReasoningDialect::Vllm,
+            &mut reasoning_index,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(c1.choices[0].delta.reasoning_details.is_empty());
+
+        let c2 = parse_chunk(
+            "t",
+            &delta_chunk(None, Some("second")),
+            ReasoningDialect::Vllm,
+            &mut reasoning_index,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(c2.choices[0].delta.reasoning_details[0].index, Some(1));
     }
 
     // --- ThinkTagAccumulator tests ---
@@ -650,7 +728,7 @@ mod tests {
             "total_tokens": 30,
             "completion_tokens_details": {"reasoning_tokens": 7}
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi)
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         let usage = chunk.usage.expect("terminal usage present");
@@ -668,7 +746,7 @@ mod tests {
             "prompt_cache_hit_tokens": 80,
             "prompt_cache_miss_tokens": 20
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek)
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::DeepSeek, &mut 0)
             .unwrap()
             .unwrap();
         let usage = chunk.usage.expect("terminal usage present");
@@ -685,7 +763,7 @@ mod tests {
             "total_tokens": 120,
             "prompt_tokens_details": {"cached_tokens": 64}
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi)
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         let usage = chunk.usage.expect("terminal usage present");
@@ -704,7 +782,7 @@ mod tests {
             "reasoning_tokens": 11,
             "completion_tokens_details": {"reasoning_tokens": 99}
         }));
-        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi)
+        let chunk = parse_chunk("t", &raw, ReasoningDialect::OpenAi, &mut 0)
             .unwrap()
             .unwrap();
         assert_eq!(chunk.usage.unwrap().reasoning_tokens, Some(11));
