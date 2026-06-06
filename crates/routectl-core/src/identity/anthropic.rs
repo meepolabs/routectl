@@ -1,5 +1,5 @@
-//! Compiled Claude Code SDK identity-header defaults for the
-//! OauthBearer auth surface.
+//! Compiled Claude Code SDK identity-header defaults -- the `anthropic`
+//! half of the provider identity module.
 //!
 //! These ship with routectl and fire by default on the `oauth-bearer`
 //! path so a zero-config operator (auth_kind + api_key_ref only) emits
@@ -11,8 +11,8 @@
 //!
 //! `anthropic-beta` is intentionally NOT a default: it feeds the
 //! three-source beta compose (ingress + provider + model) handled in
-//! `build_headers`, so it stays an explicit `header_extras` entry for
-//! operators who need it.
+//! the egress `build_headers`, so it stays an explicit `header_extras`
+//! entry for operators who need it.
 //!
 //! The version literals below are the "ship with routectl, bump each
 //! release" values. Roll them forward when the upstream Claude Code SDK
@@ -33,7 +33,7 @@ const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
 /// Composed from `CLAUDE_CLI_VERSION` so a single constant drives both
 /// the UA and any future version-keyed default. Computed once per
 /// process; subsequent calls return the cached value.
-pub(crate) fn default_claude_code_user_agent() -> &'static str {
+pub fn default_claude_code_user_agent() -> &'static str {
     static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     UA.get_or_init(|| format!("claude-cli/{CLAUDE_CLI_VERSION} (external, sdk-cli)"))
         .as_str()
@@ -67,7 +67,7 @@ fn stainless_os() -> &'static str {
 /// entries (`x-stainless-arch`, `x-stainless-os`). Excludes
 /// `anthropic-beta` (composed separately) and auth headers (injected by
 /// the auth dispatcher).
-pub(crate) fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str)> {
+pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str)> {
     vec![
         ("x-app", "cli"),
         ("anthropic-dangerous-direct-browser-access", "true"),
