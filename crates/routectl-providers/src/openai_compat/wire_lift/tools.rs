@@ -42,6 +42,11 @@ pub fn lift(
                         .and_then(|o| o.get("type"))
                         .and_then(|t| t.as_str())
                         .unwrap_or("unknown");
+                    let tool_name = v
+                        .as_object()
+                        .and_then(|o| o.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
                     if strict {
                         return Err(Error::Validation(format!(
                             "strict_translation: provider `{id}`: Anthropic builtin / \
@@ -52,6 +57,7 @@ pub fn lift(
                     warn!(
                         provider = id,
                         builtin = builtin,
+                        tool_name = tool_name,
                         "dropping anthropic-builtin tool on openai-compat egress"
                     );
                     // Do not push -- tool is dropped.

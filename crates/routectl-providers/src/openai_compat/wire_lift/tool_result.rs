@@ -27,9 +27,8 @@
 //! lift inner image shapes here too.
 
 use serde_json::{Map, Value};
-use tracing::warn;
 
-use routectl_core::{ChatRequest, Result};
+use routectl_core::{ChatRequest, Error, Result};
 
 pub fn lift(
     id: &str,
@@ -48,13 +47,13 @@ pub fn lift(
 
     let mut rewritten: Vec<Value> = Vec::with_capacity(messages.len());
     for msg in messages {
-        rewrite_message(id, msg, &mut rewritten);
+        rewrite_message(id, msg, &mut rewritten)?;
     }
     obj.insert("messages".into(), Value::Array(rewritten));
     Ok(())
 }
 
-fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) {
+fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) -> Result<()> {
     let role_is_user = msg
         .as_object()
         .and_then(|o| o.get("role"))
@@ -62,7 +61,7 @@ fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) {
         == Some("user");
     if !role_is_user {
         out.push(msg);
-        return;
+        return Ok(());
     }
     // Only act when content is an array carrying at least one tool_result.
     let parts_clone = msg
@@ -74,13 +73,13 @@ fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) {
         Some(p) => p,
         None => {
             out.push(msg);
-            return;
+            return Ok(());
         }
     };
     let has_tool_result = parts.iter().any(part_is_tool_result);
     if !has_tool_result {
         out.push(msg);
-        return;
+        return Ok(());
     }
 
     // Split the user message into a sequence of (user-text-chunk, tool-msg)
@@ -89,7 +88,7 @@ fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) {
     for part in parts {
         if part_is_tool_result(&part) {
             flush_user_chunk(&msg, &mut pending_user_chunk, out);
-            if let Some(tool_msg) = build_tool_message(id, &part) {
+            if let Some(tool_msg) = build_tool_message(id, &part)? {
                 out.push(tool_msg);
             }
         } else {
@@ -97,6 +96,7 @@ fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) {
         }
     }
     flush_user_chunk(&msg, &mut pending_user_chunk, out);
+    Ok(())
 }
 
 fn flush_user_chunk(template: &Value, pending: &mut Vec<Value>, out: &mut Vec<Value>) {
@@ -137,16 +137,19 @@ fn is_text_block(part: &Value) -> bool {
         == Some("text")
 }
 
-fn build_tool_message(id: &str, part: &Value) -> Option<Value> {
-    let obj = part.as_object()?;
+fn build_tool_message(id: &str, part: &Value) -> Result<Option<Value>> {
+    let obj = match part.as_object() {
+        Some(o) => o,
+        None => return Ok(None),
+    };
     let tool_use_id = match obj.get("tool_use_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            warn!(
-                provider = id,
-                "openai-compat egress: tool_result missing `tool_use_id`; dropping"
-            );
-            return None;
+            return Err(Error::normalize_request(
+                id,
+                "tool_result block is missing required `tool_use_id`; \
+                 cannot construct OpenAI-compat tool message",
+            ));
         }
     };
     let content = obj
@@ -154,11 +157,11 @@ fn build_tool_message(id: &str, part: &Value) -> Option<Value> {
         .cloned()
         .unwrap_or(Value::String(String::new()));
     let content = normalize_tool_result_content(content);
-    Some(serde_json::json!({
+    Ok(Some(serde_json::json!({
         "role": "tool",
         "tool_call_id": tool_use_id,
         "content": content
-    }))
+    })))
 }
 
 /// Normalize a tool_result content payload for OpenAI:
@@ -242,6 +245,16 @@ mod tests {
         obj.insert("messages".into(), messages);
         lift("test", &mut obj, &req, false).unwrap();
         obj
+    }
+
+    /// Variant of `run` that surfaces the `Result` so tests can assert
+    /// on the error path without a panic.
+    fn run_result(messages: Value) -> routectl_core::Result<Map<String, Value>> {
+        let req = empty_req();
+        let mut obj = Map::new();
+        obj.insert("messages".into(), messages);
+        lift("test", &mut obj, &req, false)?;
+        Ok(obj)
     }
 
     #[test]
@@ -356,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_missing_tool_use_id_is_dropped() {
+    fn tool_result_missing_tool_use_id_returns_error() {
         // Arrange -- malformed tool_result without tool_use_id.
         let messages = json!([
             {"role": "user", "content": [
@@ -364,13 +377,20 @@ mod tests {
             ]}
         ]);
 
-        // Act
-        let obj = run(messages);
+        // Act -- must hard-fail, not silently drop.
+        let result = run_result(messages);
 
-        // Assert -- the orphan is dropped; no messages remain since the
-        // pending_user_chunk was never populated.
-        let msgs = obj["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 0, "malformed tool_result must be dropped");
+        // Assert
+        assert!(
+            result.is_err(),
+            "tool_result missing tool_use_id must return an error, not silently drop"
+        );
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("tool_use_id"),
+            "error message must mention tool_use_id, got: {msg}"
+        );
     }
 
     #[test]

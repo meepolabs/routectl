@@ -353,18 +353,34 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
 /// the strip path would silently drop. Drives the operator-visibility
 /// warn so a DeepSeek-v4 / vLLM operator can see why their upstream
 /// 400s without enabling debug logs.
+///
+/// Checks three shapes:
+///   1. Flat `m.reasoning` string (DeepSeek / vLLM echo-back slot).
+///   2. Typed `m.reasoning_details` array (lifted details).
+///   3. `ContentPart::Known(KnownContentPart::Thinking)` content block --
+///      the common Anthropic-ingress shape where the thinking trace rides
+///      inside the parts array instead of the dedicated reasoning slots.
 fn request_carries_reasoning(req: &ChatRequest) -> bool {
+    use routectl_core::{ContentPart, KnownContentPart, MessageContent};
     req.messages.iter().any(|m| {
         matches!(m.role, routectl_core::Role::Assistant)
             && (m.reasoning.as_deref().is_some_and(|s| !s.is_empty())
-                || !m.reasoning_details.is_empty())
+                || !m.reasoning_details.is_empty()
+                || matches!(&m.content, MessageContent::Parts(parts)
+                    if parts.iter().any(|p| matches!(
+                        p,
+                        ContentPart::Known(KnownContentPart::Thinking { .. })
+                    ))
+                ))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
+    use routectl_core::{
+        ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, ReasoningConfig, Role,
+    };
     use serde_json::json;
 
     fn simple_req(model: &str) -> ChatRequest {
@@ -940,5 +956,45 @@ mod tests {
             messages[0]["content"], "legacy duplicate",
             "the lowered req.system must win, not the legacy Role::System message"
         );
+    }
+
+    /// `request_carries_reasoning` must return `true` when an assistant
+    /// message has a `Thinking` content part (the Anthropic-ingress shape
+    /// where the thinking trace rides in the parts array). Before this fix
+    /// the check only looked at `m.reasoning` and `m.reasoning_details`,
+    /// so the strip WARN was never emitted for this shape even though the
+    /// downstream strip would remove the block.
+    #[test]
+    fn request_carries_reasoning_detects_thinking_content_part() {
+        let mut req = simple_req("any-model");
+        req.messages.push(Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![
+                ContentPart::Known(KnownContentPart::Thinking {
+                    thinking: "my trace".into(),
+                    signature: None,
+                }),
+                ContentPart::Known(KnownContentPart::Text {
+                    text: "answer".into(),
+                    cache_control: None,
+                }),
+            ]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        });
+        assert!(
+            request_carries_reasoning(&req),
+            "Thinking content part must be detected as carrying reasoning"
+        );
+    }
+
+    /// Counterpart: a request with NO reasoning in any form must return `false`.
+    #[test]
+    fn request_carries_reasoning_false_when_no_reasoning() {
+        let req = simple_req("any-model");
+        assert!(!request_carries_reasoning(&req));
     }
 }

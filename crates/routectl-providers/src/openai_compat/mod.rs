@@ -481,16 +481,15 @@ impl Provider for OpenAiCompatProvider {
                 match result {
                     Ok(None) => {}
                     Ok(Some(mut chunk)) => {
-                        // Accumulate content text from EVERY chunk, including
-                        // the terminal one (the chunk that carries
-                        // finish_reason). Terminal-chunk text is intentionally
-                        // included so the suffix-match heuristic sees the
-                        // full body: some openai-compat hosts (and the
-                        // RawThinkTag dialect's post-strip emit) put real
-                        // content on the same chunk as the terminator.
-                        for choice in chunk.choices.iter() {
-                            if let Some(t) = choice.delta.content.as_deref() {
-                                accumulated_text.push_str(t);
+                        // Only accumulate content text when stop-sequence
+                        // detection is actually needed: skip the push_str
+                        // when the caller sent no stop sequences, avoiding
+                        // allocation and string growth for the common case.
+                        if request_stop.is_some() {
+                            for choice in chunk.choices.iter() {
+                                if let Some(t) = choice.delta.content.as_deref() {
+                                    accumulated_text.push_str(t);
+                                }
                             }
                         }
                         // Apply the stop-sequence heuristic on any choice
