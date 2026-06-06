@@ -3038,6 +3038,79 @@ async fn count_tokens_path_unions_anthropic_beta_from_three_sources() {
     );
 }
 
+/// Pin: a non-beta per-model `header_extras` entry must reach the
+/// upstream request through the full router dispatch path. The router
+/// composes provider + model `header_extras` onto
+/// `req.routectl_internal.header_extras`; the Anthropic-API egress reads
+/// that carrier in `build_headers`. A rebuild of `routectl_internal`
+/// that does not preserve the composed map would silently drop per-model
+/// headers before they reach the wire.
+#[tokio::test]
+async fn per_model_non_beta_header_extras_reaches_wire() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+
+    let provider_entry =
+        ProviderEntry::anthropic_api("literal:test-key").with_base_url(upstream.uri());
+    let mut providers = BTreeMap::new();
+    providers.insert("anthropic-mock".to_string(), provider_entry);
+
+    let mut model_headers = BTreeMap::new();
+    model_headers.insert("x-model-tag".to_string(), "from-model".to_string());
+    let mut models = BTreeMap::new();
+    models.insert(
+        "haiku".to_string(),
+        ModelEntry::new("anthropic-mock", "claude-haiku-4-5").with_header_extras(model_headers),
+    );
+
+    let mut aliases = BTreeMap::new();
+    aliases.insert("heavy".to_string(), AliasValue::Single("haiku".into()));
+
+    let config = Arc::new(Config {
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            auth: None,
+            strict_translation: false,
+            allow_disable_fallbacks: true,
+            ..Default::default()
+        },
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    });
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&json!({
+            "model": "heavy",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let tag = received[0]
+        .headers
+        .get("x-model-tag")
+        .map(|h| h.to_str().unwrap_or_default());
+    assert_eq!(
+        tag,
+        Some("from-model"),
+        "per-model header_extras must reach the upstream request"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // v0.8 per-model max_output_tokens override (end-to-end)
 // ---------------------------------------------------------------------------

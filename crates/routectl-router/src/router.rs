@@ -1293,10 +1293,16 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // X-Claude-Code-* headers for gateway cost attribution.
     let captured_claude_code_headers =
         std::mem::take(&mut req.routectl_internal.claude_code_headers);
+    // Preserve the header_extras map that `merge_header_extras` composed
+    // onto the request above. The struct rebuild starts from
+    // `Default::default()`, so without this take the merged provider +
+    // model header_extras would be dropped before the egress reads them.
+    let composed_header_extras = req.routectl_internal.header_extras.take();
     let mut internal = RoutectlInternal::default();
     internal.reasoning_dialect = target.reasoning_dialect.map(|d| d.into());
     internal.history_reasoning = target.history_reasoning.map(|h| h.into());
     internal.claude_code_headers = captured_claude_code_headers;
+    internal.header_extras = composed_header_extras;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
@@ -1306,7 +1312,53 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // Other egresses (openai-compat, openai-responses, bedrock-converse)
     // ignore this field and forward `req.max_tokens` omission cleanly.
     internal.max_output_tokens = target.max_output_tokens;
+    // Operator-configured beta floor: the provider + model
+    // `header_extras["anthropic-beta"]` betas, EXCLUDING the
+    // client/ingress betas already on `req.anthropic_beta`. The
+    // Anthropic-API egress re-adds these unconditionally after applying
+    // the per-provider `allowed_betas` allowlist, so an operator's
+    // model-pinned beta bypasses a filter meant only for client betas.
+    // `req.anthropic_beta` itself stays the full union (composed by
+    // `merge_header_extras`) so Bedrock's `filter_bedrock_betas` and the
+    // log-safe summary still see the complete set.
+    internal.operator_betas = operator_betas(provider_headers, &target.model_header_extras);
     req.routectl_internal = internal;
+}
+
+/// Collect the operator-configured `anthropic-beta` floor: the union of
+/// the provider and model `header_extras["anthropic-beta"]` values
+/// (comma-split, trimmed, deduplicated, visit order preserved). Client/
+/// ingress betas are deliberately excluded -- those ride on
+/// `req.anthropic_beta` and stay subject to the per-provider
+/// `allowed_betas` allowlist.
+fn operator_betas(
+    provider_extras: Option<&BTreeMap<String, String>>,
+    model_extras: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let provider_val = provider_extras
+        .and_then(|m| {
+            m.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
+                .map(|(_, v)| v.as_str())
+        })
+        .unwrap_or("");
+    let model_val = model_extras
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for raw in [provider_val, model_val] {
+        for piece in raw.split(',') {
+            let t = piece.trim();
+            if !t.is_empty() && seen.insert(t.to_string()) {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Merge per-provider and per-model `header_extras` into the
@@ -2441,6 +2493,65 @@ mod merge_header_extras_tests {
             assert!(
                 !AUTH_HEADERS.contains(h),
                 "router-side: {h:?} appears in both MANAGED and AUTH",
+            );
+        }
+    }
+
+    #[test]
+    fn apply_layered_overlays_records_operator_betas_excluding_client() {
+        // Invariant: operator-configured betas (provider + model
+        // header_extras) are recorded on `routectl_internal.operator_betas`
+        // so the Anthropic-API egress can re-add them as a floor that
+        // bypasses the per-provider `allowed_betas` allowlist. The
+        // client/ingress betas (on `req.anthropic_beta`) MUST NOT leak
+        // into that floor -- the allowlist still gates them.
+        let mut config = Config::default();
+        config.providers.insert(
+            "test-prov".into(),
+            crate::config::ProviderEntry::anthropic_api("literal:k")
+                .with_header_extras(map(&[("anthropic-beta", "prov-beta")])),
+        );
+
+        let target = DispatchTarget {
+            provider_name: "test-prov".into(),
+            state_key: "nick".into(),
+            upstream: "claude-x".into(),
+            provider: None,
+            supports_adaptive_thinking: false,
+            effort_levels: std::sync::Arc::from(Vec::<String>::new()),
+            nickname: Some("nick".into()),
+            model_header_extras: map(&[("anthropic-beta", "model-beta")]),
+            model_payload_extras: None,
+            reasoning_dialect: None,
+            history_reasoning: None,
+            stream_first_byte_timeout_ms: None,
+            max_thinking_budget: 0,
+            max_output_tokens: 0,
+        };
+
+        let mut req = req_with_betas(vec!["client-beta"]);
+        apply_layered_overlays(&config, &target, &mut req);
+
+        assert_eq!(
+            req.routectl_internal.operator_betas,
+            vec!["prov-beta".to_string(), "model-beta".to_string()],
+            "operator_betas must hold the provider + model floor only",
+        );
+        assert!(
+            !req.routectl_internal
+                .operator_betas
+                .iter()
+                .any(|b| b == "client-beta"),
+            "client/ingress betas must never enter the operator floor",
+        );
+
+        // `req.anthropic_beta` still carries the full union (client +
+        // provider + model) so Bedrock's `filter_bedrock_betas` and the
+        // log-safe summary see the complete set.
+        for expected in ["client-beta", "prov-beta", "model-beta"] {
+            assert!(
+                req.anthropic_beta.iter().any(|b| b == expected),
+                "req.anthropic_beta must carry the full union; missing {expected}",
             );
         }
     }

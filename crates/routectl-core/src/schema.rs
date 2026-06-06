@@ -194,6 +194,22 @@ pub struct RoutectlInternal {
     /// Sentinel `0` means "no per-model override"; the consuming
     /// egress falls through to its hardcoded baseline (64000).
     pub max_output_tokens: u32,
+
+    /// Operator-configured `anthropic-beta` flags composed by the
+    /// dispatch layer from provider `header_extras["anthropic-beta"]`
+    /// plus model `header_extras["anthropic-beta"]` -- the
+    /// client/ingress-supplied betas are deliberately excluded.
+    ///
+    /// Invariant: operator betas bypass the per-provider `allowed_betas`
+    /// allowlist unconditionally. `allowed_betas` gates only the betas a
+    /// client requests; an operator who pins a beta in config has
+    /// already opted in, so the Anthropic-API egress re-adds these as a
+    /// floor after filtering the client-supplied set.
+    ///
+    /// Empty for library consumers that construct a `ChatRequest`
+    /// without the router; in that path the egress's own
+    /// `cfg.header_extras` provider floor is the only operator source.
+    pub operator_betas: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
