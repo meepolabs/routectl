@@ -921,10 +921,19 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
 
     let mut blocks: Vec<ContentBlock> = Vec::with_capacity(sorted.len());
     let mut skipped_unsigned: Vec<Option<u32>> = Vec::new();
+    // Track reasoning details dropped because their format is not
+    // `anthropic-claude-v1`. These cannot be replayed as Anthropic blocks
+    // regardless of signature presence; a separate WARN aggregates them so
+    // operators can distinguish format-mismatch drops from unsigned drops.
+    let mut skipped_format_count: usize = 0;
+    let mut skipped_format_values: Vec<String> = Vec::new();
     for detail in &sorted {
         match detail.kind {
             ReasoningDetailKind::Text => {
                 if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) {
+                    skipped_format_count = skipped_format_count.saturating_add(1);
+                    skipped_format_values
+                        .push(detail.format.as_deref().unwrap_or("<none>").to_string());
                     continue;
                 }
                 let thinking = detail
@@ -955,6 +964,9 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
             }
             ReasoningDetailKind::Encrypted => {
                 if detail.format.as_deref() != Some(super::ANTHROPIC_FORMAT) {
+                    skipped_format_count = skipped_format_count.saturating_add(1);
+                    skipped_format_values
+                        .push(detail.format.as_deref().unwrap_or("<none>").to_string());
                     continue;
                 }
                 let data = detail
@@ -981,6 +993,19 @@ fn emit_reasoning_blocks(id: &str, details: &[ReasoningDetail]) -> Result<Vec<Co
             "skipping Thinking blocks on replay: signature missing or empty \
              (multi-block thinking history is now partially echoed; \
              see CLAUDE.md \"Anthropic streaming reasoning replay\" residual)"
+        );
+    }
+    if skipped_format_count > 0 {
+        // Deduplicate format strings for a compact log field; order is
+        // not meaningful so sort-then-dedup is fine.
+        skipped_format_values.sort_unstable();
+        skipped_format_values.dedup();
+        tracing::warn!(
+            provider = id,
+            skipped_count = skipped_format_count,
+            skipped_formats = ?skipped_format_values,
+            "skipping reasoning blocks on replay: format is not anthropic-claude-v1 \
+             (non-Anthropic format details cannot be echoed as Anthropic Thinking blocks)"
         );
     }
     Ok(blocks)
@@ -3580,6 +3605,111 @@ mod multi_turn_tool_use_tests {
         assert_eq!(
             thinking["budget_tokens"], 3000,
             "max_thinking_budget=0 must not alter the budget; got {thinking:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // emit_reasoning_blocks: non-anthropic format WARN (Finding 2)
+    // -----------------------------------------------------------------
+
+    /// When `emit_reasoning_blocks` encounters reasoning details whose
+    /// `format` is not `anthropic-claude-v1` it must drop them (behavior-
+    /// preserving) AND emit a structured WARN that aggregates the skipped
+    /// count and the distinct format strings so operators can diagnose why
+    /// blocks are absent from the replay.
+    #[test]
+    fn emit_reasoning_blocks_warns_on_non_anthropic_format() {
+        // Arrange: assistant message with two reasoning details that carry
+        // non-anthropic formats (one foreign string, one absent / None).
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![
+                user_msg("think then reply"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Text("I thought about it.".into()),
+                    reasoning: None,
+                    reasoning_details: vec![
+                        ReasoningDetail {
+                            kind: ReasoningDetailKind::Text,
+                            id: None,
+                            format: Some("openai-o-format".to_string()),
+                            index: Some(0),
+                            payload: json!({"text": "some reasoning", "signature": "sig"}),
+                        },
+                        ReasoningDetail {
+                            kind: ReasoningDetailKind::Encrypted,
+                            id: None,
+                            // format = None -> not anthropic-claude-v1 -> must also be skipped
+                            format: None,
+                            index: Some(1),
+                            payload: json!({"data": "encrypted-blob"}),
+                        },
+                    ],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Act: normalize under capture to observe the emitted WARN.
+        let mut body_out: Option<Value> = None;
+        let captured = test_capture::with_capture(|| {
+            body_out = Some(
+                normalize("prov-test", &req, false, &[], false, None)
+                    .expect("normalize must succeed"),
+            );
+        });
+        let _body = body_out.expect("normalize ran");
+
+        // Assert: the skipped-format WARN must be emitted.
+        let warn_event = captured
+            .iter()
+            .find(|e| {
+                e.message.contains(
+                    "skipping reasoning blocks on replay: format is not anthropic-claude-v1",
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!("expected non-anthropic-format WARN; got events: {captured:?}",)
+            });
+        assert_eq!(warn_event.level, tracing::Level::WARN);
+
+        // provider field must identify the caller.
+        let provider_val = warn_event
+            .fields
+            .iter()
+            .find(|(k, _)| k == "provider")
+            .map(|(_, v)| v.as_str())
+            .expect("provider field present");
+        assert_eq!(provider_val, "prov-test");
+
+        // skipped_count: both details were dropped.
+        let count_val = warn_event
+            .fields
+            .iter()
+            .find(|(k, _)| k == "skipped_count")
+            .map(|(_, v)| v.as_str())
+            .expect("skipped_count field present");
+        assert_eq!(count_val, "2", "both non-anthropic details must be counted");
+
+        // skipped_formats: must contain the foreign format string and the
+        // placeholder for the absent format.
+        let formats_val = warn_event
+            .fields
+            .iter()
+            .find(|(k, _)| k == "skipped_formats")
+            .map(|(_, v)| v.as_str())
+            .expect("skipped_formats field present");
+        assert!(
+            formats_val.contains("openai-o-format"),
+            "skipped_formats must include the foreign format string; got: {formats_val:?}",
+        );
+        assert!(
+            formats_val.contains("<none>"),
+            "skipped_formats must include <none> for format=None details; got: {formats_val:?}",
         );
     }
 }

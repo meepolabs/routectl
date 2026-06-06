@@ -67,11 +67,19 @@ impl SseState {
     /// is produced at start; the matching ingress reconstructs the
     /// block from `chunk.opaque_events`.
     pub(super) fn open_unknown_block(&mut self, index: u32, value: &Value, provider: &str) {
-        let type_tag = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
+        // Sanitize `type_tag` at capture time: `content_block.type` is
+        // upstream-controlled and flows straight into tracing fields. A
+        // malicious or compromised upstream could embed CR, LF, or ANSI
+        // escape sequences to forge log lines on a text subscriber.
+        // Sanitizing here once means every downstream use -- the stored
+        // OpenBlockKind field, the WARN log, and OpaqueCapture -- all
+        // inherit the clean value without per-site guards.
+        let type_tag = routectl_core::sanitize_for_log(
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+        );
         self.open_block = Some(OpenBlockKind::Unknown {
             upstream_index: index,
             type_tag: type_tag.clone(),
@@ -403,6 +411,62 @@ mod tests {
         assert_eq!(
             state.open_block.as_ref().map(|b| b.upstream_index()),
             Some(0),
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Log-injection: sanitize upstream-controlled type_tag at capture
+    // -----------------------------------------------------------------
+
+    /// An upstream-controlled `content_block.type` containing CR, LF, or
+    /// ANSI escape sequences must be sanitized before it is stored in
+    /// `OpenBlockKind::Unknown.type_tag` and before it reaches any tracing
+    /// field. Verifies the fix: sanitize at capture time (once) so all
+    /// downstream log sites inherit the clean value.
+    #[test]
+    fn open_unknown_block_type_tag_is_sanitized_before_logging() {
+        use super::super::sse::OpenBlockKind;
+
+        // Arrange: a content_block_start whose type tag embeds CRLF and
+        // an ANSI escape sequence -- a malicious upstream could use these
+        // to forge fake log lines on a text-format tracing subscriber.
+        let mut state = SseState::default();
+
+        // Act: open the unknown block via parse_event.
+        let _ = state
+            .parse_event(
+                "test",
+                // The type field contains \n (newline), \r (carriage return),
+                // and \x1b (ESC for ANSI). We embed them via JSON unicode
+                // escapes so the test source stays ASCII-only.
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"evil\nfake_line\r\u001b[31mred"}}"#,
+            )
+            .unwrap();
+
+        // Assert: the type_tag stored in OpenBlockKind::Unknown is sanitized.
+        // Since block_type = %type_tag in the WARN log reads from the same
+        // stored string, a clean stored value means a clean logged field.
+        let stored_tag = match state.open_block.as_ref().expect("block must be open") {
+            OpenBlockKind::Unknown { type_tag, .. } => type_tag.clone(),
+            other => panic!("expected Unknown block, got: {other:?}"),
+        };
+        assert!(
+            !stored_tag.contains('\n'),
+            "stored type_tag must not contain newline (CR/LF injection); got: {stored_tag:?}"
+        );
+        assert!(
+            !stored_tag.contains('\r'),
+            "stored type_tag must not contain carriage return; got: {stored_tag:?}"
+        );
+        assert!(
+            !stored_tag.contains('\x1b'),
+            "stored type_tag must not contain ESC (ANSI injection); got: {stored_tag:?}"
+        );
+        // The placeholder character `?` must appear where the injected bytes
+        // were so operators can see that filtering occurred.
+        assert!(
+            stored_tag.contains('?'),
+            "sanitized type_tag must contain placeholder `?` characters; got: {stored_tag:?}"
         );
     }
 
