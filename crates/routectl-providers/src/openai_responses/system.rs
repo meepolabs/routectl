@@ -9,18 +9,18 @@
 //!
 //! Lossy seam: per-block `cache_control` markers cannot ride the
 //! Responses wire (no Anthropic-style prompt cache surface here yet),
-//! so we drop with a WARN. The caller's request_id will be on the span
+//! so we drop at DEBUG level. The caller's request_id will be on the span
 //! emitted by the Provider's `complete()` instrumentation, so the
-//! WARN is correlated automatically.
+//! debug event is correlated automatically.
 
 use routectl_core::{ChatRequest, SystemContent};
 
 /// Build the `instructions` field for the Responses API from the
 /// canonical `system` field. Returns `None` when no system content is
-/// present so the caller can skip the field entirely (an empty
-/// instructions string would still serialize to `""` -- the parent
-/// `ResponsesRequest` uses `skip_serializing_if = "String::is_empty"`
-/// so absent and empty behave identically on the wire).
+/// present so the caller can skip the field entirely (the parent
+/// `ResponsesRequest` always serializes `instructions`, even when
+/// empty; an empty string `""` is accepted by the server as
+/// "no system prompt").
 pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
     let s = req.system.as_ref()?;
     match s {
@@ -42,9 +42,9 @@ pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
     }
 }
 
-/// Emit a WARN for each block carrying a `cache_control` marker that
-/// will be dropped on the Responses wire. Operators see the loss in
-/// `routectl-warn.log` and can either move the prompt to an
+/// Emit a debug event for each block carrying a `cache_control` marker that
+/// will be dropped on the Responses wire. Operators can raise the log level
+/// to DEBUG to see the loss and can either move the prompt to an
 /// Anthropic-shape provider or accept the drop.
 fn warn_on_cache_control_loss(blocks: &[routectl_core::SystemBlock]) {
     let dropped = blocks.iter().filter(|b| b.cache_control.is_some()).count();

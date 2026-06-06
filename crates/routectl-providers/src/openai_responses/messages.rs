@@ -242,9 +242,13 @@ fn lift_reasoning_details(details: &[ReasoningDetail], out: &mut Vec<ResponseInp
     let mut order: Vec<Option<String>> = Vec::new();
     let mut groups: std::collections::HashMap<Option<String>, ReasoningGroup> =
         std::collections::HashMap::new();
+    let mut skipped_count: u32 = 0;
+    let mut skipped_formats: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for d in details {
         if d.format.as_deref() != Some(OPENAI_RESPONSES_FORMAT) {
+            skipped_count += 1;
+            skipped_formats.insert(d.format.as_deref().unwrap_or("<none>").to_string());
             continue;
         }
         let key = d.id.clone();
@@ -295,6 +299,15 @@ fn lift_reasoning_details(details: &[ReasoningDetail], out: &mut Vec<ResponseInp
             content: group.content,
             encrypted_content: group.encrypted_content.unwrap_or_default(),
         });
+    }
+
+    if skipped_count > 0 {
+        let formats: Vec<&str> = skipped_formats.iter().map(String::as_str).collect();
+        tracing::debug!(
+            skipped = skipped_count,
+            formats = ?formats,
+            "openai-responses: skipped reasoning_details entries with non-openai-responses-v1 format"
+        );
     }
 }
 
@@ -432,7 +445,11 @@ fn walk_assistant_part(
                     "skipping Thinking content-part because reasoning_details already emitted Reasoning items"
                 );
             } else {
-                reasoning.push(translate_thinking_part(thinking, signature.as_deref()));
+                reasoning.push(translate_thinking_part(
+                    thinking,
+                    signature.as_deref(),
+                    None,
+                ));
             }
         }
         ContentPart::Known(KnownContentPart::RedactedThinking { data }) => {
@@ -488,13 +505,16 @@ fn walk_assistant_part(
 }
 
 /// Translate a canonical Thinking block to a Responses-shape
-/// `Reasoning` input item. The signature is lifted verbatim into
-/// `encrypted_content`; when None, an empty string is emitted -- codex
-/// treats empty `encrypted_content` as a no-op for replay
-/// (`arc_monitor.rs::325-336`), so the field is safe to send empty.
+/// `Reasoning` input item. The signature is forwarded as
+/// `encrypted_content` ONLY when `format` is `openai-responses-v1` --
+/// the one case where we know the signature is a valid OpenAI
+/// encrypted_content token. For Anthropic-format thinking parts the
+/// field is emitted as an empty string; codex treats empty
+/// `encrypted_content` as a no-op for replay (`arc_monitor.rs::325-336`).
 pub(super) fn translate_thinking_part(
     thinking: &str,
     signature: Option<&str>,
+    format: Option<&str>,
 ) -> ResponseInputItem {
     let summary = if thinking.is_empty() {
         Vec::new()
@@ -503,11 +523,20 @@ pub(super) fn translate_thinking_part(
             text: thinking.to_string(),
         }]
     };
+    // Only forward the signature as encrypted_content when the source
+    // is openai-responses-v1. Anthropic signatures are not valid OpenAI
+    // encrypted_content tokens; forwarding them would corrupt the replay
+    // gate on the upstream server.
+    let encrypted_content = if format == Some(OPENAI_RESPONSES_FORMAT) {
+        signature.unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
     ResponseInputItem::Reasoning {
         id: None,
         summary,
         content: Vec::new(),
-        encrypted_content: signature.unwrap_or("").to_string(),
+        encrypted_content,
     }
 }
 
@@ -692,5 +721,195 @@ fn translate_tool_image_source(
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod messages_tests {
+    use serde_json::json;
+
+    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+
+    use super::super::types::ResponseInputItem;
+    use super::super::OPENAI_RESPONSES_FORMAT;
+    use super::{lift_reasoning_details, translate_thinking_part};
+
+    fn make_detail(
+        format: Option<&str>,
+        kind: ReasoningDetailKind,
+        payload: serde_json::Value,
+    ) -> ReasoningDetail {
+        ReasoningDetail {
+            kind,
+            id: None,
+            format: format.map(str::to_string),
+            index: None,
+            payload,
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 5: lift_reasoning_details skips non-openai-responses-v1
+    // entries and aggregates the dropped formats for debug logging.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn lift_skips_anthropic_format_details() {
+        // Arrange: one detail with anthropic-claude-v1 format.
+        let details = vec![make_detail(
+            Some("anthropic-claude-v1"),
+            ReasoningDetailKind::Text,
+            json!({"text": "some reasoning"}),
+        )];
+
+        // Act
+        let mut out = Vec::new();
+        lift_reasoning_details(&details, &mut out);
+
+        // Assert: no items emitted for anthropic-format details.
+        assert!(
+            out.is_empty(),
+            "expected no Reasoning items from anthropic-claude-v1 details"
+        );
+    }
+
+    #[test]
+    fn lift_skips_format_less_details() {
+        // Arrange: detail with no format tag.
+        let details = vec![make_detail(
+            None,
+            ReasoningDetailKind::Text,
+            json!({"text": "some reasoning"}),
+        )];
+
+        // Act
+        let mut out = Vec::new();
+        lift_reasoning_details(&details, &mut out);
+
+        // Assert: no items emitted for format-less details.
+        assert!(
+            out.is_empty(),
+            "expected no Reasoning items from format-less details"
+        );
+    }
+
+    #[test]
+    fn lift_includes_openai_responses_v1_details() {
+        // Arrange: one detail with the correct format tag.
+        let details = vec![make_detail(
+            Some(OPENAI_RESPONSES_FORMAT),
+            ReasoningDetailKind::Text,
+            json!({"text": "the reasoning text"}),
+        )];
+
+        // Act
+        let mut out = Vec::new();
+        lift_reasoning_details(&details, &mut out);
+
+        // Assert: openai-responses-v1 details produce a Reasoning item.
+        assert_eq!(
+            out.len(),
+            1,
+            "expected one Reasoning item from openai-responses-v1 detail"
+        );
+    }
+
+    #[test]
+    fn lift_mixed_formats_only_includes_v1() {
+        // Arrange: mix of openai-responses-v1 and anthropic-claude-v1.
+        let details = vec![
+            make_detail(
+                Some(OPENAI_RESPONSES_FORMAT),
+                ReasoningDetailKind::Text,
+                json!({"text": "openai reasoning"}),
+            ),
+            make_detail(
+                Some("anthropic-claude-v1"),
+                ReasoningDetailKind::Text,
+                json!({"text": "anthropic reasoning"}),
+            ),
+        ];
+
+        // Act
+        let mut out = Vec::new();
+        lift_reasoning_details(&details, &mut out);
+
+        // Assert: only the v1 item is included.
+        assert_eq!(
+            out.len(),
+            1,
+            "expected exactly one item (the openai-responses-v1 detail)"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Finding 6: translate_thinking_part gates signature on format.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn anthropic_format_thinking_does_not_leak_signature_into_encrypted_content() {
+        // Arrange: ContentPart::Thinking path passes format = None
+        // (KnownContentPart::Thinking carries no format field).
+        let thinking = "I reasoned carefully about this.";
+        let signature = Some("anthropic_sig_MUST_NOT_APPEAR");
+
+        // Act
+        let item = translate_thinking_part(thinking, signature, None);
+
+        // Assert: Anthropic signature MUST NOT appear in encrypted_content.
+        let ResponseInputItem::Reasoning {
+            encrypted_content, ..
+        } = item
+        else {
+            panic!("expected ResponseInputItem::Reasoning");
+        };
+        assert!(
+            encrypted_content.is_empty(),
+            "Anthropic signature must not leak into encrypted_content, got: {encrypted_content}"
+        );
+    }
+
+    #[test]
+    fn openai_responses_format_forwards_signature_to_encrypted_content() {
+        // Arrange: openai-responses-v1 path (came from reasoning_details).
+        let thinking = "Some intermediate reasoning";
+        let signature = Some("eyJhbGciOiJSUzI1NiJ9.openai_sig");
+
+        // Act
+        let item = translate_thinking_part(thinking, signature, Some(OPENAI_RESPONSES_FORMAT));
+
+        // Assert: the signature IS forwarded.
+        let ResponseInputItem::Reasoning {
+            encrypted_content, ..
+        } = item
+        else {
+            panic!("expected ResponseInputItem::Reasoning");
+        };
+        assert_eq!(
+            encrypted_content, "eyJhbGciOiJSUzI1NiJ9.openai_sig",
+            "openai-responses-v1 signature must be forwarded as encrypted_content"
+        );
+    }
+
+    #[test]
+    fn openai_responses_format_no_signature_emits_empty_encrypted_content() {
+        // Arrange: openai-responses-v1 format, no signature available.
+        let thinking = "Some reasoning";
+
+        // Act
+        let item = translate_thinking_part(thinking, None, Some(OPENAI_RESPONSES_FORMAT));
+
+        // Assert: no signature -> empty encrypted_content (the documented
+        // "no prior signature" shape; codex treats it as a no-op).
+        let ResponseInputItem::Reasoning {
+            encrypted_content, ..
+        } = item
+        else {
+            panic!("expected ResponseInputItem::Reasoning");
+        };
+        assert!(
+            encrypted_content.is_empty(),
+            "None signature should yield empty encrypted_content, got: {encrypted_content}"
+        );
     }
 }

@@ -1,18 +1,17 @@
 //! Canonical `req.tools` + `req.tool_choice` -> Responses
 //! `tools` / `tool_choice` translation.
 //!
-//! `ToolDef::Custom` -> `{type:"function", function:{name, description?,
-//! parameters, strict?}}` (chat-completions-shape). `ToolDef::Other`
-//! passes through verbatim so Anthropic builtins / future shapes ride
-//! the egress without code edits.
+//! `ToolDef::Custom` -> flat Responses shape `{type, name, description?,
+//! parameters, strict?}`. `ToolDef::Other` passes through verbatim so
+//! Anthropic builtins / future shapes ride the egress without code edits.
 //!
 //! tool_choice mapping:
 //!   - `"auto"` / `"required"` / `"none"` -> bare-string passthrough
 //!   - named function (OpenAI object shape, Anthropic-shape, or any
-//!     `{"name"}`-bearing object) -> `{"type":"function","function":
-//!     {"name":"X"}}` (chat-completions-shape). CG.C smoke will
-//!     validate; we'll flip to the flat shape there if the server
-//!     400s.
+//!     `{"name"}`-bearing object) -> flat Responses shape
+//!     `{"type":"function","name":"X"}` (smoke 2026-05-12 confirmed the
+//!     nested chat-completions shape is rejected with
+//!     "Unknown parameter: 'tool_choice.function'").
 
 use serde_json::{json, Value};
 
@@ -58,8 +57,8 @@ pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
 /// Translate `req.tool_choice` to the Responses-shape value. Returns
 /// None when canonical has no tool_choice. Bare-string shapes
 /// (`auto`/`required`/`none`) pass through verbatim; OpenAI / Anthropic
-/// named-function shapes collapse to `{"type":"function","function":
-/// {"name":"X"}}` (chat-completions-shape).
+/// named-function shapes collapse to flat Responses shape
+/// `{"type":"function","name":"X"}`.
 pub(super) fn translate_tool_choice(tc: Option<&Value>) -> Option<Value> {
     let tc = tc?;
     match tc {
