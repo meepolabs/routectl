@@ -13,7 +13,10 @@
 
 use serde_json::Value;
 
-use routectl_core::{ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role};
+use routectl_core::{
+    ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningDetail,
+    ReasoningDetailKind, Result, Role,
+};
 
 use crate::anthropic_api::parts::strip_text_after_tool_use;
 
@@ -57,7 +60,7 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
                 });
             }
             Role::Assistant => {
-                let blocks = build_assistant_content_blocks(id, &msg.content)?;
+                let blocks = build_assistant_content_blocks(id, msg)?;
                 if blocks.is_empty() {
                     tracing::debug!(
                         provider = id,
@@ -119,15 +122,137 @@ fn build_user_content_blocks(
 /// multi-turn replay (the trailing transition Text after the last
 /// ToolUse). Mirrors `anthropic_api::request::append_assistant_message_blocks`
 /// behavior so the Converse path doesn't silently 400 upstream.
-fn build_assistant_content_blocks(
-    id: &str,
-    content: &MessageContent,
-) -> Result<Vec<ConverseContentBlock>> {
-    if let MessageContent::Parts(parts) = content {
+///
+/// When `msg.reasoning_details` is non-empty (canonical multi-turn
+/// channel populated by the streaming decoder), emit Converse
+/// `ReasoningContent` blocks first (only `anthropic-claude-v1` format),
+/// then append the remaining content. Mirrors the Anthropic-API egress
+/// `emit_reasoning_blocks` + `append_assistant_message_blocks` split.
+/// The two sources (`reasoning_details` vs `KnownContentPart::Thinking`
+/// in `content.Parts`) are mutually exclusive by design: the streaming
+/// decoder puts thinking into `reasoning_details`, not `content.Parts`.
+fn build_assistant_content_blocks(id: &str, msg: &Message) -> Result<Vec<ConverseContentBlock>> {
+    if !msg.reasoning_details.is_empty() {
+        let mut blocks = emit_reasoning_blocks_converse(id, &msg.reasoning_details)?;
+        append_converse_content_blocks(id, &msg.content, &mut blocks)?;
+        return Ok(blocks);
+    }
+    if let MessageContent::Parts(parts) = &msg.content {
         let cleaned = strip_text_after_tool_use(parts);
         return content_blocks_from_parts(id, &cleaned);
     }
-    content_blocks_with_cache_control(id, content)
+    content_blocks_with_cache_control(id, &msg.content)
+}
+
+/// Translate `reasoning_details` into Bedrock Converse `ReasoningContent`
+/// blocks for echo on a multi-turn assistant turn. Index-ordered so an
+/// upstream that re-orders reasoning blocks doesn't surprise the
+/// downstream signature check. Only `anthropic-claude-v1` format details
+/// are emitted; others (e.g. OpenAI-format) are skipped -- they have no
+/// Converse wire equivalent. Bedrock validates the signature on multi-turn
+/// replay identical to direct Anthropic; a missing signature 400s with
+/// "invalid reasoning content". Unsigned blocks are skipped and the count
+/// is aggregated into a single WARN so the operator can correlate without
+/// per-detail log spam.
+fn emit_reasoning_blocks_converse(
+    id: &str,
+    details: &[ReasoningDetail],
+) -> Result<Vec<ConverseContentBlock>> {
+    let mut sorted = details.to_vec();
+    sorted.sort_by_key(|d| d.index.unwrap_or(0));
+
+    let mut blocks: Vec<ConverseContentBlock> = Vec::with_capacity(sorted.len());
+    let mut skipped_unsigned: Vec<Option<u32>> = Vec::new();
+    for detail in &sorted {
+        match detail.kind {
+            ReasoningDetailKind::Text => {
+                if detail.format.as_deref() != Some(crate::anthropic_api::ANTHROPIC_FORMAT) {
+                    continue;
+                }
+                let thinking = detail
+                    .payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let signature = detail
+                    .payload
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if signature.is_empty() {
+                    // Bedrock Converse validates the signature on multi-turn
+                    // replay and 400s without it. Skip the block so replay
+                    // doesn't fail on a guaranteed-bad echo; aggregate the
+                    // WARN to avoid per-detail log spam.
+                    skipped_unsigned.push(detail.index);
+                    continue;
+                }
+                blocks.push(ConverseContentBlock::ReasoningContent {
+                    reasoning_content: ConverseRequestReasoningBlock::ReasoningText {
+                        reasoning_text: ConverseRequestReasoningText {
+                            text: thinking,
+                            signature: Some(signature.to_string()),
+                        },
+                    },
+                });
+            }
+            ReasoningDetailKind::Encrypted => {
+                if detail.format.as_deref() != Some(crate::anthropic_api::ANTHROPIC_FORMAT) {
+                    continue;
+                }
+                let data = detail
+                    .payload
+                    .get("data")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                blocks.push(ConverseContentBlock::ReasoningContent {
+                    reasoning_content: ConverseRequestReasoningBlock::RedactedContent {
+                        redacted_content: data,
+                    },
+                });
+            }
+            ReasoningDetailKind::Summary => {
+                // Not a Bedrock Converse block type; skip.
+            }
+        }
+    }
+    if !skipped_unsigned.is_empty() {
+        tracing::warn!(
+            provider = id,
+            skipped_count = skipped_unsigned.len(),
+            skipped_indices = ?skipped_unsigned,
+            "skipping Thinking blocks on Converse replay: signature missing or empty; \
+             Bedrock Converse requires a signature on replayed reasoningContent blocks"
+        );
+    }
+    Ok(blocks)
+}
+
+/// Append the assistant message's text/parts content AFTER the reasoning
+/// blocks already pushed. Mirrors
+/// `anthropic_api::request::append_assistant_message_blocks`. For Text,
+/// emits a single Text block (skipped on empty/Null since reasoning-only
+/// assistant turns are valid). For Parts, translates each block after
+/// stripping trailing text-after-tool_use.
+fn append_converse_content_blocks(
+    id: &str,
+    content: &MessageContent,
+    blocks: &mut Vec<ConverseContentBlock>,
+) -> Result<()> {
+    match content {
+        MessageContent::Text(t) if !t.is_empty() => {
+            blocks.push(ConverseContentBlock::Text { text: t.clone() });
+        }
+        MessageContent::Text(_) | MessageContent::Null => {}
+        MessageContent::Parts(parts) => {
+            let cleaned = strip_text_after_tool_use(parts);
+            let more = content_blocks_from_parts(id, &cleaned)?;
+            blocks.extend(more);
+        }
+    }
+    Ok(())
 }
 
 fn content_blocks_with_cache_control(
@@ -617,4 +742,230 @@ fn document_to_tool_result(
             "source": {"bytes": data},
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use routectl_core::{ReasoningDetail, ReasoningDetailKind};
+    use serde_json::json;
+
+    fn user_msg() -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Text("hello".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// An assistant message carrying `reasoning_details` (anthropic-claude-v1
+    /// format, Text kind) must produce a `ReasoningContent` block with the
+    /// correct text and signature on the Converse request.
+    #[test]
+    fn assistant_reasoning_details_text_produces_reasoning_content_block() {
+        // Arrange
+        let detail = ReasoningDetail {
+            kind: ReasoningDetailKind::Text,
+            id: Some("rd-1".into()),
+            format: Some(crate::anthropic_api::ANTHROPIC_FORMAT.to_string()),
+            index: Some(0),
+            payload: json!({"text": "my reasoning", "signature": "sig_abc"}),
+        };
+        let messages = vec![
+            user_msg(),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("sure".into()),
+                reasoning: None,
+                reasoning_details: vec![detail],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let assistant = result
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message must be present");
+        let reasoning_block = assistant
+            .content
+            .iter()
+            .find(|b| matches!(b, ConverseContentBlock::ReasoningContent { .. }));
+        assert!(
+            reasoning_block.is_some(),
+            "assistant message carrying reasoning_details must produce a \
+             ReasoningContent block on the Converse request, got: {:?}",
+            assistant.content
+        );
+        match reasoning_block.unwrap() {
+            ConverseContentBlock::ReasoningContent { reasoning_content } => match reasoning_content
+            {
+                ConverseRequestReasoningBlock::ReasoningText { reasoning_text } => {
+                    assert_eq!(reasoning_text.text, "my reasoning");
+                    assert_eq!(reasoning_text.signature.as_deref(), Some("sig_abc"));
+                }
+                other => panic!("expected ReasoningText, got {other:?}"),
+            },
+            _ => panic!("expected ReasoningContent block"),
+        }
+        // The trailing text content must also be present after the reasoning block.
+        let text_block = assistant
+            .content
+            .iter()
+            .find(|b| matches!(b, ConverseContentBlock::Text { .. }));
+        assert!(
+            text_block.is_some(),
+            "text content must survive alongside reasoning_details"
+        );
+    }
+
+    /// Encrypted reasoning (ReasoningDetailKind::Encrypted) must produce a
+    /// RedactedContent block on the Converse egress.
+    #[test]
+    fn assistant_encrypted_reasoning_detail_produces_redacted_block() {
+        // Arrange
+        let detail = ReasoningDetail {
+            kind: ReasoningDetailKind::Encrypted,
+            id: Some("rd-2".into()),
+            format: Some(crate::anthropic_api::ANTHROPIC_FORMAT.to_string()),
+            index: Some(0),
+            payload: json!({"data": "base64data=="}),
+        };
+        let messages = vec![
+            user_msg(),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("here".into()),
+                reasoning: None,
+                reasoning_details: vec![detail],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let assistant = result
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message must be present");
+        let redacted = assistant.content.iter().find(|b| {
+            matches!(
+                b,
+                ConverseContentBlock::ReasoningContent {
+                    reasoning_content: ConverseRequestReasoningBlock::RedactedContent { .. },
+                }
+            )
+        });
+        assert!(
+            redacted.is_some(),
+            "encrypted reasoning_detail must produce a RedactedContent block, \
+             got: {:?}",
+            assistant.content
+        );
+    }
+
+    /// Non-anthropic-claude-v1 format reasoning details must be ignored.
+    #[test]
+    fn non_anthropic_format_reasoning_detail_is_skipped() {
+        // Arrange
+        let detail = ReasoningDetail {
+            kind: ReasoningDetailKind::Text,
+            id: Some("rd-3".into()),
+            format: Some("openai-v1".into()),
+            index: Some(0),
+            payload: json!({"text": "other reasoning", "signature": "sig_x"}),
+        };
+        let messages = vec![
+            user_msg(),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("response".into()),
+                reasoning: None,
+                reasoning_details: vec![detail],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let assistant = result
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message must be present");
+        let has_reasoning = assistant
+            .content
+            .iter()
+            .any(|b| matches!(b, ConverseContentBlock::ReasoningContent { .. }));
+        assert!(
+            !has_reasoning,
+            "non-anthropic-claude-v1 reasoning_detail must not produce a Converse block, \
+             got: {:?}",
+            assistant.content
+        );
+    }
+
+    /// When reasoning_details is empty, KnownContentPart::Thinking in content
+    /// still produces a ReasoningContent block (existing path, regression guard).
+    #[test]
+    fn thinking_in_content_parts_still_works_when_no_reasoning_details() {
+        // Arrange
+        use routectl_core::KnownContentPart;
+        let messages = vec![
+            user_msg(),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Thinking {
+                        thinking: "content-path thinking".into(),
+                        signature: Some("sig_content".into()),
+                    }),
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "result".into(),
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let assistant = result
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message must be present");
+        let has_reasoning = assistant
+            .content
+            .iter()
+            .any(|b| matches!(b, ConverseContentBlock::ReasoningContent { .. }));
+        assert!(
+            has_reasoning,
+            "KnownContentPart::Thinking in content.Parts must still produce a \
+             ReasoningContent block when reasoning_details is empty, got: {:?}",
+            assistant.content
+        );
+    }
 }

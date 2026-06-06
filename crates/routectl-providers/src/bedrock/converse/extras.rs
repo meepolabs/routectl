@@ -63,6 +63,26 @@ pub(super) fn build_additional_fields(
     // `super::super::betas` for the full contract.
     filter_bedrock_betas(&cfg.id, &mut bag, &cfg.anthropic_beta, &cfg.allowed_betas);
 
+    // Warn when the operator's allowed_body_fields list would drop a
+    // routectl-managed key that carries thinking or effort semantics.
+    // The downstream filter logs at DEBUG for all drops; upgrading to
+    // WARN here (before the filter runs) ensures operators can see the
+    // loss without digging through debug logs.
+    if !cfg.allowed_body_fields.is_empty() {
+        for key in ["thinking", "output_config"] {
+            if bag.contains_key(key) && !cfg.allowed_body_fields.iter().any(|k| k == key) {
+                tracing::warn!(
+                    provider = %cfg.id,
+                    field = %key,
+                    surface = "converse_additional_fields",
+                    "allowed_body_fields omits routectl-managed field; it will be \
+                     dropped and thinking/effort semantics will be lost. Add this \
+                     field to [bedrock] allowed_body_fields to preserve Converse behavior."
+                );
+            }
+        }
+    }
+
     // Filter the bag itself against `[bedrock] allowed_body_fields`.
     // Anthropic-on-Bedrock rejects unknown body fields with HTTP 400
     // ("Extra inputs are not permitted"); for Converse those fields

@@ -274,13 +274,13 @@ fn handle_converse_frame(
         "contentBlockStart" => {
             let ev: StreamContentBlockStart =
                 parse_payload(provider_id, payload, "contentBlockStart")?;
-            handle_block_start(state, ev);
+            handle_block_start(provider_id, state, ev);
             Ok(vec![])
         }
         "contentBlockDelta" => {
             let ev: StreamContentBlockDelta =
                 parse_payload(provider_id, payload, "contentBlockDelta")?;
-            Ok(handle_block_delta(state, ev))
+            Ok(handle_block_delta(provider_id, state, ev))
         }
         "contentBlockStop" => {
             let ev: StreamContentBlockStop =
@@ -355,7 +355,11 @@ fn handle_converse_frame(
     }
 }
 
-fn handle_block_start(state: &mut ConverseStreamState, ev: StreamContentBlockStart) {
+fn handle_block_start(
+    provider_id: &str,
+    state: &mut ConverseStreamState,
+    ev: StreamContentBlockStart,
+) {
     let kind = match ev.start {
         Some(StreamContentBlockStartPayload::ToolUse { tool_use }) => {
             let call_index = state.next_call_index;
@@ -366,13 +370,26 @@ fn handle_block_start(state: &mut ConverseStreamState, ev: StreamContentBlockSta
                 call_index,
             }
         }
-        Some(StreamContentBlockStartPayload::Other(_)) | None => {
-            // Per AWS docs only tool_use blocks carry a typed start
-            // payload. Text + reasoning open without one. We don't know
-            // for certain at start time which kind this is -- but the
-            // first delta's shape disambiguates and we update on the
-            // fly. Default to Text; the delta handler upgrades to
-            // Reasoning on the first reasoningContent delta.
+        Some(StreamContentBlockStartPayload::Other(ref raw)) => {
+            // An unrecognized start payload. Per AWS docs only tool_use
+            // blocks carry a typed start payload today; a future AWS
+            // block type would land here first. Log at DEBUG so the raw
+            // shape is visible in trace logs without noise at higher
+            // levels. Default to Text; the first delta's shape
+            // disambiguates and the delta handler upgrades to Reasoning
+            // on the first reasoningContent delta.
+            tracing::debug!(
+                provider = provider_id,
+                start_payload = ?raw,
+                "bedrock converse: unknown contentBlockStart payload type; \
+                 defaulting to Text block state -- first delta will disambiguate"
+            );
+            BlockState::Text
+        }
+        None => {
+            // Per AWS docs text + reasoning blocks open without a typed
+            // start payload. Default to Text; the delta handler upgrades
+            // to Reasoning on the first reasoningContent delta.
             BlockState::Text
         }
     };
@@ -380,6 +397,7 @@ fn handle_block_start(state: &mut ConverseStreamState, ev: StreamContentBlockSta
 }
 
 fn handle_block_delta(
+    provider_id: &str,
     state: &mut ConverseStreamState,
     ev: StreamContentBlockDelta,
 ) -> Vec<ChatChunk> {
@@ -482,9 +500,14 @@ fn handle_block_delta(
             chunks
         }
         StreamDelta::Other(_) => {
-            // Forward compat -- skip silently. A future AWS delta type
-            // (citation, image, toolResult) lands here; the OpenAI
-            // canonical shape doesn't have a place for them today.
+            // Forward compat: a future AWS delta type (citation, image,
+            // toolResult) lands here. Log at DEBUG so a future AWS-typed
+            // delta is visible in trace logs without noise at higher levels.
+            tracing::debug!(
+                provider = provider_id,
+                content_block_index = ev.content_block_index,
+                "bedrock converse: unknown content-block delta type; skipping"
+            );
             vec![]
         }
     }
