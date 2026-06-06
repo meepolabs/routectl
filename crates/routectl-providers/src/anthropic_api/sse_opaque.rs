@@ -152,10 +152,14 @@ impl OpaqueCapture {
     }
 
     /// Capture the `content_block_stop` sentinel and emit the INFO
-    /// summary. The summary fires regardless of degraded state so
-    /// operators see a per-block rollup; the stop sentinel is appended
-    /// to capture only when not degraded so the consumer only sees
-    /// well-paired (start, ..., stop) sequences.
+    /// summary. The stop sentinel is appended unconditionally -- even
+    /// when the block degraded -- so the captured sequence stays
+    /// well-paired: a start that was emitted is always matched by a
+    /// stop. Degrading stops capturing further DELTAS (see
+    /// `record_delta`), not the stop boundary, so the consumer sees
+    /// (start, ..., truncated deltas, stop) rather than an unclosed
+    /// block. The INFO summary fires regardless of degraded state so
+    /// operators see a per-block rollup.
     pub(super) fn record_stop(&mut self, provider: &str, out: &mut Vec<OpaqueSseEvent>) {
         tracing::info!(
             provider = %provider,
@@ -165,9 +169,6 @@ impl OpaqueCapture {
             delta_count = self.delta_count,
             "anthropic SSE: opaque block closed",
         );
-        if self.degraded {
-            return;
-        }
         out.push(OpaqueSseEvent::ContentBlockStop {
             upstream_index: self.upstream_index,
         });
@@ -347,7 +348,9 @@ mod tests {
     /// Feed 10001 unknown deltas. Exactly 10000 must be captured into
     /// opaque_events; the 10001st event triggers the per-block
     /// downgrade and is dropped from capture. The stream itself
-    /// continues to flow normally past the cap.
+    /// continues to flow normally past the cap, and the degraded
+    /// block's stop sentinel is still emitted so the start/stop pair
+    /// stays well-formed (only the post-cap deltas are dropped).
     #[test]
     fn delta_overflow_triggers_downgrade_and_warn() {
         // Arrange
@@ -404,15 +407,18 @@ mod tests {
             )
             .unwrap()
             .expect("stream continues past overflow");
-        // Stop sentinel was suppressed under degraded mode.
+        // The degraded block's start was already emitted, so its stop
+        // sentinel must still ride out to keep the (start, ..., stop)
+        // pair well-formed. Degrading drops post-cap deltas, not the
+        // stop boundary.
         let stop_count = final_chunk
             .opaque_events
             .iter()
             .filter(|e| matches!(e, OpaqueSseEvent::ContentBlockStop { .. }))
             .count();
         assert_eq!(
-            stop_count, 0,
-            "degraded block must not emit a stop sentinel into capture",
+            stop_count, 1,
+            "degraded block must still emit its stop sentinel to pair the start",
         );
     }
 

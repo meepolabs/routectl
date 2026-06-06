@@ -21,8 +21,10 @@
 //!   - Test 3: a stream whose unknown-block payload exceeds the
 //!     256 KB byte cap degrades cleanly: capture stops at the cap,
 //!     downstream opaque events are fewer than input deltas, the
-//!     canonical text block following the unknown block still reaches
-//!     the client, and the egress emits a degrade WARN.
+//!     degraded block stays well-paired (its start is matched by a
+//!     stop before the trailing block opens), the canonical text block
+//!     following the unknown block still reaches the client, and the
+//!     egress emits a degrade WARN.
 //!
 //! The router-level "chain doesn't walk" test lives in
 //! `routectl-router/tests/router.rs` -- it pins router-circuit
@@ -625,6 +627,56 @@ async fn byte_overflow_degrades_capture_but_stream_continues() {
     assert!(
         opaque_delta_count < N,
         "post-cap citations_delta events must be sink-drained; got {opaque_delta_count} of {N}",
+    );
+
+    // Assert 3b: the degraded opaque block stays well-paired. Its
+    // content_block_start was already emitted before the cap tripped,
+    // so a matching content_block_stop (same ingress index) MUST ride
+    // out before the trailing canonical text block opens -- otherwise
+    // a strict client sees an unclosed opaque block.
+    let opaque_start = find_event(&events, "content_block_start", |v| {
+        v.pointer("/content_block/type").and_then(Value::as_str) == Some("web_search_tool_result")
+    })
+    .expect("degraded opaque content_block_start must be emitted");
+    let opaque_index = parse_data(opaque_start)
+        .pointer("/index")
+        .and_then(Value::as_u64)
+        .expect("opaque content_block_start carries an index");
+    let opaque_start_pos = events
+        .iter()
+        .position(|e| {
+            e.event.as_deref() == Some("content_block_start")
+                && parse_data(e)
+                    .pointer("/content_block/type")
+                    .and_then(Value::as_str)
+                    == Some("web_search_tool_result")
+        })
+        .expect("opaque start position");
+    let opaque_stop_pos = events
+        .iter()
+        .position(|e| {
+            e.event.as_deref() == Some("content_block_stop")
+                && parse_data(e).pointer("/index").and_then(Value::as_u64) == Some(opaque_index)
+        })
+        .expect("degraded opaque block must emit a matching content_block_stop");
+    let text_start_pos = events
+        .iter()
+        .position(|e| {
+            e.event.as_deref() == Some("content_block_start")
+                && parse_data(e)
+                    .pointer("/content_block/type")
+                    .and_then(Value::as_str)
+                    == Some("text")
+        })
+        .expect("trailing canonical text content_block_start");
+    assert!(
+        opaque_start_pos < opaque_stop_pos,
+        "opaque stop must follow its start; start={opaque_start_pos} stop={opaque_stop_pos}",
+    );
+    assert!(
+        opaque_stop_pos < text_start_pos,
+        "opaque block must close before the trailing text block opens; \
+         stop={opaque_stop_pos} text_start={text_start_pos}",
     );
 
     // Assert 4: the egress logged a WARN naming the byte-overflow
