@@ -111,8 +111,8 @@ impl Dialect for VllmDialect {
         Ok(())
     }
 
-    fn apply_chunk(&self, id: &str, val: &mut Value) -> Result<()> {
-        lift_delta_reasoning_content(id, val, self.format_tag())
+    fn apply_chunk(&self, id: &str, val: &mut Value, reasoning_index: &mut u32) -> Result<()> {
+        lift_delta_reasoning_content(id, val, self.format_tag(), reasoning_index)
     }
 }
 

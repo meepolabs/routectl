@@ -71,10 +71,18 @@ fn think_tag_regex() -> &'static Regex {
 /// Wrap `delta.reasoning` (a coalesced string) into a typed
 /// `reasoning_details` array entry on the chunk's first choice's delta.
 /// Leaves `delta.reasoning` intact for legacy-compat clients.
+///
+/// `reasoning_index` is a per-stream, monotonically incrementing counter
+/// owned by the streaming caller. Each emitted detail takes the current
+/// value and then advances it, so successive streamed reasoning deltas
+/// carry distinct `index` values (0, 1, 2, ...) rather than collapsing
+/// onto index 0. Downstream consumers key on this index for ordering and
+/// block identity.
 pub(super) fn lift_delta_reasoning_content(
     id: &str,
     val: &mut Value,
     format_tag: &str,
+    reasoning_index: &mut u32,
 ) -> Result<()> {
     let choices = val
         .get_mut("choices")
@@ -92,7 +100,11 @@ pub(super) fn lift_delta_reasoning_content(
             _ => continue,
         };
 
-        let detail = build_reasoning_detail(&rc, format_tag, 0);
+        let detail = build_reasoning_detail(&rc, format_tag, *reasoning_index);
+        // saturating_add so a multi-day-running stream (4B+ reasoning
+        // chunks) wraps to a no-op rather than panicking on overflow,
+        // mirroring ThinkTagAccumulator's chunk_index contract.
+        *reasoning_index = reasoning_index.saturating_add(1);
         let detail_val = serde_json::to_value(detail)
             .map_err(|e| Error::Streaming(format!("provider `{id}`: detail serialize: {e}")))?;
 

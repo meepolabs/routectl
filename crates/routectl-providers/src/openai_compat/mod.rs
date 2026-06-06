@@ -249,7 +249,18 @@ impl Provider for OpenAiCompatProvider {
     /// (no request context available). `stream()` itself captures the
     /// per-request dialect from `req.routectl_internal`.
     fn normalize_chunk(&self, raw: &str) -> Result<Option<ChatChunk>> {
-        sse::parse_chunk(&self.cfg.id, raw, self.cfg.reasoning_dialect)
+        // Stateless trait fallback: with no cross-chunk state the
+        // reasoning detail index cannot advance here (same inherent
+        // limitation as RawThinkTag's cross-chunk <think> stripping).
+        // The real streaming path is `stream()`, which threads a
+        // persistent per-stream counter.
+        let mut reasoning_index = 0u32;
+        sse::parse_chunk(
+            &self.cfg.id,
+            raw,
+            self.cfg.reasoning_dialect,
+            &mut reasoning_index,
+        )
     }
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
@@ -426,6 +437,12 @@ impl Provider for OpenAiCompatProvider {
 
         let out = async_stream::stream! {
             let mut think_acc = ThinkTagAccumulator::new();
+            // Per-stream, monotonically incrementing reasoning detail
+            // index for the stateless dialects (DeepSeek/Vllm). Threaded
+            // into `parse_chunk` so successive streamed reasoning deltas
+            // carry distinct `index` values instead of collapsing onto 0.
+            // RawThinkTag threads its own counter inside ThinkTagAccumulator.
+            let mut reasoning_index: u32 = 0;
             // Running concatenation of `delta.content` text across chunks.
             // The terminal chunk (the one carrying `finish_reason`) gets
             // the matched_stop_sequence applied just before yield, mirroring
@@ -458,7 +475,7 @@ impl Provider for OpenAiCompatProvider {
                 let result = if dialect == ReasoningDialect::RawThinkTag {
                     think_acc.process(&provider_id, &data)
                 } else {
-                    sse::parse_chunk(&provider_id, &data, dialect)
+                    sse::parse_chunk(&provider_id, &data, dialect, &mut reasoning_index)
                 };
 
                 match result {
