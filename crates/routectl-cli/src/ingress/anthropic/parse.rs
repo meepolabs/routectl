@@ -58,10 +58,12 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // `betas: [...]` (a typed SDK option) into the
     // `anthropic-beta: a,b,c` HTTP header, so claude-code's first-party
     // betas (context-management, prompt-cache-1h, adaptive-thinking,
-    // ...) arrive on the header surface. The egress emits
-    // `anthropic_beta` as a body field (Anthropic accepts either), so
-    // routing through canonical normalizes both wire shapes onto one
-    // egress path. Comma-separated header values are split + trimmed
+    // ...) arrive on the header surface. The egress emits the merged
+    // values on the upstream `anthropic-beta` HTTP header
+    // (api.anthropic.com rejects the body-level field on OAuth
+    // flavors), so routing through canonical normalizes both wire
+    // shapes onto one egress path. Comma-separated header values are
+    // split + trimmed
     // and merged with any existing body-level `anthropic_beta`,
     // preserving order and dropping duplicates.
     merge_inbound_anthropic_beta_header(headers, &mut req);
@@ -280,6 +282,13 @@ fn merge_output_format(
     let Some(legacy) = output_format else {
         return output_config;
     };
+    // A JSON null output_format means "not set"; treat it the same as
+    // the field being absent. Promoting null into output_config.format
+    // causes a 400 from api.anthropic.com because the structured-output
+    // spec requires format to be a non-null object when present.
+    if legacy.is_null() {
+        return output_config;
+    }
     let nested_format_present = output_config
         .as_ref()
         .and_then(Value::as_object)

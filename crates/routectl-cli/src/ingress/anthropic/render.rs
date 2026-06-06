@@ -65,16 +65,26 @@ pub(super) fn render_messages_response(resp: ChatResponse) -> Value {
             .prompt_tokens
             .saturating_sub(u.cache_creation_input_tokens.unwrap_or(0))
             .saturating_sub(u.cache_read_input_tokens.unwrap_or(0));
-        let mut usage_obj = json!({
-            "input_tokens": raw_input,
-            "output_tokens": u.completion_tokens,
-            "cache_creation_input_tokens": u.cache_creation_input_tokens,
-            "cache_read_input_tokens": u.cache_read_input_tokens,
-            "cache_creation": u.cache_creation.as_ref().map(|c| json!({
-                "ephemeral_5m_input_tokens": c.ephemeral_5m_input_tokens,
-                "ephemeral_1h_input_tokens": c.ephemeral_1h_input_tokens,
-            })),
-        });
+        let mut usage_map = Map::new();
+        usage_map.insert("input_tokens".into(), json!(raw_input));
+        usage_map.insert("output_tokens".into(), json!(u.completion_tokens));
+        if let Some(n) = u.cache_creation_input_tokens {
+            usage_map.insert("cache_creation_input_tokens".into(), json!(n));
+        }
+        if let Some(n) = u.cache_read_input_tokens {
+            usage_map.insert("cache_read_input_tokens".into(), json!(n));
+        }
+        if let Some(c) = u.cache_creation.as_ref() {
+            let mut cc = Map::new();
+            if let Some(n) = c.ephemeral_5m_input_tokens {
+                cc.insert("ephemeral_5m_input_tokens".into(), json!(n));
+            }
+            if let Some(n) = c.ephemeral_1h_input_tokens {
+                cc.insert("ephemeral_1h_input_tokens".into(), json!(n));
+            }
+            usage_map.insert("cache_creation".into(), Value::Object(cc));
+        }
+        let mut usage_obj = Value::Object(usage_map);
         // Forward-compat: emit unknown usage sub-fields (e.g.
         // `service_tier`) that flowed into `extras` from upstream.
         // Typed fields above win on key conflict.

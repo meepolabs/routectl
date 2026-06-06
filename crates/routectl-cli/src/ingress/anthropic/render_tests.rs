@@ -465,3 +465,125 @@ fn render_response_summary_kind_omits_signature_key_when_absent() {
         "no signature key on Summary thinking when payload has none, got: {thinking}"
     );
 }
+
+/// Spec-drift fix: when canonical Usage has no cache fields (None),
+/// the non-streaming render must omit `cache_creation_input_tokens`,
+/// `cache_read_input_tokens`, and `cache_creation` from the wire
+/// rather than emitting them as JSON null. Emitting null for these
+/// fields diverges from api.anthropic.com's own response shape and
+/// can confuse downstream consumers that treat null and absent
+/// differently (e.g. token-counting dashboards that sum cache fields).
+#[test]
+fn render_response_omits_absent_cache_fields_from_usage() {
+    use routectl_core::{schema::Choice, Message, MessageContent, Role, Usage};
+    let resp = ChatResponse {
+        id: "msg_no_cache".into(),
+        model: "claude-opus-4-7".into(),
+        created: 0,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("hello".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 20,
+            completion_tokens: 8,
+            total_tokens: 28,
+            // All cache fields are None -- no cache activity.
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation: None,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+    };
+    let v = AnthropicIngress.render_response(resp).unwrap();
+    let usage = v["usage"].as_object().expect("usage is present");
+
+    // Typed fields that ARE present must be emitted.
+    assert_eq!(v["usage"]["input_tokens"], 20);
+    assert_eq!(v["usage"]["output_tokens"], 8);
+
+    // Cache fields that are None must NOT appear at all -- not even as null.
+    assert!(
+        !usage.contains_key("cache_creation_input_tokens"),
+        "cache_creation_input_tokens must be absent when None, got usage: {usage:?}"
+    );
+    assert!(
+        !usage.contains_key("cache_read_input_tokens"),
+        "cache_read_input_tokens must be absent when None, got usage: {usage:?}"
+    );
+    assert!(
+        !usage.contains_key("cache_creation"),
+        "cache_creation must be absent when None, got usage: {usage:?}"
+    );
+}
+
+/// Counterpart: when cache fields ARE present they must still be emitted
+/// with the correct values.
+#[test]
+fn render_response_emits_cache_fields_when_present() {
+    use routectl_core::{
+        schema::{CacheCreation, Choice},
+        Message, MessageContent, Role, Usage,
+    };
+    let resp = ChatResponse {
+        id: "msg_cache".into(),
+        model: "claude-opus-4-7".into(),
+        created: 0,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("cached".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            // prompt_tokens = raw(100) + cache_create(50) + cache_read(30) = 180
+            prompt_tokens: 180,
+            completion_tokens: 10,
+            total_tokens: 190,
+            cache_creation_input_tokens: Some(50),
+            cache_read_input_tokens: Some(30),
+            cache_creation: Some(CacheCreation {
+                ephemeral_5m_input_tokens: Some(50),
+                ephemeral_1h_input_tokens: None,
+            }),
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+    };
+    let v = AnthropicIngress.render_response(resp).unwrap();
+    // Raw input = 180 - 50 - 30 = 100.
+    assert_eq!(v["usage"]["input_tokens"], 100);
+    assert_eq!(v["usage"]["output_tokens"], 10);
+    assert_eq!(v["usage"]["cache_creation_input_tokens"], 50);
+    assert_eq!(v["usage"]["cache_read_input_tokens"], 30);
+    let cc = v["usage"]["cache_creation"]
+        .as_object()
+        .expect("cache_creation present");
+    assert_eq!(cc["ephemeral_5m_input_tokens"], 50);
+    // ephemeral_1h is None -- must be absent, not null.
+    assert!(
+        !cc.contains_key("ephemeral_1h_input_tokens"),
+        "absent ephemeral_1h_input_tokens must be omitted, got cc: {cc:?}"
+    );
+}
