@@ -69,6 +69,7 @@ pub(crate) mod body_fields;
 pub mod converse;
 pub mod endpoint;
 pub mod eventstream;
+pub(crate) mod frame;
 pub mod invoke;
 pub mod signing;
 
@@ -310,39 +311,22 @@ impl BedrockProvider {
         // Prefer the router-composed map (provider + model merged at
         // dispatch) if present; fall back to `self.cfg.header_extras`
         // for library consumers that built the provider directly.
+        //
+        // Defense-in-depth: `apply_header_extras` refuses auth-reserved
+        // headers, which includes the `x-amz-` prefix -- any x-amz-*
+        // injected after SigV4 signing would not appear in the signed
+        // string, invalidating the signature. The BearerKey path doesn't
+        // sign at all, but guarding here keeps both paths safe.
         let header_source = crate::http_client::effective_header_extras(
             &self.cfg.header_extras,
             req.routectl_internal.header_extras.as_ref(),
         );
-        for (k, v) in &header_source {
-            // Defense-in-depth: refuse auth-reserved headers from
-            // user-supplied extra_headers. This includes the `x-amz-`
-            // prefix -- any x-amz-* injected after SigV4 signing would
-            // not appear in the signed string, invalidating the
-            // signature. The BearerKey path doesn't sign at all but
-            // guarding here keeps both paths safe.
-            if crate::http_client::is_auth_header(k) {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
-                );
-                continue;
-            }
-            if crate::http_client::is_managed_header(k) {
-                tracing::debug!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "dropping managed header from header_extras; composed dynamically by routectl"
-                );
-                continue;
-            }
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| Error::Config(format!("invalid header name `{k}`: {e}")))?;
-            let value = reqwest::header::HeaderValue::from_str(v)
-                .map_err(|e| Error::Config(format!("invalid header value for `{k}`: {e}")))?;
-            request.headers_mut().insert(name, value);
-        }
+        crate::http_client::apply_header_extras(
+            request.headers_mut(),
+            &header_source,
+            &self.cfg.id,
+            &[],
+        );
 
         signing::apply(&mut request, &self.resolved, &self.cfg.region).await?;
         // Dir 2: outgoing request headers. The SigV4 Authorization /

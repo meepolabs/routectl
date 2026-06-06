@@ -24,34 +24,38 @@
 //! Translation to ChatChunk lives in `converse::eventstream`; this
 //! module handles only the framing layer shared by both shapes.
 
-use aws_smithy_eventstream::frame::{DecodedFrame, MessageFrameDecoder};
 use aws_smithy_types::event_stream::Message;
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine;
-use bytes::{Bytes, BytesMut};
-use futures::stream::{BoxStream, Stream, StreamExt};
+use bytes::Bytes;
+use futures::stream::{BoxStream, Stream};
 use serde_json::Value;
 
 use routectl_core::{ChatChunk, Error, Result};
 
+use super::frame::{self, FrameHandler, FrameLabel};
 use crate::anthropic_api::sse::SseState;
 
-/// Cap on a single eventstream frame's advertised total length. AWS
-/// eventstream's wire `total_length` is a raw `u32` (~4 GB cap by spec)
-/// and Bedrock places no documented upper bound, but legitimate
-/// chunks are bounded by the model's per-frame output -- typically
-/// well under 64 KB. 8 MB is generous enough that we never trip on
-/// real traffic but small enough that a malicious or compromised
-/// upstream can't drive the buffer toward OOM by advertising a giant
-/// frame and never sending the bytes.
-const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Per-frame handler for the Anthropic-shape Invoke stream. Holds the
+/// `SseState` that accumulates across `chunk` frames; the framing layer
+/// owns everything up to the decoded `Message`.
+struct InvokeFrameHandler {
+    sse_state: SseState,
+}
+
+impl FrameHandler for InvokeFrameHandler {
+    fn on_frame(&mut self, provider_id: &str, message: Message) -> Result<Vec<ChatChunk>> {
+        handle_invoke_frame(provider_id, message, &mut self.sse_state)
+            .map(|maybe| maybe.into_iter().collect())
+    }
+}
 
 /// Decode Bedrock InvokeModel-stream frames into routectl `ChatChunk`s.
 ///
 /// `byte_stream` is the body of a `/invoke-with-response-stream` HTTP
-/// response from `reqwest`. Each emitted item is an attempt to parse
-/// the next complete eventstream frame; partial frames buffer
-/// internally until enough bytes arrive.
+/// response from `reqwest`. The shared `frame::decode_frames` driver
+/// handles the AWS-eventstream framing; this function supplies only the
+/// Anthropic-SSE payload interpretation.
 pub fn invoke_stream<S>(
     provider_id: String,
     byte_stream: S,
@@ -59,249 +63,10 @@ pub fn invoke_stream<S>(
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
-    let stream = async_stream::stream! {
-        let mut buffer = BytesMut::new();
-        let mut decoder = MessageFrameDecoder::new();
-        let mut sse_state = SseState::default();
-        // Tracks whether smithy has already consumed the 12-byte
-        // prelude into its internal buffer but has not yet returned
-        // Complete. The advertised-length DoS guard reads
-        // `buffer[0..4]` as the next frame's `total_length` -- but
-        // that's only valid when no prelude has been previously
-        // consumed. Once smithy has the prelude buffered (after an
-        // Incomplete return), `buffer[0..4]` is the START OF THE
-        // HEADERS section, not a length, and the cap check would
-        // spuriously fire on header bytes that look like a giant
-        // little-endian integer (e.g. `0x0b3a6576` from `\x0b:ev` =
-        // the `:event-type` length-prefix + colon + start of the
-        // header name). Set to true when we drain the prelude on
-        // Incomplete; cleared back to false when smithy returns
-        // Complete (which internally calls `self.reset()` so its
-        // `prelude_read` flag goes back to false).
-        let mut smithy_has_prelude_buffered = false;
-
-        let mut byte_stream = Box::pin(byte_stream);
-        loop {
-            // Try to decode any complete frames already in buffer. The
-            // advertised-length DoS guard runs at the TOP of this inner
-            // loop so it fires before EVERY decode attempt, not just
-            // once per outer-loop tick. Otherwise a buffer holding
-            // [small valid frame][giant malicious frame] would consume
-            // the small one and decode the giant one without checking
-            // its advertised total_length.
-            loop {
-                if !smithy_has_prelude_buffered && buffer.len() >= 4 {
-                    let advertised = u32::from_be_bytes([
-                        buffer[0], buffer[1], buffer[2], buffer[3],
-                    ]) as usize;
-                    if advertised > MAX_FRAME_BYTES {
-                        yield Err(Error::Streaming(format!(
-                            "bedrock eventstream frame advertised {advertised} bytes, exceeds cap {MAX_FRAME_BYTES}"
-                        )));
-                        return;
-                    }
-                }
-                let mut cursor = std::io::Cursor::new(buffer.as_ref());
-                match decoder.decode_frame(&mut cursor) {
-                    Ok(DecodedFrame::Complete(message)) => {
-                        let consumed = usize::try_from(cursor.position()).map_err(|_| {
-                            Error::Streaming(
-                                "bedrock eventstream decoder consumed more than usize::MAX bytes"
-                                    .into(),
-                            )
-                        })?;
-                        let _ = buffer.split_to(consumed);
-                        // smithy.decode_frame internally calls
-                        // `self.reset()` on a successful Complete,
-                        // clearing its `prelude_read` flag. Mirror
-                        // that here so the cap check above re-engages
-                        // for the next frame's prelude.
-                        smithy_has_prelude_buffered = false;
-
-                        match handle_invoke_frame(&provider_id, message, &mut sse_state) {
-                            Ok(maybe_chunk) => {
-                                if let Some(chunk) = maybe_chunk {
-                                    yield Ok(chunk);
-                                }
-                            }
-                            Err(e) => {
-                                yield Err(e);
-                                return;
-                            }
-                        }
-                    }
-                    Ok(DecodedFrame::Incomplete) => {
-                        // Drain whatever bytes smithy consumed
-                        // before returning Incomplete.
-                        //
-                        // `MessageFrameDecoder::decode_frame` reads
-                        // the 12-byte prelude into its internal state on
-                        // first call and sets `prelude_read = true`.
-                        // It returns Incomplete because the rest of the
-                        // frame hasn't arrived. Without this drain, the
-                        // next outer-loop iteration creates a fresh
-                        // cursor at offset 0 of the buffer -- but the
-                        // prelude bytes are still there. On re-entry,
-                        // smithy skips re-reading the prelude (because
-                        // `prelude_read=true`) and reads the next N
-                        // bytes from cursor offset 0 as the headers
-                        // section -- which is actually still the
-                        // prelude. The big-endian `total_length` field
-                        // gets interpreted as a sequence of header
-                        // tag/value pairs, fails UTF-8 validation, and
-                        // surfaces as `InvalidUtf8String` on a frame
-                        // whose actual payload is perfectly valid.
-                        //
-                        // Symptom in the wild: any Bedrock streaming
-                        // response that arrives in multiple HTTP body
-                        // chunks (i.e. essentially every long Opus
-                        // response) hits a mid-stream UTF-8 error.
-                        // Mirror smithy's prelude consumption back to
-                        // our `BytesMut` so the next iteration's fresh
-                        // cursor starts past the consumed prelude bytes.
-                        let consumed = cursor.position() as usize;
-                        if consumed > 0 {
-                            let _ = buffer.split_to(consumed);
-                            // Track that smithy still has the prelude
-                            // buffered internally -- the cap check at
-                            // the top of the loop must skip until
-                            // smithy returns Complete (and resets).
-                            smithy_has_prelude_buffered = true;
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        // Skip the failed frame instead of killing
-                        // the stream.
-                        //
-                        // If a decode error propagates as stream-fatal
-                        // `Err(Streaming)`, that conflates a single
-                        // transient bad frame with a stream-wide
-                        // failure -- forcing claude-code to restart
-                        // the entire response over for what could
-                        // have been a 1-frame glitch.
-                        //
-                        // Recovery: read the advertised `total_length`
-                        // from `buffer[0..4]` (already DoS-capped at
-                        // the top of the loop), drain that many bytes
-                        // (or clear the whole buffer if it's smaller
-                        // than the advertised length), reset the
-                        // decoder, and continue. The Anthropic SSE
-                        // state machine inside `sse_state` is
-                        // tolerant to one missing event.
-                        //
-                        // Log hygiene: the 12-byte prelude (always
-                        // non-content: total_length, headers_length,
-                        // prelude_crc) is safe to emit at WARN for
-                        // diagnosability. The variable-length payload
-                        // may carry model output and must NOT go to
-                        // a third-party log SaaS at WARN; it is
-                        // gated at TRACE instead.
-                        let advertised = if buffer.len() >= 4 {
-                            u32::from_be_bytes([
-                                buffer[0], buffer[1], buffer[2], buffer[3],
-                            ]) as usize
-                        } else {
-                            0
-                        };
-                        // Log only the 12-byte prelude at WARN.
-                        let prelude_len = 12_usize.min(buffer.len());
-                        let prelude_hex: String = buffer[..prelude_len]
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        tracing::warn!(
-                            provider = %provider_id,
-                            err = %e,
-                            frame_len = advertised,
-                            prelude_hex = %prelude_hex,
-                            "bedrock eventstream frame decode failed; skipping frame"
-                        );
-                        // Full hex dump (up to 256 bytes) at TRACE only.
-                        // Gated behind the trace opt-in so payload bytes
-                        // never reach a third-party log SaaS by default.
-                        if tracing::enabled!(tracing::Level::TRACE) {
-                            let dump_len = advertised.min(256).min(buffer.len());
-                            let hex: String = buffer[..dump_len]
-                                .iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            tracing::trace!(
-                                provider = %provider_id,
-                                frame_len = advertised,
-                                hex = %hex,
-                                "bedrock eventstream frame decode failed (full hex dump)"
-                            );
-                        }
-
-                        // Skip past the failed frame.
-                        if advertised > 0 && buffer.len() >= advertised {
-                            // Full malformed frame in buffer -- drain
-                            // exactly the advertised length so frame
-                            // N+1 stays aligned.
-                            let _ = buffer.split_to(advertised);
-                        } else {
-                            // Partial or zero-length: drop everything
-                            // we have. Realignment would require the
-                            // upstream to mark a new frame boundary
-                            // (which it does on every send), so the
-                            // worst case is one extra frame lost.
-                            buffer.clear();
-                        }
-                        // Reset the decoder so its internal
-                        // `prelude_read` state and our flag align.
-                        decoder = MessageFrameDecoder::new();
-                        smithy_has_prelude_buffered = false;
-                        continue;
-                    }
-                }
-            }
-
-            // Need more bytes; pull next chunk from upstream.
-            match byte_stream.next().await {
-                Some(Ok(bytes)) => buffer.extend_from_slice(&bytes),
-                Some(Err(e)) => {
-                    yield Err(Error::Streaming(format!(
-                        "bedrock upstream byte read failed: {e}"
-                    )));
-                    return;
-                }
-                None => {
-                    // Upstream closed. If we still have buffered
-                    // bytes -- OR if smithy has a partial frame's
-                    // prelude buffered internally -- the stream was
-                    // truncated mid-frame. Both must surface as
-                    // errors, not clean EOF.
-                    //
-                    // Without the `smithy_has_prelude_buffered` half
-                    // of this check, an upstream that closes after
-                    // sending exactly 12 bytes (a prelude with no
-                    // body) would report success: our `buffer` is
-                    // empty (we drained the 12 prelude bytes after
-                    // the Incomplete return) but smithy still has
-                    // an incomplete frame staged. The router's
-                    // circuit breaker would record a "successful"
-                    // probe for an unhealthy upstream.
-                    if !buffer.is_empty() {
-                        yield Err(Error::Streaming(format!(
-                            "bedrock stream truncated: {} buffered bytes left at EOF",
-                            buffer.len()
-                        )));
-                    } else if smithy_has_prelude_buffered {
-                        yield Err(Error::Streaming(
-                            "bedrock stream truncated: prelude consumed but frame body never arrived before EOF"
-                                .to_string(),
-                        ));
-                    }
-                    return;
-                }
-            }
-        }
+    let handler = InvokeFrameHandler {
+        sse_state: SseState::default(),
     };
-
-    Box::pin(stream)
+    frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Invoke)
 }
 
 /// Decode Bedrock ConverseStream frames into routectl `ChatChunk`s.
@@ -327,7 +92,7 @@ fn handle_invoke_frame(
     message: Message,
     sse_state: &mut SseState,
 ) -> Result<Option<ChatChunk>> {
-    let event_type = header_str(&message, ":event-type")
+    let event_type = frame::header_str(&message, ":event-type")
         .unwrap_or("")
         .to_string();
     let payload_bytes = message.payload();
@@ -472,23 +237,13 @@ fn handle_invoke_frame(
     }
 }
 
-fn header_str<'a>(message: &'a Message, name: &str) -> Option<&'a str> {
-    for header in message.headers() {
-        if header.name().as_str() == name {
-            if let Ok(s) = header.value().as_string() {
-                return Some(s.as_str());
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use aws_smithy_types::event_stream::{Header, HeaderValue, Message};
     use base64::Engine;
     use bytes::Bytes;
+    use futures::stream::StreamExt;
     use routectl_core::Error;
 
     fn make_frame(event_type: &str, payload_json: &str) -> Message {

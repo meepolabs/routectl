@@ -122,7 +122,7 @@ fn build_user_content_blocks(
 /// Assistant-role content with text-after-tool_use cleanup. Bedrock and
 /// Anthropic both reject `[Text, ToolUse, Text]` shape echoed on a
 /// multi-turn replay (the trailing transition Text after the last
-/// ToolUse). Mirrors `anthropic_api::request::append_assistant_message_blocks`
+/// ToolUse). Mirrors `anthropic_api::messages::append_assistant_message_blocks`
 /// behavior so the Converse path doesn't silently 400 upstream.
 ///
 /// When `msg.reasoning_details` is non-empty (canonical multi-turn
@@ -234,7 +234,7 @@ fn emit_reasoning_blocks_converse(
 
 /// Append the assistant message's text/parts content AFTER the reasoning
 /// blocks already pushed. Mirrors
-/// `anthropic_api::request::append_assistant_message_blocks`. For Text,
+/// `anthropic_api::messages::append_assistant_message_blocks`. For Text,
 /// emits a single Text block (skipped on empty/Null since reasoning-only
 /// assistant turns are valid). For Parts, translates each block after
 /// stripping trailing text-after-tool_use.
