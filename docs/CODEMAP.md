@@ -209,7 +209,7 @@ listed at the bottom of each crate.
 ### ingress
 
 - `src/ingress/mod.rs` -- `IngressAdapter` trait, `SseEvent`, `read_alias_header` (`x-routectl-alias` override)
-- `src/ingress/openai.rs` -- OpenAI Chat Completions ingress; lifts `role:"system"` messages into `req.system`, lifts function tools
+- `src/ingress/openai.rs` -- OpenAI Chat Completions ingress; lifts `role:"system"` and `role:"developer"` messages into `req.system` (preserving per-block `cache_control`), lifts function tools, strips internal `matched_stop_sequence` on render. Tests: inline unit tests in this file plus `tests/server.rs`, `tests/contract_ingress.rs`, `tests/cross_dialect_render.rs`, `tests/e2e_reasoning.rs`, `tests/replay_ingress.rs`
 - `src/ingress/anthropic/mod.rs` -- `AnthropicIngress` impl + streaming state types (`AnthropicStreamState`, `OpenBlockKind`)
 - `src/ingress/anthropic/parse.rs` -- Anthropic body -> canonical `ChatRequest`; forward-compat sweep into `provider_extras`
 - `src/ingress/anthropic/render.rs` -- canonical `ChatResponse` -> Anthropic Messages response body shape
