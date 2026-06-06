@@ -224,13 +224,17 @@ async fn resolve_listener_tokens(config: &Config) -> Result<Arc<TokenSet>> {
 
     let store = MemoryStore::new();
     let mut resolved: Vec<String> = Vec::with_capacity(auth.tokens.len());
-    for uri in &auth.tokens {
+    for (i, uri) in auth.tokens.iter().enumerate() {
+        // Identify the failing entry by position, never by raw value: a
+        // `literal:` token (or a bare misconfigured secret) would otherwise
+        // land in startup logs verbatim.
+        let entry = i + 1;
         let secret_ref = SecretRef::parse(uri)
-            .map_err(|e| Error::Config(format!("[server.auth].tokens entry `{uri}`: {e}")))?;
+            .map_err(|e| Error::Config(format!("[server.auth].tokens entry #{entry}: {e}")))?;
         let value = store
             .get(&secret_ref)
             .await
-            .map_err(|e| Error::Config(format!("[server.auth].tokens entry `{uri}`: {e}")))?;
+            .map_err(|e| Error::Config(format!("[server.auth].tokens entry #{entry}: {e}")))?;
         resolved.push(value);
     }
     tracing::info!(
