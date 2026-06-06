@@ -942,3 +942,174 @@ fn render_error_eos_filters_control_chars_via_sanitize_for_log() {
         "raw ESC byte must be filtered: {msg:?}"
     );
 }
+
+// -------- audit findings: behavioral fixes --------
+
+/// Finding #1 (bug): closing `message_delta` must carry `input_tokens`
+/// even when the upstream `UsageDelta` omits `prompt_tokens`. Before the
+/// fix, the `if let Some(prompt) = u.prompt_tokens` guard silently dropped
+/// the key, which violates the Anthropic spec requirement. After the fix,
+/// a missing `prompt_tokens` defaults to 0 and `input_tokens: 0` always
+/// appears on the wire.
+#[test]
+fn message_delta_missing_prompt_tokens_still_emits_input_tokens_zero() {
+    use routectl_core::UsageDelta;
+    let mut s = fresh_state();
+    let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
+    // UsageDelta with completion_tokens but NO prompt_tokens.
+    let closing = ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![],
+        usage: Some(UsageDelta {
+            prompt_tokens: None,
+            completion_tokens: Some(20),
+            total_tokens: None,
+            ..Default::default()
+        }),
+        opaque_events: Vec::new(),
+    };
+    let events = render_chunk_internal(closing, &mut s).unwrap();
+    let delta_event = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_delta"))
+        .expect("message_delta emitted");
+    let payload: Value = serde_json::from_str(&delta_event.data).unwrap();
+    assert!(
+        !payload["usage"]["input_tokens"].is_null(),
+        "input_tokens must appear on the closing delta even when prompt_tokens is absent"
+    );
+    assert_eq!(
+        payload["usage"]["input_tokens"], 0,
+        "absent prompt_tokens must default input_tokens to 0"
+    );
+    assert_eq!(payload["usage"]["output_tokens"], 20);
+}
+
+/// Finding #2 (spec-drift): a fully-None `UsageDelta` must not produce an
+/// empty `usage: {}` object in the `message_delta` payload. After fixes #1
+/// and #2 compose, the wire output carries `input_tokens: 0` (from fix #1)
+/// rather than an empty map, and `usage` is only inserted when at least one
+/// key is present (fix #2 guard). The test pins both halves of the contract.
+#[test]
+fn message_delta_all_none_usage_emits_input_tokens_not_empty_object() {
+    use routectl_core::UsageDelta;
+    let mut s = fresh_state();
+    let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
+    let chunk = ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![],
+        usage: Some(UsageDelta::default()),
+        opaque_events: Vec::new(),
+    };
+    let events = render_chunk_internal(chunk, &mut s).unwrap();
+    let delta_event = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_delta"))
+        .expect("message_delta emitted");
+    let payload: Value = serde_json::from_str(&delta_event.data).unwrap();
+    // usage must be present (not absent) and carry at least input_tokens.
+    assert!(
+        !payload["usage"].is_null(),
+        "usage object must be present when UsageDelta is Some"
+    );
+    // Must not be an empty object.
+    assert!(
+        payload["usage"].as_object().is_some_and(|m| !m.is_empty()),
+        "usage must not be an empty map; got: {}",
+        payload["usage"]
+    );
+    assert_eq!(
+        payload["usage"]["input_tokens"], 0,
+        "all-None UsageDelta: input_tokens must default to 0"
+    );
+}
+
+/// Finding #4 (bug): `message_start` must use the request's resolved model
+/// when upstream stream chunks carry no model string. The fix adds a
+/// `req_model` field to `AnthropicStreamState` (populated via
+/// `new_state_with_req_model`) and `emit_message_start` falls back to it
+/// when `msg_model` (from chunk caching) is also absent. The test
+/// constructs the state directly with `req_model` set to verify the
+/// fallback path. Populating `req_model` in production requires a future
+/// call-site change to `new_stream_state` (which currently lacks access to
+/// `req.model`); that plumbing is noted in the code comment on the field.
+#[test]
+fn message_start_uses_req_model_when_chunk_carries_no_model() {
+    use routectl_core::{ChunkChoice, ChunkDelta};
+    // Arrange: state initialized with req_model, first chunk has no model.
+    let mut s = new_state_with_req_model(Some("claude-opus-4-7".to_string()));
+    let chunk = ChatChunk {
+        id: "msg_01".into(),
+        model: "".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                content: Some("hi".into()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        opaque_events: Vec::new(),
+    };
+
+    // Act
+    let events = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert
+    let start = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_start"))
+        .expect("message_start emitted");
+    let payload: Value = serde_json::from_str(&start.data).unwrap();
+    assert_eq!(
+        payload["message"]["model"], "claude-opus-4-7",
+        "message_start.message.model must fall back to req_model when chunk carries no model"
+    );
+}
+
+/// Finding #5 (bug): `render_error_eos_internal` called after a normal
+/// clean finish (where `state.finished` is already true) must return an
+/// empty event list -- not push a second terminal `event: error` frame.
+/// Before the fix, the function unconditionally appended the error event,
+/// so a late transport error after `message_stop` would double-terminate
+/// the stream. The fix adds an early `if state.finished { return Vec::new() }`
+/// guard.
+#[test]
+fn render_error_eos_after_normal_finish_emits_nothing() {
+    use routectl_core::{ChunkChoice, ChunkDelta, UsageDelta};
+    let mut s = fresh_state();
+    // Drive a normal clean finish: text + finish with inline usage.
+    let _ = render_chunk_internal(text_chunk("hello", None), &mut s).unwrap();
+    let closing = ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(UsageDelta {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(5),
+            total_tokens: Some(15),
+            ..Default::default()
+        }),
+        opaque_events: Vec::new(),
+    };
+    let _ = render_chunk_internal(closing, &mut s).unwrap();
+    assert!(s.finished, "stream must be finished after normal close");
+
+    // Act: late error after normal finish.
+    let late_events = render_error_eos_internal(&mut s, &"late transport error");
+
+    // Assert: no events emitted -- double-termination must be suppressed.
+    assert!(
+        late_events.is_empty(),
+        "render_error_eos after normal finish must emit no events, got: {late_events:?}"
+    );
+}
