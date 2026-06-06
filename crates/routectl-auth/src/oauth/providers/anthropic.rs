@@ -130,6 +130,18 @@ impl OAuthFlow for Anthropic {
             "refresh_token": refresh_token,
             "client_id": CLIENT_ID,
         });
+
+        // Compute sha8 once; reuse on pre-POST debug and failure error
+        // so operators can correlate the three legs of a refresh attempt
+        // (pre-POST, success, failure) by refresh_token_sha8 without
+        // seeing the raw token value.
+        let prior_sha8 = super::sha8(refresh_token);
+        tracing::debug!(
+            grant_type = "refresh_token",
+            refresh_token_sha8 = %prior_sha8,
+            "anthropic refresh request"
+        );
+
         let resp = http
             .post(TOKEN_URL)
             .header("anthropic-beta", OAUTH_BETA_HEADER)
@@ -138,7 +150,7 @@ impl OAuthFlow for Anthropic {
             .send()
             .await
             .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
-        decode_token_response(resp, TokenFlow::Refresh).await
+        decode_token_response_traced(resp, &prior_sha8).await
     }
 }
 
@@ -190,6 +202,81 @@ async fn decode_token_response(
     check_status_error(status, &url, &body, flow)?;
     let parsed = parse_token_response_json(&body, flow)?;
     Ok(map_to_record(parsed))
+}
+
+/// Refresh-only variant of [`decode_token_response`] with structured
+/// tracing. Emits `tracing::debug!` on success (expires_in,
+/// new_refresh_token_sha8) and `tracing::error!` on failure (status,
+/// error_kind, prior_refresh_token_sha8) so operators can correlate a
+/// 401 or token-endpoint failure back to the specific credential
+/// without ever seeing raw token values.
+///
+/// Failure-side events deliberately do NOT echo any portion of the
+/// response body: token-endpoint error envelopes from some IdPs echo
+/// the submitted refresh_token; logging the body verbatim would defeat
+/// the bearer-redaction contract that governs the rest of the auth
+/// layer. The structured fields carry every operator-actionable signal
+/// (status, error_kind, prior sha8); the human-readable error string
+/// returned to the caller still conveys the non-sensitive context.
+pub(super) async fn decode_token_response_traced(
+    resp: reqwest::Response,
+    prior_refresh_sha8: &str,
+) -> OAuthResult<TokenRecord> {
+    let status = resp.status();
+    let url = resp.url().to_string();
+    let body = read_capped_body(resp).await?;
+
+    if let Err(e) = check_status_error(status, &url, &body, TokenFlow::Refresh) {
+        let kind = error_kind_label(&e);
+        tracing::error!(
+            status = %status.as_u16(),
+            error_kind = %kind,
+            prior_refresh_token_sha8 = %prior_refresh_sha8,
+            "anthropic refresh failed"
+        );
+        return Err(e);
+    }
+
+    let parsed = match parse_token_response_json(&body, TokenFlow::Refresh) {
+        Ok(p) => p,
+        Err(e) => {
+            let kind = error_kind_label(&e);
+            tracing::error!(
+                status = %status.as_u16(),
+                error_kind = %kind,
+                prior_refresh_token_sha8 = %prior_refresh_sha8,
+                "anthropic refresh failed"
+            );
+            return Err(e);
+        }
+    };
+
+    // Pull tracing fields before consuming `parsed` via `map_to_record`.
+    let new_refresh_sha8 = super::sha8(&parsed.refresh_token);
+    let expires_in = parsed.expires_in;
+    let record = map_to_record(parsed);
+
+    tracing::debug!(
+        status = %status.as_u16(),
+        expires_in = %expires_in,
+        new_refresh_token_sha8 = %new_refresh_sha8,
+        "anthropic refresh response"
+    );
+
+    Ok(record)
+}
+
+/// Short label for the error variant returned by the token endpoint.
+/// Used in the structured `error_kind` field on refresh-failure trace
+/// events so operators can grep for the failure mode without scraping
+/// the human-readable message.
+fn error_kind_label(e: &OAuthError) -> &'static str {
+    match e {
+        OAuthError::Network(_) => "network",
+        OAuthError::TokenEndpoint(_) => "token_endpoint",
+        OAuthError::RefreshExpired(_) => "refresh_expired",
+        _ => "other",
+    }
 }
 
 /// Which token-endpoint call produced the response. Used by

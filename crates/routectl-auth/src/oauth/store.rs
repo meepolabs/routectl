@@ -66,6 +66,17 @@ struct Inner {
     /// way). The map itself is guarded by a sync `std::sync::Mutex`
     /// because get-or-insert is a tiny CPU-only critical section.
     refresh_locks: std::sync::Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
+    /// Monotonic counter bumped by every successful `reload_from_disk`
+    /// call (under the file `RwLock` write guard). `refresh_under_lock`
+    /// snapshots this before the network POST and re-reads it under the
+    /// file write lock before committing the refresh result; if the
+    /// counter changed, a reload ran while the POST was in-flight and
+    /// brought in a newer on-disk state -- the refresh result is
+    /// discarded rather than clobbering the reload. `AtomicU64` so
+    /// the snapshot read in `refresh_under_lock` does not need to
+    /// acquire the file lock twice (once for the double-check and
+    /// once for the final write).
+    reload_gen: std::sync::atomic::AtomicU64,
     /// Test seam: when set, `refresh_under_lock` uses this flow instead
     /// of `providers::lookup`. Lets the unit tests inject a counting
     /// fake without standing up the real token endpoint. The field is
@@ -144,6 +155,7 @@ impl OAuthStore {
                 file: RwLock::new(cf),
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
+                reload_gen: std::sync::atomic::AtomicU64::new(0),
                 #[cfg(test)]
                 refresh_flow: None,
             }),
@@ -337,6 +349,15 @@ impl OAuthStore {
         let cf = file_io::load(&self.inner.path).await?;
         let mut guard = self.inner.file.write().await;
         *guard = cf;
+        // Bump the reload generation counter while the write lock is held.
+        // Any concurrent `refresh_under_lock` that snapshots the counter
+        // before this line and then checks it again (under its own write
+        // lock acquisition, which must come after we release here) will
+        // see the mismatch and discard its stale refresh result rather
+        // than clobbering the freshly-loaded cache.
+        self.inner
+            .reload_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -399,6 +420,19 @@ impl OAuthStore {
             return Ok(rec);
         }
 
+        // Snapshot the reload generation before the network round-trip.
+        // If `reload_from_disk` completes while this POST is in-flight,
+        // it bumps this counter (under the file write lock). We re-check
+        // it under our own file write lock acquisition in step 4 so the
+        // comparison and the cache write are atomic with respect to any
+        // concurrent reload: either we see the old counter (no reload
+        // happened yet, we proceed normally) or the new counter (reload
+        // already committed a fresher state, we discard our result).
+        let gen_before = self
+            .inner
+            .reload_gen
+            .load(std::sync::atomic::Ordering::Acquire);
+
         // Step 3: actually refresh.
         let flow = self.resolve_flow(provider)?;
         let mut new_rec = flow
@@ -425,13 +459,42 @@ impl OAuthStore {
             new_rec.session_id = rec.session_id.clone();
         }
 
-        // Step 4: persist atomically. `write_record` already does the
-        // disk-first ordering (temp + fsync + rename, then commit
-        // memory) so a failed save leaves the in-memory cache pointing
-        // at the still-valid old record.
-        self.write_record(provider, new_rec.clone())
-            .await
-            .map_err(Error::from)?;
+        // Step 4: persist atomically. Acquire the file write lock and
+        // re-check the reload generation counter BEFORE committing. If
+        // `reload_from_disk` ran while we were on the network (indicated
+        // by a changed counter), the cache already holds a fresher
+        // on-disk state; return that rather than clobbering it with our
+        // refresh result (which was derived from the pre-reload token).
+        {
+            let mut wguard = self.inner.file.write().await;
+            let gen_now = self
+                .inner
+                .reload_gen
+                .load(std::sync::atomic::Ordering::Acquire);
+            if gen_now != gen_before {
+                // A reload committed between our double-check and now.
+                // Return the current in-memory record. If it is still
+                // near-expiry the next `get()` will re-trigger a refresh
+                // through the same gate; cost is at most one extra POST
+                // per reload race (bounded by the operator-driven reload
+                // cadence of minutes to hours).
+                let reloaded = wguard
+                    .get(provider)
+                    .cloned()
+                    .ok_or_else(|| Error::from(OAuthError::NotLoggedIn(provider.to_string())))?;
+                return Ok(reloaded);
+            }
+            // No reload raced us: commit the refresh result disk-first.
+            // Disk-first ordering: save before committing to memory so a
+            // failed save leaves both halves consistent (same invariant
+            // as `write_record`).
+            let mut staged = wguard.clone();
+            staged.upsert(provider, new_rec.clone());
+            file_io::save(&self.inner.path, &staged)
+                .await
+                .map_err(Error::from)?;
+            *wguard = staged;
+        }
         Ok(new_rec)
     }
 
@@ -680,6 +743,7 @@ mod tests {
                 file: RwLock::new(cf),
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
+                reload_gen: std::sync::atomic::AtomicU64::new(0),
                 refresh_flow: Some(flow),
             }),
         }
@@ -1127,6 +1191,7 @@ mod tests {
                 file: RwLock::new(CredentialsFile::empty()),
                 http,
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
+                reload_gen: std::sync::atomic::AtomicU64::new(0),
                 refresh_flow: None,
             }),
         };
@@ -1423,5 +1488,89 @@ mod tests {
             "session_id must be preserved across token rotation",
         );
         assert_eq!(post.access_token.expose(), "tok-refreshed");
+    }
+
+    /// A `reload_from_disk` that completes while a refresh POST is
+    /// in-flight must win: the refresh result must be discarded and the
+    /// reloaded token left in cache. This exercises the generation-counter
+    /// guard in `refresh_under_lock` step 4.
+    ///
+    /// Interleaving: `CountingFlow` yields twice inside `refresh_token`.
+    /// The reload arm yields once first (so the refresh task starts and
+    /// captures `gen_before`), then calls `reload_from_disk` (bumps gen).
+    /// When the refresh task resumes it finds `gen_now != gen_before` and
+    /// returns the reloaded record without clobbering the cache.
+    #[tokio::test]
+    async fn reload_during_refresh_wins_over_stale_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+
+        // Seed a near-expiry record on disk so `get` triggers a refresh.
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_at(unix_now() + 10))
+            .await
+            .unwrap();
+        drop(seed);
+
+        // CountingFlow with yield_once: refresh POST suspends mid-flight
+        // so the reload arm can run between gen-snapshot and write-back.
+        let flow = Arc::new(
+            CountingFlow::new(RefreshOutcome::Mint("tok-from-refresh".into())).with_yield(),
+        );
+        let store = open_with_flow(&path, flow.clone()).await;
+
+        // Write a newer record to disk via a separate handle -- this is
+        // what reload_from_disk will pick up.
+        let writer = OAuthStore::open(&path).await.unwrap();
+        writer
+            .write_record("anthropic", rec_named("tok-from-reload", unix_now() + 7200))
+            .await
+            .unwrap();
+        drop(writer);
+
+        // Run both operations concurrently on the same store. The refresh
+        // (triggered by near-expiry) wins the per-provider mutex first,
+        // captures gen_before, then yields to let the reload arm advance.
+        // The reload arm yields once so the refresh arm can start and
+        // reach its yield point before reload runs.
+        let store_a = store.clone();
+        let store_b = store.clone();
+        let (get_result, reload_result) = tokio::join!(
+            // Arm A: trigger a refresh via the near-expiry path.
+            async move {
+                store_a
+                    .get(&SecretRef::OAuth {
+                        provider: "anthropic".into(),
+                    })
+                    .await
+            },
+            // Arm B: yield once (so A starts and captures gen_before),
+            // then reload. This bumps the generation counter before A
+            // can acquire the file write lock.
+            async move {
+                tokio::task::yield_now().await;
+                store_b.reload_from_disk().await
+            }
+        );
+
+        assert!(get_result.is_ok(), "get should succeed: {get_result:?}");
+        assert!(
+            reload_result.is_ok(),
+            "reload should succeed: {reload_result:?}"
+        );
+        // The refresh endpoint was called exactly once (it just
+        // discarded its result due to the gen mismatch).
+        assert_eq!(flow.call_count(), 1, "refresh endpoint called exactly once");
+
+        // The in-memory cache must reflect the reloaded token, not the
+        // refresh result. The generation counter guard must have forced
+        // the refresh arm to discard its stale write-back.
+        let listed = store.list().await;
+        assert_eq!(listed.len(), 1, "exactly one provider in cache");
+        let in_memory_tok = listed[0].1.access_token.expose().to_string();
+        assert_eq!(
+            in_memory_tok, "tok-from-reload",
+            "reload must win over in-flight stale refresh; got: {in_memory_tok}"
+        );
     }
 }

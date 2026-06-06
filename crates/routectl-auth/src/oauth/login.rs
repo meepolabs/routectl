@@ -309,24 +309,41 @@ async fn run_print_url(flow: &'static dyn OAuthFlow, store: &OAuthStore) -> OAut
 /// so a misbehaving terminal cannot funnel a multi-GB blob into RAM.
 /// Excess bytes return `OAuthError::Io`. Strips a single trailing
 /// `\r?\n` so callers can `.trim()` like a normal line read.
+///
+/// Uses `BufRead::read_line` rather than `Read::take(N).read_to_end(...)`.
+/// The old approach kept reading until EOF or the byte cap: on an
+/// interactive TTY in canonical (line-buffered) mode that blocked past
+/// the first newline because `read_to_end` only returns on EOF or a
+/// full-cap buffer. `BufRead::read_line` returns as soon as it sees a
+/// newline, which is what the operator expects after pressing Enter.
 fn read_line_capped(max_bytes: usize) -> OAuthResult<String> {
-    use std::io::Read;
     let stdin = std::io::stdin();
-    // Read::take wraps the stdin lock in a length-limited reader; we
-    // request `max_bytes + 1` so we can detect overrun (a read of
-    // exactly `max_bytes + 1` means the input did not fit).
-    let mut handle = stdin.lock().take((max_bytes + 1) as u64);
-    let mut buf = Vec::new();
-    handle
-        .read_to_end(&mut buf)
+    let handle = stdin.lock();
+    read_line_from_bufread(handle, max_bytes)
+}
+
+/// Core of `read_line_capped`, factored out so unit tests can drive it
+/// with a `Cursor<&[u8]>` without redirecting stdin.
+fn read_line_from_bufread(
+    mut reader: impl std::io::BufRead,
+    max_bytes: usize,
+) -> OAuthResult<String> {
+    let mut line = String::new();
+    // `read_line` appends until the first newline or EOF. On a canonical
+    // TTY it returns immediately after the user presses Enter. `n` is the
+    // number of raw bytes placed into `line` (including the newline if
+    // one was present).
+    let n = reader
+        .read_line(&mut line)
         .map_err(|e| OAuthError::Io(format!("read stdin: {e}")))?;
-    if buf.len() > max_bytes {
+    // n == 0 means EOF with no bytes (Ctrl-D on an empty line). Treat as
+    // an empty line; the caller's split_once('#') produces a clear error.
+    if n > max_bytes {
         return Err(OAuthError::Io(format!(
             "input exceeds {max_bytes} bytes; refusing to load"
         )));
     }
-    let mut line = String::from_utf8(buf)
-        .map_err(|e| OAuthError::Io(format!("stdin input is not valid UTF-8: {e}")))?;
+    // Strip a single trailing \r?\n.
     if line.ends_with('\n') {
         line.pop();
         if line.ends_with('\r') {
@@ -511,6 +528,69 @@ const REJECTED_HTML: &str = r#"<!doctype html>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- read_line_from_bufread tests -----
+
+    #[test]
+    fn read_line_from_bufread_returns_first_line_only() {
+        // Multi-line input: only the first line (up to and including the
+        // first newline) is consumed and returned without the trailing
+        // newline. The second line stays unread in the buffer.
+        use std::io::Cursor;
+        let input = b"first-line\nsecond-line\n";
+        let result = read_line_from_bufread(Cursor::new(input), 16 * 1024).unwrap();
+        assert_eq!(result, "first-line");
+    }
+
+    #[test]
+    fn read_line_from_bufread_strips_crlf() {
+        use std::io::Cursor;
+        let input = b"data\r\n";
+        let result = read_line_from_bufread(Cursor::new(input), 1024).unwrap();
+        assert_eq!(result, "data");
+    }
+
+    #[test]
+    fn read_line_from_bufread_cap_exceeded_is_error() {
+        // A line (including its newline) longer than max_bytes must error.
+        // "toolong\n" is 8 bytes; cap is 4.
+        use std::io::Cursor;
+        let input = b"toolong\n";
+        let err = read_line_from_bufread(Cursor::new(input), 4).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "expected cap error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_line_from_bufread_line_exactly_at_cap_is_ok() {
+        // n == max_bytes is NOT an overrun (check is `>`, not `>=`).
+        // "ab\n" is 3 bytes; cap is 3. Should succeed.
+        use std::io::Cursor;
+        let input = b"ab\n";
+        let result = read_line_from_bufread(Cursor::new(input), 3).unwrap();
+        assert_eq!(result, "ab");
+    }
+
+    #[test]
+    fn read_line_from_bufread_eof_without_newline_returns_content() {
+        // EOF without a trailing newline: the content is returned as-is.
+        use std::io::Cursor;
+        let input = b"no-newline";
+        let result = read_line_from_bufread(Cursor::new(input), 1024).unwrap();
+        assert_eq!(result, "no-newline");
+    }
+
+    #[test]
+    fn read_line_from_bufread_empty_input_returns_empty_string() {
+        // Ctrl-D / EOF with no bytes: n == 0, returns empty string.
+        use std::io::Cursor;
+        let result = read_line_from_bufread(Cursor::new(b""), 1024).unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ----- bind_port_candidates tests -----
 
     #[test]
     fn bind_port_candidates_default_is_ephemeral_only() {

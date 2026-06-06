@@ -14,6 +14,7 @@ pub(crate) mod anthropic;
 pub(crate) mod codex;
 
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::oauth::types::TokenRecord;
@@ -165,6 +166,25 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
         .last()
         .unwrap_or(0);
     format!("{}... ({} bytes total)", &s[..cut], s.len())
+}
+
+/// First 4 bytes of `SHA-256(token)` rendered as 8 lowercase hex
+/// chars. Stable, deterministic correlation id for refresh-flow trace
+/// events without leaking token VALUES. 4 bytes (32 bits) gives a
+/// collision probability that is fine for log correlation across a
+/// single operator's refresh history -- this is NOT a cryptographic
+/// commitment, just a logging tag.
+///
+/// Shared by the Anthropic and codex provider impls so both refresh
+/// paths emit structurally identical trace events keyed off the same
+/// sha8 computation.
+pub(super) fn sha8(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    let mut out = String::with_capacity(8);
+    for b in &digest[..4] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 #[cfg(test)]
