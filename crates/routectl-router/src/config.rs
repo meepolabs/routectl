@@ -1311,7 +1311,7 @@ impl Default for RetryPolicy {
             max_attempts: default_max_attempts(),
             initial_backoff_ms: default_backoff_ms(),
             backoff_multiplier: default_backoff_multiplier(),
-            jitter_ms: 0,
+            jitter_ms: 50,
             retry_allowlist: Vec::new(),
             retry_denylist: None,
             retry_on_429: None,
@@ -1410,6 +1410,19 @@ forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
             ),
             other => panic!("expected AnthropicApi entry; got {other:?}"),
         }
+    }
+
+    /// `RetryPolicy::default()` ships with `jitter_ms = 50` so
+    /// multi-client deployments get retry spread out of the box without
+    /// any explicit operator configuration.
+    #[test]
+    fn retry_policy_default_jitter_is_50() {
+        use super::RetryPolicy;
+        assert_eq!(
+            RetryPolicy::default().jitter_ms,
+            50,
+            "default jitter_ms must be 50 for out-of-the-box retry spread"
+        );
     }
 }
 
