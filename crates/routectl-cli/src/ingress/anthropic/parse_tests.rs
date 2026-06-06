@@ -382,3 +382,49 @@ fn parse_request_output_config_without_effort() {
     let extras = req.provider_extras.as_ref().unwrap();
     assert_eq!(extras["output_config"]["format"]["type"], "json_schema");
 }
+
+/// Bug fix: `output_format: null` (JSON null, not field-absent) must be
+/// treated as not-set and NOT promoted into output_config.format. Promoting
+/// null causes a 400 from api.anthropic.com on requests that include
+/// `output_format: null` as a default SDK serialization artifact.
+#[test]
+fn parse_request_null_output_format_is_dropped() {
+    // Case 1: output_format: null with no output_config at all.
+    // output_config must not appear in provider_extras.
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "output_format": null
+    });
+    let req = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap();
+    if let Some(extras) = req.provider_extras.as_ref() {
+        assert!(
+            extras.get("output_config").is_none(),
+            "output_config must not be created when output_format is null, \
+             got extras: {extras}"
+        );
+    }
+
+    // Case 2: output_format: null with a pre-existing output_config.
+    // The pre-existing output_config must survive unchanged.
+    let body2 = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "output_format": null,
+        "output_config": {"effort": "high"}
+    });
+    let req2 = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body2)
+        .unwrap();
+    let extras2 = req2.provider_extras.as_ref().unwrap();
+    // output_config is preserved; no format key was injected from the null.
+    assert_eq!(extras2["output_config"]["effort"], "high");
+    assert!(
+        extras2["output_config"].get("format").is_none(),
+        "null output_format must not inject a format key into output_config"
+    );
+}
