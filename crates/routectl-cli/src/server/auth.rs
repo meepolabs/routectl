@@ -25,13 +25,16 @@ use crate::ingress::ErrorEnvelopeShape;
 /// Set of valid tokens. `None` (or empty) means "no auth required".
 ///
 /// Token comparison uses `subtle::ConstantTimeEq` so an attacker
-/// reaching the listener cannot binary-search a valid token via
-/// response-time differences. The comparison does NOT short-circuit
-/// on length mismatch: we accumulate hits across all tokens so the
-/// loop count is constant regardless of which entry matches (or none
-/// does). This matters most when `--unsafe-public` is set (listener
+/// reaching the listener cannot binary-search a valid token's value
+/// via response-time differences. Per-token `[u8]::ct_eq` is
+/// constant-time in the token CONTENTS; it does short-circuit on a
+/// length mismatch (subtle-documented), which can leak a configured
+/// token's LENGTH but never its value. The outer loop never
+/// early-returns on a match -- it accumulates hits across all tokens
+/// so it does not leak which entry matched (or that any did). This
+/// matters most when `--unsafe-public` is set (listener
 /// reachable beyond loopback); on pure loopback the risk is
-/// theoretical, but the cost of a constant-time loop is negligible.
+/// theoretical, but the cost of the constant-time loop is negligible.
 #[derive(Debug, Default, Clone)]
 pub struct TokenSet {
     tokens: Arc<Vec<Vec<u8>>>,
@@ -68,10 +71,12 @@ impl TokenSet {
     }
 
     /// Constant-time membership test. Iterates every token and
-    /// accumulates a hit via `subtle::ConstantTimeEq` -- no
-    /// length-based short-circuit, no early return on first match.
-    /// The number of iterations is always `self.tokens.len()` so the
-    /// loop timing does not leak whether and where a match occurred.
+    /// accumulates a hit via `subtle::ConstantTimeEq`, with no early
+    /// return on first match. `[u8]::ct_eq` short-circuits on a length
+    /// mismatch (subtle-documented), so per-token timing can leak a
+    /// configured token's length but never its contents. The outer
+    /// loop always runs `self.tokens.len()` iterations, so it does not
+    /// leak whether or where a match occurred.
     fn contains(&self, candidate: &[u8]) -> bool {
         let mut hit: u8 = 0;
         for token in self.tokens.iter() {

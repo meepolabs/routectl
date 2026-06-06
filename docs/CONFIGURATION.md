@@ -261,8 +261,11 @@ allowed_betas        = ["computer-use-2025-01-24", "files-api-2025-04-14"]
 
 A static `anthropic_beta` value that routectl always injects on
 requests destined for this Bedrock provider, regardless of what the
-caller sent. This floor value bypasses the `[bedrock] allowed_betas`
-post-filter -- it is written unconditionally AFTER the filter runs.
+caller sent. The floor is merged into the request BEFORE the
+`[bedrock] allowed_betas` filter runs, and the filter preserves it:
+flags present in `[providers.X] anthropic_beta` pass through the
+filter unconditionally even when they are absent from
+`allowed_betas`, so the floor is always present on the wire.
 
 Use this to guarantee a required beta flag is always present (for
 example, a model that requires `computer-use-2025-01-24` to operate
@@ -299,8 +302,8 @@ a 400, walk to the next chain entry. That burns latency, surfaces a
 400 in operator dashboards, and counts the failure against Bedrock's
 breaker even though the request never had a chance.
 
-`unsupported_features` is a declarative, operator-supplied list on
-each provider's runtime block. The router derives feature keys from
+`unsupported_features` is a declarative, operator-supplied list set
+directly on each `[providers.X]` table. The router derives feature keys from
 the request's `tools` array and pre-filters the alias chain BEFORE
 dispatch -- a chain entry whose provider lists ANY of the request's
 features is dropped. If every entry gets filtered, the router returns
@@ -346,7 +349,7 @@ per the chain order. A request carrying a `web_search_20250305` tool
 skips Bedrock and goes directly to `anthropic-opus`. If BOTH
 providers listed `web_search` as unsupported, the router returns
 `501 not_implemented` with the message `no provider in chain
-supports feature \`web_search\``.
+supports features: web_search` (the feature keys are comma-joined).
 
 Per-skip events log at DEBUG (`provider skipped: feature in
 unsupported_features list`); the terminal empty-chain event logs at
@@ -355,8 +358,11 @@ at WARN, retry-same-provider at DEBUG".
 
 ## Per-provider runtime gates
 
-Each `[providers.X]` entry accepts a `[providers.X.runtime]` block with
-five knobs. All accounting is per-attempt (not per-request).
+Each `[providers.X]` entry accepts five runtime-gate knobs set
+directly on the `[providers.X]` table (the policy is flattened into
+the provider entry -- there is no `[providers.X.runtime]` sub-table;
+nesting one fails to load with `unknown field \`runtime\``). All
+accounting is per-attempt (not per-request).
 
 | Field                          | Type       | Default         | Effect |
 |--------------------------------|------------|-----------------|--------|
@@ -374,11 +380,15 @@ its default of 30s applies when `circuit_failures` is present but
 Example:
 
 ```toml
-[providers.bedrock.runtime]
+[providers.bedrock]
+kind                   = "bedrock"
+region                 = "us-west-2"
+creds                  = { kind = "default-chain" }
 rpm_limit              = 60
 circuit_failures       = 5
 circuit_cooldown_ms    = 60000
 request_timeout_ms     = 120000
+unsupported_features   = ["web_search"]
 ```
 
 ## Retry and fallback defaults
