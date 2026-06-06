@@ -180,9 +180,13 @@ fn assistant_text_message_translates_to_output_text() {
 }
 
 #[test]
-fn assistant_thinking_translates_to_reasoning_with_encrypted_content() {
-    // Arrange: assistant turn with a Thinking block carrying a
-    // signature. The egress should emit a Reasoning input item.
+fn assistant_thinking_with_unknown_format_emits_empty_encrypted_content() {
+    // Arrange: assistant turn with a Thinking block carrying a signature.
+    // ContentPart::Thinking has no format field, so the egress cannot
+    // know whether the signature is an Anthropic or OpenAI token.
+    // Correct behavior: emit a Reasoning input item with EMPTY
+    // encrypted_content (Anthropic signatures are not valid OpenAI
+    // encrypted_content tokens and must not be forwarded).
     let parts = vec![
         ContentPart::Known(KnownContentPart::Thinking {
             thinking: "step 1".into(),
@@ -201,7 +205,11 @@ fn assistant_thinking_translates_to_reasoning_with_encrypted_content() {
     // Assert: reasoning item emitted FIRST, then the message item.
     let reasoning = &v["input"][1];
     assert_eq!(reasoning["type"], "reasoning");
-    assert_eq!(reasoning["encrypted_content"], "sig-xyz");
+    // Signature must NOT be forwarded: KnownContentPart::Thinking carries
+    // no format tag so the egress cannot verify it is a valid OpenAI
+    // encrypted_content token. Empty string is the documented "no prior
+    // signature" shape (codex arc_monitor.rs:325-336 treats it as no-op).
+    assert_eq!(reasoning["encrypted_content"], "");
     assert_eq!(
         reasoning["summary"],
         json!([{"type": "summary_text", "text": "step 1"}])

@@ -72,7 +72,7 @@ pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest)
 }
 
 /// Layer canonical `req.provider_extras` into the Responses request.
-/// Only the 5 allowed keys are honored; everything else is left
+/// Only the 6 allowed keys are honored; everything else is left
 /// unforwarded so an operator-supplied long-tail field doesn't slip
 /// through unaudited. The `store` flag is special-cased: for
 /// `ChatgptOauth`, it stays hardcoded to `false` regardless of any
