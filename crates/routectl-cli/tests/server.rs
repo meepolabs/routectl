@@ -696,3 +696,88 @@ async fn deeply_nested_json_returns_400_not_panic() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["type"], "bad_request");
 }
+
+// ---------------------------------------------------------------------------
+// x-routectl-alias header overrides wire model on /v1/chat/completions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn x_routectl_alias_header_overrides_model_on_chat_completions() {
+    // Mirror of `x_routectl_alias_header_overrides_aliases_map` from the
+    // Anthropic-ingress tests. Two model entries on the same wiremock,
+    // distinguished by upstream wire-model id. The wire-string alias maps
+    // `claude-opus-4-7-20251022` -> `opus-oc` (which resolves to
+    // `gpt-4o-NEVER-CALLED`). The `x-routectl-alias: heavy` header MUST
+    // take precedence and route to `haiku-oc` -> `gpt-4o-haiku`.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(chat_response_body("gpt-4o-haiku", "alias answer")),
+        )
+        .mount(&upstream)
+        .await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "mock-oc".to_string(),
+        ProviderEntry::openai_compat(upstream.uri(), "literal:test-key"),
+    );
+
+    let mut models = BTreeMap::new();
+    models.insert(
+        "haiku-oc".to_string(),
+        ModelEntry::new("mock-oc", "gpt-4o-haiku"),
+    );
+    models.insert(
+        "opus-oc".to_string(),
+        ModelEntry::new("mock-oc", "gpt-4o-NEVER-CALLED"),
+    );
+
+    let mut aliases = BTreeMap::new();
+    // Wire-string alias: body `model` value points here and would route
+    // to `gpt-4o-NEVER-CALLED` without the header override.
+    aliases.insert(
+        "claude-opus-4-7-20251022".to_string(),
+        AliasValue::Single("opus-oc".into()),
+    );
+    // Named alias: the `x-routectl-alias` header points here and must win.
+    aliases.insert("heavy".to_string(), AliasValue::Single("haiku-oc".into()));
+
+    let config = Arc::new(Config {
+        server: ServerConfig::default(),
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    });
+
+    let base = helpers::spawn_test_server(config).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("x-routectl-alias", "heavy")
+        .json(&json!({
+            "model": "claude-opus-4-7-20251022",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+
+    let received = upstream.received_requests().await.expect("requests");
+    let body: Value =
+        serde_json::from_slice(&received[0].body).expect("upstream body parses as JSON");
+    assert_eq!(
+        body["model"].as_str(),
+        Some("gpt-4o-haiku"),
+        "header alias `heavy` -> `haiku-oc` should set upstream model to gpt-4o-haiku; \
+         got {:?}",
+        body["model"],
+    );
+}
