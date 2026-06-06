@@ -396,9 +396,9 @@ mod tests {
     /// so when the canonical request carries `output_config` in
     /// provider_extras (placed there by the Anthropic ingress, see
     /// `routectl_cli::ingress::anthropic::translate_request`), the
-    /// Bedrock egress must emit the field unchanged. Confirms the
-    /// user's "Layer 3 needs json_schema -> tool-use translation"
-    /// theory is wrong: Bedrock-Invoke needs no extra translation.
+    /// Bedrock egress must emit the field unchanged. Bedrock-Invoke for
+    /// Claude is pure Anthropic-shape passthrough; structured output
+    /// (output_config.format) needs no extra translation on this seam.
     #[test]
     fn structured_output_format_passes_through_to_bedrock_invoke_body() {
         let cfg = fake_cfg();

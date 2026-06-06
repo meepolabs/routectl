@@ -73,6 +73,12 @@ fn common_builder(user_agent: Option<&str>) -> reqwest::ClientBuilder {
 /// the version at provider construction time (operator config) and
 /// allowing an `extra_headers["anthropic-version"]` override would
 /// desync from the body-schema versioning the egress assumes.
+///
+/// Note: the `x-amz-` prefix is handled by `is_auth_header` directly
+/// (not stored in this slice) because it is a prefix match rather than
+/// an exact match. Any `x-amz-*` header supplied via `header_extras`
+/// would desync the AWS SigV4 signature computed over the request
+/// before these headers are added, so the entire prefix is reserved.
 const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "anthropic-version"];
 
 /// Header names that routectl owns the value of for wire-shape
@@ -99,9 +105,22 @@ const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "anthropic-version
 /// `header_extras`.
 const MANAGED_HEADERS: &[&str] = &["host", "content-type", "content-length"];
 
-/// True if the given header name carries provider auth. Case-insensitive.
+/// True if the given header name carries provider auth or belongs to
+/// the AWS SigV4 signing envelope. Case-insensitive.
+///
+/// In addition to the exact-match names in `AUTH_HEADERS`, any header
+/// with the `x-amz-` prefix is treated as auth-reserved. On the Bedrock
+/// path, SigV4 signs a fixed set of `x-amz-*` headers (date, security
+/// token, etc.) at request-build time. An operator-supplied
+/// `x-amz-*` header_extra injected after signing but before send would
+/// not appear in the signed string, making the signature invalid. The
+/// WARN+skip path already used for the exact-match names applies here
+/// too, keeping both the SigV4 path and the BearerKey path safe.
 pub fn is_auth_header(name: &str) -> bool {
     let lc = name.to_ascii_lowercase();
+    if lc.starts_with("x-amz-") {
+        return true;
+    }
     AUTH_HEADERS.contains(&lc.as_str())
 }
 
@@ -171,6 +190,30 @@ mod tests {
         for name in ["anthropic-beta", "content-type", "host", "x-request-id"] {
             assert!(!is_auth_header(name), "{name:?} must NOT classify as auth");
         }
+    }
+
+    /// Any header with an `x-amz-` prefix is auth-reserved on the
+    /// Bedrock path because SigV4 signs the request before these
+    /// headers are added. An extra `x-amz-*` injected after signing
+    /// would not appear in the signed string, invalidating the
+    /// signature.
+    #[test]
+    fn is_auth_header_treats_x_amz_prefix_as_reserved() {
+        for name in [
+            "x-amz-date",
+            "X-Amz-Date",
+            "X-AMZ-DATE",
+            "x-amz-security-token",
+            "x-amz-content-sha256",
+            "x-amz-target",
+        ] {
+            assert!(
+                is_auth_header(name),
+                "{name:?} with x-amz- prefix must classify as auth-reserved"
+            );
+        }
+        // Sanity: a non-x-amz header is not affected.
+        assert!(!is_auth_header("x-custom-header"));
     }
 
     #[test]
