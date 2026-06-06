@@ -26,10 +26,9 @@
 
 use std::collections::HashMap;
 
-use aws_smithy_eventstream::frame::{DecodedFrame, MessageFrameDecoder};
 use aws_smithy_types::event_stream::Message;
-use bytes::{Bytes, BytesMut};
-use futures::stream::{BoxStream, Stream, StreamExt};
+use bytes::Bytes;
+use futures::stream::{BoxStream, Stream};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -38,16 +37,14 @@ use routectl_core::{
     ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result,
 };
 
-use super::response::{lift_stop_sequence, map_stop_reason};
+use super::super::frame::{self, FrameHandler, FrameLabel};
+use super::response::lift_stop_sequence;
 use super::response_types::{
     ConverseUsage, StreamContentBlockDelta, StreamContentBlockStart,
     StreamContentBlockStartPayload, StreamContentBlockStop, StreamDelta, StreamMessageStart,
     StreamMessageStop, StreamMetadata,
 };
-
-/// Same cap as the Invoke side. See
-/// `super::super::eventstream::MAX_FRAME_BYTES` for the rationale.
-const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+use crate::anthropic_api::response::map_stop_reason;
 
 /// Format tag matching the Anthropic-API egress so chained downstreams
 /// see consistent reasoning_details across the Bedrock-Invoke and
@@ -105,148 +102,50 @@ struct ConverseStreamState {
     pending_stop_sequence: Option<String>,
 }
 
+/// Per-frame handler for the ConverseStream. Holds the cross-frame
+/// block-state map; the shared framing layer owns everything up to the
+/// decoded `Message`.
+struct ConverseFrameHandler {
+    state: ConverseStreamState,
+}
+
+impl FrameHandler for ConverseFrameHandler {
+    fn on_frame(&mut self, provider_id: &str, message: Message) -> Result<Vec<ChatChunk>> {
+        handle_converse_frame(provider_id, message, &mut self.state)
+    }
+
+    fn on_eof(&mut self, provider_id: &str) -> Vec<ChatChunk> {
+        // messageStop arrived but metadata never did. AWS docs put
+        // metadata last, but a network truncation or middleware quirk can
+        // drop it silently. Without this flush, finish_reason (and any
+        // partial usage we held) vanish from the wire and clients see a
+        // stream that just stops. Emit the closing chunk with the captured
+        // stop_reason and an empty UsageDelta.
+        if self.state.pending_stop_reason.is_some() {
+            tracing::warn!(
+                provider = %provider_id,
+                "stream ended after messageStop without metadata; \
+                 emitting closing chunk with no usage info"
+            );
+            vec![build_closing_chunk(&mut self.state, None)]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 /// Decode Bedrock ConverseStream frames into routectl `ChatChunk`s.
-/// Symmetric to `super::super::eventstream::invoke_stream` -- same
-/// framing layer, Converse-specific per-frame handler.
+/// Symmetric to `super::super::eventstream::invoke_stream` -- the shared
+/// `frame::decode_frames` driver handles the AWS-eventstream framing;
+/// this function supplies only the Converse-specific frame routing.
 pub fn stream<S>(provider_id: String, byte_stream: S) -> BoxStream<'static, Result<ChatChunk>>
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
-    let s = async_stream::stream! {
-        let mut buffer = BytesMut::new();
-        let mut decoder = MessageFrameDecoder::new();
-        let mut state = ConverseStreamState::default();
-        // Smithy-prelude tracking state -- see invoke_stream for
-        // the full story. False until the smithy decoder buffers a
-        // prelude internally on Incomplete; flipped back to false
-        // when smithy returns Complete (which calls `self.reset()`).
-        let mut smithy_has_prelude_buffered = false;
-
-        let mut byte_stream = Box::pin(byte_stream);
-        loop {
-            loop {
-                // Advertised-length DoS guard. Mirrors invoke_stream.
-                if !smithy_has_prelude_buffered && buffer.len() >= 4 {
-                    let advertised = u32::from_be_bytes([
-                        buffer[0], buffer[1], buffer[2], buffer[3],
-                    ]) as usize;
-                    if advertised > MAX_FRAME_BYTES {
-                        yield Err(Error::Streaming(format!(
-                            "bedrock converse-stream frame advertised {advertised} bytes, exceeds cap {MAX_FRAME_BYTES}"
-                        )));
-                        return;
-                    }
-                }
-                let mut cursor = std::io::Cursor::new(buffer.as_ref());
-                match decoder.decode_frame(&mut cursor) {
-                    Ok(DecodedFrame::Complete(message)) => {
-                        let consumed = usize::try_from(cursor.position()).map_err(|_| {
-                            Error::Streaming(
-                                "bedrock converse-stream consumed more than usize::MAX bytes"
-                                    .into(),
-                            )
-                        })?;
-                        let _ = buffer.split_to(consumed);
-                        smithy_has_prelude_buffered = false;
-
-                        match handle_converse_frame(&provider_id, message, &mut state) {
-                            Ok(chunks) => {
-                                for c in chunks {
-                                    yield Ok(c);
-                                }
-                            }
-                            Err(e) => {
-                                yield Err(e);
-                                return;
-                            }
-                        }
-                    }
-                    Ok(DecodedFrame::Incomplete) => {
-                        let consumed = cursor.position() as usize;
-                        if consumed > 0 {
-                            let _ = buffer.split_to(consumed);
-                            smithy_has_prelude_buffered = true;
-                        }
-                        break;
-                    }
-                    Err(e) => {
-                        // Skip-and-continue, mirroring invoke_stream
-                        // so a single bad frame doesn't kill an
-                        // in-flight stream.
-                        let advertised = if buffer.len() >= 4 {
-                            u32::from_be_bytes([
-                                buffer[0], buffer[1], buffer[2], buffer[3],
-                            ]) as usize
-                        } else {
-                            0
-                        };
-                        let dump_len = advertised.min(256).min(buffer.len());
-                        let hex: String = buffer[..dump_len]
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        tracing::warn!(
-                            provider = %provider_id,
-                            err = %e,
-                            frame_len = advertised,
-                            hex = %hex,
-                            "bedrock converse-stream frame decode failed; skipping frame"
-                        );
-                        if advertised > 0 && buffer.len() >= advertised {
-                            let _ = buffer.split_to(advertised);
-                        } else {
-                            buffer.clear();
-                        }
-                        decoder = MessageFrameDecoder::new();
-                        smithy_has_prelude_buffered = false;
-                        continue;
-                    }
-                }
-            }
-
-            match byte_stream.next().await {
-                Some(Ok(bytes)) => buffer.extend_from_slice(&bytes),
-                Some(Err(e)) => {
-                    yield Err(Error::Streaming(format!(
-                        "bedrock converse upstream byte read failed: {e}"
-                    )));
-                    return;
-                }
-                None => {
-                    if !buffer.is_empty() {
-                        yield Err(Error::Streaming(format!(
-                            "bedrock converse-stream truncated: {} buffered bytes left at EOF",
-                            buffer.len()
-                        )));
-                    } else if smithy_has_prelude_buffered {
-                        yield Err(Error::Streaming(
-                            "bedrock converse-stream truncated: prelude consumed but frame body never arrived before EOF"
-                                .to_string(),
-                        ));
-                    } else if state.pending_stop_reason.is_some() {
-                        // messageStop arrived but metadata never did.
-                        // AWS docs put metadata last, but a network
-                        // truncation or middleware quirk can drop it
-                        // silently. Without this flush, finish_reason
-                        // (and any partial usage we held) vanish from
-                        // the wire and clients see a stream that just
-                        // stops. Emit the closing chunk with the
-                        // captured stop_reason and an empty UsageDelta.
-                        tracing::warn!(
-                            provider = %provider_id,
-                            "stream ended after messageStop without metadata; \
-                             emitting closing chunk with no usage info"
-                        );
-                        yield Ok(build_closing_chunk(&mut state, None));
-                    }
-                    return;
-                }
-            }
-        }
+    let handler = ConverseFrameHandler {
+        state: ConverseStreamState::default(),
     };
-
-    Box::pin(s)
+    frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Converse)
 }
 
 /// Translate one decoded Converse-stream frame to zero-or-more canonical
@@ -257,7 +156,7 @@ fn handle_converse_frame(
     message: Message,
     state: &mut ConverseStreamState,
 ) -> Result<Vec<ChatChunk>> {
-    let event_type = header_str(&message, ":event-type")
+    let event_type = frame::header_str(&message, ":event-type")
         .unwrap_or("")
         .to_string();
     let payload = message.payload();
@@ -731,17 +630,6 @@ fn truncate_excerpt(s: &str) -> String {
     s.chars()
         .take(routectl_core::MAX_LOG_BODY_EXCERPT)
         .collect()
-}
-
-fn header_str<'a>(message: &'a Message, name: &str) -> Option<&'a str> {
-    for header in message.headers() {
-        if header.name().as_str() == name {
-            if let Ok(s) = header.value().as_string() {
-                return Some(s.as_str());
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

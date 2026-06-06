@@ -177,11 +177,207 @@ pub fn is_reserved_extra_header(name: &str) -> bool {
     is_auth_header(name) || is_managed_header(name)
 }
 
+/// Insert a header name+value into a `HeaderMap`, replacing any
+/// existing entry with the same (case-insensitive) name. Skips the
+/// entry with a WARN if either the name or value cannot be parsed
+/// into the http-crate types -- an invalid value would otherwise
+/// poison `RequestBuilder::headers()`'s merge.
+///
+/// This is the single header-insert policy for every provider:
+/// malformed names/values are logged at WARN and skipped rather than
+/// failing the whole request. A single bad `header_extras` entry must
+/// not take down an otherwise-valid request, and silently swallowing
+/// it would hide operator config mistakes.
+pub fn insert_header(
+    map: &mut reqwest::header::HeaderMap,
+    provider_id: &str,
+    name: &str,
+    value: &str,
+) {
+    let header_name = match reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_id,
+                header = %name,
+                error = %e,
+                "skipping malformed header name",
+            );
+            return;
+        }
+    };
+    let header_value = match reqwest::header::HeaderValue::from_str(value) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_id,
+                header = %name,
+                error = %e,
+                "skipping malformed header value",
+            );
+            return;
+        }
+    };
+    map.insert(header_name, header_value);
+}
+
+/// Merge an egress's effective `header_extras` into `header_map`,
+/// applying the shared skip policy every provider needs:
+///
+/// - **auth-reserved** ([`is_auth_header`]): skip with WARN -- letting
+///   one through would bypass the provider's auth contract.
+/// - **routectl-managed** ([`is_managed_header`]) or any name in
+///   `list_valued`: skip with DEBUG -- routectl composes these
+///   dynamically, so an operator value would lose or double-emit.
+/// - everything else: insert via [`insert_header`] (WARN+skip on
+///   malformed names/values).
+///
+/// `list_valued` carries the per-provider names that routectl composes
+/// itself even though they are not in the global managed list. The
+/// anthropic-api egress passes `&["anthropic-beta"]` (composed from the
+/// ingress + provider + model union); the other providers pass `&[]`.
+/// Names are compared case-insensitively.
+///
+/// Callers build a `HeaderMap`, call this once, then attach it to the
+/// request (`rb.headers(map)` or `request.headers_mut()`). Centralizing
+/// the loop keeps the auth/managed skip policy from drifting across the
+/// four providers that share it.
+pub fn apply_header_extras(
+    header_map: &mut reqwest::header::HeaderMap,
+    extras: &[(String, String)],
+    provider_id: &str,
+    list_valued: &[&str],
+) {
+    for (k, v) in extras {
+        if is_auth_header(k) {
+            tracing::warn!(
+                provider = %provider_id,
+                header = %k,
+                "ignoring auth-reserved header from header_extras (would bypass provider auth)"
+            );
+            continue;
+        }
+        let is_list_valued = list_valued.iter().any(|n| k.eq_ignore_ascii_case(n));
+        if is_list_valued || is_managed_header(k) {
+            tracing::debug!(
+                provider = %provider_id,
+                header = %k,
+                "dropping managed header from header_extras; composed dynamically by routectl"
+            );
+            continue;
+        }
+        insert_header(header_map, provider_id, k, v);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        is_auth_header, is_managed_header, is_reserved_extra_header, AUTH_HEADERS, MANAGED_HEADERS,
+        apply_header_extras, insert_header, is_auth_header, is_managed_header,
+        is_reserved_extra_header, AUTH_HEADERS, MANAGED_HEADERS,
     };
+    use reqwest::header::HeaderMap;
+
+    #[test]
+    fn insert_header_inserts_valid_pair() {
+        let mut map = HeaderMap::new();
+        insert_header(&mut map, "p", "x-custom", "value");
+        assert_eq!(map.get("x-custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn insert_header_replaces_existing_same_name() {
+        let mut map = HeaderMap::new();
+        insert_header(&mut map, "p", "x-custom", "first");
+        insert_header(&mut map, "p", "x-custom", "second");
+        // insert (not append) -> exactly one value, the latest.
+        assert_eq!(map.get_all("x-custom").iter().count(), 1);
+        assert_eq!(map.get("x-custom").unwrap(), "second");
+    }
+
+    #[test]
+    fn insert_header_skips_malformed_name_without_panic() {
+        let mut map = HeaderMap::new();
+        // A space is illegal in a header name; WARN+skip, no insert.
+        insert_header(&mut map, "p", "bad name", "value");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn insert_header_skips_malformed_value_without_panic() {
+        let mut map = HeaderMap::new();
+        // A newline is illegal in a header value; WARN+skip, no insert.
+        insert_header(&mut map, "p", "x-custom", "bad\nvalue");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn apply_header_extras_inserts_plain_headers() {
+        let mut map = HeaderMap::new();
+        let extras = vec![("x-foo".to_string(), "1".to_string())];
+        apply_header_extras(&mut map, &extras, "p", &[]);
+        assert_eq!(map.get("x-foo").unwrap(), "1");
+    }
+
+    #[test]
+    fn apply_header_extras_skips_auth_reserved() {
+        let mut map = HeaderMap::new();
+        let extras = vec![
+            ("authorization".to_string(), "Bearer x".to_string()),
+            ("x-api-key".to_string(), "k".to_string()),
+            ("x-amz-date".to_string(), "20260101".to_string()),
+            ("x-foo".to_string(), "1".to_string()),
+        ];
+        apply_header_extras(&mut map, &extras, "p", &[]);
+        assert!(map.get("authorization").is_none());
+        assert!(map.get("x-api-key").is_none());
+        assert!(map.get("x-amz-date").is_none());
+        // Non-reserved entry still lands.
+        assert_eq!(map.get("x-foo").unwrap(), "1");
+    }
+
+    #[test]
+    fn apply_header_extras_skips_managed() {
+        let mut map = HeaderMap::new();
+        let extras = vec![
+            ("content-type".to_string(), "text/plain".to_string()),
+            ("host".to_string(), "evil".to_string()),
+        ];
+        apply_header_extras(&mut map, &extras, "p", &[]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn apply_header_extras_skips_list_valued_names() {
+        let mut map = HeaderMap::new();
+        let extras = vec![
+            ("anthropic-beta".to_string(), "ctx-1m".to_string()),
+            ("x-foo".to_string(), "1".to_string()),
+        ];
+        // anthropic-beta is list-valued (composed by routectl) -> skip;
+        // x-foo is plain -> insert.
+        apply_header_extras(&mut map, &extras, "p", &["anthropic-beta"]);
+        assert!(map.get("anthropic-beta").is_none());
+        assert_eq!(map.get("x-foo").unwrap(), "1");
+    }
+
+    #[test]
+    fn apply_header_extras_list_valued_is_case_insensitive() {
+        let mut map = HeaderMap::new();
+        let extras = vec![("Anthropic-Beta".to_string(), "ctx-1m".to_string())];
+        apply_header_extras(&mut map, &extras, "p", &["anthropic-beta"]);
+        assert!(map.get("anthropic-beta").is_none());
+    }
+
+    #[test]
+    fn apply_header_extras_empty_list_valued_keeps_anthropic_beta() {
+        // With list_valued = &[], anthropic-beta is just a plain header
+        // (the non-anthropic providers don't compose it themselves).
+        let mut map = HeaderMap::new();
+        let extras = vec![("anthropic-beta".to_string(), "ctx-1m".to_string())];
+        apply_header_extras(&mut map, &extras, "p", &[]);
+        assert_eq!(map.get("anthropic-beta").unwrap(), "ctx-1m");
+    }
 
     #[test]
     fn is_auth_header_matches_auth_names() {

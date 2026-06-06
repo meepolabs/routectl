@@ -26,6 +26,8 @@ use routectl_core::{
     ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
 };
 
+use crate::anthropic_api::response::{map_stop_reason, sum_prompt_tokens};
+
 use super::response_types::{
     ConverseCacheDetail, ConverseResponse, ConverseResponseContentBlock, ConverseUsage,
 };
@@ -264,26 +266,6 @@ fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageConte
     }
 }
 
-/// Map a Converse stopReason to canonical OpenAI-shape finish_reason.
-/// Overlap with the Anthropic value set is exact for the four
-/// OpenAI-mappable values (`end_turn`, `stop_sequence`, `max_tokens`,
-/// `tool_use`); Converse-specific values (`guardrail_intervened`,
-/// `content_filtered`, `malformed_model_output`, `malformed_tool_use`,
-/// `model_context_window_exceeded`) pass through verbatim per the
-/// CLAUDE.md "stop_reason round-trip is lossy for Anthropic-only values"
-/// gotcha -- preserving information at the canonical layer rather than
-/// clobbering to "stop".
-pub(crate) fn map_stop_reason(reason: Option<&str>) -> Option<String> {
-    let r = reason?;
-    let mapped = match r {
-        "end_turn" | "stop_sequence" => "stop",
-        "max_tokens" => "length",
-        "tool_use" => "tool_calls",
-        other => other,
-    };
-    Some(mapped.to_string())
-}
-
 /// Translate Converse `usage` into the canonical `Usage`. Mirrors
 /// `anthropic_api::response::translate_usage` so an OpenAI client
 /// reading `prompt_tokens` sees the cumulative context size
@@ -292,10 +274,7 @@ pub(crate) fn map_stop_reason(reason: Option<&str>) -> Option<String> {
 fn translate_usage(u: &ConverseUsage) -> Usage {
     let cache_write = u.cache_write_input_tokens.unwrap_or(0);
     let cache_read = u.cache_read_input_tokens.unwrap_or(0);
-    let prompt_tokens = u
-        .input_tokens
-        .saturating_add(cache_write)
-        .saturating_add(cache_read);
+    let prompt_tokens = sum_prompt_tokens(u.input_tokens, cache_write, cache_read);
     let completion_tokens = u.output_tokens;
     Usage {
         prompt_tokens,

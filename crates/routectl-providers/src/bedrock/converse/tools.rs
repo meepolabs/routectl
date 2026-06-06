@@ -117,7 +117,7 @@ fn cache_point_tool_def(cc: &CacheControl) -> ConverseToolDef {
 fn custom_tool_to_converse(c: &CustomTool) -> ConverseToolDef {
     // The canonical CustomTool fields map 1:1 to ConverseToolSpec
     // without any per-shape transform. Routing through
-    // anthropic_api::request::translate_custom_tool would only
+    // anthropic_api::tools::translate_custom_tool would only
     // round-trip through AnthropicTool::Custom and back; skip the
     // indirection.
     ConverseToolDef::Spec {

@@ -26,12 +26,16 @@ use routectl_core::{
 };
 
 pub(crate) mod context_management;
+mod extras;
+mod messages;
 pub(crate) mod parts;
 pub mod request;
 pub mod response;
 pub mod sse;
 pub mod sse_opaque;
 pub mod sse_unknown;
+mod system;
+mod tools;
 pub(crate) mod types;
 pub(crate) mod types_sse;
 
@@ -346,7 +350,7 @@ impl AnthropicApiProvider {
         if self.cfg.auth_kind == AuthKind::OauthBearer {
             for (k, v) in routectl_core::identity::anthropic::default_claude_code_identity_headers()
             {
-                insert_header(&mut header_map, &self.cfg.id, k, v);
+                crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
             }
         }
 
@@ -356,26 +360,14 @@ impl AnthropicApiProvider {
             &self.cfg.header_extras,
             req.routectl_internal.header_extras.as_ref(),
         );
-        for (k, v) in &source {
-            if crate::http_client::is_auth_header(k) {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
-                );
-                continue;
-            }
-            if k.eq_ignore_ascii_case("anthropic-beta") || crate::http_client::is_managed_header(k)
-            {
-                tracing::debug!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "dropping managed header from header_extras; composed dynamically by routectl"
-                );
-                continue;
-            }
-            insert_header(&mut header_map, &self.cfg.id, k, v);
-        }
+        // `anthropic-beta` is list-valued and composed above from the
+        // ingress + provider + model union, so it is skipped here.
+        crate::http_client::apply_header_extras(
+            &mut header_map,
+            &source,
+            &self.cfg.id,
+            &["anthropic-beta"],
+        );
 
         // Forward inbound X-Claude-Code-* headers per the operator's
         // allowlist. The ingress greedy-captures the whole namespace;
@@ -392,7 +384,12 @@ impl AnthropicApiProvider {
                     .iter()
                     .any(|n| n.eq_ignore_ascii_case(&lc))
                 {
-                    insert_header(&mut header_map, &self.cfg.id, name.as_str(), val.as_str());
+                    crate::http_client::insert_header(
+                        &mut header_map,
+                        &self.cfg.id,
+                        name.as_str(),
+                        val.as_str(),
+                    );
                 }
             }
         }
@@ -417,39 +414,6 @@ fn resolve_user_agent(user_agent: Option<&str>, auth_kind: AuthKind) -> Option<S
         }
         (None, AuthKind::ApiKey) => None,
     }
-}
-
-/// Insert a header name+value into a `HeaderMap`, replacing any
-/// existing entry with the same (case-insensitive) name. Skips the
-/// entry with a WARN if either the name or value cannot be parsed
-/// into the http-crate types -- an invalid value would otherwise
-/// poison `RequestBuilder::headers()`'s merge.
-fn insert_header(map: &mut reqwest::header::HeaderMap, provider_id: &str, name: &str, value: &str) {
-    let header_name = match reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::warn!(
-                provider = %provider_id,
-                header = %name,
-                error = %e,
-                "skipping malformed header name",
-            );
-            return;
-        }
-    };
-    let header_value = match reqwest::header::HeaderValue::from_str(value) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                provider = %provider_id,
-                header = %name,
-                error = %e,
-                "skipping malformed header value",
-            );
-            return;
-        }
-    };
-    map.insert(header_name, header_value);
 }
 
 #[async_trait]

@@ -192,6 +192,25 @@ fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageConte
     }
 }
 
+/// Sum the Anthropic-vocabulary input buckets into the canonical
+/// `prompt_tokens`. Anthropic and Bedrock-Converse both report the
+/// raw `input_tokens` field as ONLY the new, non-cached tokens, while
+/// OpenAI's `prompt_tokens` is the full prompt size. To stay
+/// OpenAI-spec correct on the wire, `prompt_tokens` is the saturating
+/// SUM of new + cache-creation + cache-read inputs; the per-bucket
+/// breakdown stays available on the canonical extension fields.
+///
+/// Shared by `anthropic_api::response::translate_usage` and
+/// `bedrock::converse::response::translate_usage` so the summing rule
+/// cannot drift between the two Anthropic-vocabulary egresses (the
+/// field NAMES differ -- `cache_creation_input_tokens` vs
+/// `cache_write_input_tokens` -- but the arithmetic is identical).
+pub(crate) fn sum_prompt_tokens(input_tokens: u32, cache_creation: u32, cache_read: u32) -> u32 {
+    input_tokens
+        .saturating_add(cache_creation)
+        .saturating_add(cache_read)
+}
+
 /// Translate Anthropic `usage` into the canonical `Usage`, including
 /// the cache-stats extension (cache_creation_input_tokens,
 /// cache_read_input_tokens, per-TTL breakdown).
@@ -205,10 +224,7 @@ fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageConte
 fn translate_usage(u: &AnthropicUsage) -> Usage {
     let cache_creation = u.cache_creation_input_tokens.unwrap_or(0);
     let cache_read = u.cache_read_input_tokens.unwrap_or(0);
-    let prompt_tokens = u
-        .input_tokens
-        .saturating_add(cache_creation)
-        .saturating_add(cache_read);
+    let prompt_tokens = sum_prompt_tokens(u.input_tokens, cache_creation, cache_read);
     Usage {
         prompt_tokens,
         completion_tokens: u.output_tokens,

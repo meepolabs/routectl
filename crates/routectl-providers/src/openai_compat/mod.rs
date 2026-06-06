@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use tracing::debug;
 
@@ -190,29 +190,7 @@ impl OpenAiCompatProvider {
             &self.cfg.header_extras,
             req.routectl_internal.header_extras.as_ref(),
         );
-        for (k, v) in &source {
-            if crate::http_client::is_auth_header(k) {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "ignoring auth-reserved header from extra_headers (would bypass provider auth)"
-                );
-                continue;
-            }
-            if crate::http_client::is_managed_header(k) {
-                tracing::debug!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "dropping managed header from extra_headers; composed dynamically by routectl"
-                );
-                continue;
-            }
-            let name = HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| Error::Config(format!("invalid header name `{k}`: {e}")))?;
-            let value = HeaderValue::from_str(v)
-                .map_err(|e| Error::Config(format!("invalid header value for `{k}`: {e}")))?;
-            headers.insert(name, value);
-        }
+        crate::http_client::apply_header_extras(&mut headers, &source, &self.cfg.id, &[]);
         Ok(headers)
     }
 }

@@ -267,7 +267,7 @@ impl OpenAiResponsesProvider {
         // BedrockMantle get no defaults (no codex fingerprint).
         if self.cfg.auth_kind == AuthKind::ChatgptOauth {
             for (k, v) in default_codex_identity_headers() {
-                insert_header(&mut header_map, &self.cfg.id, k, v);
+                crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
             }
         }
 
@@ -278,25 +278,7 @@ impl OpenAiResponsesProvider {
             &self.cfg.header_extras,
             req.routectl_internal.header_extras.as_ref(),
         );
-        for (k, v) in &source {
-            if crate::http_client::is_auth_header(k) {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
-                );
-                continue;
-            }
-            if crate::http_client::is_managed_header(k) {
-                tracing::debug!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "dropping managed header from header_extras; composed dynamically by routectl"
-                );
-                continue;
-            }
-            insert_header(&mut header_map, &self.cfg.id, k, v);
-        }
+        crate::http_client::apply_header_extras(&mut header_map, &source, &self.cfg.id, &[]);
 
         // On the ChatgptOauth path, inject the per-request and
         // per-provider codex identity headers. These OVERRIDE any
@@ -307,14 +289,19 @@ impl OpenAiResponsesProvider {
         //     `self.window_id`, stable across requests on this instance.
         if self.cfg.auth_kind == AuthKind::ChatgptOauth {
             let thread_id = uuid::Uuid::new_v4().to_string();
-            insert_header(&mut header_map, &self.cfg.id, "thread-id", &thread_id);
-            insert_header(
+            crate::http_client::insert_header(
+                &mut header_map,
+                &self.cfg.id,
+                "thread-id",
+                &thread_id,
+            );
+            crate::http_client::insert_header(
                 &mut header_map,
                 &self.cfg.id,
                 "x-client-request-id",
                 &thread_id,
             );
-            insert_header(
+            crate::http_client::insert_header(
                 &mut header_map,
                 &self.cfg.id,
                 "x-codex-window-id",
@@ -352,39 +339,6 @@ fn default_codex_identity_headers() -> [(&'static str, &'static str); 3] {
         (RESIDENCY_HEADER_NAME, RESIDENCY_HEADER_VALUE),
         ("version", PINNED_CODEX_VERSION),
     ]
-}
-
-/// Insert a header name+value into a `HeaderMap`, replacing any
-/// existing entry with the same (case-insensitive) name. Skips the
-/// entry with a WARN if either the name or value cannot be parsed
-/// into the http-crate types -- an invalid value would otherwise
-/// poison `RequestBuilder::headers()`'s merge.
-fn insert_header(map: &mut reqwest::header::HeaderMap, provider_id: &str, name: &str, value: &str) {
-    let header_name = match reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::warn!(
-                provider = %provider_id,
-                header = %name,
-                error = %e,
-                "skipping malformed header name",
-            );
-            return;
-        }
-    };
-    let header_value = match reqwest::header::HeaderValue::from_str(value) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                provider = %provider_id,
-                header = %name,
-                error = %e,
-                "skipping malformed header value",
-            );
-            return;
-        }
-    };
-    map.insert(header_name, header_value);
 }
 
 /// Persist the Cloudflare cookie jar on provider teardown so the next

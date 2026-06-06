@@ -9,6 +9,7 @@
 use super::*;
 use aws_smithy_types::event_stream::{Header, HeaderValue, Message as AwsMessage};
 use futures::stream as fstream;
+use futures::StreamExt;
 
 fn make_frame(event_type: &str, payload_json: &str) -> AwsMessage {
     AwsMessage::new(Bytes::from(payload_json.to_string().into_bytes())).add_header(Header::new(
