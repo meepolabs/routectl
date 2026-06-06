@@ -22,8 +22,9 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
   - `bedrock` -- AWS Bedrock with SigV4 + InvokeModel + Converse.
     Behind a `bedrock` Cargo feature; opt out with
     `--no-default-features` for a lean build without the AWS SDK.
-  - `openai_responses` -- ChatGPT Codex via `chatgpt-oauth` JWT
-    (stream-only).
+  - `openai_responses` -- OpenAI Responses API (chatgpt-oauth JWT,
+    OpenAI api-key, or AWS bedrock-mantle bearer); `complete()`
+    force-streams.
 
   `model_profile.rs` is the per-model quirks table (edit here when a
   model needs new behavior). `effort.rs` and `header_trace.rs` are

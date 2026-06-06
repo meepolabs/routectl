@@ -78,6 +78,13 @@ default           = "default"
 resolved at startup. Bind non-loopback only with `--unsafe-public` on
 the CLI.
 
+On a non-loopback bind, routectl refuses to start unless at least one
+`[server.auth].tokens` entry is configured. The startup error names
+the bind address: `"refusing to serve on public bind '<addr>' without
+[server.auth].tokens"`. Loopback binds (127.x.x.x, ::1,
+::ffff:127.0.0.1) are exempt so the default local-dev workflow
+requires no auth.
+
 **`max_body_bytes`** (u32, default 33554432 -- 32 MiB)
 
 Caps the inbound HTTP body size for `/v1/messages` and
@@ -129,7 +136,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
-| `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only                                                          |
+| `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only; `anthropic_version` default `2023-06-01` (anthropic-api only) |
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
 | `runtime` (RPM, breaker, timeouts, `unsupported_features`) | `[providers.X]` | provider-only                                                          |
 | `allowed_betas`                | `[providers.X]` AnthropicApi    | provider-only; allowlist for `anthropic_beta` flags to `api.anthropic.com`; empty = pass-through |
@@ -137,6 +144,12 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor always sent, bypasses `[bedrock] allowed_betas`            |
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
 | `allow_disable_fallbacks`      | `[server]`                      | bool, default true; when false the `x-routectl-disable-fallbacks` per-request header is ignored   |
+
+**`base_url` scheme requirement.** `base_url` must use `https://` (or
+`http://` for loopback addresses only). Link-local addresses
+(IPv4 `169.254.0.0/16` and IPv6 `fe80::/10`) are rejected at provider
+build time regardless of scheme to prevent SSRF and cloud-metadata
+credential leaks. The startup error names the offending address.
 
 ## header_extras merge
 
@@ -220,6 +233,63 @@ egress reads `req.anthropic_beta` and emits ONE
 HTTP header. Bedrock egresses route the same canonical list through
 `filter_bedrock_betas`.
 
+## Bedrock and Anthropic API beta-flag controls
+
+Three distinct knobs govern how `anthropic_beta` flags reach each
+upstream. They are independent and serve different purposes.
+
+### `[bedrock] allowed_betas` -- global Bedrock post-filter
+
+An allowlist of `anthropic_beta` flag strings accepted by AWS Bedrock.
+Applied as a post-filter to every Bedrock-destined request: any flag
+NOT in the list is silently dropped before the request goes on the
+wire. Omitting the list (empty = default) puts the filter in
+pass-through mode -- every flag reaches AWS as-is.
+
+Use this to prevent unknown flags (new Anthropic betas not yet
+supported by Bedrock) from causing upstream 400 errors fleet-wide.
+routectl ships no built-in default; AWS schema drift is
+operator-tracked.
+
+```toml
+[bedrock]
+allowed_betas        = ["computer-use-2025-01-24", "files-api-2025-04-14"]
+# allowed_body_fields  = [...]  # optional body-field allowlist
+```
+
+### `[providers.X] anthropic_beta` -- per-provider Bedrock floor
+
+A static `anthropic_beta` value that routectl always injects on
+requests destined for this Bedrock provider, regardless of what the
+caller sent. This floor value bypasses the `[bedrock] allowed_betas`
+post-filter -- it is written unconditionally AFTER the filter runs.
+
+Use this to guarantee a required beta flag is always present (for
+example, a model that requires `computer-use-2025-01-24` to operate
+correctly).
+
+```toml
+[providers.bedrock-computer]
+kind           = "bedrock"
+region         = "us-west-2"
+creds          = { kind = "default-chain" }
+anthropic_beta = "computer-use-2025-01-24"
+```
+
+### `[providers.X] allowed_betas` -- Anthropic API (non-Bedrock) allowlist
+
+An allowlist of `anthropic_beta` flags accepted by this
+`anthropic-api` provider. Applied analogously to the Bedrock
+global filter but scoped to one provider. Empty (default) = every
+flag the caller requests reaches `api.anthropic.com` unfiltered.
+
+```toml
+[providers.anthropic-strict]
+kind         = "anthropic-api"
+api_key_ref  = "env://ANTHROPIC_API_KEY"
+allowed_betas = ["claude-code-20250219", "oauth-2025-04-20"]
+```
+
 ## Per-provider capability filter (`unsupported_features`)
 
 Some upstreams reject specific built-in tool shapes (Bedrock, for
@@ -282,6 +352,34 @@ Per-skip events log at DEBUG (`provider skipped: feature in
 unsupported_features list`); the terminal empty-chain event logs at
 WARN. INFO would flood; the codebase precedent is "fallback events
 at WARN, retry-same-provider at DEBUG".
+
+## Per-provider runtime gates
+
+Each `[providers.X]` entry accepts a `[providers.X.runtime]` block with
+five knobs. All accounting is per-attempt (not per-request).
+
+| Field                          | Type       | Default         | Effect |
+|--------------------------------|------------|-----------------|--------|
+| `rpm_limit`                    | Option<u32> | None (disabled) | Maximum requests per minute to this provider. When exceeded the router treats this provider as a fallbackable failure and tries the next chain entry. |
+| `circuit_failures`             | Option<u32> | None (disabled) | Trip the circuit breaker after this many consecutive failed attempts. Once tripped, the router skips this provider for `circuit_cooldown_ms`. |
+| `circuit_cooldown_ms`          | Option<u64> | 30000 (30s) when `circuit_failures` is set; unused otherwise | How long to keep the circuit open once tripped. |
+| `request_timeout_ms`           | Option<u64> | None (no cap)   | Per-attempt request timeout. Alias-level `[aliases.X.retry] request_timeout_ms` always wins; this is the per-provider fallback when the alias-level field is unset. Resolution order: provider > global `[retry] request_timeout_ms` > None. |
+| `stream_first_byte_timeout_ms` | Option<u64> | None            | Per-provider first-byte timeout for streaming responses. Resolution order: per-model > per-provider > global `[retry] stream_first_byte_timeout_ms`. |
+
+`rpm_limit` and circuit breaker are both `None` (disabled) when omitted.
+`circuit_cooldown_ms` is only meaningful when `circuit_failures` is set;
+its default of 30s applies when `circuit_failures` is present but
+`circuit_cooldown_ms` is absent.
+
+Example:
+
+```toml
+[providers.bedrock.runtime]
+rpm_limit              = 60
+circuit_failures       = 5
+circuit_cooldown_ms    = 60000
+request_timeout_ms     = 120000
+```
 
 ## Retry and fallback defaults
 
@@ -579,6 +677,11 @@ Per-knob resolution: env wins when set; otherwise the matching
 `[log]` block leaves current behavior unchanged (env-only or
 hardcoded default for each knob).
 
+Accepted truthy spellings for the boolean env vars
+(`ROUTECTL_TRACE_HEADERS`, `ROUTECTL_LOG_REDACT_PROMPTS`): `1`,
+`true`, `yes`, `on` (case-insensitive, whitespace-trimmed). Anything
+else (including empty string) is treated as false.
+
 What each knob does:
 
 - `trace_headers` -- opt-in for the four `trace_*_headers`
@@ -624,12 +727,18 @@ resolved`) so operators can confirm the effective value once.
 refs resolve, provider kinds map to known impls, alias chains reference
 existing model nicknames, Bedrock allowlists include the
 routectl-mandatory keys (`messages`, `anthropic_version`, `max_tokens`)
-when set. A partial Bedrock allowlist silently breaks every Bedrock
-request, so the validator surfaces it as a clean `Error::Config` at
-startup rather than a runtime 400.
+when set, and if any `[providers.X]` Bedrock entry sets an
+`anthropic_beta` floor, the validator also confirms that
+`allowed_body_fields` includes `anthropic_beta` (so the floor value
+actually reaches the upstream). A partial Bedrock allowlist silently
+breaks every Bedrock request, so the validator surfaces it as a clean
+`Error::Config` at startup rather than a runtime 400.
 
-`config show` prints the post-merge view: secret refs resolved (values
-redacted), defaults filled in, layered overlays NOT yet applied
+`config show` prints the post-merge view: `literal:`-prefixed secrets
+are redacted to `literal:[REDACTED]`; `env://`, `file://`, and
+`oauth://` references remain as opaque URIs (they are non-secret
+pointers, not credential values); defaults are filled in; layered
+overlays NOT yet applied
 (those compose per request, not at startup). Useful when chasing
 "why is my model picking provider Y instead of Z" without flipping
 trace logging.

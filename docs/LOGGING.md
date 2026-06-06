@@ -177,6 +177,30 @@ after a large messages array. Field-name stability: adding a new
 field is allowed without ceremony; renaming or removing an existing
 field requires updating this table.
 
+### Header trace redaction policy
+
+When `ROUTECTL_TRACE_HEADERS=1` is set, the four `trace_*_headers`
+emitters apply DIFFERENT redaction per direction by design:
+
+| Direction | Headers emitted | Redaction |
+|-----------|-----------------|-----------|
+| 1 -- ingress request (client -> routectl) | RAW, no redaction | None -- fixture captures need the real auth/beta/version headers the client sent |
+| 2 -- outgoing request (routectl -> upstream) | Redacted | `authorization`, `x-api-key`, and `proxy-authorization` values are replaced with `[REDACTED: Bearer JWT]` / `[REDACTED: api key]` etc. so live tokens never land in log archives |
+| 3 -- upstream response (upstream -> routectl) | RAW, no redaction | None -- response headers carry no outgoing secrets |
+| 4 -- egress response (routectl -> client) | RAW, no redaction | None -- egress headers carry no secrets |
+
+This is intentional. Direction 2 is the only direction that carries
+outgoing auth material (Bearer JWTs, api keys). The remaining three
+directions are raw so fixture-capture and triage workflows see the
+exact wire values without workarounds.
+
+**Treat TRACE logs as sensitive.** Even with direction-2 redaction,
+directions 1, 3, and 4 emit header values verbatim. Any listener
+auth tokens the caller sends (direction 1) or beta flags that double
+as capability indicators appear in the trace log. Restrict log-archive
+access accordingly and avoid leaving `ROUTECTL_TRACE_HEADERS=1` on in
+long-running production processes.
+
 ## Anthropic SSE forward-compat observability
 
 routectl's Anthropic-API egress sink-drains unknown SSE block / delta
