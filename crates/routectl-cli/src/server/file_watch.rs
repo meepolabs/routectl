@@ -126,12 +126,29 @@ pub fn spawn_watcher(
     let mut watched_parents: std::collections::BTreeSet<PathBuf> =
         std::collections::BTreeSet::new();
     for target in &targets {
-        let path = target.path();
-        let parent = match path.parent() {
+        let raw_path = target.path();
+        // Canonicalize to resolve symlinks so the debouncer watches the
+        // real inode's parent directory. If the file does not exist yet
+        // (e.g. credentials.json before the first `routectl login`),
+        // canonicalize fails; fall back to the textual path and emit a
+        // one-line WARN so operators know the watcher may miss symlinked
+        // targets until the file appears.
+        let resolved = match std::fs::canonicalize(raw_path) {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(
+                    target = %raw_path.display(),
+                    "watch target canonicalize failed (file may not exist yet); \
+                     using textual path to derive parent directory",
+                );
+                raw_path.clone()
+            }
+        };
+        let parent = match resolved.parent() {
             Some(p) => p.to_path_buf(),
             None => {
                 tracing::warn!(
-                    target = %path.display(),
+                    target = %raw_path.display(),
                     "watch target has no parent directory; skipping",
                 );
                 continue;
@@ -281,9 +298,14 @@ async fn handle_event_batch(
 /// (one update site if semantics ever tighten -- case folding,
 /// NFC/NFD, etc.).
 fn is_atomic_rewrite_remove(remove_path: &std::path::Path, batch: &[DebouncedEvent]) -> bool {
+    use notify::event::ModifyKind;
     batch.iter().any(|ev| {
-        matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(_))
-            && ev.paths.iter().any(|p| basenames_match(p, remove_path))
+        matches!(
+            ev.kind,
+            EventKind::Create(_)
+                | EventKind::Modify(ModifyKind::Data(_))
+                | EventKind::Modify(ModifyKind::Name(_))
+        ) && ev.paths.iter().any(|p| basenames_match(p, remove_path))
     })
 }
 
@@ -303,13 +325,18 @@ async fn send_reload(tx: &mpsc::Sender<ReloadRequest>, req: ReloadRequest) {
 }
 
 /// True if this event kind should map to a reload. Filters out
-/// noisy kinds (`EventKind::Access`, `EventKind::Other`) so a
-/// `cat credentials.json` from another shell does not fire a
-/// reload.
+/// noisy kinds (`EventKind::Access`, `EventKind::Other`, and
+/// `EventKind::Modify(Metadata(_))`) so a `cat credentials.json`
+/// or a `chmod`/`touch`/`utimes` from another shell does not fire
+/// a spurious reload.
 fn is_reload_kind(kind: &EventKind) -> bool {
+    use notify::event::ModifyKind;
     matches!(
         kind,
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+        EventKind::Create(_)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Remove(_)
     )
 }
 
@@ -793,6 +820,139 @@ mod tests {
             "WARN wording for lone Remove changed; if intentional, update the test \
              alongside the production string. Got: {:?}",
             warns[0].message,
+        );
+    }
+
+    // --- Finding #4: metadata events must not trigger reloads ---------
+
+    #[test]
+    fn is_reload_kind_passes_data_writes_and_creates() {
+        // Arrange + Assert: the kinds that SHOULD trigger a reload pass
+        // the filter. This pins the positive side of the tightened gate.
+        let allowed: &[EventKind] = &[
+            EventKind::Create(notify::event::CreateKind::File),
+            EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+            EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::To,
+            )),
+            EventKind::Remove(notify::event::RemoveKind::File),
+        ];
+        for kind in allowed {
+            assert!(
+                is_reload_kind(kind),
+                "is_reload_kind should return true for {kind:?} but returned false",
+            );
+        }
+    }
+
+    #[test]
+    fn is_reload_kind_excludes_metadata_events() {
+        // Arrange + Assert: chmod / touch / utimes / access events must
+        // NOT pass the filter. Before the fix, Modify(Metadata(_)) fell
+        // through the broad `Modify(_)` arm.
+        let blocked: &[EventKind] = &[
+            EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::Permissions,
+            )),
+            EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::WriteTime,
+            )),
+            EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::AccessTime,
+            )),
+            EventKind::Access(notify::event::AccessKind::Read),
+            EventKind::Access(notify::event::AccessKind::Open(
+                notify::event::AccessMode::Read,
+            )),
+        ];
+        for kind in blocked {
+            assert!(
+                !is_reload_kind(kind),
+                "is_reload_kind should return false for {kind:?} but returned true",
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_event_does_not_trigger_reload() {
+        // Arrange: a single Metadata(Permissions) event -- the exact
+        // kind emitted by `chmod 600 config.toml`. Before the fix this
+        // caused a spurious reload; now it must produce zero
+        // ReloadRequest sends.
+        let dir = std::path::PathBuf::from("/tmp/routectl-test");
+        let target = dir.join("config.toml");
+        let batch = vec![make_event(
+            EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::Permissions,
+            )),
+            &target,
+        )];
+        let targets = vec![WatchTarget::Config(target.clone())];
+
+        // Act
+        let events = drive_handle_event_batch(batch, targets);
+
+        // Assert: no WARN and no INFO (the reload branch emits no
+        // events for silently-dropped kinds). Any event at all here
+        // means the filter did not engage.
+        let reload_events: Vec<&CapturedEvent> = events
+            .iter()
+            .filter(|e| {
+                // The reload path emits a DEBUG breadcrumb with the
+                // target path when it dispatches. Match on any message
+                // referencing config.toml to catch false positives.
+                e.message.contains("config.toml") || e.message.to_lowercase().contains("reload")
+            })
+            .collect();
+        assert!(
+            reload_events.is_empty(),
+            "metadata-only event must not emit any reload-related log entries; \
+             got {reload_events:?}",
+        );
+    }
+
+    // --- Finding #3: symlinked config paths must fire reloads ----------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_config_path_fires_reload() {
+        // Arrange: real file under one tempdir; symlink under another
+        // dir points to the real file. `spawn_watcher` receives the
+        // symlink path. Canonicalize inside `spawn_watcher` must resolve
+        // to the real file's parent dir so the inotify watch fires when
+        // the real file is written.
+        let real_dir = tempdir().unwrap();
+        let real_file = real_dir.path().join("config.toml");
+        std::fs::write(&real_file, b"# initial\n").unwrap();
+
+        let link_dir = tempdir().unwrap();
+        let link_path = link_dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real_file, &link_path).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<ReloadRequest>(8);
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+        let _handle = spawn_watcher(
+            vec![WatchTarget::Config(link_path.clone())],
+            tx,
+            shutdown_rx,
+        )
+        .unwrap();
+
+        tokio::time::sleep(StdDuration::from_millis(SETTLE_MS)).await;
+
+        // Act: write to the real file (NOT through the symlink). The
+        // inotify watch on the real dir should fire.
+        std::fs::write(&real_file, b"# changed via real path\n").unwrap();
+
+        // Assert: a Config reload request arrives within the debounce
+        // + polling slack window.
+        let got = wait_for_one(&mut rx, StdDuration::from_secs(3)).await;
+        assert_eq!(
+            got,
+            Some(ReloadRequest::Config),
+            "writing to the real file behind a symlink must fire a Config reload",
         );
     }
 }
