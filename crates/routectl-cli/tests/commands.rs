@@ -60,6 +60,11 @@ fn config_with(server_url: &str) -> Config {
 }
 
 #[tokio::test]
+// Serialized like the other env-mutating tests: login::run opens the
+// default OAuthStore, which reads the process-global XDG_CONFIG_HOME.
+// Without this it can race a sibling test and observe its half-written
+// credentials file (before that test's chmod 0600).
+#[serial_test::serial]
 async fn login_unknown_provider_errors_clearly() {
     // The login flow should fail-fast on an unknown provider name BEFORE
     // binding any sockets or opening browsers. (clap normally rejects
