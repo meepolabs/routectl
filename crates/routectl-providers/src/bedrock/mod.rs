@@ -261,6 +261,103 @@ impl BedrockProvider {
             client,
         }
     }
+
+    /// Build, annotate, and SigV4-sign a Bedrock outbound request.
+    ///
+    /// Shared by `complete()` and `stream()`; the two methods differ
+    /// only in the URL suffix and the Accept header they pass in.
+    ///
+    /// Steps performed:
+    /// 1. Build the reqwest::Request from `url`, `accept`, and the
+    ///    serialized JSON body.
+    /// 2. Explicitly insert `user-agent` into the request headers so
+    ///    the dir-2 header trace sees it and SigV4 signs it.
+    /// 3. Merge `header_extras` (provider + model, router-composed),
+    ///    skipping auth-reserved names (including the `x-amz-` prefix)
+    ///    and routectl-managed names.
+    /// 4. Apply SigV4 signing (or BearerKey passthrough) via
+    ///    `signing::apply_auth`.
+    /// 5. Emit the dir-2 outgoing header trace.
+    async fn build_signed_request(
+        &self,
+        body_str: Vec<u8>,
+        req: &ChatRequest,
+        url: &str,
+        accept: &str,
+    ) -> Result<reqwest::Request> {
+        let mut request = self
+            .client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, accept)
+            .body(body_str)
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        // Explicitly insert user-agent so it appears in the dir-2
+        // header trace and is included in the SigV4 signing scope.
+        // The client-level UA (set via common_builder) is not visible
+        // on request.headers() -- only headers explicitly set on the
+        // request itself show up there.
+        if let Some(ua) = &self.cfg.user_agent {
+            let ua_value = reqwest::header::HeaderValue::from_str(ua)
+                .map_err(|e| Error::Config(format!("invalid user-agent value: {e}")))?;
+            request
+                .headers_mut()
+                .insert(reqwest::header::USER_AGENT, ua_value);
+        }
+
+        // Prefer the router-composed map (provider + model merged at
+        // dispatch) if present; fall back to `self.cfg.header_extras`
+        // for library consumers that built the provider directly.
+        let header_source = crate::http_client::effective_header_extras(
+            &self.cfg.header_extras,
+            req.routectl_internal.header_extras.as_ref(),
+        );
+        for (k, v) in &header_source {
+            // Defense-in-depth: refuse auth-reserved headers from
+            // user-supplied extra_headers. This includes the `x-amz-`
+            // prefix -- any x-amz-* injected after SigV4 signing would
+            // not appear in the signed string, invalidating the
+            // signature. The BearerKey path doesn't sign at all but
+            // guarding here keeps both paths safe.
+            if crate::http_client::is_auth_header(k) {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
+                );
+                continue;
+            }
+            if crate::http_client::is_managed_header(k) {
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "dropping managed header from header_extras; composed dynamically by routectl"
+                );
+                continue;
+            }
+            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
+                .map_err(|e| Error::Config(format!("invalid header name `{k}`: {e}")))?;
+            let value = reqwest::header::HeaderValue::from_str(v)
+                .map_err(|e| Error::Config(format!("invalid header value for `{k}`: {e}")))?;
+            request.headers_mut().insert(name, value);
+        }
+
+        signing::apply_auth(&mut request, &self.resolved, &self.cfg.region).await?;
+        // Dir 2: outgoing request headers. The SigV4 Authorization /
+        // x-amz-* (or Bearer) headers were applied to `request` by
+        // signing::apply_auth above, so auth IS visible here. The
+        // user-agent is also visible here because it was explicitly
+        // inserted above. Opt-in via ROUTECTL_TRACE_HEADERS.
+        crate::header_trace::outgoing(
+            self.cfg.api_shape.provider_kind_str(),
+            &self.cfg.id,
+            request.headers(),
+        );
+
+        Ok(request)
+    }
 }
 
 #[async_trait]
@@ -314,61 +411,9 @@ impl Provider for BedrockProvider {
         let body_str = serde_json::to_vec(&body)
             .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
 
-        let mut request = self
-            .client
-            .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT, "application/json")
-            .body(body_str)
-            .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-
-        // Prefer the router-composed map (provider + model merged at
-        // dispatch) if present; fall back to `self.cfg.header_extras`
-        // for library consumers that built the provider directly.
-        let header_source = crate::http_client::effective_header_extras(
-            &self.cfg.header_extras,
-            req.routectl_internal.header_extras.as_ref(),
-        );
-        for (k, v) in &header_source {
-            // Defense-in-depth: refuse auth-reserved headers from
-            // user-supplied extra_headers. The Bedrock SigV4 path
-            // would overwrite Authorization later anyway, but the
-            // BearerKey path wouldn't -- so guarding here keeps both
-            // paths safe and surfaces the misconfiguration.
-            if crate::http_client::is_auth_header(k) {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
-                );
-                continue;
-            }
-            if crate::http_client::is_managed_header(k) {
-                tracing::debug!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "dropping managed header from header_extras; composed dynamically by routectl"
-                );
-                continue;
-            }
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| Error::Config(format!("invalid header name `{k}`: {e}")))?;
-            let value = reqwest::header::HeaderValue::from_str(v)
-                .map_err(|e| Error::Config(format!("invalid header value for `{k}`: {e}")))?;
-            request.headers_mut().insert(name, value);
-        }
-
-        signing::apply_auth(&mut request, &self.resolved, &self.cfg.region).await?;
-        // Dir 2: outgoing request headers. The SigV4 Authorization /
-        // x-amz-* (or Bearer) headers were applied to `request` by
-        // signing::apply_auth above, so auth IS visible here -- it is
-        // not signed downstream. Opt-in via ROUTECTL_TRACE_HEADERS.
-        crate::header_trace::outgoing(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            request.headers(),
-        );
+        let request = self
+            .build_signed_request(body_str, &req, &url, "application/json")
+            .await?;
 
         let resp = self
             .client
@@ -439,62 +484,9 @@ impl Provider for BedrockProvider {
         let body_str = serde_json::to_vec(&body)
             .map_err(|e| Error::NormalizeRequest(self.cfg.id.clone(), e.to_string()))?;
 
-        let mut request = self
-            .client
-            .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(
-                reqwest::header::ACCEPT,
-                "application/vnd.amazon.eventstream",
-            )
-            .body(body_str)
-            .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
-
-        // Prefer the router-composed map (provider + model merged at
-        // dispatch) if present; fall back to `self.cfg.header_extras`
-        // for library consumers that built the provider directly.
-        let header_source = crate::http_client::effective_header_extras(
-            &self.cfg.header_extras,
-            req.routectl_internal.header_extras.as_ref(),
-        );
-        for (k, v) in &header_source {
-            // Defense-in-depth: refuse auth-reserved headers from
-            // user-supplied extra_headers. The Bedrock SigV4 path
-            // would overwrite Authorization later anyway, but the
-            // BearerKey path wouldn't -- so guarding here keeps both
-            // paths safe and surfaces the misconfiguration.
-            if crate::http_client::is_auth_header(k) {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "ignoring auth-reserved header from header_extras (would bypass provider auth)"
-                );
-                continue;
-            }
-            if crate::http_client::is_managed_header(k) {
-                tracing::debug!(
-                    provider = %self.cfg.id,
-                    header = %k,
-                    "dropping managed header from header_extras; composed dynamically by routectl"
-                );
-                continue;
-            }
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| Error::Config(format!("invalid header name `{k}`: {e}")))?;
-            let value = reqwest::header::HeaderValue::from_str(v)
-                .map_err(|e| Error::Config(format!("invalid header value for `{k}`: {e}")))?;
-            request.headers_mut().insert(name, value);
-        }
-
-        signing::apply_auth(&mut request, &self.resolved, &self.cfg.region).await?;
-        // Dir 2: outgoing request headers (incl. signed auth) for the
-        // stream path. Opt-in via ROUTECTL_TRACE_HEADERS.
-        crate::header_trace::outgoing(
-            self.cfg.api_shape.provider_kind_str(),
-            &self.cfg.id,
-            request.headers(),
-        );
+        let request = self
+            .build_signed_request(body_str, &req, &url, "application/vnd.amazon.eventstream")
+            .await?;
 
         let resp = self
             .client

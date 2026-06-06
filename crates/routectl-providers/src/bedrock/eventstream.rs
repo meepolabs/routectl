@@ -190,11 +190,13 @@ where
                         // state machine inside `sse_state` is
                         // tolerant to one missing event.
                         //
-                        // Diagnosability: dump the failed frame's
-                        // prelude + first 256 bytes as hex at WARN so
-                        // a future framing bug is diagnosable from a
-                        // single log capture instead of an ad-hoc
-                        // tcpdump session.
+                        // Log hygiene: the 12-byte prelude (always
+                        // non-content: total_length, headers_length,
+                        // prelude_crc) is safe to emit at WARN for
+                        // diagnosability. The variable-length payload
+                        // may carry model output and must NOT go to
+                        // a third-party log SaaS at WARN; it is
+                        // gated at TRACE instead.
                         let advertised = if buffer.len() >= 4 {
                             u32::from_be_bytes([
                                 buffer[0], buffer[1], buffer[2], buffer[3],
@@ -202,8 +204,9 @@ where
                         } else {
                             0
                         };
-                        let dump_len = advertised.min(256).min(buffer.len());
-                        let hex: String = buffer[..dump_len]
+                        // Log only the 12-byte prelude at WARN.
+                        let prelude_len = 12_usize.min(buffer.len());
+                        let prelude_hex: String = buffer[..prelude_len]
                             .iter()
                             .map(|b| format!("{b:02x}"))
                             .collect::<Vec<_>>()
@@ -212,9 +215,26 @@ where
                             provider = %provider_id,
                             err = %e,
                             frame_len = advertised,
-                            hex = %hex,
+                            prelude_hex = %prelude_hex,
                             "bedrock eventstream frame decode failed; skipping frame"
                         );
+                        // Full hex dump (up to 256 bytes) at TRACE only.
+                        // Gated behind the trace opt-in so payload bytes
+                        // never reach a third-party log SaaS by default.
+                        if tracing::enabled!(tracing::Level::TRACE) {
+                            let dump_len = advertised.min(256).min(buffer.len());
+                            let hex: String = buffer[..dump_len]
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            tracing::trace!(
+                                provider = %provider_id,
+                                frame_len = advertised,
+                                hex = %hex,
+                                "bedrock eventstream frame decode failed (full hex dump)"
+                            );
+                        }
 
                         // Skip past the failed frame.
                         if advertised > 0 && buffer.len() >= advertised {
@@ -334,9 +354,21 @@ fn handle_invoke_frame(
                     return Ok(None);
                 }
             };
-            let b64 = outer.get("bytes").and_then(|v| v.as_str()).ok_or_else(|| {
-                Error::Streaming("bedrock chunk payload missing `bytes` field".into())
-            })?;
+            let b64 = match outer.get("bytes").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => {
+                    // Missing `bytes` field -- treat symmetrically with
+                    // the malformed-outer-JSON arm above: WARN and skip
+                    // the frame rather than killing the stream. One
+                    // malformed frame should not abort an in-flight
+                    // response.
+                    tracing::warn!(
+                        provider = %provider_id,
+                        "bedrock chunk payload missing `bytes` field; skipping"
+                    );
+                    return Ok(None);
+                }
+            };
             let decoded = B64_STANDARD.decode(b64).map_err(|e| {
                 Error::Streaming(format!("bedrock chunk bytes not valid base64: {e}"))
             })?;
@@ -526,12 +558,19 @@ mod tests {
     }
 
     #[test]
-    fn chunk_payload_missing_bytes_field_errors() {
+    fn chunk_payload_missing_bytes_field_skips_frame() {
+        // After the symmetric-skip fix, a chunk frame missing the
+        // `bytes` field should produce Ok(None) and a WARN -- not a
+        // stream-fatal Err. This mirrors the behavior for malformed
+        // outer JSON.
         let payload = r#"{"not_bytes":"oops"}"#;
-        let err = handle("chunk", payload).unwrap_err();
-        match err {
-            Error::Streaming(msg) => assert!(msg.contains("missing `bytes` field"), "got: {msg}"),
-            other => panic!("expected Streaming, got {other:?}"),
+        let res = handle("chunk", payload);
+        match res {
+            Ok(None) => {} // expected: frame skipped
+            Ok(Some(_)) => panic!("missing-bytes chunk should skip, not yield a chunk"),
+            Err(e) => {
+                panic!("regression: missing-bytes chunk returned Err instead of Ok(None): {e:?}")
+            }
         }
     }
 
