@@ -1,10 +1,10 @@
 //! Provider implementations.
 //!
 //! The default build includes `openai-compat`, `anthropic-api`, and
-//! `bedrock`. To build a lean binary without the AWS SDK dependency
-//! tree:
+//! `bedrock`. To build this providers library without the AWS SDK
+//! dependency tree:
 //!
-//!   cargo build --release --no-default-features \
+//!   cargo check -p routectl-providers --no-default-features \
 //!     --features openai-compat,anthropic-api
 //!
 //! Per-model quirks (e.g. "drop temperature for o3-mini",

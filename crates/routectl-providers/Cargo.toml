@@ -22,8 +22,11 @@ default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"]
 # Implies `anthropic-api`: the working Invoke body shape today is the
 # Anthropic Messages JSON shape, and bedrock/{invoke,eventstream}.rs
 # reuse `crate::anthropic_api::{request, response, sse, types}` directly.
-# To skip the AWS deps entirely build with:
-#   --no-default-features --features openai-compat,anthropic-api
+# To skip the AWS deps entirely when building this providers library:
+#   cargo check -p routectl-providers --no-default-features \
+#     --features openai-compat,anthropic-api
+# (A --workspace build still pulls in AWS: routectl-cli always links
+#  bedrock, and Cargo feature unification re-enables it graph-wide.)
 "bedrock" = [
     "anthropic-api",
     "dep:reqwest",
