@@ -1993,18 +1993,20 @@ impl RetryPolicy {
     /// Resolve the retry cap for a given upstream HTTP status code.
     /// Returns 0 for non-retryable errors.
     ///
-    /// Note: `retry_on_5xx` only applies to 5xx codes that are ALSO
-    /// fallbackable per `is_fallbackable_status`. A 5xx code excluded
-    /// by the allowlist (or named in the denylist) is treated as
-    /// non-retryable here AND as non-fallbackable in `should_fallback`,
-    /// so it propagates immediately to the caller. This is intentional:
-    /// an operator who excludes a status from the fallback predicate
-    /// is asking routectl to surface the error verbatim, and silently
-    /// retrying anyway would contradict that.
+    /// Both the 429 arm and the 5xx arm are gated on
+    /// `is_fallbackable_status`. A status excluded by the allowlist
+    /// (or named in the denylist) is treated as non-retryable here AND
+    /// as non-fallbackable in `should_fallback`, so it propagates
+    /// immediately to the caller. This is intentional: an operator who
+    /// excludes a status from the fallback predicate is asking routectl
+    /// to surface the error verbatim, and silently retrying anyway
+    /// would contradict that.
     pub fn retries_for_status(&self, status: u16) -> u32 {
         match status {
             0 => self.retry_on_network.unwrap_or(self.max_attempts),
-            429 => self.retry_on_429.unwrap_or(self.max_attempts),
+            429 if self.is_fallbackable_status(429) => {
+                self.retry_on_429.unwrap_or(self.max_attempts)
+            }
             s if (500..600).contains(&s) && self.is_fallbackable_status(s) => {
                 self.retry_on_5xx.unwrap_or(self.max_attempts)
             }
@@ -2368,6 +2370,73 @@ max_output_token = 32000
         assert!(
             msg.contains("max_output_token") || msg.contains("unknown field"),
             "expected unknown-field error; got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod retries_for_status_tests {
+    //! Pin the symmetry contract: both the 429 arm and the 5xx arm of
+    //! `retries_for_status` honor `is_fallbackable_status`. A status
+    //! excluded from the fallback predicate (via allowlist miss or
+    //! denylist hit) must also return 0 from `retries_for_status`.
+    use super::RetryPolicy;
+
+    /// Regression guard: default policy (no allowlist/denylist
+    /// restrictions) must still retry 429 up to max_attempts.
+    #[test]
+    fn default_policy_retries_429_unchanged() {
+        let p = RetryPolicy::default();
+        assert!(
+            p.is_fallbackable_status(429),
+            "default policy: 429 must be fallbackable"
+        );
+        assert_eq!(
+            p.retries_for_status(429),
+            p.max_attempts,
+            "default policy: retries_for_status(429) must equal max_attempts"
+        );
+    }
+
+    /// When an operator puts 429 in `retry_denylist`, both
+    /// `is_fallbackable_status` and `retries_for_status` must return
+    /// false / 0 -- the error propagates verbatim.
+    #[test]
+    fn denylist_excludes_429_makes_it_non_retryable() {
+        let p = RetryPolicy {
+            retry_allowlist: vec![],
+            retry_denylist: Some(vec![429]),
+            ..RetryPolicy::default()
+        };
+        assert!(
+            !p.is_fallbackable_status(429),
+            "denylist=[429]: is_fallbackable_status must be false"
+        );
+        assert_eq!(
+            p.retries_for_status(429),
+            0,
+            "denylist=[429]: retries_for_status(429) must be 0"
+        );
+    }
+
+    /// When an operator uses an explicit `retry_allowlist` that does
+    /// not include 429 (e.g. only [500, 502]), 429 is excluded from
+    /// the fallback predicate and must also be non-retryable.
+    #[test]
+    fn allowlist_without_429_makes_it_non_retryable() {
+        let p = RetryPolicy {
+            retry_allowlist: vec![500, 502],
+            retry_denylist: None,
+            ..RetryPolicy::default()
+        };
+        assert!(
+            !p.is_fallbackable_status(429),
+            "allowlist=[500,502]: 429 not in list, must not be fallbackable"
+        );
+        assert_eq!(
+            p.retries_for_status(429),
+            0,
+            "allowlist=[500,502]: retries_for_status(429) must be 0"
         );
     }
 }

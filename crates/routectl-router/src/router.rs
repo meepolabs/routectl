@@ -4262,28 +4262,29 @@ mod circuit_breaker_slot_release_tests {
     }
 
     #[tokio::test]
-    async fn complete_half_open_retry_without_fallback_does_not_lock_breaker() {
-        // Regression for the retry-without-fallback leak: a NON-probe
-        // request hits a half-open provider that returns 429. The
-        // operator's policy excludes 429 from the fallback allowlist
-        // (`do_fallback=false`) but still permits a same-provider 429
-        // retry (`retries_for_status(429)>=1`), so the dispatch lands on
-        // the `can_retry_here && !do_fallback` branch and its `continue`
-        // re-enters the loop. Without the slot-release fix the in-loop
-        // re-gate sees the still-held half_open slot, returns CircuitOpen,
-        // and the single-entry chain exhausts -- leaving the slot stuck
-        // `true` forever (permanent CircuitOpen). With the fix the slot is
-        // freed before each re-probe.
+    async fn complete_half_open_non_fallbackable_429_does_not_lock_breaker() {
+        // Regression: a NON-probe request hits a half-open provider that
+        // returns 429 under a policy that excludes 429 from fallback
+        // (`retry_allowlist=[500]`). Because `retries_for_status` honors
+        // the fallback predicate, an excluded 429 is also non-retryable
+        // (`retries_for_status(429)=0`) even with `retry_on_429` set --
+        // exclusion wins. So the dispatch takes the terminal
+        // non-fallbackable path, which must release the half-open probe
+        // slot before returning. A leaked slot would leave the breaker
+        // stuck CircuitOpen forever; the second dispatch must still reach
+        // the upstream. (The release at the `can_retry_here && !do_fallback`
+        // site is now defense-in-depth -- unreachable while every retryable
+        // status is also fallbackable.)
         let calls = Arc::new(AtomicUsize::new(0));
         let provider: Arc<dyn Provider> = Arc::new(Probe429Provider {
             id: "p".into(),
             calls: calls.clone(),
         });
-        // retry_allowlist=[500] excludes 429 (so do_fallback=false);
-        // retry_on_429=2 makes retries_for_status(429)=2, so the first
-        // attempt (attempts_made=1 < 2) is can_retry_here, and the loop
-        // still terminates on the second attempt. Zero backoff/jitter keep
-        // the test instant.
+        // retry_allowlist=[500] excludes 429: do_fallback=false AND
+        // retries_for_status(429)=0 (exclusion wins over retry_on_429), so
+        // the attempt is neither retried nor fallen back -- it hits the
+        // terminal non-fallbackable release. Zero backoff/jitter keep the
+        // test instant.
         let retry = RetryPolicy {
             max_attempts: 1,
             initial_backoff_ms: 0,
