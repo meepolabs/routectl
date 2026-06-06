@@ -84,6 +84,12 @@ impl IngressAdapter for OpenAiIngress {
         // it. Rename it to `max_tokens` here, before deserialization,
         // so the per-request token cap is never lost.
         normalize_max_completion_tokens(&mut body);
+        // o-series / gpt-5+ clients also send `role: "developer"` as
+        // the system-voice successor. The canonical `Role` enum does
+        // not include that variant so serde would 400. Rewrite it to
+        // `role: "system"` here, before deserialization, so it then
+        // flows through `lift_system_messages` normally.
+        normalize_developer_role(&mut body);
 
         // Forward-compat sweep: pull every top-level key NOT on
         // `ChatRequest` into `provider_extras` so OpenAI clients
@@ -137,6 +143,12 @@ impl IngressAdapter for OpenAiIngress {
         // OpenAI Chat-Completions clients see the tool call only on the
         // `tool_calls` channel they understand.
         let resp = strip_tool_use_parts_when_tool_calls_present(resp);
+        // Strip `matched_stop_sequence` from every choice: it is an
+        // Anthropic-internal field set by the egress to round-trip the
+        // matched stop sequence back through the canonical layer to the
+        // Anthropic ingress. OpenAI Chat-Completions clients do not
+        // expect it and some SDKs error or forward it unexpectedly.
+        let resp = strip_matched_stop_sequence_from_response(resp);
         serde_json::to_value(&resp)
             .map_err(|e| Error::Config(format!("openai ingress: serialize response: {e}")))
     }
@@ -156,6 +168,12 @@ impl IngressAdapter for OpenAiIngress {
         // chunk can never carry a `tool_use` content block. The
         // double-emission the non-streaming `render_response` guards
         // against is structurally impossible here.
+        //
+        // Strip `matched_stop_sequence` before serializing: it is an
+        // Anthropic-internal field (see `Choice.matched_stop_sequence`
+        // docs) and OpenAI Chat-Completions clients do not expect it on
+        // streaming chunks.
+        let chunk = strip_matched_stop_sequence_from_chunk(chunk);
         let data = serde_json::to_string(&chunk)
             .map_err(|e| Error::Config(format!("openai ingress: serialize chunk: {e}")))?;
         Ok(vec![SseEvent::unnamed(data)])
@@ -302,28 +320,74 @@ fn normalize_max_completion_tokens(body: &mut Value) {
     // `max_completion_tokens` above; `max_tokens` stays unchanged.
 }
 
-/// If any `Role::System` messages are in `req.messages`, concatenate
-/// their text content with newlines into `req.system` (preserving any
-/// existing `req.system` value) and remove them from the messages
-/// array. No-op when there are no System messages.
+/// Rewrite `role: "developer"` to `role: "system"` on each message
+/// before serde deserialization. The o-series / gpt-5+ system-voice
+/// successor role is not a canonical `Role` variant; renaming it here
+/// means the message then flows through `lift_system_messages` normally.
+/// No other role values are touched.
+fn normalize_developer_role(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for msg in messages.iter_mut() {
+        let Some(obj) = msg.as_object_mut() else {
+            continue;
+        };
+        if obj.get("role").and_then(|v| v.as_str()) == Some("developer") {
+            obj.insert("role".into(), Value::String("system".into()));
+        }
+    }
+}
+
+/// If any `Role::System` messages are in `req.messages`, lift their text
+/// content into `req.system` and remove them from the messages array.
+/// No-op when there are no System messages.
+///
+/// Lifting strategy:
+/// - `MessageContent::Text` messages contribute a `SystemBlock` with no
+///   `cache_control` (same as before v0.7.0).
+/// - `MessageContent::Parts` messages contribute one `SystemBlock` per text
+///   part, preserving `cache_control` and `citations` from each part.
+///
+/// Output shape:
+/// - When no lifted block carries `cache_control` or `citations`, the result
+///   is concatenated into `SystemContent::Text` (backward-compatible).
+/// - When any block carries `cache_control` or `citations`, the result is
+///   `SystemContent::Blocks` so the per-block cache breakpoints survive the
+///   ingress boundary and reach the Anthropic / Bedrock egress intact.
 fn lift_system_messages(req: &mut ChatRequest) {
-    let mut lifted: Vec<String> = Vec::new();
+    let mut lifted_blocks: Vec<routectl_core::SystemBlock> = Vec::new();
     req.messages.retain(|m| {
         if !matches!(m.role, Role::System) {
             return true;
         }
         match &m.content {
-            MessageContent::Text(t) => lifted.push(t.clone()),
+            MessageContent::Text(t) => {
+                lifted_blocks.push(routectl_core::SystemBlock {
+                    kind: "text".into(),
+                    text: t.clone(),
+                    cache_control: None,
+                    citations: None,
+                });
+            }
             MessageContent::Parts(parts) => {
-                // Collect text parts only -- images/documents in a
-                // System message are not meaningful in canonical and
-                // would have been dropped by the egress anyway.
+                // Preserve cache_control and citations from each text part
+                // so prompt-cache breakpoints survive the ingress boundary.
+                // Non-text parts (images, documents) in a System message are
+                // not meaningful in canonical and would be dropped by egresses
+                // that do not support them; skip them here as before.
                 for p in parts {
-                    if let routectl_core::ContentPart::Known(
-                        routectl_core::KnownContentPart::Text { text, .. },
-                    ) = p
+                    if let ContentPart::Known(KnownContentPart::Text {
+                        text,
+                        cache_control,
+                    }) = p
                     {
-                        lifted.push(text.clone());
+                        lifted_blocks.push(routectl_core::SystemBlock {
+                            kind: "text".into(),
+                            text: text.clone(),
+                            cache_control: cache_control.clone(),
+                            citations: None,
+                        });
                     }
                 }
             }
@@ -332,27 +396,73 @@ fn lift_system_messages(req: &mut ChatRequest) {
         false
     });
 
-    if lifted.is_empty() {
+    if lifted_blocks.is_empty() {
         return;
     }
-    let lifted_text = lifted.join("\n");
+
+    let needs_blocks = lifted_blocks
+        .iter()
+        .any(|b| b.cache_control.is_some() || b.citations.is_some());
+
     match req.system.take() {
-        Some(SystemContent::Text(existing)) => {
+        Some(SystemContent::Text(existing)) if !needs_blocks => {
+            let lifted_text = lifted_blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             req.system = Some(SystemContent::Text(format!("{existing}\n{lifted_text}")));
         }
-        Some(SystemContent::Blocks(mut blocks)) => {
-            blocks.push(routectl_core::SystemBlock {
+        Some(SystemContent::Text(existing)) => {
+            // Upgrade the plain existing text to a Blocks vec so that
+            // cache_control on the lifted parts is not silently dropped.
+            let mut blocks = vec![routectl_core::SystemBlock {
                 kind: "text".into(),
-                text: lifted_text,
+                text: existing,
                 cache_control: None,
                 citations: None,
-            });
+            }];
+            blocks.extend(lifted_blocks);
             req.system = Some(SystemContent::Blocks(blocks));
         }
-        None => {
+        Some(SystemContent::Blocks(mut blocks)) => {
+            blocks.extend(lifted_blocks);
+            req.system = Some(SystemContent::Blocks(blocks));
+        }
+        None if !needs_blocks => {
+            let lifted_text = lifted_blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             req.system = Some(SystemContent::Text(lifted_text));
         }
+        None => {
+            req.system = Some(SystemContent::Blocks(lifted_blocks));
+        }
     }
+}
+
+/// Strip `matched_stop_sequence` from every `Choice` in a `ChatResponse`.
+/// This is an Anthropic-internal field set by the egress to thread the
+/// matched stop sequence back to the Anthropic ingress via the canonical
+/// layer. OpenAI Chat-Completions clients do not expect it and some SDKs
+/// error or forward it unexpectedly to callers.
+fn strip_matched_stop_sequence_from_response(mut resp: ChatResponse) -> ChatResponse {
+    for choice in resp.choices.iter_mut() {
+        choice.matched_stop_sequence = None;
+    }
+    resp
+}
+
+/// Strip `matched_stop_sequence` from every `ChunkChoice` in a `ChatChunk`.
+/// Same rationale as `strip_matched_stop_sequence_from_response`: OpenAI
+/// streaming clients do not expect this Anthropic-internal field.
+fn strip_matched_stop_sequence_from_chunk(mut chunk: ChatChunk) -> ChatChunk {
+    for choice in chunk.choices.iter_mut() {
+        choice.matched_stop_sequence = None;
+    }
+    chunk
 }
 
 /// Strip duplicate `tool_use` content blocks from any assistant choice
@@ -1112,5 +1222,149 @@ mod tests {
             .parse_request(&HeaderMap::new(), body)
             .unwrap();
         assert_eq!(req.max_tokens, Some(512));
+    }
+
+    /// o-series / gpt-5+ clients may send `role: "developer"` as the
+    /// system-voice successor role. The canonical `Role` enum has no
+    /// such variant, so a bare serde would 400. The ingress rewrites
+    /// it to `role: "system"` before deserialization, then
+    /// `lift_system_messages` promotes it into `req.system` normally.
+    #[test]
+    fn ingress_treats_developer_role_as_system() {
+        // Arrange: one developer-role message + one user message.
+        let body = json!({
+            "model": "o3",
+            "messages": [
+                {"role": "developer", "content": "respond in JSON only"},
+                {"role": "user", "content": "list colors"}
+            ]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert: developer message lifted into req.system.
+        match req.system {
+            Some(SystemContent::Text(s)) => assert_eq!(s, "respond in JSON only"),
+            other => panic!("expected SystemContent::Text, got {other:?}"),
+        }
+        // Developer message removed from messages array.
+        assert_eq!(req.messages.len(), 1);
+        assert!(matches!(req.messages[0].role, Role::User));
+    }
+
+    /// A Parts-form system message whose text block carries a
+    /// `cache_control` marker must survive the `lift_system_messages`
+    /// pass as `SystemContent::Blocks` with the per-block `cache_control`
+    /// intact. Prior to the fix, the cache_control was silently dropped
+    /// (the old code concatenated only the text string).
+    #[test]
+    fn lift_system_message_parts_preserves_cache_control() {
+        // Arrange: system message with a Parts body carrying cache_control.
+        let body = json!({
+            "model": "claude-sonnet-4",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "be precise",
+                            "cache_control": {"type": "ephemeral", "ttl": "5m"}
+                        }
+                    ]
+                },
+                {"role": "user", "content": "hi"}
+            ]
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert: system is Blocks and cache_control survived.
+        match &req.system {
+            Some(SystemContent::Blocks(blocks)) => {
+                assert_eq!(blocks.len(), 1);
+                assert_eq!(blocks[0].text, "be precise");
+                let cc = blocks[0]
+                    .cache_control
+                    .as_ref()
+                    .expect("cache_control must survive the lift");
+                assert_eq!(cc.effective_ttl(), "5m");
+            }
+            other => panic!("expected SystemContent::Blocks, got {other:?}"),
+        }
+        // System message removed from messages array.
+        assert_eq!(req.messages.len(), 1);
+    }
+
+    /// `matched_stop_sequence` is an Anthropic-internal field threaded
+    /// through the canonical layer so the Anthropic ingress can emit
+    /// the correct `stop_reason` / `stop_sequence` pair. OpenAI
+    /// Chat-Completions clients do not expect it. The OpenAI ingress
+    /// must strip it from every `choices[]` entry before serializing.
+    /// This test covers both the non-streaming (`render_response`) and
+    /// the streaming (`render_chunk`) paths.
+    #[test]
+    fn render_strips_matched_stop_sequence_from_choices() {
+        // --- non-streaming path ---
+        let resp = ChatResponse {
+            id: "chatcmpl-1".into(),
+            model: "claude-sonnet-4".into(),
+            created: 1700000000,
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Text("done".into()),
+                    reasoning: None,
+                    reasoning_details: Vec::new(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+                matched_stop_sequence: Some("</answer>".into()),
+            }],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+        };
+        let v = OpenAiIngress.render_response(resp).unwrap();
+        let choice = &v["choices"][0];
+        assert!(
+            choice.get("matched_stop_sequence").is_none()
+                || choice["matched_stop_sequence"].is_null(),
+            "render_response must not emit matched_stop_sequence: {choice}"
+        );
+
+        // --- streaming path ---
+        let chunk = ChatChunk {
+            id: "chatcmpl-2".into(),
+            model: "claude-sonnet-4".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: None,
+                    ..Default::default()
+                },
+                finish_reason: Some("stop_sequence".into()),
+                matched_stop_sequence: Some("</answer>".into()),
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+        };
+        let mut state = OpenAiIngress.new_stream_state();
+        let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(
+            !events[0].data.contains("matched_stop_sequence"),
+            "render_chunk must not emit matched_stop_sequence: {}",
+            events[0].data
+        );
     }
 }
