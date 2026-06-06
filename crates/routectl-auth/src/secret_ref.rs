@@ -64,9 +64,42 @@ impl SecretRef {
                 provider: prov.to_string(),
             });
         }
-        Err(Error::Auth(format!(
-            "unrecognized secret URI scheme: {uri} (expected env://, file://, literal:, or oauth://)"
-        )))
+        // The fallthrough must never echo the raw `uri`: a bare,
+        // unprefixed value (e.g. an API key pasted without a scheme) IS
+        // secret material, and this error can reach operator-facing
+        // stdout via `config check` -> shell history / CI logs. Report
+        // only the scheme-shaped prefix (validated as an RFC 3986
+        // scheme), or a generic message when none exists -- never the
+        // value itself. The expected-scheme list stays for the operator.
+        match scheme_token(uri) {
+            Some(scheme) => Err(Error::Auth(format!(
+                "unrecognized secret URI scheme `{scheme}` (expected env://, file://, literal:, or oauth://)"
+            ))),
+            None => Err(Error::Auth(
+                "unrecognized secret URI scheme: no recognized scheme prefix \
+                 (expected env://, file://, literal:, or oauth://)"
+                    .into(),
+            )),
+        }
+    }
+}
+
+/// Extract the scheme-shaped prefix of `uri` -- the text before the
+/// first `:` -- but only when it is a syntactically valid URI scheme per
+/// RFC 3986: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`. Returns `None`
+/// for a bare value with no `:` delimiter, or one whose prefix is not
+/// scheme-shaped. This guarantees secret material (which is not
+/// scheme-shaped) is never echoed back to the caller in an error.
+fn scheme_token(uri: &str) -> Option<&str> {
+    let (scheme, _) = uri.split_once(':')?;
+    let mut chars = scheme.chars();
+    if !chars.next()?.is_ascii_alphabetic() {
+        return None;
+    }
+    if chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+        Some(scheme)
+    } else {
+        None
     }
 }
 
@@ -183,6 +216,29 @@ mod tests {
         assert!(
             msg.contains("oauth://"),
             "error message must mention oauth: {msg}"
+        );
+    }
+
+    #[test]
+    fn bare_value_error_does_not_leak_secret() {
+        // A bare, unprefixed value is itself secret material. The
+        // unrecognized-scheme error must not echo it -- it reaches
+        // operator-facing stdout via `config check`. Uses an obvious
+        // fake value, never a real key.
+        let fake = "test-unprefixed-secret-not-real";
+        let err = SecretRef::parse(fake).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("supersecret"),
+            "error must not leak secret material: {msg}"
+        );
+        assert!(
+            !msg.contains(fake),
+            "error must not echo the raw value: {msg}"
+        );
+        assert!(
+            msg.contains("oauth://"),
+            "error should still list expected schemes: {msg}"
         );
     }
 }
