@@ -143,3 +143,99 @@ fn openai_compat_to_anthropic_render_strips_vendor_keys_and_omits_null_signature
     );
     assert_eq!(thinking["thinking"], "thinking trace");
 }
+
+/// Drive a canonical ChatResponse that has a tool_use block in BOTH
+/// `tool_calls` and `ContentPart::ToolUse` through the OpenAI ingress
+/// render path and assert:
+/// (a) `tool_calls` is populated with exactly one entry, and
+/// (b) the `content` field contains NO `tool_use` blocks (the
+///     `strip_tool_use_parts_when_tool_calls_present` dedup fires).
+///
+/// The text part survives the strip and collapses to a string.
+#[test]
+fn openai_render_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
+    use routectl_cli::ingress::openai::OpenAiIngress;
+    use routectl_core::{
+        ChatResponse, Choice, ContentPart, KnownContentPart, Message, MessageContent, Role, Usage,
+    };
+
+    let resp = ChatResponse {
+        id: "chatcmpl-dup".into(),
+        model: "claude-haiku-4-5".into(),
+        created: 0,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "I will call the tool.".into(),
+                        cache_control: None,
+                    }),
+                    ContentPart::Known(KnownContentPart::ToolUse {
+                        id: "call_dedup".into(),
+                        name: "calculator".into(),
+                        input: json!({"a": 1, "b": 2}),
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_dedup",
+                    "type": "function",
+                    "function": {"name": "calculator", "arguments": "{\"a\":1,\"b\":2}"}
+                })]),
+            },
+            finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 10,
+            total_tokens: 15,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+    };
+
+    let v = OpenAiIngress
+        .render_response(resp)
+        .expect("render_response must succeed");
+
+    // Assert (1): tool_calls populated with exactly one entry.
+    let tool_calls = v["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .expect("tool_calls must be an array");
+    assert_eq!(
+        tool_calls.len(),
+        1,
+        "expected exactly one tool call; got {tool_calls:?}"
+    );
+    assert_eq!(tool_calls[0]["id"], "call_dedup");
+
+    // Assert (2): content must NOT contain any tool_use blocks after dedup.
+    // After strip, the text-only parts collapse to a string; the content
+    // field will be a string, not an array with tool_use blocks.
+    let content = &v["choices"][0]["message"]["content"];
+    if let Some(arr) = content.as_array() {
+        let tool_use_blocks: Vec<_> = arr
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+            .collect();
+        assert!(
+            tool_use_blocks.is_empty(),
+            "content must not contain tool_use blocks after dedup; got: {arr:?}"
+        );
+    }
+    // The text part survives the strip and collapses to a string.
+    if let Some(s) = content.as_str() {
+        assert!(
+            s.contains("I will call the tool"),
+            "collapsed text content must be preserved; got: {s}"
+        );
+    }
+}

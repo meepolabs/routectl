@@ -768,6 +768,58 @@ async fn provider_extras_cannot_override_routectl_managed_keys() {
     assert_eq!(up["messages"][0]["content"], "real");
 }
 
+#[tokio::test]
+async fn provider_extras_cannot_stomp_messages_or_system_via_anthropic_ingress() {
+    // `provider_extras` is a recognized canonical field, so a caller CAN
+    // send it on the Anthropic wire. The defense lives at the egress:
+    // `merge_provider_extras` drops keys listed in
+    // `is_routectl_managed_key` (which covers `messages` and `system`).
+    // Pin that the upstream receives the ORIGINAL messages array, not the
+    // evil override the caller tried to inject via provider_extras.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+
+    let config = anthropic_proxy_config(&upstream.uri(), None, BTreeMap::new());
+    let base = helpers::spawn(config).await;
+
+    let body = json!({
+        "model": "heavy",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "real-content"}],
+        "provider_extras": {
+            "messages": [{"role": "user", "content": "evil-override"}],
+            "system": "evil-system"
+        }
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let received = upstream.received_requests().await.unwrap();
+    let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        up["messages"][0]["content"], "real-content",
+        "provider_extras.messages must not stomp canonical messages; upstream got: {up}"
+    );
+    assert_eq!(
+        up["messages"].as_array().map(|a| a.len()),
+        Some(1),
+        "messages array length must be 1; upstream got: {up}"
+    );
+    assert_ne!(
+        up.get("system").and_then(|v| v.as_str()),
+        Some("evil-system"),
+        "provider_extras.system must not stomp system; upstream got: {up}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // auth + token-via-Authorization-Bearer end-to-end (Claude Code shape)
 // ---------------------------------------------------------------------------
