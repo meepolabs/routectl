@@ -11,6 +11,8 @@
 //! body rather than a translation failure. Cache breakpoints survive as
 //! sibling `{cachePoint}` entries.
 
+use base64::engine::general_purpose::STANDARD as B64_STANDARD;
+use base64::Engine;
 use serde_json::Value;
 
 use routectl_core::{
@@ -392,8 +394,20 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
 /// media_type, data}`) into a `ConverseContentBlock::Image`. Returns
 /// None for URL-shape sources or unknown formats.
 fn translate_image_source(id: &str, source: &Value) -> Option<ConverseContentBlock> {
-    let obj = source.as_object()?;
-    let kind = obj.get("type").and_then(|v| v.as_str())?;
+    let Some(obj) = source.as_object() else {
+        tracing::warn!(
+            provider = id,
+            "dropping image with non-object source on Converse egress"
+        );
+        return None;
+    };
+    let Some(kind) = obj.get("type").and_then(|v| v.as_str()) else {
+        tracing::warn!(
+            provider = id,
+            "dropping image source missing `type` on Converse egress"
+        );
+        return None;
+    };
     if kind != "base64" {
         tracing::warn!(
             provider = id,
@@ -404,7 +418,14 @@ fn translate_image_source(id: &str, source: &Value) -> Option<ConverseContentBlo
     }
     let media_type = obj.get("media_type").and_then(|v| v.as_str()).unwrap_or("");
     let data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
-    let format = media_type_to_image_format(media_type)?;
+    let Some(format) = media_type_to_image_format(media_type) else {
+        tracing::warn!(
+            provider = id,
+            media_type = %media_type,
+            "dropping image with unmapped media_type on Converse egress"
+        );
+        return None;
+    };
     Some(ConverseContentBlock::Image {
         image: ConverseImage {
             format,
@@ -466,28 +487,53 @@ fn translate_document(
     source: &Value,
     title: Option<&str>,
 ) -> Option<ConverseContentBlock> {
-    let obj = source.as_object()?;
-    let kind = obj.get("type").and_then(|v| v.as_str())?;
-    if kind != "base64" {
+    let Some(obj) = source.as_object() else {
         tracing::warn!(
             provider = id,
-            source_type = %kind,
-            "dropping non-base64 document source on Converse egress; \
-             AWS Converse JSON wire only accepts base64 sources"
+            "dropping document with non-object source on Converse egress"
         );
         return None;
-    }
+    };
+    let Some(kind) = obj.get("type").and_then(|v| v.as_str()) else {
+        tracing::warn!(
+            provider = id,
+            "dropping document source missing `type` on Converse egress"
+        );
+        return None;
+    };
     let media_type = obj.get("media_type").and_then(|v| v.as_str()).unwrap_or("");
-    let data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
-    let format = media_type_to_document_format(media_type)?;
+    let raw_data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
+    // AWS Converse's JSON wire only accepts base64-encoded source bytes.
+    // A canonical text-source document carries a plain UTF-8 body, so we
+    // base64-encode it here -- a valid Anthropic shape would otherwise be
+    // dropped rather than forwarded to the model.
+    let bytes = match kind {
+        "base64" => raw_data.to_string(),
+        "text" => B64_STANDARD.encode(raw_data.as_bytes()),
+        other => {
+            tracing::warn!(
+                provider = id,
+                source_type = %other,
+                "dropping unsupported document source type on Converse egress; \
+                 AWS Converse JSON wire accepts only base64 or text sources"
+            );
+            return None;
+        }
+    };
+    let Some(format) = media_type_to_document_format(media_type) else {
+        tracing::warn!(
+            provider = id,
+            media_type = %media_type,
+            "dropping document with unmapped media_type on Converse egress"
+        );
+        return None;
+    };
     let name = sanitize_document_name(title);
     Some(ConverseContentBlock::Document {
         document: ConverseDocument {
             format,
             name,
-            source: ConverseDocumentSource {
-                bytes: data.to_string(),
-            },
+            source: ConverseDocumentSource { bytes },
         },
     })
 }
@@ -967,5 +1013,111 @@ mod tests {
              ReasoningContent block when reasoning_details is empty, got: {:?}",
             assistant.content
         );
+    }
+
+    /// A canonical text-source document (`{type:"text", media_type, data}`)
+    /// is a valid Anthropic shape and must survive translation as a base64
+    /// Converse document block -- the plain-text body gets base64-encoded
+    /// rather than dropped.
+    #[test]
+    fn text_source_document_survives_as_base64_document_block() {
+        // Arrange
+        use routectl_core::KnownContentPart;
+        let body = "the quick brown fox";
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Document {
+                source: json!({
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": body,
+                }),
+                title: Some("notes".into()),
+                citations: None,
+                cache_control: None,
+            })]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let user = result
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message must survive a text-source document");
+        let doc = user
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ConverseContentBlock::Document { document } => Some(document),
+                _ => None,
+            })
+            .expect("text-source document must produce a Document block");
+        assert_eq!(doc.format, "txt", "text/plain maps to the txt format");
+        assert_eq!(
+            doc.source.bytes,
+            B64_STANDARD.encode(body.as_bytes()),
+            "text-source body must be base64-encoded onto the Converse wire"
+        );
+    }
+
+    /// An image whose media_type doesn't map to an AWS image format is
+    /// dropped (the caller-contract promises a tracing diagnostic on every
+    /// drop). A sibling Text block confirms only the image was dropped.
+    #[test]
+    fn image_with_unmapped_media_type_is_dropped() {
+        // Arrange
+        use routectl_core::KnownContentPart;
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Known(KnownContentPart::Text {
+                    text: "look at this".into(),
+                    cache_control: None,
+                }),
+                ContentPart::Known(KnownContentPart::Image {
+                    source: json!({
+                        "type": "base64",
+                        "media_type": "image/tiff",
+                        "data": "AAAA",
+                    }),
+                    cache_control: None,
+                }),
+            ]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let user = result
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message must survive on the sibling Text block");
+        let has_image = user
+            .content
+            .iter()
+            .any(|b| matches!(b, ConverseContentBlock::Image { .. }));
+        assert!(
+            !has_image,
+            "image with an unmapped media_type must be dropped, got: {:?}",
+            user.content
+        );
+        let has_text = user
+            .content
+            .iter()
+            .any(|b| matches!(b, ConverseContentBlock::Text { .. }));
+        assert!(has_text, "the sibling Text block must survive");
     }
 }
