@@ -876,17 +876,22 @@ async fn read_anthropic_error(
 }
 
 /// Build the body for `POST /v1/messages/count_tokens` from the
-/// already-normalized `/v1/messages` body. Only the explicit allowlist
-/// of fields the count_tokens endpoint accepts (per
-/// <https://docs.anthropic.com/en/api/messages-count-tokens>) gets
-/// copied through:
+/// already-normalized `/v1/messages` body. Only an explicit allowlist
+/// of fields gets copied through:
 /// `model`, `messages`, `system`, `tools`, `tool_choice`, `thinking`,
-/// `mcp_servers`, `metadata`.
+/// `mcp_servers`.
 ///
-/// This is more defensive than strip-by-blocklist: future additions
-/// to `normalize_request` (e.g. `output_config.format`, which IS
-/// rejected by some Anthropic endpoints) won't accidentally leak
-/// into count_tokens.
+/// The count_tokens schema accepts `messages`, `model`, `cache_control`,
+/// `output_config`, `system`, `thinking`, `tool_choice`, and `tools`
+/// (`cache_control` rides inside the message/system/tool blocks that are
+/// forwarded wholesale). `metadata` is NOT part of that schema, so it must
+/// be dropped or the upstream 400s with `Extra inputs are not permitted`.
+/// `output_config` IS accepted but is intentionally omitted here because it
+/// does not affect the input token count.
+///
+/// This allowlist is more defensive than strip-by-blocklist: future
+/// additions to `normalize_request` won't accidentally leak into
+/// count_tokens.
 fn build_count_tokens_body(normalized: &Value) -> Value {
     const ALLOWED: &[&str] = &[
         "model",
@@ -895,8 +900,9 @@ fn build_count_tokens_body(normalized: &Value) -> Value {
         "tools",
         "tool_choice",
         "thinking",
+        // Accepted only by the MCP-connector beta variant of count_tokens
+        // (routectl unions that beta header through).
         "mcp_servers",
-        "metadata",
     ];
     let mut out = serde_json::Map::new();
     let Some(src) = normalized.as_object() else {
@@ -916,11 +922,13 @@ fn build_count_tokens_body(normalized: &Value) -> Value {
 mod tests {
     use super::*;
 
-    /// Allowlist of body fields accepted by Anthropic's
-    /// `/v1/messages/count_tokens` endpoint. Pulled from
-    /// <https://docs.anthropic.com/en/api/messages-count-tokens>.
-    /// Pinning the list as a const lets the test assert that no
-    /// extra fields leak into the count_tokens body even when
+    /// Body fields routectl forwards to Anthropic's
+    /// `/v1/messages/count_tokens` endpoint. This is the forwarding
+    /// allowlist, a subset of the count_tokens schema (`messages`,
+    /// `model`, `cache_control`, `output_config`, `system`, `thinking`,
+    /// `tool_choice`, `tools`); `metadata` is excluded because it is NOT
+    /// in that schema. Pinning the list as a const lets the test assert
+    /// that no extra fields leak into the count_tokens body even when
     /// `normalize_request` is extended.
     const COUNT_TOKENS_ALLOWED_FIELDS: &[&str] = &[
         "model",
@@ -930,15 +938,13 @@ mod tests {
         "tool_choice",
         "thinking",
         "mcp_servers",
-        "metadata",
     ];
 
     /// Pin: `build_count_tokens_body` copies ONLY the allowlist
     /// fields, even when `normalize_request` produces extra keys.
-    /// Without this contract, a future field added to
-    /// `normalize_request` (e.g. `output_config`) silently flows
-    /// into `/v1/messages/count_tokens` and the upstream 400s with
-    /// `Extra inputs are not permitted`.
+    /// Without this contract, a non-schema field such as `metadata`
+    /// silently flows into `/v1/messages/count_tokens` and the upstream
+    /// 400s with `Extra inputs are not permitted`.
     #[test]
     fn build_count_tokens_body_only_emits_allowlist_fields() {
         let normalized = serde_json::json!({
@@ -949,8 +955,8 @@ mod tests {
             "tool_choice": {"type": "auto"},
             "thinking": {"type": "enabled", "budget_tokens": 1024},
             "mcp_servers": [{"name": "s1", "url": "https://mcp.example.com"}],
-            "metadata": {"user_id": "u_42"},
             // Fields below MUST NOT reach the upstream count_tokens body:
+            "metadata": {"user_id": "u_42"},
             "stream": true,
             "max_tokens": 4096,
             "anthropic_beta": ["context-1m-2025-08-07"],
@@ -973,7 +979,8 @@ mod tests {
         assert_eq!(obj["system"], "you are helpful");
         assert_eq!(obj["tools"][0]["name"], "calculator");
         assert_eq!(obj["thinking"]["type"], "enabled");
-        assert_eq!(obj["metadata"]["user_id"], "u_42");
+        // `metadata` is not part of the count_tokens schema; it must be dropped.
+        assert!(!obj.contains_key("metadata"));
     }
 
     /// Allowlist fields not present on the input must NOT be synthesized
