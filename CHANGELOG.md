@@ -87,7 +87,8 @@ a gateway client" for the operator setup, and the README
   newtype zeroizes on drop with a redacted `Debug`.
 
 - **OAuth runtime refresh + 401 recovery.** Lazy refresh at egress:
-  `oauth://` resolution checks near-expiry (60s lead), acquires a
+  `oauth://` resolution checks near-expiry (300s lead -- matches the
+  codex CLI 5-minute refresh window), acquires a
   per-provider mutex, double-checks under the lock so concurrent
   gets collapse to one refresh per window, persists atomically.
   New `Provider::on_auth_failure` hook lets a 401 force-rotate the
@@ -805,7 +806,7 @@ Initial release.
 
 - Single binary, OpenAI-compatible HTTP server bound to `127.0.0.1`
   by default.
-- Two provider classes: `openai-compat` (5 reasoning dialects:
+- Two provider classes: `openai-compat` (6 reasoning dialects:
   `openai`, `deepseek`, `vllm`, `raw-think-tag`, `openrouter`,
   `passthrough`) and `anthropic-api` (api-key auth; `thinking` blocks
   with `signature` preserved across multi-turn tool use).

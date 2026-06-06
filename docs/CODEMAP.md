@@ -97,6 +97,7 @@ listed at the bottom of each crate.
 - `src/openai_responses/types.rs` -- request wire types: `ResponsesRequest`, `ResponseInputItem` union, `ResponsesTool` flat shape
 - `src/openai_responses/response_types.rs` -- response + SSE event wire types (`ResponsesResponse`, output-item union, stream events)
 - `src/openai_responses/auth.rs` -- header injection per `AuthKind` (ChatgptOauth Bearer+Account-Id+originator + codex identity headers `version`/`session-id`/`x-codex-installation-id`/`x-codex-window-id`/`thread-id`/`x-client-request-id`/residency, ApiKey Bearer, BedrockMantle Bearer)
+- `src/openai_responses/cookies.rs` -- persistent Cloudflare cookie jar (allowlist-pinned to non-secret cookie names)
 - `src/openai_responses/request.rs` -- orchestrator: builds `ResponsesRequest` from `ChatRequest` via system/messages/tools/extras submodules
 - `src/openai_responses/system.rs` -- canonical `system` -> Responses `instructions` flat string (drops per-block cache_control with WARN)
 - `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items)
@@ -152,7 +153,7 @@ listed at the bottom of each crate.
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`
 - `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch
 - `src/runtime_state.rs` -- per-provider token-bucket RPM limiter + circuit breaker state machine
-- `src/feature_keys.rs` -- feature-key derivation for the alias-chain pre-filter; strips date suffixes (e.g. `_20250305`) from request `tools[].name` so `unsupported_features` on `ProviderRuntimePolicy` can match capability-class regardless of vendor versioning
+- `src/feature_keys.rs` -- feature-key derivation for the alias-chain pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date suffixes (e.g. `_20250305`) so `unsupported_features` on `ProviderRuntimePolicy` can match capability-class regardless of vendor versioning; `ToolDef::Custom` (user-defined tools) does not contribute feature keys
 
 ### Tests
 
