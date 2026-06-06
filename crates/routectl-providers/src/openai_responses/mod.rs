@@ -202,8 +202,10 @@ pub struct OpenAiResponsesProvider {
     /// Cloudflare cookie jar shared with the reqwest client. `Arc`d so
     /// the provider can persist the jar to disk on Drop while reqwest
     /// continues to read / write through it on every request. `None`
-    /// when persistence is intentionally disabled (no `HOME`,
-    /// `ROUTECTL_COOKIE_FILE` set to empty, etc.).
+    /// when the persistence path cannot be resolved (no `HOME` and no
+    /// `ROUTECTL_COOKIE_FILE` set, or `HOME` is empty). An empty
+    /// `ROUTECTL_COOKIE_FILE` falls through to the HOME-based default
+    /// path -- it does NOT disable persistence.
     cookie_jar: Option<Arc<reqwest_cookie_store::CookieStoreMutex>>,
     /// Persistence path for `cookie_jar`. Resolved at construction so
     /// Drop can save without re-reading env vars (Drop runs late and
@@ -289,6 +291,21 @@ impl OpenAiResponsesProvider {
                 );
                 continue;
             }
+            // On the ChatgptOauth path, codex fingerprint headers are
+            // set precisely by auth::apply_chatgpt_oauth to mirror the
+            // codex CLI. Operator-supplied overrides would corrupt the
+            // fingerprint checked by chatgpt.com's risk system and can
+            // trigger session invalidation. Drop them silently here so
+            // the fingerprint value routectl chose is always the one
+            // on the wire.
+            if self.cfg.auth_kind == AuthKind::ChatgptOauth && is_codex_fingerprint_header(k) {
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    header = %k,
+                    "dropping codex fingerprint header from header_extras on chatgpt-oauth path"
+                );
+                continue;
+            }
             rb = rb.header(k.as_str(), v.as_str());
         }
         Ok(rb)
@@ -299,18 +316,51 @@ impl OpenAiResponsesProvider {
 /// process boot does not pay the Cloudflare challenge cost from a
 /// cold cache. Soft-fail on I/O error -- a missing or unwritable
 /// persistence path must not poison shutdown.
+///
+/// Implementation note: `cookies::save_jar` is blocking file I/O.
+/// Performing it directly in `drop` blocks whichever async executor
+/// thread holds the last `Arc` reference -- a problem on hot-reload
+/// where the router rebuilds providers in place while the runtime is
+/// live. Instead we detect a live Tokio runtime via
+/// `Handle::try_current()` and delegate to `spawn_blocking` (a
+/// best-effort fire-and-forget task on the blocking thread pool). When
+/// no runtime is present (test teardown, synchronous shutdown before
+/// the executor starts), we skip the save with a DEBUG rather than
+/// block the calling thread.
 impl Drop for OpenAiResponsesProvider {
     fn drop(&mut self) {
-        let (Some(jar), Some(path)) = (self.cookie_jar.as_ref(), self.cookie_path.as_ref()) else {
-            return;
+        // Take ownership so the values can be moved into the closure.
+        let jar = match self.cookie_jar.take() {
+            Some(j) => j,
+            None => return,
         };
-        if let Err(e) = cookies::save_jar(jar, path) {
-            tracing::debug!(
-                provider = %self.cfg.id,
-                path = %path.display(),
-                error = %e,
-                "openai-responses: cookie jar persist failed; continuing"
-            );
+        let path = match self.cookie_path.take() {
+            Some(p) => p,
+            None => return,
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // Fire-and-forget: the JoinHandle is dropped; the task
+                // runs to completion on the blocking thread pool even
+                // after the provider is gone.
+                handle.spawn_blocking(move || {
+                    if let Err(e) = cookies::save_jar(&jar, &path) {
+                        tracing::debug!(
+                            path = %path.display(),
+                            error = %e,
+                            "openai-responses: cookie jar persist failed; continuing"
+                        );
+                    }
+                });
+            }
+            Err(_) => {
+                // No runtime available (test teardown, sync shutdown).
+                // Skip rather than block the calling thread. The next
+                // boot will start with a cold jar, which is acceptable.
+                tracing::debug!(
+                    "openai-responses: no tokio runtime in Drop; skipping cookie jar persist (best-effort)"
+                );
+            }
         }
     }
 }
@@ -644,6 +694,29 @@ impl Provider for OpenAiResponsesProvider {
     async fn on_auth_failure(&self) -> Result<()> {
         self.cfg.auth.on_auth_failure().await
     }
+}
+
+/// Returns true when `name` (case-insensitive) is one of the headers
+/// set by `auth::apply_chatgpt_oauth` to mirror the codex CLI
+/// fingerprint. On the `ChatgptOauth` path, operator-supplied
+/// `header_extras` entries matching these names are dropped before
+/// merging so they cannot corrupt the fingerprint that chatgpt.com's
+/// risk system validates on every request.
+fn is_codex_fingerprint_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "originator"
+            | "x-openai-internal-codex-residency"
+            | "version"
+            | "x-codex-window-id"
+            | "thread-id"
+            | "threadid"
+            | "x-client-request-id"
+            | "chatgpt-account-id"
+            | "session-id"
+            | "x-codex-installation-id"
+    )
 }
 
 fn build_error_excerpt(body_text: &str) -> String {
@@ -1063,6 +1136,134 @@ mod auth_wiring_tests {
         assert!(
             dbg.contains("[REDACTED]"),
             "Debug must mark the auth field redacted; got: {dbg}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprint-header protection tests (finding #1)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use routectl_core::{ChatRequest, MessageContent, StaticToken, TokenSource};
+    use std::sync::Arc;
+
+    fn oauth_provider_with_extras(extras: Vec<(String, String)>) -> OpenAiResponsesProvider {
+        let cfg = OpenAiResponsesConfig {
+            id: "openai-responses:fp-test".into(),
+            auth: Arc::new(StaticToken::new("test-jwt")) as Arc<dyn TokenSource>,
+            account_id: Some("acct-uuid".into()),
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            auth_kind: AuthKind::ChatgptOauth,
+            header_extras: extras,
+            user_agent: None,
+            originator: None,
+            session_id: None,
+            installation_id: None,
+        };
+        OpenAiResponsesProvider::new(cfg)
+    }
+
+    fn base_req() -> ChatRequest {
+        ChatRequest {
+            model: "gpt-5-codex".into(),
+            messages: vec![routectl_core::Message {
+                role: routectl_core::Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            max_tokens: Some(32),
+            ..Default::default()
+        }
+    }
+
+    /// Pin (finding #1): when auth_kind == ChatgptOauth, an operator
+    /// `header_extras` entry for `originator` must be dropped; the
+    /// outbound request must carry routectl's fingerprint value
+    /// (`codex_cli_rs`), NOT the operator's value. Multiple values for
+    /// the same header would be equally wrong -- verify `operator-value`
+    /// is absent from every originator header value, and the fingerprint
+    /// value is present.
+    #[test]
+    fn chatgpt_oauth_header_extras_cannot_override_originator() {
+        // Arrange
+        let provider = oauth_provider_with_extras(vec![(
+            "originator".to_string(),
+            "operator-value".to_string(),
+        )]);
+        let rb = provider.client.post("https://chatgpt.test/responses");
+
+        // Act
+        let rb = provider
+            .build_headers(rb, &base_req(), "test-jwt")
+            .expect("build_headers ok");
+        let request = rb.build().expect("build");
+
+        // Assert: "operator-value" must not appear in any originator
+        // header value; the fingerprint value must be present.
+        let all_originator: Vec<String> = request
+            .headers()
+            .get_all("originator")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .collect();
+
+        assert!(
+            !all_originator.iter().any(|v| v == "operator-value"),
+            "operator-value must be dropped; got: {all_originator:?}"
+        );
+        assert!(
+            all_originator
+                .iter()
+                .any(|v| v == routectl_core::codex_fingerprint::CODEX_ORIGINATOR),
+            "fingerprint originator value must be present; got: {all_originator:?}"
+        );
+    }
+
+    /// Counterpart: on the ApiKey path, `header_extras` that happen to
+    /// share a name with a codex fingerprint header (e.g., `version`)
+    /// must NOT be blocked -- the fingerprint filter is ChatgptOauth-only.
+    #[test]
+    fn api_key_header_extras_not_blocked_by_fingerprint_filter() {
+        let cfg = OpenAiResponsesConfig {
+            id: "openai-responses:fp-apikey".into(),
+            auth: Arc::new(StaticToken::new("sk-test")) as Arc<dyn TokenSource>,
+            account_id: None,
+            base_url: "https://api.openai.com/v1".into(),
+            auth_kind: AuthKind::ApiKey,
+            header_extras: vec![("version".to_string(), "custom-1.0".to_string())],
+            user_agent: None,
+            originator: None,
+            session_id: None,
+            installation_id: None,
+        };
+        let provider = OpenAiResponsesProvider::new(cfg);
+        let rb = provider.client.post("https://api.openai.com/v1/responses");
+
+        let rb = provider
+            .build_headers(rb, &base_req(), "sk-test")
+            .expect("build_headers ok");
+        let request = rb.build().expect("build");
+
+        // `version` header from extras must be present on api-key path.
+        let version_vals: Vec<String> = request
+            .headers()
+            .get_all("version")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .collect();
+
+        assert!(
+            version_vals.iter().any(|v| v == "custom-1.0"),
+            "version extra must pass through on api-key path; got: {version_vals:?}"
         );
     }
 }

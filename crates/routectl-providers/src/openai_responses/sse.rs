@@ -157,10 +157,10 @@ impl ResponsesStreamState {
             "response.function_call_arguments.delta" => Ok(self.handle_function_call_delta(&event)),
             "response.function_call_arguments.done" => Ok(Vec::new()),
             "response.output_item.done" => Ok(self.handle_item_done(&event)),
-            "response.completed" => Ok(self.handle_completed(&event)),
-            "response.incomplete" => Ok(self.handle_incomplete(&event)),
+            "response.completed" => self.handle_completed(provider_id, &event),
+            "response.incomplete" => self.handle_incomplete(provider_id, &event),
             "response.failed" => Err(self.handle_failed(provider_id, &event)),
-            "response.cancelled" => Ok(self.handle_cancelled(&event)),
+            "response.cancelled" => Err(self.handle_cancelled(provider_id, &event)),
             other => {
                 // Forward compat: a new event kind ships without a
                 // rebuild. DEBUG (not WARN) because OpenAI adds new
@@ -466,12 +466,26 @@ impl ResponsesStreamState {
         chunks
     }
 
-    fn handle_completed(&mut self, event: &ResponsesStreamEvent) -> Vec<ChatChunk> {
-        // `response` shape on `response.completed` mirrors the
-        // non-streaming body. We deserialize via the same type so the
-        // finish_reason + usage logic stays exactly aligned with the
-        // non-streaming translator.
-        let resp_value = event.response.clone().unwrap_or(Value::Null);
+    fn handle_completed(
+        &mut self,
+        provider_id: &str,
+        event: &ResponsesStreamEvent,
+    ) -> Result<Vec<ChatChunk>> {
+        // Guard: a `response.completed` event with no `response` field
+        // is a malformed payload. Treat it as an upstream error so
+        // callers see an explicit failure rather than a silent empty-
+        // output completion. `unwrap_or_default_resp` used to paper over
+        // this; the explicit check makes the contract observable.
+        let resp_value = match event.response.clone() {
+            Some(v) => v,
+            None => {
+                return Err(Error::upstream(
+                    provider_id,
+                    0,
+                    "openai-responses: response.completed without response payload".to_string(),
+                ));
+            }
+        };
         let resp: ResponsesResponse = serde_json::from_value(resp_value).unwrap_or_default_resp();
 
         // `has_function_call` decides whether a `completed` status
@@ -534,7 +548,7 @@ impl ResponsesStreamState {
             self.model = resp.model;
         }
 
-        vec![ChatChunk {
+        Ok(vec![ChatChunk {
             id: self.response_id.clone(),
             model: self.model.clone(),
             choices: vec![ChunkChoice {
@@ -545,13 +559,17 @@ impl ResponsesStreamState {
             }],
             usage: usage_delta,
             opaque_events: Vec::new(),
-        }]
+        }])
     }
 
-    fn handle_incomplete(&mut self, event: &ResponsesStreamEvent) -> Vec<ChatChunk> {
+    fn handle_incomplete(
+        &mut self,
+        provider_id: &str,
+        event: &ResponsesStreamEvent,
+    ) -> Result<Vec<ChatChunk>> {
         // Same code path as `completed` -- the body carries
         // status="incomplete" and the translator does the right thing.
-        self.handle_completed(event)
+        self.handle_completed(provider_id, event)
     }
 
     fn handle_failed(&mut self, provider_id: &str, event: &ResponsesStreamEvent) -> Error {
@@ -568,11 +586,23 @@ impl ResponsesStreamState {
         )
     }
 
-    fn handle_cancelled(&mut self, event: &ResponsesStreamEvent) -> Vec<ChatChunk> {
-        // Cancelled emits a terminal chunk with finish_reason="error"
-        // so the client sees a clean termination. Same code path as
-        // completed -- the body translator does the mapping.
-        self.handle_completed(event)
+    fn handle_cancelled(&mut self, provider_id: &str, event: &ResponsesStreamEvent) -> Error {
+        // Cancelled mirrors failed: surface as Err::upstream so callers
+        // can distinguish cancellation from clean completion and retry.
+        // Previously this delegated to handle_completed and emitted a
+        // normal terminal chunk with finish_reason="error" -- that was
+        // inconsistent with how complete() treats cancellation (Err),
+        // and hid the event from callers who gate retries on Err.
+        if let Some(resp_value) = event.response.clone() {
+            if let Ok(resp) = serde_json::from_value::<ResponsesResponse>(resp_value) {
+                return upstream_error_from_failed(provider_id, &resp);
+            }
+        }
+        Error::upstream(
+            provider_id,
+            0,
+            "openai-responses: response.cancelled".to_string(),
+        )
     }
 
     // ------------------------------------------------------------------
