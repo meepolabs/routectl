@@ -4,56 +4,407 @@ All notable changes to routectl. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.0] - YYYY-MM-DD
+## [0.8.0] - 2026-06-07
 
 ### Added
 
-- Per-provider `max_thinking_entry_bytes` knob on `[providers.X]` of
-  `kind = "anthropic-api"` (1 KiB to 4 MiB; default 1 MiB). Tunes the
-  per-entry byte cap on the `context_management` emulation
-  thinking-cache. Out-of-range values are clamped at startup with a
-  WARN; unset falls through to the 1 MiB default. The docs already
-  advertised the field but the runtime rejected unknown keys; this
-  re-adds the field and resolves the doc/code drift.
+- **Config-overridable identity defaults for codex and anthropic
+  egresses.** Both providers now ship compiled identity-header
+  defaults that fire on zero-config and let operator `header_extras`
+  override any key. Merge order in `build_headers`: auth headers
+  (never overridden) -> compiled defaults -> `header_extras` (config
+  wins) -> per-request UUIDs (always win). The `chatgpt-oauth` egress
+  emits `originator`, `x-openai-internal-codex-residency`, and
+  `version` from pinned constants; the `oauth-bearer` anthropic-api
+  egress emits `x-stainless-*`, `x-app`, and
+  `anthropic-dangerous-direct-browser-access` with dynamic OS/arch
+  mapping, and defaults `user_agent` to `claude-cli/<version>` when
+  the config field is unset. Superseded `OpenAiResponsesConfig`
+  plumbing (`session_id`, `installation_id`, `originator`) is now
+  auto-generated or carried via `header_extras` rather than set as
+  explicit fields.
+
+- **codex CLI client-header parity on the chatgpt.com surface.**
+  The `openai-responses` codex egress and its OAuth refresh client
+  now present every header ChatGPT's upstream can fingerprint as
+  codex CLI does, resolving sessions being invalidated within
+  6-15 minutes and re-authenticated. New
+  `routectl-core::codex_fingerprint` module is the single source of
+  truth for the codex `User-Agent` shape, the `originator`/residency
+  defaults, and the process-global `x-codex-window-id`. Requests
+  stamp `version`, `session-id`, `x-codex-installation-id`,
+  `x-codex-window-id`, `thread-id`, and `x-client-request-id`.
+  `session_id` is per-credential (persisted on `credentials.json`'s
+  token record, minted on `routectl login codex`, lazy-backfilled
+  into pre-existing records, preserved across refresh);
+  the static identity headers (`version`, `originator`, residency,
+  `x-codex-installation-id`) ride the config-overridable identity
+  defaults above, so `header_extras` can override any of them;
+  `thread-id` and `x-client-request-id` are a fresh UUIDv4 per
+  upstream turn. The OAuth refresh client now
+  carries the codex UA and default headers. Pinned codex version is
+  documented in `docs/PROVIDER-QUIRKS.md` with the
+  client-header lockstep contract.
+
+- **`bedrock-mantle` bearer-token auth path** on the
+  `openai-responses` provider. New `auth_kind = "bedrock-mantle"`
+  replaces the prior `NotImplemented` stub, unlocking AWS Bedrock
+  GPT-5.5 (and future Mantle-hosted Responses-API models) through the
+  existing provider with no separate provider kind. The wire shape is
+  verbatim OpenAI Responses, so request assembly, the SSE state
+  machine, response decoding, and the URL builder are reused
+  unchanged; the only delta is the bearer source (typically
+  `env://AWS_BEARER_TOKEN_BEDROCK`). The `/openai/v1` path prefix is
+  carried in `base_url`.
+
+- **Hot-reload of `credentials.json` and `config.toml` on external
+  rewrite.** A single filesystem watcher on the parent directories
+  (reacting to `IN_CLOSE_WRITE`/`IN_MOVED_TO`, 250ms debounce) plus a
+  `SIGHUP` escape hatch feed one reload coordinator. The pipeline is
+  parse-validate-or-keep-old: an invalid TOML/JSON write emits a WARN
+  with the parse error and keeps the current config; only successful
+  parses swap in. Hot-reloadable: `[providers]`, `[models]`,
+  `[aliases]`, `[retry]`, the `[bedrock]` global, and
+  `credentials.json`. Restart-required (with a diff-WARN on detected
+  change): `server.host`, `server.port`, `server.auth`,
+  `server.max_body_bytes`, and the `[log]` knobs. Circuit-breaker
+  counters and RPM token buckets are carried across the reload for
+  surviving model nicknames; the OAuth token cache and per-provider
+  refresh mutexes are preserved.
+
+- **`[server] max_body_bytes` and per-model `[models.X]
+  max_output_tokens`, plus raised internal caps.** New
+  `max_body_bytes` knob (default 32 MiB, was a hardcoded 4 MiB;
+  returns 413 above the cap). `max_output_tokens` caps the
+  `max_tokens` value the Anthropic-shape egresses (`anthropic-api`,
+  `bedrock-invoke`) inject when the caller omits the field;
+  resolution chain `request.max_tokens` -> `[models.X]
+  max_output_tokens` -> hardcoded `64000` baseline. The
+  `openai-compat`, `openai-responses`, and `bedrock-converse`
+  egresses forward omission cleanly without injection. Caps raised
+  for parallel-tool-fanout and long-conversation workloads: anthropic
+  ingress tool-call index 64 -> 4096, openai-responses output-block
+  count 512 -> 4096, anthropic-api thinking-cache entries
+  1000 -> 10000.
+
+- **Per-provider `max_thinking_entry_bytes` knob** on `[providers.X]`
+  of `kind = "anthropic-api"` (1 KiB to 4 MiB; default 1 MiB). Tunes
+  the per-entry byte cap on the `context_management` emulation
+  thinking-cache. Zero falls back to the default with a WARN (a zero
+  cap would silently disable the cache); values above the 4 MiB
+  ceiling clamp with a WARN.
+
+- **Build-time WARN when `context_management = true` without
+  `history_reasoning = "preserve"`.** The two settings are
+  complementary on non-Anthropic anthropic-api endpoints (DeepSeek
+  `/anthropic`, vLLM, LM Studio); without `preserve`, multi-turn
+  continuity breaks the next turn with a missing-thinking 400. The
+  WARN surfaces the misconfig once at startup instead of on every
+  dispatch.
+
+- **`max_completion_tokens` -> `max_tokens` translation on the OpenAI
+  Chat ingress.** o-series / gpt-5+ clients send
+  `max_completion_tokens`; the canonical request has no such field,
+  so it was silently dropped and the egress saw no per-request token
+  cap. It is now renamed before deserialization (`max_tokens` wins if
+  both are present).
+
+- **`role: "developer"` support on the OpenAI Chat ingress.** Newer
+  clients send the system-voice successor `developer` role; it is
+  rewritten to `system` before deserialization so it flows through
+  the system-message lift normally instead of failing with a 400.
 
 ### Changed
 
-- Bumped per-entry byte cap on the `context_management` emulation
-  thinking-cache from 256 KB to 1 MiB. The 256 KB cap rejected cache
-  writes on full-budget Opus 4.6/4.7/4.8 reasoning turns (~328 KB at
-  65k thinking tokens); 1 MiB gives ~3x headroom. Operators on
-  memory-constrained hosts can tune down via the new
+- **`Error::Internal` added to the error taxonomy** for unexpected
+  runtime failures (serialization bugs, socket / serve-loop IO,
+  impossible states). Six sites that misused `Error::Config` for
+  non-config failures are reclassified. The HTTP mapping returns a
+  generic `internal error` to clients while logging detail at ERROR
+  for operators; `Error::Config` is now documented as
+  configuration-validation-only.
+
+- **Default retry jitter is now 50ms** (`RetryPolicy::default()
+  .jitter_ms`, previously 0), giving retry spread out of the box.
+
+- **Per-entry byte cap on the `context_management` emulation
+  thinking-cache raised from 256 KB to 1 MiB.** The 256 KB cap
+  rejected cache writes on full-budget Opus 4.6/4.7/4.8 reasoning
+  turns (~328 KB at 65k thinking tokens); 1 MiB gives ~3x headroom.
+  Operators on memory-constrained hosts can tune down via the new
   `max_thinking_entry_bytes` knob.
-- Switched the thinking-cache TTL from set-on-create to sliding:
+
+- **Thinking-cache TTL switched from set-on-create to sliding:**
   every successful hit refreshes the entry's `expires_at` to
   `ttl-from-now`, matching Anthropic and DeepSeek prompt-cache
   semantics. Idle entries still die after the hardcoded 60-minute
   window.
 
+- Internal: structural decomposition and shared-helper extraction
+  across the bedrock and anthropic-api modules (shared eventstream
+  framing driver, hoisted HTTP/header helpers, request-builder split,
+  consolidated identity module, unified provider seam naming,
+  test-builder dedup into `routectl-core`), with no behavior change.
+
 ### Fixed
 
-- Bedrock Converse now completes the `stop_sequence` round-trip: the
-  request opts in via `additionalModelResponseFieldPaths`, and the
-  matched sequence is lifted onto the canonical response on both the
-  non-streaming and streaming (`messageStop`) paths, gated on
-  `stop_reason == "stop_sequence"`.
-- The 0.7.0 changelog entry incorrectly stated the thinking-cache LRU
-  cap as 1000; actual value is 10000.
+- **Bedrock Converse now completes the `stop_sequence` round-trip.**
+  The request always declares `["/stop_sequence"]` in
+  `additionalModelResponseFieldPaths`, AWS lifts the matched literal
+  into `additionalModelResponseFields`, and routectl reads it back
+  gated on `stop_reason == "stop_sequence"` on both the non-streaming
+  and streaming (metadata-frame) paths. A schema-drift DEBUG fires
+  when the stop reason indicates a match but the lifted field is
+  absent.
+
+- **anthropic-api effort caps no longer bypassed via
+  `provider_extras`.** On the adaptive-thinking path,
+  `merge_provider_extras` overwrote the clamped `output_config.effort`
+  with the raw caller-supplied value (since `output_config` is
+  intentionally not routectl-managed), so a client sending
+  `output_config.effort` shipped the unclamped value (e.g. `max`) even
+  when the operator declared `effort_levels`. The post-merge seam now
+  re-clamps `output_config.effort` while leaving sibling sub-keys
+  (`format`, etc.) untouched. Affects `anthropic-api` and
+  `bedrock-invoke`.
+
+- **anthropic-api: probe-shaped `thinking` 400, `signature: null`,
+  and openai-compat envelope leak.** Claude Code probes
+  (`max_tokens` 48-128) 400'd because the legacy thinking shape
+  derived a budget with no floor; `thinking` is now dropped with a
+  WARN when `max_tokens` cannot fit a >=1024 budget plus content,
+  rather than mutating the caller's `max_tokens`. A canonical
+  reasoning detail with no signature rendered as `signature: null`,
+  which Anthropic rejects on mid-conversation provider switch; the
+  field is now omitted entirely when the source has none.
+  openai-compat envelope fields (`object`, `system_fingerprint`,
+  `cost`, top-level `role`) and usage sub-bags
+  (`prompt_cache_hit_tokens`, `prompt_tokens_details.cached_tokens`,
+  `completion_tokens_details.reasoning_tokens`) are filtered at the
+  openai-compat parse seam so they stop leaking onto Anthropic-shape
+  responses.
+
+- **`count_tokens` body allowlist drops `metadata`.** The
+  `/v1/messages/count_tokens` endpoint rejects `metadata` with an
+  "Extra inputs are not permitted" 400; it is removed from the
+  forwarding allowlist (and `output_config` is documented as accepted
+  but token-count-irrelevant).
+
+- **anthropic-api: opaque-block stop sentinel and dropped-reasoning
+  observability.** A degraded opaque (unknown-type) content block
+  that exceeded the capture cap after its `content_block_start` had
+  already been emitted left an unclosed block on the wire; the
+  `content_block_stop` is now emitted unconditionally. A structured
+  WARN now fires when `emit_reasoning_blocks` drops
+  `reasoning_details` whose format is not `anthropic-claude-v1`.
+
+- **anthropic-api `allowed_betas` now enforced on the
+  `anthropic-beta` HTTP header.** The allowlist was applied only to
+  the request body field (which is stripped before send), so the
+  header the upstream inspects carried the unfiltered client list.
+  Header and body now share one predicate.
+
+- **OpenAI ingress: tool_use double-render, system `cache_control`
+  loss, and stop-sequence strip.** Anthropic-shape egresses carry
+  each tool_use in both the canonical `tool_calls` field and the
+  parts array; the OpenAI render emitted both, so Chat-Completions
+  clients received tool_use content blocks alongside the tool_calls
+  they understand. tool_use parts are now stripped at the OpenAI
+  render seam when `tool_calls` is present (Anthropic-ingress and
+  egress paths untouched). Parts-form system messages were flattened
+  to plain text, dropping per-block `cache_control` and citations;
+  the lift now emits `SystemContent::Blocks` when any block carries
+  them. The internal `matched_stop_sequence` field is stripped from
+  every choice on both render paths.
+
+- **anthropic ingress: streaming usage and finalization.** The
+  closing `message_delta` omitted `input_tokens` when the upstream
+  lacked `prompt_tokens`, emitted a hollow empty usage object when
+  every field was `None`, and could double-emit the terminal error
+  event after a normal finish; a client-sent `output_format` of JSON
+  null was promoted to `output_config.format = null` (rejected with
+  400); and the non-streaming render emitted absent cache-usage
+  fields as JSON null. Each is fixed (default missing `prompt_tokens`
+  to 0, attach usage only when populated, early-return from the
+  error-eos path once finished, drop a null `output_format`, build
+  the response usage object incrementally).
+
+- **openai-compat: mid-stream errors and hardened lifts.** An
+  upstream mid-200 error envelope was reported as a chunk-deserialize
+  error rather than an upstream error; a JSON-null usage sub-bag
+  blocked the usage lift; a `tool_result` without `tool_use_id` was
+  dropped silently (now hard-fails, matching the anthropic-api
+  contract); the reasoning-strip WARN missed the `Thinking`
+  content-part shape; and stop-sequence text was accumulated even
+  with no configured stop. Streamed `reasoning_details` from DeepSeek
+  and vLLM now increment `detail_index` per emitted block instead of
+  collapsing onto index 0.
+
+- **openai-responses: signature passthrough, cancel semantics, and
+  reasoning logging.** The canonical Anthropic-shape signature was
+  placed into the OpenAI Responses `encrypted_content` field (which
+  only accepts an `openai-responses-v1` token); the signature is now
+  forwarded only when the source format matches.
+  `response.cancelled` and a `response.completed` missing its payload
+  now surface as upstream errors (matching `complete()`) instead of a
+  benign terminal chunk. Dropped non-`openai-responses-v1` reasoning
+  entries are summarized in a single DEBUG instead of discarded
+  silently.
+
+- **bedrock-converse: forward text documents and envelope
+  reasoning_details.** Text-source documents (a valid Anthropic
+  document shape) were dropped instead of normalized to base64;
+  images/documents with an unmapped `media_type` or missing source
+  were dropped with no log line. The Converse egress also dropped
+  envelope `reasoning_details` entirely, losing multi-turn reasoning
+  on replay; it now emits `ReasoningContent` blocks for
+  `anthropic-claude-v1` details (skipping unsigned blocks, which
+  Bedrock rejects) and no longer emits an orphan `cachePoint` for an
+  empty-text system block.
+
+- **bedrock: reserve `x-amz-*` headers and sign the User-Agent.** An
+  operator `header_extras` entry carrying an `x-amz-*` header could
+  desync the SigV4 signature; the `x-amz-` prefix is now reserved. The
+  User-Agent is inserted on the outbound request so it is both
+  SigV4-signed and visible in the header trace; a chunk frame missing
+  its `bytes` field is skipped (WARN) instead of killing the stream.
+
+- **router: half-open breaker probe slot now released on all exits.**
+  Several dispatch exits returned without recording an outcome (probe
+  fast-fail on 429/529, auth-refresh failure, auth-refresh success
+  before retry, retry-without-fallback, non-fallbackable client
+  errors), leaking the single half-open probe slot and holding the
+  breaker open for that provider until restart. A slot release that
+  frees the flag without a failure debit now runs on every such exit,
+  and the gate runs inside the retry loop in `stream` and
+  `count_tokens` so per-attempt RPM and breaker accounting match
+  `complete()`.
+
+- **router: 429 non-retryable when excluded from fallback, and
+  operator beta floor / `header_extras` preserved across dispatch.**
+  `retries_for_status` gated its 5xx arm on fallbackability but not
+  its 429 arm, so an operator who excluded 429 from fallback still
+  got same-provider 429 retries; the 429 arm is now gated the same
+  way. A model-level `anthropic-beta` from `[models.X] header_extras`
+  was folded into the client beta union and then dropped by the
+  per-provider `allowed_betas` filter (meant to gate only
+  client-requested betas); it now rides a separate operator-floor
+  field and is re-added unconditionally after the allowlist runs.
+  `apply_layered_overlays` rebuilt `routectl_internal` from default
+  and dropped the composed non-beta `header_extras` map; the composed
+  map is now preserved across the rebuild.
+
+- **factory: dedup bedrock credential probe on the failure path, and
+  WARN on the bedrock-mantle region-pin fallback.** On
+  credential-resolution failure for one Bedrock model, sibling models
+  on the same provider re-ran the SSO probe / credential-chain build
+  because the failure path never consulted `provider_failed`; the
+  chain is now hit at most once per provider. Because the
+  `openai-responses` config carries no region field, the factory
+  falls back to the `us-east-1` bedrock-mantle endpoint; it now WARNs
+  at construction so operators on other regions are not silently
+  misdirected.
+
+- **auth: close the OAuth reload/refresh race and harden login
+  read.** A `reload_from_disk` could be clobbered by a refresh POST
+  that began before it; a generation counter now lets a stale refresh
+  detect the reload and discard its result. The unbounded login-line
+  read is replaced with a bounded `read_line` loop.
+
+- **file-watch: suppress the misleading Remove WARN on atomic
+  rewrites.** Atomic-rewrite editors (vim, safe-save) issue a
+  Remove + Create pair within one debounced batch; the handler now
+  scans the batch for a sibling Create/Modify with matching basename
+  and emits a DEBUG breadcrumb instead of a "watched file was
+  removed" WARN. Lone Remove events keep the WARN so genuine
+  deletions still alert. (#38)
+
+- **build: feature-isolation fixes.** The `openai-responses` feature
+  did not declare `dep:chrono` (built only when a sibling feature
+  pulled `chrono` in); the dependency is now declared on the feature.
 
 ### Documentation
 
-- Document the per-model `max_output_tokens` knob in
-  `docs/CONFIGURATION.md`. The field already shipped in earlier
-  commits; it caps the `max_tokens` value the Anthropic-shape
-  egresses (`anthropic-api`, `bedrock-invoke`) inject when the
-  caller omits the field. Resolution chain: `request.max_tokens`
-  -> `[models.X].max_output_tokens` -> hardcoded `64000` baseline.
-  The `openai-compat`, `openai-responses`, and `bedrock-converse`
-  egresses forward omission cleanly without injection.
+- Corrected reference drift across `CONFIGURATION.md`, `CODEMAP.md`,
+  `ARCHITECTURE.md`, `LOGGING.md`, `PROVIDER-QUIRKS.md`, and
+  `WIRE-GOTCHAS.md`: the bedrock framing driver, the two-tier retry
+  resolution and per-error-class caps, the bedrock `api_shape`
+  selector, the 256-char WARN body-excerpt cap, 6 (not 5) reasoning
+  dialects, the 300s OAuth refresh lead, per-provider runtime gates,
+  the config-show secret-redaction behavior, the non-loopback bind
+  auth requirement, and the per-direction header-trace redaction
+  policy. Each verified against the cited code.
+
+- Documented previously-undocumented `[server]` knobs in
+  `CONFIGURATION.md`: `max_body_bytes` (32 MiB cap, 413 failure shape,
+  restart requirement) and `allow_disable_fallbacks` (plus its
+  `x-routectl-disable-fallbacks` request header), and the per-model
+  `max_output_tokens` knob with its resolution chain.
+
+- Recast the replay harness around a local-only fixture corpus:
+  `docs/REPLAY-FIXTURES.md` is now a format reference (per-fixture
+  layout, `meta.json` schema), the "Adding a replay fixture" flow in
+  `DEVELOPMENT.md` collapses to a 5-step capture flow, and the
+  capture script stamps the workspace version into fixture metadata.
 
 ### Security
 
-- Bound per-entry size on the anthropic-api thinking cache; oversized writes are rejected and observed via WARN log to prevent unbounded LRU memory use.
+- **Eventstream payload logging gated behind TRACE on both Bedrock
+  decoders.** The Converse decode-error path and `contentBlockStart`
+  handler logged decoded, upstream-controlled model output (which may
+  carry prompt-derived secrets/PII) at WARN/DEBUG; both now log only
+  the 12-byte frame prelude (or top-level key list) at WARN/DEBUG and
+  gate the full payload behind TRACE, matching the Invoke decoder and
+  the shared framing driver.
+
+- **Bearer JWT redacted from the outgoing-headers TRACE.** The
+  outgoing-request-headers TRACE in `routectl-core::log_safe` emitted
+  `Authorization: Bearer <jwt>` verbatim, exposing live access tokens
+  (which embed account/session identifiers). The fix lives at the
+  lowest trace layer so all four providers are covered;
+  `Authorization`, `x-api-key`, and `proxy-authorization` values are
+  masked while header names are preserved.
+
+- **Cloudflare cookie jar on the chatgpt.com client.** The
+  `openai-responses` provider now attaches a persistent cookie jar
+  (default `~/.config/routectl/cookies/chatgpt.json`, mode 0600,
+  overridable via `ROUTECTL_COOKIE_FILE`), allowlist-filtered to
+  Cloudflare service-cookie names on both save and load so account or
+  session cookies never land on disk. Persistence runs off the async
+  executor on provider drop.
+
+- **OAuth refresh tracing with `sha256[0:8]` hashes.** Pre-POST,
+  success, and failure events emit grant type, status, and
+  hashed-token correlation fields; token values are never logged, and
+  failure events omit upstream body excerpts (some token endpoints
+  echo `refresh_token` in error envelopes). A canary test pins that
+  no echoed token leaks into any captured field.
+
+- **Upstream error bodies sanitized against log-line forgery.**
+  Upstream-controlled 4xx/5xx error bodies and the forward-compat SSE
+  `content_block.type` were logged without control-char filtering, so
+  CR/LF/ANSI sequences could forge log lines on text-format
+  subscribers. openai-compat, openai-responses, bedrock, the shared
+  DEBUG full-body helper, and the SSE block-type capture now pass
+  through the control-char filter.
+
+- **Secret-ref values redacted from error messages.**
+  `SecretRef::parse` and the listener-token resolver embedded the raw
+  reference in error strings, so a bare or `literal:` secret could
+  reach operator-facing output (config-check stdout, startup logs).
+  They now report only a validated scheme prefix (or, for listener
+  tokens, the entry position).
+
+- **Operator `header_extras` can no longer override codex fingerprint
+  headers** on the ChatGPT-OAuth path, keeping the client parity
+  contract intact.
+
+- **Per-entry size bound on the anthropic-api thinking cache.**
+  Oversized writes are rejected with a WARN (the cache-miss recovery
+  handles the next turn as it would on a TTL eviction), preventing
+  unbounded LRU memory use. Truncation was rejected as an alternative
+  because it would corrupt the opaque continuity signature on
+  Anthropic thinking blocks.
 
 ## [0.7.0] - 2026-05-30
 
@@ -825,6 +1176,7 @@ Initial release.
 - Per-provider retry with exponential backoff.
 - TOML config in `~/.config/routectl/config.toml`.
 
+[0.8.0]: https://github.com/meepolabs/routectl/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/meepolabs/routectl/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/meepolabs/routectl/compare/v0.4.0...v0.6.0
 [0.4.0]: https://github.com/meepolabs/routectl/compare/v0.2.0...v0.4.0
