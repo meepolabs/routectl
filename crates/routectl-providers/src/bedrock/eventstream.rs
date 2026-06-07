@@ -174,7 +174,7 @@ fn handle_invoke_frame(
                         tracing::warn!(
                             provider = %provider_id,
                             event_type = err_type,
-                            message = %err_msg,
+                            message = %routectl_core::sanitize_for_log(err_msg),
                             "bedrock in-stream auth/permission exception",
                         );
                     }
@@ -217,7 +217,7 @@ fn handle_invoke_frame(
                 tracing::warn!(
                     provider = %provider_id,
                     event_type = %event_type,
-                    message = %msg,
+                    message = %routectl_core::sanitize_for_log(&msg),
                     "bedrock in-stream auth/permission exception",
                 );
             }
