@@ -78,7 +78,7 @@ reqwest_cookie_store = { workspace = true, optional = true }
 # to specific minor versions so cargo update churn is bounded.
 aws-config = { version = "1.8", optional = true, default-features = false, features = ["behavior-version-latest", "rustls", "credentials-process", "sso"] }
 aws-credential-types = { version = "1.2", optional = true }
-aws-sigv4 = { version = "1.2", optional = true, features = ["http1"] }
+aws-sigv4 = { version = "1.4", optional = true, features = ["http1"] }
 aws-smithy-eventstream = { version = "0.60", optional = true }
 aws-smithy-runtime-api = { version = "1.7", optional = true, features = ["client"] }
 aws-smithy-types = { version = "1.2", optional = true }
