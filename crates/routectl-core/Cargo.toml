@@ -8,6 +8,14 @@ repository.workspace = true
 publish.workspace = true
 description = "Core types and Provider trait for routectl. OpenRouter-shape schema."
 
+[features]
+# Exposes shared canonical-request / canonical-response builders under
+# `routectl_core::test_utils` for the cross-crate contract tests. Enabled
+# as a dev-dependency feature by the consumer crates (routectl-providers,
+# routectl-cli) so the fixtures are available to integration tests but
+# never compiled into a release build.
+"test-utils" = []
+
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
