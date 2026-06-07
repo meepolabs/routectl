@@ -272,17 +272,38 @@ fn handle_block_start(
         Some(StreamContentBlockStartPayload::Other(ref raw)) => {
             // An unrecognized start payload. Per AWS docs only tool_use
             // blocks carry a typed start payload today; a future AWS
-            // block type would land here first. Log at DEBUG so the raw
-            // shape is visible in trace logs without noise at higher
-            // levels. Default to Text; the first delta's shape
-            // disambiguates and the delta handler upgrades to Reasoning
-            // on the first reasoningContent delta.
+            // block type would land here first. `raw` is an
+            // upstream-controlled JSON value that may carry model output,
+            // so DEBUG emits only a non-content marker (the top-level key
+            // list); the full shape is gated behind TRACE and routed
+            // through the prompt-redaction + control-char sanitizer so it
+            // inherits the same hygiene as the body-trace helpers. Default
+            // to Text; the first delta's shape disambiguates and the delta
+            // handler upgrades to Reasoning on the first reasoningContent
+            // delta.
+            let payload_keys: String = match raw {
+                serde_json::Value::Object(map) => map.keys().cloned().collect::<Vec<_>>().join(","),
+                serde_json::Value::Array(_) => "<array>".to_string(),
+                serde_json::Value::String(_) => "<string>".to_string(),
+                serde_json::Value::Number(_) => "<number>".to_string(),
+                serde_json::Value::Bool(_) => "<bool>".to_string(),
+                serde_json::Value::Null => "<null>".to_string(),
+            };
             tracing::debug!(
                 provider = provider_id,
-                start_payload = ?raw,
+                payload_keys = %routectl_core::sanitize_for_log(&payload_keys),
                 "bedrock converse: unknown contentBlockStart payload type; \
                  defaulting to Text block state -- first delta will disambiguate"
             );
+            if tracing::enabled!(tracing::Level::TRACE) {
+                let redacted = routectl_core::redact_prompts_in(raw);
+                let serialized = serde_json::to_string(&redacted).unwrap_or_default();
+                tracing::trace!(
+                    provider = provider_id,
+                    start_payload = %routectl_core::sanitize_for_log(&serialized),
+                    "bedrock converse: unknown contentBlockStart payload (redacted)"
+                );
+            }
             BlockState::Text
         }
         None => {
@@ -619,17 +640,11 @@ fn decode_exception_event(provider_id: &str, event_type: &str, payload: &[u8]) -
         tracing::warn!(
             provider = %provider_id,
             event_type = %event_type,
-            message = %truncate_excerpt(&msg),
+            message = %routectl_core::sanitize_for_log(&msg),
             "bedrock in-stream auth/permission exception",
         );
     }
     Error::upstream(provider_id, status, msg)
-}
-
-fn truncate_excerpt(s: &str) -> String {
-    s.chars()
-        .take(routectl_core::MAX_LOG_BODY_EXCERPT)
-        .collect()
 }
 
 #[cfg(test)]
