@@ -293,6 +293,27 @@ api_key_ref  = "env://ANTHROPIC_API_KEY"
 allowed_betas = ["claude-code-20250219", "oauth-2025-04-20"]
 ```
 
+## `[providers.X] api_shape` -- Bedrock API selector
+
+A `bedrock`-kind provider picks its wire shape with `api_shape`
+(string, default `"invoke"`, also accepts `"converse"`):
+
+- `"invoke"` -- vendor-specific InvokeModel body (the Anthropic
+  Messages payload, default).
+- `"converse"` -- vendor-neutral Converse API.
+
+```toml
+[providers.bedrock]
+kind      = "bedrock"
+region    = "us-west-2"
+creds     = { kind = "default-chain" }
+api_shape = "converse"   # default "invoke"
+```
+
+Both shapes are wired for Anthropic models on Bedrock; see
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#bedrock-any-region) for the
+adaptive-thinking interaction.
+
 ## Per-provider capability filter (`unsupported_features`)
 
 Some upstreams reject specific built-in tool shapes (Bedrock, for
@@ -369,7 +390,7 @@ accounting is per-attempt (not per-request).
 | `rpm_limit`                    | Option<u32> | None (disabled) | Maximum requests per minute to this provider. When exceeded the router treats this provider as a fallbackable failure and tries the next chain entry. |
 | `circuit_failures`             | Option<u32> | None (disabled) | Trip the circuit breaker after this many consecutive failed attempts. Once tripped, the router skips this provider for `circuit_cooldown_ms`. |
 | `circuit_cooldown_ms`          | Option<u64> | 30000 (30s) when `circuit_failures` is set; unused otherwise | How long to keep the circuit open once tripped. |
-| `request_timeout_ms`           | Option<u64> | None (no cap)   | Per-attempt request timeout. Alias-level `[aliases.X.retry] request_timeout_ms` always wins; this is the per-provider fallback when the alias-level field is unset. Resolution order: provider > global `[retry] request_timeout_ms` > None. |
+| `request_timeout_ms`           | Option<u64> | None (no cap)   | Per-attempt request timeout. Resolution order: per-provider `request_timeout_ms` > global `[retry] request_timeout_ms` > None (no cap). Per-alias retry overrides were removed in v0.6; to vary timeouts per route, split into distinct `[providers.X]` entries. |
 | `stream_first_byte_timeout_ms` | Option<u64> | None            | Per-provider first-byte timeout for streaming responses. Resolution order: per-model > per-provider > global `[retry] stream_first_byte_timeout_ms`. |
 
 `rpm_limit` and circuit breaker are both `None` (disabled) when omitted.
@@ -419,6 +440,9 @@ jitter_ms                     = 50
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 probe_max_tokens              = 1             # fast-fail availability probes
+# Per-error-class caps (each overrides max_attempts for that class only):
+# retry_on_429                = 1             # rate-limits usually clear in one retry
+# retry_on_network            = 2             # flaky DNS/TLS/connect
 ```
 
 `probe_max_tokens` (default `1`) fast-fails availability probes. A
@@ -433,10 +457,29 @@ disable (no request is ever treated as a probe). Real requests
 every 4xx (including a capability-rejection 400, which a sibling
 provider may accept) keep the normal retry+fallback behavior.
 
-Workspace defaults are tight; bump per-provider for known-slow
-upstreams via the `stream_first_byte_timeout_ms` table in
-[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#stream_first_byte_timeout_ms)
-rather than loosening the global.
+### Per-error-class retry caps
+
+Three optional knobs override `max_attempts` for a single error class
+each, leaving the other classes on the global ceiling. Rate-limits
+often clear in one retry while flaky 5xx may need more, so tuning the
+classes independently avoids over- or under-retrying any one of them.
+
+| Field              | Type        | Default | Effect |
+|--------------------|-------------|---------|--------|
+| `retry_on_429`     | Option<u32> | None    | Cap for 429 (rate-limit) responses. Unset -> falls back to `max_attempts`. |
+| `retry_on_5xx`     | Option<u32> | None    | Cap for 5xx responses. Unset -> falls back to `max_attempts`. |
+| `retry_on_network` | Option<u32> | None    | Cap for network errors (status 0: DNS, TCP connect, TLS handshake, request body, request timeout). Unset -> effectively `max_attempts`. |
+
+Resolution lives in `RetryPolicy::retries_for_status`
+(`crates/routectl-router/src/config.rs`): each knob, when `Some`,
+replaces `max_attempts` for THAT class only. Both the 429 arm and the
+5xx arm are gated on `is_fallbackable_status` -- a 429 (or 5xx) that
+the allowlist excludes or the denylist names is non-retryable and
+yields 0 retries regardless of `retry_on_429` / `retry_on_5xx`, so it
+propagates to the caller immediately. They ship commented in
+[`examples/config.toml`](../examples/config.toml).
+
+
 
 ## Per-model knobs
 

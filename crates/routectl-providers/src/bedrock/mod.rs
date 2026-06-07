@@ -536,9 +536,9 @@ async fn parse_upstream_error_body(
     let body_text = resp.text().await.unwrap_or_default();
     log_bedrock_upstream_error(provider, status, &body_text);
     // Emit the full upstream error body at debug level alongside the
-    // status-specific WARN above. The WARN excerpt (200B) keeps
-    // `routectl-warn.log` scannable; DEBUG gives operators field-level
-    // detail when they flip log level during triage.
+    // status-specific WARN above. The WARN excerpt (256-char cap via
+    // sanitize_for_log) keeps `routectl-warn.log` scannable; DEBUG gives
+    // operators field-level detail when they flip log level during triage.
     routectl_core::debug_upstream_error_body(provider_kind, provider, status, &body_text);
 
     serde_json::from_str::<Value>(&body_text)

@@ -62,7 +62,7 @@ this doc first for similar patterns. For operator-facing config recipes see
   Bedrock validators 400 on `tool_choice: "auto"` (OpenAI) where
   Anthropic expects `{"type":"auto"}`. Handled at the Anthropic-API
   egress by `translate_tool_choice` in
-  `crates/routectl-providers/src/anthropic_api/request.rs`. Maps
+  `crates/routectl-providers/src/anthropic_api/tools.rs`. Maps
   `"auto"|"none"|"required"` plus the OpenAI `{"type":"function",...}`
   object form into the Anthropic tagged-enum shape; Anthropic-shape
   inputs pass through unchanged.
@@ -145,7 +145,7 @@ this doc first for similar patterns. For operator-facing config recipes see
   `content_block_stop` carrying both. When Anthropic 4.5 omits the
   `signature_delta` event on a tool-only thinking turn, the terminal
   detail emits with `signature: ""`. The replay path
-  (`anthropic_api/request.rs::emit_reasoning_blocks`) WARNs and
+  (`anthropic_api/messages.rs::emit_reasoning_blocks`) WARNs and
   skips any detail with an empty signature -- because Anthropic 400s
   on a `Thinking` block missing the field, and a partial echo is
   better than a hard rejection that breaks every Claude 4.5

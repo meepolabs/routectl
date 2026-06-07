@@ -36,6 +36,7 @@ listed at the bottom of each crate.
 - `tests/schema_roundtrip.rs` -- serde round-trip for `ChatRequest`/`ChatResponse`/`ChatChunk` against real wire fixtures
 - `tests/header_trace_emit_disabled.rs` -- emit-path coverage for the four header-trace emitters with tracing OFF; isolated test binary so `header_trace_enabled()` freezes to false in its own process
 - `tests/header_trace_emit_enabled.rs` -- emit-path coverage for `trace_ingress_headers` / `trace_outgoing_headers` / `trace_upstream_response_headers` / `trace_egress_headers` with tracing ENABLED; pairs with the disabled-path test
+- `tests/header_trace_outgoing_redacts.rs` -- end-to-end coverage that `trace_outgoing_headers` collapses a live `authorization` Bearer JWT and `x-api-key` value to `Bearer [REDACTED]` / `[REDACTED]` before emit; isolated binary so the `ROUTECTL_TRACE_HEADERS` OnceLock freezes ON
 - `tests/log_overrides_redact_prompts.rs` -- resolution-rule coverage for the `redact_prompts` knob (env > `[log]` > default); isolated binary so OnceLock state stays clean
 - `tests/log_overrides_trace_body_bytes.rs` -- resolution-rule coverage for `trace_body_bytes`; isolated binary
 - `tests/log_overrides_trace_headers.rs` -- resolution-rule coverage for `trace_headers`; isolated binary
@@ -119,7 +120,8 @@ listed at the bottom of each crate.
 - `src/bedrock/auth.rs` -- AWS credential resolution (`Bearer` short-circuit, `SigV4` via `SharedCredentialsProvider`)
 - `src/bedrock/signing.rs` -- SigV4 signing entry point; merges Authorization/x-amz-date/x-amz-security-token onto request
 - `src/bedrock/endpoint.rs` -- region-to-bedrock-runtime URL builders; ARN/bracket-suffix path encoding
-- `src/bedrock/eventstream.rs` -- AWS eventstream binary frame decoder for InvokeModel-stream (with 8 MB DoS cap)
+- `src/bedrock/frame.rs` -- shared AWS-eventstream framing driver for both Bedrock egresses; owns the byte loop, the 12-byte prelude/length/CRC invariants, the `MAX_FRAME_BYTES` 8 MB DoS cap, decode-error recovery, and the WARN/TRACE log-hygiene split (prelude-only at WARN, full payload hex at TRACE); both the InvokeModel-stream and ConverseStream decoders delegate to `decode_frames`
+- `src/bedrock/eventstream.rs` -- InvokeModel-stream frame handler / payload interpreter (base64-unwrap of Anthropic SSE per frame); delegates the framing byte loop and DoS cap to `frame.rs`
 - `src/bedrock/invoke.rs` -- InvokeModel adapter: reuses `anthropic_api::request::normalize`, patches `anthropic_version: "bedrock-2023-05-31"`
 - `src/bedrock/betas.rs` -- shared `anthropic_beta` allowlist filter (Invoke body + Converse `additionalModelRequestFields`)
 - `src/bedrock/body_fields.rs` -- shared `allowed_body_fields` filter against AWS strict-schema 400s
@@ -136,7 +138,6 @@ listed at the bottom of each crate.
 - `src/bedrock/converse/extras.rs` -- assembles `additionalModelRequestFields` (thinking, anthropic_beta, cache_control, output_config)
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame decoder; per-block-index state map
-- `src/bedrock/converse/request_tests_round2.rs` -- review-finding test sidecar imported from `request.rs` (toolChoice none, extras merge, document siblings)
 
 ### Tests
 
@@ -144,6 +145,7 @@ listed at the bottom of each crate.
 - `tests/anthropic_api.rs` -- wiremock-based complete + stream tests for Anthropic Messages API egress
 - `tests/context_management.rs` -- wiremock-driven complete() + streaming end-to-end for context-management emulation; asserts beta-header strip, context_management body-key strip, and thinking-block injection; gated on `#[cfg(feature = "anthropic-api")]` (run with `--features test-utils` to exercise helpers that pre-populate the thinking cache)
 - `tests/openai_compat.rs` -- wiremock-based complete + stream tests for openai-compat egress (DeepSeek multi-turn, etc.)
+- `tests/bedrock_streaming.rs` -- scoped Bedrock integration tests over the public credential-resolution / auth-dispatch API (`bedrock::auth::resolve` Bearer vs SigV4 variants across regions)
 - `tests/contract_egress.rs` -- canonical -> Anthropic+openai-compat wire body snapshots via insta
 - `tests/contract_egress_bedrock_invoke.rs` -- canonical -> Bedrock-Invoke (Anthropic-shape) body snapshots
 - `tests/contract_egress_bedrock_converse.rs` -- canonical -> Bedrock-Converse vendor-neutral body snapshots
@@ -165,6 +167,7 @@ listed at the bottom of each crate.
 ### Tests
 
 - `tests/factory.rs` -- secret-store-backed provider construction across all four provider kinds
+- `tests/factory_context_management_warning.rs` -- coverage for the `context_management` + `history_reasoning != "preserve"` consistency WARN emitted by `build_resolved_models` (fires once when inconsistent; silent otherwise)
 - `tests/router.rs` -- fallback-chain semantics, runtime-gate behavior with mock `Provider` impls
 
 ## routectl-auth
@@ -176,11 +179,10 @@ listed at the bottom of each crate.
 - `src/oauth/mod.rs` -- crate-internal entry for the OAuth 2.0 PKCE subsystem; defines `OAuthError` and re-exports `OAuthStore`, `LoginOptions`, `run_login`, `known_provider_ids`, token types
 - `src/oauth/types.rs` -- on-disk schema: `CredentialsFile`, `TokenRecord` (incl. optional `session_id`), `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug), `SCHEMA_VERSION`, `unix_now`
 - `src/oauth/file_io.rs` -- atomic load/save of `~/.config/routectl/credentials.json` (TOCTOU-safe fstat, `0o600` enforcement on Unix, tempfile + fsync + rename)
-- `src/oauth/installation_id.rs` -- atomic load/lazy-generate of `~/.config/routectl/installation_id` (process-cached UUIDv4 for the codex `x-codex-installation-id` header; mode `0o600`)
 - `src/oauth/pkce.rs` -- PKCE verifier / SHA-256 challenge / CSRF state; `OsRng`-sourced, Drop-zeroized, constant-time state compare
 - `src/oauth/login.rs` -- login flow driver: PKCE bundle, axum callback sub-app on loopback, `webbrowser` launch, `--print-url` headless fallback, 120s timeout
 - `src/oauth/rate_limit.rs` -- per-source-port + listener-wide sliding-window rate limit on the loopback callback server (turns sustained 400-spam into 429)
-- `src/oauth/store.rs` -- `OAuthStore` `SecretStore` impl; cached `CredentialsFile` + per-provider single-flight refresh mutex + atomic writeback; near-expiry (300s lead) and 401-recovery hooks; refresh client carries codex CLI HTTP fingerprint headers; `peek_or_create_session_id` lazy-mints per-credential session ids
+- `src/oauth/store.rs` -- `OAuthStore` `SecretStore` impl; cached `CredentialsFile` + per-provider single-flight refresh mutex + atomic writeback; near-expiry (300s lead) and 401-recovery hooks; refresh client carries codex CLI HTTP fingerprint headers; preserves an existing `session_id` across token rotation (the codex provider flow mints the fresh `session_id` on first OAuth exchange)
 - `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry + `known_provider_ids` (anthropic, codex); `AuthParams` and `truncate` helper
 - `src/oauth/providers/anthropic.rs` -- claude.ai OAuth flow: `claude.com/cai/oauth/authorize` + `platform.claude.com/v1/oauth/token`, `anthropic-beta: oauth-2025-04-20`, manual-paste redirect support
 - `src/oauth/providers/codex.rs` -- OpenAI ChatGPT/Codex OAuth 2.0 PKCE flow (public client, JWT-derived expiry, lazy refresh-token rotation)
@@ -188,6 +190,7 @@ listed at the bottom of each crate.
 ### Tests
 
 - `tests/secret_resolution.rs` -- `SecretRef::parse` happy/error paths plus `MemoryStore` env/file resolution
+- `tests/codex_refresh_tracing.rs` -- refresh-flow tracing coverage for the codex (chatgpt-oauth) provider; drives the response decoder through the success and 401-`refresh_token_expired` paths under a captured subscriber, asserting the contractual structured fields (status, `new_refresh_token_present`, sha8) emit without leaking token values
 
 ## routectl-cli
 
@@ -235,11 +238,13 @@ listed at the bottom of each crate.
 
 - `tests/common/mod.rs` -- thin re-export shim of `routectl_core::test_utils` (single source of truth for the canonical scenario builders) plus the cli-only `replay` harness submodule; the builders are enabled via the `test-utils` dev-dependency feature on core
 - `tests/server.rs` -- end-to-end axum server tests with wiremock upstreams
+- `tests/hot_reload.rs` -- file-watch + SIGHUP hot-reload integration tests; boots `serve_on_listener` against a tempdir-rooted config.toml + credentials.json and polls for the live `Router` swap
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration tests
 - `tests/anthropic_ingress.rs` -- `/v1/messages` end-to-end (cache_control round-trip, forward-compat, listener auth)
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest` shape per ingress
 - `tests/contract_response_ingress.rs` -- canonical `ChatResponse` -> Anthropic wire body via `render_response`
 - `tests/contract_stream_ingress.rs` -- canonical chunk sequences -> Anthropic SSE events (asserts terminal-event ordering)
+- `tests/replay_egress.rs` -- replay-driven egress contract test; walks `tests/fixtures/captured/`, drives each captured ingress request through the matching egress provider's `normalize_request`, and structurally diffs the upstream-bound body against the on-disk `outgoing_request.json` (anthropic / openai-compat / openai-responses)
 - `tests/e2e_reasoning.rs` -- end-to-end reasoning round-trip across DeepSeek / vLLM / Anthropic dialects
 - `tests/live_matrix.rs` -- live provider matrix (OpenRouter / opencode-go / NIM); requires API keys, gated by feature flag
 - `tests/live_anthropic_oauth.rs` -- live OAuth-bearer test against `api.anthropic.com`; gated by env token file

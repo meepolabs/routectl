@@ -18,10 +18,19 @@ cargo test --workspace --features bedrock --release
 # clean. To include them:
 cargo test --workspace --features bedrock,test-utils --release
 
-# Live matrix against real providers. Requires OPENROUTER_API_KEY,
-# OPENCODE_GO_API_KEY, NIM_API_KEY in env (skips per-provider when
-# missing). 5/5 tests must pass; per-provider PASS counts must match
-# the baseline in docs/TESTED_MODELS.md.
+# Live matrix against real providers. Each provider's tests skip
+# cleanly when their env key is absent, so set keys for whatever you
+# want to exercise:
+#   OPENROUTER_API_KEY / OPENCODE_GO_API_KEY / NIM_API_KEY
+#                                  -- openai-compat matrix (5 tests)
+#   AWS_BEARER_TOKEN_BEDROCK (+ AWS_REGION)
+#                                  -- bedrock invoke + converse (7 tests)
+#   OPENAI_BEARER_KEY / OPENAI_ACCOUNT_ID
+#                                  -- openai-responses (2 tests)
+# There is no single absolute pass count: only the providers whose keys
+# are present run. Match the per-provider PASS rows against the baseline
+# in docs/TESTED_MODELS.md -- a missing key SKIPS that provider's tests
+# rather than failing them.
 cargo test -p routectl-cli --features live-integration --release \
   --test live_matrix -- --nocapture --test-threads=1
 
