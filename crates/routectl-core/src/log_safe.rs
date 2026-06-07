@@ -1313,10 +1313,10 @@ impl Drop for StreamWithSummary {
 
 /// Emit a `tracing::debug!` line carrying the full upstream error
 /// body on a 4xx/5xx response. The provider's existing WARN with
-/// `body_excerpt` (200-512 chars) stays at WARN so
-/// `routectl-warn.log` remains scannable; this DEBUG line gives
-/// operators the full picture (capped at 4 KB) when they flip log
-/// level during triage. Inherits parent span for `request_id`
+/// `body_excerpt` (capped at `MAX` chars via [`sanitize_for_log`])
+/// stays at WARN so `routectl-warn.log` remains scannable; this DEBUG
+/// line gives operators the full picture (capped at 4 KB) when they
+/// flip log level during triage. Inherits parent span for `request_id`
 /// correlation.
 ///
 /// HTML pages from misconfigured proxies / CDN error pages are

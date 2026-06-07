@@ -78,7 +78,7 @@ ROUTECTL_LOG=routectl_providers::bedrock=debug ./routectl serve 2>&1 \
 ```
 
 What you get at debug:
-- Existing `body_excerpt=...` WARN on every 4xx/5xx (512-char
+- Existing `body_excerpt=...` WARN on every 4xx/5xx (256-char
   truncated; greppable from any tracing subscriber that records
   WARN-level events)
 - New `body=...` DEBUG with the full upstream error body (4 KB cap,
@@ -185,7 +185,7 @@ emitters apply DIFFERENT redaction per direction by design:
 | Direction | Headers emitted | Redaction |
 |-----------|-----------------|-----------|
 | 1 -- ingress request (client -> routectl) | RAW, no redaction | None -- fixture captures need the real auth/beta/version headers the client sent |
-| 2 -- outgoing request (routectl -> upstream) | Redacted | `authorization`, `x-api-key`, and `proxy-authorization` values are replaced with `[REDACTED: Bearer JWT]` / `[REDACTED: api key]` etc. so live tokens never land in log archives |
+| 2 -- outgoing request (routectl -> upstream) | Redacted | `authorization` Bearer values are replaced with `Bearer [REDACTED]` (scheme kept); `x-api-key`, non-Bearer `authorization`, and `proxy-authorization` collapse to `[REDACTED]` so live tokens never land in log archives |
 | 3 -- upstream response (upstream -> routectl) | RAW, no redaction | None -- response headers carry no outgoing secrets |
 | 4 -- egress response (routectl -> client) | RAW, no redaction | None -- egress headers carry no secrets |
 
@@ -286,6 +286,6 @@ No secret values, ever:
 - The supplied `x-api-key` / `Authorization: Bearer` value on a
   rejected listener auth (we log only header presence).
 - Full upstream request/response bodies. Bodies are only excerpted to
-  512 chars on 4xx/5xx upstream paths, intentionally. Full body
+  256 chars on 4xx/5xx upstream paths, intentionally. Full body
   inspection is available at trace level -- see the Triage recipes
   section above.

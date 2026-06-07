@@ -54,13 +54,55 @@ when the flag is `false`.
 
 ## meta.json schema
 
+There are two views of `meta.json`: the SUPERSET the capture rig
+writes, and the SUBSET the replay loader's `FixtureMeta` actually
+deserializes. They do not match field-for-field -- the rig records
+extra triage metadata the replay drivers never read, and one
+loader-known field (`expected_unknown_block_count`) is not produced by
+the current rig at all.
+
+### Rig-written superset (`scripts/capture_fixtures.sh`)
+
+The rig emits `meta.json` by hand (no jq dependency). Every key below
+is always present:
+
     {
+      "request_id": String,
+      "captured_at_ts": String,
+      "routectl_version": String,
+      "alias": String,
+      "model": String,
       "ingress_kind": "anthropic" | "openai-chat-completions" | ...,
       "provider_kind": "anthropic" | "openai-compat" | "openai-responses" | ...,
       "stream": bool,
+      "finish_reason": String,
+      "input_tokens": u64,
+      "output_tokens": u64,
+      "total_tokens": u64,
+      "has_ingress_body": bool,
+      "has_outgoing_body": bool,
       "has_upstream_response": bool,
       "has_egress_response": bool,
-      "expected_unknown_block_count": Option<u32>,
+      "has_ingress_headers": bool,
+      "has_outgoing_headers": bool,
+      "has_upstream_headers": bool,
+      "has_egress_headers": bool
+    }
+
+Note the rig does NOT write `expected_unknown_block_count`; see below.
+
+### Loader-deserialized subset (`FixtureMeta`)
+
+The replay loader only deserializes these fields (everything else in
+the rig's superset is ignored on load via serde's default
+unknown-field tolerance):
+
+    {
+      "provider_kind": String,
+      "stream": bool,
+      "has_upstream_response": bool,
+      "has_egress_response": bool,
+      "expected_unknown_block_count": Option<u32>,  // loader-known, NOT rig-written
       "model": Option<String>,
       "routectl_version": Option<String>
     }
@@ -89,11 +131,13 @@ Fields:
 - `has_upstream_response` / `has_egress_response` -- which response
   files are present. Useful for capture sets that did not record
   the upstream side, or response-only fixtures.
-- `expected_unknown_block_count` -- reserved, not yet enforced. The
-  loader deserializes it into `FixtureMeta`, but no replay driver
-  reads it today. Intended for a future forward-compat scenario that
+- `expected_unknown_block_count` -- loader-deserializable but NOT
+  produced by the current capture rig: `capture_fixtures.sh` never
+  writes this key, so it deserializes to `None` (via `#[serde(default)]`)
+  on every real fixture today. Reserved, not yet enforced -- no replay
+  driver reads it. Intended for a future forward-compat scenario that
   pins the number of unknown content blocks the canonical pipeline
-  must opaquely pass through.
+  must opaquely pass through, written by a future rig pass or by hand.
 - `model` -- post-alias provider model id from the trace. Optional
   in the schema (older captures load without it), but the capture
   rig always writes it. Used by the replay drivers to apply the

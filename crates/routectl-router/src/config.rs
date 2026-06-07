@@ -1154,9 +1154,9 @@ pub struct ProviderRuntimePolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_cooldown_ms: Option<u64>,
     /// Per-attempt request timeout that applies to every alias chain
-    /// entry routing through this provider. Only used when the alias's
-    /// `[aliases.X.retry] request_timeout_ms` is unset; the alias-level
-    /// override always wins.
+    /// entry routing through this provider. Two-tier resolution
+    /// (per-provider > global): this field fills in only when the
+    /// global `[retry] request_timeout_ms` left the timeout unset.
     ///
     /// Resolution order (provider > global):
     ///   provider.request_timeout_ms (this field)

@@ -473,8 +473,9 @@ is shaped for the beta-aware edit workflow.
 
 ## Troubleshooting matrix
 
-routectl logs a 200B-truncated `body_excerpt` at WARN on every
-4xx/5xx; flip `ROUTECTL_LOG=routectl=debug` for the full body.
+routectl logs a 256-chars-truncated `body_excerpt` (`sanitize_for_log`)
+at WARN on every 4xx/5xx; flip `ROUTECTL_LOG=routectl=debug` for the
+full body.
 
 | Symptom | Likely cause |
 |---|---|
