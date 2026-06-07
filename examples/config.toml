@@ -49,6 +49,8 @@ api_key_ref = "env://OPENROUTER_API_KEY"
 kind        = "openai-compat"
 base_url    = "https://api.deepseek.com/v1"
 api_key_ref = "env://DEEPSEEK_API_KEY"
+# DeepSeek's API only accepts text content blocks; strip image_url before egress.
+supports_vision = false
 
 # Anthropic Messages API direct.
 [providers.anthropic]

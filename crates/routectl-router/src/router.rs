@@ -2430,6 +2430,7 @@ mod three_source_anthropic_beta_lift_tests {
                 header_extras: provider_headers,
                 payload_extras: None,
                 user_agent: None,
+                supports_vision: true,
                 runtime: ProviderRuntimePolicy::default(),
             },
         );
@@ -2783,6 +2784,7 @@ mod resolved_models_tests {
                 header_extras: BTreeMap::new(),
                 payload_extras: None,
                 user_agent: None,
+                supports_vision: true,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(60_000),
@@ -3298,6 +3300,7 @@ mod feature_filter_tests {
                 header_extras: BTreeMap::new(),
                 payload_extras: None,
                 user_agent: None,
+                supports_vision: true,
                 runtime: ProviderRuntimePolicy {
                     unsupported_features: unsupported_first,
                     ..Default::default()
@@ -3312,6 +3315,7 @@ mod feature_filter_tests {
                 header_extras: BTreeMap::new(),
                 payload_extras: None,
                 user_agent: None,
+                supports_vision: true,
                 runtime: ProviderRuntimePolicy {
                     unsupported_features: unsupported_second,
                     ..Default::default()
@@ -3576,6 +3580,7 @@ mod auth_failure_recovery_tests {
                 header_extras: BTreeMap::new(),
                 payload_extras: None,
                 user_agent: None,
+                supports_vision: true,
                 runtime: ProviderRuntimePolicy::default(),
             },
         );

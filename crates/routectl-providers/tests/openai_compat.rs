@@ -33,6 +33,7 @@ fn make_provider(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatProvi
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        supports_vision: true,
     })
 }
 
@@ -97,6 +98,7 @@ async fn extra_headers_reserved_name_does_not_override_authorization() {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        supports_vision: true,
     });
 
     // If the guard is missing, the wiremock matcher above won't find
@@ -480,6 +482,7 @@ fn strict_translation_off_warns_and_allows_request() {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        supports_vision: true,
     });
     let req = ChatRequest {
         model: "gpt-4o".into(),
@@ -524,6 +527,7 @@ fn strict_translation_on_rejects_canonical_only_fields() {
         user_agent: None,
         strict_translation: true,
         disable_stream_include_usage: false,
+        supports_vision: true,
     });
     let req = ChatRequest {
         model: "gpt-4o".into(),

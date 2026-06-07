@@ -1682,7 +1682,11 @@ async fn cross_anthropic_output_config_format_translates_to_openai_response_form
     let rf = up.get("response_format").unwrap_or_else(|| {
         panic!("response_format missing -- structured output silently dropped on OpenAI host: {up}")
     });
-    assert_eq!(rf["type"], "json_schema");
+    // The upstream model is `deepseek-chat` (aliased via heavy→ds-chat),
+    // and the deepseek substring profile sets drops_json_schema_response_format.
+    // The lift correctly downgrades json_schema→json_object so the upstream
+    // (DeepSeek API) doesn't 400.
+    assert_eq!(rf["type"], "json_object");
 }
 
 #[tokio::test]

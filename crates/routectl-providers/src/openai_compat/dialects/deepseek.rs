@@ -156,7 +156,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -183,7 +183,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -213,7 +213,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -240,7 +240,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -267,7 +267,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -288,7 +288,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 

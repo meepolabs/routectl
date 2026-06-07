@@ -75,6 +75,7 @@ fn openai_compat_provider(base_url: &str) -> OpenAiCompatProvider {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        supports_vision: true,
     })
 }
 
@@ -416,6 +417,7 @@ async fn openai_compat_egress_opt_out_suppresses_stream_options() {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: true,
+        supports_vision: true,
     });
     let _ = collect_chunks(&provider, stream_request("gpt-4o")).await;
 
@@ -476,6 +478,7 @@ async fn openai_compat_per_model_header_extras_reach_wire() {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        supports_vision: true,
     });
 
     // Simulate what the router would publish onto the request before
@@ -534,6 +537,7 @@ async fn openai_compat_egress_preserves_operator_supplied_stream_options() {
         user_agent: None,
         strict_translation: false,
         disable_stream_include_usage: false,
+        supports_vision: true,
     });
     let _ = collect_chunks(&provider, stream_request("gpt-4o")).await;
 

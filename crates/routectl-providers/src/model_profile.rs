@@ -65,6 +65,14 @@ pub struct ModelProfile {
     /// Set on a per-model basis when the model is served by a thinking
     /// model that needs `enable_thinking`. Read by `openai_compat::request`.
     pub uses_chat_template_kwargs: bool,
+
+    /// Downgrade `response_format` with `type: "json_schema"` to
+    /// `type: "json_object"` (schema-less JSON mode). Set for providers
+    /// that 400 on the structured-output schema variant but still accept
+    /// simple JSON mode. DeepSeek is the canonical case: the API returns
+    /// "This response_format type is unavailable now" for `json_schema`.
+    /// Read by `openai_compat::wire_lift::response_format`.
+    pub drops_json_schema_response_format: bool,
 }
 
 impl ModelProfile {
@@ -76,6 +84,7 @@ impl ModelProfile {
         drops_sampling_params: false,
         requires_reasoning_effort: false,
         uses_chat_template_kwargs: false,
+        drops_json_schema_response_format: false,
     };
 
     /// Test the profile's pattern against a (lowercase) model id.
@@ -126,6 +135,17 @@ pub const PROFILES: &[ModelProfile] = &[
         pattern: "reasoner",
         kind: MatchKind::Substring,
         drops_sampling_params: true,
+        drops_json_schema_response_format: true,
+        ..ModelProfile::DEFAULT
+    },
+    // All DeepSeek models: the API does not support `response_format`
+    // with `type: "json_schema"`, only `type: "json_object"`.
+    // Placed AFTER `reasoner` so reasoner variants match the more
+    // specific profile first (which also drops sampling params).
+    ModelProfile {
+        pattern: "deepseek",
+        kind: MatchKind::Substring,
+        drops_json_schema_response_format: true,
         ..ModelProfile::DEFAULT
     },
 ];
@@ -190,6 +210,7 @@ mod tests {
         let p = profile_for("deepseek-reasoner");
         assert!(p.drops_sampling_params);
         assert!(!p.requires_reasoning_effort);
+        assert!(p.drops_json_schema_response_format);
     }
 
     #[test]
@@ -197,12 +218,15 @@ mod tests {
         // Future variant -- substring rule means no code change needed.
         let p = profile_for("deepseek-reasoner-r2");
         assert!(p.drops_sampling_params);
+        assert!(p.drops_json_schema_response_format);
     }
 
     #[test]
-    fn deepseek_chat_does_not_match() {
+    fn deepseek_chat_matches_substring_and_drops_json_schema() {
         let p = profile_for("deepseek-chat");
         assert!(!p.drops_sampling_params);
+        assert!(p.drops_json_schema_response_format);
+        assert!(!p.requires_reasoning_effort);
     }
 
     #[test]

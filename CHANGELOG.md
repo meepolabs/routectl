@@ -8,6 +8,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Per-provider `supports_vision` knob on `[providers.X]` of
+  `kind = "openai-compat"` (default `true`). Set to `false` to strip
+  both Anthropic-shape `image` and OpenAI-shape `image_url` content
+  blocks from all messages before upstream dispatch. Required for the
+  DeepSeek API, which only accepts `text` content blocks and 400s on
+  `image_url` with "unknown variant `image_url`, expected `text`".
+- `drops_json_schema_response_format` auto-detection in `ModelProfile`.
+  The openai-compat egress now downgrades `response_format` from
+  `{type: "json_schema", json_schema: {...}}` to `{type: "json_object"}`
+  for any upstream model matching `"deepseek"` or `"reasoner"` in its
+  model ID. DeepSeek's API returns "This response_format type is
+  unavailable now" for `json_schema`. Note: structured-output schema
+  enforcement is lost on the downgraded path; the upstream sees only
+  plain JSON mode.
 - Per-provider `max_thinking_entry_bytes` knob on `[providers.X]` of
   `kind = "anthropic-api"` (1 KiB to 4 MiB; default 1 MiB). Tunes the
   per-entry byte cap on the `context_management` emulation

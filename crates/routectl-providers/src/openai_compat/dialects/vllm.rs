@@ -159,7 +159,7 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -186,7 +186,7 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -216,7 +216,7 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -243,7 +243,7 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -270,7 +270,7 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -291,7 +291,7 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 
@@ -323,7 +323,7 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
 

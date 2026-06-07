@@ -166,6 +166,7 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             user_agent,
+            supports_vision,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -190,6 +191,7 @@ async fn build_provider_inner(
                 user_agent: user_agent.clone(),
                 strict_translation: opts.strict_translation,
                 disable_stream_include_usage: false,
+                supports_vision: *supports_vision,
             };
             Ok(Arc::new(OpenAiCompatProvider::new(cfg)))
         }

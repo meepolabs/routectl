@@ -125,6 +125,7 @@ fn build_provider_for_kind(
                 user_agent: None,
                 strict_translation: false,
                 disable_stream_include_usage: false,
+                supports_vision: true,
             },
         )))),
         // FUTURE: replace with provider construction when SSE-aware ingress replay lands (see mount_for_kind comment).

@@ -580,6 +580,13 @@ pub enum ProviderEntry {
         /// Override the outbound User-Agent.
         #[serde(default)]
         user_agent: Option<String>,
+        /// When `false`, image content blocks (both Anthropic-shape
+        /// `image` and OpenAI-shape `image_url`) are stripped from all
+        /// messages before the request is sent upstream. Default `true`.
+        /// Set to `false` for providers whose API only accepts `text`
+        /// content blocks and 400s on `image_url` (e.g. DeepSeek).
+        #[serde(default = "default_true", alias = "supports-vision")]
+        supports_vision: bool,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -823,6 +830,7 @@ impl ProviderEntry {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
+            supports_vision: true,
             runtime: ProviderRuntimePolicy::default(),
         }
     }

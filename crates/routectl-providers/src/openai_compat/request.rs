@@ -40,6 +40,7 @@ pub fn normalize(
     history_reasoning: HistoryReasoning,
     payload_extras: Option<&Value>,
     strict_translation: bool,
+    supports_vision: bool,
 ) -> Result<Value> {
     // Lossy seams: Anthropic-canonical fields the OpenAI-compat wire
     // can't carry. Default mode warns + continues; strict mode 400s.
@@ -124,6 +125,17 @@ pub fn normalize(
     // (openrouter). Running history_reasoning before wire_lift would
     // make both modes blind to anything cc echoed as content blocks.
     super::wire_lift::lift_all(id, obj, req, strict_translation)?;
+
+    // Strip image content blocks from every message when the upstream
+    // provider does not support vision. DeepSeek's API, for instance,
+    // only accepts `text` content blocks and 400s on `image_url` with
+    // "unknown variant `image_url`, expected `text`". This runs AFTER
+    // the content lift (which converts Anthropic `image` blocks to
+    // `image_url`) so both the converted and pre-existing image_url
+    // blocks are caught in one pass.
+    if !supports_vision {
+        strip_image_blocks(id, obj);
+    }
 
     match history_reasoning {
         HistoryReasoning::Auto => {
@@ -361,6 +373,46 @@ fn request_carries_reasoning(req: &ChatRequest) -> bool {
     })
 }
 
+/// Strip `image_url` content blocks from every message in the wire
+/// body's `messages` array. Runs after the content lift so both
+/// Anthropic-converted `image` blocks and pre-existing `image_url`
+/// blocks are caught. Used when the upstream provider does not support
+/// vision (DeepSeek API only accepts `text` content blocks).
+fn strip_image_blocks(id: &str, obj: &mut serde_json::Map<String, serde_json::Value>) {
+    let messages = match obj.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        Some(m) => m,
+        None => return,
+    };
+    for msg in messages.iter_mut() {
+        let Some(msg_obj) = msg.as_object_mut() else {
+            continue;
+        };
+        let Some(content_val) = msg_obj.get_mut("content") else {
+            continue;
+        };
+        let Some(parts) = content_val.as_array_mut() else {
+            continue;
+        };
+        let original_len = parts.len();
+        parts.retain(|part| {
+            let is_image = part
+                .as_object()
+                .and_then(|o| o.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("image_url");
+            !is_image
+        });
+        let dropped = original_len - parts.len();
+        if dropped > 0 {
+            tracing::warn!(
+                provider = id,
+                dropped_image_blocks = dropped,
+                "openai-compat egress: stripped image_url blocks (provider does not support vision)",
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,7 +449,7 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         // temperature preserved for non-reasoning models
@@ -424,7 +476,7 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert!(
@@ -443,7 +495,7 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert!(body.get("temperature").is_none());
@@ -464,7 +516,7 @@ mod tests {
             ReasoningDialect::OpenAi,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert_eq!(body["reasoning_effort"], "high");
@@ -479,7 +531,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert!(body.get("temperature").is_none());
@@ -503,7 +555,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         let msgs = body["messages"].as_array().unwrap();
@@ -537,7 +589,7 @@ mod tests {
             ReasoningDialect::DeepSeek,
             HistoryReasoning::Preserve,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         let assistant = body["messages"]
@@ -577,7 +629,7 @@ mod tests {
             ReasoningDialect::OpenRouter, // default = passthrough/no-op
             HistoryReasoning::Strip,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         let assistant = body["messages"]
@@ -610,7 +662,7 @@ mod tests {
             ReasoningDialect::OpenRouter,
             HistoryReasoning::Preserve,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         let assistant = body["messages"]
@@ -638,7 +690,7 @@ mod tests {
             ReasoningDialect::Vllm,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
@@ -654,7 +706,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert_eq!(body["custom_key"], "custom_val");
@@ -695,7 +747,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         // Canonical fields preserved from the request, NOT overridden.
@@ -745,7 +797,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             Some(&defaults),
-            false,
+            false, true,
         )
         .unwrap();
         // Canonical fields preserved from the request, NOT overridden.
@@ -778,7 +830,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             Some(&json!({"system": "INJECTED via default_extras"})),
-            false,
+            false, true,
         )
         .unwrap();
         assert!(
@@ -805,7 +857,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             Some(&defaults),
-            false,
+            false, true,
         )
         .unwrap();
         assert_eq!(body["key"], "from_request");
@@ -827,7 +879,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert!(
@@ -868,7 +920,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert!(body.get("system").is_none());
@@ -890,7 +942,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         assert!(body.get("system").is_none());
@@ -925,7 +977,7 @@ mod tests {
             ReasoningDialect::Passthrough,
             HistoryReasoning::Auto,
             None,
-            false,
+            false, true,
         )
         .unwrap();
         let messages = body["messages"].as_array().unwrap();
@@ -940,5 +992,166 @@ mod tests {
             messages[0]["content"], "legacy duplicate",
             "the lowered req.system must win, not the legacy Role::System message"
         );
+    }
+
+    // ── strip_image_blocks unit tests ──────────────────────────────
+
+    #[test]
+    fn strip_image_blocks_removes_image_url_and_keeps_text() {
+        let mut obj = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "plain string"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "describe this"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}},
+                    {"type": "text", "text": "thanks"}
+                ]},
+                {"role": "assistant", "content": "reply"}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        strip_image_blocks("test", &mut obj);
+        let msgs = obj["messages"].as_array().unwrap();
+        // Plain string content untouched.
+        assert_eq!(msgs[0]["content"], "plain string");
+        // image_url removed, text blocks kept.
+        let parts = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "describe this");
+        assert_eq!(parts[1]["type"], "text");
+        assert_eq!(parts[1]["text"], "thanks");
+        // Assistant message untouched.
+        assert_eq!(msgs[2]["content"], "reply");
+    }
+
+    #[test]
+    fn strip_image_blocks_all_image_url_yields_empty_content_array() {
+        let mut obj = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/b.png"}}
+                ]}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        strip_image_blocks("test", &mut obj);
+        let parts = obj["messages"][0]["content"].as_array().unwrap();
+        assert!(
+            parts.is_empty(),
+            "all-image_url content should result in empty array"
+        );
+    }
+
+    #[test]
+    fn strip_image_blocks_handles_missing_messages_key() {
+        let mut obj = serde_json::Map::new();
+        strip_image_blocks("test", &mut obj);
+        // No panic — the function must handle missing keys gracefully.
+    }
+
+    #[test]
+    fn strip_image_blocks_handles_message_without_content() {
+        let mut obj = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": null}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        strip_image_blocks("test", &mut obj);
+        // No panic.
+    }
+
+    #[test]
+    fn normalize_strips_image_blocks_when_supports_vision_is_false() {
+        use routectl_core::{ContentPart, KnownContentPart};
+        let req = ChatRequest {
+            model: "deepseek-chat".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "look at this".into(),
+                        cache_control: None,
+                    }),
+                    ContentPart::Known(KnownContentPart::ImageUrl {
+                        image_url: serde_json::json!({"url": "https://example.com/img.png"}),
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::DeepSeek,
+            HistoryReasoning::Auto,
+            None,
+            false,
+            false, // supports_vision = false
+        )
+        .unwrap();
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 1, "only text block should remain");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "look at this");
+    }
+
+    #[test]
+    fn normalize_preserves_image_blocks_when_supports_vision_is_true() {
+        use routectl_core::{ContentPart, KnownContentPart};
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "look at this".into(),
+                        cache_control: None,
+                    }),
+                    ContentPart::Known(KnownContentPart::ImageUrl {
+                        image_url: serde_json::json!({"url": "https://example.com/img.png"}),
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenAi,
+            HistoryReasoning::Auto,
+            None,
+            false,
+            true, // supports_vision = true
+        )
+        .unwrap();
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2, "both text and image blocks should remain");
+        let types: Vec<&str> = parts
+            .iter()
+            .map(|p| p["type"].as_str().unwrap())
+            .collect();
+        assert!(types.contains(&"text"));
+        assert!(types.contains(&"image_url"));
     }
 }

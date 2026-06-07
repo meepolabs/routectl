@@ -33,13 +33,23 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, Result};
 
+use crate::model_profile::profile_for;
+
 pub fn lift(
     _id: &str,
     obj: &mut Map<String, Value>,
     req: &ChatRequest,
     _strict: bool,
 ) -> Result<()> {
-    // If response_format is already set, caller wins.
+    let profile = profile_for(&req.model);
+
+    // If response_format is already set, caller wins — but still
+    // downgrade json_schema→json_object for providers that don't
+    // support it (DeepSeek).
+    let needs_downgrade = profile.drops_json_schema_response_format;
+    if let Some(rf) = obj.get_mut("response_format") {
+        downgrade_json_schema_if_needed(rf, needs_downgrade);
+    }
     if obj.contains_key("response_format") {
         // Still strip a stray output_config to keep the wire clean.
         obj.remove("output_config");
@@ -58,16 +68,30 @@ pub fn lift(
         None => return Ok(()),
     };
 
-    let lifted = match translate_format(format) {
+    let mut lifted = match translate_format(format) {
         Some(v) => v,
         None => return Ok(()),
     };
+    downgrade_json_schema_if_needed(&mut lifted, profile.drops_json_schema_response_format);
     obj.insert("response_format".into(), lifted);
     // Strip the Anthropic-shape leftover regardless. (It currently
     // can't reach the wire today since the egress's extras merge has
     // a managed-key list, but defense in depth.)
     obj.remove("output_config");
     Ok(())
+}
+
+/// If the provider doesn't support `json_schema` response format,
+/// downgrade to simple `json_object` mode. The model still outputs
+/// JSON but without schema enforcement — a graceful degradation.
+fn downgrade_json_schema_if_needed(rf: &mut Value, needs_downgrade: bool) {
+    if !needs_downgrade {
+        return;
+    }
+    let typ = rf.get("type").and_then(|v| v.as_str());
+    if typ == Some("json_schema") {
+        *rf = serde_json::json!({"type": "json_object"});
+    }
 }
 
 fn translate_format(format: &Value) -> Option<Value> {
@@ -225,5 +249,122 @@ mod tests {
             obj.get("output_config").is_none(),
             "output_config must be stripped from the wire"
         );
+    }
+
+    // ── downgrade_json_schema_if_needed tests ───────────────────────
+
+    #[test]
+    fn downgrade_json_schema_to_json_object_when_needed() {
+        let mut rf = json!({"type": "json_schema", "json_schema": {"schema": {}, "strict": true}});
+        downgrade_json_schema_if_needed(&mut rf, true);
+        assert_eq!(rf, json!({"type": "json_object"}));
+    }
+
+    #[test]
+    fn downgrade_leaves_json_object_unchanged() {
+        let mut rf = json!({"type": "json_object"});
+        let original = rf.clone();
+        downgrade_json_schema_if_needed(&mut rf, true);
+        assert_eq!(rf, original);
+    }
+
+    #[test]
+    fn downgrade_noop_when_flag_is_false() {
+        let mut rf = json!({"type": "json_schema", "json_schema": {"schema": {}, "strict": true}});
+        let original = rf.clone();
+        downgrade_json_schema_if_needed(&mut rf, false);
+        assert_eq!(rf, original);
+    }
+
+    #[test]
+    fn downgrade_leaves_other_types_unchanged() {
+        let mut rf = json!({"type": "text"});
+        let original = rf.clone();
+        downgrade_json_schema_if_needed(&mut rf, true);
+        assert_eq!(rf, original);
+    }
+
+    #[test]
+    fn lift_downgrades_json_schema_for_deepseek_model() {
+        let extras = json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {"type": "object", "properties": {"x": {"type": "integer"}}}
+                }
+            }
+        });
+        let req = ChatRequest {
+            model: "deepseek-chat".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            provider_extras: Some(extras),
+            ..Default::default()
+        };
+        let mut obj = Map::new();
+        lift("test", &mut obj, &req, false).unwrap();
+        assert_eq!(obj["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn lift_does_not_downgrade_for_non_deepseek_model() {
+        let extras = json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {"type": "object", "properties": {"x": {"type": "integer"}}}
+                }
+            }
+        });
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            provider_extras: Some(extras),
+            ..Default::default()
+        };
+        let mut obj = Map::new();
+        lift("test", &mut obj, &req, false).unwrap();
+        assert_eq!(obj["response_format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn lift_downgrades_existing_response_format_for_deepseek() {
+        // Caller-supplied response_format with json_schema on a deepseek
+        // model: the downgrade must still apply.
+        let req = ChatRequest {
+            model: "deepseek-reasoner".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        let mut obj = Map::new();
+        obj.insert(
+            "response_format".into(),
+            json!({"type": "json_schema", "json_schema": {"schema": {}, "strict": true}}),
+        );
+        lift("test", &mut obj, &req, false).unwrap();
+        assert_eq!(obj["response_format"], json!({"type": "json_object"}));
     }
 }

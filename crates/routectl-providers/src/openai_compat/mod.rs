@@ -98,6 +98,13 @@ pub struct OpenAiCompatConfig {
     /// `payload_extras` / `provider_extras` always wins -- including an
     /// explicit `include_usage = false`.
     pub disable_stream_include_usage: bool,
+    /// When `false`, image content blocks (both Anthropic-shape `image`
+    /// and OpenAI-shape `image_url`) are stripped from all messages
+    /// before the request is sent upstream. Default `true` (preserve).
+    /// Set to `false` for providers that do not support vision, such as
+    /// DeepSeek (whose API only accepts `text` content blocks and 400s
+    /// on `image_url`).
+    pub supports_vision: bool,
 }
 
 /// Outgoing-history reasoning policy. Sibling of the router-side
@@ -233,6 +240,7 @@ impl Provider for OpenAiCompatProvider {
             history,
             self.cfg.payload_extras.as_ref(),
             self.cfg.strict_translation,
+            self.cfg.supports_vision,
         )
     }
 
