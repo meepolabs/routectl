@@ -18,6 +18,12 @@ pub mod system_content;
 pub mod token_source;
 pub mod tool_def;
 
+/// Shared canonical-request / canonical-response builders for the
+/// cross-crate contract tests. Compiled only under `cfg(test)` or the
+/// `test-utils` feature so the fixtures never ship in release builds.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
+
 pub use cache_control::{Breakpoint, BreakpointPosition, CacheControl};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};

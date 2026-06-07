@@ -25,6 +25,7 @@ listed at the bottom of each crate.
 - `src/provider.rs` -- `Provider` trait every backend implements (normalize_request/response/chunk + complete + stream + on_auth_failure hook for 401 recovery)
 - `src/token_source.rs` -- `TokenSource` async trait (`Arc<dyn TokenSource>` per-provider) + `StaticToken` default impl; lets OAuth refresh rotate without daemon restart
 - `src/log_safe.rs` -- log sanitization, body-trace helpers (4 directions), prompt redaction, structural-summary extractor, `[log]`-block override seeding
+- `src/test_utils.rs` -- single source of truth for the cross-crate contract-test fixture builders (`scenarios::*`, `user_msg`, `get_weather_tool`); gated behind `#[cfg(any(test, feature = "test-utils"))]` so it never ships in a release build; re-exported by both `routectl-providers/tests/common/mod.rs` and `routectl-cli/tests/common/mod.rs`
 - `src/identity/mod.rs` -- provider identity-header module root; one canonical home for the compiled HTTP-fingerprint constants and default-header builders (`pub mod codex; pub mod anthropic;`)
 - `src/identity/codex.rs` -- shared codex CLI HTTP fingerprint (UA, originator, residency) + `default_identity_headers()` (originator/residency/version trio); consumed by both the openai-responses egress client and the routectl-auth OAuth refresh client so token-endpoint round-trips do not drift from real codex traffic
 - `src/identity/anthropic.rs` -- compiled Claude Code SDK (Stainless) identity-header defaults (`default_claude_code_identity_headers`, `default_claude_code_user_agent`); consumed by the anthropic-api egress on the OauthBearer path so a zero-config provider emits the Claude Code fingerprint
@@ -139,7 +140,7 @@ listed at the bottom of each crate.
 
 ### Tests
 
-- `tests/common/mod.rs` -- shared canonical-`ChatRequest` scenario builders mirrored with `routectl-cli/tests/common/mod.rs`
+- `tests/common/mod.rs` -- thin re-export shim of `routectl_core::test_utils` (the single source of truth for the canonical scenario builders); enabled via the `test-utils` dev-dependency feature on core
 - `tests/anthropic_api.rs` -- wiremock-based complete + stream tests for Anthropic Messages API egress
 - `tests/context_management.rs` -- wiremock-driven complete() + streaming end-to-end for context-management emulation; asserts beta-header strip, context_management body-key strip, and thinking-block injection; gated on `#[cfg(feature = "anthropic-api")]` (run with `--features test-utils` to exercise helpers that pre-populate the thinking cache)
 - `tests/openai_compat.rs` -- wiremock-based complete + stream tests for openai-compat egress (DeepSeek multi-turn, etc.)
@@ -232,7 +233,7 @@ listed at the bottom of each crate.
 
 ### Tests
 
-- `tests/common/mod.rs` -- shared canonical scenario builders mirrored with `routectl-providers/tests/common/mod.rs`
+- `tests/common/mod.rs` -- thin re-export shim of `routectl_core::test_utils` (single source of truth for the canonical scenario builders) plus the cli-only `replay` harness submodule; the builders are enabled via the `test-utils` dev-dependency feature on core
 - `tests/server.rs` -- end-to-end axum server tests with wiremock upstreams
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration tests
 - `tests/anthropic_ingress.rs` -- `/v1/messages` end-to-end (cache_control round-trip, forward-compat, listener auth)

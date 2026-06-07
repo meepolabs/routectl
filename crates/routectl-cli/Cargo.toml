@@ -51,6 +51,10 @@ arc-swap = { workspace = true }
 live-integration = []
 
 [dev-dependencies]
+# Enable the shared contract-test fixture builders (test_utils) from core.
+# A dev-dependency with extra features unifies the `test-utils` feature in
+# only for test/bench builds, never for the release binary.
+routectl-core = { workspace = true, features = ["test-utils"] }
 wiremock.workspace = true
 reqwest = { workspace = true }
 futures = { workspace = true }

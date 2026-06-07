@@ -87,6 +87,10 @@ http = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
+# Enable the shared contract-test fixture builders (test_utils) from core.
+# A dev-dependency with extra features unifies the `test-utils` feature in
+# only for test/bench builds, never for the release library.
+routectl-core = { workspace = true, features = ["test-utils"] }
 wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 pretty_assertions = "1"
