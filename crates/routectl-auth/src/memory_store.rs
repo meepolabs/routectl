@@ -219,3 +219,26 @@ async fn read_secret_file(path: &Path) -> Result<String> {
         Error::Auth(format!("secret file read for `{display}` {kind}: {e}"))
     })?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn default_list_seats_returns_single_ref() {
+        // MemoryStore inherits the trait's default `list_seats`: any ref
+        // is a single credential, so enumeration echoes the input ref.
+        let store = MemoryStore::new();
+        for sr in [
+            SecretRef::Env("FOO".into()),
+            SecretRef::Literal("bar".into()),
+            SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            },
+        ] {
+            let seats = store.list_seats(&sr).await.unwrap();
+            assert_eq!(seats, vec![sr]);
+        }
+    }
+}

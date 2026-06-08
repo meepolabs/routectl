@@ -179,6 +179,25 @@ impl SecretStore for CompositeStore {
             _ => self.fallback.account_id(secret_ref).await,
         }
     }
+
+    async fn list_seats(&self, secret_ref: &SecretRef) -> Result<Vec<SecretRef>> {
+        match secret_ref {
+            // Route oauth:// seat enumeration to the OAuth arm so the
+            // factory can expand a bare pool ref into one ref per stored
+            // seat. When the OAuth arm is absent (no HOME/XDG) there is
+            // no credentials file to enumerate; fall back to the
+            // single-ref default so the downstream resolve surfaces the
+            // clear "OAuth store unavailable" error rather than an empty
+            // pool here.
+            SecretRef::OAuth { .. } => match &self.oauth {
+                Some(oauth) => oauth.list_seats(secret_ref).await,
+                None => Ok(vec![secret_ref.clone()]),
+            },
+            // env:// / file:// / literal: are single-credential refs;
+            // the MemoryStore default echoes the input ref.
+            _ => self.fallback.list_seats(secret_ref).await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -483,5 +502,77 @@ mod tests {
             msg.contains("OAuth store unavailable"),
             "expected unavailable-OAuth message, got: {msg}"
         );
+    }
+
+    /// `list_seats` for an oauth:// ref must route through the OAuth arm
+    /// (so a bare pool ref expands to one ref per stored seat), while a
+    /// non-oauth ref falls through to the MemoryStore single-ref default.
+    #[tokio::test]
+    async fn composite_store_forwards_list_seats_to_oauth_arm() {
+        // Arrange: seed two seats for one provider on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let creds = serde_json::json!({
+            "schema_version": 1,
+            "providers": {
+                "anthropic": {
+                    "access_token": "tok-default",
+                    "refresh_token": "rtok-default",
+                    "token_type": "Bearer",
+                    "expires_at_unix": now + 3600,
+                    "scopes": ["user:inference"],
+                    "obtained_at_unix": now
+                },
+                "anthropic#seat-b": {
+                    "access_token": "tok-seat-b",
+                    "refresh_token": "rtok-seat-b",
+                    "token_type": "Bearer",
+                    "expires_at_unix": now + 3600,
+                    "scopes": ["user:inference"],
+                    "obtained_at_unix": now
+                }
+            }
+        });
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&creds).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let store = CompositeStore::open_at(&path).await.unwrap();
+
+        // Act: a bare oauth:// pool ref expands through the OAuth arm.
+        let seats = store
+            .list_seats(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            })
+            .await
+            .unwrap();
+
+        // Assert: default seat first, labeled seat second.
+        assert_eq!(
+            seats,
+            vec![
+                SecretRef::OAuth {
+                    provider: "anthropic".into(),
+                    label: None,
+                },
+                SecretRef::OAuth {
+                    provider: "anthropic".into(),
+                    label: Some("seat-b".into()),
+                },
+            ]
+        );
+
+        // A non-oauth ref falls through to the single-ref default.
+        let env_ref = SecretRef::Env("FOO".into());
+        let env_seats = store.list_seats(&env_ref).await.unwrap();
+        assert_eq!(env_seats, vec![env_ref]);
     }
 }

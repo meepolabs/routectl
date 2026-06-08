@@ -32,4 +32,18 @@ pub trait SecretStore: Send + Sync {
     async fn account_id(&self, _secret_ref: &SecretRef) -> Result<Option<String>> {
         Ok(None)
     }
+
+    /// Enumerate the concrete seat refs a (possibly pooled) credential
+    /// reference resolves to. Default: a single-element vec echoing the
+    /// input ref -- `env://`, `file://`, `literal:`, and an already-pinned
+    /// or single-seat `oauth://` ref are all one credential, so the
+    /// router sees exactly one target. The OAuth store overrides this so
+    /// a bare `oauth://<provider>` pool ref expands to one ref per stored
+    /// seat (default seat first, then sorted labels), letting the factory
+    /// build a multi-seat credential pool from one TOML entry. A ref that
+    /// pins a specific seat (`oauth://<provider>#<label>`) returns just
+    /// that seat -- the operator already selected it.
+    async fn list_seats(&self, secret_ref: &SecretRef) -> Result<Vec<SecretRef>> {
+        Ok(vec![secret_ref.clone()])
+    }
 }

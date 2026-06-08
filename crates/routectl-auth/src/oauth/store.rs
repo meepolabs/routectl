@@ -19,7 +19,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::oauth::file_io;
 use crate::oauth::providers;
-use crate::oauth::types::{unix_now, CredentialsFile, TokenRecord};
+use crate::oauth::types::{seat_key, unix_now, CredentialsFile, TokenRecord};
 use crate::oauth::{OAuthError, OAuthResult};
 use crate::{SecretRef, SecretStore};
 
@@ -55,16 +55,23 @@ struct Inner {
     /// or hostile token endpoint from holding a login attempt open
     /// forever.
     http: reqwest::Client,
-    /// Per-provider single-flight refresh mutex. Only acquired when a
+    /// Per-seat single-flight refresh mutex. Only acquired when a
     /// near-expiry (or forced 401) trigger fires; the lock-holder
     /// refreshes and persists, stragglers re-read the freshly-written
     /// record and return without re-refreshing (double-check pattern).
-    /// `BTreeMap` rather than a single global `tokio::sync::Mutex` so
-    /// per-provider concurrency is preserved when a future codex
-    /// provider lands; the cost is one heap-allocated `Arc<Mutex<()>>`
-    /// per provider id (refresh contention is cents-per-day either
-    /// way). The map itself is guarded by a sync `std::sync::Mutex`
-    /// because get-or-insert is a tiny CPU-only critical section.
+    /// Keyed by SEAT KEY (`seat_key(provider, label)`), not the bare
+    /// provider, so concurrent refreshes on distinct seats of the same
+    /// provider proceed independently (a refresh on `anthropic#seat-b`
+    /// does not serialize behind one on the default `anthropic` seat),
+    /// while concurrent gets on the SAME seat still collapse to one
+    /// token-endpoint POST. The unlabeled seat keys as the bare provider
+    /// (`seat_key(p, None) == p`), so a single-seat deployment behaves
+    /// exactly as before. `BTreeMap` rather than a single global
+    /// `tokio::sync::Mutex` so per-seat concurrency is preserved; the
+    /// cost is one heap-allocated `Arc<Mutex<()>>` per live seat key
+    /// (refresh contention is cents-per-day either way). The map itself
+    /// is guarded by a sync `std::sync::Mutex` because get-or-insert is
+    /// a tiny CPU-only critical section.
     refresh_locks: std::sync::Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     /// Monotonic counter bumped by every successful `reload_from_disk`
     /// call (under the file `RwLock` write guard). `refresh_under_lock`
@@ -259,18 +266,30 @@ impl OAuthStore {
         self.remove_provider(provider).await
     }
 
-    /// Force a refresh for `provider` regardless of expiry. Used by
-    /// `routectl refresh <provider>` and by `on_auth_failure` after an
-    /// upstream 401. Goes through the per-provider single-flight gate
-    /// so a 401 storm collapses to one token-endpoint POST. Returns the
-    /// freshly-persisted `TokenRecord` so the CLI can report the new
-    /// expiry.
+    /// Force a refresh for `provider`'s default (unlabeled) seat
+    /// regardless of expiry. Used by `routectl refresh <provider>`. Goes
+    /// through the per-seat single-flight gate so a 401 storm collapses
+    /// to one token-endpoint POST. Returns the freshly-persisted
+    /// `TokenRecord` so the CLI can report the new expiry.
     pub async fn force_refresh(&self, provider: &str) -> Result<TokenRecord> {
+        // The default seat keys as the bare provider name.
+        self.force_refresh_seat(provider, &seat_key(provider, None))
+            .await
+    }
+
+    /// Force a refresh for a specific `seat` of `provider`, regardless of
+    /// expiry. `provider` selects the `OAuthFlow` (the registry is keyed
+    /// by provider id); `seat` selects the credentials-map record, lock,
+    /// and persistence target (`seat_key(provider, label)`). For an
+    /// unlabeled seat the two coincide. Drives both the CLI
+    /// `force_refresh` and the trait `on_auth_failure` paths.
+    async fn force_refresh_seat(&self, provider: &str, seat: &str) -> Result<TokenRecord> {
         // Validate the provider id up front so an unknown id does not
         // surface as `NotLoggedIn` (which is misleading).
         providers::lookup(provider).map_err(Error::from)?;
-        let current = self.read_record(provider).await.map_err(Error::from)?;
-        self.refresh_under_lock(provider, &current, true).await
+        let current = self.read_record(seat).await.map_err(Error::from)?;
+        self.refresh_under_lock(provider, seat, &current, true)
+            .await
     }
 
     /// Re-read the on-disk credentials file and overwrite the in-memory
@@ -310,17 +329,23 @@ impl OAuthStore {
         Ok(())
     }
 
-    /// Refresh `provider`'s record under the per-provider single-flight
-    /// mutex. The `current` record is the snapshot the caller saw
-    /// before contending for the lock; on the `force` path it is the
-    /// "dead" token the upstream rejected, used to short-circuit
-    /// redundant rotations when another caller already refreshed.
+    /// Refresh `seat`'s record under the per-seat single-flight mutex.
+    /// `provider` selects the `OAuthFlow` (the static registry is keyed
+    /// by provider id); `seat` is the credentials-map key
+    /// (`seat_key(provider, label)`) that names the record, the lock, and
+    /// the persistence target. For an unlabeled seat the two coincide.
+    /// The `current` record is the snapshot the caller saw before
+    /// contending for the lock; on the `force` path it is the "dead"
+    /// token the upstream rejected, used to short-circuit redundant
+    /// rotations when another caller already refreshed the SAME seat.
     ///
     /// Single-flight + double-check pattern:
-    /// 1. Acquire the per-provider mutex (instantiating it lazily).
-    /// 2. Re-read the in-memory record (writes are disk-first under
-    ///    the same lock, so a fresh read reflects any winner's
-    ///    persisted refresh).
+    /// 1. Acquire the per-SEAT mutex (instantiating it lazily). Distinct
+    ///    seats take distinct locks, so a refresh on one seat never
+    ///    blocks a refresh on another.
+    /// 2. Re-read the in-memory record for THIS seat (writes are
+    ///    disk-first under the same lock, so a fresh read reflects any
+    ///    winner's persisted refresh).
     /// 3. If the lock-waiter sees the record is no longer stale
     ///    (`!near_expiry` for the get path, or the in-memory access
     ///    token differs from the dead token for the force path),
@@ -330,11 +355,12 @@ impl OAuthStore {
     async fn refresh_under_lock(
         &self,
         provider: &str,
+        seat: &str,
         current: &TokenRecord,
         force: bool,
     ) -> Result<TokenRecord> {
-        // Step 1: get-or-insert the per-provider tokio mutex. The map
-        // is guarded by a `std::sync::Mutex` -- the critical section is
+        // Step 1: get-or-insert the per-seat tokio mutex. The map is
+        // guarded by a `std::sync::Mutex` -- the critical section is
         // CPU-only (BTreeMap entry + Arc clone) and never crosses an
         // await, so a sync mutex is the right primitive here.
         let lock = {
@@ -344,15 +370,15 @@ impl OAuthStore {
                 .lock()
                 .expect("refresh_locks mutex poisoned");
             locks
-                .entry(provider.to_string())
+                .entry(seat.to_string())
                 .or_insert_with(|| Arc::new(AsyncMutex::new(())))
                 .clone()
         };
         let _guard = lock.lock().await;
 
         // Step 2: double-check after acquiring the lock. Another caller
-        // may have refreshed while we were parked.
-        let rec = self.read_record(provider).await.map_err(Error::from)?;
+        // may have refreshed THIS seat while we were parked.
+        let rec = self.read_record(seat).await.map_err(Error::from)?;
         let still_stale = if force {
             // Forced (401) path: skip the expiry check, but if the
             // on-disk access token has already changed since the dead
@@ -428,9 +454,9 @@ impl OAuthStore {
                 // per reload race (bounded by the operator-driven reload
                 // cadence of minutes to hours).
                 let reloaded = wguard
-                    .get(provider)
+                    .get(seat)
                     .cloned()
-                    .ok_or_else(|| Error::from(OAuthError::NotLoggedIn(provider.to_string())))?;
+                    .ok_or_else(|| Error::from(OAuthError::NotLoggedIn(seat.to_string())))?;
                 return Ok(reloaded);
             }
             // No reload raced us: commit the refresh result disk-first.
@@ -438,7 +464,7 @@ impl OAuthStore {
             // failed save leaves both halves consistent (same invariant
             // as `write_record`).
             let mut staged = wguard.clone();
-            staged.upsert(provider, new_rec.clone());
+            staged.upsert(seat, new_rec.clone());
             file_io::save(&self.inner.path, &staged)
                 .await
                 .map_err(Error::from)?;
@@ -464,8 +490,8 @@ impl OAuthStore {
 #[async_trait]
 impl SecretStore for OAuthStore {
     async fn get(&self, secret_ref: &SecretRef) -> Result<String> {
-        let provider = match secret_ref {
-            SecretRef::OAuth { provider, .. } => provider,
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
             other => {
                 return Err(Error::Auth(format!(
                     "OAuthStore only handles oauth:// refs, got {other}",
@@ -474,18 +500,26 @@ impl SecretStore for OAuthStore {
         };
         // Validate provider is known. The lookup also gives operators
         // the authoritative "unknown oauth provider" message rather
-        // than a silent miss.
+        // than a silent miss. Validation keys on the provider id (the
+        // flow registry is per-provider), independent of the seat.
         providers::lookup(provider).map_err(Error::from)?;
 
-        let rec = self.read_record(provider).await.map_err(Error::from)?;
+        // Resolve the credentials-map record by SEAT KEY: a bare ref
+        // (label None) keys as the unlabeled provider record exactly as
+        // before; a labeled ref keys this seat's record.
+        let seat = seat_key(provider, label.as_deref());
+        let rec = self.read_record(&seat).await.map_err(Error::from)?;
 
         if rec.near_expiry(REFRESH_LEAD_SECS, unix_now()) {
             tracing::debug!(
                 provider = %provider,
+                seat = %seat,
                 expires_at_unix = rec.expires_at_unix,
                 "oauth access token near expiry; entering refresh single-flight"
             );
-            let refreshed = self.refresh_under_lock(provider, &rec, false).await?;
+            let refreshed = self
+                .refresh_under_lock(provider, &seat, &rec, false)
+                .await?;
             return Ok(refreshed.access_token.expose().to_string());
         }
         Ok(rec.access_token.expose().to_string())
@@ -504,15 +538,18 @@ impl SecretStore for OAuthStore {
     }
 
     async fn delete(&self, secret_ref: &SecretRef) -> Result<()> {
-        let provider = match secret_ref {
-            SecretRef::OAuth { provider, .. } => provider,
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
             other => {
                 return Err(Error::Auth(format!(
                     "OAuthStore only handles oauth:// refs, got {other}",
                 )));
             }
         };
-        self.remove_provider(provider)
+        // Delete targets only the named seat: a labeled ref removes that
+        // seat's record and leaves sibling seats untouched; a bare ref
+        // removes the unlabeled record exactly as before.
+        self.remove_provider(&seat_key(provider, label.as_deref()))
             .await
             .map(|_| ())
             .map_err(Error::from)
@@ -523,29 +560,86 @@ impl SecretStore for OAuthStore {
         // credential resolved from this store. Force a refresh -- the
         // upstream said the access token is dead regardless of what
         // `expires_at_unix` claims (clock skew, server-side rotation,
-        // revocation). The single-flight gate inside `force_refresh`
-        // collapses a 401 storm into one POST.
-        let provider = match secret_ref {
-            SecretRef::OAuth { provider, .. } => provider,
+        // revocation). The single-flight gate inside `force_refresh_seat`
+        // collapses a 401 storm into one POST. Targets only the named
+        // seat: a 401 on a labeled seat force-refreshes that seat's
+        // record and leaves sibling seats untouched.
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
             other => {
                 return Err(Error::Auth(format!(
                     "OAuthStore only handles oauth:// refs, got {other}",
                 )));
             }
         };
-        self.force_refresh(provider).await.map(|_| ())
+        self.force_refresh_seat(provider, &seat_key(provider, label.as_deref()))
+            .await
+            .map(|_| ())
     }
 
     async fn account_id(&self, secret_ref: &SecretRef) -> Result<Option<String>> {
-        let provider = match secret_ref {
-            SecretRef::OAuth { provider, .. } => provider,
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
             other => {
                 return Err(Error::Auth(format!(
                     "OAuthStore only handles oauth:// refs, got {other}",
                 )));
             }
         };
-        Ok(self.peek_account_id(provider).await)
+        Ok(self
+            .peek_account_id(&seat_key(provider, label.as_deref()))
+            .await)
+    }
+
+    async fn list_seats(&self, secret_ref: &SecretRef) -> Result<Vec<SecretRef>> {
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
+            // Non-oauth refs are single-ref by definition; mirror the
+            // trait default rather than erroring (the composite store
+            // only routes oauth:// refs here, but a direct caller that
+            // hands a non-oauth ref to OAuthStore should still get the
+            // single-ref answer, not a hard failure).
+            other => return Ok(vec![other.clone()]),
+        };
+        // A labeled ref pins one seat: the operator already selected it,
+        // so enumeration returns just that ref.
+        if label.is_some() {
+            return Ok(vec![secret_ref.clone()]);
+        }
+        // A bare pool ref expands to one ref per stored seat (default
+        // first, then sorted labels). Each seat key is parsed back into
+        // a provider + optional label so the returned refs round-trip
+        // through `Display`/`parse`.
+        let seat_keys = {
+            let guard = self.inner.file.read().await;
+            guard.seats_for_provider(provider)
+        };
+        // No stored seats yet (not logged in): fall back to the single
+        // bare ref so the caller's downstream "not logged in" guidance
+        // fires instead of an empty pool that silently resolves to
+        // nothing.
+        if seat_keys.is_empty() {
+            return Ok(vec![secret_ref.clone()]);
+        }
+        Ok(seat_keys
+            .into_iter()
+            .map(|key| seat_ref_from_key(provider, &key))
+            .collect())
+    }
+}
+
+/// Reconstruct a `SecretRef::OAuth` from a credentials-map seat key.
+/// The unlabeled/default seat keys as the bare provider (label None);
+/// a labeled seat keys as `provider#label` (the text after the first
+/// `#` is the label). Inverse of `seat_key`.
+fn seat_ref_from_key(provider: &str, seat_key: &str) -> SecretRef {
+    let label = seat_key
+        .strip_prefix(provider)
+        .and_then(|rest| rest.strip_prefix('#'))
+        .map(str::to_string);
+    SecretRef::OAuth {
+        provider: provider.to_string(),
+        label,
     }
 }
 
@@ -585,6 +679,41 @@ mod tests {
         RefreshExpired,
     }
 
+    /// Tracks simultaneous `refresh_token` invocations so a test can
+    /// distinguish concurrent per-seat refreshes from serialized
+    /// per-provider ones. `in_flight` is the live count; `max` is the
+    /// high-water mark observed across the run.
+    #[derive(Clone, Default)]
+    struct ConcurrencyGauge {
+        in_flight: Arc<StdMutex<u32>>,
+        max: Arc<StdMutex<u32>>,
+    }
+
+    impl ConcurrencyGauge {
+        /// Record entry into `refresh_token`: bump in-flight and lift the
+        /// high-water mark if this is the most simultaneous so far.
+        fn enter(&self) {
+            let now = {
+                let mut g = self.in_flight.lock().unwrap();
+                *g += 1;
+                *g
+            };
+            let mut m = self.max.lock().unwrap();
+            if now > *m {
+                *m = now;
+            }
+        }
+
+        /// Record exit from `refresh_token`.
+        fn leave(&self) {
+            *self.in_flight.lock().unwrap() -= 1;
+        }
+
+        fn max(&self) -> u32 {
+            *self.max.lock().unwrap()
+        }
+    }
+
     /// Fake `OAuthFlow` that counts `refresh_token` invocations and
     /// returns canned outcomes. Used as a `cfg(test)` override in
     /// `Inner::refresh_flow` so unit tests do not stand up the real
@@ -594,8 +723,25 @@ mod tests {
         outcome: RefreshOutcome,
         /// When true, `refresh_token` yields once before returning so a
         /// concurrent caller (in `tokio::join!`) can park on the
-        /// per-provider single-flight mutex while we hold it.
+        /// per-seat single-flight mutex while we hold it.
         yield_once: bool,
+        /// Optional concurrency gauge. When set, `refresh_token` records
+        /// entry/exit so a test can read the max simultaneous in-flight
+        /// count. A per-seat lock lets two arms overlap (max == 2); a
+        /// shared per-provider lock serializes them (max == 1). Lets a
+        /// test assert that distinct seats refresh concurrently rather
+        /// than merely counting total refreshes (which is 2 either way,
+        /// since each seat's double-check still finds its own record
+        /// stale).
+        concurrency: Option<ConcurrencyGauge>,
+        /// Optional rendezvous barrier. When set, `refresh_token` waits on
+        /// it inside the gauge region (after `enter`, before `leave`) so
+        /// max-in-flight == 2 is reachable ONLY when both arms are provably
+        /// inside `refresh_token` at once, not as a yield-timing artifact.
+        /// A shared per-provider lock can never bring the second arm to the
+        /// barrier, so it deadlocks (the test bounds it with a timeout)
+        /// instead of silently passing.
+        rendezvous: Option<Arc<tokio::sync::Barrier>>,
     }
 
     impl CountingFlow {
@@ -604,6 +750,8 @@ mod tests {
                 calls: Arc::new(StdMutex::new(0)),
                 outcome,
                 yield_once: false,
+                concurrency: None,
+                rendezvous: None,
             }
         }
 
@@ -612,8 +760,33 @@ mod tests {
             self
         }
 
+        /// Enable the concurrency gauge (see the `concurrency` field).
+        /// Implies `with_yield` so the overlap window is observable.
+        fn with_concurrency_gauge(mut self) -> Self {
+            self.yield_once = true;
+            self.concurrency = Some(ConcurrencyGauge::default());
+            self
+        }
+
+        /// Attach a rendezvous barrier (see the `rendezvous` field). The
+        /// barrier's party count must match the number of concurrent
+        /// refresh arms the test drives.
+        fn with_rendezvous(mut self, barrier: Arc<tokio::sync::Barrier>) -> Self {
+            self.rendezvous = Some(barrier);
+            self
+        }
+
         fn call_count(&self) -> u32 {
             *self.calls.lock().unwrap()
+        }
+
+        /// Max simultaneous `refresh_token` invocations observed. Only
+        /// meaningful when built `with_concurrency_gauge`.
+        fn max_in_flight(&self) -> u32 {
+            self.concurrency
+                .as_ref()
+                .map(ConcurrencyGauge::max)
+                .unwrap_or(0)
         }
     }
 
@@ -647,11 +820,29 @@ mod tests {
             _refresh_token: &str,
         ) -> OAuthResult<TokenRecord> {
             *self.calls.lock().unwrap() += 1;
+            // Concurrency gauge: record entry BEFORE yielding so a
+            // concurrent arm that enters during the yield window is
+            // observed as overlapping.
+            if let Some(gauge) = &self.concurrency {
+                gauge.enter();
+            }
+            // Rendezvous (when set): block until every concurrent arm is
+            // inside the gauge region, so max-in-flight reflects genuine
+            // simultaneity, not yield ordering. A shared lock never brings
+            // the second arm here -> deadlock -> the test's timeout fails
+            // loudly instead of a silent false-green.
+            if let Some(barrier) = &self.rendezvous {
+                barrier.wait().await;
+            }
             if self.yield_once {
-                // Suspend so a concurrent caller has a chance to park
-                // on the per-provider refresh mutex.
+                // Suspend so a concurrent caller has a chance to enter
+                // (per-seat lock) or park on the single-flight mutex
+                // (per-provider lock).
                 tokio::task::yield_now().await;
                 tokio::task::yield_now().await;
+            }
+            if let Some(gauge) = &self.concurrency {
+                gauge.leave();
             }
             match &self.outcome {
                 RefreshOutcome::Mint(at) => Ok(rec_named(at, unix_now() + 3600)),
@@ -1477,5 +1668,375 @@ mod tests {
             in_memory_tok, "tok-from-reload",
             "reload must win over in-flight stale refresh; got: {in_memory_tok}"
         );
+    }
+
+    // ---- Labeled-seat resolution + per-seat single-flight ----
+
+    #[tokio::test]
+    async fn get_resolves_labeled_seat_token() {
+        // Arrange: seed the default seat and a labeled seat with DISTINCT
+        // tokens, both fresh so no refresh fires.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_named("tok-default", unix_now() + 3600))
+            .await
+            .unwrap();
+        store
+            .write_record(
+                "anthropic#seat-b",
+                rec_named("tok-seat-b", unix_now() + 3600),
+            )
+            .await
+            .unwrap();
+
+        // Act / Assert: the labeled ref resolves seat-b's token; the
+        // bare ref resolves the unlabeled record.
+        let seat_b = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: Some("seat-b".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(seat_b, "tok-seat-b");
+
+        let default = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(default, "tok-default");
+    }
+
+    #[tokio::test]
+    async fn bare_oauth_resolves_unlabeled_seat_unchanged() {
+        // Back-compat pin: a single unlabeled seat + bare ref behaves
+        // exactly as before -- the seat key for `label: None` is the bare
+        // provider, so resolution is byte-for-byte identical to today.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+
+        let tok = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(tok, "tok-abc");
+    }
+
+    #[tokio::test]
+    async fn refresh_single_flight_is_per_seat() {
+        // Two distinct near-expiry seats refreshed concurrently must run
+        // their refreshes CONCURRENTLY -- per-seat single-flight keys the
+        // gate on the seat key, so seat-a's refresh takes a different lock
+        // than seat-b's and the two overlap. The concurrency gauge in the
+        // fake flow observes max-in-flight == 2 only when both arms are
+        // inside `refresh_token` at once; a shared per-provider lock would
+        // serialize them (max == 1) even though the total count is 2 in
+        // both designs (each seat's double-check still finds its own
+        // record stale). The gauge is therefore the discriminating
+        // assertion; the count is a secondary check.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record("anthropic", rec_named("tok-a-stale", unix_now() + 10))
+            .await
+            .unwrap();
+        seed.write_record(
+            "anthropic#seat-b",
+            rec_named("tok-b-stale", unix_now() + 10),
+        )
+        .await
+        .unwrap();
+        drop(seed);
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let flow = Arc::new(
+            CountingFlow::new(RefreshOutcome::Mint("tok-refreshed".into()))
+                .with_concurrency_gauge()
+                .with_rendezvous(barrier.clone()),
+        );
+        let store = open_with_flow(&path, flow.clone()).await;
+        let store2 = store.clone();
+        let r_a = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: None,
+        };
+        let r_b = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: Some("seat-b".into()),
+        };
+
+        // Bound the join with a timeout: with per-seat locks both arms
+        // reach the rendezvous and proceed; a shared per-provider lock
+        // parks the second arm on the lock so it never reaches the
+        // barrier, deadlocking -- the timeout turns that into a loud
+        // failure rather than a silent pass.
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            tokio::join!(async move { store.get(&r_a).await }, async move {
+                store2.get(&r_b).await
+            })
+        })
+        .await
+        .expect(
+            "per-seat single-flight must let both seats refresh concurrently; \
+             a shared per-provider lock would deadlock the rendezvous barrier",
+        );
+        assert_eq!(a.unwrap(), "tok-refreshed");
+        assert_eq!(b.unwrap(), "tok-refreshed");
+        assert_eq!(
+            flow.max_in_flight(),
+            2,
+            "distinct seats must refresh concurrently: a shared per-provider \
+             lock would serialize them to max-in-flight 1"
+        );
+        assert_eq!(flow.call_count(), 2, "one refresh per seat",);
+    }
+
+    #[tokio::test]
+    async fn concurrent_get_same_seat_collapses_to_one_refresh() {
+        // Regression pin for the labeled-seat path: two concurrent gets
+        // on the SAME labeled seat must still collapse to one refresh
+        // through that seat's single-flight gate (mirrors the unlabeled
+        // `concurrent_get_calls_collapse_to_single_refresh`).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        seed.write_record(
+            "anthropic#seat-b",
+            rec_named("tok-b-stale", unix_now() + 10),
+        )
+        .await
+        .unwrap();
+        drop(seed);
+
+        let flow =
+            Arc::new(CountingFlow::new(RefreshOutcome::Mint("tok-refreshed".into())).with_yield());
+        let store = open_with_flow(&path, flow.clone()).await;
+        let store2 = store.clone();
+        let r = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: Some("seat-b".into()),
+        };
+        let r2 = r.clone();
+
+        let (a, b) = tokio::join!(async move { store.get(&r).await }, async move {
+            store2.get(&r2).await
+        });
+        assert_eq!(a.unwrap(), "tok-refreshed");
+        assert_eq!(b.unwrap(), "tok-refreshed");
+        assert_eq!(
+            flow.call_count(),
+            1,
+            "same-seat concurrent gets must collapse to one refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_auth_failure_targets_only_the_named_seat() {
+        // A 401 on a labeled seat force-refreshes that seat's record and
+        // leaves the sibling default seat untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        // Both seats healthy: only the force path on seat-b should run.
+        seed.write_record("anthropic", rec_named("tok-a-orig", unix_now() + 3600))
+            .await
+            .unwrap();
+        seed.write_record(
+            "anthropic#seat-b",
+            rec_named("tok-b-orig", unix_now() + 3600),
+        )
+        .await
+        .unwrap();
+        drop(seed);
+
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+            "tok-b-rotated".into(),
+        )));
+        let store = open_with_flow(&path, flow.clone()).await;
+
+        store
+            .on_auth_failure(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: Some("seat-b".into()),
+            })
+            .await
+            .expect("forced refresh of seat-b should succeed");
+        assert_eq!(flow.call_count(), 1, "exactly one refresh fired");
+
+        // seat-b rotated; the default seat is byte-for-byte unchanged.
+        let seat_b = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: Some("seat-b".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(seat_b, "tok-b-rotated");
+        let default = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            default, "tok-a-orig",
+            "the default seat must be untouched by a 401 on seat-b"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_id_preserved_per_seat_across_refresh() {
+        // seat-b's session_id must survive its own refresh and be
+        // independent of the default seat's session_id. Per-seat map
+        // keys make preservation automatic: the refresh reads and
+        // re-writes the SAME seat's record.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        // Default seat: distinct session id, fresh (no refresh).
+        let mut default = rec_named("tok-a", unix_now() + 3600);
+        default.session_id = Some("session-default".into());
+        seed.write_record("anthropic", default).await.unwrap();
+        // seat-b: distinct session id, near-expiry so its refresh fires.
+        let mut seat_b = rec_named("tok-b-stale", unix_now() + 10);
+        seat_b.session_id = Some("session-seat-b".into());
+        seed.write_record("anthropic#seat-b", seat_b).await.unwrap();
+        drop(seed);
+
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+            "tok-b-refreshed".into(),
+        )));
+        let store = open_with_flow(&path, flow.clone()).await;
+
+        // Trigger seat-b's refresh via the near-expiry get path.
+        let _ = store
+            .get(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: Some("seat-b".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(flow.call_count(), 1, "exactly one refresh fired");
+
+        // Read both seats back from the in-memory cache.
+        let listed: BTreeMap<String, TokenRecord> = store.list().await.into_iter().collect();
+        assert_eq!(
+            listed["anthropic#seat-b"].session_id.as_deref(),
+            Some("session-seat-b"),
+            "seat-b's session_id must survive its own refresh"
+        );
+        assert_eq!(
+            listed["anthropic#seat-b"].access_token.expose(),
+            "tok-b-refreshed"
+        );
+        assert_eq!(
+            listed["anthropic"].session_id.as_deref(),
+            Some("session-default"),
+            "the default seat's session_id must be independent and untouched"
+        );
+    }
+
+    // ---- list_seats ----
+
+    #[tokio::test]
+    async fn oauth_list_seats_returns_default_plus_labeled_refs() {
+        // A bare pool ref expands to one SecretRef per stored seat:
+        // default first, then labeled seats in sorted order.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        store
+            .write_record("anthropic#seat-b", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        store
+            .write_record("anthropic#alpha", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+
+        let seats = store
+            .list_seats(&SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            seats,
+            vec![
+                SecretRef::OAuth {
+                    provider: "anthropic".into(),
+                    label: None,
+                },
+                SecretRef::OAuth {
+                    provider: "anthropic".into(),
+                    label: Some("alpha".into()),
+                },
+                SecretRef::OAuth {
+                    provider: "anthropic".into(),
+                    label: Some("seat-b".into()),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_list_seats_on_labeled_ref_returns_just_that_seat() {
+        // An already-pinned ref returns only itself -- the operator
+        // selected the seat, so enumeration does not widen it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        store
+            .write_record("anthropic#seat-b", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+
+        let pinned = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: Some("seat-b".into()),
+        };
+        let seats = store.list_seats(&pinned).await.unwrap();
+        assert_eq!(seats, vec![pinned]);
+    }
+
+    #[tokio::test]
+    async fn oauth_list_seats_no_record_falls_back_to_single_ref() {
+        // No stored seats (not logged in): enumeration returns the bare
+        // ref so downstream "not logged in" guidance fires rather than an
+        // empty pool that resolves to nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+
+        let bare = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: None,
+        };
+        let seats = store.list_seats(&bare).await.unwrap();
+        assert_eq!(seats, vec![bare]);
     }
 }
