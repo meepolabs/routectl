@@ -1182,6 +1182,27 @@ pub struct ProviderRuntimePolicy {
     /// `crates/routectl-router/src/feature_keys.rs`.
     #[serde(default)]
     pub unsupported_features: Vec<String>,
+
+    /// How dispatch picks among multiple OAuth seats configured for this
+    /// provider's credential pool. `fill-first` (the default) drains one
+    /// seat before moving to the next; `round-robin` spreads load across
+    /// seats. Pure config plumbing for now -- no dispatch path consumes
+    /// it yet.
+    #[serde(default)]
+    pub seat_selection: SeatSelection,
+}
+
+/// Per-provider seat-selection strategy for the OAuth credential pool.
+/// Default is `fill-first` so a single-seat provider (the common case)
+/// keeps its current behavior with no config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SeatSelection {
+    /// Drain one seat fully before advancing to the next.
+    #[default]
+    FillFirst,
+    /// Rotate across seats to spread load.
+    RoundRobin,
 }
 
 fn default_anthropic_base() -> String {
@@ -2538,6 +2559,81 @@ mod retries_for_status_tests {
             p.retries_for_status(429),
             0,
             "allowlist=[500,502]: retries_for_status(429) must be 0"
+        );
+    }
+}
+
+#[cfg(test)]
+mod seat_selection_tests {
+    //! Pin the `seat_selection` per-provider knob: a default, an
+    //! explicit `round-robin`, and a rejected unknown value. The field
+    //! flattens off `ProviderRuntimePolicy` onto every `[providers.X]`.
+    use crate::config::{Config, SeatSelection};
+
+    fn runtime_of<'a>(cfg: &'a Config, name: &str) -> &'a super::ProviderRuntimePolicy {
+        cfg.providers.get(name).expect("provider").runtime()
+    }
+
+    #[test]
+    fn seat_selection_defaults_to_fill_first() {
+        // Arrange: a provider entry omitting seat_selection.
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+"#;
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        // Assert
+        assert_eq!(
+            runtime_of(&cfg, "anthropic").seat_selection,
+            SeatSelection::FillFirst
+        );
+    }
+
+    #[test]
+    fn seat_selection_parses_round_robin() {
+        // Arrange
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+seat_selection = "round-robin"
+"#;
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        // Assert
+        assert_eq!(
+            runtime_of(&cfg, "anthropic").seat_selection,
+            SeatSelection::RoundRobin
+        );
+    }
+
+    #[test]
+    fn seat_selection_rejects_unknown_value() {
+        // Arrange
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+seat_selection = "bogus"
+"#;
+        // Act
+        let result = toml::from_str::<Config>(toml_text);
+        // Assert: an unknown variant is a clean deserialize Err.
+        assert!(
+            result.is_err(),
+            "unknown seat_selection value must reject; got Ok"
+        );
+    }
+
+    /// `ProviderRuntimePolicy::default()` carries `FillFirst`, so a
+    /// programmatically-built provider matches the TOML-omitted default.
+    #[test]
+    fn provider_runtime_policy_default_is_fill_first() {
+        assert_eq!(
+            super::ProviderRuntimePolicy::default().seat_selection,
+            SeatSelection::FillFirst
         );
     }
 }

@@ -37,7 +37,9 @@ pub mod types;
 pub use login::{run as run_login, LoginOptions};
 pub use providers::known_provider_ids;
 pub use store::OAuthStore;
-pub use types::{unix_now, AccountInfo, CredentialsFile, SecretToken, TokenRecord, SCHEMA_VERSION};
+pub use types::{
+    seat_key, unix_now, AccountInfo, CredentialsFile, SecretToken, TokenRecord, SCHEMA_VERSION,
+};
 
 /// Test-only entry points into the OAuth provider surface. Not part of
 /// the supported public API -- the symbols here exist solely so the

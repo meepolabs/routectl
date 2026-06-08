@@ -163,10 +163,31 @@ impl TokenRecord {
     }
 }
 
+/// Compose the `credentials.json` map key for a provider seat. An
+/// unlabeled seat is the bare provider name (`"anthropic"`); a labeled
+/// seat joins provider and label with `#` (`"anthropic#seat-b"`). The
+/// form deliberately mirrors `SecretRef::OAuth`'s `Display` (the part
+/// after `oauth://`) so a key and the ref that points at it agree
+/// byte-for-byte.
+pub fn seat_key(provider: &str, label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("{provider}#{label}"),
+        None => provider.to_string(),
+    }
+}
+
 /// On-disk schema for credentials.json. One file holds all providers
 /// under a `providers` map; atomic-rename of one file is simpler than
 /// coordinating multiple, and `routectl whoami` reads everything in
 /// one stat+parse.
+///
+/// NO MIGRATION for labeled seats: the on-disk shape stays a
+/// `BTreeMap<String, TokenRecord>` and `SCHEMA_VERSION` stays 1. A
+/// labeled seat is just an additional string key of the form
+/// `provider#label`; the unlabeled/default seat keeps the bare
+/// `provider` key. An old single-seat file therefore parses
+/// identically, and the get/upsert/remove accessors already take the
+/// composite key verbatim (the key is just a string).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct CredentialsFile {
@@ -199,6 +220,31 @@ impl CredentialsFile {
 
     pub fn remove(&mut self, provider: &str) -> Option<TokenRecord> {
         self.providers.remove(provider)
+    }
+
+    /// Enumerate the seat keys belonging to one provider, ordered with
+    /// the unlabeled/default seat first (when present) and labeled seats
+    /// after it in sorted order. The unlabeled seat is the bare provider
+    /// key; labeled seats are keys of the form `provider#label`.
+    ///
+    /// The `#` separator is load-bearing: matching the exact bare key OR
+    /// keys prefixed with `provider#` avoids colliding with a sibling
+    /// provider whose name merely starts with this one (e.g. asking for
+    /// `"anthropic"` must not pull in `"anthropic-eu"`). The backing map
+    /// is a `BTreeMap`, so the labeled keys already iterate in sorted
+    /// order; we only need to lift the bare key to the front.
+    pub fn seats_for_provider(&self, provider: &str) -> Vec<String> {
+        let labeled_prefix = format!("{provider}#");
+        let mut seats = Vec::new();
+        if self.providers.contains_key(provider) {
+            seats.push(provider.to_string());
+        }
+        for key in self.providers.keys() {
+            if key.starts_with(&labeled_prefix) {
+                seats.push(key.clone());
+            }
+        }
+        seats
     }
 }
 
@@ -316,5 +362,99 @@ mod tests {
         assert!(!dbg.contains("tok\""), "access token leaked in {dbg}");
         assert!(!dbg.contains("rtok\""), "refresh token leaked in {dbg}");
         assert!(dbg.contains("REDACTED"));
+    }
+
+    #[test]
+    fn seat_key_unlabeled_is_bare_provider() {
+        // Arrange / Act
+        let key = seat_key("anthropic", None);
+        // Assert
+        assert_eq!(key, "anthropic");
+    }
+
+    #[test]
+    fn seat_key_labeled_is_hash_joined() {
+        // Arrange / Act
+        let key = seat_key("anthropic", Some("seat-b"));
+        // Assert
+        assert_eq!(key, "anthropic#seat-b");
+    }
+
+    fn file_with_keys(keys: &[&str]) -> CredentialsFile {
+        let mut cf = CredentialsFile::empty();
+        for k in keys {
+            cf.upsert(k, rec_at(1000));
+        }
+        cf
+    }
+
+    #[test]
+    fn seats_for_provider_returns_default_plus_labels_sorted() {
+        // Arrange
+        let cf = file_with_keys(&["anthropic", "anthropic#seat-b", "anthropic#a", "codex"]);
+        // Act
+        let seats = cf.seats_for_provider("anthropic");
+        // Assert: default first, labels sorted, "codex" excluded.
+        assert_eq!(seats, vec!["anthropic", "anthropic#a", "anthropic#seat-b"]);
+    }
+
+    #[test]
+    fn seats_for_provider_single_unlabeled_returns_one() {
+        // Arrange
+        let cf = file_with_keys(&["anthropic"]);
+        // Act
+        let seats = cf.seats_for_provider("anthropic");
+        // Assert
+        assert_eq!(seats, vec!["anthropic"]);
+    }
+
+    #[test]
+    fn seats_for_provider_labels_only_no_default() {
+        // Arrange: labeled seats only, no bare default key.
+        let cf = file_with_keys(&["anthropic#a", "anthropic#b"]);
+        // Act
+        let seats = cf.seats_for_provider("anthropic");
+        // Assert
+        assert_eq!(seats, vec!["anthropic#a", "anthropic#b"]);
+    }
+
+    #[test]
+    fn seats_for_provider_does_not_match_prefix_sibling() {
+        // Arrange: a sibling provider whose name starts with the query.
+        let cf = file_with_keys(&["anthropic", "anthropic-eu", "anthropic-eu#a"]);
+        // Act
+        let seats = cf.seats_for_provider("anthropic");
+        // Assert: the `#` separator prevents the prefix collision; the
+        // bare "anthropic-eu" and its labeled seat are excluded.
+        assert_eq!(seats, vec!["anthropic"]);
+    }
+
+    #[test]
+    fn old_single_seat_json_parses_unchanged() {
+        // Arrange: a single-provider credentials.json as written by an
+        // older binary -- one bare provider key, schema_version 1.
+        let json = r#"{
+            "schema_version": 1,
+            "providers": {
+                "anthropic": {
+                    "access_token": "tok",
+                    "refresh_token": "rtok",
+                    "expires_at_unix": 1900000000,
+                    "scopes": ["user:inference"],
+                    "obtained_at_unix": 1899000000
+                }
+            }
+        }"#;
+        // Act
+        let parsed: CredentialsFile = serde_json::from_str(json).unwrap();
+        // Assert: schema unchanged, the record round-trips intact.
+        assert_eq!(parsed.schema_version, 1);
+        assert_eq!(parsed.providers.len(), 1);
+        let rec = parsed.get("anthropic").unwrap();
+        assert_eq!(rec.access_token.expose(), "tok");
+        assert_eq!(rec.refresh_token.expose(), "rtok");
+        assert_eq!(rec.expires_at_unix, 1_900_000_000);
+        assert_eq!(rec.obtained_at_unix, 1_899_000_000);
+        assert_eq!(rec.scopes, vec!["user:inference".to_string()]);
     }
 }
