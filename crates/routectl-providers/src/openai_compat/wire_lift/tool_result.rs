@@ -166,14 +166,25 @@ fn build_tool_message(id: &str, part: &Value) -> Result<Option<Value>> {
 
 /// Translate a tool_result content payload for OpenAI:
 /// - String -> string
-/// - Array of blocks -> array, with Anthropic image shapes lifted to
-///   image_url shape (mirrors the `content` lift, which doesn't
-///   recurse into tool_result).
+/// - Text-only array -> single string (text fields joined with "\n\n").
+///   Strict backends (DeepSeek, older vLLM) 400 on an array here and
+///   accept only a string.
+/// - Array with an image block -> array, with Anthropic image shapes
+///   lifted to image_url shape (mirrors the `content` lift, which
+///   doesn't recurse into tool_result).
 /// - Object / scalar -> stringified JSON
 fn translate_tool_result_content(content: Value) -> Value {
     match content {
         Value::String(_) => content,
         Value::Array(arr) => {
+            if !arr.is_empty() && arr.iter().all(is_text_block) {
+                let joined = arr
+                    .iter()
+                    .map(|b| b["text"].as_str().unwrap_or(""))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                return Value::String(joined);
+            }
             let lifted: Vec<Value> = arr.into_iter().map(lift_inner_block).collect();
             Value::Array(lifted)
         }
@@ -347,6 +358,98 @@ mod tests {
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image_url");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,ZZ==");
+    }
+
+    #[test]
+    fn tool_result_text_only_array_collapses_to_string() {
+        // Arrange -- a tool_result whose content is an array with a
+        // single text block. Strict backends 400 on the array; we must
+        // collapse it to a plain string.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "42"}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let msgs = obj["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(
+            msgs[0]["content"],
+            json!("42"),
+            "text-only array must collapse to a string"
+        );
+    }
+
+    #[test]
+    fn tool_result_multi_text_array_joins_with_double_newline() {
+        // Arrange -- two text blocks join into one string.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let msgs = obj["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"], json!("first\n\nsecond"));
+    }
+
+    #[test]
+    fn tool_result_text_plus_image_array_stays_array() {
+        // Arrange -- a non-text (image) block present, so the array form
+        // must be preserved (with the image lifted to image_url).
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "see image"},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let msgs = obj["messages"].as_array().unwrap();
+        assert!(
+            msgs[0]["content"].is_array(),
+            "array with an image block must stay an array"
+        );
+        let content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "image_url");
+    }
+
+    #[test]
+    fn tool_result_string_content_stays_string() {
+        // Arrange -- a plain string content is unchanged.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "already a string"}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let msgs = obj["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"], json!("already a string"));
     }
 
     #[test]

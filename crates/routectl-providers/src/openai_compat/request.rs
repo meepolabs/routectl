@@ -179,7 +179,19 @@ fn merge_extras(
     };
     for (k, v) in extra_obj {
         if is_routectl_managed_key(k) {
-            if source == PROVIDER_EXTRAS_SOURCE {
+            if k == "metadata" {
+                // Anthropic ingress stashes the full inbound `metadata`
+                // object into provider_extras. Strict openai-compat hosts
+                // (NIM, vLLM-strict, DeepSeek-direct) 400 with
+                // `Unsupported parameter(s): metadata`. Warn so an
+                // operator sees the drop; log the key only, never the
+                // object's contents (may carry PII like user_id).
+                tracing::warn!(
+                    provider = id,
+                    source = source,
+                    "openai-compat egress: Anthropic `metadata` object dropped (not valid on OpenAI wire)"
+                );
+            } else if source == PROVIDER_EXTRAS_SOURCE {
                 tracing::debug!(
                     provider = id,
                     source = source,
@@ -228,6 +240,9 @@ fn is_routectl_managed_key(key: &str) -> bool {
             key,
             // Anthropic-only nested output config; not valid on OpenAI wire.
             "output_config"
+            // Anthropic ingress sweeps the inbound `metadata` object into
+            // provider_extras. Strict openai-compat hosts 400 on it; drop.
+            | "metadata"
             // Anthropic-only quarterly-cadence beta fields. Forwarding
             // these to strict openai-compat upstreams 400s the request.
             | "context_management"
@@ -465,6 +480,53 @@ mod tests {
         assert!(body.get("temperature").is_none());
         assert!(body.get("top_p").is_none());
         assert!(body.get("presence_penalty").is_none());
+    }
+
+    /// Reasoning models (drops_sampling_params=true) reject `max_tokens`
+    /// on real OpenAI; the OpenAI ingress renamed the inbound
+    /// `max_completion_tokens` to canonical `max_tokens`, so the egress
+    /// must rename it back for these models.
+    #[test]
+    fn openai_renames_max_tokens_to_max_completion_tokens_for_reasoning_model() {
+        let req = simple_req("o3-mini"); // simple_req sets max_tokens = 512
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenAi,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            body.get("max_tokens").is_none(),
+            "reasoning model must not carry max_tokens; got: {body}"
+        );
+        assert_eq!(
+            body["max_completion_tokens"], 512,
+            "reasoning model must carry max_completion_tokens"
+        );
+    }
+
+    /// Non-reasoning models keep `max_tokens` unchanged and must not gain
+    /// a `max_completion_tokens` key.
+    #[test]
+    fn openai_keeps_max_tokens_for_non_reasoning_model() {
+        let req = simple_req("gpt-4o"); // max_tokens = 512, not a reasoning model
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenAi,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(body["max_tokens"], 512);
+        assert!(
+            body.get("max_completion_tokens").is_none(),
+            "non-reasoning model must not gain max_completion_tokens; got: {body}"
+        );
     }
 
     #[test]
@@ -774,6 +836,34 @@ mod tests {
         // Long-tail extras land verbatim.
         assert_eq!(body["top_k"], 40);
         assert_eq!(body["service_tier"], "premium");
+    }
+
+    #[test]
+    fn anthropic_metadata_is_dropped_from_openai_compat_body() {
+        // The Anthropic ingress sweeps the inbound `metadata` object into
+        // provider_extras. Strict openai-compat hosts (NIM, vLLM-strict,
+        // DeepSeek-direct) 400 with `Unsupported parameter(s): metadata`,
+        // so the egress must strip it from the upstream body.
+        let mut req = simple_req("gpt-4o");
+        req.provider_extras = Some(json!({
+            "metadata": {"user_id": "abc123"},
+            "top_k": 40,
+        }));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            body.get("metadata").is_none(),
+            "Anthropic metadata must not reach the openai-compat wire, got: {body}"
+        );
+        // A non-metadata provider_extras key still forwards.
+        assert_eq!(body["top_k"], 40);
     }
 
     #[test]

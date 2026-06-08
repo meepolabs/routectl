@@ -36,6 +36,13 @@ impl Dialect for OpenAiDialect {
         }
         if profile_for(&req.model).drops_sampling_params {
             drop_sampling_params(obj);
+            // Real OpenAI rejects `max_tokens` on o-series / gpt-5 reasoning
+            // models and requires `max_completion_tokens`. The OpenAI ingress
+            // renames the inbound `max_completion_tokens` to canonical
+            // `max_tokens`; restore it here for reasoning models only.
+            if let Some(v) = obj.remove("max_tokens") {
+                obj.insert("max_completion_tokens".into(), v);
+            }
         }
         Ok(())
     }
