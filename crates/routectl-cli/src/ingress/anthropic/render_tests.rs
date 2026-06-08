@@ -587,3 +587,126 @@ fn render_response_emits_cache_fields_when_present() {
         "absent ephemeral_1h_input_tokens must be omitted, got cc: {cc:?}"
     );
 }
+
+#[test]
+fn content_filter_finish_renders_refusal_stop_reason() {
+    use routectl_core::{schema::Choice, Message, Role, Usage};
+    let resp = ChatResponse {
+        id: "msg_cf".into(),
+        model: "gpt-5".into(),
+        created: 0,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("redacted".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("content_filter".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 2,
+            total_tokens: 7,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+    };
+    let v = AnthropicIngress.render_response(resp).unwrap();
+    assert_eq!(v["stop_reason"], "refusal");
+}
+
+#[test]
+fn anthropic_native_pause_turn_finish_round_trips_unchanged() {
+    // An Anthropic-native stop_reason with no OpenAI analogue must
+    // survive the reverse mapping verbatim via the catchall arm.
+    assert_eq!(openai_finish_to_anthropic_stop("pause_turn"), "pause_turn");
+}
+
+fn render_single_tool_call(arguments: &str) -> Value {
+    use routectl_core::{schema::Choice, Message, MessageContent, Role, Usage};
+    let resp = ChatResponse {
+        id: "msg_args".into(),
+        model: "qwen-3-coder".into(),
+        created: 0,
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text(String::new()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_args",
+                    "type": "function",
+                    "function": {
+                        "name": "do_thing",
+                        "arguments": arguments
+                    }
+                })]),
+            },
+            finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras: Default::default(),
+    };
+    AnthropicIngress.render_response(resp).unwrap()
+}
+
+#[test]
+fn empty_tool_call_arguments_render_input_as_empty_object() {
+    let v = render_single_tool_call("");
+    let content = v["content"].as_array().expect("content is array");
+    let tu = content
+        .iter()
+        .find(|b| b["type"] == "tool_use")
+        .expect("tool_use block present");
+    assert!(
+        tu["input"].is_object(),
+        "input must be an object, got: {:?}",
+        tu["input"]
+    );
+    assert_eq!(tu["input"], json!({}));
+}
+
+#[test]
+fn non_json_tool_call_arguments_render_input_as_empty_object() {
+    let v = render_single_tool_call("notjson");
+    let content = v["content"].as_array().expect("content is array");
+    let tu = content
+        .iter()
+        .find(|b| b["type"] == "tool_use")
+        .expect("tool_use block present");
+    assert!(
+        tu["input"].is_object(),
+        "input must be an object, got: {:?}",
+        tu["input"]
+    );
+    assert_eq!(tu["input"], json!({}));
+}
+
+#[test]
+fn valid_tool_call_arguments_render_input_unchanged() {
+    let v = render_single_tool_call("{\"x\":1}");
+    let content = v["content"].as_array().expect("content is array");
+    let tu = content
+        .iter()
+        .find(|b| b["type"] == "tool_use")
+        .expect("tool_use block present");
+    assert_eq!(tu["input"], json!({"x": 1}));
+}

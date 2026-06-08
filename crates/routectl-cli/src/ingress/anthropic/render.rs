@@ -246,11 +246,13 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
                 .and_then(|f| f.get("name"))
                 .cloned()
                 .unwrap_or(Value::Null);
+            // Anthropic requires tool_use.input to be an object; fall
+            // back to {} (never null) for empty or non-JSON arguments.
             let args = func
                 .and_then(|f| f.get("arguments"))
                 .and_then(|v| v.as_str())
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .unwrap_or(Value::Null);
+                .unwrap_or_else(|| Value::Object(Default::default()));
             blocks.push(json!({
                 "type": "tool_use",
                 "id": id_value,

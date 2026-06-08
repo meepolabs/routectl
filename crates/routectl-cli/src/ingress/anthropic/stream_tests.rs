@@ -435,6 +435,37 @@ fn usage_only_chunk_emits_null_stop_reason() {
     assert!(payload["delta"]["stop_reason"].is_null());
 }
 
+#[test]
+fn stream_content_filter_finish_emits_refusal_stop_reason() {
+    use routectl_core::{ChunkChoice, ChunkDelta, UsageDelta};
+    let mut s = fresh_state();
+    let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
+    let closing = ChatChunk {
+        id: "msg_01".into(),
+        model: "gpt-5".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: Some("content_filter".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(UsageDelta {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(5),
+            total_tokens: Some(15),
+            ..Default::default()
+        }),
+        opaque_events: Vec::new(),
+    };
+    let events = render_chunk_internal(closing, &mut s).unwrap();
+    let delta_event = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_delta"))
+        .expect("message_delta emitted");
+    let payload: Value = serde_json::from_str(&delta_event.data).unwrap();
+    assert_eq!(payload["delta"]["stop_reason"], "refusal");
+}
+
 /// Closing chunk's `usage.prompt_tokens` must be rendered into
 /// Anthropic's `input_tokens` on message_delta carries the RAW
 /// input portion (cache_creation and cache_read are separate

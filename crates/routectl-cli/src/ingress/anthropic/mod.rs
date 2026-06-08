@@ -197,6 +197,10 @@ fn openai_finish_to_anthropic_stop(fr: &str) -> &str {
         "stop" => "end_turn",
         "length" => "max_tokens",
         "tool_calls" => "tool_use",
+        // content_filter has no OpenAI->Anthropic vocabulary match;
+        // "refusal" is the closest Anthropic stop_reason. Emitting the
+        // raw "content_filter" would be rejected by strict clients.
+        "content_filter" => "refusal",
         // Forward-compat: any value the egress passed through verbatim
         // (i.e. an Anthropic stop_reason that doesn't have an OpenAI
         // analogue) must survive the ingress reverse mapping or it
