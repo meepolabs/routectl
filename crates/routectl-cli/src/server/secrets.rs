@@ -222,6 +222,7 @@ mod tests {
         let err = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap_err();
@@ -311,6 +312,7 @@ mod tests {
         let token = store
             .get(&SecretRef::OAuth {
                 provider: "codex".into(),
+                label: None,
             })
             .await
             .expect("oauth://codex should resolve via composite");
@@ -366,6 +368,7 @@ mod tests {
         let err = store
             .get(&SecretRef::OAuth {
                 provider: "made-up-provider".into(),
+                label: None,
             })
             .await
             .expect_err("unknown oauth provider must error, not panic");
@@ -408,6 +411,7 @@ mod tests {
         let err = store
             .on_auth_failure(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap_err();
@@ -470,6 +474,7 @@ mod tests {
         let err = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .expect_err("oauth:// must error when OAuth arm is unavailable");

@@ -37,7 +37,7 @@ impl SecretStore for MemoryStore {
             }),
             SecretRef::Literal(s) => Ok(s.clone()),
             SecretRef::File(path) => read_secret_file(path).await,
-            SecretRef::OAuth { provider } => {
+            SecretRef::OAuth { provider, .. } => {
                 // MemoryStore does not own the OAuth store. The
                 // composite store in routectl-cli (CompositeStore)
                 // routes oauth:// refs to OAuthStore before they reach

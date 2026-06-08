@@ -225,7 +225,8 @@ async fn resolved_model_retains_oauth_secret_ref_for_anthropic() {
     assert_eq!(
         m.auth_secret_ref,
         Some(SecretRef::OAuth {
-            provider: "anthropic".into()
+            provider: "anthropic".into(),
+            label: None,
         })
     );
 }

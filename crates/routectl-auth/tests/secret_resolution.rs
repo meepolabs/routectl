@@ -317,6 +317,7 @@ async fn memory_store_get_rejects_oauth_with_composite_hint() {
     let store = MemoryStore::new();
     let r = SecretRef::OAuth {
         provider: "anthropic".into(),
+        label: None,
     };
     let err = store.get(&r).await.unwrap_err();
     let msg = err.to_string();
@@ -415,6 +416,7 @@ async fn oauth_store_resolves_oauth_codex_to_seeded_access_token() {
     let token = store
         .get(&SecretRef::OAuth {
             provider: "codex".into(),
+            label: None,
         })
         .await
         .expect("resolve oauth://codex");
@@ -444,6 +446,7 @@ async fn oauth_store_codex_account_id_is_readable_from_seeded_record() {
     let acct = store
         .account_id(&SecretRef::OAuth {
             provider: "codex".into(),
+            label: None,
         })
         .await
         .expect("read codex account_id");
@@ -470,6 +473,7 @@ async fn oauth_store_returns_unknown_provider_error_for_typo_codex_id() {
     let err = store
         .get(&SecretRef::OAuth {
             provider: "codeex-typo".into(),
+            label: None,
         })
         .await
         .expect_err("unknown oauth provider must error");

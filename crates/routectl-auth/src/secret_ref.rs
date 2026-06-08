@@ -27,7 +27,15 @@ pub enum SecretRef {
     /// `routectl login <provider>` first. Resolution reads the token
     /// from `~/.config/routectl/credentials.json`; refresh and 401-retry
     /// are handled transparently by `OAuthStore`.
-    OAuth { provider: String },
+    ///
+    /// An optional `#label` after the provider names a specific seat
+    /// within that provider's credential pool (`oauth://anthropic#seat-b`).
+    /// A bare `oauth://anthropic` carries `label: None` -- the default/pool
+    /// seat -- and is byte-for-byte identical to today's semantics.
+    OAuth {
+        provider: String,
+        label: Option<String>,
+    },
 }
 
 impl SecretRef {
@@ -53,15 +61,28 @@ impl SecretRef {
         if let Some(lit) = uri.strip_prefix("literal:") {
             return Ok(Self::Literal(lit.to_string()));
         }
-        if let Some(prov) = uri.strip_prefix("oauth://") {
+        if let Some(rest) = uri.strip_prefix("oauth://") {
+            // Split on the FIRST `#`: text before is the provider, text
+            // after is an optional seat label. A bare `oauth://anthropic`
+            // (no `#`) is the default/pool seat -- `label: None`.
+            let (prov, label) = match rest.split_once('#') {
+                Some((p, l)) => (p, Some(l)),
+                None => (rest, None),
+            };
             if prov.is_empty() {
                 return Err(Error::Auth("oauth:// URI missing provider name".into()));
+            }
+            if matches!(label, Some(l) if l.trim().is_empty()) {
+                return Err(Error::Auth(
+                    "oauth:// URI has an empty seat label after `#`".into(),
+                ));
             }
             // Provider name validation is deferred to the OAuth store at
             // use-time -- mirroring env:// where existence of the var is
             // also a use-time check, not a parse-time one.
             return Ok(Self::OAuth {
                 provider: prov.to_string(),
+                label: label.map(str::to_string),
             });
         }
         // The fallthrough must never echo the raw `uri`: a bare,
@@ -113,9 +134,11 @@ impl fmt::Debug for SecretRef {
         match self {
             SecretRef::Env(v) => f.debug_tuple("Env").field(v).finish(),
             SecretRef::File(p) => f.debug_tuple("File").field(p).finish(),
-            SecretRef::OAuth { provider } => {
-                f.debug_struct("OAuth").field("provider", provider).finish()
-            }
+            SecretRef::OAuth { provider, label } => f
+                .debug_struct("OAuth")
+                .field("provider", provider)
+                .field("label", label)
+                .finish(),
             SecretRef::Literal(_) => write!(f, "{self}"),
         }
     }
@@ -135,7 +158,14 @@ impl fmt::Display for SecretRef {
             SecretRef::File(path) => write!(f, "file://{}", path.display()),
             SecretRef::Literal(val) if val.is_empty() => write!(f, "literal:"),
             SecretRef::Literal(_) => write!(f, "literal:[REDACTED]"),
-            SecretRef::OAuth { provider } => write!(f, "oauth://{provider}"),
+            SecretRef::OAuth {
+                provider,
+                label: Some(label),
+            } => write!(f, "oauth://{provider}#{label}"),
+            SecretRef::OAuth {
+                provider,
+                label: None,
+            } => write!(f, "oauth://{provider}"),
         }
     }
 }
@@ -150,7 +180,8 @@ mod tests {
         assert_eq!(
             sr,
             SecretRef::OAuth {
-                provider: "anthropic".into()
+                provider: "anthropic".into(),
+                label: None,
             }
         );
     }
@@ -161,7 +192,8 @@ mod tests {
         assert_eq!(
             sr,
             SecretRef::OAuth {
-                provider: "codex".into()
+                provider: "codex".into(),
+                label: None,
             }
         );
     }
@@ -180,7 +212,8 @@ mod tests {
         assert_eq!(
             sr,
             SecretRef::OAuth {
-                provider: "made-up".into()
+                provider: "made-up".into(),
+                label: None,
             }
         );
     }
@@ -189,10 +222,85 @@ mod tests {
     fn display_oauth_round_trips() {
         let sr = SecretRef::OAuth {
             provider: "anthropic".into(),
+            label: None,
         };
         assert_eq!(format!("{sr}"), "oauth://anthropic");
         let parsed = SecretRef::parse(&format!("{sr}")).unwrap();
         assert_eq!(parsed, sr);
+    }
+
+    #[test]
+    fn parses_oauth_provider_with_label() {
+        // Arrange / Act
+        let sr = SecretRef::parse("oauth://anthropic#seat-b").unwrap();
+
+        // Assert
+        assert_eq!(
+            sr,
+            SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: Some("seat-b".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_bare_oauth_provider_has_no_label() {
+        // Arrange / Act
+        let sr = SecretRef::parse("oauth://anthropic").unwrap();
+
+        // Assert
+        assert_eq!(
+            sr,
+            SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            }
+        );
+    }
+
+    #[test]
+    fn display_labeled_oauth_round_trips() {
+        // Arrange
+        let labeled = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: Some("seat-b".into()),
+        };
+        let unlabeled = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: None,
+        };
+
+        // Act / Assert
+        assert_eq!(labeled.to_string(), "oauth://anthropic#seat-b");
+        assert_eq!(SecretRef::parse(&labeled.to_string()).unwrap(), labeled);
+        assert_eq!(unlabeled.to_string(), "oauth://anthropic");
+        assert_eq!(SecretRef::parse(&unlabeled.to_string()).unwrap(), unlabeled);
+    }
+
+    #[test]
+    fn rejects_empty_label() {
+        // Arrange / Act
+        let err = SecretRef::parse("oauth://anthropic#").unwrap_err();
+
+        // Assert
+        let msg = err.to_string();
+        assert!(
+            msg.contains("label") && msg.contains("empty"),
+            "error must name the empty label: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_provider_with_label() {
+        // Arrange / Act
+        let err = SecretRef::parse("oauth://#seat-b").unwrap_err();
+
+        // Assert
+        assert!(
+            err.to_string().contains("missing provider"),
+            "error must name the missing provider: {err}"
+        );
     }
 
     #[test]

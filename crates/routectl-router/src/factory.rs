@@ -595,13 +595,11 @@ async fn resolve_responses_account_id(
     if let Some(uri) = account_id_ref {
         return Ok(Some(resolve(&**secrets, uri).await?));
     }
-    let SecretRef::OAuth { provider } = SecretRef::parse(api_key_ref)? else {
+    let parsed = SecretRef::parse(api_key_ref)?;
+    let SecretRef::OAuth { provider, .. } = &parsed else {
         return Ok(None);
     };
-    let secret_ref = SecretRef::OAuth {
-        provider: provider.clone(),
-    };
-    match secrets.account_id(&secret_ref).await? {
+    match secrets.account_id(&parsed).await? {
         Some(id) => Ok(Some(id)),
         None => Err(routectl_core::Error::Config(format!(
             "openai-responses provider `{name}`: no ChatGPT account id found for \
@@ -2343,7 +2341,7 @@ mod managed_token_tests {
         async fn get(&self, sr: &SecretRef) -> routectl_core::Result<String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match sr {
-                SecretRef::OAuth { provider } => Ok(format!("token-for-{provider}")),
+                SecretRef::OAuth { provider, .. } => Ok(format!("token-for-{provider}")),
                 SecretRef::Env(_) => Ok("static-canned".to_string()),
                 _ => Err(routectl_core::Error::Auth(
                     "counting store: oauth/env-only".into(),

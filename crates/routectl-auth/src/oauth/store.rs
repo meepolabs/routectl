@@ -465,7 +465,7 @@ impl OAuthStore {
 impl SecretStore for OAuthStore {
     async fn get(&self, secret_ref: &SecretRef) -> Result<String> {
         let provider = match secret_ref {
-            SecretRef::OAuth { provider } => provider,
+            SecretRef::OAuth { provider, .. } => provider,
             other => {
                 return Err(Error::Auth(format!(
                     "OAuthStore only handles oauth:// refs, got {other}",
@@ -505,7 +505,7 @@ impl SecretStore for OAuthStore {
 
     async fn delete(&self, secret_ref: &SecretRef) -> Result<()> {
         let provider = match secret_ref {
-            SecretRef::OAuth { provider } => provider,
+            SecretRef::OAuth { provider, .. } => provider,
             other => {
                 return Err(Error::Auth(format!(
                     "OAuthStore only handles oauth:// refs, got {other}",
@@ -526,7 +526,7 @@ impl SecretStore for OAuthStore {
         // revocation). The single-flight gate inside `force_refresh`
         // collapses a 401 storm into one POST.
         let provider = match secret_ref {
-            SecretRef::OAuth { provider } => provider,
+            SecretRef::OAuth { provider, .. } => provider,
             other => {
                 return Err(Error::Auth(format!(
                     "OAuthStore only handles oauth:// refs, got {other}",
@@ -538,7 +538,7 @@ impl SecretStore for OAuthStore {
 
     async fn account_id(&self, secret_ref: &SecretRef) -> Result<Option<String>> {
         let provider = match secret_ref {
-            SecretRef::OAuth { provider } => provider,
+            SecretRef::OAuth { provider, .. } => provider,
             other => {
                 return Err(Error::Auth(format!(
                     "OAuthStore only handles oauth:// refs, got {other}",
@@ -699,6 +699,7 @@ mod tests {
         let tok = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap();
@@ -724,6 +725,7 @@ mod tests {
         let tok = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap();
@@ -759,6 +761,7 @@ mod tests {
         let tok = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap();
@@ -790,6 +793,7 @@ mod tests {
         let store2 = store.clone();
         let r = SecretRef::OAuth {
             provider: "anthropic".into(),
+            label: None,
         };
         let r2 = r.clone();
 
@@ -838,6 +842,7 @@ mod tests {
         let store2 = store.clone();
         let r = SecretRef::OAuth {
             provider: "anthropic".into(),
+            label: None,
         };
         let r2 = r.clone();
 
@@ -873,6 +878,7 @@ mod tests {
         store
             .on_auth_failure(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .expect("forced refresh should succeed");
@@ -882,6 +888,7 @@ mod tests {
         let tok = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap();
@@ -904,6 +911,7 @@ mod tests {
         let err = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap_err();
@@ -953,6 +961,7 @@ mod tests {
         let err = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap_err();
@@ -967,6 +976,7 @@ mod tests {
         let err = store
             .get(&SecretRef::OAuth {
                 provider: "made-up".into(),
+                label: None,
             })
             .await
             .unwrap_err();
@@ -994,6 +1004,7 @@ mod tests {
         store
             .delete(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap();
@@ -1037,6 +1048,7 @@ mod tests {
             .set(
                 &SecretRef::OAuth {
                     provider: "anthropic".into(),
+                    label: None,
                 },
                 "tok",
             )
@@ -1057,6 +1069,7 @@ mod tests {
         let err = store
             .on_auth_failure(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap_err();
@@ -1103,6 +1116,7 @@ mod tests {
         let tok = store2
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap();
@@ -1362,6 +1376,7 @@ mod tests {
         let _ = store
             .get(&SecretRef::OAuth {
                 provider: "anthropic".into(),
+                label: None,
             })
             .await
             .unwrap();
@@ -1430,6 +1445,7 @@ mod tests {
                 store_a
                     .get(&SecretRef::OAuth {
                         provider: "anthropic".into(),
+                        label: None,
                     })
                     .await
             },
