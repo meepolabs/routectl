@@ -52,10 +52,15 @@ pub(crate) fn normalize_tool_calls(
 
 fn normalize_one(provider: &str, index: usize, call: &Value) -> NormalizedToolCall {
     let raw_id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    // Empty-id fallback first (deterministic `call_<index>`, itself
+    // charset-valid), then sanitize to Anthropic's `^[a-zA-Z0-9_-]+$`
+    // so the emitted toolUseId / call_id matches the tool_result that
+    // correlates to it. Sanitization is deterministic, so a sanitized
+    // id and its result land on the same value.
     let id = if raw_id.is_empty() {
         format!("call_{index}")
     } else {
-        raw_id.to_string()
+        crate::tool_id::sanitize_tool_id(raw_id).into_owned()
     };
     let function = call.get("function");
     let name = function

@@ -40,6 +40,19 @@ pub(crate) mod header_trace;
 ))]
 pub mod retry_after;
 
+// Shared tool-call id charset sanitizer. Anthropic and Bedrock Converse
+// require `tool_use.id` to match `^[a-zA-Z0-9_-]+$`; an OpenAI-origin id
+// with `.`/`:`/`/` 400s the upstream. Applied at every id-emit site and
+// every tool_result correlation site so a sanitized id and its result
+// stay equal. Gated on anthropic-api / bedrock (the egresses that enforce
+// the charset) so a lean openai-compat-only build carries no dead code.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses"
+))]
+pub(crate) mod tool_id;
+
 // Shared parse step for OpenAI-shape `Message.tool_calls` entries. The
 // bedrock-converse and openai-responses egresses re-emit those calls as
 // their native tool-use items so a following tool_result turn is not

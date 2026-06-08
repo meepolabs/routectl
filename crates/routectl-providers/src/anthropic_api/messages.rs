@@ -458,11 +458,9 @@ fn emit_tool_use_blocks_from_calls(
     blocks: &mut Vec<ContentBlock>,
 ) -> Result<()> {
     for call in tool_calls {
-        let tool_id = call
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let tool_id =
+            crate::tool_id::sanitize_tool_id(call.get("id").and_then(|v| v.as_str()).unwrap_or(""))
+                .into_owned();
         let function = call.get("function");
         let name = function
             .and_then(|f| f.get("name"))
@@ -662,7 +660,11 @@ fn translate_simple_content(c: &MessageContent) -> AnthropicContent {
 // ---------------------------------------------------------------------------
 
 fn build_tool_message(msg: &Message) -> AnthropicMessage {
-    let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
+    // Sanitize to the same charset the tool_use emit uses so a result
+    // for an OpenAI-origin id (`call.foo:1`) still correlates with its
+    // tool_use block after both are mapped to `call_foo_1`.
+    let tool_use_id =
+        crate::tool_id::sanitize_tool_id(msg.tool_call_id.as_deref().unwrap_or("")).into_owned();
     // Anthropic tool_result.content accepts either a string or an array
     // of content blocks. We honor whichever shape the canonical message
     // carries.
@@ -1005,5 +1007,120 @@ mod thinking_signature_tests {
             &parts[0],
             ContentPart::Known(KnownContentPart::Text { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod tool_id_correlation_tests {
+    use super::{translate_messages, ContentBlock};
+    use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage};
+    use routectl_core::{Message, MessageContent, Role};
+    use serde_json::json;
+
+    fn user_msg() -> Message {
+        Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    fn assistant_with_tool_call(id: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content: MessageContent::Null,
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![json!({
+                "id": id,
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}"},
+            })]),
+        }
+    }
+
+    fn tool_result(id: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Tool,
+            content: MessageContent::Text("ok".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some(id.into()),
+            tool_calls: None,
+        }
+    }
+
+    fn tool_use_id(out: &[AnthropicMessage]) -> String {
+        out.iter()
+            .find_map(|m| match &m.content {
+                AnthropicContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                    ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("tool_use block must be present")
+    }
+
+    fn tool_result_id(out: &[AnthropicMessage]) -> String {
+        out.iter()
+            .find_map(|m| match &m.content {
+                AnthropicContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                    ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("tool_result block must be present")
+    }
+
+    /// An OpenAI-origin id with `.`/`:` is sanitized identically at the
+    /// tool_use emit AND the tool_result correlation site, so the result
+    /// is not orphaned: both land on `call_foo_1`.
+    #[test]
+    fn openai_origin_tool_id_sanitized_consistently_across_anthropic_egress() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            assistant_with_tool_call("call.foo:1"),
+            tool_result("call.foo:1"),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translation must not error");
+
+        // Assert
+        assert_eq!(tool_use_id(&out), "call_foo_1");
+        assert_eq!(tool_result_id(&out), "call_foo_1");
+        assert_eq!(tool_use_id(&out), tool_result_id(&out));
+    }
+
+    /// A valid id round-trips unchanged through both the tool_use emit and
+    /// the tool_result correlation site.
+    #[test]
+    fn valid_tool_id_round_trips_unchanged_through_anthropic_egress() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            assistant_with_tool_call("call_abc-1_2"),
+            tool_result("call_abc-1_2"),
+        ];
+
+        // Act
+        let out = translate_messages("anthropic", &messages).expect("translation must not error");
+
+        // Assert
+        assert_eq!(tool_use_id(&out), "call_abc-1_2");
+        assert_eq!(tool_result_id(&out), "call_abc-1_2");
     }
 }

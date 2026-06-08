@@ -803,6 +803,10 @@ fn build_tool_message(msg: &Message) -> Result<ConverseMessage> {
                 .to_string(),
         ));
     };
+    // Sanitize to the charset the toolUse emit uses (via
+    // `normalize_tool_calls`) so a result for an OpenAI-origin id still
+    // correlates after both map to the same `[a-zA-Z0-9_-]+` value.
+    let tool_use_id = crate::tool_id::sanitize_tool_id(&tool_use_id).into_owned();
     let content = match &msg.content {
         MessageContent::Text(t) => vec![ConverseToolResultContent::Text { text: t.clone() }],
         MessageContent::Parts(parts) => parts.iter().map(translate_part_for_tool_result).collect(),
@@ -1571,5 +1575,134 @@ mod tests {
             ConverseContentBlock::Text { text } => assert_eq!(text, "just text"),
             other => panic!("expected a single Text block, got {other:?}"),
         }
+    }
+
+    /// An OpenAI-origin id with `.`/`:` is sanitized identically at the
+    /// toolUse emit AND the toolResult correlation site, so the result is
+    /// not orphaned: both land on `call_foo_1`.
+    #[test]
+    fn openai_origin_tool_id_sanitized_consistently_across_converse_egress() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call.foo:1",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                })]),
+            },
+            Message {
+                refusal: None,
+                role: Role::Tool,
+                content: MessageContent::Text("ok".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some("call.foo:1".into()),
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert -- emitted toolUse id and toolResult id are the same
+        // sanitized value, so the result is not orphaned.
+        let tool_use_id = result
+            .iter()
+            .find_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ConverseContentBlock::ToolUse { tool_use } => {
+                        Some(tool_use.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("toolUse block must be present");
+        let tool_result_id = result
+            .iter()
+            .find_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ConverseContentBlock::ToolResult { tool_result } => {
+                        Some(tool_result.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("toolResult block must be present");
+        assert_eq!(tool_use_id, "call_foo_1");
+        assert_eq!(tool_result_id, "call_foo_1");
+        assert_eq!(tool_use_id, tool_result_id);
+    }
+
+    /// A valid id round-trips unchanged through both the toolUse emit and
+    /// the toolResult correlation site.
+    #[test]
+    fn valid_tool_id_round_trips_unchanged_through_converse_egress() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_abc-1_2",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "{}"},
+                })]),
+            },
+            Message {
+                refusal: None,
+                role: Role::Tool,
+                content: MessageContent::Text("ok".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some("call_abc-1_2".into()),
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let tool_use_id = result
+            .iter()
+            .find_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ConverseContentBlock::ToolUse { tool_use } => {
+                        Some(tool_use.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("toolUse block must be present");
+        let tool_result_id = result
+            .iter()
+            .find_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ConverseContentBlock::ToolResult { tool_result } => {
+                        Some(tool_result.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("toolResult block must be present");
+        assert_eq!(tool_use_id, "call_abc-1_2");
+        assert_eq!(tool_result_id, "call_abc-1_2");
     }
 }
