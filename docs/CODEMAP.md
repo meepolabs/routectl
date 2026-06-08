@@ -158,11 +158,12 @@ listed at the bottom of each crate.
 
 - `src/lib.rs` -- crate root; re-exports `Config`, `Router`, `ResolvedModel`, factory builders
 - `src/config.rs` -- TOML schema (`Config`, `ProviderEntry`, `ModelEntry`, `AliasValue`, `RetryPolicy`, `ServerAuth`, etc.)
-- `src/factory.rs` -- secret resolution + `build_provider`/`build_resolved_models`; validation guards
+- `src/factory.rs` -- secret resolution + `build_provider`/`build_resolved_models`; validation guards; OAuth credential-pool expansion (a bare-pool `oauth://<provider>` ref with >1 stored seat builds one seat-pinned provider per seat via `list_seats`)
 - `src/glob.rs` -- `[aliases]` table suffix-glob parser + longest-prefix lookup index (`AliasPattern`, `PrefixIndex`)
-- `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`
-- `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch; `rate_limit_reset_hint` (clamp an `Error::Upstream.retry_after` to the configured ceiling) + `park_provider` (open the breaker for a honored reset) thread upstream resets into the three dispatch loops
+- `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`; optional `seats` slice (one `SeatTarget` per OAuth pool seat, `None` for the single-seat / non-pooled case)
+- `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch; `expand_chain_to_targets` expands a pooled model into one per-seat `DispatchTarget` (seat order from `seat_pool`); `rate_limit_reset_hint` (clamp an `Error::Upstream.retry_after` to the configured ceiling) + `park_provider` (open the breaker for a honored reset) thread upstream resets into the three dispatch loops
 - `src/runtime_state.rs` -- per-model (nickname-keyed) token-bucket RPM limiter + circuit breaker state machine; `force_open` parks the breaker for an explicit reset hint, bypassing the consecutive-failure threshold
+- `src/seat_pool.rs` -- OAuth credential-pool glue: `SeatTarget` (seat-pinned provider + per-seat `state_key`), `seat_state_key` (bare nickname for the default seat, `nickname#label` for labeled seats), `seat_order_for_request` + `RoundRobinCursors` (per-pool `AtomicUsize` rotating the start seat per request under `RoundRobin`; `FillFirst` walks a fixed default-first order)
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date suffixes (e.g. `_20250305`) so `unsupported_features` on `ProviderRuntimePolicy` can match capability-class regardless of vendor versioning; `ToolDef::Custom` (user-defined tools) does not contribute feature keys
 
 ### Tests

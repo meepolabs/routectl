@@ -86,6 +86,13 @@ pub struct Router {
     /// patterns (e.g. `claude-opus-*`) on lookup miss; longest prefix
     /// wins.
     alias_glob_index: PrefixIndex<AliasValue>,
+    /// Per-pool round-robin cursors for OAuth credential pools whose
+    /// `seat_selection` is `RoundRobin`. One `AtomicUsize` per pooled
+    /// nickname; advanced once per request to rotate the starting seat.
+    /// Deliberately NOT carried over on a Router rebuild (a reset to
+    /// seat 0 is benign at single-operator scale). `FillFirst` pools
+    /// and non-pooled models have no entry here.
+    round_robin: crate::seat_pool::RoundRobinCursors,
 }
 
 /// Per-request switches that the HTTP handler can flip via header
@@ -227,6 +234,7 @@ impl Router {
             state,
             resolved_models: BTreeMap::new(),
             alias_glob_index,
+            round_robin: Default::default(),
         }
     }
 
@@ -263,6 +271,27 @@ impl Router {
                 .get(&m.provider_name)
                 .map(|e| e.runtime().clone())
                 .unwrap_or_default();
+            // A pooled model (Some seats) gets one state slot per seat,
+            // each keyed by the seat's `state_key`, so the breaker + RPM
+            // bucket are per-seat (R7/R8/R12 + D1 park apply per seat).
+            // The default seat keys as the bare nickname, so the slot
+            // below covers it; this loop adds the labeled-seat slots.
+            // A non-pooled model (None seats) only gets the nickname slot.
+            if let Some(seats) = m.seats.as_ref() {
+                for seat in seats.iter() {
+                    self.state
+                        .entry(seat.state_key.clone())
+                        .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&policy))));
+                }
+                // Round-robin pools rotate the starting seat per request;
+                // register a cursor only for that selection mode.
+                if matches!(
+                    policy.seat_selection,
+                    crate::config::SeatSelection::RoundRobin
+                ) {
+                    self.round_robin.register(nickname);
+                }
+            }
             self.state
                 .entry(nickname.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(ProviderState::new(&policy))));
@@ -434,19 +463,68 @@ impl Router {
     /// any nickname starting with `claude-`.
     fn dispatch_chain(&self, model: &str) -> Result<Vec<DispatchTarget>> {
         if let Some(chain) = self.resolve_v6_alias(model)? {
-            return Ok(into_dispatch_targets(chain));
+            return Ok(self.expand_chain_to_targets(chain));
         }
         // Wire model could ALSO be a direct nickname.
         if let Some(m) = self.resolve_nickname(model) {
-            return Ok(vec![into_one_dispatch_target(m)]);
+            return Ok(self.expand_chain_to_targets(vec![m]));
         }
         // Catch-all: only consulted after exact alias / glob / direct
         // nickname all miss. This ordering means a wire model that's
         // a known nickname always wins over a configured default.
         if let Some(chain) = self.resolve_default_alias()? {
-            return Ok(into_dispatch_targets(chain));
+            return Ok(self.expand_chain_to_targets(chain));
         }
         Err(Error::UnknownAlias(model.to_string()))
+    }
+
+    /// Expand a resolved-model chain into the per-request dispatch-target
+    /// chain. A non-pooled model (`seats == None`) maps to exactly one
+    /// target keyed by nickname -- byte-for-byte the pre-pool path. A
+    /// pooled model maps to one target per seat, in the order
+    /// `seat_pool::seat_order_for_request` returns for the provider's
+    /// `seat_selection` (FillFirst: fixed default-first order; RoundRobin:
+    /// per-request rotated start). The expanded seat targets slot inline
+    /// where the model sat, preserving the operator's fallback order so a
+    /// chain `[opus, sonnet]` becomes `[opus-seatA, opus-seatB, sonnet]`.
+    fn expand_chain_to_targets(&self, chain: Vec<Arc<ResolvedModel>>) -> Vec<DispatchTarget> {
+        let mut out: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
+        for m in chain {
+            match m.seats.as_ref() {
+                None => out.push(into_one_dispatch_target(m.clone())),
+                Some(seats) => self.push_seat_targets(&m, seats, &mut out),
+            }
+        }
+        out
+    }
+
+    /// Append one dispatch target per seat of a pooled model, in the
+    /// request's resolved seat order. Each target carries the seat's own
+    /// provider, `state_key`, and `auth_secret_ref` so the breaker, RPM
+    /// gate, retry caps, probe fast-fail, and D1 `Retry-After` park all
+    /// apply per seat; every other dispatch knob is shared from the model.
+    fn push_seat_targets(
+        &self,
+        m: &Arc<ResolvedModel>,
+        seats: &[crate::seat_pool::SeatTarget],
+        out: &mut Vec<DispatchTarget>,
+    ) {
+        let selection = self
+            .config
+            .providers
+            .get(&m.provider_name)
+            .map(|e| e.runtime().seat_selection)
+            .unwrap_or_default();
+        let order = crate::seat_pool::seat_order_for_request(
+            &m.nickname,
+            seats.len(),
+            selection,
+            &self.round_robin,
+        );
+        for idx in order {
+            let seat = &seats[idx];
+            out.push(dispatch_target_for_seat(m, seat));
+        }
     }
 
     /// Resolve the dispatch chain for a request and pre-filter against
@@ -792,6 +870,7 @@ impl Router {
                                 tracing::warn!(
                                     provider = provider_name,
                                     model = %target.nickname.as_deref().unwrap_or(""),
+                                    state_key = %state_key,
                                     error = ?e,
                                     "fallback to next",
                                 );
@@ -799,6 +878,7 @@ impl Router {
                                 tracing::warn!(
                                     provider = provider_name,
                                     model = %target.nickname.as_deref().unwrap_or(""),
+                                    state_key = %state_key,
                                     error = ?e,
                                     "chain exhausted; no fallback target available; request will fail",
                                 );
@@ -1695,10 +1775,6 @@ fn is_managed_reserved(name: &str) -> bool {
 /// Convert a chain of `Arc<ResolvedModel>` into the `DispatchTarget`
 /// shape the dispatch loop walks. Hoisted out of `dispatch_chain`
 /// so the three resolution branches share one builder.
-fn into_dispatch_targets(chain: Vec<Arc<ResolvedModel>>) -> Vec<DispatchTarget> {
-    chain.into_iter().map(into_one_dispatch_target).collect()
-}
-
 fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
     DispatchTarget {
         provider_name: m.provider_name.clone(),
@@ -1707,6 +1783,33 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         state_key: m.nickname.clone(),
         upstream: m.upstream.clone(),
         provider: Some(m.provider.clone()),
+        supports_adaptive_thinking: m.supports_adaptive_thinking,
+        effort_levels: m.effort_levels.clone(),
+        nickname: Some(m.nickname.clone()),
+        model_header_extras: m.header_extras.clone(),
+        model_payload_extras: m.payload_extras.clone(),
+        reasoning_dialect: m.reasoning_dialect,
+        history_reasoning: m.history_reasoning,
+        stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
+        max_thinking_budget: m.max_thinking_budget,
+        max_output_tokens: m.max_output_tokens,
+    }
+}
+
+/// Build a dispatch target for one seat of a pooled model. Identical to
+/// `into_one_dispatch_target` except the seat overrides the provider
+/// instance and `state_key` (its own breaker + RPM bucket); every other
+/// knob is shared from the model. The nickname stays the model's nickname
+/// for tracing, while `state_key` carries the seat suffix.
+fn dispatch_target_for_seat(
+    m: &Arc<ResolvedModel>,
+    seat: &crate::seat_pool::SeatTarget,
+) -> DispatchTarget {
+    DispatchTarget {
+        provider_name: m.provider_name.clone(),
+        state_key: seat.state_key.clone(),
+        upstream: m.upstream.clone(),
+        provider: Some(seat.provider.clone()),
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
         nickname: Some(m.nickname.clone()),
@@ -3493,6 +3596,237 @@ mod resolved_models_tests {
             Err(other) => panic!("expected Error::Config from depth cap, got {other:?}"),
             Ok(_) => panic!("expected Error::Config from depth cap, got Ok(...)"),
         }
+    }
+}
+
+#[cfg(test)]
+mod seat_pool_dispatch_tests {
+    //! Router-level tests for OAuth credential-pool dispatch: a pooled
+    //! model expands into one DispatchTarget per seat, each with its own
+    //! breaker entry, ordered by the provider's `seat_selection`.
+
+    use super::*;
+    use crate::config::{ProviderEntry, ProviderRuntimePolicy, SeatSelection};
+    use crate::seat_pool::SeatTarget;
+    use async_trait::async_trait;
+    use routectl_core::{Choice, Message};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Provider that records each `complete` call against a shared
+    /// counter so a test can assert which seat served a request.
+    struct SeatProvider {
+        id: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for SeatProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ChatResponse {
+                id: format!("ok-{}", self.id),
+                model: req.model,
+                created: 0,
+                choices: vec![Choice {
+                    index: 0,
+                    message: Message {
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+            })
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!()
+        }
+    }
+
+    /// Build a pooled model `opus` on provider `anthropic` with three
+    /// seats (default + seat-b + seat-c), each backed by its own
+    /// `SeatProvider` + call counter. Returns the installed Router plus
+    /// the three per-seat counters in seat order.
+    fn pooled_router(selection: SeatSelection) -> (Router, Vec<Arc<AtomicUsize>>) {
+        let labels: Vec<Option<String>> = vec![None, Some("seat-b".into()), Some("seat-c".into())];
+        let mut counters = Vec::new();
+        let mut seats: Vec<SeatTarget> = Vec::new();
+        for label in &labels {
+            let counter = Arc::new(AtomicUsize::new(0));
+            counters.push(counter.clone());
+            let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
+                id: format!("anthropic-{}", label.as_deref().unwrap_or("default")),
+                calls: counter,
+            });
+            seats.push(SeatTarget {
+                label: label.clone(),
+                state_key: crate::seat_pool::seat_state_key("opus", label.as_deref()),
+                provider,
+                auth_secret_ref: None,
+            });
+        }
+        let default_provider = seats[0].provider.clone();
+
+        let mut providers = BTreeMap::new();
+        let runtime = ProviderRuntimePolicy {
+            seat_selection: selection,
+            ..Default::default()
+        };
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderEntry::anthropic_api("oauth://anthropic").with_runtime(runtime),
+        );
+        let cfg = Arc::new(Config {
+            providers,
+            ..Config::default()
+        });
+
+        let mut router = Router::new(cfg);
+        let model = ResolvedModel::new("opus", "anthropic", default_provider, "claude-opus-4-7")
+            .with_seats(Arc::from(seats));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert("opus".to_string(), Arc::new(model));
+        router.install_resolved_models(models);
+        (router, counters)
+    }
+
+    fn req() -> ChatRequest {
+        ChatRequest {
+            model: "opus".into(),
+            messages: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// The seat order produced by `dispatch_chain` for `opus`, as a list
+    /// of `state_key`s. Same-module access to the private method.
+    fn chain_state_keys(router: &Router) -> Vec<String> {
+        router
+            .dispatch_chain("opus")
+            .expect("chain resolves")
+            .into_iter()
+            .map(|t| t.state_key)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn each_seat_has_independent_breaker() {
+        // Parking seat-a (force_open) must leave seat-b/seat-c
+        // dispatchable -- the three seats own distinct state_key slots,
+        // so there is no shared breaker.
+        let (router, _counters) = pooled_router(SeatSelection::FillFirst);
+        // All three seats own a state slot.
+        assert!(router.state.contains_key("opus"));
+        assert!(router.state.contains_key("opus#seat-b"));
+        assert!(router.state.contains_key("opus#seat-c"));
+
+        // Park the default seat for a long cooldown.
+        router.park_provider("opus", Duration::from_secs(3600));
+
+        // The default seat's breaker is open; siblings are untouched.
+        assert!(
+            router.gate_check("opus", "anthropic").is_some(),
+            "parked default seat must gate-block"
+        );
+        assert!(
+            router.gate_check("opus#seat-b", "anthropic").is_none(),
+            "sibling seat-b must remain dispatchable"
+        );
+        assert!(
+            router.gate_check("opus#seat-c", "anthropic").is_none(),
+            "sibling seat-c must remain dispatchable"
+        );
+    }
+
+    #[tokio::test]
+    async fn fill_first_walks_seats_in_fixed_order() {
+        // FillFirst: the chain's seat order is stable across requests
+        // (default seat first, then sorted labels).
+        let (router, _counters) = pooled_router(SeatSelection::FillFirst);
+        let first = chain_state_keys(&router);
+        let second = chain_state_keys(&router);
+        assert_eq!(first, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+        assert_eq!(second, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+    }
+
+    #[tokio::test]
+    async fn round_robin_rotates_start_seat_per_request() {
+        // RoundRobin: the starting seat advances by one per request and
+        // wraps modulo the seat count.
+        let (router, _counters) = pooled_router(SeatSelection::RoundRobin);
+        assert_eq!(
+            chain_state_keys(&router),
+            vec!["opus", "opus#seat-b", "opus#seat-c"]
+        );
+        assert_eq!(
+            chain_state_keys(&router),
+            vec!["opus#seat-b", "opus#seat-c", "opus"]
+        );
+        assert_eq!(
+            chain_state_keys(&router),
+            vec!["opus#seat-c", "opus", "opus#seat-b"]
+        );
+        assert_eq!(
+            chain_state_keys(&router),
+            vec!["opus", "opus#seat-b", "opus#seat-c"]
+        );
+    }
+
+    #[tokio::test]
+    async fn parked_seat_is_skipped_and_sibling_serves() {
+        // Full dispatch: park the default seat, then a request must fall
+        // to the next seat (seat-b) and that seat's provider serves.
+        let (router, counters) = pooled_router(SeatSelection::FillFirst);
+        router.park_provider("opus", Duration::from_secs(3600));
+
+        let resp = router.complete(req()).await.expect("sibling serves");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            0,
+            "parked default seat must not be hit"
+        );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            1,
+            "seat-b must serve the request"
+        );
+        assert_eq!(
+            counters[2].load(Ordering::SeqCst),
+            0,
+            "seat-c must not be reached once seat-b succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn fill_first_serves_default_seat_first() {
+        // Sanity: with no seat parked, FillFirst serves the default seat.
+        let (router, counters) = pooled_router(SeatSelection::FillFirst);
+        let resp = router.complete(req()).await.expect("default serves");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic"));
+        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
+        assert_eq!(counters[1].load(Ordering::SeqCst), 0);
+        assert_eq!(counters[2].load(Ordering::SeqCst), 0);
     }
 }
 

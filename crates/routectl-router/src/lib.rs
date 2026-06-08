@@ -11,6 +11,7 @@ pub mod glob;
 pub mod resolved;
 pub mod router;
 pub mod runtime_state;
+pub(crate) mod seat_pool;
 
 pub use config::{
     AliasValue, Config, HistoryReasoning, LogConfig, ModelEntry, ProviderEntry,

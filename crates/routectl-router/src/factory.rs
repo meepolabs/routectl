@@ -501,6 +501,142 @@ fn primary_api_key_uri(entry: &ProviderEntry) -> Option<&str> {
     }
 }
 
+/// Clone a provider entry with its primary `api_key_ref` swapped for a
+/// seat-pinned URI. Used to build one provider instance per OAuth seat
+/// in a credential pool. Bedrock has no single `api_key_ref` slot, so it
+/// returns `None` -- pools are never built for Bedrock (its creds shape
+/// is multi-field and is not an `oauth://` pool).
+fn entry_with_api_key_ref(entry: &ProviderEntry, seat_uri: &str) -> Option<ProviderEntry> {
+    let mut cloned = entry.clone();
+    match &mut cloned {
+        ProviderEntry::OpenaiCompat { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
+        ProviderEntry::AnthropicApi { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
+        #[cfg(feature = "openai-responses")]
+        ProviderEntry::OpenaiResponses { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
+        #[cfg(feature = "bedrock")]
+        ProviderEntry::Bedrock { .. } => return None,
+    }
+    Some(cloned)
+}
+
+/// Expand a model's primary OAuth credential reference into a fixed set
+/// of seat-pinned providers, ONE per stored seat, when (and only when)
+/// the ref is a bare-pool `oauth://<provider>` (label `None`) backed by
+/// MORE THAN ONE seat. Returns:
+///
+///   - `None` for the single-seat / non-pooled / labeled / non-oauth
+///     case -- the model dispatches its single `default_provider` keyed
+///     by nickname, byte-for-byte the pre-pool behavior.
+///   - `Some(seats)` with one `SeatTarget` per seat (default seat first,
+///     then sorted labels) when expansion applies. The first seat reuses
+///     `default_provider` (already built, default ref); the rest are
+///     built fresh from a seat-pinned ref. Each seat carries its own
+///     `state_key` so the breaker + RPM bucket are per-seat.
+///
+/// `list_seats` is reached through the `Arc<dyn SecretStore>` the factory
+/// already holds; for the server build path this lands in `OAuthStore`,
+/// which enumerates the stored seats for the provider.
+async fn build_seat_targets(
+    nickname: &str,
+    provider_name: &str,
+    provider_entry: &ProviderEntry,
+    primary_ref: &SecretRef,
+    default_provider: &Arc<dyn Provider>,
+    secrets: Arc<dyn SecretStore>,
+    opts: BuildOptions,
+) -> Option<Arc<[crate::seat_pool::SeatTarget]>> {
+    // Only a bare-pool oauth ref (label None) can expand. A labeled ref
+    // already pins one seat; env/file/literal are single-credential.
+    if !matches!(primary_ref, SecretRef::OAuth { label: None, .. }) {
+        return None;
+    }
+    let seat_refs = match secrets.list_seats(primary_ref).await {
+        Ok(refs) => refs,
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_name,
+                model = %nickname,
+                error = %e,
+                "seat enumeration failed; falling back to single-seat dispatch",
+            );
+            return None;
+        }
+    };
+    // A single seat resolves to the same provider already on the model;
+    // skip the pool and keep the byte-for-byte single-target path.
+    if seat_refs.len() <= 1 {
+        return None;
+    }
+    let mut seats: Vec<crate::seat_pool::SeatTarget> = Vec::with_capacity(seat_refs.len());
+    for seat_ref in seat_refs.iter() {
+        let label = match seat_ref {
+            SecretRef::OAuth { label, .. } => label.clone(),
+            _ => None,
+        };
+        let state_key = crate::seat_pool::seat_state_key(nickname, label.as_deref());
+        // The default seat (label None) reuses the provider the factory
+        // already built from the bare-pool ref -- no second build. This
+        // MUST key off the label, NOT the seat index: a labels-only pool
+        // (no bare default seat) has a labeled seat at index 0, which has
+        // to build from its OWN pinned ref rather than inherit the bare,
+        // credential-less provider.
+        let provider = if label.is_none() {
+            default_provider.clone()
+        } else {
+            let seat_uri = seat_ref.to_string();
+            let seat_entry = match entry_with_api_key_ref(provider_entry, &seat_uri) {
+                Some(e) => e,
+                None => {
+                    // A provider kind with no single api_key_ref slot cannot
+                    // be seat-pinned; skip this seat, not the whole pool.
+                    tracing::warn!(
+                        provider = %provider_name,
+                        model = %nickname,
+                        seat = %state_key,
+                        "skipping OAuth pool seat (no api_key_ref to pin)",
+                    );
+                    continue;
+                }
+            };
+            match build_provider_with_options(
+                provider_name,
+                &seat_entry,
+                secrets.clone(),
+                opts.clone(),
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    // A single seat failing to build should not sink the
+                    // whole pool; skip it and keep the healthy seats.
+                    tracing::warn!(
+                        provider = %provider_name,
+                        model = %nickname,
+                        seat = %state_key,
+                        error = %e,
+                        "skipping OAuth pool seat (build failed)",
+                    );
+                    continue;
+                }
+            }
+        };
+        seats.push(crate::seat_pool::SeatTarget {
+            label,
+            state_key,
+            provider,
+            auth_secret_ref: Some(seat_ref.clone()),
+        });
+    }
+    // If only the default seat survived (every labeled seat failed to
+    // build), there is no pool to dispatch across -- fall back to the
+    // single-target path so behavior matches a single-seat config.
+    if seats.len() <= 1 {
+        return None;
+    }
+    Some(Arc::from(seats))
+}
+
 /// Build a `TokenSource` for a provider that needs per-request token
 /// resolution. For `oauth://<provider>` refs this returns a
 /// `ManagedToken` that re-enters `SecretStore::get` per request -- so
@@ -647,6 +783,21 @@ pub async fn build_resolved_models(
 
     for (nickname, entry) in &config.models {
         if !entry.selectable {
+            continue;
+        }
+        // A `#` in a model nickname would collide with a labeled seat's
+        // runtime-state key (`{nickname}#{label}`), letting two distinct
+        // dispatch identities share one circuit breaker. Reject it here so
+        // the collision is impossible by construction; the offending model
+        // is dropped from the resolved table with a clear reason.
+        if nickname.contains('#') {
+            failed.push((
+                nickname.clone(),
+                format!(
+                    "model nickname `{nickname}` must not contain `#` \
+                     (reserved as the seat-pool state-key separator)"
+                ),
+            ));
             continue;
         }
         let Some(provider_entry) = config.providers.get(&entry.provider) else {
@@ -825,7 +976,27 @@ pub async fn build_resolved_models(
         }
         if let Some(uri) = primary_api_key_uri(provider_entry) {
             if let Ok(sr) = SecretRef::parse(uri) {
-                resolved = resolved.with_auth_secret_ref(sr);
+                resolved = resolved.with_auth_secret_ref(sr.clone());
+                // OAuth credential-pool expansion. A bare-pool
+                // `oauth://<provider>` ref backed by more than one stored
+                // seat expands into one seat-pinned provider per seat so
+                // the dispatch chain rotates + cools across seats. A
+                // single seat / labeled ref / non-oauth ref builds exactly
+                // one provider (the default `provider` already on
+                // `resolved`), so this is a no-op there -- back-compat.
+                if let Some(seats) = build_seat_targets(
+                    nickname,
+                    &entry.provider,
+                    provider_entry,
+                    &sr,
+                    &resolved.provider,
+                    secrets.clone(),
+                    opts.clone(),
+                )
+                .await
+                {
+                    resolved = resolved.with_seats(seats);
+                }
             }
         }
         models.insert(nickname.clone(), Arc::new(resolved));
@@ -2024,6 +2195,212 @@ mod build_resolved_models_tests {
         assert!(haiku.header_extras.is_empty());
         assert!(haiku.payload_extras.is_none());
         assert!(haiku.stream_first_byte_timeout_ms.is_none());
+    }
+
+    /// Stub store that reports a fixed list of OAuth seats for any bare
+    /// pool ref. `get`/`set`/`delete` are unused by these build-time
+    /// tests (the anthropic-api oauth arm wraps a lazy `ManagedToken`
+    /// rather than resolving a token at build).
+    struct MultiSeatStore {
+        labels: Vec<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for MultiSeatStore {
+        async fn get(&self, _secret_ref: &SecretRef) -> routectl_core::Result<String> {
+            Ok("token".into())
+        }
+        async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
+            Ok(())
+        }
+        async fn list_seats(
+            &self,
+            secret_ref: &SecretRef,
+        ) -> routectl_core::Result<Vec<SecretRef>> {
+            // A labeled ref pins one seat; mirror the real store.
+            if let SecretRef::OAuth { label: Some(_), .. } = secret_ref {
+                return Ok(vec![secret_ref.clone()]);
+            }
+            let SecretRef::OAuth { provider, .. } = secret_ref else {
+                return Ok(vec![secret_ref.clone()]);
+            };
+            Ok(self
+                .labels
+                .iter()
+                .map(|label| SecretRef::OAuth {
+                    provider: provider.clone(),
+                    label: label.clone(),
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn single_unlabeled_seat_builds_one_target_unchanged() {
+        // Back-compat pin: a bare-pool oauth ref backed by exactly one
+        // (unlabeled/default) seat does NOT expand -- `seats` stays None,
+        // so dispatch builds one target keyed by nickname, byte-for-byte
+        // the pre-pool behavior.
+        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore { labels: vec![None] });
+        let cfg = config_with_models(
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api("oauth://anthropic")
+                    .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
+            )],
+            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = models.get("opus").expect("opus entry");
+        assert!(
+            opus.seats.is_none(),
+            "single seat must NOT expand into a pool"
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_with_three_seats_expands_to_three_targets() {
+        // A bare-pool ref backed by three stored seats expands into three
+        // seat targets, each pinned to a distinct labeled SecretRef and a
+        // distinct state_key (default seat first, then sorted labels).
+        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore {
+            labels: vec![None, Some("seat-b".into()), Some("seat-c".into())],
+        });
+        let cfg = config_with_models(
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api("oauth://anthropic")
+                    .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
+            )],
+            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = models.get("opus").expect("opus entry");
+        let seats = opus.seats.as_ref().expect("three-seat pool must expand");
+        assert_eq!(seats.len(), 3, "expected three seat targets");
+
+        // Distinct state_keys: default seat is the bare nickname, labeled
+        // seats carry the `#label` suffix.
+        let keys: Vec<&str> = seats.iter().map(|s| s.state_key.as_str()).collect();
+        assert_eq!(keys, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+
+        // Distinct seat-pinned SecretRefs round-tripping through Display.
+        let refs: Vec<String> = seats
+            .iter()
+            .map(|s| s.auth_secret_ref.as_ref().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            refs,
+            vec![
+                "oauth://anthropic",
+                "oauth://anthropic#seat-b",
+                "oauth://anthropic#seat-c",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn labels_only_pool_builds_each_seat_from_its_own_ref() {
+        // Regression pin for the labels-only bug: a pool with NO bare
+        // default seat (operator ran `login anthropic --label a` / `--label
+        // b` only) puts a LABELED seat at index 0. Seat 0 must build from
+        // its OWN pinned ref (`oauth://anthropic#a`), NOT inherit the bare,
+        // credential-less provider the model was built from. The old
+        // `idx == 0` reuse silently bound seat 0 to the bare provider.
+        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore {
+            labels: vec![Some("a".into()), Some("b".into())],
+        });
+        let cfg = config_with_models(
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api("oauth://anthropic")
+                    .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
+            )],
+            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = models.get("opus").expect("opus entry");
+        let seats = opus.seats.as_ref().expect("labels-only pool must expand");
+        assert_eq!(seats.len(), 2, "expected two labeled seat targets");
+
+        // Labels-only: index 0 is the FIRST LABELED seat -- no bare `opus`
+        // state_key, no bare `oauth://anthropic` ref.
+        let keys: Vec<&str> = seats.iter().map(|s| s.state_key.as_str()).collect();
+        assert_eq!(keys, vec!["opus#a", "opus#b"]);
+        let refs: Vec<String> = seats
+            .iter()
+            .map(|s| s.auth_secret_ref.as_ref().unwrap().to_string())
+            .collect();
+        assert_eq!(refs, vec!["oauth://anthropic#a", "oauth://anthropic#b"]);
+
+        // The fix: NO labeled seat reuses the bare-ref provider the model
+        // was built from. With the old `idx == 0` reuse, seat 0 would be
+        // pointer-equal to `opus.provider` (the bare, credential-less
+        // build) and silently resolve the wrong identity at request time.
+        for seat in seats.iter() {
+            assert!(
+                !Arc::ptr_eq(&opus.provider, &seat.provider),
+                "labels-only seat {} must be built from its own ref, not the bare provider",
+                seat.state_key,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicitly_labeled_ref_does_not_expand() {
+        // A model whose api_key_ref already pins a seat
+        // (`oauth://anthropic#seat-b`) builds exactly one target -- the
+        // operator selected the seat, so there is no pool to expand.
+        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore {
+            labels: vec![None, Some("seat-b".into()), Some("seat-c".into())],
+        });
+        let cfg = config_with_models(
+            vec![(
+                "anthropic",
+                ProviderEntry::anthropic_api("oauth://anthropic#seat-b")
+                    .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer),
+            )],
+            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = models.get("opus").expect("opus entry");
+        assert!(
+            opus.seats.is_none(),
+            "an explicitly-labeled ref must NOT expand into a pool"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_oauth_ref_does_not_expand() {
+        // Back-compat: a literal/env/file ref never pools, even if a
+        // (misconfigured) store reported multiple seats for it.
+        let store: Arc<dyn SecretStore> = Arc::new(MultiSeatStore {
+            labels: vec![None, Some("seat-b".into())],
+        });
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![("opus", ModelEntry::new("anthropic", "claude-opus-4-7"))],
+        );
+        let (models, _) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        let opus = models.get("opus").expect("opus entry");
+        assert!(opus.seats.is_none(), "a non-oauth ref must never pool");
     }
 }
 

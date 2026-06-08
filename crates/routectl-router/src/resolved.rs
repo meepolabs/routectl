@@ -97,6 +97,16 @@ pub struct ResolvedModel {
     /// `None` for provider kinds that don't carry a primary api-key
     /// reference (e.g. Bedrock under DefaultChain / Profile creds).
     pub auth_secret_ref: Option<routectl_auth::SecretRef>,
+    /// OAuth credential-pool seats. `None` for the common single-seat /
+    /// non-pooled case -- dispatch then builds exactly ONE target keyed
+    /// by `nickname` (byte-for-byte the pre-pool behavior). `Some` only
+    /// when this model's primary `api_key_ref` was a bare-pool
+    /// `oauth://<provider>` backed by MORE THAN ONE stored seat; the
+    /// slice then holds one seat-pinned provider per seat (default seat
+    /// first, then sorted labels), each with its own `state_key`.
+    /// `provider` / `auth_secret_ref` above mirror the first (default)
+    /// seat. `Arc<[..]>` so cloning at dispatch is a refcount bump.
+    pub(crate) seats: Option<Arc<[crate::seat_pool::SeatTarget]>>,
 }
 
 impl ResolvedModel {
@@ -121,6 +131,7 @@ impl ResolvedModel {
             stream_first_byte_timeout_ms: None,
             max_output_tokens: 0,
             auth_secret_ref: None,
+            seats: None,
         }
     }
 
@@ -187,6 +198,15 @@ impl ResolvedModel {
         self.auth_secret_ref = Some(sr);
         self
     }
+
+    /// Attach the OAuth credential-pool seats for a pooled model. Only
+    /// called by the factory when the model's primary ref expanded to
+    /// more than one seat; a single-seat / non-pooled model leaves
+    /// `seats` as `None` and dispatches a single nickname-keyed target.
+    pub(crate) fn with_seats(mut self, seats: Arc<[crate::seat_pool::SeatTarget]>) -> Self {
+        self.seats = Some(seats);
+        self
+    }
 }
 
 impl std::fmt::Debug for ResolvedModel {
@@ -217,6 +237,13 @@ impl std::fmt::Debug for ResolvedModel {
             .field(
                 "auth_secret_ref",
                 &self.auth_secret_ref.as_ref().map(|sr| sr.to_string()),
+            )
+            .field(
+                "seat_state_keys",
+                &self
+                    .seats
+                    .as_ref()
+                    .map(|s| s.iter().map(|t| t.state_key.as_str()).collect::<Vec<_>>()),
             )
             .finish()
     }
