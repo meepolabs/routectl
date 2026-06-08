@@ -90,6 +90,16 @@ impl IngressAdapter for OpenAiIngress {
         // `role: "system"` here, before deserialization, so it then
         // flows through `lift_system_messages` normally.
         normalize_developer_role(&mut body);
+        // Vanilla OpenAI clients set thinking via a top-level
+        // `reasoning_effort` string, not the canonical nested
+        // `reasoning.effort`. `ChatRequest` has no such field and no
+        // serde alias, so without this the key is swept into
+        // `provider_extras`, merged verbatim into the egress body
+        // (leaking a stray `reasoning_effort` that strict Anthropic-shape
+        // upstreams reject), while `req.reasoning` stays None and thinking
+        // is never composed. Promote it into `reasoning.effort` here, then
+        // drop the top-level key so it never survives serde or the sweep.
+        normalize_reasoning_effort(&mut body);
 
         // Forward-compat sweep: pull every top-level key NOT on
         // `ChatRequest` into `provider_extras` so OpenAI clients
@@ -335,6 +345,45 @@ fn normalize_developer_role(body: &mut Value) {
         };
         if obj.get("role").and_then(|v| v.as_str()) == Some("developer") {
             obj.insert("role".into(), Value::String("system".into()));
+        }
+    }
+}
+
+/// Promote the top-level OpenAI `reasoning_effort` string into the
+/// canonical `reasoning.effort` field before serde deserialization,
+/// then remove the top-level key.
+///
+/// Rules (mirror `normalize_max_completion_tokens`, where the explicit
+/// canonical key wins):
+/// - No `reasoning_effort`, or it is not a string: no-op.
+/// - `reasoning` absent: create `{"effort": <reasoning_effort>}`.
+/// - `reasoning` present without `effort`: fill its `effort`, leaving
+///   sibling fields (`max_tokens`, `exclude`, `enabled`) untouched.
+/// - `reasoning.effort` already set: the explicit nested value wins;
+///   just drop `reasoning_effort`.
+fn normalize_reasoning_effort(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    if !obj.get("reasoning_effort").is_some_and(Value::is_string) {
+        // Leave a non-string `reasoning_effort` in place so the sweep
+        // forwards it verbatim and serde surfaces any shape error.
+        return;
+    }
+    let effort = obj.remove("reasoning_effort");
+    match obj.get_mut("reasoning") {
+        Some(Value::Object(reasoning)) => {
+            reasoning.entry("effort").or_insert_with(|| {
+                effort.expect("reasoning_effort confirmed present as a string above")
+            });
+        }
+        _ => {
+            let mut reasoning = Map::new();
+            reasoning.insert(
+                "effort".into(),
+                effort.expect("reasoning_effort confirmed present as a string above"),
+            );
+            obj.insert("reasoning".into(), Value::Object(reasoning));
         }
     }
 }
@@ -1224,8 +1273,83 @@ mod tests {
         assert_eq!(req.max_tokens, Some(512));
     }
 
+    /// Vanilla OpenAI clients set thinking via a top-level
+    /// `reasoning_effort` string. The ingress must promote it into
+    /// canonical `reasoning.effort` and drop the top-level key, so the
+    /// effort survives serde and never leaks into the egress body.
+    #[test]
+    fn ingress_promotes_top_level_reasoning_effort_to_reasoning() {
+        // Arrange
+        let body = json!({
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high"
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert: canonical effort set.
+        assert_eq!(req.reasoning.unwrap().effort.as_deref(), Some("high"));
+        // No leftover top-level key swept into provider_extras.
+        let leaked = req
+            .provider_extras
+            .as_ref()
+            .and_then(|v| v.get("reasoning_effort"));
+        assert!(
+            leaked.is_none(),
+            "reasoning_effort must not leak: {leaked:?}"
+        );
+    }
+
+    /// Precedence: when both the top-level `reasoning_effort` and a
+    /// nested `reasoning.effort` are present, the explicit nested value
+    /// wins and the top-level key is dropped.
+    #[test]
+    fn ingress_reasoning_effort_explicit_object_wins() {
+        // Arrange
+        let body = json!({
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "low",
+            "reasoning": {"effort": "high"}
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        assert_eq!(req.reasoning.unwrap().effort.as_deref(), Some("high"));
+    }
+
+    /// Promotion must not clobber sibling `reasoning` fields: a body with
+    /// `reasoning_effort` AND `reasoning.max_tokens` keeps both.
+    #[test]
+    fn ingress_reasoning_effort_preserves_reasoning_siblings() {
+        // Arrange
+        let body = json!({
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "medium",
+            "reasoning": {"max_tokens": 2048}
+        });
+
+        // Act
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+
+        // Assert
+        let reasoning = req.reasoning.unwrap();
+        assert_eq!(reasoning.effort.as_deref(), Some("medium"));
+        assert_eq!(reasoning.max_tokens, Some(2048));
+    }
+
     /// o-series / gpt-5+ clients may send `role: "developer"` as the
-    /// system-voice successor role. The canonical `Role` enum has no
     /// such variant, so a bare serde would 400. The ingress rewrites
     /// it to `role: "system"` before deserialization, then
     /// `lift_system_messages` promotes it into `req.system` normally.

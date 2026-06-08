@@ -1265,7 +1265,69 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["temperature"], 1.0);
     }
 
-    /// With `adaptive = false` (or absent), the wire
+    /// End-to-end: a ChatRequest whose canonical `reasoning.effort` was
+    /// set (as the OpenAI ingress does when promoting a top-level
+    /// `reasoning_effort`) must compose thinking on the egress AND carry
+    /// no stray top-level `reasoning_effort` key. Proves both halves of
+    /// the fix: thinking composed + leak gone.
+    #[test]
+    fn reasoning_effort_composes_thinking_and_does_not_leak() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(2048),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
+
+        // Thinking composed from the effort string.
+        let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(thinking["type"], "enabled");
+
+        // No stray reasoning_effort key leaked into the egress body.
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "reasoning_effort must not leak into egress body, got {body:?}"
+        );
+    }
+
+    /// `reasoning.effort == "none"` must disable thinking (the
+    /// `thinking` field emits `{"type":"disabled"}`, not a budget) and
+    /// never leak a top-level `reasoning_effort` key.
+    #[test]
+    fn reasoning_effort_none_disables_thinking_and_does_not_leak() {
+        use routectl_core::ReasoningConfig;
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(2048),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("none".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
+
+        // Disabled thinking emits the disabled shape, not a budget.
+        let thinking = body.get("thinking").expect("thinking field present");
+        assert_eq!(thinking["type"], "disabled");
+        assert!(
+            thinking.get("budget_tokens").is_none(),
+            "disabled thinking must not carry a budget, got {thinking:?}"
+        );
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "reasoning_effort must not leak into egress body, got {body:?}"
+        );
+    }
     /// shape is the legacy `Enabled { budget_tokens }` form. Older
     /// Claude models (4.5/4.6 family) still want this shape and would
     /// 400 on the adaptive form.
