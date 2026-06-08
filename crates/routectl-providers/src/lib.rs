@@ -40,6 +40,16 @@ pub(crate) mod header_trace;
 ))]
 pub mod retry_after;
 
+// Shared parse step for OpenAI-shape `Message.tool_calls` entries. The
+// bedrock-converse and openai-responses egresses re-emit those calls as
+// their native tool-use items so a following tool_result turn is not
+// orphaned upstream; both consume this helper. Gated on those two
+// features so a lean build (openai-compat + anthropic-api only) doesn't
+// carry dead code -- the anthropic-api egress keeps its own inline parse
+// to stay byte-identical on the empty-id path.
+#[cfg(any(feature = "bedrock", feature = "openai-responses"))]
+pub(crate) mod tool_calls;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 

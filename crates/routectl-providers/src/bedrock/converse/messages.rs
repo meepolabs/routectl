@@ -133,17 +133,72 @@ fn build_user_content_blocks(
 /// The two sources (`reasoning_details` vs `KnownContentPart::Thinking`
 /// in `content.Parts`) are mutually exclusive by design: the streaming
 /// decoder puts thinking into `reasoning_details`, not `content.Parts`.
+///
+/// After the content blocks are built, any OpenAI-shape
+/// `Message.tool_calls` (populated by the OpenAI ingress instead of
+/// `KnownContentPart::ToolUse` content parts) are re-emitted as Converse
+/// `toolUse` blocks via `append_tool_use_blocks_from_calls`, so the turn
+/// is no longer empty/skipped and the toolUse precedes the next turn's
+/// toolResult.
 fn build_assistant_content_blocks(id: &str, msg: &Message) -> Result<Vec<ConverseContentBlock>> {
-    if !msg.reasoning_details.is_empty() {
+    let mut blocks = if !msg.reasoning_details.is_empty() {
         let mut blocks = emit_reasoning_blocks_converse(id, &msg.reasoning_details)?;
         append_converse_content_blocks(id, &msg.content, &mut blocks)?;
-        return Ok(blocks);
-    }
-    if let MessageContent::Parts(parts) = &msg.content {
+        blocks
+    } else if let MessageContent::Parts(parts) = &msg.content {
         let cleaned = strip_text_after_tool_use(parts);
-        return content_blocks_from_parts(id, &cleaned);
+        content_blocks_from_parts(id, &cleaned)?
+    } else {
+        content_blocks_with_cache_control(id, &msg.content)?
+    };
+    append_tool_use_blocks_from_calls(id, msg, &mut blocks);
+    Ok(blocks)
+}
+
+/// Re-emit OpenAI-shape `Message.tool_calls` as Converse `toolUse`
+/// blocks. The OpenAI ingress populates `tool_calls` rather than emitting
+/// `KnownContentPart::ToolUse` content parts; without this re-emission an
+/// assistant turn whose calls live only on `tool_calls` produces no
+/// `toolUse` block, the message is skipped as empty, and the following
+/// `toolResult` turn is orphaned ("tool_use ids ... without preceding
+/// tool_use blocks").
+///
+/// The guard skips re-emission when the content already carries
+/// `ToolUse` parts: a caller that put ToolUse in content already got
+/// those blocks via `content_blocks_from_parts`, and re-emitting from
+/// `tool_calls` would double the toolUse blocks.
+fn append_tool_use_blocks_from_calls(
+    id: &str,
+    msg: &Message,
+    blocks: &mut Vec<ConverseContentBlock>,
+) {
+    let Some(tool_calls) = msg.tool_calls.as_ref().filter(|tc| !tc.is_empty()) else {
+        return;
+    };
+    if message_content_has_tool_use(&msg.content) {
+        return;
     }
-    content_blocks_with_cache_control(id, &msg.content)
+    for call in crate::tool_calls::normalize_tool_calls(id, tool_calls) {
+        blocks.push(ConverseContentBlock::ToolUse {
+            tool_use: ConverseToolUse {
+                tool_use_id: call.id,
+                name: call.name,
+                input: call.arguments,
+            },
+        });
+    }
+}
+
+/// True iff the assistant content already carries a `ToolUse` part. Used
+/// to avoid double-emitting tool-use blocks when both `msg.tool_calls`
+/// and content `ToolUse` parts are set on the same turn.
+fn message_content_has_tool_use(content: &MessageContent) -> bool {
+    let MessageContent::Parts(parts) = content else {
+        return false;
+    };
+    parts
+        .iter()
+        .any(|p| matches!(p, ContentPart::Known(KnownContentPart::ToolUse { .. })))
 }
 
 /// Translate `reasoning_details` into Bedrock Converse `ReasoningContent`
@@ -1313,5 +1368,193 @@ mod tests {
             .iter()
             .any(|b| matches!(b, ConverseContentBlock::Text { .. }));
         assert!(has_text, "the sibling Text block must survive");
+    }
+
+    /// An assistant turn whose tool call rides ONLY on the OpenAI-shape
+    /// `tool_calls` field (content null/empty, no ToolUse content part)
+    /// must re-emit a Converse `toolUse` block carrying the call id, name,
+    /// and parsed arguments -- so the following toolResult turn has a
+    /// preceding toolUse with a matching id and is not orphaned.
+    #[test]
+    fn assistant_openai_tool_calls_field_emits_converse_tool_use_block() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
+                })]),
+            },
+            Message {
+                role: Role::Tool,
+                content: MessageContent::Text("sunny".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some("call_1".into()),
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert: the assistant turn survives with a toolUse block.
+        let assistant = result
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message carrying tool_calls must not be skipped");
+        let tool_use = assistant
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ConverseContentBlock::ToolUse { tool_use } => Some(tool_use),
+                _ => None,
+            })
+            .expect("tool_calls field must produce a toolUse block");
+        assert_eq!(tool_use.tool_use_id, "call_1");
+        assert_eq!(tool_use.name, "get_weather");
+        assert_eq!(tool_use.input, json!({"city": "SF"}));
+
+        // The toolResult turn references the same id and is preceded by
+        // the toolUse (the assistant turn appears before the tool turn).
+        let assistant_idx = result.iter().position(|m| m.role == "assistant").unwrap();
+        let tool_result_idx = result
+            .iter()
+            .position(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ConverseContentBlock::ToolResult { .. }))
+            })
+            .expect("toolResult turn must be present");
+        assert!(
+            assistant_idx < tool_result_idx,
+            "toolUse must precede the toolResult"
+        );
+    }
+
+    /// A tool call with a missing id is synthesized to a non-empty
+    /// toolUseId so AWS does not reject the empty-id toolUse block.
+    #[test]
+    fn assistant_tool_call_missing_id_is_synthesized_on_converse() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "function": {"name": "f", "arguments": "{}"},
+                })]),
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let assistant = result.iter().find(|m| m.role == "assistant").unwrap();
+        let tool_use = assistant
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ConverseContentBlock::ToolUse { tool_use } => Some(tool_use),
+                _ => None,
+            })
+            .expect("missing-id tool call must still produce a toolUse block");
+        assert!(
+            !tool_use.tool_use_id.is_empty(),
+            "missing id must be synthesized non-empty, got empty"
+        );
+    }
+
+    /// When the assistant turn ALREADY carries a ToolUse content part,
+    /// setting `tool_calls` as well must NOT double-emit the toolUse block
+    /// (the content-part path already emitted it).
+    #[test]
+    fn assistant_tool_use_content_part_not_doubled_by_tool_calls_field() {
+        // Arrange
+        use routectl_core::KnownContentPart;
+        let messages = vec![
+            user_msg(),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolUse {
+                        id: "call_1".into(),
+                        name: "get_weather".into(),
+                        input: json!({"city": "SF"}),
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
+                })]),
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert: exactly one toolUse block, not two.
+        let assistant = result.iter().find(|m| m.role == "assistant").unwrap();
+        let tool_use_count = assistant
+            .content
+            .iter()
+            .filter(|b| matches!(b, ConverseContentBlock::ToolUse { .. }))
+            .count();
+        assert_eq!(
+            tool_use_count, 1,
+            "ToolUse must not be doubled when both content part and tool_calls are set"
+        );
+    }
+
+    /// A single-turn assistant message with no tool_calls and no ToolUse
+    /// content is unchanged: a plain text turn produces exactly one Text
+    /// block and nothing else.
+    #[test]
+    fn assistant_plain_text_turn_unchanged_without_tool_calls() {
+        // Arrange
+        let messages = vec![
+            user_msg(),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("just text".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let assistant = result.iter().find(|m| m.role == "assistant").unwrap();
+        assert_eq!(assistant.content.len(), 1, "exactly one block expected");
+        match &assistant.content[0] {
+            ConverseContentBlock::Text { text } => assert_eq!(text, "just text"),
+            other => panic!("expected a single Text block, got {other:?}"),
+        }
     }
 }

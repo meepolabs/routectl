@@ -51,6 +51,7 @@ listed at the bottom of each crate.
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller `reasoning.effort` against per-model `effort_levels` (rounds toward most-capable above max, least-capable below min); single source of truth across openai-compat, anthropic-api, bedrock, openai-responses
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream -> routectl) emit sites
 - `src/retry_after.rs` -- parser for the standard HTTP `Retry-After` response header (RFC 9110 delta-seconds or HTTP-date) plus `is_rate_limit_status`; every egress lifts the hint on a 429/503/529 and carries it on `Error::Upstream.retry_after` for the router to honor (the Codex `usage_limit_reached` `resets_at` / `resets_in_seconds` reset is parsed in `openai_responses/response.rs` and preferred over the header hint)
+- `src/tool_calls.rs` -- shared parse step (`normalize_tool_calls`) for OpenAI-shape `Message.tool_calls` entries (`{id, function:{name, arguments}}`, arguments a JSON-encoded string); returns `{id, name, arguments: Value}` with missing-id synthesis (`call_<index>`) and a `{"_arguments": ...}` fallback on unparseable arguments. Consumed by the bedrock-converse and openai-responses egresses to re-emit `tool_calls` as native tool-use items; gated on those two features (the anthropic-api egress keeps its own inline parse to stay byte-identical on the empty-id path)
 
 ### anthropic_api
 

@@ -8,7 +8,10 @@
 //! items (with the canonical signature lifted into
 //! `encrypted_content`); tool messages become `FunctionCallOutput`
 //! items. ToolUse content parts on an assistant turn become standalone
-//! `FunctionCall` items emitted alongside the `Message` for that turn.
+//! `FunctionCall` items emitted alongside the `Message` for that turn;
+//! OpenAI-shape `Message.tool_calls` (populated by the OpenAI ingress
+//! instead of ToolUse content parts) are re-emitted the same way so a
+//! following `function_call_output` is never dangling.
 //!
 //! Reasoning replay: codex re-injects reasoning blocks only when
 //! `encrypted_content` is non-empty (see
@@ -195,12 +198,16 @@ fn translate_assistant_message(
     lift_reasoning_details(&msg.reasoning_details, &mut reasoning_items);
     let suppress_thinking_parts = !reasoning_items.is_empty();
 
+    let mut content_has_tool_use = false;
     match &msg.content {
         MessageContent::Text(t) if !t.is_empty() => {
             message_content.push(ResponsesContentItem::OutputText { text: t.clone() });
         }
         MessageContent::Text(_) | MessageContent::Null => {}
         MessageContent::Parts(parts) => {
+            content_has_tool_use = parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::Known(KnownContentPart::ToolUse { .. })));
             for p in parts {
                 walk_assistant_part(
                     id,
@@ -214,6 +221,19 @@ fn translate_assistant_message(
         }
     }
 
+    // Re-emit OpenAI-shape `Message.tool_calls` as `function_call` input
+    // items. The OpenAI ingress populates `tool_calls` rather than
+    // emitting `KnownContentPart::ToolUse` content parts; without this a
+    // turn whose calls live only on `tool_calls` produces no
+    // `function_call`, and the following `function_call_output` is
+    // dangling ("No tool output found for function call <id>"). The guard
+    // skips re-emission when content already carried ToolUse parts (the
+    // walk above already pushed those) so the call isn't doubled. The
+    // Responses wire wants `arguments` as a JSON STRING, so the parsed
+    // value is re-serialized -- consistent with the ToolUse-part path,
+    // which also `serde_json::to_string`s its input.
+    append_function_calls_from_tool_calls(id, msg, content_has_tool_use, &mut tool_calls)?;
+
     out.extend(reasoning_items);
     if !message_content.is_empty() {
         out.push(ResponseInputItem::Message {
@@ -222,6 +242,33 @@ fn translate_assistant_message(
         });
     }
     out.extend(tool_calls);
+    Ok(())
+}
+
+/// Re-emit OpenAI-shape `Message.tool_calls` as Responses `function_call`
+/// input items. See `translate_assistant_message` for the orphaned-output
+/// failure this prevents. No-op when `tool_calls` is empty or when the
+/// content already carried `ToolUse` parts (avoids double-emission).
+fn append_function_calls_from_tool_calls(
+    id: &str,
+    msg: &Message,
+    content_has_tool_use: bool,
+    tool_calls: &mut Vec<ResponseInputItem>,
+) -> Result<()> {
+    let Some(raw_calls) = msg.tool_calls.as_ref().filter(|tc| !tc.is_empty()) else {
+        return Ok(());
+    };
+    if content_has_tool_use {
+        return Ok(());
+    }
+    for call in crate::tool_calls::normalize_tool_calls(id, raw_calls) {
+        tool_calls.push(ResponseInputItem::FunctionCall {
+            call_id: call.id,
+            name: call.name,
+            arguments: serde_json::to_string(&call.arguments)
+                .map_err(|e| Error::normalize_request(id, e.to_string()))?,
+        });
+    }
     Ok(())
 }
 
@@ -911,5 +958,206 @@ mod messages_tests {
             encrypted_content.is_empty(),
             "None signature should yield empty encrypted_content, got: {encrypted_content}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_calls_field_tests {
+    use serde_json::json;
+
+    use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
+
+    use super::super::types::ResponseInputItem;
+    use super::build_input;
+
+    fn user_text(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// An assistant turn whose tool call rides ONLY on the OpenAI-shape
+    /// `tool_calls` field (content null/empty, no ToolUse content part)
+    /// must emit a `function_call` input item carrying the call_id, name,
+    /// and forwarded arguments string -- so the following
+    /// `function_call_output` is not dangling.
+    #[test]
+    fn assistant_openai_tool_calls_field_emits_function_call_item() {
+        // Arrange
+        let messages = vec![
+            user_text("hi"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
+                })]),
+            },
+            Message {
+                role: Role::Tool,
+                content: MessageContent::Text("sunny".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: Some("call_1".into()),
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let out = build_input("test", &messages).unwrap();
+
+        // Assert: a function_call item carries the call data.
+        let fc_idx = out
+            .iter()
+            .position(|i| {
+                matches!(
+                    i,
+                    ResponseInputItem::FunctionCall { call_id, name, arguments }
+                        if call_id == "call_1"
+                            && name == "get_weather"
+                            && arguments == "{\"city\":\"SF\"}"
+                )
+            })
+            .expect("tool_calls field must produce a matching function_call item");
+
+        // The function_call_output references the same id and follows
+        // the function_call (not orphaned).
+        let fco_idx = out
+            .iter()
+            .position(|i| {
+                matches!(i, ResponseInputItem::FunctionCallOutput { call_id, .. } if call_id == "call_1")
+            })
+            .expect("function_call_output must be present");
+        assert!(
+            fc_idx < fco_idx,
+            "function_call must precede its function_call_output"
+        );
+    }
+
+    /// A tool call with a missing id is synthesized to a non-empty
+    /// call_id so the Responses upstream does not reject an empty id.
+    #[test]
+    fn assistant_tool_call_missing_id_is_synthesized_on_responses() {
+        // Arrange
+        let messages = vec![
+            user_text("hi"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Null,
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "function": {"name": "f", "arguments": "{}"},
+                })]),
+            },
+        ];
+
+        // Act
+        let out = build_input("test", &messages).unwrap();
+
+        // Assert
+        let call_id = out
+            .iter()
+            .find_map(|i| match i {
+                ResponseInputItem::FunctionCall { call_id, .. } => Some(call_id),
+                _ => None,
+            })
+            .expect("missing-id tool call must still produce a function_call item");
+        assert!(
+            !call_id.is_empty(),
+            "missing id must be synthesized non-empty, got empty"
+        );
+    }
+
+    /// When the assistant turn ALREADY carries a ToolUse content part,
+    /// setting `tool_calls` as well must NOT double-emit the function_call
+    /// item (the content-part walk already emitted it).
+    #[test]
+    fn assistant_tool_use_content_part_not_doubled_by_tool_calls_field() {
+        // Arrange
+        let messages = vec![
+            user_text("hi"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolUse {
+                        id: "call_1".into(),
+                        name: "get_weather".into(),
+                        input: json!({"city": "SF"}),
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
+                })]),
+            },
+        ];
+
+        // Act
+        let out = build_input("test", &messages).unwrap();
+
+        // Assert: exactly one function_call item, not two.
+        let count = out
+            .iter()
+            .filter(|i| matches!(i, ResponseInputItem::FunctionCall { .. }))
+            .count();
+        assert_eq!(
+            count, 1,
+            "function_call must not be doubled when both content part and tool_calls are set"
+        );
+    }
+
+    /// A single-turn assistant text message with no tool_calls produces a
+    /// single assistant Message item and no function_call items.
+    #[test]
+    fn assistant_plain_text_turn_unchanged_without_tool_calls() {
+        // Arrange
+        let messages = vec![
+            user_text("hi"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("just text".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+
+        // Act
+        let out = build_input("test", &messages).unwrap();
+
+        // Assert: no function_call items; the assistant Message survives.
+        assert!(
+            out.iter()
+                .all(|i| !matches!(i, ResponseInputItem::FunctionCall { .. })),
+            "no function_call items expected on a plain text turn"
+        );
+        let assistant_msg = out
+            .iter()
+            .find(|i| matches!(i, ResponseInputItem::Message { role, .. } if role == "assistant"));
+        assert!(assistant_msg.is_some(), "assistant Message must survive");
     }
 }
