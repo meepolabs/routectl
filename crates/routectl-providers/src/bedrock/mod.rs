@@ -407,13 +407,26 @@ impl Provider for BedrockProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
+            // Capture the reset hint from response headers BEFORE
+            // `parse_upstream_error_body` moves `resp`, gated on
+            // rate-limit statuses.
+            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
             let msg = parse_upstream_error_body(
                 self.cfg.api_shape.provider_kind_str(),
                 &self.cfg.id,
                 resp,
             )
             .await;
-            return Err(Error::upstream(&self.cfg.id, status, msg));
+            return Err(Error::upstream_with_retry_after(
+                &self.cfg.id,
+                status,
+                msg,
+                retry_after,
+            ));
         }
 
         // Dir 3: upstream response headers, read BEFORE resp.json()
@@ -480,13 +493,26 @@ impl Provider for BedrockProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
+            // Capture the reset hint from response headers BEFORE
+            // `parse_upstream_error_body` moves `resp`, gated on
+            // rate-limit statuses.
+            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
             let msg = parse_upstream_error_body(
                 self.cfg.api_shape.provider_kind_str(),
                 &self.cfg.id,
                 resp,
             )
             .await;
-            return Err(Error::upstream(&self.cfg.id, status, msg));
+            return Err(Error::upstream_with_retry_after(
+                &self.cfg.id,
+                status,
+                msg,
+                retry_after,
+            ));
         }
 
         // Dir 3: upstream response headers, read BEFORE `resp` is moved

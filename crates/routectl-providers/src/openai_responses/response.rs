@@ -23,6 +23,7 @@
 
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::time::Duration;
 use uuid::Uuid;
 
 use routectl_core::{
@@ -388,6 +389,40 @@ fn split_other_value(raw: &Value) -> (String, serde_json::Map<String, Value>) {
     (type_tag, extras)
 }
 
+/// Lift a reset hint from a Codex / ChatGPT usage-limit error body.
+///
+/// The ChatGPT-Codex backend signals the 5-hour usage cap with an
+/// `error.type == "usage_limit_reached"` body that carries the reset
+/// either as a relative `resets_in_seconds` count or an absolute
+/// `resets_at` unix epoch. Prefer the relative form; fall back to the
+/// absolute form (computed against `now`, clamped to >= 0). Any other
+/// error type -- or a body missing both fields -- yields `None`, so a
+/// non-usage-limit failure never parks the provider.
+pub(crate) fn codex_reset_hint(err_body: &Value) -> Option<Duration> {
+    let is_usage_limit = err_body
+        .pointer("/error/type")
+        .and_then(Value::as_str)
+        .map(|t| t == "usage_limit_reached")
+        .unwrap_or(false);
+    if !is_usage_limit {
+        return None;
+    }
+    if let Some(secs) = err_body
+        .pointer("/error/resets_in_seconds")
+        .and_then(Value::as_u64)
+    {
+        return Some(Duration::from_secs(secs));
+    }
+    let resets_at = err_body
+        .pointer("/error/resets_at")
+        .and_then(Value::as_u64)?;
+    // Absolute epoch -> delay from now. Guard a negative `now` (clock
+    // before the unix epoch is impossible in practice but keeps the
+    // cast total) and saturate so a past `resets_at` clamps to zero.
+    let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+    Some(Duration::from_secs(resets_at.saturating_sub(now)))
+}
+
 /// Build an `Error::Upstream` for a `status:"failed"` body. Lifts the
 /// `error.message` field when present so the operator-facing error
 /// is informative; falls back to a generic string otherwise.
@@ -399,7 +434,15 @@ pub(crate) fn upstream_error_from_failed(provider_id: &str, body: &ResponsesResp
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "openai-responses: response.status=failed".to_string());
-    Error::upstream(provider_id, 0, msg)
+    // `body.error` is the bare error object (`{type, message, ...}`);
+    // `codex_reset_hint` expects it nested under `/error`, so wrap it.
+    let retry_after = body
+        .error
+        .as_ref()
+        .map(|e| json!({ "error": e }))
+        .as_ref()
+        .and_then(codex_reset_hint);
+    Error::upstream_with_retry_after(provider_id, 0, msg, retry_after)
 }
 
 #[cfg(test)]

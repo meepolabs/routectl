@@ -276,6 +276,13 @@ impl Provider for OpenAiCompatProvider {
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
+            // Capture the reset hint from response headers BEFORE
+            // `resp.text()` moves the body, gated on rate-limit statuses.
+            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
             let body_text = resp.text().await.unwrap_or_default();
             // Full upstream error body at debug level. The truncated
             // WARN excerpt below stays for warn-log scannability.
@@ -299,7 +306,12 @@ impl Provider for OpenAiCompatProvider {
                     "openai-compat upstream error",
                 );
             }
-            return Err(Error::upstream(&self.cfg.id, status, sanitized));
+            return Err(Error::upstream_with_retry_after(
+                &self.cfg.id,
+                status,
+                sanitized,
+                retry_after,
+            ));
         }
 
         // Dir 3: upstream response headers, read BEFORE the body
@@ -371,6 +383,13 @@ impl Provider for OpenAiCompatProvider {
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
+            // Capture the reset hint from response headers BEFORE
+            // `resp.text()` moves the body, gated on rate-limit statuses.
+            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
             let body_text = resp.text().await.unwrap_or_default();
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let sanitized = extract_upstream_message(&body_text);
@@ -390,7 +409,12 @@ impl Provider for OpenAiCompatProvider {
                     "openai-compat upstream error",
                 );
             }
-            return Err(Error::upstream(&self.cfg.id, status, sanitized));
+            return Err(Error::upstream_with_retry_after(
+                &self.cfg.id,
+                status,
+                sanitized,
+                retry_after,
+            ));
         }
 
         // Dir 3: upstream response headers, read BEFORE `resp` is moved

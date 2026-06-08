@@ -573,7 +573,10 @@ impl ResponsesStreamState {
     }
 
     fn handle_failed(&mut self, provider_id: &str, event: &ResponsesStreamEvent) -> Error {
-        // Try the structured ResponseFailed envelope first.
+        // Try the structured ResponseFailed envelope first. The structured
+        // path lifts a codex usage-limit reset hint via
+        // `upstream_error_from_failed`; this bare fallback has no
+        // structured error object, so retry_after stays None.
         if let Some(resp_value) = event.response.clone() {
             if let Ok(resp) = serde_json::from_value::<ResponsesResponse>(resp_value) {
                 return upstream_error_from_failed(provider_id, &resp);

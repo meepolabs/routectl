@@ -644,6 +644,7 @@ fn decode_exception_event(provider_id: &str, event_type: &str, payload: &[u8]) -
             "bedrock in-stream auth/permission exception",
         );
     }
+    // no HTTP headers at the eventstream frame layer
     Error::upstream(provider_id, status, msg)
 }
 

@@ -34,6 +34,20 @@ pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     parse_http_date_delta(raw)
 }
 
+/// Report whether a reset hint is meaningful for the given HTTP status.
+///
+/// Only rate-limit / overload statuses carry a useful reset signal:
+///   - 429 rate-limit
+///   - 503 service-unavailable
+///   - 529 anthropic-overloaded
+///
+/// A stray `Retry-After` on any other status (400/401/500 etc.) must
+/// NOT park a provider, so the egress wiring gates hint extraction on
+/// this predicate.
+pub fn is_rate_limit_status(status: u16) -> bool {
+    matches!(status, 429 | 503 | 529)
+}
+
 /// Parse an HTTP-date `Retry-After` value into the delay from now,
 /// clamped to `Duration::ZERO` for a past date. RFC 9110's preferred
 /// IMF-fixdate form (e.g. `Wed, 21 Oct 2026 07:28:00 GMT`) parses via
@@ -48,7 +62,7 @@ fn parse_http_date_delta(raw: &str) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_retry_after;
+    use super::{is_rate_limit_status, parse_retry_after};
     use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
     use std::time::Duration;
 
@@ -116,5 +130,23 @@ mod tests {
 
         // Assert: a past date clamps to ZERO rather than returning None.
         assert_eq!(got, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn flags_only_rate_limit_statuses() {
+        // Arrange + Act + Assert: only the reset-meaningful statuses
+        // flag true; everything else (including other 4xx/5xx) is false.
+        for status in [429, 503, 529] {
+            assert!(
+                is_rate_limit_status(status),
+                "status {status} must flag as rate-limit"
+            );
+        }
+        for status in [200, 400, 401, 403, 404, 408, 429 + 1, 500, 502, 504] {
+            assert!(
+                !is_rate_limit_status(status),
+                "status {status} must NOT flag as rate-limit"
+            );
+        }
     }
 }

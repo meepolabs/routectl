@@ -865,6 +865,15 @@ async fn read_anthropic_error(
     status: u16,
     resp: reqwest::Response,
 ) -> (String, Error) {
+    // Capture the reset hint from response headers BEFORE `resp.text()`
+    // moves the body, gated on rate-limit statuses. This is the single
+    // chokepoint for complete/stream/count_tokens, so all three HTTP
+    // paths pick up the hint here.
+    let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+        crate::retry_after::parse_retry_after(resp.headers())
+    } else {
+        None
+    };
     let body_text = resp.text().await.unwrap_or_default();
     // Emit the FULL upstream error body at debug level so triage
     // doesn't have to reproduce. The caller's WARN excerpt stays
@@ -877,7 +886,7 @@ async fn read_anthropic_error(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| sanitize_upstream_body(&body_text));
-    let err = Error::upstream(provider_id, status, msg.clone());
+    let err = Error::upstream_with_retry_after(provider_id, status, msg.clone(), retry_after);
     (msg, err)
 }
 

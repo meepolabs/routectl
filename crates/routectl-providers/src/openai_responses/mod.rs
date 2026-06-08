@@ -451,6 +451,13 @@ impl Provider for OpenAiResponsesProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
+            // Capture the header hint BEFORE `resp.text()` moves the
+            // body, gated on rate-limit statuses.
+            let header_hint = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
             let body_text = resp.text().await.unwrap_or_default();
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let msg = build_error_excerpt(&body_text);
@@ -471,7 +478,18 @@ impl Provider for OpenAiResponsesProvider {
                     "openai-responses upstream error",
                 );
             }
-            return Err(Error::upstream(&self.cfg.id, status, msg));
+            // The Codex usage-limit body wins over the header hint: it
+            // carries the 5-hour-cap reset, which Retry-After does not.
+            let codex_hint = serde_json::from_str::<Value>(&body_text)
+                .ok()
+                .and_then(|v| crate::openai_responses::response::codex_reset_hint(&v));
+            let retry_after = codex_hint.or(header_hint);
+            return Err(Error::upstream_with_retry_after(
+                &self.cfg.id,
+                status,
+                msg,
+                retry_after,
+            ));
         }
 
         // Drain the SSE stream until a terminal event lands. Three
@@ -637,6 +655,13 @@ impl Provider for OpenAiResponsesProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
+            // Capture the header hint BEFORE `resp.text()` moves the
+            // body, gated on rate-limit statuses.
+            let header_hint = if crate::retry_after::is_rate_limit_status(status) {
+                crate::retry_after::parse_retry_after(resp.headers())
+            } else {
+                None
+            };
             let body_text = resp.text().await.unwrap_or_default();
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
             let msg = build_error_excerpt(&body_text);
@@ -657,7 +682,18 @@ impl Provider for OpenAiResponsesProvider {
                     "openai-responses upstream error",
                 );
             }
-            return Err(Error::upstream(&self.cfg.id, status, msg));
+            // The Codex usage-limit body wins over the header hint: it
+            // carries the 5-hour-cap reset, which Retry-After does not.
+            let codex_hint = serde_json::from_str::<Value>(&body_text)
+                .ok()
+                .and_then(|v| crate::openai_responses::response::codex_reset_hint(&v));
+            let retry_after = codex_hint.or(header_hint);
+            return Err(Error::upstream_with_retry_after(
+                &self.cfg.id,
+                status,
+                msg,
+                retry_after,
+            ));
         }
 
         // Dir 3: upstream response headers, read BEFORE `resp` is moved

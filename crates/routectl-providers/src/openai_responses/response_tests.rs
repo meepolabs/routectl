@@ -425,3 +425,75 @@ fn response_usage_extracts_input_output_tokens() {
     assert_eq!(u.cache_read_input_tokens, Some(40));
     assert_eq!(u.reasoning_tokens, Some(15));
 }
+
+#[test]
+fn codex_resets_in_seconds_lifted() {
+    // Arrange: a usage-limit body with the relative reset form.
+    let body = json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "5-hour cap reached",
+            "resets_in_seconds": 1800
+        }
+    });
+
+    // Act
+    let hint = codex_reset_hint(&body);
+
+    // Assert: the relative count is taken verbatim.
+    assert_eq!(hint, Some(Duration::from_secs(1800)));
+}
+
+#[test]
+fn codex_resets_at_epoch_computed() {
+    // Arrange: a usage-limit body with only the absolute reset form,
+    // set to a fixed far-future epoch (year ~2286).
+    let far_future: u64 = 9_999_999_999;
+    let body = json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "cap reached",
+            "resets_at": far_future
+        }
+    });
+
+    // Act
+    let hint = codex_reset_hint(&body).expect("far-future epoch must yield a hint");
+
+    // Assert: positive and bounded by the absolute target (now > 0).
+    assert!(hint > Duration::ZERO, "future reset must be positive");
+    assert!(
+        hint <= Duration::from_secs(far_future),
+        "delay cannot exceed the absolute target"
+    );
+}
+
+#[test]
+fn non_usage_limit_returns_none() {
+    // Arrange: a different error type carrying reset fields anyway.
+    let body = json!({
+        "error": {
+            "type": "rate_limit_exceeded",
+            "resets_in_seconds": 60,
+            "resets_at": 9_999_999_999u64
+        }
+    });
+
+    // Act + Assert: only `usage_limit_reached` qualifies.
+    assert!(codex_reset_hint(&body).is_none());
+}
+
+#[test]
+fn garbage_returns_none() {
+    // Arrange: bodies with no usable structure.
+    let no_error = json!({ "foo": "bar" });
+    let usage_limit_no_fields = json!({
+        "error": { "type": "usage_limit_reached", "message": "no reset fields" }
+    });
+    let not_an_object = json!("plain string");
+
+    // Act + Assert
+    assert!(codex_reset_hint(&no_error).is_none());
+    assert!(codex_reset_hint(&usage_limit_no_fields).is_none());
+    assert!(codex_reset_hint(&not_an_object).is_none());
+}
