@@ -1317,6 +1317,17 @@ pub struct RetryPolicy {
     /// above this) are unaffected.
     #[serde(default = "default_probe_max_tokens")]
     pub probe_max_tokens: u32,
+
+    /// Ceiling on how long the circuit breaker will park a provider in
+    /// response to an upstream reset hint (a parsed `Retry-After` value
+    /// carried on `Error::Upstream`). A reset hint longer than this
+    /// ceiling is clamped down to it, so a misbehaving or hostile
+    /// upstream cannot pin a provider out of rotation for an arbitrary
+    /// duration. `None` (the default) uses
+    /// `DEFAULT_MAX_HONORED_RETRY_AFTER_MS` (1 hour). Read via
+    /// [`RetryPolicy::max_honored_retry_after`].
+    #[serde(default)]
+    pub max_honored_retry_after_ms: Option<u64>,
 }
 
 impl Default for RetryPolicy {
@@ -1334,6 +1345,7 @@ impl Default for RetryPolicy {
             request_timeout_ms: None,
             stream_first_byte_timeout_ms: None,
             probe_max_tokens: default_probe_max_tokens(),
+            max_honored_retry_after_ms: None,
         }
     }
 }
@@ -2051,11 +2063,30 @@ impl RetryPolicy {
             .max(self.retry_on_network.unwrap_or(0))
             .max(1)
     }
+
+    /// Effective ceiling on an honored upstream reset hint. When
+    /// `max_honored_retry_after_ms` is `Some(n)`, returns
+    /// `Duration::from_millis(n)`; when `None`, returns the
+    /// `DEFAULT_MAX_HONORED_RETRY_AFTER_MS` (1 hour) baseline. The
+    /// circuit breaker clamps a parsed `Retry-After` to this ceiling
+    /// before parking a provider.
+    pub fn max_honored_retry_after(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.max_honored_retry_after_ms
+                .unwrap_or(DEFAULT_MAX_HONORED_RETRY_AFTER_MS),
+        )
+    }
 }
 
 fn default_max_attempts() -> u32 {
     2
 }
+
+/// Default ceiling on an honored upstream reset hint when
+/// `RetryPolicy::max_honored_retry_after_ms` is unset: one hour. Caps
+/// how long the circuit breaker will park a provider on a `Retry-After`
+/// so a single hint cannot pin a provider out of rotation indefinitely.
+const DEFAULT_MAX_HONORED_RETRY_AFTER_MS: u64 = 3_600_000;
 
 fn default_probe_max_tokens() -> u32 {
     1
@@ -2243,6 +2274,49 @@ probe_max_tokens = 0
     fn default_retry_policy_has_probe_max_tokens_one() {
         // The Default impl (no `[retry]` block at all) also yields 1.
         assert_eq!(RetryPolicy::default().probe_max_tokens, 1);
+    }
+
+    /// A `[retry]` block omitting `max_honored_retry_after_ms` resolves
+    /// to the documented 1h default via the getter.
+    #[test]
+    fn max_honored_retry_after_defaults_to_one_hour_when_omitted() {
+        use crate::config::Config;
+        use std::time::Duration;
+
+        let toml_text = r#"
+[retry]
+max_attempts = 3
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert!(
+            cfg.retry.max_honored_retry_after_ms.is_none(),
+            "field must default to None when omitted"
+        );
+        assert_eq!(
+            cfg.retry.max_honored_retry_after(),
+            Duration::from_millis(3_600_000),
+            "None must resolve to the 1h ceiling"
+        );
+    }
+
+    /// An explicit `max_honored_retry_after_ms` parses and the getter
+    /// returns the configured duration.
+    #[test]
+    fn max_honored_retry_after_uses_configured_value() {
+        use crate::config::Config;
+        use std::time::Duration;
+
+        let toml_text = r#"
+[retry]
+max_honored_retry_after_ms = 90000
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(cfg.retry.max_honored_retry_after_ms, Some(90_000));
+        assert_eq!(
+            cfg.retry.max_honored_retry_after(),
+            Duration::from_millis(90_000),
+            "Some(90000) must resolve to 90s"
+        );
     }
 
     /// context_management = true round-trips through TOML deserialization.

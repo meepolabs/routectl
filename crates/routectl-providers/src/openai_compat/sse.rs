@@ -879,6 +879,7 @@ mod tests {
                 provider,
                 status,
                 body,
+                ..
             } => {
                 assert_eq!(provider, "test-provider");
                 assert_eq!(status, 403);

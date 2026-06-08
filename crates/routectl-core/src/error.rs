@@ -9,6 +9,12 @@ pub enum Error {
         provider: String,
         status: u16,
         body: String,
+        /// Optional reset hint parsed from the upstream response (e.g.
+        /// a `Retry-After` header). Consumed structurally by the router
+        /// and circuit breaker to park the provider for the indicated
+        /// duration; intentionally NOT surfaced in the Display string.
+        /// `None` when the upstream sent no hint or it was unparseable.
+        retry_after: Option<std::time::Duration>,
     },
 
     #[error("provider `{0}`: request normalization failed: {1}")]
@@ -89,6 +95,25 @@ impl Error {
             provider: provider.into(),
             status,
             body: body.into(),
+            retry_after: None,
+        }
+    }
+
+    /// Construct an `Upstream` error carrying a reset hint (e.g. a
+    /// parsed `Retry-After` value). The router and circuit breaker read
+    /// `retry_after` to decide how long to park the provider. Pass
+    /// `None` to behave exactly like [`Error::upstream`].
+    pub fn upstream_with_retry_after(
+        provider: impl Into<String>,
+        status: u16,
+        body: impl Into<String>,
+        retry_after: Option<std::time::Duration>,
+    ) -> Self {
+        Self::Upstream {
+            provider: provider.into(),
+            status,
+            body: body.into(),
+            retry_after,
         }
     }
 
@@ -98,5 +123,53 @@ impl Error {
 
     pub fn normalize_response(provider: impl Into<String>, msg: impl Into<String>) -> Self {
         Self::NormalizeResponse(provider.into(), msg.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+    use std::time::Duration;
+
+    #[test]
+    fn upstream_ctor_sets_retry_after_none() {
+        // Arrange + Act
+        let err = Error::upstream("test", 429, "rate limited");
+
+        // Assert
+        match err {
+            Error::Upstream {
+                provider,
+                status,
+                body,
+                retry_after,
+            } => {
+                assert_eq!(provider, "test");
+                assert_eq!(status, 429);
+                assert_eq!(body, "rate limited");
+                assert!(
+                    retry_after.is_none(),
+                    "plain ctor must set retry_after = None"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upstream_with_retry_after_carries_value() {
+        // Arrange
+        let hint = Duration::from_secs(42);
+
+        // Act
+        let err = Error::upstream_with_retry_after("test", 429, "rate limited", Some(hint));
+
+        // Assert
+        match err {
+            Error::Upstream { retry_after, .. } => {
+                assert_eq!(retry_after, Some(hint), "ctor must carry the reset hint");
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
     }
 }

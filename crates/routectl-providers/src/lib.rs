@@ -28,6 +28,18 @@ pub mod effort;
 // feature-gated build.
 pub(crate) mod header_trace;
 
+// Shared parser for the standard HTTP `Retry-After` response header.
+// Gated on the provider features that bring in `reqwest` + `chrono`
+// (every provider does); the router consumes the parsed `Duration` via
+// `Error::Upstream`, but provider egresses call this directly.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses"
+))]
+pub mod retry_after;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 

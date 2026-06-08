@@ -72,11 +72,7 @@ async fn anthropic_envelope_validation_error_emits_invalid_request_error() {
 #[tokio::test]
 async fn anthropic_envelope_5xx_emits_api_error_or_overloaded() {
     // 503 -> overloaded_error
-    let err503 = Error::Upstream {
-        provider: "p".into(),
-        status: 503,
-        body: "service unavailable".into(),
-    };
+    let err503 = Error::upstream("p", 503, "service unavailable");
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err503);
     let status = resp.status();
     let body = body_to_value(resp).await;
@@ -85,22 +81,14 @@ async fn anthropic_envelope_5xx_emits_api_error_or_overloaded() {
     assert_eq!(body["error"]["type"], "overloaded_error");
 
     // 529 -> overloaded_error
-    let err529 = Error::Upstream {
-        provider: "p".into(),
-        status: 529,
-        body: "anthropic overloaded".into(),
-    };
+    let err529 = Error::upstream("p", 529, "anthropic overloaded");
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err529);
     assert_eq!(resp.status().as_u16(), 529);
     let body = body_to_value(resp).await;
     assert_eq!(body["error"]["type"], "overloaded_error");
 
     // 502 -> api_error
-    let err502 = Error::Upstream {
-        provider: "p".into(),
-        status: 502,
-        body: "bad gateway".into(),
-    };
+    let err502 = Error::upstream("p", 502, "bad gateway");
     let resp = map_error(ErrorEnvelopeShape::Anthropic, err502);
     assert_eq!(resp.status().as_u16(), 502);
     let body = body_to_value(resp).await;
@@ -139,11 +127,11 @@ async fn openai_envelope_unchanged_regression_pin() {
 #[test]
 fn sanitize_stream_error_strips_provider_and_body_from_upstream_error() {
     // Arrange
-    let err = Error::Upstream {
-        provider: "secret-provider-id".into(),
-        status: 529,
-        body: "Anthropic Overloaded: tenant-12345 exceeded quota".into(),
-    };
+    let err = Error::upstream(
+        "secret-provider-id",
+        529,
+        "Anthropic Overloaded: tenant-12345 exceeded quota",
+    );
 
     // Act
     let safe = sanitize_stream_error_for_client(&err);
@@ -231,11 +219,11 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
     let upstream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
         Box::pin(futures::stream::iter(vec![
             Ok(streaming_text_chunk("hello")),
-            Err(Error::Upstream {
-                provider: "secret-provider-id".into(),
-                status: 529,
-                body: "Anthropic Overloaded: tenant-12345".into(),
-            }),
+            Err(Error::upstream(
+                "secret-provider-id",
+                529,
+                "Anthropic Overloaded: tenant-12345",
+            )),
         ]));
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -294,11 +282,11 @@ async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
     let upstream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
         Box::pin(futures::stream::iter(vec![
             Ok(streaming_text_chunk("hi")),
-            Err(Error::Upstream {
-                provider: "secret-provider-id".into(),
-                status: 503,
-                body: "Service Unavailable".into(),
-            }),
+            Err(Error::upstream(
+                "secret-provider-id",
+                503,
+                "Service Unavailable",
+            )),
         ]));
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
