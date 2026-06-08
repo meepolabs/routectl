@@ -70,6 +70,19 @@ pub enum KnownContentPart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// OpenAI-shape file block (`{type: "file", file: {filename,
+    /// file_data}}` for a base64 upload, or `{type: "file", file:
+    /// {file_id}}` for a previously-uploaded reference). Kept distinct
+    /// from `Document` so the OpenAI-compat egress round-trips it
+    /// byte-stable in its native shape; the Anthropic / Bedrock egresses
+    /// translate the base64 `file_data` form into an Anthropic document
+    /// block. `file` carries the raw nested object verbatim, mirroring
+    /// how `ImageUrl` carries `image_url`.
+    File {
+        file: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     /// Anthropic-shape document block. `source` is the document payload
     /// (base64 / url / text); `title` and `citations` carry retrieval
     /// metadata for the model. OpenAI-shape inputs do not have an
@@ -148,6 +161,7 @@ impl KnownContentPart {
             KnownContentPart::Text { cache_control, .. }
             | KnownContentPart::Image { cache_control, .. }
             | KnownContentPart::ImageUrl { cache_control, .. }
+            | KnownContentPart::File { cache_control, .. }
             | KnownContentPart::Document { cache_control, .. }
             | KnownContentPart::ToolUse { cache_control, .. }
             | KnownContentPart::ToolResult { cache_control, .. } => cache_control.as_ref(),
@@ -160,6 +174,7 @@ impl KnownContentPart {
             KnownContentPart::Text { .. } => "text",
             KnownContentPart::Image { .. } => "image",
             KnownContentPart::ImageUrl { .. } => "image_url",
+            KnownContentPart::File { .. } => "file",
             KnownContentPart::Document { .. } => "document",
             KnownContentPart::ToolUse { .. } => "tool_use",
             KnownContentPart::ToolResult { .. } => "tool_result",
@@ -217,6 +232,78 @@ mod tests {
             &part,
             ContentPart::Known(KnownContentPart::ImageUrl { .. })
         ));
+        assert_eq!(serde_json::to_value(&part).unwrap(), v);
+    }
+
+    #[test]
+    fn openai_file_block_deserializes_to_known_file() {
+        let v = json!({
+            "type": "file",
+            "file": {
+                "filename": "draft.pdf",
+                "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
+            }
+        });
+        let part: ContentPart = serde_json::from_value(v).unwrap();
+        match &part {
+            ContentPart::Known(KnownContentPart::File { file, .. }) => {
+                assert_eq!(file["filename"], "draft.pdf");
+                assert_eq!(
+                    file["file_data"],
+                    "data:application/pdf;base64,JVBERi0xLjQ="
+                );
+            }
+            other => panic!("expected File, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openai_file_block_round_trips_byte_stable() {
+        let v = json!({
+            "type": "file",
+            "file": {
+                "filename": "draft.pdf",
+                "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
+            }
+        });
+        let part: ContentPart = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&part).unwrap(), v);
+    }
+
+    #[test]
+    fn openai_file_id_only_block_round_trips() {
+        let v = json!({
+            "type": "file",
+            "file": {"file_id": "file-abc"}
+        });
+        let part: ContentPart = serde_json::from_value(v.clone()).unwrap();
+        assert!(matches!(
+            &part,
+            ContentPart::Known(KnownContentPart::File { .. })
+        ));
+        assert_eq!(serde_json::to_value(&part).unwrap(), v);
+    }
+
+    #[test]
+    fn file_block_type_tag_is_file() {
+        let part = ContentPart::Known(KnownContentPart::File {
+            file: json!({"file_id": "file-abc"}),
+            cache_control: None,
+        });
+        assert_eq!(part.type_tag(), "file");
+    }
+
+    #[test]
+    fn file_block_honors_cache_control() {
+        let v = json!({
+            "type": "file",
+            "file": {"file_id": "file-abc"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        });
+        let part: ContentPart = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(part.cache_control().unwrap().effective_ttl(), "1h");
+        // cache_control rides at the block level, not inside `file`, so
+        // the round-trip is byte-stable.
         assert_eq!(serde_json::to_value(&part).unwrap(), v);
     }
 

@@ -25,7 +25,7 @@ use routectl_core::{
     MessageContent, ReasoningDetail, ReasoningDetailKind, Result, Role,
 };
 
-use super::parts::{parse_image_url_source, strip_text_after_tool_use};
+use super::parts::{parse_file_document_source, parse_image_url_source, strip_text_after_tool_use};
 use super::types::{AnthropicContent, AnthropicMessage, AnthropicRole, ContentBlock};
 
 /// Walk the canonical `ChatRequest` messages and apply two outgoing
@@ -265,6 +265,55 @@ fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
             title: title.clone(),
             citations: citations.clone(),
             cache_control: cache_control.clone(),
+        },
+        // OpenAI-shape file part. A base64 PDF upload
+        // (`file.file_data` = `data:application/pdf;base64,<b64>`)
+        // becomes an Anthropic document block with a base64 source --
+        // Bedrock + Anthropic both require this shape and 400 on the
+        // raw OpenAI `file` block otherwise. Any part we cannot
+        // faithfully translate (file_id-only reference, non-base64
+        // file_data, non-PDF media type, empty payload) falls back to
+        // re-emitting the original block verbatim as ContentBlock::Other
+        // so it still reaches the Anthropic upstream (which surfaces a
+        // clean error) rather than being silently dropped here.
+        KnownContentPart::File {
+            file,
+            cache_control,
+        } => match parse_file_document_source(file) {
+            Some((source, title)) => ContentBlock::Document {
+                source,
+                title,
+                citations: None,
+                cache_control: cache_control.clone(),
+            },
+            None => {
+                let media_type = file
+                    .get("file_data")
+                    .and_then(|v| v.as_str())
+                    .and_then(|d| d.strip_prefix("data:"))
+                    .and_then(|rest| rest.split_once(";base64,"))
+                    .map(|(mt, _)| mt.split(';').next().unwrap_or(mt).to_ascii_lowercase());
+                let reason = match file.get("file_data").and_then(|v| v.as_str()) {
+                    None => "no inline file_data (file_id reference or unsupported shape)",
+                    Some(d) if !d.starts_with("data:") || !d.contains(";base64,") => {
+                        "file_data is not a base64 data URI"
+                    }
+                    Some(_) => "file_data media type is not application/pdf",
+                };
+                tracing::warn!(
+                    media_type = media_type.as_deref().unwrap_or("<none>"),
+                    reason,
+                    "cannot translate OpenAI file part to an Anthropic document; \
+                     passing the block through verbatim (upstream will reject if unsupported)"
+                );
+                let mut extras = serde_json::Map::new();
+                extras.insert("file".to_string(), file.clone());
+                ContentBlock::Other {
+                    type_tag: "file".to_string(),
+                    cache_control: cache_control.clone(),
+                    extras,
+                }
+            }
         },
         KnownContentPart::ToolUse {
             id,
@@ -614,4 +663,101 @@ pub(super) fn translate_messages(id: &str, messages: &[Message]) -> Result<Vec<A
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod translate_file_part_tests {
+    use super::translate_content_part;
+    use super::ContentBlock;
+    use routectl_core::{ContentPart, KnownContentPart};
+    use serde_json::json;
+
+    fn file_part(file: serde_json::Value) -> ContentPart {
+        ContentPart::Known(KnownContentPart::File {
+            file,
+            cache_control: None,
+        })
+    }
+
+    #[test]
+    fn pdf_data_uri_translates_to_document_block_with_base64_source() {
+        let part = file_part(json!({
+            "filename": "draft.pdf",
+            "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
+        }));
+        match translate_content_part(&part) {
+            ContentBlock::Document {
+                source,
+                title,
+                citations,
+                ..
+            } => {
+                assert_eq!(source["type"], "base64");
+                assert_eq!(source["media_type"], "application/pdf");
+                assert_eq!(source["data"], "JVBERi0xLjQ=");
+                assert_eq!(title.as_deref(), Some("draft.pdf"));
+                assert!(citations.is_none());
+            }
+            other => panic!("expected Document, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_id_only_falls_back_to_other_passthrough() {
+        // No inline bytes -> verbatim passthrough as a `file` block so an
+        // Anthropic upstream surfaces a clean error rather than a silent
+        // drop. The original nested `file` object is preserved.
+        let part = file_part(json!({"file_id": "file-abc"}));
+        match translate_content_part(&part) {
+            ContentBlock::Other {
+                type_tag, extras, ..
+            } => {
+                assert_eq!(type_tag, "file");
+                assert_eq!(extras["file"], json!({"file_id": "file-abc"}));
+            }
+            other => panic!("expected Other passthrough, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_pdf_media_type_falls_back_to_other_passthrough_without_panic() {
+        let part = file_part(json!({
+            "filename": "note.txt",
+            "file_data": "data:text/plain;base64,aGVsbG8="
+        }));
+        match translate_content_part(&part) {
+            ContentBlock::Other { type_tag, .. } => assert_eq!(type_tag, "file"),
+            other => panic!("expected Other passthrough, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_base64_payload_falls_back_to_other_passthrough() {
+        let part = file_part(json!({
+            "filename": "draft.pdf",
+            "file_data": "data:application/pdf;base64,"
+        }));
+        match translate_content_part(&part) {
+            ContentBlock::Other { type_tag, .. } => assert_eq!(type_tag, "file"),
+            other => panic!("expected Other passthrough, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pdf_file_part_honors_block_level_cache_control() {
+        use routectl_core::CacheControl;
+        let part = ContentPart::Known(KnownContentPart::File {
+            file: json!({
+                "filename": "draft.pdf",
+                "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
+            }),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+        });
+        match translate_content_part(&part) {
+            ContentBlock::Document { cache_control, .. } => {
+                assert!(cache_control.is_some());
+            }
+            other => panic!("expected Document, got {other:?}"),
+        }
+    }
 }

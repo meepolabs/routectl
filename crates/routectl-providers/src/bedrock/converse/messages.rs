@@ -13,7 +13,7 @@
 
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use routectl_core::{
     ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningDetail,
@@ -323,6 +323,23 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
         KnownContentPart::Document { source, title, .. } => {
             Ok(translate_document(id, source, title.as_deref()))
         }
+        // OpenAI-shape file part. Reuse the document translator by first
+        // rewriting the base64 `file_data` data URI into the canonical
+        // Anthropic document source shape. Non-translatable shapes
+        // (file_id-only reference, non-base64 file_data, unmapped media
+        // type) drop with a WARN -- the JSON Converse wire cannot carry a
+        // raw OpenAI file block, so passthrough is not an option here
+        // (mirrors how `translate_image_url` drops unsupported refs).
+        KnownContentPart::File { file, .. } => match file_data_to_document_source(file) {
+            Some((source, title)) => Ok(translate_document(id, &source, title.as_deref())),
+            None => {
+                tracing::warn!(
+                    provider = id,
+                    "dropping file part on Converse egress; only base64 PDF data URIs are supported"
+                );
+                Ok(None)
+            }
+        },
         KnownContentPart::ToolUse {
             id: tu_id,
             name,
@@ -460,6 +477,45 @@ fn translate_image_url(id: &str, image_url: &Value) -> Option<ConverseContentBlo
         "dropping image_url on Converse egress; only base64 data URIs are supported"
     );
     None
+}
+
+/// Rewrite an OpenAI-shape `file` part (`{filename, file_data}`) into the
+/// canonical Anthropic document `source` plus an optional title, so the
+/// Converse `translate_document` path can consume it. Returns None for
+/// every shape that has no inline base64 PDF bytes to translate (the
+/// `file_id`-only reference form, a non-`data:...;base64,` `file_data`,
+/// an empty payload, or a non-PDF media type).
+///
+/// Scope is application/pdf only, matching the Anthropic egress helper
+/// (`anthropic_api::parts::parse_file_document_source`). Keeping both
+/// egresses PDF-only avoids a surprising asymmetry where the same
+/// canonical `file` part would ship as a document on one backend and be
+/// dropped on the other depending on which target a fallback chain picks.
+/// Widening to other Converse document formats (txt, csv, ...) would be a
+/// deliberate, symmetric change across both egresses, not an accident of
+/// the downstream format table.
+fn file_data_to_document_source(file: &Value) -> Option<(Value, Option<String>)> {
+    let file_data = file.get("file_data").and_then(|v| v.as_str())?;
+    let rest = file_data.strip_prefix("data:")?;
+    let (mt_with_params, b64) = rest.split_once(";base64,")?;
+    if b64.is_empty() {
+        return None;
+    }
+    let raw_media_type = mt_with_params.split(';').next().unwrap_or(mt_with_params);
+    let media_type_lc = raw_media_type.to_ascii_lowercase();
+    if media_type_lc != "application/pdf" {
+        return None;
+    }
+    let title = file
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let source = json!({
+        "type": "base64",
+        "media_type": media_type_lc,
+        "data": b64,
+    });
+    Some((source, title))
 }
 
 fn media_type_to_image_format(mt: &str) -> Option<String> {
@@ -1064,6 +1120,144 @@ mod tests {
             doc.source.bytes,
             B64_STANDARD.encode(body.as_bytes()),
             "text-source body must be base64-encoded onto the Converse wire"
+        );
+    }
+
+    /// An OpenAI-shape file part carrying a base64 PDF data URI must
+    /// survive translation as a Converse Document block (the file_data is
+    /// rewritten into the canonical Anthropic source the document
+    /// translator consumes).
+    #[test]
+    fn pdf_file_part_survives_as_converse_document_block() {
+        // Arrange
+        use routectl_core::KnownContentPart;
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
+                file: json!({
+                    "filename": "draft.pdf",
+                    "file_data": "data:application/pdf;base64,JVBERi0xLjQ=",
+                }),
+                cache_control: None,
+            })]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let user = result
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message must survive a base64 PDF file part");
+        let doc = user
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ConverseContentBlock::Document { document } => Some(document),
+                _ => None,
+            })
+            .expect("PDF file part must produce a Document block");
+        assert_eq!(doc.format, "pdf");
+        assert_eq!(doc.source.bytes, "JVBERi0xLjQ=");
+    }
+
+    /// A file_id-only reference has no inline bytes the JSON Converse wire
+    /// can carry, so it is dropped with a diagnostic. A sibling Text block
+    /// confirms only the file part was dropped.
+    #[test]
+    fn file_id_only_part_is_dropped_on_converse() {
+        // Arrange
+        use routectl_core::KnownContentPart;
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Known(KnownContentPart::Text {
+                    text: "see attached".into(),
+                    cache_control: None,
+                }),
+                ContentPart::Known(KnownContentPart::File {
+                    file: json!({"file_id": "file-abc"}),
+                    cache_control: None,
+                }),
+            ]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let user = result
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message must survive on the sibling Text block");
+        let has_document = user
+            .content
+            .iter()
+            .any(|b| matches!(b, ConverseContentBlock::Document { .. }));
+        assert!(
+            !has_document,
+            "file_id-only part must be dropped, got: {:?}",
+            user.content
+        );
+    }
+
+    /// A non-PDF file part (e.g. a text/plain base64 data URI) is dropped
+    /// on the Converse egress, matching the PDF-only scope of the Anthropic
+    /// egress helper. A sibling Text block confirms only the file part was
+    /// dropped, not the whole message.
+    #[test]
+    fn non_pdf_file_part_is_dropped_on_converse() {
+        // Arrange
+        use routectl_core::KnownContentPart;
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Known(KnownContentPart::Text {
+                    text: "see attached".into(),
+                    cache_control: None,
+                }),
+                ContentPart::Known(KnownContentPart::File {
+                    file: json!({
+                        "filename": "note.txt",
+                        "file_data": "data:text/plain;base64,aGVsbG8=",
+                    }),
+                    cache_control: None,
+                }),
+            ]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+
+        // Act
+        let result = build_messages("test", &messages).unwrap();
+
+        // Assert
+        let user = result
+            .iter()
+            .find(|m| m.role == "user")
+            .expect("user message must survive on the sibling Text block");
+        let has_document = user
+            .content
+            .iter()
+            .any(|b| matches!(b, ConverseContentBlock::Document { .. }));
+        assert!(
+            !has_document,
+            "non-PDF file part must be dropped, got: {:?}",
+            user.content
         );
     }
 

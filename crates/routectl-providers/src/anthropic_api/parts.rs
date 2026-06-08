@@ -28,6 +28,15 @@ use routectl_core::{ContentPart, KnownContentPart};
 /// caller input before lookup so `Image/PNG` matches `image/png`.
 const ALLOWED_IMAGE_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
+/// Anthropic + Bedrock accept this MIME type as a base64 document source
+/// today. Scope is PDF only: Anthropic text documents use a different
+/// `{type: "text"}` source shape carrying raw (non-base64) data, which is
+/// not what an OpenAI `file` part with a `data:...;base64,` URI produces.
+/// Same defense-in-depth rationale as `ALLOWED_IMAGE_MEDIA_TYPES`: a
+/// crafted or typo'd `media_type` must never reach the Anthropic body
+/// verbatim. All entries lowercase; comparison normalizes caller input.
+const ALLOWED_DOCUMENT_MEDIA_TYPES: &[&str] = &["application/pdf"];
+
 /// Translate an OpenAI-style `image_url.url` value into the Anthropic
 /// `source` block. Detects RFC 2397 data URIs (`data:<mt>;base64,<b64>`)
 /// and rewrites them to `{type: "base64", media_type, data}` because
@@ -100,6 +109,60 @@ pub(crate) fn parse_image_url_source(url: &str) -> Value {
         }
     }
     json!({"type": "url", "url": url})
+}
+
+/// Translate an OpenAI-shape `file` content part (`{filename, file_data}`)
+/// into the Anthropic document `source` block plus an optional title.
+/// Returns `Some((source, title))` only when the part is a base64 PDF
+/// upload we can faithfully translate; returns `None` for every shape
+/// the caller must pass through verbatim instead (the caller logs and
+/// emits the original part unchanged so an Anthropic upstream still
+/// surfaces a clean error rather than routectl silently dropping it).
+///
+/// Translatable shape: `file.file_data` is a `data:application/pdf;base64,
+/// <payload>` URI with a non-empty payload. The emitted source is
+/// `{type: "base64", media_type: "application/pdf", data: <payload>}`;
+/// `title` comes from `file.filename` when present.
+///
+/// `None` (caller passes through verbatim) for:
+/// - no `file_data` string (e.g. the `file_id`-only reference form, which
+///   has no inline bytes to translate),
+/// - a `file_data` that is not a `data:<mt>;base64,<b64>` URI,
+/// - a non-allowlisted media type (defense-in-depth; only application/pdf
+///   is in scope),
+/// - an empty base64 payload (truncated upload / client bug).
+///
+/// Defenses mirror `parse_image_url_source`: RFC 2397 `;param` between the
+/// media-type and `;base64,` is stripped before the allowlist check, the
+/// media type is lowercased + allowlisted (so `Application/PDF` cannot
+/// bypass the filter), and an empty payload is rejected rather than
+/// shipped as a guaranteed-malformed base64 source.
+pub(crate) fn parse_file_document_source(file: &Value) -> Option<(Value, Option<String>)> {
+    let file_data = file.get("file_data").and_then(|v| v.as_str())?;
+    let rest = file_data.strip_prefix("data:")?;
+    let (mt_with_params, b64) = rest.split_once(";base64,")?;
+    // RFC 2397 allows `;<param>` between media-type and the `;base64`
+    // flag; take the bare media-type for the allowlist check + emission.
+    let raw_media_type = mt_with_params.split(';').next().unwrap_or(mt_with_params);
+    let media_type_lc = raw_media_type.to_ascii_lowercase();
+    if !ALLOWED_DOCUMENT_MEDIA_TYPES.contains(&media_type_lc.as_str()) {
+        return None;
+    }
+    if b64.is_empty() {
+        return None;
+    }
+    let title = file
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    // Emit the lowercased media type even if the caller sent a mixed-case
+    // form, keeping the wire body deterministic across casing variations.
+    let source = json!({
+        "type": "base64",
+        "media_type": media_type_lc,
+        "data": b64,
+    });
+    Some((source, title))
 }
 
 /// Strip `Text` content parts that appear AFTER the last `ToolUse`
@@ -277,6 +340,116 @@ mod parse_image_url_source_tests {
                 "media_type for {url} must be lowercased"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod parse_file_document_source_tests {
+    use super::parse_file_document_source;
+    use serde_json::json;
+
+    #[test]
+    fn pdf_data_uri_emits_base64_document_source_with_title() {
+        // The translatable shape: an OpenAI client embeds a PDF as a
+        // data:application/pdf;base64,XXX file_data with a filename.
+        let file = json!({
+            "filename": "draft.pdf",
+            "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
+        });
+        let (source, title) = parse_file_document_source(&file).unwrap();
+        assert_eq!(
+            source,
+            json!({
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "JVBERi0xLjQ=",
+            })
+        );
+        assert_eq!(title.as_deref(), Some("draft.pdf"));
+    }
+
+    #[test]
+    fn pdf_data_uri_without_filename_emits_source_with_no_title() {
+        let file = json!({
+            "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
+        });
+        let (source, title) = parse_file_document_source(&file).unwrap();
+        assert_eq!(source["media_type"], "application/pdf");
+        assert!(title.is_none());
+    }
+
+    #[test]
+    fn file_id_only_returns_none() {
+        // No inline bytes to translate; the caller passes this through
+        // verbatim rather than dropping it.
+        let file = json!({"file_id": "file-abc"});
+        assert!(parse_file_document_source(&file).is_none());
+    }
+
+    #[test]
+    fn non_pdf_media_type_returns_none() {
+        // Defense-in-depth: only application/pdf is in scope. A crafted
+        // or out-of-scope media type must not reach the Anthropic body.
+        for file_data in [
+            "data:text/plain;base64,aGVsbG8=",
+            "data:application/x-script;base64,YWxlcnQoMSk=",
+            "data:image/png;base64,iVBORw0KGgo=",
+        ] {
+            let file = json!({"filename": "x", "file_data": file_data});
+            assert!(
+                parse_file_document_source(&file).is_none(),
+                "expected None for {file_data}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_base64_payload_returns_none() {
+        let file = json!({
+            "filename": "draft.pdf",
+            "file_data": "data:application/pdf;base64,"
+        });
+        assert!(parse_file_document_source(&file).is_none());
+    }
+
+    #[test]
+    fn non_data_uri_file_data_returns_none() {
+        // file_data without the data: prefix or the ;base64, separator
+        // cannot be parsed safely; pass through verbatim.
+        for file_data in [
+            "https://example.com/draft.pdf",
+            "data:application/pdf,not-base64",
+        ] {
+            let file = json!({"file_data": file_data});
+            assert!(
+                parse_file_document_source(&file).is_none(),
+                "expected None for {file_data}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_case_pdf_media_type_normalizes_to_lowercase() {
+        // RFC 2045 says MIME types are case-insensitive; a crafted
+        // `Application/PDF` must be normalized so it cannot bypass the
+        // allowlist while shipping a non-canonical media_type.
+        let file = json!({
+            "file_data": "data:Application/PDF;base64,JVBERi0xLjQ="
+        });
+        let (source, _) = parse_file_document_source(&file).unwrap();
+        assert_eq!(source["media_type"], "application/pdf");
+    }
+
+    #[test]
+    fn charset_param_is_stripped_from_media_type() {
+        // RFC 2397 `;param` between media-type and `;base64,` is stripped
+        // before the allowlist check, mirroring the image-url path.
+        let file = json!({
+            "file_data": "data:application/pdf;charset=utf-8;base64,JVBERi0xLjQ="
+        });
+        let (source, _) = parse_file_document_source(&file).unwrap();
+        assert_eq!(source["media_type"], "application/pdf");
+        assert_eq!(source["data"], "JVBERi0xLjQ=");
     }
 }
 
