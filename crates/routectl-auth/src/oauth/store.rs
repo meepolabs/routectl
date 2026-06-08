@@ -245,6 +245,25 @@ impl OAuthStore {
         Ok(true)
     }
 
+    /// Snapshot the set of credential (seat) keys currently in the
+    /// in-memory cache -- every key across the `providers` map, including
+    /// labeled seats (`provider#label`). The reload coordinator snapshots
+    /// this before and after `reload_from_disk` to decide whether the seat
+    /// set actually changed (a login/logout adds or removes a key) versus a
+    /// routine token-value-only refresh (same keys), gating an expensive
+    /// Router rebuild on the former. Read under the same file `RwLock` as
+    /// `list`, so the snapshot is consistent with the cache it reflects.
+    pub async fn credential_keys(&self) -> std::collections::BTreeSet<String> {
+        self.inner
+            .file
+            .read()
+            .await
+            .providers
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Snapshot all known provider records (for `routectl whoami`).
     pub async fn list(&self) -> Vec<(String, TokenRecord)> {
         self.inner

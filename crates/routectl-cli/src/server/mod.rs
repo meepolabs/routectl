@@ -503,7 +503,13 @@ async fn run_reload_coordinator(
                 let Some(req) = req else { return; };
                 match req {
                     ReloadRequest::Credentials => {
-                        handle_credentials_reload(&oauth_store).await;
+                        handle_credentials_reload(
+                            &oauth_store,
+                            &current_config,
+                            secrets.clone(),
+                            &router_swap,
+                        )
+                        .await;
                     }
                     ReloadRequest::Config => {
                         if let Some(new_config) = handle_config_reload(
@@ -521,32 +527,92 @@ async fn run_reload_coordinator(
     }
 }
 
-/// Apply a credentials reload. Successful reload emits one info
-/// line; a parse / IO failure emits a warn and leaves the in-memory
+/// Apply a credentials reload. Refreshes the in-memory OAuth token
+/// cache from disk; a parse / IO failure emits a warn and leaves the
 /// cache untouched (the disk-first ordering invariant in
 /// `OAuthStore::reload_from_disk`).
-async fn handle_credentials_reload(oauth_store: &Option<Arc<routectl_auth::OAuthStore>>) {
+///
+/// When the SEAT SET changes across the reload (a `routectl login
+/// --label` / `logout --label` or a hand-edit added or removed a
+/// credential key) the live Router is rebuilt from the CURRENT
+/// (unchanged) config so a bare-pool `oauth://provider` re-expands to
+/// the new per-seat target set without a daemon restart. The common
+/// case -- routectl's own hourly-ish token auto-refresh, which rewrites
+/// credentials.json with the same keys but new token values -- leaves
+/// the seat set identical and skips the rebuild, so a routine refresh
+/// costs only the cache reload it already paid for.
+async fn handle_credentials_reload(
+    oauth_store: &Option<Arc<routectl_auth::OAuthStore>>,
+    current_config: &Arc<Config>,
+    secrets: Arc<dyn SecretStore>,
+    router_swap: &Arc<ArcSwap<Router>>,
+) {
     let Some(store) = oauth_store else {
         tracing::debug!(
             "credentials reload requested but OAuth store unavailable (no HOME/XDG); ignoring",
         );
         return;
     };
-    match store.reload_from_disk().await {
-        Ok(()) => {
-            tracing::info!(
-                path = %store.path().display(),
-                "credentials reloaded from disk",
-            );
-        }
+
+    let before = store.credential_keys().await;
+    if let Err(e) = store.reload_from_disk().await {
+        tracing::warn!(
+            path = %store.path().display(),
+            error = %e,
+            "credentials reload failed; keeping previous in-memory cache",
+        );
+        return;
+    }
+    tracing::info!(
+        path = %store.path().display(),
+        "credentials reloaded from disk",
+    );
+
+    // Gate the Router rebuild on a real seat-set change. A token-value-only
+    // refresh (same keys) must not rebuild, or every routine auto-refresh
+    // would needlessly re-run the startup validators and re-expand the pool.
+    let after = store.credential_keys().await;
+    if before == after {
+        return;
+    }
+
+    rebuild_router_for_seat_change(current_config, secrets, router_swap, &before, &after).await;
+}
+
+/// Rebuild the live Router from the unchanged config after a seat-set
+/// change, preserving per-seat runtime state and honoring the
+/// disk-first-keep-old invariant on a build failure. No config re-read
+/// is needed (the config is unchanged); re-running the startup
+/// validators on it is harmless. Split out of `handle_credentials_reload`
+/// to keep that function under the size ceiling.
+async fn rebuild_router_for_seat_change(
+    current_config: &Arc<Config>,
+    secrets: Arc<dyn SecretStore>,
+    router_swap: &Arc<ArcSwap<Router>>,
+    before: &std::collections::BTreeSet<String>,
+    after: &std::collections::BTreeSet<String>,
+) {
+    let mut new_router = match build_router_from_config(current_config.clone(), secrets).await {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!(
-                path = %store.path().display(),
                 error = %e,
-                "credentials reload failed; keeping previous in-memory cache",
+                "credentials seat-set changed but router rebuild failed; keeping previous router",
             );
+            return;
         }
-    }
+    };
+
+    // Carry over per-state_key runtime state (circuit-breaker counters,
+    // RPM token buckets) so surviving seats keep gates that took time to
+    // build up; a freshly-added seat starts with fresh state.
+    new_router.carry_over_runtime_state_from(&router_swap.load_full());
+    router_swap.store(Arc::new(new_router));
+    tracing::info!(
+        seats_before = before.len(),
+        seats_after = after.len(),
+        "credentials seat set changed; router rebuilt and swapped",
+    );
 }
 
 /// Apply a config reload. On any pre-build failure (read, parse,
@@ -875,5 +941,208 @@ mod tests {
 
         assert_eq!(first, file_watch::ReloadRequest::Config);
         assert_eq!(second, file_watch::ReloadRequest::Credentials);
+    }
+
+    // ---- Credentials reload: seat-set-change Router rebuild gate ----
+
+    /// Write a `credentials.json` carrying one record per seat key in
+    /// `seats` (each `(key, access_token)`) using the same JSON shape +
+    /// 0o600 hygiene the production `file_io::save` emits, so
+    /// `OAuthStore::open` / `reload_from_disk` accept it. Keys are the raw
+    /// credentials-map keys: a bare provider (`anthropic`) for the default
+    /// seat, `provider#label` for a labeled seat.
+    #[cfg(test)]
+    fn write_pool_credentials(path: &std::path::Path, seats: &[(&str, &str)]) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut providers = serde_json::Map::new();
+        for (key, token) in seats {
+            providers.insert(
+                (*key).to_string(),
+                serde_json::json!({
+                    "access_token": token,
+                    "refresh_token": "seeded-refresh-token",
+                    "token_type": "Bearer",
+                    "expires_at_unix": now + 3600,
+                    "scopes": ["user:inference"],
+                    "account": { "email": null, "account_id": null },
+                    "obtained_at_unix": now
+                }),
+            );
+        }
+        let doc = serde_json::json!({ "schema_version": 1, "providers": providers });
+        let bytes = serde_json::to_vec_pretty(&doc).expect("serialize creds");
+        let parent = path.parent().expect("creds path has parent");
+        std::fs::create_dir_all(parent).expect("mkdir creds parent");
+        std::fs::write(path, &bytes).expect("write creds");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 0600");
+        }
+    }
+
+    /// Config with a single pooled model `claude` whose provider resolves
+    /// its bearer via the bare-pool `oauth://anthropic` ref. With >=2
+    /// seats on disk this expands to one dispatch target per seat; with one
+    /// seat it stays single-target.
+    #[cfg(test)]
+    fn pooled_oauth_config() -> Arc<Config> {
+        let text = r#"
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[providers.anthropic_oauth]
+kind = "anthropic-api"
+base_url = "http://127.0.0.1:1"
+api_key_ref = "oauth://anthropic"
+auth_kind = "oauth-bearer"
+
+[models.claude]
+provider = "anthropic_oauth"
+upstream = "claude-sonnet-4-6"
+
+[aliases]
+default = "claude"
+"#;
+        Arc::new(toml::from_str(text).expect("pooled oauth config must parse"))
+    }
+
+    /// Build the `(OAuthStore handle, secrets, router_swap)` triple the
+    /// reload coordinator owns, seeded from a credentials file already on
+    /// disk at `creds_path`. Mirrors `serve_on_listener`'s wiring: one
+    /// shared `Arc<dyn SecretStore>` across rebuilds.
+    #[cfg(test)]
+    async fn coordinator_rig(
+        creds_path: &std::path::Path,
+        config: &Arc<Config>,
+    ) -> (
+        Arc<routectl_auth::OAuthStore>,
+        Arc<dyn SecretStore>,
+        Arc<ArcSwap<Router>>,
+    ) {
+        let composite = CompositeStore::open_at(creds_path)
+            .await
+            .expect("open composite store at temp creds path");
+        let oauth = composite.oauth_store().expect("oauth arm present");
+        let secrets: Arc<dyn SecretStore> = Arc::new(composite);
+        let router = build_router_from_config(config.clone(), secrets.clone())
+            .await
+            .expect("initial router build");
+        let swap = Arc::new(ArcSwap::from_pointee(router));
+        (oauth, secrets, swap)
+    }
+
+    /// Adding a seat to credentials.json and firing a credentials reload
+    /// must re-expand the live Router's pool: the model goes from a single
+    /// target (one seat, non-pooled) to two seat targets, with no daemon
+    /// restart and no config change.
+    #[tokio::test]
+    async fn credentials_reload_reexpands_seat_set() {
+        // Arrange: one seat on disk -> non-pooled (seat_count_for == None).
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("routectl").join("credentials.json");
+        write_pool_credentials(&creds, &[("anthropic", "tok-default")]);
+        let config = pooled_oauth_config();
+        let (oauth, secrets, swap) = coordinator_rig(&creds, &config).await;
+        assert_eq!(
+            swap.load().seat_count_for("claude"),
+            None,
+            "single seat must stay single-target before reload"
+        );
+
+        // Act: add a second seat on disk, then reload credentials.
+        write_pool_credentials(
+            &creds,
+            &[("anthropic", "tok-default"), ("anthropic#seat-b", "tok-b")],
+        );
+        handle_credentials_reload(&Some(oauth), &config, secrets, &swap).await;
+
+        // Assert: the live Router now resolves two seat targets.
+        assert_eq!(
+            swap.load().seat_count_for("claude"),
+            Some(2),
+            "reload must re-expand the pool to two seats"
+        );
+    }
+
+    /// A credentials reload that changes only a token VALUE (same seat
+    /// keys) -- the routine auto-refresh case -- must NOT rebuild the
+    /// Router. Proven by pointer-equality of the `ArcSwap` payload across
+    /// the reload: the seat-set gate skipped the rebuild.
+    #[tokio::test]
+    async fn credentials_reload_token_only_change_does_not_rebuild() {
+        // Arrange: a stable two-seat pool.
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("routectl").join("credentials.json");
+        write_pool_credentials(
+            &creds,
+            &[("anthropic", "tok-default"), ("anthropic#seat-b", "tok-b")],
+        );
+        let config = pooled_oauth_config();
+        let (oauth, secrets, swap) = coordinator_rig(&creds, &config).await;
+        let before = swap.load_full();
+
+        // Act: rewrite with the SAME keys but new token values, reload.
+        write_pool_credentials(
+            &creds,
+            &[
+                ("anthropic", "tok-default-rotated"),
+                ("anthropic#seat-b", "tok-b-rotated"),
+            ],
+        );
+        handle_credentials_reload(&Some(oauth), &config, secrets, &swap).await;
+
+        // Assert: the Router Arc is pointer-unchanged (no rebuild fired).
+        let after = swap.load_full();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "token-value-only refresh must not rebuild the router"
+        );
+    }
+
+    /// A credentials reload whose Router rebuild fails (seat set changed,
+    /// but the config no longer builds against the new credentials) must
+    /// keep the previously-installed Router (disk-first-keep-old). Induced
+    /// by pointing the pool's provider-build path at a config the rebuild
+    /// rejects: here we make the alias reference a model whose only seat
+    /// disappears so the rebuild errors, and pin that the live Router is
+    /// untouched.
+    #[tokio::test]
+    async fn credentials_reload_rebuild_failure_keeps_previous_router() {
+        // Arrange: a healthy two-seat pool and a built Router.
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("routectl").join("credentials.json");
+        write_pool_credentials(
+            &creds,
+            &[("anthropic", "tok-default"), ("anthropic#seat-b", "tok-b")],
+        );
+        let config = pooled_oauth_config();
+        let (oauth, secrets, swap) = coordinator_rig(&creds, &config).await;
+        let before = swap.load_full();
+
+        // Act: corrupt credentials.json so reload_from_disk fails. The
+        // disk-first invariant means the cache (and thus the seat set) is
+        // untouched, and the Router must not be rebuilt or swapped.
+        std::fs::write(&creds, b"<<corrupt-json>>").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        handle_credentials_reload(&Some(oauth), &config, secrets, &swap).await;
+
+        // Assert: a failed reload leaves the previous Router installed.
+        let after = swap.load_full();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "a failed credentials reload must keep the previous router"
+        );
     }
 }

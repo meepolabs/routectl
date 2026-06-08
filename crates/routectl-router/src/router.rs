@@ -316,6 +316,49 @@ impl Router {
         }
     }
 
+    /// Number of dispatch seats a resolved model expands to: `Some(n)`
+    /// for a pooled (multi-seat) model, `None` for a non-pooled
+    /// single-target model (a lone seat collapses to the single-target
+    /// path). Read-only introspection over the resolved-model table; the
+    /// hot-reload coordinator's tests use it to observe that a credentials
+    /// reload re-expanded a bare-pool `oauth://provider` into the new seat
+    /// count without reaching into the private `resolved_models` map.
+    pub fn seat_count_for(&self, nickname: &str) -> Option<usize> {
+        self.resolved_models
+            .get(nickname)
+            .and_then(|m| m.seats.as_ref())
+            .map(|seats| seats.len())
+    }
+
+    /// Trip the circuit breaker for the state slot keyed by `state_key`
+    /// (a model nickname or a per-seat `nickname#label`), returning `false`
+    /// when no such slot exists. Test seam for the hot-reload carry-over
+    /// assertions; `cfg(test)`-gated so it cannot widen the production
+    /// surface.
+    #[cfg(test)]
+    pub fn force_open_breaker(&self, state_key: &str, cooldown: std::time::Duration) -> bool {
+        match self.state.get(state_key) {
+            Some(slot) => {
+                slot.lock().force_open(std::time::Instant::now(), cooldown);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the breaker for `state_key` currently reads open (parked).
+    /// `None` when no state slot exists for the key. Companion test seam to
+    /// `force_open_breaker` for the carry-over tests.
+    #[cfg(test)]
+    pub fn breaker_open_for(&self, state_key: &str) -> Option<bool> {
+        self.state.get(state_key).map(|slot| {
+            matches!(
+                slot.lock().try_dispatch(std::time::Instant::now()),
+                GateDecision::CircuitOpen
+            )
+        })
+    }
+
     /// Look up a model nickname in the resolved table.
     fn resolve_nickname(&self, nickname: &str) -> Option<Arc<ResolvedModel>> {
         self.resolved_models.get(nickname).cloned()
@@ -3668,10 +3711,24 @@ mod seat_pool_dispatch_tests {
     /// `SeatProvider` + call counter. Returns the installed Router plus
     /// the three per-seat counters in seat order.
     fn pooled_router(selection: SeatSelection) -> (Router, Vec<Arc<AtomicUsize>>) {
-        let labels: Vec<Option<String>> = vec![None, Some("seat-b".into()), Some("seat-c".into())];
+        pooled_router_with_labels(
+            selection,
+            &[None, Some("seat-b".into()), Some("seat-c".into())],
+        )
+    }
+
+    /// Build a pooled `opus` model with one seat per entry in `labels`
+    /// (`None` is the default seat). Lets a test stand up pools of
+    /// arbitrary seat sets -- e.g. a "before reload" two-seat pool and an
+    /// "after reload" three-seat pool -- to exercise the coordinator's
+    /// rebuild + per-state_key carry-over.
+    fn pooled_router_with_labels(
+        selection: SeatSelection,
+        labels: &[Option<String>],
+    ) -> (Router, Vec<Arc<AtomicUsize>>) {
         let mut counters = Vec::new();
         let mut seats: Vec<SeatTarget> = Vec::new();
-        for label in &labels {
+        for label in labels {
             let counter = Arc::new(AtomicUsize::new(0));
             counters.push(counter.clone());
             let provider: Arc<dyn Provider> = Arc::new(SeatProvider {
@@ -3827,6 +3884,51 @@ mod seat_pool_dispatch_tests {
         assert_eq!(counters[0].load(Ordering::SeqCst), 1);
         assert_eq!(counters[1].load(Ordering::SeqCst), 0);
         assert_eq!(counters[2].load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn carry_over_preserves_surviving_seat_breaker_and_starts_new_seat_fresh() {
+        // Simulate the credentials-reload rebuild: a two-seat pool
+        // (default + seat-b) trips the default seat's breaker, then a seat
+        // is added on disk so the coordinator rebuilds a THREE-seat pool
+        // (default + seat-b + seat-c) and carries over per-state_key
+        // runtime state. The surviving seat's tripped breaker must persist
+        // (carry-over by state_key); the freshly-added seat must start
+        // closed.
+        let (before, _c1) =
+            pooled_router_with_labels(SeatSelection::FillFirst, &[None, Some("seat-b".into())]);
+        // Trip the default seat's breaker for a long cooldown.
+        assert!(
+            before.force_open_breaker("opus", Duration::from_secs(3600)),
+            "default seat must own a state slot to trip"
+        );
+        assert_eq!(
+            before.breaker_open_for("opus"),
+            Some(true),
+            "default seat breaker must read open after force_open"
+        );
+
+        // Rebuild with the added seat-c, then carry over from `before`.
+        let (mut after, _c2) = pooled_router_with_labels(
+            SeatSelection::FillFirst,
+            &[None, Some("seat-b".into()), Some("seat-c".into())],
+        );
+        after.carry_over_runtime_state_from(&before);
+
+        // The surviving default seat's tripped breaker carried over.
+        assert_eq!(
+            after.breaker_open_for("opus"),
+            Some(true),
+            "surviving seat's breaker state must survive the rebuild"
+        );
+        // The freshly-added seat-c starts closed (fresh state).
+        assert_eq!(
+            after.breaker_open_for("opus#seat-c"),
+            Some(false),
+            "newly-added seat must start with a fresh, closed breaker"
+        );
+        // And the pool re-expanded to three seats.
+        assert_eq!(after.seat_count_for("opus"), Some(3));
     }
 }
 
