@@ -83,10 +83,18 @@ pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseReque
 }
 
 fn build_inference_config(req: &ChatRequest) -> Option<InferenceConfig> {
+    // Claude 4.x rejects requests that carry both `temperature` and
+    // `top_p`. Emit `top_p` only when no temperature is set; temperature
+    // wins.
+    let top_p = if req.temperature.is_some() {
+        None
+    } else {
+        req.top_p
+    };
     let cfg = InferenceConfig {
         max_tokens: req.max_tokens,
         temperature: req.temperature,
-        top_p: req.top_p,
+        top_p,
         stop_sequences: req.stop.clone(),
     };
     let any_set = cfg.max_tokens.is_some()

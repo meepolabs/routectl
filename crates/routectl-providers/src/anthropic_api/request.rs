@@ -277,6 +277,15 @@ pub(crate) fn normalize(
         _ => req.temperature,
     };
 
+    // Claude 4.x rejects requests that carry both `temperature` and
+    // `top_p`, and also rejects `top_p` while thinking is active. Emit
+    // `top_p` only when no temperature is in play; temperature wins.
+    let top_p = if temperature.is_some() {
+        None
+    } else {
+        req.top_p
+    };
+
     let ar = AnthropicRequest {
         model: req.model.clone(),
         messages: anthropic_messages,
@@ -285,7 +294,7 @@ pub(crate) fn normalize(
         thinking,
         output_config,
         temperature,
-        top_p: req.top_p,
+        top_p,
         stop_sequences: req.stop.clone(),
         stream: None, // caller sets this
         tools,
@@ -2460,6 +2469,110 @@ mod multi_turn_tool_use_tests {
         assert!(
             formats_val.contains("<none>"),
             "skipped_formats must include <none> for format=None details; got: {formats_val:?}",
+        );
+    }
+
+    /// Claude 4.x rejects a body carrying both sampling knobs. When the
+    /// caller sends both, temperature wins and top_p is dropped.
+    #[test]
+    fn drops_top_p_when_temperature_also_set() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(256),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            ..Default::default()
+        };
+
+        // Act
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
+
+        // Assert
+        assert_eq!(body["temperature"], 0.7);
+        assert!(
+            body.get("top_p").is_none(),
+            "top_p must be dropped when temperature is set, got {body:?}"
+        );
+    }
+
+    /// With only top_p set the body carries top_p and no temperature.
+    #[test]
+    fn keeps_top_p_when_temperature_unset() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(256),
+            temperature: None,
+            top_p: Some(0.9),
+            ..Default::default()
+        };
+
+        // Act
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
+
+        // Assert
+        assert_eq!(body["top_p"], 0.9);
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be absent when only top_p is set, got {body:?}"
+        );
+    }
+
+    /// With only temperature set the body carries temperature and no top_p.
+    #[test]
+    fn keeps_temperature_when_top_p_unset() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4-6".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(256),
+            temperature: Some(0.3),
+            top_p: None,
+            ..Default::default()
+        };
+
+        // Act
+        let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
+
+        // Assert
+        assert_eq!(body["temperature"], 0.3);
+        assert!(
+            body.get("top_p").is_none(),
+            "top_p must be absent when only temperature is set, got {body:?}"
+        );
+    }
+
+    /// Thinking forces temperature to 1.0; top_p must then be dropped too,
+    /// since Anthropic also rejects top_p while thinking is active.
+    #[test]
+    fn drops_top_p_when_thinking_forces_temperature() {
+        use routectl_core::ReasoningConfig;
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(2048),
+            top_p: Some(0.9),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+
+        // Act
+        let body = normalize("test-anthropic", &req, true, &[], false, None).unwrap();
+
+        // Assert
+        assert_eq!(body["temperature"], 1.0);
+        assert!(
+            body.get("top_p").is_none(),
+            "top_p must be dropped while thinking is active, got {body:?}"
         );
     }
 }

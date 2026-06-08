@@ -862,3 +862,80 @@ fn additional_model_response_field_paths_emitted_for_non_anthropic_model() {
     assert_eq!(paths.len(), 1, "got {body}");
     assert_eq!(paths[0], "/stop_sequence", "got {body}");
 }
+
+/// Claude 4.x rejects a body carrying both sampling knobs. When the
+/// caller sends both, temperature wins and topP is dropped.
+#[test]
+fn drops_top_p_when_temperature_also_set() {
+    // Arrange
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hi")],
+        max_tokens: Some(256),
+        temperature: Some(0.7),
+        top_p: Some(0.9),
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert
+    assert_eq!(body["inferenceConfig"]["temperature"], 0.7, "got {body}");
+    assert!(
+        body["inferenceConfig"].get("topP").is_none(),
+        "topP must be dropped when temperature is set, got {body}"
+    );
+}
+
+/// With only top_p set the inference config carries topP and no temperature.
+#[test]
+fn keeps_top_p_when_temperature_unset() {
+    // Arrange
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hi")],
+        max_tokens: Some(256),
+        temperature: None,
+        top_p: Some(0.9),
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert
+    assert_eq!(body["inferenceConfig"]["topP"], 0.9, "got {body}");
+    assert!(
+        body["inferenceConfig"].get("temperature").is_none(),
+        "temperature must be absent when only top_p is set, got {body}"
+    );
+}
+
+/// With only temperature set the inference config carries temperature
+/// and no topP.
+#[test]
+fn keeps_temperature_when_top_p_unset() {
+    // Arrange
+    let cfg = fake_cfg();
+    let req = ChatRequest {
+        model: "anthropic.claude-haiku-4-5".into(),
+        messages: vec![user_msg("hi")],
+        max_tokens: Some(256),
+        temperature: Some(0.3),
+        top_p: None,
+        ..Default::default()
+    };
+
+    // Act
+    let body = normalize_request(&cfg, &req).unwrap();
+
+    // Assert
+    assert_eq!(body["inferenceConfig"]["temperature"], 0.3, "got {body}");
+    assert!(
+        body["inferenceConfig"].get("topP").is_none(),
+        "topP must be absent when only temperature is set, got {body}"
+    );
+}
