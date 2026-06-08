@@ -70,7 +70,6 @@ fn stainless_os() -> &'static str {
 pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str)> {
     vec![
         ("x-app", "cli"),
-        ("anthropic-dangerous-direct-browser-access", "true"),
         ("x-stainless-lang", "js"),
         ("x-stainless-runtime", "node"),
         ("x-stainless-runtime-version", STAINLESS_RUNTIME_VERSION),
@@ -104,10 +103,6 @@ mod tests {
         let headers = default_claude_code_identity_headers();
         let lookup = |name: &str| headers.iter().find_map(|(n, v)| (*n == name).then_some(*v));
         assert_eq!(lookup("x-app"), Some("cli"));
-        assert_eq!(
-            lookup("anthropic-dangerous-direct-browser-access"),
-            Some("true")
-        );
         assert_eq!(lookup("x-stainless-lang"), Some("js"));
         assert_eq!(lookup("x-stainless-runtime"), Some("node"));
         assert_eq!(
@@ -130,6 +125,19 @@ mod tests {
                 .iter()
                 .any(|(n, _)| n.eq_ignore_ascii_case("anthropic-beta")),
             "anthropic-beta must NOT be a compiled default (it feeds the beta compose)",
+        );
+    }
+
+    #[test]
+    fn defaults_omit_dangerous_direct_browser_access() {
+        let headers = default_claude_code_identity_headers();
+        assert!(
+            !headers
+                .iter()
+                .any(|(n, _)| *n == "anthropic-dangerous-direct-browser-access"),
+            "anthropic-dangerous-direct-browser-access must NOT be sent on the \
+             OAuth path -- real Claude Code omits it for OAuth and sends it only \
+             in raw-API-key mode",
         );
     }
 
