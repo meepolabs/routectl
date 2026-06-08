@@ -14,7 +14,7 @@
 //! the router (alias resolution, retry, fallback) or core.
 
 use axum::http::HeaderMap;
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
+use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Result};
 use serde_json::Value;
 
 pub mod anthropic;
@@ -24,13 +24,93 @@ pub mod openai;
 /// field directly to pin routing to a specific configured alias.
 pub const ALIAS_HEADER: &str = "x-routectl-alias";
 
-/// Wire `error.type` value used by both ingress dialects when emitting
-/// a terminal error event for a mid-stream upstream failure. Matches
-/// the Anthropic SSE `error.type` vocabulary
-/// (`api_error` / `overloaded_error` / ...) which both OpenAI and
-/// Anthropic clients tolerate. Routed through one constant so the
-/// dialect impls and their tests cannot drift on the magic string.
+/// Default wire `error.type` value for a mid-stream upstream failure
+/// when no more specific classification applies. Matches the Anthropic
+/// SSE `error.type` vocabulary (`api_error` / `overloaded_error` / ...)
+/// which both OpenAI and Anthropic clients tolerate. Routed through one
+/// constant so the dialect impls and their tests cannot drift on the
+/// magic string.
 pub(crate) const STREAM_ERROR_TYPE: &str = "api_error";
+
+/// Anthropic SSE `error.type` for an overloaded upstream (503/529).
+pub(crate) const STREAM_OVERLOADED_TYPE: &str = "overloaded_error";
+
+/// Resolved classifier for a mid-stream terminal error event, derived
+/// from the upstream `Error` so the terminal SSE event carries a
+/// status-aware (and, when present, upstream-aware) `error.type` instead
+/// of a hardcoded `api_error`. Built once in the handler and handed to
+/// each dialect's `render_error_eos`, which reads the field matching its
+/// wire shape.
+///
+/// - `anthropic_type`: the Anthropic-vocabulary `error.type`
+///   (`overloaded_error` for 503/529, else `api_error`), or an
+///   upstream-supplied member when it is already valid Anthropic vocab.
+/// - `openai_type` / `openai_code`: the upstream's own classifier when
+///   present, else the Anthropic type / a generic fallback -- mirroring
+///   the non-stream OpenAI envelope so stream and non-stream agree.
+#[derive(Debug, Clone)]
+pub struct StreamErrorClass {
+    pub anthropic_type: String,
+    pub openai_type: String,
+    pub openai_code: String,
+}
+
+impl StreamErrorClass {
+    /// Derive the terminal-error classifier from the upstream `Error`.
+    /// Non-`Upstream` errors (render failures, transport errors with no
+    /// HTTP status) fall back to the generic `api_error` bucket.
+    pub(crate) fn from_error(e: &Error) -> Self {
+        match e {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                ..
+            } => {
+                let anthropic_type = match upstream_type.as_deref().and_then(anthropic_vocab_member)
+                {
+                    Some(member) => member.to_string(),
+                    None if matches!(status, 503 | 529) => STREAM_OVERLOADED_TYPE.to_string(),
+                    None => STREAM_ERROR_TYPE.to_string(),
+                };
+                let openai_type = upstream_type
+                    .clone()
+                    .unwrap_or_else(|| anthropic_type.clone());
+                let openai_code = upstream_code
+                    .clone()
+                    .or_else(|| upstream_type.clone())
+                    .unwrap_or_else(|| anthropic_type.clone());
+                Self {
+                    anthropic_type,
+                    openai_type,
+                    openai_code,
+                }
+            }
+            _ => Self {
+                anthropic_type: STREAM_ERROR_TYPE.to_string(),
+                openai_type: STREAM_ERROR_TYPE.to_string(),
+                openai_code: STREAM_ERROR_TYPE.to_string(),
+            },
+        }
+    }
+}
+
+/// Return the Anthropic-vocabulary spelling of `t` when `t` is already a
+/// valid Anthropic `error.type` member, else `None`. Kept in sync with
+/// the non-stream `handlers::ingress_handle::anthropic_vocab_member`.
+fn anthropic_vocab_member(t: &str) -> Option<&'static str> {
+    match t {
+        "invalid_request_error" => Some("invalid_request_error"),
+        "authentication_error" => Some("authentication_error"),
+        "permission_error" => Some("permission_error"),
+        "not_found_error" => Some("not_found_error"),
+        "request_too_large" => Some("request_too_large"),
+        "rate_limit_error" => Some("rate_limit_error"),
+        "api_error" => Some("api_error"),
+        "overloaded_error" => Some("overloaded_error"),
+        _ => None,
+    }
+}
 
 /// Read the `x-routectl-alias` header. Returns the trimmed header
 /// value when present and non-empty; otherwise `None`. The ingress
@@ -185,10 +265,16 @@ pub trait IngressAdapter: Send + Sync {
     /// that would otherwise break SSE wire framing or forge log lines
     /// on text-format subscribers downstream.
     ///
+    /// `class` carries the status-aware (and, when present,
+    /// upstream-aware) `error.type` / `error.code` so the terminal event
+    /// reflects the real failure class (`overloaded_error` for 503/529,
+    /// the upstream's own type when valid) instead of a hardcoded
+    /// `api_error`. Each adapter reads the field matching its wire shape.
+    ///
     /// Wire shapes:
     ///
     /// - Anthropic: one `event: error` named SSE event with payload
-    ///   `{"type":"error","error":{"type":"api_error","message":...}}`.
+    ///   `{"type":"error","error":{"type":<class.anthropic_type>,"message":...}}`.
     ///   The error event is itself terminal in the Anthropic SSE
     ///   format -- no further events follow.
     /// - OpenAI: one bare `data: {"error":{...}}` chunk followed by
@@ -199,6 +285,7 @@ pub trait IngressAdapter: Send + Sync {
         &self,
         _state: &mut dyn IngressStreamState,
         _error: &dyn std::fmt::Display,
+        _class: &StreamErrorClass,
     ) -> Vec<SseEvent> {
         // Default no-op so a third-party adapter that does not yet have
         // a dialect-specific error envelope can compile against the

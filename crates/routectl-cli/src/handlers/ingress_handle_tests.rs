@@ -117,6 +117,106 @@ async fn openai_envelope_unchanged_regression_pin() {
         .contains("nonesuch"));
 }
 
+// -------- Layer B: OpenAI ingress preserves upstream type/code -------
+
+#[tokio::test]
+async fn openai_envelope_emits_upstream_type_when_present() {
+    // Arrange: an upstream 429 carrying its own classifier.
+    let err = Error::upstream_full(
+        "p",
+        429,
+        "rate limited",
+        None,
+        Some("rate_limit_exceeded".into()),
+        Some("rate_limited".into()),
+    );
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert: the upstream type/code survive instead of "upstream_error".
+    assert_eq!(body["error"]["type"], "rate_limit_exceeded");
+    assert_eq!(body["error"]["code"], "rate_limited");
+}
+
+#[tokio::test]
+async fn openai_envelope_falls_back_to_upstream_error_without_type() {
+    // Arrange: an upstream error with no parsed classifier.
+    let err = Error::upstream("p", 500, "boom");
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert: the legacy generic tag stays when no upstream type exists.
+    assert_eq!(body["error"]["type"], "upstream_error");
+    assert_eq!(body["error"]["code"], "upstream_error");
+}
+
+// -------- Layer C: Anthropic ingress non-stream status arms ----------
+
+#[tokio::test]
+async fn anthropic_envelope_maps_upstream_status_to_specific_types() {
+    // 401 -> authentication_error
+    let resp = map_error(
+        ErrorEnvelopeShape::Anthropic,
+        Error::upstream("p", 401, "nope"),
+    );
+    assert_eq!(resp.status().as_u16(), 401);
+    let body = body_to_value(resp).await;
+    assert_eq!(body["error"]["type"], "authentication_error");
+
+    // 403 -> permission_error
+    let resp = map_error(
+        ErrorEnvelopeShape::Anthropic,
+        Error::upstream("p", 403, "nope"),
+    );
+    assert_eq!(resp.status().as_u16(), 403);
+    let body = body_to_value(resp).await;
+    assert_eq!(body["error"]["type"], "permission_error");
+
+    // 413 -> request_too_large
+    let resp = map_error(
+        ErrorEnvelopeShape::Anthropic,
+        Error::upstream("p", 413, "too big"),
+    );
+    assert_eq!(resp.status().as_u16(), 413);
+    let body = body_to_value(resp).await;
+    assert_eq!(body["error"]["type"], "request_too_large");
+
+    // 503 -> overloaded_error (existing behavior preserved)
+    let resp = map_error(
+        ErrorEnvelopeShape::Anthropic,
+        Error::upstream("p", 503, "down"),
+    );
+    assert_eq!(resp.status().as_u16(), 503);
+    let body = body_to_value(resp).await;
+    assert_eq!(body["error"]["type"], "overloaded_error");
+}
+
+#[tokio::test]
+async fn anthropic_envelope_passes_through_valid_upstream_type() {
+    // Arrange: an upstream type that is already valid Anthropic vocab
+    // wins over the status-derived guess (502 would otherwise be
+    // api_error).
+    let err = Error::upstream_full(
+        "p",
+        502,
+        "slow down",
+        None,
+        Some("rate_limit_error".into()),
+        None,
+    );
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+}
+
 // -------- sanitize_stream_error_for_client --------------------------
 
 /// The streaming-error sanitizer must NOT include the upstream
@@ -254,7 +354,8 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
         .expect("error event present");
     let payload: Value = serde_json::from_str(&err_event.data).unwrap();
     assert_eq!(payload["type"], "error");
-    assert_eq!(payload["error"]["type"], "api_error");
+    // Layer D: a 529 upstream maps to overloaded_error, not api_error.
+    assert_eq!(payload["error"]["type"], "overloaded_error");
     let msg = payload["error"]["message"].as_str().unwrap();
     // Sanitized: kind tag + status, NO provider id or body.
     assert!(msg.contains("upstream stream error"));
@@ -308,7 +409,8 @@ async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
     );
     // Event 1: error envelope.
     let err_payload: Value = serde_json::from_str(&events[1].data).unwrap();
-    assert_eq!(err_payload["error"]["type"], "api_error");
+    // Layer D: a 503 upstream maps to overloaded_error, not api_error.
+    assert_eq!(err_payload["error"]["type"], "overloaded_error");
     let msg = err_payload["error"]["message"].as_str().unwrap();
     assert!(msg.contains("upstream stream error"));
     assert!(msg.contains("503"));
@@ -407,8 +509,9 @@ impl<A: IngressAdapter> IngressAdapter for RenderChunkFailsOnceAdapter<A> {
         &self,
         state: &mut dyn IngressStreamState,
         error: &dyn std::fmt::Display,
+        class: &crate::ingress::StreamErrorClass,
     ) -> Vec<SseEvent> {
-        self.inner.render_error_eos(state, error)
+        self.inner.render_error_eos(state, error, class)
     }
 }
 

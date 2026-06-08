@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 
 use super::{
     read_alias_header, ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent,
-    STREAM_ERROR_TYPE,
+    StreamErrorClass,
 };
 
 const DONE_SENTINEL: &str = "[DONE]";
@@ -208,6 +208,7 @@ impl IngressAdapter for OpenAiIngress {
         &self,
         _state: &mut dyn IngressStreamState,
         error: &dyn std::fmt::Display,
+        class: &StreamErrorClass,
     ) -> Vec<SseEvent> {
         // The caller in `handlers::ingress_handle` already strips
         // provider names, upstream bodies, and tokens before passing
@@ -218,7 +219,8 @@ impl IngressAdapter for OpenAiIngress {
         let msg = routectl_core::sanitize_for_log(&error.to_string());
         let payload = serde_json::json!({
             "error": {
-                "type": STREAM_ERROR_TYPE,
+                "type": class.openai_type,
+                "code": class.openai_code,
                 "message": msg,
             }
         });
@@ -647,6 +649,7 @@ fn collapse_after_tool_use_strip(parts: Vec<ContentPart>) -> MessageContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingress::STREAM_ERROR_TYPE;
     use routectl_core::{
         Choice, ChunkChoice, ChunkDelta, Message, MessageContent, ReasoningConfig,
         ReasoningDetailKind, Usage,
@@ -737,9 +740,11 @@ mod tests {
         // Arrange
         let mut state = OpenAiIngress.new_stream_state();
         let error_msg = "upstream stream error (HTTP 529)";
+        let class =
+            StreamErrorClass::from_error(&routectl_core::Error::Streaming("render failure".into()));
 
         // Act
-        let events = OpenAiIngress.render_error_eos(state.as_mut(), &error_msg);
+        let events = OpenAiIngress.render_error_eos(state.as_mut(), &error_msg, &class);
 
         // Assert
         // Two events: error chunk + [DONE].
@@ -760,6 +765,50 @@ mod tests {
         assert_eq!(events[1].data, "[DONE]");
     }
 
+    /// Layer D: a 503/529 upstream stream error must carry
+    /// `overloaded_error` on the OpenAI terminal error chunk so stream
+    /// and non-stream classification agree; a present upstream type is
+    /// preferred over the status-derived guess.
+    #[test]
+    fn render_error_eos_openai_emits_overloaded_for_529() {
+        // Arrange
+        let mut state = OpenAiIngress.new_stream_state();
+        let err = routectl_core::Error::upstream("p", 529, "overloaded");
+        let class = StreamErrorClass::from_error(&err);
+
+        // Act
+        let events = OpenAiIngress.render_error_eos(state.as_mut(), &"boom", &class);
+
+        // Assert
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(payload["error"]["type"], "overloaded_error");
+    }
+
+    /// Layer D: when the upstream supplied its own classifier, the
+    /// OpenAI terminal error chunk surfaces it verbatim on type/code.
+    #[test]
+    fn render_error_eos_openai_prefers_upstream_type_and_code() {
+        // Arrange
+        let mut state = OpenAiIngress.new_stream_state();
+        let err = routectl_core::Error::upstream_full(
+            "p",
+            429,
+            "rate limited",
+            None,
+            Some("rate_limit_exceeded".into()),
+            Some("rate_limited".into()),
+        );
+        let class = StreamErrorClass::from_error(&err);
+
+        // Act
+        let events = OpenAiIngress.render_error_eos(state.as_mut(), &"boom", &class);
+
+        // Assert
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(payload["error"]["type"], "rate_limit_exceeded");
+        assert_eq!(payload["error"]["code"], "rate_limited");
+    }
+
     /// Belt-and-suspenders sanitization. Even though the caller in
     /// `handlers::ingress_handle` strips provider names and tokens
     /// before passing the error here, control characters in a
@@ -771,9 +820,11 @@ mod tests {
         // Arrange: a message containing CR, LF, and an ANSI escape.
         let mut state = OpenAiIngress.new_stream_state();
         let dirty = "upstream stream error\r\n\x1b[31mexploit\x1b[0m";
+        let class =
+            StreamErrorClass::from_error(&routectl_core::Error::Streaming("render failure".into()));
 
         // Act
-        let events = OpenAiIngress.render_error_eos(state.as_mut(), &dirty);
+        let events = OpenAiIngress.render_error_eos(state.as_mut(), &dirty, &class);
 
         // Assert: the emitted message has no raw \r, \n, or ESC bytes.
         let payload: Value = serde_json::from_str(&events[0].data).unwrap();

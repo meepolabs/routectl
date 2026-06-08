@@ -287,6 +287,11 @@ impl Provider for OpenAiCompatProvider {
             // Full upstream error body at debug level. The truncated
             // WARN excerpt below stays for warn-log scannability.
             debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
+            // Best-effort lift of the upstream classifier so an SDK that
+            // branches on `error.type` / `error.code` keeps the upstream
+            // signal. `code` may be a string or a number on the OpenAI
+            // wire; stringify either. Parse failures leave both None.
+            let (upstream_type, upstream_code) = parse_openai_error_classifier(&body_text);
             let sanitized = extract_upstream_message(&body_text);
             let safe_excerpt = sanitize_for_log(&sanitized);
             // Extend the auth-only WARN to all 4xx/5xx so an operator
@@ -306,11 +311,13 @@ impl Provider for OpenAiCompatProvider {
                     "openai-compat upstream error",
                 );
             }
-            return Err(Error::upstream_with_retry_after(
+            return Err(Error::upstream_full(
                 &self.cfg.id,
                 status,
                 sanitized,
                 retry_after,
+                upstream_type,
+                upstream_code,
             ));
         }
 
@@ -575,9 +582,32 @@ fn ensure_stream_options_include_usage(body: &mut Value, disabled: bool) {
     }
 }
 
+/// Best-effort parse of the OpenAI-shape error envelope
+/// (`{"error":{"type":...,"code":...}}`) to lift the upstream
+/// classifier. Returns `(upstream_type, upstream_code)`; either is
+/// `None` when absent or the body is not JSON. `code` is stringified
+/// because the OpenAI wire admits both a string code
+/// (`"context_length_exceeded"`) and a numeric one. The full body is
+/// NOT logged here -- the caller's debug/warn lines already cover that.
+fn parse_openai_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<Value>(body_text) else {
+        return (None, None);
+    };
+    let upstream_type = v
+        .pointer("/error/type")
+        .and_then(|t| t.as_str())
+        .map(str::to_string);
+    let upstream_code = v.pointer("/error/code").and_then(|c| match c {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    });
+    (upstream_type, upstream_code)
+}
+
 #[cfg(test)]
 mod helper_tests {
-    use super::ensure_stream_options_include_usage;
+    use super::{ensure_stream_options_include_usage, parse_openai_error_classifier};
     use serde_json::json;
 
     #[test]
@@ -637,5 +667,44 @@ mod helper_tests {
         ensure_stream_options_include_usage(&mut body, false);
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["stream_options"]["unrelated_key"], "v");
+    }
+
+    #[test]
+    fn parse_classifier_lifts_string_type_and_code() {
+        // Arrange
+        let body = r#"{"error":{"type":"rate_limit_exceeded","code":"rate_limited","message":"slow down"}}"#;
+
+        // Act
+        let (upstream_type, upstream_code) = parse_openai_error_classifier(body);
+
+        // Assert
+        assert_eq!(upstream_type.as_deref(), Some("rate_limit_exceeded"));
+        assert_eq!(upstream_code.as_deref(), Some("rate_limited"));
+    }
+
+    #[test]
+    fn parse_classifier_stringifies_numeric_code() {
+        // Arrange
+        let body = r#"{"error":{"type":"invalid_request_error","code":429}}"#;
+
+        // Act
+        let (upstream_type, upstream_code) = parse_openai_error_classifier(body);
+
+        // Assert
+        assert_eq!(upstream_type.as_deref(), Some("invalid_request_error"));
+        assert_eq!(upstream_code.as_deref(), Some("429"));
+    }
+
+    #[test]
+    fn parse_classifier_returns_none_on_non_json_body() {
+        // Arrange
+        let body = "503 Service Unavailable (plain text from a proxy)";
+
+        // Act
+        let (upstream_type, upstream_code) = parse_openai_error_classifier(body);
+
+        // Assert
+        assert!(upstream_type.is_none());
+        assert!(upstream_code.is_none());
     }
 }

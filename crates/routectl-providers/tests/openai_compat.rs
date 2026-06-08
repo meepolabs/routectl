@@ -255,6 +255,42 @@ async fn complete_upstream_error_surfaces_as_error_upstream() {
     }
 }
 
+#[tokio::test]
+async fn complete_429_populates_upstream_type_and_code() {
+    // Arrange
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {
+                "type": "rate_limit_exceeded",
+                "code": "rate_limited",
+                "message": "rate limited"
+            }
+        })))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+
+    // Act
+    let err = provider.complete(user_request("gpt-4o")).await.unwrap_err();
+
+    // Assert: the upstream classifier is lifted into upstream_type/code.
+    match err {
+        routectl_core::Error::Upstream {
+            status,
+            upstream_type,
+            upstream_code,
+            ..
+        } => {
+            assert_eq!(status, 429);
+            assert_eq!(upstream_type.as_deref(), Some("rate_limit_exceeded"));
+            assert_eq!(upstream_code.as_deref(), Some("rate_limited"));
+        }
+        other => panic!("expected Upstream, got: {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // stream() integration tests
 // ---------------------------------------------------------------------------

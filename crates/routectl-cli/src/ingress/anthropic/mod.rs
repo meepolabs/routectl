@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 
-use super::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
+use super::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass};
 
 /// The format tag the canonical layer uses for Anthropic-shape
 /// reasoning details (from the Anthropic-API egress on the upstream
@@ -268,8 +268,9 @@ impl IngressAdapter for AnthropicIngress {
         &self,
         state: &mut dyn IngressStreamState,
         error: &dyn std::fmt::Display,
+        class: &StreamErrorClass,
     ) -> Vec<SseEvent> {
-        render_error_eos_internal(anthropic_state_mut(state), error)
+        render_error_eos_internal(anthropic_state_mut(state), error, class)
     }
 }
 

@@ -2,7 +2,7 @@ use serde_json::{json, Map, Value};
 
 use routectl_core::{ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result};
 
-use crate::ingress::{IngressStreamState, SseEvent, STREAM_ERROR_TYPE};
+use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
 
 use super::{
     openai_finish_to_anthropic_stop, random_msg_id, AnthropicStreamState, OpenBlockKind,
@@ -681,6 +681,7 @@ pub(super) fn emit_message_stop(state: &mut AnthropicStreamState, events: &mut V
 pub(super) fn render_error_eos_internal(
     state: &mut AnthropicStreamState,
     error: &dyn std::fmt::Display,
+    class: &StreamErrorClass,
 ) -> Vec<SseEvent> {
     // Fix #5: a late error arriving after a normal clean finish (e.g.
     // an upstream transport error that fires after message_stop has
@@ -696,7 +697,7 @@ pub(super) fn render_error_eos_internal(
     let payload = json!({
         "type": "error",
         "error": {
-            "type": STREAM_ERROR_TYPE,
+            "type": class.anthropic_type,
             "message": msg,
         }
     });

@@ -109,7 +109,15 @@ pub(crate) fn render_json_rejection(
     } else {
         "bad_request"
     };
-    error_response(shape, status, kind, &e.to_string(), "invalid_request_error")
+    error_response(
+        shape,
+        status,
+        kind,
+        &e.to_string(),
+        "invalid_request_error",
+        None,
+        None,
+    )
 }
 
 async fn complete_response<A: IngressAdapter>(
@@ -263,10 +271,10 @@ async fn render_stream_task<A: IngressAdapter>(
                         // client already disconnected, the Drop on
                         // EgressStreamSummary still fires.
                         tracing::error!(error = ?e, "ingress chunk render failed");
-                        let safe_msg = sanitize_stream_error_for_client(
-                            &routectl_core::Error::Streaming(e.to_string()),
-                        );
-                        for ev in adapter.render_error_eos(state.as_mut(), &safe_msg) {
+                        let render_err = routectl_core::Error::Streaming(e.to_string());
+                        let safe_msg = sanitize_stream_error_for_client(&render_err);
+                        let class = crate::ingress::StreamErrorClass::from_error(&render_err);
+                        for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                             let _ = tx.send(ev).await;
                         }
                         return;
@@ -283,7 +291,8 @@ async fn render_stream_task<A: IngressAdapter>(
                     "upstream stream error -- emitting terminal error event"
                 );
                 let safe_msg = sanitize_stream_error_for_client(&e);
-                for ev in adapter.render_error_eos(state.as_mut(), &safe_msg) {
+                let class = crate::ingress::StreamErrorClass::from_error(&e);
+                for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                     if tx.send(ev).await.is_err() {
                         // Client disconnected before we could
                         // deliver the terminal error event. Drop
@@ -417,7 +426,27 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         }
         _ => e.to_string(),
     };
-    error_response(shape, status, type_str, &public_message, type_str)
+    // Lift the upstream classifier so an SDK that branches on
+    // `error.type` / `error.code` keeps the upstream signal instead of
+    // a generic collapse. Only `Error::Upstream` carries these; every
+    // other variant uses the static `type_str` mapping unchanged.
+    let (upstream_type, upstream_code) = match &e {
+        Error::Upstream {
+            upstream_type,
+            upstream_code,
+            ..
+        } => (upstream_type.as_deref(), upstream_code.as_deref()),
+        _ => (None, None),
+    };
+    error_response(
+        shape,
+        status,
+        type_str,
+        &public_message,
+        type_str,
+        upstream_type,
+        upstream_code,
+    )
 }
 
 fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
@@ -446,25 +475,48 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
     }
 }
 
+/// Build a dialect-correct error envelope.
+///
+/// `err_type` / `code` are the routectl-internal static classifiers
+/// from `error_status_and_type`. `upstream_type` / `upstream_code`, when
+/// present, carry the upstream's own `error.type` / `error.code`
+/// (populated only for `Error::Upstream`) so an SDK that branches on the
+/// classifier keeps the upstream signal:
+///
+/// - OpenAI envelope: `error.type` becomes the upstream type (falling
+///   back to `err_type`); `error.code` becomes the upstream code,
+///   falling back to the upstream type, then to `code`.
+/// - Anthropic envelope: a captured upstream type that is already a
+///   valid Anthropic-vocabulary member passes through verbatim;
+///   otherwise the status-derived guess in `anthropic_error_type` wins.
+#[allow(clippy::too_many_arguments)]
 fn error_response(
     shape: ErrorEnvelopeShape,
     status: StatusCode,
     err_type: &str,
     message: &str,
     code: &str,
+    upstream_type: Option<&str>,
+    upstream_code: Option<&str>,
 ) -> Response {
     let body: Value = match shape {
-        ErrorEnvelopeShape::OpenAi => json!({
-            "error": {
-                "message": message,
-                "type": err_type,
-                "code": code,
-            }
-        }),
+        ErrorEnvelopeShape::OpenAi => {
+            // Prefer the upstream classifier; fall back to the generic
+            // routectl tags when the upstream sent none.
+            let out_type = upstream_type.unwrap_or(err_type);
+            let out_code = upstream_code.or(upstream_type).unwrap_or(code);
+            json!({
+                "error": {
+                    "message": message,
+                    "type": out_type,
+                    "code": out_code,
+                }
+            })
+        }
         ErrorEnvelopeShape::Anthropic => json!({
             "type": "error",
             "error": {
-                "type": anthropic_error_type(err_type, status),
+                "type": anthropic_error_type(err_type, status, upstream_type),
                 "message": message,
             }
         }),
@@ -476,15 +528,28 @@ fn error_response(
 /// `error_status_and_type`) to the wire string Anthropic clients
 /// expect on `error.type`. The Anthropic API uses a small fixed
 /// vocabulary -- `invalid_request_error`, `authentication_error`,
-/// `permission_error`, `not_found_error`, `rate_limit_error`,
-/// `api_error`, `overloaded_error`. routectl's tags are richer
-/// (e.g. `validation_error`, `payload_too_large`,
-/// `unsupported_media_type`); collapse them to the closest
-/// Anthropic equivalent so claude-code's per-`error.type` handling
-/// fires correctly. Status code is consulted for `upstream_error`
-/// to distinguish `overloaded_error` (503/529) from the generic
-/// `api_error` bucket.
-fn anthropic_error_type(err_type: &str, status: StatusCode) -> &'static str {
+/// `permission_error`, `not_found_error`, `request_too_large`,
+/// `rate_limit_error`, `api_error`, `overloaded_error`. routectl's tags
+/// are richer (e.g. `validation_error`, `payload_too_large`,
+/// `unsupported_media_type`); collapse them to the closest Anthropic
+/// equivalent so claude-code's per-`error.type` handling fires
+/// correctly.
+///
+/// When the upstream supplied its own `error.type` and it is already a
+/// valid Anthropic-vocabulary member, prefer it verbatim over the
+/// status-derived guess so stream + non-stream agree and the upstream
+/// signal survives. Otherwise the status table decides: `upstream_error`
+/// at 401/403/413 maps to `authentication_error` / `permission_error` /
+/// `request_too_large`, 503/529 to `overloaded_error`, and everything
+/// else falls back to `api_error`.
+fn anthropic_error_type(
+    err_type: &str,
+    status: StatusCode,
+    upstream_type: Option<&str>,
+) -> &'static str {
+    if let Some(member) = upstream_type.and_then(anthropic_vocab_member) {
+        return member;
+    }
     match (err_type, status.as_u16()) {
         ("unknown_alias", _) | ("unknown_provider", _) => "not_found_error",
         ("bad_request", _)
@@ -492,9 +557,30 @@ fn anthropic_error_type(err_type: &str, status: StatusCode) -> &'static str {
         | ("payload_too_large", _)
         | ("unsupported_media_type", _) => "invalid_request_error",
         ("auth_error", _) | ("authentication_error", _) => "authentication_error",
+        ("upstream_error", 401) => "authentication_error",
+        ("upstream_error", 403) => "permission_error",
+        ("upstream_error", 413) => "request_too_large",
         ("upstream_error", 503) | ("upstream_error", 529) => "overloaded_error",
         ("upstream_error", _) | ("streaming_error", _) | ("bad_gateway", _) => "api_error",
         (_, _) => "api_error",
+    }
+}
+
+/// Return the static Anthropic-vocabulary spelling of `t` when `t` is
+/// already a valid Anthropic `error.type` member, else `None`. Used to
+/// pass an upstream-supplied type through verbatim while still yielding
+/// a `&'static str` for the envelope.
+fn anthropic_vocab_member(t: &str) -> Option<&'static str> {
+    match t {
+        "invalid_request_error" => Some("invalid_request_error"),
+        "authentication_error" => Some("authentication_error"),
+        "permission_error" => Some("permission_error"),
+        "not_found_error" => Some("not_found_error"),
+        "request_too_large" => Some("request_too_large"),
+        "rate_limit_error" => Some("rate_limit_error"),
+        "api_error" => Some("api_error"),
+        "overloaded_error" => Some("overloaded_error"),
+        _ => None,
     }
 }
 

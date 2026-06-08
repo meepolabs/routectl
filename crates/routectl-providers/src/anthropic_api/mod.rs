@@ -958,14 +958,30 @@ async fn read_anthropic_error(
     // doesn't have to reproduce. The caller's WARN excerpt stays
     // unchanged for `routectl-warn.log` scannability.
     debug_upstream_error_body(PROVIDER_KIND, provider_id, status, &body_text);
-    let msg = serde_json::from_str::<Value>(&body_text)
-        .ok()
+    let parsed = serde_json::from_str::<Value>(&body_text).ok();
+    let msg = parsed
         .as_ref()
         .and_then(|v| v.pointer("/error/message"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| sanitize_upstream_body(&body_text));
-    let err = Error::upstream_with_retry_after(provider_id, status, msg.clone(), retry_after);
+    // Lift the upstream classifier (Anthropic shape
+    // `{type:"error",error:{type,message}}`) so an SDK that branches on
+    // `error.type` keeps the upstream signal. Anthropic errors carry no
+    // separate `code`, so only `upstream_type` is populated.
+    let upstream_type = parsed
+        .as_ref()
+        .and_then(|v| v.pointer("/error/type"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let err = Error::upstream_full(
+        provider_id,
+        status,
+        msg.clone(),
+        retry_after,
+        upstream_type,
+        None,
+    );
     (msg, err)
 }
 

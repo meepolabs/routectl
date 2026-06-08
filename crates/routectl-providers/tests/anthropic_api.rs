@@ -1518,4 +1518,40 @@ mod tests {
             other => panic!("expected Error::Upstream, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn complete_403_populates_upstream_type_permission_error() {
+        // Arrange
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "type": "error",
+                "error": {
+                    "type": "permission_error",
+                    "message": "you do not have permission"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let provider = make_provider(&mock_server.uri());
+        let req = base_req("claude-3-opus", vec![user_msg("hi")]);
+
+        // Act
+        let err = provider.complete(req).await.unwrap_err();
+
+        // Assert: the upstream classifier is lifted into upstream_type.
+        match &err {
+            routectl_core::Error::Upstream {
+                status,
+                upstream_type,
+                ..
+            } => {
+                assert_eq!(*status, 403);
+                assert_eq!(upstream_type.as_deref(), Some("permission_error"));
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
 }

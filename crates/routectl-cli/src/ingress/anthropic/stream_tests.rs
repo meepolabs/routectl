@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::ingress::anthropic::{AnthropicIngress, ANTHROPIC_FORMAT};
-use crate::ingress::{IngressAdapter, STREAM_ERROR_TYPE};
+use crate::ingress::{IngressAdapter, StreamErrorClass, STREAM_ERROR_TYPE};
 
 use super::*;
 
@@ -901,9 +901,11 @@ fn render_error_eos_returns_anthropic_error_event() {
     // Arrange
     let mut s = fresh_state();
     let error_msg = "upstream stream error (HTTP 529)";
+    let class =
+        StreamErrorClass::from_error(&routectl_core::Error::Streaming("render failure".into()));
 
     // Act
-    let events = render_error_eos_internal(&mut s, &error_msg);
+    let events = render_error_eos_internal(&mut s, &error_msg, &class);
 
     // Assert
     // Exactly one event.
@@ -926,6 +928,39 @@ fn render_error_eos_returns_anthropic_error_event() {
     );
 }
 
+/// Layer D: a 503/529 upstream stream error must carry
+/// `overloaded_error` on the Anthropic terminal error event so stream
+/// and non-stream classification agree.
+#[test]
+fn render_error_eos_emits_overloaded_for_529() {
+    // Arrange
+    let mut s = fresh_state();
+    let class = StreamErrorClass::from_error(&routectl_core::Error::upstream("p", 529, "busy"));
+
+    // Act
+    let events = render_error_eos_internal(&mut s, &"boom", &class);
+
+    // Assert
+    let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+    assert_eq!(payload["error"]["type"], "overloaded_error");
+}
+
+/// Layer D: a non-overloaded upstream stream error stays `api_error`
+/// on the Anthropic terminal event.
+#[test]
+fn render_error_eos_emits_api_error_for_502() {
+    // Arrange
+    let mut s = fresh_state();
+    let class = StreamErrorClass::from_error(&routectl_core::Error::upstream("p", 502, "bad gw"));
+
+    // Act
+    let events = render_error_eos_internal(&mut s, &"boom", &class);
+
+    // Assert
+    let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+    assert_eq!(payload["error"]["type"], "api_error");
+}
+
 /// Counterpart: a chunk arriving after `render_error_eos` must be
 /// dropped. Pins the `state.finished = true` invariant against any
 /// future refactor that forgets to mark the state as terminal.
@@ -934,7 +969,9 @@ fn render_error_eos_marks_state_finished_so_stragglers_dropped() {
     // Arrange
     let mut s = fresh_state();
     let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
-    let _ = render_error_eos_internal(&mut s, &"upstream stream error");
+    let class =
+        StreamErrorClass::from_error(&routectl_core::Error::Streaming("render failure".into()));
+    let _ = render_error_eos_internal(&mut s, &"upstream stream error", &class);
 
     // Act: a misbehaving upstream might deliver a straggler chunk
     // after the task tried to terminate -- defensive only since
@@ -959,9 +996,11 @@ fn render_error_eos_filters_control_chars_via_sanitize_for_log() {
     // Arrange: a message containing CR, LF, and an ANSI escape.
     let mut s = fresh_state();
     let dirty = "upstream stream error\r\n\x1b[31mexploit\x1b[0m";
+    let class =
+        StreamErrorClass::from_error(&routectl_core::Error::Streaming("render failure".into()));
 
     // Act
-    let events = render_error_eos_internal(&mut s, &dirty);
+    let events = render_error_eos_internal(&mut s, &dirty, &class);
 
     // Assert: the emitted message has no raw \r, \n, or ESC bytes.
     let payload: Value = serde_json::from_str(&events[0].data).unwrap();
@@ -1136,7 +1175,9 @@ fn render_error_eos_after_normal_finish_emits_nothing() {
     assert!(s.finished, "stream must be finished after normal close");
 
     // Act: late error after normal finish.
-    let late_events = render_error_eos_internal(&mut s, &"late transport error");
+    let class =
+        StreamErrorClass::from_error(&routectl_core::Error::Streaming("render failure".into()));
+    let late_events = render_error_eos_internal(&mut s, &"late transport error", &class);
 
     // Assert: no events emitted -- double-termination must be suppressed.
     assert!(

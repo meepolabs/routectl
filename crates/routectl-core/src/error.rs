@@ -15,6 +15,18 @@ pub enum Error {
         /// duration; intentionally NOT surfaced in the Display string.
         /// `None` when the upstream sent no hint or it was unparseable.
         retry_after: Option<std::time::Duration>,
+        /// The upstream error classifier (`error.type` on the OpenAI /
+        /// Anthropic error envelope), e.g. `rate_limit_exceeded`,
+        /// `context_length_exceeded`, `permission_error`. Captured by
+        /// the provider error readers and surfaced by the ingress so an
+        /// SDK that branches on `error.type` keeps the upstream signal
+        /// instead of a generic collapse. `None` when the upstream sent
+        /// no parseable type. NOT surfaced in the Display string.
+        upstream_type: Option<String>,
+        /// The upstream error code (`error.code` on the OpenAI error
+        /// envelope; numeric codes are stringified). `None` when absent.
+        /// NOT surfaced in the Display string.
+        upstream_code: Option<String>,
     },
 
     #[error("provider `{0}`: request normalization failed: {1}")]
@@ -96,6 +108,8 @@ impl Error {
             status,
             body: body.into(),
             retry_after: None,
+            upstream_type: None,
+            upstream_code: None,
         }
     }
 
@@ -114,6 +128,33 @@ impl Error {
             status,
             body: body.into(),
             retry_after,
+            upstream_type: None,
+            upstream_code: None,
+        }
+    }
+
+    /// Construct an `Upstream` error carrying the full classifier set:
+    /// the reset hint plus the upstream `error.type` / `error.code`
+    /// parsed from the response body. The ingress surfaces
+    /// `upstream_type` / `upstream_code` so an SDK that branches on
+    /// `error.type` (rate limit, context length, auth, ...) keeps the
+    /// upstream signal rather than a generic collapse. Pass `None` for
+    /// any field the upstream did not supply.
+    pub fn upstream_full(
+        provider: impl Into<String>,
+        status: u16,
+        body: impl Into<String>,
+        retry_after: Option<std::time::Duration>,
+        upstream_type: Option<String>,
+        upstream_code: Option<String>,
+    ) -> Self {
+        Self::Upstream {
+            provider: provider.into(),
+            status,
+            body: body.into(),
+            retry_after,
+            upstream_type,
+            upstream_code,
         }
     }
 
@@ -143,6 +184,7 @@ mod tests {
                 status,
                 body,
                 retry_after,
+                ..
             } => {
                 assert_eq!(provider, "test");
                 assert_eq!(status, 429);
