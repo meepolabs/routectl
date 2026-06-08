@@ -5,9 +5,10 @@
 //! - `req.reasoning.effort` -> `reasoning.{effort, summary: "auto"}`
 //!   ("auto" matches codex's default summary mode so the server emits
 //!   reasoning_summary deltas back on stream).
-//! - `req.reasoning.max_tokens` -> WARN + drop. The Responses
-//!   reasoning surface has no budget knob; the model picks its own
-//!   from `effort`.
+//! - `req.reasoning.max_tokens` -> mapped to the nearest `effort` band
+//!   via the effort<->budget table when no explicit effort is set. The
+//!   Responses reasoning surface has no budget knob; an explicit effort
+//!   still wins.
 //!
 //! provider_extras allowlist (6 keys): `prompt_cache_key`,
 //! `service_tier`, `text`, `include`, `store`, `client_metadata`.
@@ -27,7 +28,7 @@ use routectl_core::ChatRequest;
 
 use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
 use super::AuthKind;
-use crate::effort::clamp_effort_to_supported;
+use crate::effort::{clamp_effort_to_supported, level_from_budget};
 
 /// Set `request.reasoning` from `req.reasoning`. Effort maps to the
 /// `effort` field; the `summary` mode is hardcoded to "auto" to match
@@ -38,21 +39,18 @@ pub(super) fn apply_reasoning(request: &mut ResponsesRequest, req: &ChatRequest)
         return;
     };
 
-    // Lossy seam: max_tokens has no Responses equivalent. WARN once
-    // per request rather than silently drop. Effort/enabled still
-    // flow through.
-    if let Some(budget) = r.max_tokens {
-        tracing::warn!(
-            budget_tokens = budget,
-            "openai-responses: reasoning.max_tokens has no Responses-API equivalent; \
-             dropping (the model picks its own budget from reasoning.effort)"
-        );
-    }
-
-    let effort = r
-        .effort
-        .as_deref()
-        .map(|e| clamp_effort_to_supported(e, &req.routectl_internal.effort_levels).into_owned());
+    // Explicit effort wins. When no effort is set but a budget is, map
+    // the budget to the nearest effort band (the Responses API takes
+    // effort, not a budget) rather than dropping it.
+    let effort = match r.effort.as_deref() {
+        Some(e) => {
+            Some(clamp_effort_to_supported(e, &req.routectl_internal.effort_levels).into_owned())
+        }
+        None => r.max_tokens.map(|budget| {
+            let level = level_from_budget(budget);
+            clamp_effort_to_supported(level, &req.routectl_internal.effort_levels).into_owned()
+        }),
+    };
     let enabled = r.enabled;
 
     // If reasoning is explicitly disabled and no effort is set, leave

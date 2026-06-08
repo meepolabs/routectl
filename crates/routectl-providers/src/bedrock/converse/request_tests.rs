@@ -396,8 +396,8 @@ fn thinking_config_lands_in_additional_model_request_fields() {
         .expect("expected additionalModelRequestFields, got {body}");
     let thinking = bag.get("thinking").expect("expected thinking in bag");
     assert_eq!(thinking["type"], "enabled");
-    // budget_tokens = max_tokens (2048) * effort_ratio("high")=0.80 = 1638
-    assert_eq!(thinking["budget_tokens"], 1638);
+    // table("high")=24576 clamped to window ceiling max_tokens-1 = 2047.
+    assert_eq!(thinking["budget_tokens"], 2047);
 }
 
 /// Bedrock Converse routes through `anthropic_api::request::build_thinking`

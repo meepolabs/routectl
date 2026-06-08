@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use routectl_core::{is_canonical_request_key, ChatRequest};
 
-use crate::effort::clamp_effort_to_supported;
+use crate::effort::{budget_from_level, clamp_effort_to_supported};
 
 use super::tools::{TOOL_CHOICE_TYPE_ANY, TOOL_CHOICE_TYPE_TOOL};
 use super::types::{OutputConfig, ThinkingConfig};
@@ -233,7 +233,11 @@ pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<Thinki
     }
     if let Some(effort) = r.effort.as_deref() {
         let clamped = clamp_effort_to_supported(effort, &req.routectl_internal.effort_levels);
-        let budget = ((max as f64) * effort_ratio(clamped.as_ref())).max(1.0) as u32;
+        // Prefer the exact effort->budget table; fall back to the
+        // proportional estimate only for a level outside the table so
+        // an unexpected string never regresses to a zero budget.
+        let budget = budget_from_level(clamped.as_ref())
+            .unwrap_or_else(|| ((max as f64) * effort_ratio(clamped.as_ref())).max(1.0) as u32);
         let budget = apply_operator_cap(budget, operator_cap);
         return Some(ThinkingConfig::Enabled {
             budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
@@ -519,4 +523,41 @@ pub(super) fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body
         "stripped thinking from outgoing body: tool_choice forces tool use; \
          Anthropic forbids the combo"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_thinking, ThinkingConfig};
+    use routectl_core::{ChatRequest, ReasoningConfig};
+
+    // Legacy-budget path with effort "high" must emit the exact table
+    // budget (24576), not the old proportional estimate (max * 0.80).
+    #[test]
+    fn legacy_effort_high_emits_exact_table_budget() {
+        // Arrange: non-adaptive request, max_tokens large enough that the
+        // 24576 table value survives the [1024, max-1] window clamp and
+        // is distinct from any proportional estimate.
+        let req = ChatRequest {
+            max_tokens: Some(100_000),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Act
+        let thinking = build_thinking(&req, false);
+
+        // Assert
+        assert!(
+            matches!(
+                thinking,
+                Some(ThinkingConfig::Enabled {
+                    budget_tokens: 24576
+                })
+            ),
+            "expected exact table budget 24576, got {thinking:?}"
+        );
+    }
 }

@@ -97,6 +97,50 @@ pub(crate) fn clamp_effort_to_supported<'a>(
     Cow::Owned(applied.to_owned())
 }
 
+/// Exact effort-level -> `budget_tokens` lookup. Returns `None` for any
+/// level outside the table so callers can fall back to their own
+/// estimate rather than guess. This is the forward direction of the
+/// effort<->budget bijection; `level_from_budget` is the reverse.
+///
+/// The table is independent of `VALID_EFFORT_TOKENS` / `RANK_ORDER`:
+/// it carries a "none" level (budget 0) and exact per-level budgets
+/// that the clamp path deliberately does not model.
+pub(crate) fn budget_from_level(level: &str) -> Option<u32> {
+    match level {
+        "none" => Some(0),
+        "minimal" => Some(512),
+        "low" => Some(1024),
+        "medium" => Some(8192),
+        "high" => Some(24576),
+        "xhigh" => Some(32768),
+        "max" => Some(128_000),
+        _ => None,
+    }
+}
+
+/// Reverse of `budget_from_level`: map a `budget_tokens` value back to
+/// the effort level whose threshold band contains it. Bands:
+///
+///   0           -> none
+///   1..=512     -> minimal
+///   513..=1024  -> low
+///   1025..=8192 -> medium
+///   8193..=24576 -> high
+///   24577..=32768 -> xhigh
+///   32769..     -> max
+#[cfg(feature = "openai-responses")]
+pub(crate) fn level_from_budget(budget: u32) -> &'static str {
+    match budget {
+        0 => "none",
+        1..=512 => "minimal",
+        513..=1024 => "low",
+        1025..=8192 => "medium",
+        8193..=24576 => "high",
+        24577..=32768 => "xhigh",
+        _ => "max",
+    }
+}
+
 /// Return the lowest-ranked string in `supported` by the standard rank
 /// order. Falls back to the first element for strings not in the order.
 ///
@@ -122,7 +166,9 @@ fn lowest_supported(supported: &[String]) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_effort_to_supported, RANK_ORDER, VALID_EFFORT_TOKENS};
+    #[cfg(feature = "openai-responses")]
+    use super::level_from_budget;
+    use super::{budget_from_level, clamp_effort_to_supported, RANK_ORDER, VALID_EFFORT_TOKENS};
 
     // VALID_EFFORT_TOKENS and RANK_ORDER must stay in sync: same elements,
     // same order. If either is updated, the other must follow.
@@ -219,5 +265,41 @@ mod tests {
         let sup = levels(&["minimal"]);
         // low > minimal; highest <= low in supported is minimal.
         assert_eq!(clamp_effort_to_supported("low", &sup), "minimal");
+    }
+
+    // Forward table: every defined level maps to its exact budget.
+    #[test]
+    fn budget_from_level_returns_exact_table_value_for_each_level() {
+        assert_eq!(budget_from_level("none"), Some(0));
+        assert_eq!(budget_from_level("minimal"), Some(512));
+        assert_eq!(budget_from_level("low"), Some(1024));
+        assert_eq!(budget_from_level("medium"), Some(8192));
+        assert_eq!(budget_from_level("high"), Some(24576));
+        assert_eq!(budget_from_level("xhigh"), Some(32768));
+        assert_eq!(budget_from_level("max"), Some(128_000));
+    }
+
+    // Forward table: an unknown level yields None so callers can fall back.
+    #[test]
+    fn budget_from_level_returns_none_for_unknown_level() {
+        assert_eq!(budget_from_level("ludicrous"), None);
+    }
+
+    // Reverse table: each threshold boundary maps to the correct band.
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn level_from_budget_maps_thresholds_to_bands() {
+        assert_eq!(level_from_budget(0), "none");
+        assert_eq!(level_from_budget(512), "minimal");
+        assert_eq!(level_from_budget(513), "low");
+        assert_eq!(level_from_budget(1024), "low");
+        assert_eq!(level_from_budget(1025), "medium");
+        assert_eq!(level_from_budget(8192), "medium");
+        assert_eq!(level_from_budget(8193), "high");
+        assert_eq!(level_from_budget(24576), "high");
+        assert_eq!(level_from_budget(24577), "xhigh");
+        assert_eq!(level_from_budget(32768), "xhigh");
+        assert_eq!(level_from_budget(32769), "max");
+        assert_eq!(level_from_budget(128000), "max");
     }
 }

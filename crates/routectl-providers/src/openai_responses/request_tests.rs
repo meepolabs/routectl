@@ -472,6 +472,47 @@ fn reasoning_max_tokens_warns_and_drops() {
 }
 
 #[test]
+fn reasoning_budget_only_maps_to_effort_band() {
+    // Arrange: caller supplied only a budget (no explicit effort).
+    // 8192 sits in the medium band (1025..=8192) per the reverse table.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: None,
+        max_tokens: Some(8192),
+        exclude: None,
+        enabled: None,
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: budget is mapped to "medium" rather than dropped.
+    assert_eq!(
+        v["reasoning"],
+        json!({"effort": "medium", "summary": "auto"})
+    );
+}
+
+#[test]
+fn reasoning_explicit_effort_wins_over_budget() {
+    // Arrange: both set. Explicit effort must win; budget is ignored
+    // (it would map to the medium band but "high" takes precedence).
+    let mut req = req_with(vec![user_text("ping")]);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("high".into()),
+        max_tokens: Some(8192),
+        exclude: None,
+        enabled: None,
+    });
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(v["reasoning"]["effort"], "high");
+}
+
+#[test]
 fn provider_extras_prompt_cache_key_forwards() {
     // Arrange
     let mut req = req_with(vec![user_text("ping")]);

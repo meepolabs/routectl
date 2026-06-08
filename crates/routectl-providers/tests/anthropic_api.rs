@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_high_maps_to_80_percent() {
+    fn reasoning_effort_high_maps_to_exact_table_budget() {
         let provider = make_provider("https://api.anthropic.com");
         let mut req = base_req("claude-3-opus", vec![user_msg("hi")]);
         req.max_tokens = Some(10000);
@@ -211,7 +211,8 @@ mod tests {
         let body = provider.normalize_request(&req).unwrap();
 
         assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 8000u64);
+        // table("high")=24576 clamped to window ceiling max_tokens-1 = 9999.
+        assert_eq!(body["thinking"]["budget_tokens"], 9999u64);
     }
 
     #[test]

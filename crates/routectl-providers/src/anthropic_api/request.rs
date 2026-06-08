@@ -557,6 +557,40 @@ mod context_management_normalize_tests {
         );
     }
 
+    /// Negative guard: the anthropic-api egress must NOT strip the Claude
+    /// Code billing/attribution system block. The block belongs to
+    /// Anthropic and is forwarded unchanged on the all-Anthropic path;
+    /// only the NON-Anthropic egresses (openai-compat, bedrock) strip it.
+    #[test]
+    fn normalize_forwards_billing_system_block_unchanged() {
+        use routectl_core::{SystemBlock, SystemContent};
+        let mut req = simple_req();
+        req.system = Some(SystemContent::Blocks(vec![
+            SystemBlock {
+                kind: "text".into(),
+                text: "x-anthropic-billing-header: v=1; fp=keepme".into(),
+                cache_control: None,
+                citations: None,
+            },
+            SystemBlock {
+                kind: "text".into(),
+                text: "you are helpful".into(),
+                cache_control: None,
+                citations: None,
+            },
+        ]));
+        let body =
+            normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+        let sys = body["system"].as_array().expect("system survives as array");
+        assert_eq!(
+            sys.len(),
+            2,
+            "anthropic-api egress must forward BOTH system blocks (no billing strip); got: {body}"
+        );
+        assert_eq!(sys[0]["text"], "x-anthropic-billing-header: v=1; fp=keepme");
+        assert_eq!(sys[1]["text"], "you are helpful");
+    }
+
     /// Soft-fail: when context_management=true and the thinking cache has
     /// no entry for the qualifying tool_use id (cold-start or TTL eviction),
     /// the `thinking` key must be stripped from the outgoing body so the
@@ -607,8 +641,23 @@ mod context_management_normalize_tests {
 #[cfg(test)]
 mod multi_turn_tool_use_tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD as B64_STANDARD, Engine};
     use routectl_core::{ChatRequest, CoreHistoryReasoning, Message, Role};
     use serde_json::json;
+
+    /// A genuine Claude-shaped thinking signature: E-prefixed base64 of a
+    /// payload whose first byte is 0x12. The egress strip preserves only
+    /// Claude-shaped signatures, so test fixtures that must survive the
+    /// strip use this rather than an arbitrary placeholder string.
+    fn claude_signature() -> String {
+        B64_STANDARD.encode([0x12u8, 0x34, 0x56, 0x78])
+    }
+
+    /// A distinct Claude-shaped signature, varied by a trailing byte so two
+    /// surviving thinking blocks in one fixture stay distinguishable.
+    fn claude_signature_variant(tag: u8) -> String {
+        B64_STANDARD.encode([0x12u8, 0x34, 0x56, tag])
+    }
 
     /// Minimal in-process tracing capture used by
     /// `emits_warn_when_stripping_occurs` to assert structured fields
@@ -814,7 +863,7 @@ mod multi_turn_tool_use_tests {
                         }),
                         ContentPart::Known(KnownContentPart::Thinking {
                             thinking: "signed analysis".into(),
-                            signature: Some("sig_abc".into()),
+                            signature: Some(claude_signature()),
                         }),
                         ContentPart::Known(KnownContentPart::Thinking {
                             thinking: "unsigned analysis".into(),
@@ -863,7 +912,7 @@ mod multi_turn_tool_use_tests {
             .iter()
             .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("thinking"))
             .unwrap();
-        assert_eq!(signed["signature"], "sig_abc");
+        assert_eq!(signed["signature"], claude_signature());
 
         // Other survivors keep their fields.
         let tool_use = blocks
@@ -890,7 +939,7 @@ mod multi_turn_tool_use_tests {
                     content: MessageContent::Parts(vec![
                         ContentPart::Known(KnownContentPart::Thinking {
                             thinking: "first".into(),
-                            signature: Some("sig_one".into()),
+                            signature: Some(claude_signature_variant(0x01)),
                         }),
                         ContentPart::Known(KnownContentPart::Text {
                             text: "answer".into(),
@@ -898,7 +947,7 @@ mod multi_turn_tool_use_tests {
                         }),
                         ContentPart::Known(KnownContentPart::Thinking {
                             thinking: "second".into(),
-                            signature: Some("sig_two".into()),
+                            signature: Some(claude_signature_variant(0x02)),
                         }),
                     ]),
                     reasoning: None,
@@ -930,8 +979,8 @@ mod multi_turn_tool_use_tests {
             vec!["thinking", "text", "thinking"],
             "all blocks pass through unchanged when every thinking is signed"
         );
-        assert_eq!(blocks[0]["signature"], "sig_one");
-        assert_eq!(blocks[2]["signature"], "sig_two");
+        assert_eq!(blocks[0]["signature"], claude_signature_variant(0x01));
+        assert_eq!(blocks[2]["signature"], claude_signature_variant(0x02));
     }
 
     #[test]
@@ -1364,8 +1413,8 @@ mod multi_turn_tool_use_tests {
 
         let thinking = body.get("thinking").expect("thinking field present");
         assert_eq!(thinking["type"], "enabled");
-        // budget_tokens = max_tokens (2048) * effort_ratio("high")=0.80 = 1638
-        assert_eq!(thinking["budget_tokens"], 1638);
+        // table("high")=24576 clamped to window ceiling max_tokens-1 = 2047.
+        assert_eq!(thinking["budget_tokens"], 2047);
 
         // No output_config on the legacy path.
         assert!(
@@ -1376,14 +1425,15 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["temperature"], 1.0);
     }
 
-    /// `effort = "max"` on the legacy path maps to a near-total
-    /// budget (max_tokens * 0.99). Adaptive path passes "max"
-    /// verbatim into `output_config.effort` and never calls
-    /// `effort_ratio`. This test pins the legacy mapping so a
-    /// non-adaptive provider receiving `max` from the canonical
-    /// surface still produces a serializable body.
+    /// `effort = "max"` on the legacy path maps via the exact table to
+    /// 128000, which the `[1024, max_tokens-1]` window clamps down to
+    /// `max_tokens - 1`. The adaptive path passes "max" verbatim into
+    /// `output_config.effort` and never consults the table. This test
+    /// pins the legacy mapping so a non-adaptive provider receiving
+    /// `max` from the canonical surface still produces a serializable
+    /// body.
     #[test]
-    fn effort_max_maps_to_99_percent_legacy_path() {
+    fn effort_max_maps_to_window_ceiling_legacy_path() {
         use routectl_core::ReasoningConfig;
         let req = ChatRequest {
             model: "claude-sonnet-4-6".into(),
@@ -1400,8 +1450,8 @@ mod multi_turn_tool_use_tests {
         let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         let thinking = body.get("thinking").unwrap();
         assert_eq!(thinking["type"], "enabled");
-        // 2000 * 0.99 = 1980
-        assert_eq!(thinking["budget_tokens"], 1980);
+        // table("max")=128000 clamped to window ceiling max_tokens-1 = 1999.
+        assert_eq!(thinking["budget_tokens"], 1999);
     }
 
     /// `reasoning.effort = "none"` produces `Disabled` on both
@@ -1620,14 +1670,14 @@ mod multi_turn_tool_use_tests {
         assert_eq!(body["output_config"]["effort"], "high");
     }
 
-    /// `effort="high"` on `max_tokens=1100` computes `1100*0.80=880`,
-    /// which would still 400 (below the 1024 floor) even though the
-    /// gate accepts the request (1100 > 1024). The clamp inside each
-    /// `Enabled` arm rescues the body by raising the budget to 1024.
-    /// 1024 < 1100 holds, so Anthropic's `max_tokens > budget_tokens`
-    /// constraint is satisfied; visible-output budget shrinks to 76.
+    /// `effort="high"` on `max_tokens=1100` looks up the exact table
+    /// (24576), which the `[1024, max_tokens-1]` window then clamps down
+    /// to the ceiling `max_tokens-1 = 1099`. 1099 < 1100 holds, so
+    /// Anthropic's `max_tokens > budget_tokens` constraint is satisfied;
+    /// visible-output budget shrinks to 1. Pins the ceiling clamp on the
+    /// effort path in the just-above-floor band.
     #[test]
-    fn floor_clamps_budget_in_carryable_band() {
+    fn effort_budget_ceiling_clamped_in_carryable_band() {
         use routectl_core::ReasoningConfig;
         let req = ChatRequest {
             model: "claude-sonnet-4-5-20250929".into(),
@@ -1643,7 +1693,7 @@ mod multi_turn_tool_use_tests {
         };
         let body = normalize("test-anthropic", &req, false, &[], false, None).unwrap();
         assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+        assert_eq!(body["thinking"]["budget_tokens"], 1099);
     }
 
     /// Boundary: `max_tokens=1025` is the smallest value the gate
@@ -2283,9 +2333,10 @@ mod multi_turn_tool_use_tests {
         // A SIGNED thinking block is never the target of the
         // unsigned-strip, so it survives under both Preserve and Strip.
         // Pins that the gate only ever affects unsigned blocks.
+        let sig = claude_signature();
         for hr in [CoreHistoryReasoning::Preserve, CoreHistoryReasoning::Strip] {
             // Arrange.
-            let req = req_with_hr(Some(hr), assistant_with_thinking(Some("sig_xyz")));
+            let req = req_with_hr(Some(hr), assistant_with_thinking(Some(&sig)));
 
             // Act.
             let body =
@@ -2303,7 +2354,7 @@ mod multi_turn_tool_use_tests {
                 .find(|b| b.get("type").and_then(|v| v.as_str()) == Some("thinking"))
                 .unwrap_or_else(|| panic!("thinking block absent under {hr:?}"));
             assert_eq!(
-                thinking["signature"], "sig_xyz",
+                thinking["signature"], sig,
                 "signed thinking keeps its signature under {hr:?}"
             );
         }
@@ -2756,9 +2807,11 @@ mod anthropic_effort_clamp_tests {
     /// The legacy budget must be derived from "medium" (clamped down to
     /// the operator cap), not "high".
     ///
-    /// Concretely: max_tokens=4096, effort_ratio("medium")=0.50 ->
-    /// budget_tokens=2048. If the clamp were absent, effort_ratio("high")
-    /// would yield 0.80*4096=3276.
+    /// Concretely: max_tokens=4096. The exact table maps "medium" to
+    /// 8192, which the `[1024, max_tokens-1]` window then clamps to
+    /// 4095. The high band (24576) would clamp to the same ceiling, so
+    /// the cost cap is observed at the table-lookup layer: this test
+    /// pins that effort is clamped to "medium" before the budget lookup.
     #[test]
     fn legacy_clamps_effort_to_operator_cost_cap() {
         // Arrange
@@ -2781,12 +2834,11 @@ mod anthropic_effort_clamp_tests {
         let body =
             normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
 
-        // Assert: budget derived from "medium" (0.50 * 4096 = 2048), not
-        // from "high" (0.80 * 4096 = 3276).
+        // Assert: "medium" table budget 8192 window-clamped to 4095.
         let thinking = body.get("thinking").expect("thinking field present");
         assert_eq!(thinking["type"], "enabled");
         assert_eq!(
-            thinking["budget_tokens"], 2048,
+            thinking["budget_tokens"], 4095,
             "legacy path must clamp effort from high to medium against operator cap; got: {thinking}"
         );
     }
