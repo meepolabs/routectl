@@ -3,6 +3,9 @@ source: crates/routectl-providers/tests/contract_egress_openai_responses.rs
 expression: body
 ---
 {
+  "include": [
+    "reasoning.encrypted_content"
+  ],
   "input": [
     {
       "content": [

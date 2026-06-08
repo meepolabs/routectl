@@ -54,6 +54,10 @@ pub(crate) fn translate(
 
     extras::apply_reasoning(&mut request, req);
     extras::merge_provider_extras(&mut request, req, cfg.auth_kind);
+    // Runs last: the encrypted-reasoning include depends on the final
+    // `store` value (which merge_provider_extras may have flipped) and
+    // on whether the operator pinned `include` explicitly.
+    extras::finalize_reasoning_include(&mut request, req);
 
     Ok(request)
 }

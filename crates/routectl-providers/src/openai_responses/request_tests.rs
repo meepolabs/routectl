@@ -245,6 +245,31 @@ fn assistant_thinking_without_signature_emits_empty_encrypted_content() {
 }
 
 #[test]
+fn assistant_redacted_thinking_does_not_leak_blob_into_encrypted_content() {
+    // Arrange: assistant turn with a RedactedThinking part. The opaque
+    // Anthropic base64 blob is NOT a valid OpenAI encrypted_content
+    // token and must not be forwarded into that slot.
+    let secret_blob = "EroBCkYIBxgCKkB_ANTHROPIC_REDACTED_BLOB";
+    let parts = vec![ContentPart::Known(KnownContentPart::RedactedThinking {
+        data: secret_blob.into(),
+    })];
+    let req = req_with(vec![user_text("ping"), assistant_parts(parts)]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: a reasoning item is emitted with EMPTY encrypted_content;
+    // the raw blob does not appear anywhere on the wire.
+    let reasoning = &v["input"][1];
+    assert_eq!(reasoning["type"], "reasoning");
+    assert_eq!(reasoning["encrypted_content"], "");
+    assert!(
+        !v.to_string().contains(secret_blob),
+        "redacted Anthropic blob must not leak onto the Responses wire"
+    );
+}
+
+#[test]
 fn assistant_tool_use_translates_to_function_call() {
     // Arrange: assistant turn carrying a ToolUse part.
     let parts = vec![ContentPart::Known(KnownContentPart::ToolUse {
@@ -532,6 +557,60 @@ fn store_provider_extras_override_ignored_for_chatgpt_oauth() {
     assert_eq!(v["store"], json!(false));
 }
 
+/// A non-chatgpt-oauth config (api-key path) where store stays false by
+/// default. Used to exercise the store override + include-forcing logic.
+fn cfg_api_key() -> OpenAiResponsesConfig {
+    let mut c = OpenAiResponsesConfig::new("openai-responses:test", "literal:test");
+    c.auth_kind = AuthKind::ApiKey;
+    c
+}
+
+#[test]
+fn store_false_forces_encrypted_reasoning_include() {
+    // Arrange: default chatgpt-oauth, store false, no operator include.
+    let req = req_with(vec![user_text("ping")]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: include carries the encrypted-reasoning carrier so the
+    // upstream returns a non-empty encrypted_content for later replay.
+    assert_eq!(v["store"], json!(false));
+    assert_eq!(v["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[test]
+fn store_true_does_not_force_encrypted_reasoning_include() {
+    // Arrange: api-key path with an explicit store=true override (server
+    // retains reasoning, so no include is needed).
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"store": true}));
+
+    // Act
+    let v = translate_to_json(&cfg_api_key(), &req);
+
+    // Assert: store honored, include NOT force-added.
+    assert_eq!(v["store"], json!(true));
+    assert!(
+        v.get("include").is_none(),
+        "include must not be forced when store is true; got: {v}"
+    );
+}
+
+#[test]
+fn explicit_operator_include_is_respected_not_overwritten() {
+    // Arrange: operator pins include to a custom value; store false.
+    let mut req = req_with(vec![user_text("ping")]);
+    req.provider_extras = Some(json!({"include": ["message.output_text.logprobs"]}));
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: the operator value is honored verbatim (NOT augmented with
+    // the encrypted-reasoning carrier).
+    assert_eq!(v["include"], json!(["message.output_text.logprobs"]));
+}
+
 // ---------------------------------------------------------------------------
 // user image content
 // ---------------------------------------------------------------------------
@@ -628,6 +707,103 @@ fn user_image_unknown_source_kind_warns_and_drops() {
 
     // Assert: the single unknown-source image was dropped so the user
     // message has no content and was skipped entirely.
+    assert_eq!(v["input"], json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// user file content (OpenAI-shape File -> Responses input_file)
+// ---------------------------------------------------------------------------
+
+fn user_file(file: Value) -> Message {
+    Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
+            file,
+            cache_control: None,
+        })]),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+#[test]
+fn user_file_data_translates_to_input_file_with_filename() {
+    // Arrange: OpenAI-shape file part carrying inline base64 + filename.
+    let req = req_with(vec![user_file(json!({
+        "filename": "draft.pdf",
+        "file_data": "data:application/pdf;base64,JVBER"
+    }))]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: an input_file item carries file_data + filename (no drop).
+    let content = &v["input"][0]["content"][0];
+    assert_eq!(content["type"], "input_file");
+    assert_eq!(content["file_data"], "data:application/pdf;base64,JVBER");
+    assert_eq!(content["filename"], "draft.pdf");
+    assert!(content.get("file_id").is_none());
+}
+
+#[test]
+fn user_file_id_only_translates_to_input_file_with_file_id() {
+    // Arrange: OpenAI-shape file part referencing a prior upload.
+    let req = req_with(vec![user_file(json!({"file_id": "file-abc123"}))]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: input_file item carries file_id; file_data/filename absent.
+    let content = &v["input"][0]["content"][0];
+    assert_eq!(content["type"], "input_file");
+    assert_eq!(content["file_id"], "file-abc123");
+    assert!(content.get("file_data").is_none());
+    assert!(content.get("filename").is_none());
+}
+
+#[test]
+fn user_file_with_no_carrier_is_dropped() {
+    // Arrange: a file part with neither file_data nor file_id.
+    let req = req_with(vec![user_file(json!({"filename": "empty.pdf"}))]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: nothing to forward; the user message is skipped entirely.
+    assert_eq!(v["input"], json!([]));
+}
+
+#[test]
+fn user_document_anthropic_shape_still_drops() {
+    // Arrange: Anthropic-shape Document part (out of scope for the
+    // codex target; remains dropped at parity with the reference).
+    let msg = Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Document {
+            source: json!({
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "JVBER"
+            }),
+            title: Some("spec.pdf".into()),
+            citations: None,
+            cache_control: None,
+        })]),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    };
+    let req = req_with(vec![msg]);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert: Document is dropped; no content -> message skipped.
     assert_eq!(v["input"], json!([]));
 }
 

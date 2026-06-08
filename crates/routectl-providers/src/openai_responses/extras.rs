@@ -122,6 +122,55 @@ pub(super) fn merge_provider_extras(
     }
 }
 
+/// The `include` entry that carries the encrypted reasoning blob back
+/// on the wire. Required whenever `store == false`, otherwise the
+/// upstream returns empty `encrypted_content` and a later reasoning
+/// replay by item id is a no-op (chatgpt-oauth) or a 404 (api.openai.com).
+const REASONING_ENCRYPTED_INCLUDE: &str = "reasoning.encrypted_content";
+
+/// Ensure the request asks the server to echo back the encrypted
+/// reasoning carrier when the response is not persisted.
+///
+/// When `store == false` the server only returns a usable
+/// `encrypted_content` if `include` carries
+/// `"reasoning.encrypted_content"`. We force it in UNLESS the operator
+/// supplied an explicit `include` via `provider_extras` (their value is
+/// then respected verbatim). When `store == true` the server retains
+/// reasoning, so no `include` is forced.
+///
+/// Runs after `merge_provider_extras` so it reflects a provider_extras
+/// override of `store`.
+pub(super) fn finalize_reasoning_include(request: &mut ResponsesRequest, req: &ChatRequest) {
+    if request.store {
+        return;
+    }
+    if operator_set_include(req) {
+        return;
+    }
+    if request
+        .include
+        .iter()
+        .any(|s| s == REASONING_ENCRYPTED_INCLUDE)
+    {
+        return;
+    }
+    request
+        .include
+        .push(REASONING_ENCRYPTED_INCLUDE.to_string());
+}
+
+/// Whether the operator explicitly supplied `include` via
+/// `provider_extras` (an array value under the `include` key). An
+/// explicit value -- even an empty array -- is honored as-is.
+fn operator_set_include(req: &ChatRequest) -> bool {
+    req.provider_extras
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("include"))
+        .map(|v| v.is_array())
+        .unwrap_or(false)
+}
+
 /// Apply an operator-supplied `store` override. For `ChatgptOauth`
 /// the value is IGNORED (codex parity); for other auth_kinds the
 /// boolean is honored verbatim.

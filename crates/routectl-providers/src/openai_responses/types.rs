@@ -179,6 +179,19 @@ pub(crate) enum ResponsesContentItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    /// File block on a user message. Carries either inline base64
+    /// (`file_data` as a `data:<mime>;base64,<...>` URI) or a reference
+    /// to a previously-uploaded file (`file_id`), plus an optional
+    /// `filename`. All payload fields are optional except the `type`
+    /// tag; absent fields are omitted so the wire shape stays minimal.
+    InputFile {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_data: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
 }
 
 /// One summary block on a `Reasoning` input item. Mirrors the codex

@@ -340,11 +340,23 @@ fn lift_reasoning_details(details: &[ReasoningDetail], out: &mut Vec<ResponseInp
 
     for key in order {
         let group = groups.remove(&key).expect("recorded in order");
+        let encrypted_content = group.encrypted_content.unwrap_or_default();
+        // A reasoning item with empty encrypted_content cannot be
+        // validly replayed: re-injecting it by its upstream id is a
+        // no-op (chatgpt-oauth) or a hard 404 "Item not found"
+        // (api.openai.com). Skip it rather than ship a dangling id.
+        if encrypted_content.is_empty() {
+            tracing::debug!(
+                ?key,
+                "openai-responses: skipping reasoning replay item with empty encrypted_content"
+            );
+            continue;
+        }
         out.push(ResponseInputItem::Reasoning {
             id: key,
             summary: group.summary,
             content: group.content,
-            encrypted_content: group.encrypted_content.unwrap_or_default(),
+            encrypted_content,
         });
     }
 
@@ -430,6 +442,11 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
                         // Lifted to FunctionCallOutput in
                         // `extract_tool_results`; skip silently here.
                     }
+                    ContentPart::Known(KnownContentPart::File { file, .. }) => {
+                        if let Some(item) = translate_file_part(id, file) {
+                            out.push(item);
+                        }
+                    }
                     ContentPart::Known(other) => {
                         tracing::warn!(
                             provider = id,
@@ -455,10 +472,10 @@ fn build_user_content(id: &str, content: &MessageContent) -> Result<Vec<Response
 
 /// Per-part walker for an assistant turn. Routes each part into the
 /// appropriate output bucket: `Thinking` -> reasoning items;
-/// `RedactedThinking` -> reasoning items (using the redacted data as
-/// the encrypted_content carrier with an empty summary); `Text` ->
-/// message content (output_text); `ToolUse` -> a separate
-/// `FunctionCall` input item. Everything else drops with a WARN.
+/// `RedactedThinking` -> reasoning items with EMPTY encrypted_content
+/// (the opaque Anthropic blob is not a valid OpenAI token and is not
+/// forwarded); `Text` -> message content (output_text); `ToolUse` -> a
+/// separate `FunctionCall` input item. Everything else drops with a WARN.
 ///
 /// `suppress_thinking_parts` is true when `reasoning_details` already
 /// produced Reasoning items: in that case Thinking + RedactedThinking
@@ -507,15 +524,14 @@ fn walk_assistant_part(
                     "skipping RedactedThinking content-part because reasoning_details already emitted Reasoning items"
                 );
             } else {
-                // Redacted blocks have no plaintext summary; ride the
-                // base64 bytes verbatim in encrypted_content so the
-                // server-side replay gate has something to key on.
-                reasoning.push(ResponseInputItem::Reasoning {
-                    id: None,
-                    summary: Vec::new(),
-                    content: Vec::new(),
-                    encrypted_content: data.clone(),
-                });
+                // A RedactedThinking content-part carries an opaque
+                // Anthropic blob with no format tag, so it is gated the
+                // same way as Thinking: the blob is NOT a valid OpenAI
+                // encrypted_content token and must not be forwarded into
+                // that slot. `data` is treated as the (absent) signature
+                // for an unknown-format part, yielding empty
+                // encrypted_content.
+                reasoning.push(translate_thinking_part("", Some(data), None));
             }
         }
         ContentPart::Known(KnownContentPart::ToolUse {
@@ -585,6 +601,45 @@ pub(super) fn translate_thinking_part(
         content: Vec::new(),
         encrypted_content,
     }
+}
+
+/// Translate an OpenAI-shape `File` part's nested `file` object into a
+/// `ResponsesContentItem::InputFile`. The nested object carries either
+/// `file_data` (a `data:<mime>;base64,<...>` URI for an inline upload)
+/// or `file_id` (a reference to a previously-uploaded file), plus an
+/// optional `filename`. Returns `None` and WARNs when neither carrier is
+/// present (an empty file part has nothing the upstream can act on).
+fn translate_file_part(id: &str, file: &serde_json::Value) -> Option<ResponsesContentItem> {
+    let file_data = file
+        .get("file_data")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let file_id = file
+        .get("file_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let filename = file
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    if file_data.is_none() && file_id.is_none() {
+        tracing::warn!(
+            provider = id,
+            role = "user",
+            "dropping file part with no file_data or file_id on Responses egress"
+        );
+        return None;
+    }
+
+    Some(ResponsesContentItem::InputFile {
+        file_data,
+        file_id,
+        filename,
+    })
 }
 
 /// Translate a canonical `Image` source block to a
@@ -842,11 +897,12 @@ mod messages_tests {
 
     #[test]
     fn lift_includes_openai_responses_v1_details() {
-        // Arrange: one detail with the correct format tag.
+        // Arrange: a v1 detail carrying an encrypted_content signature
+        // (the only shape that can be validly replayed).
         let details = vec![make_detail(
             Some(OPENAI_RESPONSES_FORMAT),
-            ReasoningDetailKind::Text,
-            json!({"text": "the reasoning text"}),
+            ReasoningDetailKind::Encrypted,
+            json!({"encrypted_content": "SIG"}),
         )];
 
         // Act
@@ -862,13 +918,72 @@ mod messages_tests {
     }
 
     #[test]
+    fn lift_skips_v1_detail_with_empty_encrypted_content() {
+        // Arrange: a v1 detail with no encrypted_content (text only).
+        // It cannot be validly replayed, so it must be dropped to avoid
+        // a dangling reasoning id on the wire.
+        let details = vec![make_detail(
+            Some(OPENAI_RESPONSES_FORMAT),
+            ReasoningDetailKind::Text,
+            json!({"text": "the reasoning text"}),
+        )];
+
+        // Act
+        let mut out = Vec::new();
+        lift_reasoning_details(&details, &mut out);
+
+        // Assert
+        assert!(
+            out.is_empty(),
+            "expected no Reasoning items for a v1 detail with empty encrypted_content"
+        );
+    }
+
+    #[test]
+    fn lift_replays_v1_detail_with_non_empty_encrypted_content() {
+        // Arrange: a v1 detail that carries both text and a signature.
+        let details = vec![
+            make_detail(
+                Some(OPENAI_RESPONSES_FORMAT),
+                ReasoningDetailKind::Text,
+                json!({"text": "the reasoning text"}),
+            ),
+            make_detail(
+                Some(OPENAI_RESPONSES_FORMAT),
+                ReasoningDetailKind::Encrypted,
+                json!({"encrypted_content": "SIG"}),
+            ),
+        ];
+
+        // Act
+        let mut out = Vec::new();
+        lift_reasoning_details(&details, &mut out);
+
+        // Assert: a single Reasoning item carrying the signature.
+        assert_eq!(out.len(), 1, "expected one replayed Reasoning item");
+        let ResponseInputItem::Reasoning {
+            encrypted_content, ..
+        } = &out[0]
+        else {
+            panic!("expected ResponseInputItem::Reasoning");
+        };
+        assert_eq!(encrypted_content, "SIG");
+    }
+
+    #[test]
     fn lift_mixed_formats_only_includes_v1() {
         // Arrange: mix of openai-responses-v1 and anthropic-claude-v1.
+        // The v1 entries carry a signature so the v1 item is replayable.
         let details = vec![
             make_detail(
                 Some(OPENAI_RESPONSES_FORMAT),
                 ReasoningDetailKind::Text,
                 json!({"text": "openai reasoning"}),
+            ),
+            make_detail(
+                Some(OPENAI_RESPONSES_FORMAT),
+                ReasoningDetailKind::Encrypted,
+                json!({"encrypted_content": "SIG"}),
             ),
             make_detail(
                 Some("anthropic-claude-v1"),
