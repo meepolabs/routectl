@@ -37,6 +37,7 @@ fn make_request(stream: bool) -> ChatRequest {
     ChatRequest {
         model: MODEL.to_string(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text(PROMPT.to_string()),
             reasoning: None,

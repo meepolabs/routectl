@@ -673,4 +673,33 @@ mod tests {
             "no usage sub-bags present; got {lifted:?}"
         );
     }
+
+    /// A safety refusal (`message.refusal` with `content: null`) and a
+    /// per-choice `logprobs` object must survive the openai-compat
+    /// normalize so the client still sees both. Before the canonical
+    /// gained these slots, serde dropped them silently.
+    #[test]
+    fn refusal_and_logprobs_survive_normalize() {
+        let raw = json!({
+            "id": "chatcmpl-test",
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "refusal": "I can't help with that."
+                },
+                "finish_reason": "stop",
+                "logprobs": {"content": [{"token": "x", "logprob": -0.2}]}
+            }]
+        });
+        let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+        assert_eq!(
+            resp.choices[0].message.refusal.as_deref(),
+            Some("I can't help with that.")
+        );
+        let lp = resp.choices[0].logprobs.as_ref().expect("logprobs present");
+        assert_eq!(lp["content"][0]["token"], "x");
+    }
 }

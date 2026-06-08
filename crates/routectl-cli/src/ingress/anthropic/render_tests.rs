@@ -13,8 +13,10 @@ fn render_response_emits_messages_shape() {
         model: "claude-opus-4-7".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("hi there".into()),
                 reasoning: None,
@@ -64,8 +66,10 @@ fn render_response_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() 
         model: "gpt-5".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
@@ -138,8 +142,10 @@ fn render_response_emits_tool_use_from_tool_calls_when_parts_has_no_tool_use() {
         model: "qwen-3-coder".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 // openai-compat doesn't populate parts.ToolUse; content
                 // is the model's plain text reply.
@@ -199,8 +205,10 @@ fn render_response_dedupes_tool_use_when_parts_carries_other_typed_tool_use() {
         model: "claude-opus-4-7".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![ContentPart::Other {
                     type_tag: "tool_use".into(),
@@ -258,8 +266,10 @@ fn render_response_does_not_dedupe_other_tool_use_when_id_missing() {
         model: "claude-opus-4-7".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![ContentPart::Other {
                     type_tag: "tool_use".into(),
@@ -315,8 +325,10 @@ fn render_response_omits_signature_key_when_payload_has_none() {
         model: "deepseek-v4-pro".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("answer".into()),
                 reasoning: None,
@@ -372,8 +384,10 @@ fn render_response_emits_signature_verbatim_when_payload_has_one() {
         model: "claude-opus-4-7".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("answer".into()),
                 reasoning: None,
@@ -422,8 +436,10 @@ fn render_response_summary_kind_omits_signature_key_when_absent() {
         model: "gpt-5".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("answer".into()),
                 reasoning: None,
@@ -481,8 +497,10 @@ fn render_response_omits_absent_cache_fields_from_usage() {
         model: "claude-opus-4-7".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("hello".into()),
                 reasoning: None,
@@ -542,8 +560,10 @@ fn render_response_emits_cache_fields_when_present() {
         model: "claude-opus-4-7".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("cached".into()),
                 reasoning: None,
@@ -596,8 +616,10 @@ fn content_filter_finish_renders_refusal_stop_reason() {
         model: "gpt-5".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("redacted".into()),
                 reasoning: None,
@@ -636,8 +658,10 @@ fn render_single_tool_call(arguments: &str) -> Value {
         model: "qwen-3-coder".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text(String::new()),
                 reasoning: None,

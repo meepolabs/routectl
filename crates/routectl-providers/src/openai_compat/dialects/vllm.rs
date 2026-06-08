@@ -128,6 +128,7 @@ mod tests {
         ChatRequest {
             model: model.into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hello".into()),
                 reasoning: None,

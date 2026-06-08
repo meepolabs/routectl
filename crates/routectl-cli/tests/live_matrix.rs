@@ -121,6 +121,7 @@ fn make_request(target: &str, max_tokens: u32, stream: bool) -> ChatRequest {
     ChatRequest {
         model: target.to_string(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text(SHORT_PROMPT.to_string()),
             reasoning: None,

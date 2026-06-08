@@ -57,6 +57,7 @@ pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<Ch
 
     let content = select_message_content(text, parts);
     let message = Message {
+        refusal: None,
         role: Role::Assistant,
         content,
         reasoning: None,
@@ -82,6 +83,7 @@ pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<Ch
         model: body.model,
         created,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message,
             finish_reason,

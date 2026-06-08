@@ -1087,6 +1087,7 @@ mod tool_calls_field_tests {
 
     fn user_text(text: &str) -> Message {
         Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text(text.into()),
             reasoning: None,
@@ -1108,6 +1109,7 @@ mod tool_calls_field_tests {
         let messages = vec![
             user_text("hi"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Null,
                 reasoning: None,
@@ -1121,6 +1123,7 @@ mod tool_calls_field_tests {
                 })]),
             },
             Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Text("sunny".into()),
                 reasoning: None,
@@ -1170,6 +1173,7 @@ mod tool_calls_field_tests {
         let messages = vec![
             user_text("hi"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Null,
                 reasoning: None,
@@ -1208,6 +1212,7 @@ mod tool_calls_field_tests {
         let messages = vec![
             user_text("hi"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![ContentPart::Known(
                     KnownContentPart::ToolUse {
@@ -1251,6 +1256,7 @@ mod tool_calls_field_tests {
         let messages = vec![
             user_text("hi"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("just text".into()),
                 reasoning: None,

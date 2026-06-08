@@ -158,8 +158,10 @@ fn ok_response(id: &str, model: &str) -> ChatResponse {
         model: model.to_string(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("ok".into()),
                 reasoning: None,
@@ -279,6 +281,7 @@ fn req(model: &str) -> ChatRequest {
     ChatRequest {
         model: model.to_string(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text("hi".into()),
             reasoning: None,

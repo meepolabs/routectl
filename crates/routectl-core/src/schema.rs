@@ -22,6 +22,30 @@ use crate::content_part::ContentPart;
 use crate::system_content::SystemContent;
 use crate::tool_def::ToolDef;
 
+/// Deserialize the OpenAI `stop` field, which the spec allows as EITHER
+/// a bare string (`"###"`) OR an array of strings (`["A","B"]`). serde's
+/// derive only accepts the array shape, so a bare string would fail and
+/// 400 the whole request before any egress sees it. Normalizes both to
+/// `Option<Vec<String>>`: a string becomes a one-element vec, an array
+/// passes through, and absent/null stays `None`.
+fn deserialize_stop<'de, D>(deserializer: D) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    let opt = Option::<StringOrVec>::deserialize(deserializer)?;
+    Ok(opt.map(|v| match v {
+        StringOrVec::One(s) => vec![s],
+        StringOrVec::Many(many) => many,
+    }))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub model: String,
@@ -40,7 +64,16 @@ pub struct ChatRequest {
     pub top_p: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// OpenAI accepts `stop` as EITHER a bare string OR an array of
+    /// strings; a bare string would otherwise serde-fail and 400 the
+    /// whole request at the ingress. `deserialize_stop` normalizes both
+    /// to `Vec<String>`. Serializes back out as an array (unchanged
+    /// wire-out for the array form).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_stop",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stop: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
@@ -264,6 +297,14 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<Value>>,
+
+    /// OpenAI safety-refusal string. Returned on `choices[].message.refusal`
+    /// alongside `content: null` when the model declines; canonical had no
+    /// slot, so the client saw an empty assistant turn with no signal.
+    /// Request-side this is always `None` (skip_serializing_if omits it,
+    /// no wire change on outbound requests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,6 +399,12 @@ pub struct Choice {
     /// recover a match (openai-compat without a recoverable suffix).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_stop_sequence: Option<String>,
+    /// OpenAI per-choice `logprobs` object (token log-probabilities).
+    /// Opaque passthrough: canonical does not model the shape, so the
+    /// openai-compat egress deserializes it here and the OpenAI ingress
+    /// re-serializes it verbatim. Absent on Anthropic/Bedrock upstreams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<Value>,
 }
 
 /// Usage tallies. v0.4.0 extension: cache stats from Anthropic /
@@ -554,4 +601,132 @@ pub enum ReasoningDetailKind {
     /// `Text`-kind details.
     #[serde(rename = "reasoning.text")]
     Text,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// OpenAI permits `stop` as a bare string; canonical must accept it
+    /// and normalize to a one-element vec instead of 400-ing the request.
+    #[test]
+    fn stop_accepts_bare_string() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "model": "gpt-4o",
+            "messages": [],
+            "stop": "END"
+        }))
+        .unwrap();
+        assert_eq!(req.stop, Some(vec!["END".to_string()]));
+    }
+
+    /// The array form deserializes to the multi-element vec unchanged.
+    #[test]
+    fn stop_accepts_string_array() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "model": "gpt-4o",
+            "messages": [],
+            "stop": ["A", "B"]
+        }))
+        .unwrap();
+        assert_eq!(req.stop, Some(vec!["A".to_string(), "B".to_string()]));
+    }
+
+    /// Absent `stop` stays `None` (the `default` path).
+    #[test]
+    fn stop_absent_is_none() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "model": "gpt-4o",
+            "messages": []
+        }))
+        .unwrap();
+        assert!(req.stop.is_none());
+    }
+
+    /// Regardless of inbound shape, `stop` serializes back out as an
+    /// array (unchanged wire-out for the array form).
+    #[test]
+    fn stop_round_trips_out_as_array() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "model": "gpt-4o",
+            "messages": [],
+            "stop": "END"
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["stop"], json!(["END"]));
+    }
+
+    /// A safety refusal arrives as `message.refusal` with `content: null`.
+    /// Canonical must carry it so the client still sees the signal.
+    #[test]
+    fn message_refusal_round_trips() {
+        let raw = json!({
+            "role": "assistant",
+            "content": null,
+            "refusal": "I can't help with that."
+        });
+        let msg: Message = serde_json::from_value(raw).unwrap();
+        assert_eq!(msg.refusal.as_deref(), Some("I can't help with that."));
+        let out = serde_json::to_value(&msg).unwrap();
+        assert_eq!(out["refusal"], "I can't help with that.");
+    }
+
+    /// On the request side `refusal` is `None` and skip_serializing_if
+    /// omits it -- no wire change on outbound messages.
+    #[test]
+    fn message_refusal_absent_is_omitted_on_serialize() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            refusal: None,
+        };
+        let out = serde_json::to_value(&msg).unwrap();
+        assert!(out.get("refusal").is_none(), "got {out}");
+    }
+
+    /// `Choice.logprobs` is an opaque OpenAI passthrough; it must
+    /// deserialize and serialize back verbatim.
+    #[test]
+    fn choice_logprobs_round_trips() {
+        let raw = json!({
+            "index": 0,
+            "message": {"role": "assistant", "content": "hi"},
+            "finish_reason": "stop",
+            "logprobs": {"content": [{"token": "hi", "logprob": -0.1}]}
+        });
+        let choice: Choice = serde_json::from_value(raw).unwrap();
+        assert!(choice.logprobs.is_some());
+        let out = serde_json::to_value(&choice).unwrap();
+        assert_eq!(out["logprobs"]["content"][0]["token"], "hi");
+    }
+
+    /// Absent `logprobs` is omitted on serialize (no wire change).
+    #[test]
+    fn choice_logprobs_absent_is_omitted_on_serialize() {
+        let choice = Choice {
+            index: 0,
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                refusal: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+            logprobs: None,
+        };
+        let out = serde_json::to_value(&choice).unwrap();
+        assert!(out.get("logprobs").is_none(), "got {out}");
+    }
 }

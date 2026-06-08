@@ -35,6 +35,7 @@ fn req_with(messages: Vec<Message>) -> ChatRequest {
 
 fn user_text(text: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Text(text.into()),
         reasoning: None,
@@ -47,6 +48,7 @@ fn user_text(text: &str) -> Message {
 
 fn assistant_parts(parts: Vec<ContentPart>) -> Message {
     Message {
+        refusal: None,
         role: Role::Assistant,
         content: MessageContent::Parts(parts),
         reasoning: None,
@@ -59,6 +61,7 @@ fn assistant_parts(parts: Vec<ContentPart>) -> Message {
 
 fn assistant_text(text: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::Assistant,
         content: MessageContent::Text(text.into()),
         reasoning: None,
@@ -71,6 +74,7 @@ fn assistant_text(text: &str) -> Message {
 
 fn tool_message(call_id: &str, output: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::Tool,
         content: MessageContent::Text(output.into()),
         reasoning: None,
@@ -617,6 +621,7 @@ fn explicit_operator_include_is_respected_not_overwritten() {
 
 fn user_image_base64(media_type: &str, data: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Image {
             source: json!({
@@ -636,6 +641,7 @@ fn user_image_base64(media_type: &str, data: &str) -> Message {
 
 fn user_image_url(url: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Image {
             source: json!({
@@ -689,6 +695,7 @@ fn user_image_unknown_source_kind_warns_and_drops() {
     // extension). The part should be dropped; the message item should
     // still be emitted but with no content blocks (empty -> skipped).
     let msg = Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Image {
             source: json!({"type": "s3", "bucket": "my-bucket", "key": "img.png"}),
@@ -716,6 +723,7 @@ fn user_image_unknown_source_kind_warns_and_drops() {
 
 fn user_file(file: Value) -> Message {
     Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
             file,
@@ -781,6 +789,7 @@ fn user_document_anthropic_shape_still_drops() {
     // Arrange: Anthropic-shape Document part (out of scope for the
     // codex target; remains dropped at parity with the reference).
     let msg = Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Document {
             source: json!({
@@ -813,6 +822,7 @@ fn user_document_anthropic_shape_still_drops() {
 
 fn tool_message_parts(call_id: &str, parts: Vec<ContentPart>) -> Message {
     Message {
+        refusal: None,
         role: Role::Tool,
         content: MessageContent::Parts(parts),
         reasoning: None,
@@ -1050,6 +1060,7 @@ fn sse_reasoning_round_trips_through_canonical_to_replay_request() {
     // message and drive translate_request to assert the encrypted_content
     // reaches the egress wire body.
     let assistant = Message {
+        refusal: None,
         role: Role::Assistant,
         content: MessageContent::Text("answer".into()),
         reasoning: None,

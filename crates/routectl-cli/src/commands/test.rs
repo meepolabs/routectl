@@ -87,6 +87,7 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     let req = ChatRequest {
         model: target.to_string(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text(prompt.to_string()),
             reasoning: None,

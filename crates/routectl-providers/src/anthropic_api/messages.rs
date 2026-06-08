@@ -149,6 +149,7 @@ pub(super) fn normalize_replay_invariants<'a>(
             continue;
         }
         out.push(Message {
+            refusal: None,
             role: msg.role.clone(),
             content: MessageContent::Parts(kept),
             reasoning: msg.reasoning.clone(),

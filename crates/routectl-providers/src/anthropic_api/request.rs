@@ -358,6 +358,7 @@ mod allowlist_tests {
         ChatRequest {
             model: "claude-sonnet-4-5".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,
@@ -443,6 +444,7 @@ mod context_management_normalize_tests {
         ChatRequest {
             model: "claude-sonnet-4".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hello".into()),
                 reasoning: None,
@@ -482,6 +484,7 @@ mod context_management_normalize_tests {
             }),
             messages: vec![
                 Message {
+                    refusal: None,
                     role: Role::User,
                     content: MessageContent::Text("use the calc tool".into()),
                     reasoning: None,
@@ -491,6 +494,7 @@ mod context_management_normalize_tests {
                     tool_calls: None,
                 },
                 Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Text("calling calc".into()),
                     reasoning: None,
@@ -504,6 +508,7 @@ mod context_management_normalize_tests {
                     })]),
                 },
                 Message {
+                    refusal: None,
                     role: Role::Tool,
                     content: MessageContent::Text("42".into()),
                     reasoning: None,
@@ -715,6 +720,7 @@ mod multi_turn_tool_use_tests {
 
     fn user_msg(text: &str) -> Message {
         Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text(text.into()),
             reasoning: None,
@@ -727,6 +733,7 @@ mod multi_turn_tool_use_tests {
 
     fn assistant_msg(text: &str, tool_calls: Option<Vec<Value>>) -> Message {
         Message {
+            refusal: None,
             role: Role::Assistant,
             content: MessageContent::Text(text.into()),
             reasoning: None,
@@ -798,6 +805,7 @@ mod multi_turn_tool_use_tests {
             messages: vec![
                 user_msg("compute 2+2"),
                 Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Parts(vec![
                         ContentPart::Known(KnownContentPart::Text {
@@ -877,6 +885,7 @@ mod multi_turn_tool_use_tests {
             messages: vec![
                 user_msg("hi"),
                 Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Parts(vec![
                         ContentPart::Known(KnownContentPart::Thinking {
@@ -938,6 +947,7 @@ mod multi_turn_tool_use_tests {
             messages: vec![
                 user_msg("hello"),
                 Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Parts(vec![ContentPart::Known(
                         KnownContentPart::Thinking {
@@ -987,6 +997,7 @@ mod multi_turn_tool_use_tests {
             messages: vec![
                 user_msg("hi"),
                 Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Parts(vec![ContentPart::Known(
                         KnownContentPart::Thinking {
@@ -1049,6 +1060,7 @@ mod multi_turn_tool_use_tests {
             messages: vec![
                 user_msg("hi"),
                 Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Parts(vec![
                         ContentPart::Known(KnownContentPart::Text {
@@ -1123,6 +1135,7 @@ mod multi_turn_tool_use_tests {
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Text("result content".into()),
                 reasoning: None,
@@ -1155,6 +1168,7 @@ mod multi_turn_tool_use_tests {
             messages: vec![
                 user_msg("hi"),
                 Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Parts(vec![
                         ContentPart::Known(KnownContentPart::Text {
@@ -2114,6 +2128,7 @@ mod multi_turn_tool_use_tests {
     fn assistant_with_thinking(signature: Option<&str>) -> Message {
         use routectl_core::{ContentPart, KnownContentPart};
         Message {
+            refusal: None,
             role: Role::Assistant,
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
@@ -2303,6 +2318,7 @@ mod multi_turn_tool_use_tests {
         let mut req = ChatRequest {
             model: "deepseek-chat".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Text("result content".into()),
                 reasoning: None,
@@ -2447,6 +2463,7 @@ mod multi_turn_tool_use_tests {
             messages: vec![
                 user_msg("think then reply"),
                 Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Text("I thought about it.".into()),
                     reasoning: None,
@@ -2651,6 +2668,7 @@ mod anthropic_effort_clamp_tests {
 
     fn user_msg(text: &str) -> Message {
         Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text(text.into()),
             reasoning: None,

@@ -35,6 +35,7 @@ use serde_json::json;
 
 pub fn user_msg(text: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Text(text.into()),
         reasoning: None,
@@ -47,6 +48,7 @@ pub fn user_msg(text: &str) -> Message {
 
 pub fn assistant_text_msg(text: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::Assistant,
         content: MessageContent::Text(text.into()),
         reasoning: None,
@@ -183,6 +185,7 @@ pub mod scenarios {
     /// must accept it.
     pub fn scenario_3_multi_turn_with_tool_result() -> ChatRequest {
         let assistant_with_tool_use = Message {
+            refusal: None,
             role: Role::Assistant,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::ToolUse {
                 id: "toolu_01".into(),
@@ -197,6 +200,7 @@ pub mod scenarios {
             tool_calls: None,
         };
         let tool_result = Message {
+            refusal: None,
             role: Role::Tool,
             content: MessageContent::Text("72F and sunny".into()),
             reasoning: None,
@@ -230,6 +234,7 @@ pub mod scenarios {
             model: "claude-3-opus".into(),
             created: 0,
             choices: vec![Choice {
+                logprobs: None,
                 index: 0,
                 message: assistant_text_msg("Hello there!"),
                 finish_reason: Some("stop".into()),
@@ -253,6 +258,7 @@ pub mod scenarios {
             model: "claude-3-opus".into(),
             created: 0,
             choices: vec![Choice {
+                logprobs: None,
                 index: 0,
                 message: assistant_text_msg("Pausing for tool result."),
                 finish_reason: Some("pause_turn".into()),
@@ -277,6 +283,7 @@ pub mod scenarios {
     /// four breakpoints together.
     pub fn scenario_5_cache_control_positions() -> ChatRequest {
         let user_with_cc_block = Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "Please review the attached document.".into(),
@@ -335,6 +342,7 @@ pub mod scenarios {
     /// tool-only thinking turn.
     pub fn scenario_10_reasoning_details_signature_replay() -> ChatRequest {
         let assistant_with_thinking = Message {
+            refusal: None,
             role: Role::Assistant,
             content: MessageContent::Text("Sure, here is the answer: 42.".into()),
             reasoning: None,
@@ -380,6 +388,7 @@ pub mod scenarios {
             model: "claude-3-opus".into(),
             created: 0,
             choices: vec![Choice {
+                logprobs: None,
                 index: 0,
                 message: assistant_text_msg("Here is the structured answer."),
                 finish_reason: Some("stop".into()),

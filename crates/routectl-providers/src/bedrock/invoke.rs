@@ -256,6 +256,7 @@ mod tests {
         ChatRequest {
             model: "anthropic.claude-haiku-4-5".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hello".into()),
                 reasoning: None,

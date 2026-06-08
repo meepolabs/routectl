@@ -159,8 +159,19 @@ impl IngressAdapter for OpenAiIngress {
         // Anthropic ingress. OpenAI Chat-Completions clients do not
         // expect it and some SDKs error or forward it unexpectedly.
         let resp = strip_matched_stop_sequence_from_response(resp);
-        serde_json::to_value(&resp)
-            .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))
+        let mut value = serde_json::to_value(&resp)
+            .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))?;
+        // Surface Anthropic/Bedrock cache-read counts under the standard
+        // OpenAI `usage.prompt_tokens_details.cached_tokens` field so an
+        // OpenAI-shape cost tracker sees them. Canonical emits them only
+        // under the Anthropic-vocabulary `cache_read_input_tokens`, which
+        // OpenAI clients ignore. Additive: `cache_read_input_tokens`
+        // stays present, and a response with no cache tokens gains no
+        // `prompt_tokens_details` key. Lives in the OpenAI dialect, not
+        // the canonical type, so the Anthropic ingress keeps its own
+        // vocabulary.
+        surface_cached_tokens_in_usage(&mut value);
+        Ok(value)
     }
 
     fn new_stream_state(&self) -> Box<dyn IngressStreamState> {
@@ -514,6 +525,37 @@ fn strip_matched_stop_sequence_from_chunk(mut chunk: ChatChunk) -> ChatChunk {
     chunk
 }
 
+/// Mirror the canonical Anthropic-vocabulary `usage.cache_read_input_tokens`
+/// into the standard OpenAI `usage.prompt_tokens_details.cached_tokens` on
+/// the serialized response body. Runs on the already-serialized `Value`
+/// (rather than the canonical type) so this stays an OpenAI-dialect
+/// concern: the Anthropic ingress must keep the Anthropic names.
+///
+/// Only acts when `cache_read_input_tokens` is present and non-zero; a
+/// zero or absent value leaves the usage object untouched (no empty
+/// `prompt_tokens_details`). If an upstream already supplied
+/// `prompt_tokens_details`, only the `cached_tokens` sub-key is set,
+/// preserving any sibling fields. `cache_read_input_tokens` is left in
+/// place (additive).
+fn surface_cached_tokens_in_usage(value: &mut Value) {
+    let Some(usage) = value.get_mut("usage").and_then(|u| u.as_object_mut()) else {
+        return;
+    };
+    let cached = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if cached == 0 {
+        return;
+    }
+    let details = usage
+        .entry("prompt_tokens_details")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(obj) = details.as_object_mut() {
+        obj.insert("cached_tokens".into(), Value::from(cached));
+    }
+}
+
 /// Strip duplicate `tool_use` content blocks from any assistant choice
 /// that also carries a non-empty `tool_calls`.
 ///
@@ -607,7 +649,7 @@ mod tests {
     use super::*;
     use routectl_core::{
         Choice, ChunkChoice, ChunkDelta, Message, MessageContent, ReasoningConfig,
-        ReasoningDetailKind,
+        ReasoningDetailKind, Usage,
     };
     use serde_json::json;
 
@@ -945,8 +987,10 @@ mod tests {
             cache_control: None,
         }));
         Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(parts),
                 reasoning: None,
@@ -1048,8 +1092,10 @@ mod tests {
         other_extras.insert("input".into(), json!({ "city": "Paris" }));
         other_extras.insert("future_field".into(), json!("v2"));
         let choice = Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
@@ -1092,8 +1138,10 @@ mod tests {
     fn render_response_leaves_text_content_untouched_without_tool_calls() {
         // Arrange
         let resp = response_with_choices(vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("hello world".into()),
                 reasoning: None,
@@ -1441,8 +1489,10 @@ mod tests {
             model: "claude-sonnet-4".into(),
             created: 1700000000,
             choices: vec![Choice {
+                logprobs: None,
                 index: 0,
                 message: Message {
+                    refusal: None,
                     role: Role::Assistant,
                     content: MessageContent::Text("done".into()),
                     reasoning: None,
@@ -1489,6 +1539,117 @@ mod tests {
             !events[0].data.contains("matched_stop_sequence"),
             "render_chunk must not emit matched_stop_sequence: {}",
             events[0].data
+        );
+    }
+
+    /// An openai-compat upstream may return a safety refusal on
+    /// `message.refusal` (with `content: null`) and a per-choice
+    /// `logprobs` object. The OpenAI ingress re-serialize must emit both
+    /// so the client still sees `message.refusal` and `choices[].logprobs`.
+    #[test]
+    fn render_response_preserves_refusal_and_logprobs() {
+        // Arrange: canonical response as the openai-compat egress would
+        // deserialize it from the upstream wire.
+        let resp = ChatResponse {
+            id: "chatcmpl-1".into(),
+            model: "gpt-4o".into(),
+            created: 1700000000,
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Null,
+                    reasoning: None,
+                    reasoning_details: Vec::new(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    refusal: Some("I can't help with that.".into()),
+                },
+                finish_reason: Some("stop".into()),
+                matched_stop_sequence: None,
+                logprobs: Some(json!({"content": [{"token": "x", "logprob": -0.2}]})),
+            }],
+            usage: None,
+            routectl_provider: None,
+            extras: Default::default(),
+        };
+
+        // Act
+        let v = OpenAiIngress.render_response(resp).unwrap();
+
+        // Assert
+        let choice = &v["choices"][0];
+        assert_eq!(choice["message"]["refusal"], "I can't help with that.");
+        assert!(choice["message"]["content"].is_null());
+        assert_eq!(choice["logprobs"]["content"][0]["token"], "x");
+    }
+
+    /// Anthropic/Bedrock cache-read counts arrive on canonical under the
+    /// Anthropic-vocabulary `usage.cache_read_input_tokens`. The OpenAI
+    /// ingress must ALSO surface them under the standard OpenAI
+    /// `usage.prompt_tokens_details.cached_tokens` so an OpenAI cost
+    /// tracker sees the cache hit. `cache_read_input_tokens` stays present.
+    #[test]
+    fn render_response_surfaces_cached_tokens_in_usage() {
+        // Arrange
+        let resp = ChatResponse {
+            id: "chatcmpl-1".into(),
+            model: "claude".into(),
+            created: 1700000000,
+            choices: vec![],
+            usage: Some(Usage {
+                prompt_tokens: 10000,
+                completion_tokens: 50,
+                total_tokens: 10050,
+                cache_read_input_tokens: Some(8192),
+                ..Default::default()
+            }),
+            routectl_provider: Some("anthropic-api".into()),
+            extras: Default::default(),
+        };
+
+        // Act
+        let v = OpenAiIngress.render_response(resp).unwrap();
+
+        // Assert: standard OpenAI field present and equal.
+        assert_eq!(
+            v["usage"]["prompt_tokens_details"]["cached_tokens"], 8192,
+            "cached_tokens must mirror cache_read_input_tokens: {}",
+            v["usage"]
+        );
+        // Anthropic-vocabulary field stays present (additive).
+        assert_eq!(v["usage"]["cache_read_input_tokens"], 8192);
+    }
+
+    /// No cache tokens -> no `prompt_tokens_details` key at all (no empty
+    /// object emitted).
+    #[test]
+    fn render_response_omits_prompt_tokens_details_without_cache() {
+        // Arrange
+        let resp = ChatResponse {
+            id: "chatcmpl-1".into(),
+            model: "gpt-4o".into(),
+            created: 1700000000,
+            choices: vec![],
+            usage: Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                ..Default::default()
+            }),
+            routectl_provider: None,
+            extras: Default::default(),
+        };
+
+        // Act
+        let v = OpenAiIngress.render_response(resp).unwrap();
+
+        // Assert
+        assert!(
+            v["usage"].get("prompt_tokens_details").is_none(),
+            "no cache tokens must not emit prompt_tokens_details: {}",
+            v["usage"]
         );
     }
 }

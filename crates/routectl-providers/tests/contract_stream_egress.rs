@@ -83,6 +83,7 @@ fn stream_request(model: &str) -> ChatRequest {
     ChatRequest {
         model: model.into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text("Hi".into()),
             reasoning: None,

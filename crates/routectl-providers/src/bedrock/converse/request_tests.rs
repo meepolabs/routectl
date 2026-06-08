@@ -64,6 +64,7 @@ fn fake_cfg() -> BedrockConfig {
 
 fn user_msg(text: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Text(text.into()),
         reasoning: None,
@@ -156,6 +157,7 @@ fn legacy_system_message_is_lifted_into_top_level_system() {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![
             Message {
+                refusal: None,
                 role: Role::System,
                 content: MessageContent::Text("be helpful".into()),
                 reasoning: None,
@@ -446,6 +448,7 @@ fn tool_use_block_in_assistant_content_translates_to_aws_tool_use_block() {
         messages: vec![
             user_msg("calculate 2+2"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
@@ -498,6 +501,7 @@ fn assistant_text_after_tool_use_is_stripped() {
         messages: vec![
             user_msg("calc 2+2"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
@@ -556,6 +560,7 @@ fn tool_message_with_id_emits_user_role_with_tool_result() {
         messages: vec![
             user_msg("calc 2+2"),
             Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Text("4".into()),
                 reasoning: None,
@@ -598,6 +603,7 @@ fn tool_message_without_id_returns_err() {
         messages: vec![
             user_msg("calc 2+2"),
             Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Text("result".into()),
                 reasoning: None,
@@ -631,6 +637,7 @@ fn document_content_block_translates_to_aws_document_block() {
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Document {
                 source: json!({
@@ -682,6 +689,7 @@ fn thinking_block_with_cache_control_does_not_emit_orphan_cache_point() {
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![
                 ContentPart::Other {
@@ -722,6 +730,7 @@ fn tool_result_image_content_uses_image_variant_not_json_wrap() {
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(
                 KnownContentPart::ToolResult {
@@ -771,6 +780,7 @@ fn cache_control_breakpoint_validation_runs_in_converse_path() {
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {

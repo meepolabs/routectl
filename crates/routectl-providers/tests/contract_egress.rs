@@ -545,6 +545,7 @@ mod forward_compat_pins {
         let req = ChatRequest {
             model: "claude-3-opus".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Parts(vec![ContentPart::Other {
                     type_tag: "tool_reference".into(),

@@ -44,6 +44,7 @@ mod tests {
 
     fn user_msg(text: &str) -> Message {
         Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text(text.into()),
             reasoning: None,
@@ -56,6 +57,7 @@ mod tests {
 
     fn system_msg(text: &str) -> Message {
         Message {
+            refusal: None,
             role: Role::System,
             content: MessageContent::Text(text.into()),
             reasoning: None,
@@ -123,6 +125,7 @@ mod tests {
             "claude-3-opus",
             vec![
                 Message {
+                    refusal: None,
                     role: Role::System,
                     content: MessageContent::Parts(vec![ContentPart::Known(
                         KnownContentPart::Image {
@@ -157,6 +160,7 @@ mod tests {
             "claude-3-opus",
             vec![
                 Message {
+                    refusal: None,
                     role: Role::System,
                     content: MessageContent::Parts(vec![ContentPart::Known(
                         KnownContentPart::Text {
@@ -269,6 +273,7 @@ mod tests {
         let mut req = base_req(
             "claude-opus-4-7",
             vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                     text: "look at this".into(),
@@ -302,6 +307,7 @@ mod tests {
         let mut req = base_req(
             "claude-opus-4-7",
             vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,
@@ -331,6 +337,7 @@ mod tests {
         let mut req = base_req(
             "claude-opus-4-7",
             vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,
@@ -354,6 +361,7 @@ mod tests {
         let mut req = base_req(
             "claude-opus-4-7",
             vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,
@@ -391,6 +399,7 @@ mod tests {
         let mut req = base_req(
             "claude-opus-4-7",
             vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
@@ -440,6 +449,7 @@ mod tests {
         let mut req = base_req(
             "claude-opus-4-7",
             vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,
@@ -475,6 +485,7 @@ mod tests {
         let req = base_req(
             "claude-opus-4-7",
             vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Parts(vec![ContentPart::Other {
                     type_tag: "server_tool_use".into(),
@@ -528,6 +539,7 @@ mod tests {
             payload: json!({"text": "I reasoned about it", "signature": "sig_preserve_me"}),
         };
         let assistant_msg = Message {
+            refusal: None,
             role: Role::Assistant,
             content: MessageContent::Text("Sure!".into()),
             reasoning: None,
@@ -567,6 +579,7 @@ mod tests {
         let req = base_req(
             "claude-opus-4-7",
             vec![Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Parts(vec![ContentPart::Known(
                     KnownContentPart::ImageUrl {

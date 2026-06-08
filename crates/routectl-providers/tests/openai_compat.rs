@@ -40,6 +40,7 @@ fn user_request(model: &str) -> routectl_core::ChatRequest {
     routectl_core::ChatRequest {
         model: model.into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text("What is 2+2?".into()),
             reasoning: None,
@@ -414,6 +415,7 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
     // reasoning_details and reasoning fields populated.
     let mut req = user_request("deepseek-reasoner");
     req.messages.push(Message {
+        refusal: None,
         role: Role::Assistant,
         content: MessageContent::Text("Prior answer".into()),
         reasoning: Some("prior chain of thought".into()),
@@ -423,6 +425,7 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
         tool_calls: None,
     });
     req.messages.push(Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Text("Follow-up question".into()),
         reasoning: None,
@@ -484,6 +487,7 @@ fn strict_translation_off_warns_and_allows_request() {
     let req = ChatRequest {
         model: "gpt-4o".into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "hi".into(),
@@ -528,6 +532,7 @@ fn strict_translation_on_rejects_canonical_only_fields() {
     let req = ChatRequest {
         model: "gpt-4o".into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text("hi".into()),
             reasoning: None,

@@ -258,6 +258,7 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
 
     let content = select_message_content(text, parts);
     let message = Message {
+        refusal: None,
         role: Role::Assistant,
         content,
         reasoning: None,
@@ -272,6 +273,7 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
         model: resp.model,
         created: Utc::now().timestamp(),
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message,
             finish_reason,

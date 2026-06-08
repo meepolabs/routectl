@@ -822,6 +822,7 @@ mod e2e_tests {
         ChatRequest {
             model: "gpt-5-codex".into(),
             messages: vec![routectl_core::Message {
+                refusal: None,
                 role: routectl_core::Role::User,
                 content: MessageContent::Text("ping".into()),
                 reasoning: None,
@@ -1245,6 +1246,7 @@ mod header_merge_tests {
         ChatRequest {
             model: "gpt-5-codex".into(),
             messages: vec![routectl_core::Message {
+                refusal: None,
                 role: routectl_core::Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,

@@ -54,6 +54,7 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
 
     let content = select_message_content(text, parts);
     let message = Message {
+        refusal: None,
         role,
         content,
         reasoning: None,
@@ -83,6 +84,7 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         model: String::new(),
         created: Utc::now().timestamp(),
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message,
             finish_reason,

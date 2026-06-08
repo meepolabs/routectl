@@ -909,6 +909,7 @@ mod tests {
 
     fn user_msg() -> Message {
         Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Text("hello".into()),
             reasoning: None,
@@ -935,6 +936,7 @@ mod tests {
         let messages = vec![
             user_msg(),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("sure".into()),
                 reasoning: None,
@@ -1000,6 +1002,7 @@ mod tests {
         let messages = vec![
             user_msg(),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("here".into()),
                 reasoning: None,
@@ -1048,6 +1051,7 @@ mod tests {
         let messages = vec![
             user_msg(),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("response".into()),
                 reasoning: None,
@@ -1087,6 +1091,7 @@ mod tests {
         let messages = vec![
             user_msg(),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Thinking {
@@ -1136,6 +1141,7 @@ mod tests {
         use routectl_core::KnownContentPart;
         let body = "the quick brown fox";
         let messages = vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Document {
                 source: json!({
@@ -1187,6 +1193,7 @@ mod tests {
         // Arrange
         use routectl_core::KnownContentPart;
         let messages = vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
                 file: json!({
@@ -1230,6 +1237,7 @@ mod tests {
         // Arrange
         use routectl_core::KnownContentPart;
         let messages = vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
@@ -1276,6 +1284,7 @@ mod tests {
         // Arrange
         use routectl_core::KnownContentPart;
         let messages = vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
@@ -1324,6 +1333,7 @@ mod tests {
         // Arrange
         use routectl_core::KnownContentPart;
         let messages = vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
@@ -1381,6 +1391,7 @@ mod tests {
         let messages = vec![
             user_msg(),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Null,
                 reasoning: None,
@@ -1394,6 +1405,7 @@ mod tests {
                 })]),
             },
             Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Text("sunny".into()),
                 reasoning: None,
@@ -1449,6 +1461,7 @@ mod tests {
         let messages = vec![
             user_msg(),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Null,
                 reasoning: None,
@@ -1490,6 +1503,7 @@ mod tests {
         let messages = vec![
             user_msg(),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![ContentPart::Known(
                     KnownContentPart::ToolUse {
@@ -1536,6 +1550,7 @@ mod tests {
         let messages = vec![
             user_msg(),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("just text".into()),
                 reasoning: None,

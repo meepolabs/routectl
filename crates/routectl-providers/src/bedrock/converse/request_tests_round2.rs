@@ -71,6 +71,7 @@ fn fake_cfg() -> BedrockConfig {
 
 fn user_msg(text: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Text(text.into()),
         reasoning: None,
@@ -250,6 +251,7 @@ fn document_with_existing_text_sibling_does_not_prepend_empty_text() {
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
         messages: vec![Message {
+            refusal: None,
             role: Role::User,
             content: MessageContent::Parts(vec![
                 ContentPart::Known(KnownContentPart::Text {
@@ -302,6 +304,7 @@ fn role_tool_with_image_parts_uses_image_variant_not_json_wrap() {
         messages: vec![
             user_msg("look at this"),
             Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {
@@ -361,6 +364,7 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
         messages: vec![
             user_msg("review the report"),
             Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Parts(vec![ContentPart::Known(
                     KnownContentPart::Document {
@@ -536,6 +540,7 @@ fn thinking_block_with_signature_translates_to_converse_reasoning_text() {
         messages: vec![
             user_msg("question"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Thinking {
@@ -592,6 +597,7 @@ fn thinking_block_without_signature_returns_err() {
         messages: vec![
             user_msg("q"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![ContentPart::Known(
                     KnownContentPart::Thinking {
@@ -634,6 +640,7 @@ fn thinking_block_with_empty_signature_returns_err() {
         messages: vec![
             user_msg("q"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![ContentPart::Known(
                     KnownContentPart::Thinking {
@@ -675,6 +682,7 @@ fn redacted_thinking_translates_to_converse_redacted_content() {
         messages: vec![
             user_msg("q"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::RedactedThinking {
@@ -729,6 +737,7 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
         messages: vec![
             user_msg("what is the weather in Tokyo?"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Thinking {
@@ -753,6 +762,7 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
                 tool_calls: None,
             },
             Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Text("sunny, 22C".into()),
                 reasoning: None,
@@ -870,6 +880,7 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
     };
 
     let tool_result_msg = Message {
+        refusal: None,
         role: Role::Tool,
         content: MessageContent::Text("rainy, 18C".into()),
         reasoning: None,
@@ -884,6 +895,7 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
         messages: vec![
             user_msg("what is the weather in Osaka?"),
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(assistant_parts),
                 reasoning: None,

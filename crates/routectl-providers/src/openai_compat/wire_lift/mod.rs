@@ -119,6 +119,7 @@ mod order_test {
         ChatRequest {
             model: "m".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,
@@ -189,6 +190,7 @@ mod order_test {
         // (Anthropic shape). After lift_all the tool_use block should
         // become a top-level `tool_calls` array on the assistant message.
         let assistant_msg = Message {
+            refusal: None,
             role: Role::Assistant,
             content: MessageContent::Parts(vec![ContentPart::Known(
                 routectl_core::KnownContentPart::Text {
@@ -210,6 +212,7 @@ mod order_test {
             model: "m".into(),
             messages: vec![
                 Message {
+                    refusal: None,
                     role: Role::User,
                     content: MessageContent::Text("go".into()),
                     reasoning: None,

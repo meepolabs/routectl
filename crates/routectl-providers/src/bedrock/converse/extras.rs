@@ -386,6 +386,7 @@ mod tests {
         ChatRequest {
             model: "anthropic.claude-sonnet-4-5".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,
@@ -505,6 +506,7 @@ mod tests {
         let req = ChatRequest {
             model: "anthropic.claude-sonnet-4-5".into(),
             messages: vec![Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("hi".into()),
                 reasoning: None,

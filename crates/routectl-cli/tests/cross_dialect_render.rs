@@ -164,8 +164,10 @@ fn openai_render_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
         model: "claude-haiku-4-5".into(),
         created: 0,
         choices: vec![Choice {
+            logprobs: None,
             index: 0,
             message: Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::Text {

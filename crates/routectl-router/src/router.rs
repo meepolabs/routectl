@@ -2926,8 +2926,10 @@ mod three_source_anthropic_beta_lift_tests {
                 model,
                 created: 0,
                 choices: vec![Choice {
+                    logprobs: None,
                     index: 0,
                     message: Message {
+                        refusal: None,
                         role: routectl_core::Role::Assistant,
                         content: routectl_core::MessageContent::Text("ok".into()),
                         reasoning: None,
@@ -3094,8 +3096,10 @@ mod reasoning_passthrough_tests {
                 model: "m".into(),
                 created: 0,
                 choices: vec![Choice {
+                    logprobs: None,
                     index: 0,
                     message: Message {
+                        refusal: None,
                         role: routectl_core::Role::Assistant,
                         content: routectl_core::MessageContent::Text("ok".into()),
                         reasoning: None,
@@ -3211,8 +3215,10 @@ mod resolved_models_tests {
                 model: req.model,
                 created: 0,
                 choices: vec![Choice {
+                    logprobs: None,
                     index: 0,
                     message: Message {
+                        refusal: None,
                         role: routectl_core::Role::Assistant,
                         content: routectl_core::MessageContent::Text("ok".into()),
                         reasoning: None,
@@ -3683,8 +3689,10 @@ mod seat_pool_dispatch_tests {
                 model: req.model,
                 created: 0,
                 choices: vec![Choice {
+                    logprobs: None,
                     index: 0,
                     message: Message {
+                        refusal: None,
                         role: routectl_core::Role::Assistant,
                         content: routectl_core::MessageContent::Text("ok".into()),
                         reasoning: None,
@@ -4077,8 +4085,10 @@ mod feature_filter_tests {
                 model,
                 created: 0,
                 choices: vec![Choice {
+                    logprobs: None,
                     index: 0,
                     message: Message {
+                        refusal: None,
                         role: routectl_core::Role::Assistant,
                         content: routectl_core::MessageContent::Text("ok".into()),
                         reasoning: None,
@@ -4371,8 +4381,10 @@ mod auth_failure_recovery_tests {
                     model: req.model,
                     created: 0,
                     choices: vec![Choice {
+                        logprobs: None,
                         index: 0,
                         message: Message {
+                            refusal: None,
                             role: routectl_core::Role::Assistant,
                             content: routectl_core::MessageContent::Text("ok".into()),
                             reasoning: None,
@@ -4855,8 +4867,10 @@ mod circuit_breaker_slot_release_tests {
                 model: req.model,
                 created: 0,
                 choices: vec![routectl_core::Choice {
+                    logprobs: None,
                     index: 0,
                     message: routectl_core::Message {
+                        refusal: None,
                         role: routectl_core::Role::Assistant,
                         content: routectl_core::MessageContent::Text("ok".into()),
                         reasoning: None,

@@ -59,6 +59,7 @@ fn make_provider(base_url: &str, context_management: bool) -> AnthropicApiProvid
 
 fn user_msg(text: &str) -> Message {
     Message {
+        refusal: None,
         role: Role::User,
         content: MessageContent::Text(text.into()),
         reasoning: None,
@@ -204,6 +205,7 @@ async fn e2e_context_management_strips_key_strips_beta_and_injects_thinking() {
         max_tokens: Some(4096),
         messages: vec![
             Message {
+                refusal: None,
                 role: Role::User,
                 content: MessageContent::Text("use calc".into()),
                 reasoning: None,
@@ -213,6 +215,7 @@ async fn e2e_context_management_strips_key_strips_beta_and_injects_thinking() {
                 tool_calls: None,
             },
             Message {
+                refusal: None,
                 role: Role::Assistant,
                 content: MessageContent::Text("calling calc".into()),
                 reasoning: None,
@@ -226,6 +229,7 @@ async fn e2e_context_management_strips_key_strips_beta_and_injects_thinking() {
                 })]),
             },
             Message {
+                refusal: None,
                 role: Role::Tool,
                 content: MessageContent::Text("42".into()),
                 reasoning: None,
