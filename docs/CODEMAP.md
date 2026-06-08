@@ -178,12 +178,12 @@ listed at the bottom of each crate.
 - `src/secret_ref.rs` -- `SecretRef` enum (`env://`, `file://`, `literal:`) plus URI parser
 - `src/memory_store.rs` -- default in-process `SecretStore` resolving env/file/literal references at read-time
 - `src/oauth/mod.rs` -- crate-internal entry for the OAuth 2.0 PKCE subsystem; defines `OAuthError` and re-exports `OAuthStore`, `LoginOptions`, `run_login`, `known_provider_ids`, token types
-- `src/oauth/types.rs` -- on-disk schema: `CredentialsFile`, `TokenRecord` (incl. optional `session_id`), `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug), `SCHEMA_VERSION`, `unix_now`
+- `src/oauth/types.rs` -- on-disk schema: `CredentialsFile`, `TokenRecord` (incl. optional `session_id`), `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug), `SCHEMA_VERSION`, `unix_now`; `seat_key(provider, label)` composes the credentials-map key (bare provider for the default seat, `provider#label` otherwise) and `CredentialsFile::seats_for_provider` enumerates a provider's seats (default first, then sorted labels)
 - `src/oauth/file_io.rs` -- atomic load/save of `~/.config/routectl/credentials.json` (TOCTOU-safe fstat, `0o600` enforcement on Unix, tempfile + fsync + rename)
 - `src/oauth/pkce.rs` -- PKCE verifier / SHA-256 challenge / CSRF state; `OsRng`-sourced, Drop-zeroized, constant-time state compare
-- `src/oauth/login.rs` -- login flow driver: PKCE bundle, axum callback sub-app on loopback, `webbrowser` launch, `--print-url` headless fallback, 120s timeout
+- `src/oauth/login.rs` -- login flow driver: PKCE bundle, axum callback sub-app on loopback, `webbrowser` launch, `--print-url` headless fallback, 120s timeout; `LoginOptions.label` writes the exchanged record under `seat_key(provider, label)` so a labeled login adds a seat without overwriting the default
 - `src/oauth/rate_limit.rs` -- per-source-port + listener-wide sliding-window rate limit on the loopback callback server (turns sustained 400-spam into 429)
-- `src/oauth/store.rs` -- `OAuthStore` `SecretStore` impl; cached `CredentialsFile` + per-provider single-flight refresh mutex + atomic writeback; near-expiry (300s lead) and 401-recovery hooks; refresh client carries codex CLI HTTP client headers; preserves an existing `session_id` across token rotation (the codex provider flow mints the fresh `session_id` on first OAuth exchange)
+- `src/oauth/store.rs` -- `OAuthStore` `SecretStore` impl; cached `CredentialsFile` + per-seat single-flight refresh mutex + atomic writeback; resolves labeled seats by `seat_key`, `list_seats` expands a bare pool ref to one ref per stored seat; `force_refresh(provider, label)` targets one seat (drives `routectl refresh --label`); near-expiry (300s lead) and 401-recovery hooks; refresh client carries codex CLI HTTP client headers; preserves an existing `session_id` across token rotation (the codex provider flow mints the fresh `session_id` on first OAuth exchange)
 - `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry + `known_provider_ids` (anthropic, codex); `AuthParams` and `truncate` helper
 - `src/oauth/providers/anthropic.rs` -- claude.ai OAuth flow: `claude.com/cai/oauth/authorize` + `platform.claude.com/v1/oauth/token`, `anthropic-beta: oauth-2025-04-20`, manual-paste redirect support
 - `src/oauth/providers/codex.rs` -- OpenAI ChatGPT/Codex OAuth 2.0 PKCE flow (public client, JWT-derived expiry, lazy refresh-token rotation)
@@ -230,10 +230,11 @@ listed at the bottom of each crate.
 - `src/commands/mod.rs` -- groups CLI subcommand entry points (test, config, login, logout, refresh, whoami; `serve` lives in `crate::server`)
 - `src/commands/config.rs` -- `routectl config check/show/example` (secret resolution, alias chain validation)
 - `src/commands/test.rs` -- `routectl test <target>` one-shot completion against an alias or model nickname
-- `src/commands/login.rs` -- `routectl login <provider>` runs the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via `OAuthStore`; `--print-url` headless flow guarded against providers without a paste-back landing page
-- `src/commands/logout.rs` -- `routectl logout <provider>` -- removes a provider's tokens from the credentials store; first-time logout reported but not an error
-- `src/commands/refresh.rs` -- `routectl refresh <provider>` -- forces a token refresh through the per-provider single-flight gate, regardless of expiry
-- `src/commands/whoami.rs` -- `routectl whoami` -- prints OAuth provider state from the credentials store; exits 0 when at least one provider is logged in, 2 otherwise
+- `src/commands/login.rs` -- `routectl login <provider> [--label <name>]` runs the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via `OAuthStore`; `--label` registers an additional seat without overwriting the default; `--print-url` headless flow guarded against providers without a paste-back landing page
+- `src/commands/logout.rs` -- `routectl logout <provider> [--label <name>]` -- removes one seat (`--label` removes only the named seat; no label removes the default) from the credentials store; first-time logout reported but not an error
+- `src/commands/refresh.rs` -- `routectl refresh <provider> [--label <name>]` -- forces a refresh of one seat through the per-seat single-flight gate, regardless of expiry
+- `src/commands/whoami.rs` -- `routectl whoami` -- prints OAuth seat state grouped by provider (default seat as `<provider> (default)`, labeled seats as `<provider>#<label>`), each with its own expiry; exits 0 when at least one seat is logged in, 2 otherwise
+- `src/commands/seat.rs` -- shared `--label` validation for the seat-aware OAuth commands (rejects empty/whitespace labels, mirroring the `oauth://` ref parser)
 
 ### Tests
 

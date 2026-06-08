@@ -9,19 +9,28 @@
 use routectl_auth::{LoginOptions, OAuthStore};
 use routectl_core::{Error, Result};
 
-pub async fn run(provider: &str, print_url: bool, callback_port: Option<u16>) -> Result<()> {
+use crate::commands::seat::validate_label;
+
+pub async fn run(
+    provider: &str,
+    print_url: bool,
+    callback_port: Option<u16>,
+    label: Option<&str>,
+) -> Result<()> {
     if print_url && !provider_supports_print_url(provider) {
         return Err(Error::Auth(format!(
             "{provider} login does not support --print-url; run the default \
              browser flow (SSH users can port-forward 1455)"
         )));
     }
+    let label = validate_label(label)?;
     let store = OAuthStore::open_default()
         .await
         .map_err(|e| Error::Auth(e.to_string()))?;
     let opts = LoginOptions::new()
         .with_print_url(print_url)
-        .with_callback_port(callback_port);
+        .with_callback_port(callback_port)
+        .with_label(label.map(str::to_string));
     routectl_auth::oauth::run_login(provider, &store, opts)
         .await
         .map_err(|e| Error::Auth(e.to_string()))?;

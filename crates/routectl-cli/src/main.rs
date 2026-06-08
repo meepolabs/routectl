@@ -75,6 +75,12 @@ enum Cmd {
         /// Override the local callback port. Default: random ephemeral.
         #[arg(long)]
         callback_port: Option<u16>,
+        /// Seat label. Omit to write the default seat (today's
+        /// behavior); pass a name to register an additional same-provider
+        /// seat (`oauth://<provider>#<label>`) without overwriting the
+        /// default.
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Remove a provider's tokens from the routectl credentials store.
     /// First-time logout (no record present) is reported but is not an
@@ -83,6 +89,10 @@ enum Cmd {
         /// Which provider to log out of.
         #[arg(value_parser = provider_value_parser())]
         provider: String,
+        /// Seat label. Omit to remove the default seat (today's
+        /// behavior); pass a name to remove only that one seat.
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Force a token refresh for a provider through the per-provider
     /// single-flight gate, regardless of expiry. Useful when a token
@@ -91,6 +101,10 @@ enum Cmd {
         /// Which provider to refresh.
         #[arg(value_parser = provider_value_parser())]
         provider: String,
+        /// Seat label. Omit to refresh the default seat (today's
+        /// behavior); pass a name to refresh only that one seat.
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Print the OAuth provider state from the routectl credentials
     /// store. Exits 0 when at least one provider is logged in,
@@ -165,20 +179,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             provider,
             print_url,
             callback_port,
+            label,
         } => {
-            if let Err(e) = commands::login::run(&provider, print_url, callback_port).await {
+            if let Err(e) =
+                commands::login::run(&provider, print_url, callback_port, label.as_deref()).await
+            {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
         }
-        Cmd::Logout { provider } => {
-            if let Err(e) = commands::logout::run(&provider).await {
+        Cmd::Logout { provider, label } => {
+            if let Err(e) = commands::logout::run(&provider, label.as_deref()).await {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
         }
-        Cmd::Refresh { provider } => {
-            if let Err(e) = commands::refresh::run(&provider).await {
+        Cmd::Refresh { provider, label } => {
+            if let Err(e) = commands::refresh::run(&provider, label.as_deref()).await {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }

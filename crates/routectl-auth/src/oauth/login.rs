@@ -31,6 +31,7 @@ use crate::oauth::pkce::{constant_time_eq, Pkce};
 use crate::oauth::providers::{self, AuthParams, OAuthFlow};
 use crate::oauth::rate_limit::{Decision, RateLimitTracker};
 use crate::oauth::store::OAuthStore;
+use crate::oauth::types::seat_key;
 use crate::oauth::{OAuthError, OAuthResult};
 
 /// Knobs the operator can override on the CLI.
@@ -43,6 +44,12 @@ pub struct LoginOptions {
     /// Override the local callback port. Default: kernel-assigned
     /// ephemeral port via bind on `127.0.0.1:0`.
     pub callback_port: Option<u16>,
+    /// Seat label. `None` writes the default (unlabeled) seat -- the
+    /// bare provider key, byte-for-byte today's behavior. `Some(label)`
+    /// writes a labeled seat (`provider#label`) without touching the
+    /// default seat, so an operator can register a pool of same-provider
+    /// credentials.
+    pub label: Option<String>,
 }
 
 impl LoginOptions {
@@ -62,22 +69,36 @@ impl LoginOptions {
         self.callback_port = port;
         self
     }
+
+    pub fn with_label(mut self, label: Option<String>) -> Self {
+        self.label = label;
+        self
+    }
 }
 
 /// Run the login flow for `provider_id` against `store`. On success,
 /// persists tokens and returns the authenticated provider id (which
 /// matches the input verbatim; passed back for symmetry with logout).
+///
+/// `options.label` selects the seat the resulting record is written
+/// under: `None` writes the default (unlabeled) seat -- the bare
+/// provider key -- exactly as before; `Some(label)` writes the labeled
+/// seat `provider#label` without disturbing the default seat. The
+/// freshly-exchanged `TokenRecord` carries its own per-record identity
+/// (the codex flow mints a new `session_id` on every fresh exchange),
+/// so each seat gets a stable identity of its own.
 pub async fn run(
     provider_id: &str,
     store: &OAuthStore,
     options: LoginOptions,
 ) -> OAuthResult<String> {
     let flow = providers::lookup(provider_id)?;
+    let seat = seat_key(flow.provider_id(), options.label.as_deref());
 
     if options.print_url {
-        run_print_url(flow, store).await
+        run_print_url(flow, store, &seat).await
     } else {
-        run_browser(flow, store, options.callback_port).await
+        run_browser(flow, store, options.callback_port, &seat).await
     }
 }
 
@@ -89,6 +110,7 @@ async fn run_browser(
     flow: &'static dyn OAuthFlow,
     store: &OAuthStore,
     requested_port: Option<u16>,
+    seat: &str,
 ) -> OAuthResult<String> {
     let pkce = Pkce::generate();
 
@@ -136,9 +158,7 @@ async fn run_browser(
             &redirect_uri,
         )
         .await?;
-    store
-        .write_record(flow.provider_id(), record.clone())
-        .await?;
+    store.write_record(seat, record.clone()).await?;
 
     print_login_success(flow, &record);
     Ok(flow.provider_id().to_string())
@@ -262,7 +282,11 @@ fn launch_browser_or_print_url(flow: &'static dyn OAuthFlow, auth_url: &url::Url
 /// upstream's `manual_redirect_url` (Anthropic claude.ai uses
 /// `https://platform.claude.com/oauth/code/callback`) shows the
 /// operator a `code#state` pair after they authorize.
-async fn run_print_url(flow: &'static dyn OAuthFlow, store: &OAuthStore) -> OAuthResult<String> {
+async fn run_print_url(
+    flow: &'static dyn OAuthFlow,
+    store: &OAuthStore,
+    seat: &str,
+) -> OAuthResult<String> {
     let pkce = Pkce::generate();
     let redirect_uri = flow.manual_redirect_url().to_string();
     let auth_url = flow.auth_url(&AuthParams {
@@ -297,9 +321,7 @@ async fn run_print_url(flow: &'static dyn OAuthFlow, store: &OAuthStore) -> OAut
             &redirect_uri,
         )
         .await?;
-    store
-        .write_record(flow.provider_id(), record.clone())
-        .await?;
+    store.write_record(seat, record.clone()).await?;
 
     print_login_success(flow, &record);
     Ok(flow.provider_id().to_string())

@@ -266,14 +266,16 @@ impl OAuthStore {
         self.remove_provider(provider).await
     }
 
-    /// Force a refresh for `provider`'s default (unlabeled) seat
-    /// regardless of expiry. Used by `routectl refresh <provider>`. Goes
-    /// through the per-seat single-flight gate so a 401 storm collapses
-    /// to one token-endpoint POST. Returns the freshly-persisted
-    /// `TokenRecord` so the CLI can report the new expiry.
-    pub async fn force_refresh(&self, provider: &str) -> Result<TokenRecord> {
-        // The default seat keys as the bare provider name.
-        self.force_refresh_seat(provider, &seat_key(provider, None))
+    /// Force a refresh for one seat of `provider`, regardless of expiry.
+    /// Used by `routectl refresh <provider> [--label <name>]`. `label`
+    /// `None` targets the default (unlabeled) seat -- the bare provider
+    /// name -- exactly as before; `Some(label)` targets the labeled seat
+    /// `provider#label`. Goes through the per-seat single-flight gate so a
+    /// 401 storm collapses to one token-endpoint POST. Returns the
+    /// freshly-persisted `TokenRecord` so the CLI can report the new
+    /// expiry.
+    pub async fn force_refresh(&self, provider: &str, label: Option<&str>) -> Result<TokenRecord> {
+        self.force_refresh_seat(provider, &seat_key(provider, label))
             .await
     }
 
@@ -1138,9 +1140,116 @@ mod tests {
         )));
         let store = open_with_flow(&path, flow).await;
 
-        let new_rec = store.force_refresh("anthropic").await.unwrap();
+        let new_rec = store.force_refresh("anthropic", None).await.unwrap();
         assert_eq!(new_rec.access_token.expose(), "tok-cli-refresh");
         assert!(new_rec.expires_at_unix > unix_now());
+    }
+
+    #[tokio::test]
+    async fn refresh_label_targets_named_seat() {
+        // `force_refresh(provider, Some(label))` must refresh ONLY the
+        // named seat's record and leave the default seat byte-for-byte
+        // intact. Drives the `routectl refresh <provider> --label <name>`
+        // store path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let seed = OAuthStore::open(&path).await.unwrap();
+        // Both seats healthy: only the forced refresh on seat-b runs.
+        seed.write_record(
+            "anthropic",
+            rec_named("tok-default-orig", unix_now() + 3600),
+        )
+        .await
+        .unwrap();
+        seed.write_record(
+            "anthropic#seat-b",
+            rec_named("tok-b-orig", unix_now() + 3600),
+        )
+        .await
+        .unwrap();
+        drop(seed);
+
+        let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+            "tok-b-refreshed".into(),
+        )));
+        let store = open_with_flow(&path, flow.clone()).await;
+
+        let new_rec = store
+            .force_refresh("anthropic", Some("seat-b"))
+            .await
+            .unwrap();
+        assert_eq!(new_rec.access_token.expose(), "tok-b-refreshed");
+        assert_eq!(flow.call_count(), 1, "exactly one refresh fired");
+
+        // seat-b rotated; the default seat is untouched.
+        let listed: BTreeMap<String, TokenRecord> = store.list().await.into_iter().collect();
+        assert_eq!(
+            listed["anthropic#seat-b"].access_token.expose(),
+            "tok-b-refreshed"
+        );
+        assert_eq!(
+            listed["anthropic"].access_token.expose(),
+            "tok-default-orig",
+            "the default seat must be untouched by a labeled refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_with_label_does_not_overwrite_default_seat() {
+        // The login write path persists through `write_record(seat_key)`.
+        // Writing a labeled seat after a default is present must leave the
+        // default intact -- both keys coexist. Pins the
+        // `routectl login <provider> --label <name>` non-overwrite
+        // contract at the store layer (the live login flow's only mutation
+        // is this `write_record`).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_named("tok-default", unix_now() + 3600))
+            .await
+            .unwrap();
+
+        // Labeled login effect: write under the seat key.
+        store
+            .write_record(
+                &seat_key("anthropic", Some("seat-b")),
+                rec_named("tok-seat-b", unix_now() + 3600),
+            )
+            .await
+            .unwrap();
+
+        let listed: BTreeMap<String, TokenRecord> = store.list().await.into_iter().collect();
+        assert_eq!(listed.len(), 2, "both seats must be present");
+        assert_eq!(listed["anthropic"].access_token.expose(), "tok-default");
+        assert_eq!(
+            listed["anthropic#seat-b"].access_token.expose(),
+            "tok-seat-b"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_without_label_writes_bare_provider_unchanged() {
+        // Back-compat pin: a label-less login writes the bare provider
+        // key (`seat_key(provider, None) == provider`), byte-for-byte as
+        // before. A subsequent labeled write does not move it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record(
+                &seat_key("anthropic", None),
+                rec_named("tok-default", unix_now() + 3600),
+            )
+            .await
+            .unwrap();
+
+        let listed: Vec<String> = store.list().await.into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            listed,
+            vec!["anthropic"],
+            "no-label login must write exactly the bare provider key"
+        );
     }
 
     #[tokio::test]

@@ -7,5 +7,6 @@ pub mod config;
 pub mod login;
 pub mod logout;
 pub mod refresh;
+pub mod seat;
 pub mod test;
 pub mod whoami;

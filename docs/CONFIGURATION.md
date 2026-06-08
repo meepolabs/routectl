@@ -946,6 +946,70 @@ provider permits -- see the README "Responsible use" section.
    `oauth://anthropic` token has expired -- re-run `routectl login
    anthropic` (auto-refresh is a follow-up).
 
+### Credential pool (multiple seats per provider)
+
+A single OAuth provider can hold more than one credential ("seat") in
+the routectl store. The default seat is the bare provider; additional
+seats are named with a `#<label>` suffix. This lets an operator pool a
+few same-provider subscriptions and (with the round-robin knob below)
+spread load across them.
+
+**Seat refs.** A config `api_key_ref` selects which seat resolves at
+request time:
+
+- `oauth://anthropic` -- the default (unlabeled) seat, or the whole
+  pool when `seat_selection` is set (the bare ref expands to every
+  stored seat for that provider).
+- `oauth://anthropic#seat-b` -- one specific labeled seat. Pins exactly
+  that credential; never widened to the pool.
+
+**Registering seats.** The four OAuth CLI commands take an optional
+`--label`. Without it, every command behaves exactly as before and
+targets the default seat:
+
+```bash
+# Default seat (unchanged behavior).
+routectl login anthropic
+
+# Add a second, independent seat. Does NOT overwrite the default.
+routectl login anthropic --label seat-b
+
+# Refresh / log out one named seat only.
+routectl refresh anthropic --label seat-b
+routectl logout  anthropic --label seat-b   # leaves the default intact
+
+# A bare logout removes ONLY the default seat, leaving labeled seats.
+routectl logout anthropic
+```
+
+Each seat carries its own credential and its own stable per-credential
+identity (the openai-responses `session-id` is minted per seat), so
+seats refresh and rotate independently. `routectl whoami` lists every
+stored seat grouped under its provider -- the default renders as
+`<provider> (default)`, labeled seats as `<provider>#<label>` -- each
+with its own expiry.
+
+**Seat selection.** A per-provider `seat_selection` knob picks how
+dispatch chooses among the pool's seats:
+
+```toml
+[providers.anthropic-managed]
+kind          = "anthropic-api"
+api_key_ref   = "oauth://anthropic"
+auth_kind     = "oauth-bearer"
+seat_selection = "round-robin"   # or "fill-first" (default)
+```
+
+- `fill-first` (default) -- drain one seat before advancing to the
+  next. A single-seat provider (the common case) keeps today's
+  behavior with no config.
+- `round-robin` -- rotate across seats to spread load.
+
+The knob is parsed and validated per provider today; the dispatch path
+that consumes it across a live pool is a follow-up. An empty or
+whitespace-only `--label` is rejected with a clear error, matching the
+`oauth://<provider>#<label>` ref parser's rule.
+
 ### Header pack ("look like claude-code")
 
 Drop this into `header_extras` on the anthropic-managed provider so

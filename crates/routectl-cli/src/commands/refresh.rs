@@ -1,25 +1,32 @@
-//! `routectl refresh <provider>` -- force a token refresh through the
-//! per-provider single-flight gate, regardless of expiry. Useful when
-//! the operator suspects a token has been revoked server-side or wants
-//! to cycle a fresh access token before a long-running session.
+//! `routectl refresh <provider> [--label <name>]` -- force a token
+//! refresh through the per-seat single-flight gate, regardless of expiry.
+//! Useful when the operator suspects a token has been revoked
+//! server-side or wants to cycle a fresh access token before a
+//! long-running session. Without `--label`, refreshes the default
+//! (unlabeled) seat -- today's behavior. With `--label`, refreshes only
+//! that one seat.
 
-use routectl_auth::oauth::types::unix_now;
+use routectl_auth::oauth::types::{seat_key, unix_now};
 use routectl_auth::OAuthStore;
 use routectl_core::{Error, Result};
 
-pub async fn run(provider: &str) -> Result<()> {
+use crate::commands::seat::validate_label;
+
+pub async fn run(provider: &str, label: Option<&str>) -> Result<()> {
+    let label = validate_label(label)?;
     let store = OAuthStore::open_default()
         .await
         .map_err(|e| Error::Auth(e.to_string()))?;
     // `force_refresh` already wraps refresh failures with the actionable
     // "re-run `routectl login {provider}`" hint. Surface the message
     // verbatim by propagating the error.
-    let new_rec = store.force_refresh(provider).await?;
+    let new_rec = store.force_refresh(provider, label).await?;
     let now = unix_now();
     let remaining = new_rec.expires_at_unix.saturating_sub(now);
     let human = humanize_remaining(remaining);
+    let seat = seat_key(provider, label);
     println!(
-        "Refreshed {provider}. Access token expires in {human} (expires_at_unix={}).",
+        "Refreshed {seat}. Access token expires in {human} (expires_at_unix={}).",
         new_rec.expires_at_unix
     );
     Ok(())

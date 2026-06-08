@@ -70,7 +70,7 @@ async fn login_unknown_provider_errors_clearly() {
     // binding any sockets or opening browsers. (clap normally rejects
     // unknown values first; this guards the command body's own
     // registry-lookup path, which must list every known provider.)
-    match commands::login::run("made-up-provider", false, None).await {
+    match commands::login::run("made-up-provider", false, None, None).await {
         Err(routectl_core::Error::Auth(msg)) => {
             assert!(
                 msg.contains("unknown oauth provider"),
@@ -505,7 +505,7 @@ async fn login_codex_print_url_is_refused_with_browser_only_message() {
     // must fail fast (before opening the store or binding a socket) with
     // the browser-only guidance. Exit-non-zero is enforced by main.rs;
     // here we assert the command body returns the Auth error.
-    let err = commands::login::run("codex", /* print_url */ true, None)
+    let err = commands::login::run("codex", /* print_url */ true, None, None)
         .await
         .expect_err("codex --print-url must be refused");
     match err {
@@ -536,13 +536,13 @@ async fn logout_codex_removes_seeded_record() {
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
     seed_credentials(tmp.path(), &[("codex", "dev@example.com")]);
 
-    commands::logout::run("codex")
+    commands::logout::run("codex", None)
         .await
         .expect("logout codex should succeed against a seeded record");
 
     // The record must be gone: a second logout reports nothing to remove,
     // and whoami no longer sees any provider.
-    commands::logout::run("codex")
+    commands::logout::run("codex", None)
         .await
         .expect("second logout codex is a no-op, not an error");
     let code = commands::whoami::run().await.expect("whoami ok");
@@ -560,7 +560,7 @@ async fn refresh_codex_without_record_reports_not_logged_in() {
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
 
-    let err = commands::refresh::run("codex")
+    let err = commands::refresh::run("codex", None)
         .await
         .expect_err("refresh codex with no record must error");
     match err {
@@ -608,6 +608,101 @@ async fn whoami_lists_both_anthropic_and_codex_when_present() {
     let ids: Vec<String> = store.list().await.into_iter().map(|(p, _)| p).collect();
     assert!(ids.contains(&"anthropic".to_string()), "got: {ids:?}");
     assert!(ids.contains(&"codex".to_string()), "got: {ids:?}");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn logout_label_removes_only_that_seat() {
+    // `logout <provider> --label <name>` must remove ONLY the labeled
+    // seat and leave the default seat intact.
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    seed_credentials(
+        tmp.path(),
+        &[
+            ("anthropic", "default@example.com"),
+            ("anthropic#seat-b", "seat-b@example.com"),
+        ],
+    );
+
+    commands::logout::run("anthropic", Some("seat-b"))
+        .await
+        .expect("labeled logout should succeed");
+
+    // The default seat survives; only seat-b is gone.
+    let store = routectl_auth::OAuthStore::open_default()
+        .await
+        .expect("open store");
+    let ids: Vec<String> = store.list().await.into_iter().map(|(p, _)| p).collect();
+    assert_eq!(
+        ids,
+        vec!["anthropic"],
+        "labeled logout must remove only the named seat, leaving the default: {ids:?}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn logout_no_label_removes_default_seat() {
+    // `logout <provider>` (no label) must remove ONLY the default seat
+    // and leave labeled seats intact -- a bare logout must not surprise an
+    // operator who added a pool by wiping every seat.
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    seed_credentials(
+        tmp.path(),
+        &[
+            ("anthropic", "default@example.com"),
+            ("anthropic#seat-b", "seat-b@example.com"),
+        ],
+    );
+
+    commands::logout::run("anthropic", None)
+        .await
+        .expect("default logout should succeed");
+
+    // seat-b survives; only the default is gone.
+    let store = routectl_auth::OAuthStore::open_default()
+        .await
+        .expect("open store");
+    let ids: Vec<String> = store.list().await.into_iter().map(|(p, _)| p).collect();
+    assert_eq!(
+        ids,
+        vec!["anthropic#seat-b"],
+        "no-label logout must remove only the default seat, leaving labeled seats: {ids:?}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn whoami_lists_seats_grouped_by_provider() {
+    // whoami must surface a provider's default seat AND its labeled seat,
+    // each as its own block. Exit 0 (at least one seat logged in); the
+    // store sees both keys whoami iterates.
+    let tmp = tempfile::tempdir().unwrap();
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", tmp.path());
+    seed_credentials(
+        tmp.path(),
+        &[
+            ("anthropic", "default@example.com"),
+            ("anthropic#seat-b", "seat-b@example.com"),
+        ],
+    );
+
+    let code = commands::whoami::run()
+        .await
+        .expect("whoami should not error with a pooled provider");
+    assert_eq!(code, 0, "whoami must exit 0 when seats are present");
+
+    let store = routectl_auth::OAuthStore::open_default()
+        .await
+        .expect("open seeded store");
+    let ids: Vec<String> = store.list().await.into_iter().map(|(p, _)| p).collect();
+    assert_eq!(
+        ids,
+        vec!["anthropic", "anthropic#seat-b"],
+        "store must hold both the default and labeled seat: {ids:?}"
+    );
 }
 
 // ---------------- clap-layer provider validation ----------------
@@ -695,5 +790,34 @@ fn clap_accepts_codex_for_logout_and_refresh() {
     assert!(
         !refresh_err.contains("invalid value"),
         "refresh must accept codex: {refresh_err}"
+    );
+}
+
+#[test]
+fn clap_accepts_label_flag_for_seat_commands() {
+    // `--label` must parse cleanly on logout (and by extension login /
+    // refresh, which share the same flag wiring). A labeled logout against
+    // an empty store is a clean no-op (exit 0), NOT a clap rejection.
+    let (code, stderr) = run_routectl(&["logout", "anthropic", "--label", "seat-b"]);
+    assert!(
+        !stderr.contains("unexpected argument") && !stderr.contains("invalid value"),
+        "--label must be an accepted flag: {stderr}"
+    );
+    assert_eq!(
+        code, 0,
+        "labeled logout of empty store is a no-op: {stderr}"
+    );
+}
+
+#[test]
+fn empty_label_is_rejected_at_runtime() {
+    // An empty `--label` parses at the clap layer (it is a String) but the
+    // command body rejects it with a clear, secret-free message and a
+    // non-zero exit, mirroring the SecretRef parser's empty-label rule.
+    let (code, stderr) = run_routectl(&["logout", "anthropic", "--label", "   "]);
+    assert_ne!(code, 0, "whitespace-only label must be rejected: {stderr}");
+    assert!(
+        stderr.contains("--label must not be empty"),
+        "expected empty-label guidance, got: {stderr}"
     );
 }
