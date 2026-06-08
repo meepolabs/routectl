@@ -70,6 +70,14 @@ pub(crate) mod tool_calls;
 #[cfg(any(feature = "openai-compat", feature = "bedrock"))]
 pub(crate) mod system_filter;
 
+// Body re-signer for the billing-header checksum. When routectl mutates
+// the canonical body on the egress path (effort injection, tool-id
+// sanitize, signature strip), any checksum the ingress client computed
+// is invalidated. This module re-signs the existing billing block
+// in-place so the bytes transmitted match an upstream recompute.
+#[cfg(feature = "anthropic-api")]
+pub(crate) mod claude_signing;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 

@@ -567,6 +567,8 @@ impl Provider for AnthropicApiProvider {
         // response in one pass during triage. Gated by the
         // `tracing::Level::TRACE` filter -- production with default
         // info level pays nothing.
+        // NOTE: this trace reflects the pre-resign body; the cch token
+        // in the transmitted bytes differs after resign_cch_in_place.
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
@@ -576,10 +578,23 @@ impl Provider for AnthropicApiProvider {
         // value (including the v0.7+ refresh path landing in a prior change).
         let token = self.cfg.auth.token().await?;
 
+        // Serialize first so the billing-header checksum can be re-signed
+        // over the exact bytes transmitted. routectl mutates the canonical
+        // body upstream of this point (effort injection, tool-id sanitize,
+        // signature strip), which invalidates any checksum the ingress
+        // client computed. Re-sign only on the Claude-Code OauthBearer
+        // api.anthropic.com surface; every other path is a no-op.
+        let mut body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        if self.cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&self.cfg.base_url)
+        {
+            crate::claude_signing::resign_cch_in_place(&mut body_bytes);
+        }
+
         let request = self
             .build_headers(self.client.post(self.messages_url()), &req, &token)
             .header("content-type", "application/json")
-            .json(&body)
+            .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
         // Dir 2: outgoing request headers (incl. auth) from the built
@@ -690,15 +705,27 @@ impl Provider for AnthropicApiProvider {
             obj.remove("anthropic_beta");
         }
 
+        // NOTE: this trace reflects the pre-resign body; the cch token
+        // in the transmitted bytes differs after resign_cch_in_place.
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
         let token = self.cfg.auth.token().await?;
 
+        // See the complete() path: re-sign the billing-header checksum
+        // over the exact transmitted bytes on the Claude-Code OauthBearer
+        // api.anthropic.com surface; a no-op everywhere else.
+        let mut body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+        if self.cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&self.cfg.base_url)
+        {
+            crate::claude_signing::resign_cch_in_place(&mut body_bytes);
+        }
+
         let request = self
             .build_headers(self.client.post(self.messages_url()), &req, &token)
             .header("content-type", "application/json")
-            .json(&body)
+            .body(body_bytes)
             .build()
             .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
         // Dir 2: outgoing request headers (incl. auth) for the stream
@@ -878,6 +905,7 @@ impl Provider for AnthropicApiProvider {
 
         let token = self.cfg.auth.token().await?;
 
+        // count_tokens is deliberately unsigned (matches upstream).
         let request = self
             .build_headers(self.client.post(self.count_tokens_url()), &req, &token)
             .header("content-type", "application/json")
