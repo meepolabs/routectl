@@ -29,7 +29,7 @@ listed at the bottom of each crate.
 - `src/identity/mod.rs` -- provider identity-header module root; one canonical home for the compiled HTTP-fingerprint constants and default-header builders (`pub mod codex; pub mod anthropic;`)
 - `src/identity/codex.rs` -- shared codex CLI HTTP fingerprint (UA, originator, residency) + `default_identity_headers()` (originator/residency/version trio); consumed by both the openai-responses egress client and the routectl-auth OAuth refresh client so token-endpoint round-trips do not drift from real codex traffic
 - `src/identity/anthropic.rs` -- compiled Claude Code SDK (Stainless) identity-header defaults (`default_claude_code_identity_headers`, `default_claude_code_user_agent`); consumed by the anthropic-api egress on the OauthBearer path so a zero-config provider emits the Claude Code fingerprint
-- `src/error.rs` -- `Error` enum (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...) and `Result` alias
+- `src/error.rs` -- `Error` enum (Upstream/NormalizeRequest/Validation/Streaming/Auth/Config/NotImplemented/...) and `Result` alias; `Error::Upstream` carries a structural `retry_after: Option<Duration>` (populated only on a rate-limit/overload reset hint) plus the `upstream_with_retry_after` ctor
 
 ### Tests
 
@@ -50,6 +50,7 @@ listed at the bottom of each crate.
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin and User-Agent override
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller `reasoning.effort` against per-model `effort_levels` (rounds toward most-capable above max, least-capable below min); single source of truth across openai-compat, anthropic-api, bedrock, openai-responses
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream -> routectl) emit sites
+- `src/retry_after.rs` -- parser for the standard HTTP `Retry-After` response header (RFC 9110 delta-seconds or HTTP-date) plus `is_rate_limit_status`; every egress lifts the hint on a 429/503/529 and carries it on `Error::Upstream.retry_after` for the router to honor (the Codex `usage_limit_reached` `resets_at` / `resets_in_seconds` reset is parsed in `openai_responses/response.rs` and preferred over the header hint)
 
 ### anthropic_api
 
@@ -160,8 +161,8 @@ listed at the bottom of each crate.
 - `src/factory.rs` -- secret resolution + `build_provider`/`build_resolved_models`; validation guards
 - `src/glob.rs` -- `[aliases]` table suffix-glob parser + longest-prefix lookup index (`AliasPattern`, `PrefixIndex`)
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`
-- `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch
-- `src/runtime_state.rs` -- per-model (nickname-keyed) token-bucket RPM limiter + circuit breaker state machine
+- `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch; `rate_limit_reset_hint` (clamp an `Error::Upstream.retry_after` to the configured ceiling) + `park_provider` (open the breaker for a honored reset) thread upstream resets into the three dispatch loops
+- `src/runtime_state.rs` -- per-model (nickname-keyed) token-bucket RPM limiter + circuit breaker state machine; `force_open` parks the breaker for an explicit reset hint, bypassing the consecutive-failure threshold
 - `src/feature_keys.rs` -- feature-key derivation for the alias-chain pre-filter; walks `ToolDef::Other(v)["type"]` strings and strips date suffixes (e.g. `_20250305`) so `unsupported_features` on `ProviderRuntimePolicy` can match capability-class regardless of vendor versioning; `ToolDef::Custom` (user-defined tools) does not contribute feature keys
 
 ### Tests

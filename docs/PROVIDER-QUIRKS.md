@@ -367,6 +367,32 @@ stream_first_byte_timeout_ms = 300000   # 5 min until first byte
 request_timeout_ms           = 600000   # 10 min full request
 ```
 
+### Honoring upstream rate-limit resets (`Retry-After` / `resets_at`)
+
+When an upstream rate-limits or overloads (429/503/529) and reports
+when it will reset, routectl honors that reset instead of re-probing on
+the flat backoff schedule. The reset is read from the standard
+`Retry-After` header (seconds or HTTP-date) and, on the Codex
+`openai-responses` surface, from the `usage_limit_reached`
+`resets_at` / `resets_in_seconds` fields (the 5-hour-cap quota window).
+
+What happens with the honored value:
+
+- A reset at or below 5s is folded into the next same-provider retry
+  sleep (it never blocks the request thread longer than that).
+- A larger reset parks the provider's circuit breaker open until the
+  reset elapses, so the fallback chain skips that exhausted seat rather
+  than re-hitting it every flat-schedule retry. The request itself
+  falls over to the next chain entry immediately.
+- The honored duration is clamped to `[retry] max_honored_retry_after_ms`
+  (default 1h) so a hostile or buggy upstream cannot pin a seat open
+  indefinitely. See [CONFIGURATION.md](./CONFIGURATION.md) "Honoring
+  upstream resets".
+
+Availability probes (`max_tokens <= probe_max_tokens`) are exempt: a
+probe that 429/529s still fast-fails immediately with no retry, no
+fallback, and no park.
+
 ## Multi-host fallback chains
 
 When you want a model with multiple hosts as fallback, declare each host as

@@ -47,6 +47,13 @@ const LIST_VALUED_HEADERS: &[&str] = &["anthropic-beta"];
 /// rather than recurse indefinitely.
 const ALIAS_MAX_RECURSION_DEPTH: usize = 8;
 
+/// The largest upstream reset hint we honor as an in-loop, same-provider
+/// retry sleep (blocking the request thread). A reset at or below this
+/// cap is folded into the next backoff sleep; a larger reset parks the
+/// provider via the breaker instead, so the request falls over to a
+/// sibling rather than blocking on a multi-minute (or hostile) hint.
+const INLOOP_RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
+
 pub struct Router {
     pub config: Arc<Config>,
     /// Provider implementations keyed by user-facing name. Private so
@@ -714,8 +721,26 @@ impl Router {
                             self.release_probe_slot(state_key);
                             return Err(e);
                         }
+                        // The honored upstream reset for THIS error (clamped
+                        // to the ceiling), computed once for both the park
+                        // decision below and the in-loop sleep bump in the
+                        // retry branch. `None` for every non-rate-limit error.
+                        let reset_hint = rate_limit_reset_hint(&e, &policy);
                         if do_fallback {
-                            self.record_failure(state_key);
+                            match reset_hint {
+                                // Non-probe LARGE reset: park the provider for
+                                // the honored duration (force_open) instead of
+                                // a threshold-gated debit, so an exhausted seat
+                                // is skipped until it actually resets. The
+                                // in-loop re-gate then diverts to fallback /
+                                // fail. Probes never park (R7), and a small
+                                // reset is honored as an in-loop sleep (below),
+                                // so only the large non-probe case parks here.
+                                Some(h) if !is_probe && h > INLOOP_RETRY_AFTER_CAP => {
+                                    self.park_provider(state_key, h);
+                                }
+                                _ => self.record_failure(state_key),
+                            }
                         }
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
@@ -736,6 +761,20 @@ impl Router {
                                 "retrying same provider",
                             );
                             let _ = e;
+                            // Honor a SMALL non-probe upstream reset as the
+                            // next in-loop sleep: bump `backoff` so the
+                            // loop-top sleep waits at least the reset before
+                            // re-probing the SAME provider. Only when we were
+                            // already going to retry here (can_retry_here is
+                            // unchanged -- R12), only for a reset within the
+                            // in-loop cap (a larger reset parked the provider
+                            // above instead of blocking this thread), and never
+                            // for a probe (R7).
+                            if let Some(h) = reset_hint {
+                                if !is_probe && h <= INLOOP_RETRY_AFTER_CAP {
+                                    backoff = backoff.max(h);
+                                }
+                            }
                             // Free the half-open probe slot this attempt
                             // claimed before re-probing: the in-loop re-gate
                             // re-runs `try_dispatch`, which would otherwise see
@@ -912,8 +951,20 @@ impl Router {
                     // caller (claude-code's context-budget display) and
                     // it never walks the fallback chain, so a 429 here
                     // keeps its existing breaker-accounting behavior.
-                    if should_fallback(&e, &self.policy_for(&req.model), false) {
-                        self.record_failure(&target.state_key);
+                    let policy = self.policy_for(&req.model);
+                    let reset_hint = rate_limit_reset_hint(&e, &policy);
+                    if should_fallback(&e, &policy, false) {
+                        // A reset hint (any size) parks the provider for the
+                        // honored, clamped duration so the next count_tokens
+                        // skips this seat until it actually resets. No probe
+                        // split here: count_tokens is not the generation-probe
+                        // path (is_probe=false above) and takes no in-loop
+                        // sleep, so every honored reset parks. With no hint,
+                        // fall through to the threshold-gated debit as today.
+                        match reset_hint {
+                            Some(h) => self.park_provider(&target.state_key, h),
+                            None => self.record_failure(&target.state_key),
+                        }
                     } else {
                         // Non-fallbackable client error (NotImplemented,
                         // 4xx): not counted against the breaker, but we
@@ -1092,8 +1143,18 @@ impl Router {
                             self.release_probe_slot(state_key);
                             return Err(e);
                         }
+                        // Stream dispatch never retries the same provider (no
+                        // in-loop sleep), so a reset hint only sizes the
+                        // breaker park. A non-probe reset parks the provider
+                        // for the honored, clamped duration; a probe never
+                        // parks (R7) and a no-hint error keeps the
+                        // threshold-gated debit.
+                        let reset_hint = rate_limit_reset_hint(&e, &policy);
                         if do_fallback {
-                            self.record_failure(state_key);
+                            match reset_hint {
+                                Some(h) if !is_probe => self.park_provider(state_key, h),
+                                _ => self.record_failure(state_key),
+                            }
                         }
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
@@ -1186,6 +1247,21 @@ impl Router {
     fn record_failure(&self, state_key: &str) {
         if let Some(state) = self.state.get(state_key) {
             state.lock().record_failure(Instant::now());
+        }
+    }
+
+    /// Park the provider's breaker open for `cooldown`, bypassing the
+    /// consecutive-failure threshold. Used when an upstream sent an
+    /// explicit rate-limit reset hint larger than the in-loop sleep cap:
+    /// a single such signal opens the circuit at once so the chain skips
+    /// this seat until it actually resets, rather than re-probing on the
+    /// flat schedule. The caller MUST have already clamped `cooldown` to
+    /// `RetryPolicy::max_honored_retry_after` (see `rate_limit_reset_hint`).
+    /// `force_open` clears any in-flight half-open slot, so this is a
+    /// leak-safe substitute for the `record_failure` it replaces.
+    fn park_provider(&self, state_key: &str, cooldown: Duration) {
+        if let Some(state) = self.state.get(state_key) {
+            state.lock().force_open(Instant::now(), cooldown);
         }
     }
 
@@ -1848,6 +1924,29 @@ fn log_probe_fast_fail(provider: &str, model: &str, status: u16, max_tokens: Opt
         max_tokens = ?max_tokens,
         "probe request (max_tokens<=probe_max_tokens): not retrying/falling back on rate-limit",
     );
+}
+
+/// The honored rate-limit reset for `err`, clamped to the configured
+/// ceiling, or `None` when `err` carries no reset hint. A reset hint is
+/// present ONLY on a rate-limit/overload (429/503/529) where the
+/// upstream told us when it resets (`Retry-After`, or the Codex
+/// `usage_limit_reached` `resets_at` / `resets_in_seconds`), so its
+/// presence is itself the rate-limit signal. The clamp bounds both the
+/// in-loop honored sleep and the breaker park to
+/// `RetryPolicy::max_honored_retry_after` so a hostile or buggy upstream
+/// cannot pin a provider open indefinitely. A zero-duration hint (e.g.
+/// `Retry-After: 0`, a past HTTP-date, or a saturated `resets_at`) yields
+/// `None` so it falls through to the normal threshold-gated debit instead
+/// of a degenerate zero-length park (a `force_open(.., ZERO)` would leave
+/// the breaker stuck half-open without ever tripping).
+fn rate_limit_reset_hint(err: &Error, policy: &RetryPolicy) -> Option<Duration> {
+    match err {
+        Error::Upstream {
+            retry_after: Some(d),
+            ..
+        } => Some((*d).min(policy.max_honored_retry_after())).filter(|d| !d.is_zero()),
+        _ => None,
+    }
 }
 
 fn should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
@@ -4095,6 +4194,95 @@ mod circuit_breaker_slot_release_tests {
         }
     }
 
+    /// Provider that counts `complete()` calls and always fails with a
+    /// configurable status + reset hint, so the reset-honoring tests can
+    /// drive the park / in-loop-retry decision and assert the resulting
+    /// breaker state. `status` shapes fallbackability (429 fallbackable,
+    /// 400 not); `retry_after` is the reset hint threaded through
+    /// `Error::Upstream.retry_after`.
+    struct RetryAfterProvider {
+        id: String,
+        status: u16,
+        retry_after: Option<Duration>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for RetryAfterProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::upstream_with_retry_after(
+                &self.id,
+                self.status,
+                "rate limited",
+                self.retry_after,
+            ))
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!("not exercised by these tests")
+        }
+    }
+
+    /// Like `build_router_with_provider_and_retry` but lets the test pin
+    /// the breaker threshold + cooldown so a single recorded failure does
+    /// NOT necessarily trip the breaker. Used by the reset-honoring tests
+    /// that must distinguish a force-park (breaker open immediately) from
+    /// a sub-threshold `record_failure` (breaker still closed).
+    fn build_router_with_breaker(
+        provider: Arc<dyn Provider>,
+        retry: RetryPolicy,
+        circuit_failures: u32,
+        circuit_cooldown_ms: u64,
+    ) -> Router {
+        let mut config = Config {
+            retry,
+            ..Default::default()
+        };
+        config.providers.insert(
+            "p".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                user_agent: None,
+                runtime: ProviderRuntimePolicy {
+                    circuit_failures: Some(circuit_failures),
+                    circuit_cooldown_ms: Some(circuit_cooldown_ms),
+                    ..Default::default()
+                },
+            },
+        );
+        let mut router = Router::new(Arc::new(config));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m".into(),
+            Arc::new(ResolvedModel::new("m", "p", provider, "u")),
+        );
+        router.install_resolved_models(models);
+        router
+    }
+
+    /// True when the per-model breaker would refuse a dispatch at `now`
+    /// (CircuitOpen). The reset-honoring tests use this to assert a park
+    /// happened (open) or did not (allow).
+    fn breaker_open_at(router: &Router, now: Instant) -> bool {
+        let st = router.state.get("m").expect("per-model state slot exists");
+        st.lock().try_dispatch(now) == GateDecision::CircuitOpen
+    }
+
     /// Build a single-entry-chain Router around `provider` with a
     /// threshold-1, zero-cooldown breaker. Zero cooldown: the breaker is
     /// immediately half-open-eligible on the next dispatch, so the tests
@@ -4559,6 +4747,233 @@ mod circuit_breaker_slot_release_tests {
             calls_after_second > calls_after_first,
             "second dispatch must reach the upstream; a leaked slot would lock \
              the breaker (CircuitOpen) and skip it: {calls_after_first} -> {calls_after_second}",
+        );
+    }
+
+    /// A non-probe dispatch whose upstream returns a LARGE reset hint
+    /// (> INLOOP_RETRY_AFTER_CAP) parks the provider via `force_open` for
+    /// the honored duration, rather than blocking the request thread.
+    /// The failure threshold is high (5) so the ONLY way the breaker can
+    /// be open afterward is the force-park, not a counter-driven trip.
+    #[tokio::test]
+    async fn large_retry_after_parks_provider_via_force_open() {
+        // Arrange: 60s reset, well above the 5s in-loop cap, on a 429.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+            id: "p".into(),
+            status: 429,
+            retry_after: Some(Duration::from_secs(60)),
+            calls: calls.clone(),
+        });
+        // High threshold + a non-zero default cooldown (1s) so a stray
+        // record_failure would open for only ~1s, distinguishable from a
+        // 60s force-park.
+        let router = build_router_with_breaker(provider, RetryPolicy::default(), 5, 1_000);
+        let t0 = Instant::now();
+
+        // Act.
+        let _ = router.complete(plain_req()).await.unwrap_err();
+
+        // Assert: open now, still open at +59s (a 1s record_failure trip
+        // would already have elapsed), allowed only after the 60s park.
+        assert!(
+            breaker_open_at(&router, t0),
+            "large reset must park the provider open immediately",
+        );
+        assert!(
+            breaker_open_at(&router, t0 + Duration::from_secs(59)),
+            "park must outlast the default cooldown -- proving force_open, not a record_failure trip",
+        );
+        assert!(
+            !breaker_open_at(&router, t0 + Duration::from_secs(61)),
+            "park must release once the honored 60s reset elapses",
+        );
+    }
+
+    /// A SMALL reset (<= INLOOP_RETRY_AFTER_CAP) on a retryable error is
+    /// honored as an in-loop sleep, NOT a force-park: the same provider is
+    /// retried (call count rises to the retry cap) and a high failure
+    /// threshold leaves the breaker closed (no force_open).
+    #[tokio::test]
+    async fn small_retry_after_honored_in_loop_not_parked() {
+        // Arrange: 1ms reset (tiny, keeps the in-loop sleep negligible),
+        // 429 -> retryable (default max_attempts = 2). Threshold 5 so a
+        // single recorded failure cannot trip the breaker.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+            id: "p".into(),
+            status: 429,
+            retry_after: Some(Duration::from_millis(1)),
+            calls: calls.clone(),
+        });
+        let router = build_router_with_breaker(provider, RetryPolicy::default(), 5, 1_000);
+        let t0 = Instant::now();
+
+        // Act.
+        let _ = router.complete(plain_req()).await.unwrap_err();
+
+        // Assert: the same provider was retried in-loop (2 = max_attempts),
+        // and the breaker was NOT force-parked (closed under the high
+        // threshold). A force-park would have opened it after the first
+        // attempt and skipped the second.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a small reset must be honored as an in-loop retry, not a park",
+        );
+        assert!(
+            !breaker_open_at(&router, t0),
+            "a small reset must NOT force-park the provider (breaker stays closed under a high threshold)",
+        );
+    }
+
+    /// A reset far larger than `max_honored_retry_after` parks for the
+    /// CEILING, not the raw value: open before the ceiling, allowed after.
+    #[tokio::test]
+    async fn retry_after_clamped_to_ceiling() {
+        // Arrange: a 1-hour raw reset, a 10s ceiling.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+            id: "p".into(),
+            status: 429,
+            retry_after: Some(Duration::from_secs(3_600)),
+            calls: calls.clone(),
+        });
+        let retry = RetryPolicy {
+            max_honored_retry_after_ms: Some(10_000),
+            ..RetryPolicy::default()
+        };
+        let router = build_router_with_breaker(provider, retry, 5, 1_000);
+        let t0 = Instant::now();
+
+        // Act.
+        let _ = router.complete(plain_req()).await.unwrap_err();
+
+        // Assert: parked for the 10s ceiling, NOT the raw 1h. Still open at
+        // +9s; released at +11s (the raw 1h value would still be open).
+        assert!(
+            breaker_open_at(&router, t0 + Duration::from_secs(9)),
+            "park must hold until the ceiling elapses",
+        );
+        assert!(
+            !breaker_open_at(&router, t0 + Duration::from_secs(11)),
+            "park must release at the ceiling, not the raw 1h reset",
+        );
+    }
+
+    /// A probe (max_tokens <= probe_max_tokens) that 429s with a reset hint
+    /// fast-fails (R7): NO retry, NO fallback, NO breaker debit, NO park.
+    #[tokio::test]
+    async fn probe_with_retry_after_does_not_park() {
+        // Arrange: a probe-shaped request, a large reset that would park a
+        // non-probe. Threshold 5 so any stray debit/park is observable.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+            id: "p".into(),
+            status: 429,
+            retry_after: Some(Duration::from_secs(60)),
+            calls: calls.clone(),
+        });
+        let router = build_router_with_breaker(provider, RetryPolicy::default(), 5, 1_000);
+        let t0 = Instant::now();
+
+        // Act: probe_req has max_tokens = 1 <= probe_max_tokens (default 1).
+        let _ = router.complete(probe_req()).await.unwrap_err();
+
+        // Assert: fast-fail -- exactly one upstream call (no retry), and the
+        // breaker was neither parked nor debited (slot released cleanly).
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a probe must fast-fail on 429 with no retry",
+        );
+        assert!(
+            !breaker_open_at(&router, t0),
+            "a probe reset must NOT park the provider (R7)",
+        );
+    }
+
+    /// A reset on a NON-fallbackable error (a 400 named in the denylist)
+    /// does not force a retry or a park: the error terminates exactly as
+    /// today (R12 -- the reset never changes a fallback/retry decision).
+    #[tokio::test]
+    async fn non_fallbackable_error_with_retry_after_still_terminates() {
+        // Arrange: a 400 (client error) that is NOT fallbackable, carrying
+        // a large reset hint. Threshold 5 so any stray park is observable.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+            id: "p".into(),
+            status: 400,
+            retry_after: Some(Duration::from_secs(60)),
+            calls: calls.clone(),
+        });
+        let retry = RetryPolicy {
+            retry_denylist: Some(vec![400]),
+            ..RetryPolicy::default()
+        };
+        let router = build_router_with_breaker(provider, retry, 5, 1_000);
+        let t0 = Instant::now();
+
+        // Act.
+        let result = router.complete(plain_req()).await;
+
+        // Assert: terminated with the 400 (no retry walk), exactly one
+        // upstream call, and the breaker was not parked.
+        match result {
+            Err(Error::Upstream { status: 400, .. }) => {}
+            other => panic!("expected terminal Err(Upstream 400), got: {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a non-fallbackable error must not be retried despite a reset hint",
+        );
+        assert!(
+            !breaker_open_at(&router, t0),
+            "a non-fallbackable error must not park the provider (R12)",
+        );
+    }
+
+    /// A SMALL non-probe reset actually LENGTHENS the in-loop retry sleep
+    /// (the backoff-bump path), not merely "does not park". With a 1ms
+    /// baseline backoff, the 300ms hint must dominate the inter-attempt
+    /// wait -- proving the bump took effect (without it the retry would
+    /// fire almost immediately off the 1ms baseline).
+    #[tokio::test]
+    async fn small_retry_after_lengthens_inloop_sleep() {
+        // Arrange: 300ms reset (<= the 5s in-loop cap), 429 -> retryable,
+        // baseline backoff 1ms so the bump (not the baseline) drives the
+        // wait. Threshold 5 so the breaker is not parked.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
+            id: "p".into(),
+            status: 429,
+            retry_after: Some(Duration::from_millis(300)),
+            calls: calls.clone(),
+        });
+        let retry = RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            ..RetryPolicy::default()
+        };
+        let router = build_router_with_breaker(provider, retry, 5, 1_000);
+
+        // Act: time the whole two-attempt dispatch.
+        let start = Instant::now();
+        let _ = router.complete(plain_req()).await.unwrap_err();
+        let elapsed = start.elapsed();
+
+        // Assert: retried once (2 calls), and the inter-attempt sleep was
+        // lengthened to honor the 300ms reset, far above the 1ms baseline.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a small reset on a retryable error must still retry the same provider",
+        );
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "the in-loop sleep must be lengthened to ~the 300ms reset (got {elapsed:?}); \
+             without the bump the 1ms baseline would fire the retry almost immediately",
         );
     }
 }

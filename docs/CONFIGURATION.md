@@ -481,6 +481,40 @@ propagates to the caller immediately. They ship commented in
 
 
 
+### Honoring upstream resets (`max_honored_retry_after_ms`)
+
+When an upstream rate-limits or overloads (429/503/529) and tells
+routectl WHEN it resets -- via the `Retry-After` header, or the Codex
+`usage_limit_reached` `resets_at` / `resets_in_seconds` fields --
+routectl honors that reset instead of re-probing on the flat backoff
+schedule. A small reset is folded into the next in-loop retry sleep;
+a larger one parks the provider's circuit breaker open until the reset
+elapses, so the fallback chain skips that exhausted seat rather than
+hammering it.
+
+| Field                       | Type        | Default     | Effect |
+|-----------------------------|-------------|-------------|--------|
+| `max_honored_retry_after_ms`| Option<u64> | 3600000 (1h)| Ceiling on how long an upstream reset hint can park a provider. Caps BOTH the in-loop honored sleep and the breaker park, so a hostile or buggy upstream cannot pin a seat open indefinitely. |
+
+```toml
+[retry]
+# Cap an honored upstream reset at 30 minutes (default is 1 hour):
+# max_honored_retry_after_ms  = 1800000
+```
+
+A reset at or below 5 seconds is honored as the next same-provider
+retry sleep (it never blocks the request thread beyond that). A larger
+reset, clamped to `max_honored_retry_after_ms`, parks the provider via
+the circuit breaker -- the request itself falls over to the next chain
+entry immediately rather than waiting. Recovery after the park still
+flows through the breaker's single half-open probe. The resolution and
+clamp live in `RetryPolicy::max_honored_retry_after` and the router's
+`rate_limit_reset_hint` / `park_provider`
+(`crates/routectl-router/src/config.rs`,
+`crates/routectl-router/src/router.rs`).
+
+
+
 ## Per-model knobs
 
 ### Reasoning capability declaration

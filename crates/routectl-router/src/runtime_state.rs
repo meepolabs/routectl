@@ -170,6 +170,12 @@ impl ProviderState {
     /// is given. The consecutive-failure counter is left untouched -- the
     /// open state is driven by `circuit_opened_at` + `active_cooldown`,
     /// independent of the counter.
+    ///
+    /// Call only from a context that does NOT hold the half-open probe
+    /// slot. The router satisfies this: observing the upstream error that
+    /// carries the reset implies the caller reached the provider, which
+    /// implies it owns the slot this call then releases. Calling it while
+    /// another caller holds the slot would reset that caller's state.
     pub fn force_open(&mut self, now: Instant, cooldown: Duration) {
         self.circuit_opened_at = Some(now);
         self.active_cooldown = cooldown;
