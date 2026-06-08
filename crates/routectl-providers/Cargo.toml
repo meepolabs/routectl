@@ -11,7 +11,7 @@ description = "Provider implementations for routectl."
 [features]
 default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"]
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
-"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru"]
+"anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru", "dep:base64"]
 "openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store"]
 # Exposes test-only helpers (e.g. AnthropicApiProvider::seed_thinking_for_test)
 # that must not appear in production builds. Required when running integration

@@ -18,6 +18,8 @@
 
 use std::borrow::Cow;
 
+use base64::engine::general_purpose::STANDARD as B64_STANDARD;
+use base64::Engine;
 use serde_json::{json, Value};
 
 use routectl_core::{
@@ -38,15 +40,16 @@ use super::types::{AnthropicContent, AnthropicMessage, AnthropicRole, ContentBlo
 ///   thinking-strip. Anthropic 400s on such a body and the upstream
 ///   error doesn't name the bad message; surfacing it locally gives
 ///   operators a precise field to fix.
-/// - STRIP any `Thinking` content block whose `signature` is missing or
-///   empty from each message's `Parts` content -- UNLESS
-///   `history_reasoning` is `Preserve`. Cross-provider fallback (a prior
-///   turn handled by deepseek which signs with its own uuid format, then
-///   the next turn falls back to Anthropic) and SDKs that fail to
-///   round-trip the signature field would otherwise 400 real Anthropic
-///   with a confusing upstream error. Strip drops just the offending
-///   block; signed thinking blocks pass through unchanged and so does
-///   every other block type.
+/// - STRIP any `Thinking` content block whose `signature` is missing,
+///   empty, or not Claude-shaped (a foreign signature minted by another
+///   provider on a cross-provider turn) from each message's `Parts`
+///   content -- UNLESS `history_reasoning` is `Preserve`. Cross-provider
+///   fallback (a prior turn handled by deepseek which signs with its own
+///   uuid format, then the next turn falls back to Anthropic) and SDKs
+///   that fail to round-trip the signature field would otherwise 400 real
+///   Anthropic with a confusing upstream error. Strip drops just the
+///   offending block; Claude-signed thinking blocks pass through unchanged
+///   and so does every other block type.
 ///
 ///   `Preserve` skips the strip entirely: deepseek v4's `/anthropic`
 ///   endpoint (provider kind anthropic-api) emits unsigned thinking AND
@@ -179,15 +182,64 @@ pub(super) fn normalize_replay_invariants<'a>(
     Ok(Cow::Owned(out))
 }
 
-/// True iff `p` is a `Thinking` block whose `signature` is missing
-/// or empty. Pulled out so the pre-scan and the rebuild walk share a
-/// single predicate.
+/// True iff `p` is a `Thinking` block whose `signature` cannot ride a
+/// real-Anthropic replay: missing, empty, OR present-but-not Claude-
+/// shaped (a foreign signature minted by gpt/gemini on a cross-provider
+/// turn). Anthropic 400s on every one of these. Pulled out so the
+/// pre-scan and the rebuild walk share a single predicate.
 fn is_unsigned_thinking_part(p: &ContentPart) -> bool {
     matches!(
         p,
         ContentPart::Known(KnownContentPart::Thinking { signature, .. })
-            if signature.as_deref().unwrap_or("").is_empty()
+            if !is_claude_shaped_signature(signature.as_deref().unwrap_or(""))
     )
+}
+
+/// True iff `sig` has the SHAPE of a genuine Claude thinking-block
+/// signature. Real Anthropic accepts only its own signatures on replay;
+/// a foreign signature (e.g. a gpt/gemini uuid) 400s the request, so any
+/// signature that fails this shape check is stripped upstream.
+///
+/// Claude signatures are base64. The first char encodes layer depth:
+///   - `E`: single-layer base64; decoded payload's first byte is 0x12.
+///   - `R`: double-layer; decode once -> the inner string is itself an
+///     E-prefixed single-layer Claude signature.
+///
+/// A `<word>#` cache prefix may precede the E/R marker; strip one such
+/// leading segment before inspecting. Anything else -- other prefix,
+/// malformed base64, decoded byte0 != 0x12, empty -- is not Claude-shaped.
+fn is_claude_shaped_signature(sig: &str) -> bool {
+    // A historical cache key (`modelGroup#<sig>`) may prefix the raw
+    // signature; inspect only the segment after the first `#`.
+    let sig = sig.split_once('#').map_or(sig, |(_, rest)| rest);
+    match sig.as_bytes().first() {
+        Some(b'E') => is_e_layer_claude_signature(sig),
+        Some(b'R') => {
+            // Decode the outer layer; the inner bytes must themselves be
+            // a UTF-8 E-prefixed single-layer Claude signature.
+            let Ok(inner) = B64_STANDARD.decode(sig) else {
+                return false;
+            };
+            match std::str::from_utf8(&inner) {
+                Ok(inner_sig) => is_e_layer_claude_signature(inner_sig),
+                Err(_) => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// True iff `sig` is an `E`-prefixed single-layer Claude signature: valid
+/// base64 whose decoded payload's first byte is 0x12. Non-panicking; any
+/// decode failure or non-0x12 leading byte returns false.
+fn is_e_layer_claude_signature(sig: &str) -> bool {
+    if sig.as_bytes().first() != Some(&b'E') {
+        return false;
+    }
+    match B64_STANDARD.decode(sig) {
+        Ok(bytes) => bytes.first() == Some(&0x12),
+        Err(_) => false,
+    }
 }
 
 /// True iff any `Parts` content block on `msg` is an unsigned
@@ -760,5 +812,198 @@ mod translate_file_part_tests {
             }
             other => panic!("expected Document, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod thinking_signature_tests {
+    use super::{
+        is_claude_shaped_signature, is_unsigned_thinking_part, normalize_replay_invariants,
+        B64_STANDARD,
+    };
+    use base64::Engine;
+    use routectl_core::{
+        ChatRequest, ContentPart, CoreHistoryReasoning, KnownContentPart, Message, MessageContent,
+        Role,
+    };
+
+    /// A genuine E-shaped Claude signature: base64 of a payload whose
+    /// first byte is 0x12.
+    fn e_signature() -> String {
+        B64_STANDARD.encode([0x12u8, 0x34, 0x56, 0x78])
+    }
+
+    /// A genuine R-shaped Claude signature: base64 of the E-signature's
+    /// own bytes (double-layer).
+    fn r_signature() -> String {
+        B64_STANDARD.encode(e_signature().as_bytes())
+    }
+
+    fn thinking_part(signature: Option<String>) -> ContentPart {
+        ContentPart::Known(KnownContentPart::Thinking {
+            thinking: "step by step".to_string(),
+            signature,
+        })
+    }
+
+    fn assistant_with_parts(parts: Vec<ContentPart>) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content: MessageContent::Parts(parts),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    #[test]
+    fn e_prefixed_signature_with_0x12_payload_is_claude_shaped() {
+        // Arrange
+        let sig = e_signature();
+        // Act / Assert
+        assert!(is_claude_shaped_signature(&sig));
+    }
+
+    #[test]
+    fn r_prefixed_double_layer_signature_is_claude_shaped() {
+        // Arrange
+        let sig = r_signature();
+        // Act / Assert
+        assert!(is_claude_shaped_signature(&sig));
+    }
+
+    #[test]
+    fn uuid_signature_is_not_claude_shaped() {
+        // Arrange -- a gpt/gemini-style uuid, not base64-prefixed by E/R.
+        let sig = "550e8400-e29b-41d4-a716-446655440000";
+        // Act / Assert
+        assert!(!is_claude_shaped_signature(sig));
+    }
+
+    #[test]
+    fn base64_with_non_0x12_first_byte_is_not_claude_shaped() {
+        // Arrange -- E-prefixed valid base64 but decoded byte0 != 0x12.
+        let sig = B64_STANDARD.encode([0x99u8, 0x34, 0x56]);
+        // a base64 of arbitrary bytes is unlikely to start with 'E';
+        // force the E-path with a crafted payload whose base64 begins 'E'.
+        // 0x10.. encodes to a leading 'E' in standard base64.
+        let crafted = B64_STANDARD.encode([0x10u8, 0x00, 0x00]);
+        // Act / Assert
+        assert!(!is_claude_shaped_signature(&sig));
+        assert!(crafted.starts_with('E'));
+        assert!(!is_claude_shaped_signature(&crafted));
+    }
+
+    #[test]
+    fn malformed_base64_is_not_claude_shaped_without_panic() {
+        // Arrange -- E-prefixed but not valid base64 (illegal chars/len).
+        let sig = "E!!!not base64!!!";
+        // Act / Assert
+        assert!(!is_claude_shaped_signature(sig));
+    }
+
+    #[test]
+    fn empty_signature_is_not_claude_shaped() {
+        assert!(!is_claude_shaped_signature(""));
+    }
+
+    #[test]
+    fn cache_prefixed_e_signature_is_claude_shaped() {
+        // Arrange -- a `<word>#` cache prefix precedes the real signature.
+        let sig = format!("some-model-group#{}", e_signature());
+        // Act / Assert
+        assert!(is_claude_shaped_signature(&sig));
+    }
+
+    #[test]
+    fn predicate_strips_thinking_with_foreign_signature() {
+        // Arrange
+        let part = thinking_part(Some("550e8400-e29b-41d4-a716-446655440000".to_string()));
+        // Act / Assert
+        assert!(is_unsigned_thinking_part(&part));
+    }
+
+    #[test]
+    fn predicate_keeps_thinking_with_e_signature() {
+        let part = thinking_part(Some(e_signature()));
+        assert!(!is_unsigned_thinking_part(&part));
+    }
+
+    #[test]
+    fn predicate_strips_thinking_with_empty_signature() {
+        let part = thinking_part(Some(String::new()));
+        assert!(is_unsigned_thinking_part(&part));
+    }
+
+    #[test]
+    fn egress_strips_foreign_signed_thinking_preserves_claude_signed() {
+        // Arrange -- one foreign-signed (strip), one E-signed and one
+        // R-signed thinking block (preserve), plus a text part.
+        let foreign = thinking_part(Some("not-a-claude-sig".to_string()));
+        let e_kept = thinking_part(Some(e_signature()));
+        let r_kept = thinking_part(Some(r_signature()));
+        let text = ContentPart::Known(KnownContentPart::Text {
+            text: "answer".to_string(),
+            cache_control: None,
+        });
+        let msg = assistant_with_parts(vec![foreign, e_kept, r_kept, text]);
+        let req = ChatRequest {
+            messages: vec![msg],
+            ..Default::default()
+        };
+
+        // Act
+        let out = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
+            .expect("strip should not error");
+
+        // Assert -- foreign thinking dropped; both Claude-signed kept.
+        let MessageContent::Parts(parts) = &out[0].content else {
+            panic!("expected Parts content");
+        };
+        let thinking_sigs: Vec<&str> = parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Known(KnownContentPart::Thinking { signature, .. }) => {
+                    Some(signature.as_deref().unwrap_or(""))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking_sigs.len(), 2);
+        assert!(thinking_sigs.contains(&e_signature().as_str()));
+        assert!(thinking_sigs.contains(&r_signature().as_str()));
+        // Text part survives.
+        assert_eq!(parts.len(), 3);
+    }
+
+    #[test]
+    fn egress_strips_empty_signed_thinking() {
+        // Arrange
+        let empty = thinking_part(Some(String::new()));
+        let text = ContentPart::Known(KnownContentPart::Text {
+            text: "answer".to_string(),
+            cache_control: None,
+        });
+        let req = ChatRequest {
+            messages: vec![assistant_with_parts(vec![empty, text])],
+            ..Default::default()
+        };
+
+        // Act
+        let out = normalize_replay_invariants("anthropic", &req, CoreHistoryReasoning::Auto)
+            .expect("strip should not error");
+
+        // Assert -- only the text part remains.
+        let MessageContent::Parts(parts) = &out[0].content else {
+            panic!("expected Parts content");
+        };
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(
+            &parts[0],
+            ContentPart::Known(KnownContentPart::Text { .. })
+        ));
     }
 }
