@@ -50,6 +50,13 @@ pub mod retry_after;
 #[cfg(any(feature = "bedrock", feature = "openai-responses"))]
 pub(crate) mod tool_calls;
 
+// Shared filter that drops the Claude Code billing/attribution system
+// block before a NON-Anthropic egress forwards it. Gated on the egresses
+// that strip it (openai-compat, bedrock); the anthropic-api egress keeps
+// forwarding the block and does not consume this module.
+#[cfg(any(feature = "openai-compat", feature = "bedrock"))]
+pub(crate) mod system_filter;
+
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat;
 

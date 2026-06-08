@@ -57,7 +57,18 @@ pub fn normalize(
     // (NIM) reject the top-level field with `400 Validation:
     // Unsupported parameter(s): system`.
     if let Some(sys) = req.system.as_ref() {
-        let text = sys.flatten();
+        // Drop the Claude Code billing/attribution block before flatten:
+        // openai-compat is a third-party upstream and must not receive the
+        // client fingerprint the block carries.
+        let mut billing_dropped = false;
+        let filtered = crate::system_filter::strip_billing_attribution(sys, &mut billing_dropped);
+        if billing_dropped {
+            warn!(
+                provider = id,
+                "openai-compat egress: Claude Code billing/attribution system block dropped",
+            );
+        }
+        let text = filtered.as_ref().map(|s| s.flatten()).unwrap_or_default();
         if !text.is_empty() {
             let messages = obj
                 .entry("messages")
@@ -1093,5 +1104,109 @@ mod tests {
     fn request_carries_reasoning_false_when_no_reasoning() {
         let req = simple_req("any-model");
         assert!(!request_carries_reasoning(&req));
+    }
+
+    /// The Claude Code billing/attribution block (a system block whose
+    /// text starts with `x-anthropic-billing-header:`) must be dropped
+    /// before the openai-compat egress lowers `system` to a role:system
+    /// message; a normal sibling block must survive and reach the wire.
+    #[test]
+    fn openai_compat_drops_billing_block_keeps_normal_block() {
+        use routectl_core::{SystemBlock, SystemContent};
+        let mut req = simple_req("gpt-4o");
+        req.system = Some(SystemContent::Blocks(vec![
+            SystemBlock {
+                kind: "text".into(),
+                text: "x-anthropic-billing-header: v=1; fp=secret".into(),
+                cache_control: None,
+                citations: None,
+            },
+            SystemBlock {
+                kind: "text".into(),
+                text: "you are helpful".into(),
+                cache_control: None,
+                citations: None,
+            },
+        ]));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(
+            messages[0]["content"], "you are helpful",
+            "billing block must be dropped; only the normal block survives, got: {body}"
+        );
+    }
+
+    /// A block whose text contains the billing prefix MID-string (not at
+    /// the start) is a normal prompt and must be preserved.
+    #[test]
+    fn openai_compat_preserves_mid_string_billing_prefix() {
+        use routectl_core::{SystemBlock, SystemContent};
+        let mut req = simple_req("gpt-4o");
+        req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "intro x-anthropic-billing-header: not at start".into(),
+            cache_control: None,
+            citations: None,
+        }]));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(
+            messages[0]["content"], "intro x-anthropic-billing-header: not at start",
+            "a mid-string occurrence must NOT be treated as the billing block"
+        );
+    }
+
+    /// Leading whitespace before the billing prefix still matches and the
+    /// block is dropped (mirrors the reference trim-then-prefix check).
+    #[test]
+    fn openai_compat_drops_billing_block_with_leading_whitespace() {
+        use routectl_core::{SystemBlock, SystemContent};
+        let mut req = simple_req("gpt-4o");
+        req.system = Some(SystemContent::Blocks(vec![
+            SystemBlock {
+                kind: "text".into(),
+                text: "  \n\tx-anthropic-billing-header: v=1".into(),
+                cache_control: None,
+                citations: None,
+            },
+            SystemBlock {
+                kind: "text".into(),
+                text: "real prompt".into(),
+                cache_control: None,
+                citations: None,
+            },
+        ]));
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::Passthrough,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["content"], "real prompt",
+            "leading-whitespace billing block must still be dropped, got: {body}"
+        );
     }
 }

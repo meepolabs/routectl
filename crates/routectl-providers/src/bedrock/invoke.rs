@@ -128,6 +128,14 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // not via a body field, so strip any leftover.
     obj.remove("stream");
 
+    // Drop the Claude Code billing/attribution system block before the
+    // body hits AWS. The body is in Anthropic wire shape (the shared
+    // anthropic_api normalizer forwards `system` verbatim, which is
+    // correct for the all-Anthropic path), but Bedrock is a third-party
+    // upstream, so the client fingerprint the block carries must not
+    // leave routectl here.
+    strip_billing_system_field(&cfg.id, obj);
+
     // Bedrock's InvokeModel takes the model identifier in the URL path
     // (`/model/{model_id}/invoke`), not the body. The Anthropic API
     // path requires it in the body, which `anthropic_api::request::
@@ -180,6 +188,56 @@ fn is_bedrock_invoke_managed_key(key: &str) -> bool {
 
 // `filter_bedrock_betas` moved to `super::betas`; the Converse adapter
 // applies the identical filter via the same helper.
+
+/// Drop the Claude Code billing/attribution block from the assembled
+/// Anthropic-shape `system` body field. Handles both wire shapes: a flat
+/// string `system` and an array of `{type:"text", text}` blocks. Removes
+/// the `system` key entirely when nothing survives. Reuses the canonical
+/// predicate in `crate::system_filter` for the prefix match.
+fn strip_billing_system_field(id: &str, obj: &mut serde_json::Map<String, Value>) {
+    let Some(system) = obj.get("system") else {
+        return;
+    };
+    // `Some(v)` -> replace `system` with `v`; `None` -> remove `system`.
+    // We only reach the assignment when a billing block was found, so the
+    // warn fires exactly when the body actually changes.
+    let replacement: Option<Value> = match system {
+        Value::String(s) if crate::system_filter::is_billing_attribution_block(s) => None,
+        Value::Array(blocks) => {
+            let kept: Vec<Value> = blocks
+                .iter()
+                .filter(|b| {
+                    let text = b.get("text").and_then(Value::as_str).unwrap_or("");
+                    !crate::system_filter::is_billing_attribution_block(text)
+                })
+                .cloned()
+                .collect();
+            if kept.len() == blocks.len() {
+                return;
+            }
+            if kept.is_empty() {
+                None
+            } else {
+                Some(Value::Array(kept))
+            }
+        }
+        // A normal string system, or a non-string/non-array shape: nothing
+        // to strip.
+        _ => return,
+    };
+    tracing::warn!(
+        provider = id,
+        "bedrock-invoke egress: Claude Code billing/attribution system block dropped",
+    );
+    match replacement {
+        Some(v) => {
+            obj.insert("system".into(), v);
+        }
+        None => {
+            obj.remove("system");
+        }
+    }
+}
 
 /// Parse the Bedrock InvokeModel response body into a `ChatResponse`.
 ///
@@ -601,6 +659,67 @@ mod tests {
             strs,
             vec!["future-flag-2026-12-31"],
             "allowed_betas filter did not match operator list: {strs:?}"
+        );
+    }
+
+    /// The Claude Code billing/attribution block must be dropped from the
+    /// assembled Bedrock-Invoke body (Anthropic wire shape, Blocks form):
+    /// AWS is a third-party upstream and must not receive the fingerprint.
+    /// A normal sibling block survives.
+    #[test]
+    fn billing_block_dropped_from_invoke_body_keeps_normal_block() {
+        use routectl_core::{SystemBlock, SystemContent};
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.system = Some(SystemContent::Blocks(vec![
+            SystemBlock {
+                kind: "text".into(),
+                text: "x-anthropic-billing-header: v=1; fp=secret".into(),
+                cache_control: None,
+                citations: None,
+            },
+            SystemBlock {
+                kind: "text".into(),
+                text: "you are helpful".into(),
+                cache_control: None,
+                citations: None,
+            },
+        ]));
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        let sys = body["system"].as_array().expect("system survives as array");
+        assert_eq!(sys.len(), 1, "only the normal block survives, got: {body}");
+        assert_eq!(sys[0]["text"], "you are helpful");
+    }
+
+    /// A mid-string occurrence of the billing prefix in the Invoke body is
+    /// a normal prompt and must be preserved.
+    #[test]
+    fn invoke_body_preserves_mid_string_billing_prefix() {
+        use routectl_core::{SystemBlock, SystemContent};
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "intro x-anthropic-billing-header: not at start".into(),
+            cache_control: None,
+            citations: None,
+        }]));
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        let sys = body["system"].as_array().expect("system survives as array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(
+            sys[0]["text"],
+            "intro x-anthropic-billing-header: not at start"
         );
     }
 }
