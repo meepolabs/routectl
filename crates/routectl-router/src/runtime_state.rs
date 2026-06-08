@@ -35,7 +35,14 @@ pub struct ProviderState {
 
     /// Circuit-breaker config and state. `None` means disabled.
     circuit_failure_threshold: Option<u32>,
+    /// Baseline cooldown from config; the default for every normal
+    /// failure-driven trip.
     circuit_cooldown: Duration,
+    /// Cooldown governing the CURRENT open window. Equals
+    /// `circuit_cooldown` for every normal trip; only `force_open` can
+    /// set a different value, and it is reset back to the baseline on the
+    /// next normal trip or on a successful close.
+    active_cooldown: Duration,
     consecutive_failures: u32,
     circuit_opened_at: Option<Instant>,
     /// True once `try_dispatch` has authorized a half-open probe and
@@ -61,16 +68,18 @@ pub enum GateDecision {
 impl ProviderState {
     pub fn new(policy: &ProviderRuntimePolicy) -> Self {
         let now = Instant::now();
+        let circuit_cooldown = Duration::from_millis(
+            policy
+                .circuit_cooldown_ms
+                .unwrap_or(DEFAULT_CIRCUIT_COOLDOWN_MS),
+        );
         Self {
             rpm_capacity: policy.rpm_limit.map(|r| r as f64),
             rpm_tokens: policy.rpm_limit.map(|r| r as f64).unwrap_or(0.0),
             rpm_last_refill: now,
             circuit_failure_threshold: policy.circuit_failures,
-            circuit_cooldown: Duration::from_millis(
-                policy
-                    .circuit_cooldown_ms
-                    .unwrap_or(DEFAULT_CIRCUIT_COOLDOWN_MS),
-            ),
+            circuit_cooldown,
+            active_cooldown: circuit_cooldown,
             consecutive_failures: 0,
             circuit_opened_at: None,
             half_open_in_flight: false,
@@ -82,7 +91,7 @@ impl ProviderState {
     /// (the breaker depends on every Allow being closed out).
     pub fn try_dispatch(&mut self, now: Instant) -> GateDecision {
         if let Some(opened_at) = self.circuit_opened_at {
-            if now.duration_since(opened_at) < self.circuit_cooldown {
+            if now.duration_since(opened_at) < self.active_cooldown {
                 return GateDecision::CircuitOpen;
             }
             // Cooldown elapsed. Allow exactly one probe through; other
@@ -122,6 +131,7 @@ impl ProviderState {
         self.consecutive_failures = 0;
         self.circuit_opened_at = None;
         self.half_open_in_flight = false;
+        self.active_cooldown = self.circuit_cooldown;
     }
 
     /// Mark the most recent dispatch as failed. Trips the breaker
@@ -139,8 +149,33 @@ impl ProviderState {
             // the first time.
             if was_half_open_probe || self.consecutive_failures >= threshold {
                 self.circuit_opened_at = Some(now);
+                // A normal failure-driven trip always uses the baseline
+                // cooldown, discarding any custom park set by force_open.
+                self.active_cooldown = self.circuit_cooldown;
             }
         }
+    }
+
+    /// Park the provider immediately for `cooldown`, bypassing the
+    /// consecutive-failure threshold. Used when an upstream sent an
+    /// explicit reset hint (e.g. a rate-limit reset that is hours away):
+    /// a single such signal should open the circuit at once rather than
+    /// waiting for `circuit_failure_threshold` failures to accumulate.
+    /// The custom `cooldown` governs only THIS open window; the next
+    /// normal trip or a successful close restores the baseline. Recovery
+    /// after the cooldown still flows through the single half-open probe.
+    ///
+    /// The caller is responsible for clamping `cooldown` to any
+    /// configured ceiling before calling; `force_open` honors whatever it
+    /// is given. The consecutive-failure counter is left untouched -- the
+    /// open state is driven by `circuit_opened_at` + `active_cooldown`,
+    /// independent of the counter.
+    pub fn force_open(&mut self, now: Instant, cooldown: Duration) {
+        self.circuit_opened_at = Some(now);
+        self.active_cooldown = cooldown;
+        // Release any in-flight probe slot so the new park window starts
+        // clean, mirroring the failure path.
+        self.half_open_in_flight = false;
     }
 
     /// Release a half-open probe slot claimed by `try_dispatch` WITHOUT
@@ -381,5 +416,135 @@ mod tests {
         s.try_dispatch(t);
         s.record_failure(t);
         assert_eq!(s.try_dispatch(t), GateDecision::Allow);
+    }
+
+    #[test]
+    fn force_open_parks_immediately_bypassing_threshold() {
+        // Arrange: a high failure threshold so the counter-driven trip
+        // would never fire on a single failure.
+        let policy = ProviderRuntimePolicy {
+            circuit_failures: Some(5),
+            ..Default::default()
+        };
+        let mut s = ProviderState::new(&policy);
+        let t0 = Instant::now();
+
+        // Act: park immediately after ZERO failures.
+        s.force_open(t0, Duration::from_secs(10));
+
+        // Assert: open right away, single probe only after the custom cooldown.
+        assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+        let t_after = t0 + Duration::from_secs(11);
+        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
+    }
+
+    #[test]
+    fn force_open_cooldown_outlasts_default() {
+        // Arrange: a tiny 1s default cooldown.
+        let policy = ProviderRuntimePolicy {
+            circuit_cooldown_ms: Some(1_000),
+            ..Default::default()
+        };
+        let mut s = ProviderState::new(&policy);
+        let t0 = Instant::now();
+
+        // Act: park for 60s, far longer than the 1s default.
+        s.force_open(t0, Duration::from_secs(60));
+
+        // Assert: still open at t0+5s (default would already be elapsed),
+        // probe only after the custom 60s window.
+        assert_eq!(
+            s.try_dispatch(t0 + Duration::from_secs(5)),
+            GateDecision::CircuitOpen,
+        );
+        assert_eq!(
+            s.try_dispatch(t0 + Duration::from_secs(61)),
+            GateDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn force_open_releases_inflight_probe_slot() {
+        // Arrange: trip the breaker normally, then advance past cooldown
+        // and claim the half-open slot.
+        let policy = ProviderRuntimePolicy {
+            circuit_failures: Some(1),
+            circuit_cooldown_ms: Some(500),
+            ..Default::default()
+        };
+        let mut s = ProviderState::new(&policy);
+        let t0 = Instant::now();
+        s.try_dispatch(t0);
+        s.record_failure(t0);
+        let t_after = t0 + Duration::from_millis(600);
+        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
+        assert!(s.half_open_probe_in_flight(), "probe slot must be claimed");
+
+        // Act: force_open while a probe is in flight.
+        s.force_open(t_after, Duration::from_secs(30));
+
+        // Assert: the in-flight slot is released and the breaker is open
+        // again for the new window.
+        assert!(
+            !s.half_open_probe_in_flight(),
+            "force_open must release the in-flight probe slot",
+        );
+        assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
+    }
+
+    #[test]
+    fn force_open_then_probe_success_resets_to_default() {
+        // Arrange: a 1s default cooldown, then a 60s custom park.
+        let policy = ProviderRuntimePolicy {
+            circuit_failures: Some(1),
+            circuit_cooldown_ms: Some(1_000),
+            ..Default::default()
+        };
+        let mut s = ProviderState::new(&policy);
+        let t0 = Instant::now();
+        s.force_open(t0, Duration::from_secs(60));
+
+        // Act: the custom park elapses, the single probe succeeds.
+        let t_probe = t0 + Duration::from_secs(61);
+        assert_eq!(s.try_dispatch(t_probe), GateDecision::Allow);
+        s.record_success();
+
+        // Assert: a NORMAL threshold trip now uses the DEFAULT cooldown
+        // (1s), not the stale 60s custom park.
+        s.try_dispatch(t_probe);
+        s.record_failure(t_probe);
+        assert_eq!(s.try_dispatch(t_probe), GateDecision::CircuitOpen);
+        // Still open just before the 1s default elapses.
+        assert_eq!(
+            s.try_dispatch(t_probe + Duration::from_millis(500)),
+            GateDecision::CircuitOpen,
+        );
+        // Allowed once the 1s default cooldown elapses -- proving the
+        // window is the default, not 60s.
+        assert_eq!(
+            s.try_dispatch(t_probe + Duration::from_millis(1_500)),
+            GateDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn force_open_recovery_is_single_probe() {
+        // Arrange: park immediately for a custom window.
+        let policy = ProviderRuntimePolicy {
+            circuit_failures: Some(5),
+            ..Default::default()
+        };
+        let mut s = ProviderState::new(&policy);
+        let t0 = Instant::now();
+        s.force_open(t0, Duration::from_secs(10));
+
+        // Act: the custom cooldown elapses; the first dispatch claims the
+        // single probe, a concurrent second dispatch (probe not yet
+        // recorded) is refused.
+        let t_after = t0 + Duration::from_secs(11);
+
+        // Assert: single-probe invariant holds under force_open.
+        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
+        assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
     }
 }
