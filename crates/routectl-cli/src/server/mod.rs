@@ -189,9 +189,7 @@ pub async fn serve_on_listener(
 
     let app = build_axum_router(state, token_set, max_body_bytes);
 
-    let serve_result = axum::serve(listener, app)
-        .await
-        .map_err(|e| Error::Internal(format!("serve: {e}")));
+    let serve_result = serve_with_bounded_drain(listener, app).await;
 
     // Signal every reload-side task to shut down. Drop the handles
     // last so a hung task does not block server return; tokio
@@ -200,6 +198,115 @@ pub async fn serve_on_listener(
     drop(reload_handles);
 
     serve_result
+}
+
+/// Upper bound on how long the graceful drain waits for in-flight
+/// requests (notably multi-minute streaming responses) to finish after
+/// a SIGTERM/SIGINT before the server returns regardless. axum's
+/// `with_graceful_shutdown` has no built-in drain timeout, so a hung
+/// upstream stream would otherwise block `serve` from ever returning;
+/// this cap guarantees a deploy/restart cannot wedge on one stuck
+/// connection.
+const DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Serve `app` on `listener` with a graceful shutdown that drains
+/// in-flight requests on SIGTERM/SIGINT, but bounds that drain by
+/// `DRAIN_DEADLINE` so a hung upstream cannot block shutdown forever.
+///
+/// Mechanism: a `watch` channel carries the "signal fired" edge. The
+/// shutdown future axum awaits resolves when the channel flips; a
+/// separate deadline-watcher future awaits the same flip, then sleeps
+/// `DRAIN_DEADLINE`. We `select!` the graceful `serve` future against
+/// the deadline watcher, so whichever finishes first wins -- a clean
+/// drain (serve returns) or the deadline elapsing (drain abandoned).
+/// `watch` (level-triggered) is used over `Notify` (edge-triggered) so
+/// the deadline watcher cannot miss the edge by subscribing late.
+async fn serve_with_bounded_drain(listener: TcpListener, app: AxumRouter) -> Result<()> {
+    let (signal_tx, mut signal_rx) = watch::channel(false);
+
+    // Owns the OS signal wait. Flips the watch channel on the first
+    // SIGTERM/SIGINT, then exits; the watch value stays `true` for any
+    // late subscriber (the deadline watcher).
+    let mut shutdown_rx = signal_tx.subscribe();
+    let signal_task = tokio::spawn(async move {
+        shutdown_signal().await;
+        tracing::info!("shutdown signal received (SIGTERM/SIGINT); draining in-flight requests");
+        let _ = signal_tx.send(true);
+    });
+
+    let graceful = axum::serve(listener, app).with_graceful_shutdown(async move {
+        // Resolve once the channel flips to `true`. `changed()` also
+        // returns Err if every sender dropped, which only happens at
+        // process teardown -- treat that as "shut down" too.
+        let _ = shutdown_rx.changed().await;
+    });
+
+    let serve_result = tokio::select! {
+        result = graceful => {
+            tracing::info!("graceful drain completed; server stopped");
+            result.map_err(|e| Error::Internal(format!("serve: {e}")))
+        }
+        () = drain_deadline_watcher(&mut signal_rx) => {
+            tracing::warn!(
+                drain_deadline_secs = DRAIN_DEADLINE.as_secs(),
+                "graceful drain deadline elapsed; abandoning in-flight requests and stopping",
+            );
+            Ok(())
+        }
+    };
+
+    signal_task.abort();
+    serve_result
+}
+
+/// Resolve only after the shutdown signal has fired AND
+/// `DRAIN_DEADLINE` has subsequently elapsed. Until the signal fires
+/// this future never resolves, so the `select!` against the graceful
+/// serve future cannot trip the deadline branch during normal operation.
+async fn drain_deadline_watcher(signal_rx: &mut watch::Receiver<bool>) {
+    // Wait for the flip to `true`. If it already flipped, return
+    // immediately; otherwise await the next change.
+    while !*signal_rx.borrow_and_update() {
+        if signal_rx.changed().await.is_err() {
+            // All senders dropped without a signal (process teardown);
+            // do not arm the deadline.
+            std::future::pending::<()>().await;
+        }
+    }
+    tokio::time::sleep(DRAIN_DEADLINE).await;
+}
+
+/// Future that resolves on the first SIGTERM or SIGINT. SIGHUP is
+/// deliberately NOT handled here -- it remains the config-reload
+/// trigger (`run_sighup_listener`). On non-Unix targets only Ctrl-C
+/// (SIGINT-equivalent) is available, so the SIGTERM arm is cfg-gated
+/// out there.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        // If a handler fails to install, fall back to a never-resolving
+        // future for that arm rather than treating the failure as an
+        // immediate shutdown.
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Compute the effective `DefaultBodyLimit` value. Mirrors the legacy
@@ -941,6 +1048,122 @@ mod tests {
 
         assert_eq!(first, file_watch::ReloadRequest::Config);
         assert_eq!(second, file_watch::ReloadRequest::Credentials);
+    }
+
+    // ---- Graceful shutdown: bounded in-flight drain (OPS-08) ----
+
+    /// Sending SIGTERM to ourselves must trigger the graceful shutdown
+    /// path so `serve_on_listener` returns cleanly within a short bound,
+    /// proving the signal -> drain -> serve-return wiring. tokio's
+    /// registered SIGTERM handler intercepts the signal, so the test
+    /// process is not killed. There are no in-flight requests, so the
+    /// drain completes immediately (well under `DRAIN_DEADLINE`).
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn sigterm_triggers_graceful_shutdown_and_serve_returns() {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        use std::time::Duration;
+
+        // Arrange: bind an ephemeral loopback port and start the server.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral loopback port");
+        let config = Arc::new(Config::default());
+        let server = tokio::spawn(async move { serve_on_listener(config, listener, None).await });
+
+        // Let the server install its signal handler and enter serve.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Act: deliver SIGTERM to ourselves.
+        kill(Pid::from_raw(std::process::id() as i32), Signal::SIGTERM)
+            .expect("kill(SIGTERM) to self");
+
+        // Assert: serve_on_listener returns Ok within a short bound. A
+        // 5s ceiling is generous for an idle drain yet far below
+        // DRAIN_DEADLINE, so a hang here is a real regression, not the
+        // deadline doing its job.
+        let outcome = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("serve_on_listener must return within 5s of SIGTERM")
+            .expect("server task must not panic");
+        assert!(
+            outcome.is_ok(),
+            "graceful shutdown must return Ok: {outcome:?}"
+        );
+    }
+
+    /// The bounded-drain select must resolve to "deadline elapsed" when
+    /// the drain future never completes. We drive `drain_deadline_watcher`
+    /// against a flipped signal with a tiny stand-in deadline and assert
+    /// it wins a race against a never-completing "drain". Covers the
+    /// abandon-on-hung-upstream decision in isolation (no real socket).
+    #[tokio::test(start_paused = true)]
+    async fn drain_deadline_fires_when_drain_never_completes() {
+        // Arrange: a signal channel already flipped to `true`.
+        let (tx, mut rx) = watch::channel(false);
+        tx.send(true).expect("flip signal");
+        let never_completes = std::future::pending::<()>();
+
+        // Act + Assert: the deadline watcher must win against a drain
+        // that never finishes. With paused time, sleep auto-advances.
+        let abandoned = tokio::select! {
+            () = drain_deadline_watcher(&mut rx) => true,
+            () = never_completes => false,
+        };
+        assert!(
+            abandoned,
+            "deadline watcher must resolve when the drain never completes"
+        );
+    }
+
+    /// The mirror case: when the drain completes promptly, the drain
+    /// branch wins and the deadline does NOT fire. Drives the same
+    /// select shape with a ready "drain" future against the deadline
+    /// watcher (whose DRAIN_DEADLINE sleep would otherwise dominate).
+    #[tokio::test(start_paused = true)]
+    async fn drain_completion_wins_over_deadline() {
+        // Arrange: signal flipped, but the drain is already ready.
+        let (tx, mut rx) = watch::channel(false);
+        tx.send(true).expect("flip signal");
+        let drain_done = std::future::ready(());
+
+        // Act + Assert: the completed-drain branch must win.
+        let completed = tokio::select! {
+            biased;
+            () = drain_done => true,
+            () = drain_deadline_watcher(&mut rx) => false,
+        };
+        assert!(
+            completed,
+            "a completed drain must win over the deadline watcher"
+        );
+    }
+
+    /// Before any signal fires, the deadline watcher must NOT resolve --
+    /// otherwise the bounded-drain select could trip the deadline branch
+    /// during normal operation and tear the server down prematurely.
+    #[tokio::test(start_paused = true)]
+    async fn drain_deadline_does_not_fire_before_signal() {
+        use std::time::Duration;
+
+        // Arrange: an UN-flipped signal channel (no shutdown requested).
+        let (_tx, mut rx) = watch::channel(false);
+
+        // Act: race the watcher against a long sleep. With time paused,
+        // the only way the sleep wins is if the watcher is correctly
+        // pending on the (never-arriving) signal.
+        let fired = tokio::select! {
+            () = drain_deadline_watcher(&mut rx) => true,
+            _ = tokio::time::sleep(Duration::from_secs(3600)) => false,
+        };
+
+        // Assert: the watcher stayed pending; the sleep won.
+        assert!(
+            !fired,
+            "deadline watcher must not resolve before the shutdown signal fires"
+        );
     }
 
     // ---- Credentials reload: seat-set-change Router rebuild gate ----

@@ -58,7 +58,7 @@ routectl-core = { workspace = true, features = ["test-utils"] }
 wiremock.workspace = true
 reqwest = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 insta.workspace = true
 tempfile = "3"
 serial_test = "3"
