@@ -130,6 +130,14 @@ pub struct OpenAiResponsesConfig {
     /// (`codex_cli_rs/<X.Y.Z> (...) <terminal>`) so the chatgpt.com
     /// upstream does not flag the fingerprint as drifted.
     pub user_agent: Option<String>,
+    /// Stable per-credential codex session id, stamped as the
+    /// `session-id` header on the ChatgptOauth surface. `Some` only when
+    /// the provider's `oauth://codex` credential carries a session_id
+    /// minted at login; resolved once at build time via
+    /// `SecretStore::peek_session_id`. `None` for ApiKey / BedrockMantle
+    /// providers or a credential that has none -- in every such case
+    /// `build_headers` stamps no `session-id` header.
+    pub session_id: Option<String>,
 }
 
 impl std::fmt::Debug for OpenAiResponsesConfig {
@@ -147,6 +155,9 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             .field("auth_kind", &self.auth_kind)
             .field("header_extras_len", &self.header_extras.len())
             .field("user_agent", &self.user_agent)
+            // Presence only: the session_id correlates a human's turns to
+            // the upstream upstream, so its value never enters logs.
+            .field("session_id", &self.session_id.is_some())
             .finish()
     }
 }
@@ -171,6 +182,7 @@ impl OpenAiResponsesConfig {
             auth_kind: AuthKind::ChatgptOauth,
             header_extras: Vec::new(),
             user_agent: None,
+            session_id: None,
         }
     }
 }
@@ -268,6 +280,15 @@ impl OpenAiResponsesProvider {
         if self.cfg.auth_kind == AuthKind::ChatgptOauth {
             for (k, v) in default_codex_identity_headers() {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
+            }
+            // Stable per-credential id minted at login; the codex risk
+            // system uses it to correlate one human's turns. Inserted in
+            // the defaults phase (before the header_extras loop) so an
+            // operator `header_extras` entry for `session-id` still wins,
+            // and omitted when the credential carries none. Value never
+            // logged.
+            if let Some(sid) = &self.cfg.session_id {
+                crate::http_client::insert_header(&mut header_map, &self.cfg.id, "session-id", sid);
             }
         }
 
@@ -792,6 +813,7 @@ mod e2e_tests {
             auth_kind: AuthKind::ChatgptOauth,
             header_extras: Vec::new(),
             user_agent: None,
+            session_id: None,
         };
         OpenAiResponsesProvider::new(cfg)
     }
@@ -1198,6 +1220,23 @@ mod header_merge_tests {
             auth_kind: AuthKind::ChatgptOauth,
             header_extras: extras,
             user_agent: None,
+            session_id: None,
+        };
+        OpenAiResponsesProvider::new(cfg)
+    }
+
+    /// Build a ChatgptOauth provider carrying an optional `session_id`,
+    /// with empty `header_extras`. Used by the codex session-id tests.
+    fn oauth_provider_with_session(session_id: Option<String>) -> OpenAiResponsesProvider {
+        let cfg = OpenAiResponsesConfig {
+            id: "openai-responses:hm-session".into(),
+            auth: Arc::new(StaticToken::new("test-jwt")) as Arc<dyn TokenSource>,
+            account_id: Some("acct-uuid".into()),
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            auth_kind: AuthKind::ChatgptOauth,
+            header_extras: Vec::new(),
+            user_agent: None,
+            session_id,
         };
         OpenAiResponsesProvider::new(cfg)
     }
@@ -1270,6 +1309,7 @@ mod header_merge_tests {
             auth_kind: AuthKind::ApiKey,
             header_extras: vec![("version".to_string(), "custom-1.0".to_string())],
             user_agent: None,
+            session_id: None,
         };
         let provider = OpenAiResponsesProvider::new(cfg);
         let rb = provider.client.post("https://api.openai.com/v1/responses");
@@ -1373,6 +1413,109 @@ mod header_merge_tests {
         );
     }
 
+    /// Two requests through a ChatgptOauth provider carrying a session_id
+    /// stamp the SAME `session-id` (stable per credential), while
+    /// thread-id / x-client-request-id stay fresh per request.
+    #[test]
+    fn session_id_stable_across_requests_while_thread_id_rotates() {
+        // Arrange
+        let provider = oauth_provider_with_session(Some("session-stable-123".into()));
+
+        // Act
+        let req_a = provider
+            .build_headers(
+                provider.client.post("https://chatgpt.test/responses"),
+                &base_req(),
+                "test-jwt",
+            )
+            .expect("build_headers ok")
+            .build()
+            .expect("build");
+        let req_b = provider
+            .build_headers(
+                provider.client.post("https://chatgpt.test/responses"),
+                &base_req(),
+                "test-jwt",
+            )
+            .expect("build_headers ok")
+            .build()
+            .expect("build");
+
+        // Assert: session-id is single-valued and identical across requests.
+        let sid_a = header_vals(&req_a, "session-id");
+        let sid_b = header_vals(&req_b, "session-id");
+        assert_eq!(sid_a, vec!["session-stable-123".to_string()]);
+        assert_eq!(
+            sid_a, sid_b,
+            "session-id must be stable across requests on one credential",
+        );
+
+        // Assert: the per-request identity headers still rotate.
+        let tid_a = header_vals(&req_a, "thread-id");
+        let tid_b = header_vals(&req_b, "thread-id");
+        assert_ne!(tid_a[0], tid_b[0], "thread-id must rotate per request");
+        assert_ne!(
+            header_vals(&req_a, "x-client-request-id")[0],
+            header_vals(&req_b, "x-client-request-id")[0],
+            "x-client-request-id must rotate per request",
+        );
+    }
+
+    /// A provider with `session_id == None` stamps no `session-id` header.
+    #[test]
+    fn no_session_id_stamps_no_session_header() {
+        // Arrange
+        let provider = oauth_provider_with_session(None);
+        let rb = provider.client.post("https://chatgpt.test/responses");
+
+        // Act
+        let request = provider
+            .build_headers(rb, &base_req(), "test-jwt")
+            .expect("build_headers ok")
+            .build()
+            .expect("build");
+
+        // Assert
+        assert!(
+            header_vals(&request, "session-id").is_empty(),
+            "session_id None must not stamp a session-id header",
+        );
+    }
+
+    /// The ApiKey (non-ChatgptOauth) path stamps no `session-id` header,
+    /// even when a session_id is somehow set on the config.
+    #[test]
+    fn api_key_path_stamps_no_session_header() {
+        // Arrange: ApiKey config carrying a session_id (which would be
+        // None in practice -- the factory only resolves it for
+        // ChatgptOauth -- but proves the path gate, not just the value).
+        let cfg = OpenAiResponsesConfig {
+            id: "openai-responses:hm-apikey-session".into(),
+            auth: Arc::new(StaticToken::new("sk-test")) as Arc<dyn TokenSource>,
+            account_id: None,
+            base_url: "https://api.openai.com/v1".into(),
+            auth_kind: AuthKind::ApiKey,
+            header_extras: Vec::new(),
+            user_agent: None,
+            session_id: Some("session-stable-123".into()),
+        };
+        let provider = OpenAiResponsesProvider::new(cfg);
+        let rb = provider.client.post("https://api.openai.com/v1/responses");
+
+        // Act
+        let request = provider
+            .build_headers(rb, &base_req(), "sk-test")
+            .expect("build_headers ok")
+            .build()
+            .expect("build");
+
+        // Assert
+        assert!(
+            header_vals(&request, "session-id").is_empty(),
+            "ApiKey path must not stamp a session-id header",
+        );
+    }
+
     /// A `header_extras` entry named `thread-id` is OVERRIDDEN by the
     /// generated per-request value (insert replaces, not appends).
     #[test]
@@ -1412,6 +1555,7 @@ mod header_merge_tests {
             auth_kind: AuthKind::ApiKey,
             header_extras: vec![("originator".to_string(), "codex_cli_rs".to_string())],
             user_agent: None,
+            session_id: None,
         };
         let provider = OpenAiResponsesProvider::new(cfg);
         let rb = provider.client.post("https://api.openai.com/v1/responses");

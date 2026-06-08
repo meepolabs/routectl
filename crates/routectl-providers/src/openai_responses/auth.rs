@@ -112,6 +112,7 @@ mod tests {
             auth_kind,
             header_extras: Vec::new(),
             user_agent: None,
+            session_id: None,
         }
     }
 

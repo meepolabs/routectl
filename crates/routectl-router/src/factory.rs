@@ -284,6 +284,22 @@ async fn build_provider_inner(
             let auth = resolve_token_source(&secrets, api_key_ref).await?;
             let account_id =
                 resolve_responses_account_id(&secrets, api_key_ref, account_id_ref, name).await?;
+            // Resolve the stable per-credential codex session id for the
+            // ChatgptOauth surface only. `api_key_ref` already carries the
+            // seat label, so `peek_session_id` resolves THIS seat's value
+            // with no extra fallback. ApiKey / BedrockMantle (and a
+            // non-oauth ref) get None. The ref already parsed cleanly
+            // inside `resolve_token_source` above, so a parse error here
+            // is unreachable; treat it as "no session id" rather than fail
+            // the build.
+            let session_id = if *auth_kind == OpenaiResponsesAuthKind::ChatgptOauth {
+                match SecretRef::parse(api_key_ref) {
+                    Ok(sr) => secrets.peek_session_id(&sr).await,
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
             let resolved_base_url = base_url.clone().unwrap_or_else(|| {
                 let default = default_responses_base(*auth_kind);
                 if *auth_kind == OpenaiResponsesAuthKind::BedrockMantle {
@@ -315,6 +331,7 @@ async fn build_provider_inner(
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             cfg.user_agent = user_agent.clone();
+            cfg.session_id = session_id;
             Ok(Arc::new(OpenAiResponsesProvider::new(cfg)))
         }
         #[cfg(feature = "bedrock")]
