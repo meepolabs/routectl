@@ -201,7 +201,7 @@ async fn decode_token_response(
 
     check_status_error(status, &url, &body, flow)?;
     let parsed = parse_token_response_json(&body, flow)?;
-    Ok(map_to_record(parsed))
+    Ok(map_to_record(parsed, flow))
 }
 
 /// Refresh-only variant of [`decode_token_response`] with structured
@@ -254,7 +254,7 @@ pub(super) async fn decode_token_response_traced(
     // Pull tracing fields before consuming `parsed` via `map_to_record`.
     let new_refresh_sha8 = super::sha8(&parsed.refresh_token);
     let expires_in = parsed.expires_in;
-    let record = map_to_record(parsed);
+    let record = map_to_record(parsed, TokenFlow::Refresh);
 
     tracing::debug!(
         status = %status.as_u16(),
@@ -372,7 +372,14 @@ pub(super) fn parse_token_response_json(body: &str, flow: TokenFlow) -> OAuthRes
 /// Project the parsed `Resp` onto the on-disk `TokenRecord`. Computes
 /// `expires_at_unix` against `unix_now()` once at exchange time so a
 /// later clock jump on disk does not corrupt validity.
-fn map_to_record(parsed: Resp) -> TokenRecord {
+///
+/// `flow` decides whether to mint a `session_id`. A fresh exchange
+/// (login) mints a new one; a refresh leaves it `None` so the OAuth
+/// store preserves the prior value. The upstream upstream expects
+/// one stable session-id across the credential's lifetime, so a refresh
+/// that re-minted it would re-trigger re-authentication. Mirrors the codex flow's
+/// per-credential session id.
+fn map_to_record(parsed: Resp, flow: TokenFlow) -> TokenRecord {
     let now = unix_now();
     let scopes = parsed
         .scope
@@ -386,6 +393,11 @@ fn map_to_record(parsed: Resp) -> TokenRecord {
         })
         .unwrap_or_default();
 
+    let session_id = match flow {
+        TokenFlow::Exchange => Some(uuid::Uuid::new_v4().to_string()),
+        TokenFlow::Refresh => None,
+    };
+
     TokenRecord {
         access_token: SecretToken::new(parsed.access_token),
         refresh_token: SecretToken::new(parsed.refresh_token),
@@ -394,7 +406,7 @@ fn map_to_record(parsed: Resp) -> TokenRecord {
         scopes,
         account,
         obtained_at_unix: now,
-        session_id: None,
+        session_id,
     }
 }
 
@@ -442,7 +454,7 @@ mod tests {
             parsed.account.as_ref().unwrap().account_id.as_deref(),
             Some("acc-123")
         );
-        let rec = map_to_record(parsed);
+        let rec = map_to_record(parsed, TokenFlow::Exchange);
         assert_eq!(rec.access_token.expose(), "AT");
         assert_eq!(rec.refresh_token.expose(), "RT");
         assert_eq!(rec.scopes.len(), 2);
@@ -529,5 +541,44 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("500"), "got: {msg}");
+    }
+
+    #[test]
+    fn exchange_mints_a_valid_uuid_session_id() {
+        // A fresh login (Exchange) mints a per-credential session_id so
+        // the upstream upstream can correlate the human's turns.
+        let body = r#"{
+            "access_token": "AT",
+            "refresh_token": "RT",
+            "expires_in": 3600
+        }"#;
+        let parsed = parse_token_response_json(body, TokenFlow::Exchange).unwrap();
+        let rec = map_to_record(parsed, TokenFlow::Exchange);
+        let sid = rec.session_id.expect("exchange must mint a session_id");
+        // Must parse as a valid UUID v4.
+        let parsed_uuid = uuid::Uuid::parse_str(&sid).expect("session_id must be a valid uuid");
+        assert_eq!(
+            parsed_uuid.get_version(),
+            Some(uuid::Version::Random),
+            "session_id must be a v4 uuid; got {sid}"
+        );
+    }
+
+    #[test]
+    fn refresh_leaves_session_id_none() {
+        // A refresh must NOT mint a session_id -- the store preserves the
+        // prior value, keeping the id stable across rotations. Re-minting
+        // here would break stability and re-trigger re-authentication.
+        let body = r#"{
+            "access_token": "AT",
+            "refresh_token": "RT",
+            "expires_in": 3600
+        }"#;
+        let parsed = parse_token_response_json(body, TokenFlow::Refresh).unwrap();
+        let rec = map_to_record(parsed, TokenFlow::Refresh);
+        assert!(
+            rec.session_id.is_none(),
+            "refresh must leave session_id None for the store to preserve the prior value"
+        );
     }
 }

@@ -215,6 +215,24 @@ impl OAuthStore {
             .and_then(|rec| rec.account.account_id.clone())
     }
 
+    /// Read the per-credential `session_id` recorded for `provider`
+    /// (a seat key), if any. Read-only: no expiry check, no refresh, no
+    /// network. Returns `None` when the provider has no stored record
+    /// (not logged in) OR when the record carries no `session_id` (a
+    /// pre-existing credential minted before session-id support, or one
+    /// that has only ever been refreshed). The anthropic-api factory
+    /// reads this once at build time to populate
+    /// `AnthropicApiConfig.session_id` for the Claude-Code session-id
+    /// header.
+    pub async fn peek_session_id(&self, provider: &str) -> Option<String> {
+        self.inner
+            .file
+            .read()
+            .await
+            .get(provider)
+            .and_then(|rec| rec.session_id.clone())
+    }
+
     /// Persist a token record atomically. Disk write happens FIRST,
     /// off a clone of the current in-memory state; the in-memory cache
     /// only commits on a successful save. This way a failed disk write
@@ -610,6 +628,19 @@ impl SecretStore for OAuthStore {
         Ok(self
             .peek_account_id(&seat_key(provider, label.as_deref()))
             .await)
+    }
+
+    async fn peek_session_id(&self, secret_ref: &SecretRef) -> Option<String> {
+        // Non-oauth refs carry no session metadata. Unlike `account_id`,
+        // the trait signature returns `Option` (not `Result`), so a
+        // non-oauth ref maps to `None` rather than an error -- the
+        // caller treats "no session id" identically to "not an oauth
+        // ref".
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
+            _ => return None,
+        };
+        OAuthStore::peek_session_id(self, &seat_key(provider, label.as_deref())).await
     }
 
     async fn list_seats(&self, secret_ref: &SecretRef) -> Result<Vec<SecretRef>> {
@@ -2166,5 +2197,95 @@ mod tests {
         };
         let seats = store.list_seats(&bare).await.unwrap();
         assert_eq!(seats, vec![bare]);
+    }
+
+    // ---- peek_session_id ----
+
+    #[tokio::test]
+    async fn peek_session_id_returns_per_seat_value_for_labeled_ref() {
+        // The labeled ref must resolve THAT seat's session_id, distinct
+        // from the default seat's.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        let mut default = rec_at(unix_now() + 3600);
+        default.session_id = Some("session-default".into());
+        store.write_record("anthropic", default).await.unwrap();
+        let mut seat_b = rec_at(unix_now() + 3600);
+        seat_b.session_id = Some("session-seat-b".into());
+        store
+            .write_record("anthropic#seat-b", seat_b)
+            .await
+            .unwrap();
+
+        let via_label = SecretStore::peek_session_id(
+            &store,
+            &SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: Some("seat-b".into()),
+            },
+        )
+        .await;
+        assert_eq!(via_label.as_deref(), Some("session-seat-b"));
+
+        let via_default = SecretStore::peek_session_id(
+            &store,
+            &SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            },
+        )
+        .await;
+        assert_eq!(via_default.as_deref(), Some("session-default"));
+    }
+
+    #[tokio::test]
+    async fn peek_session_id_none_for_missing_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+
+        let sid = SecretStore::peek_session_id(
+            &store,
+            &SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            },
+        )
+        .await;
+        assert!(sid.is_none(), "missing record must yield None");
+    }
+
+    #[tokio::test]
+    async fn peek_session_id_none_for_record_without_session_id() {
+        // A record with session_id: None (e.g. a pre-existing credential)
+        // yields None.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+
+        let sid = SecretStore::peek_session_id(
+            &store,
+            &SecretRef::OAuth {
+                provider: "anthropic".into(),
+                label: None,
+            },
+        )
+        .await;
+        assert!(sid.is_none(), "record without session_id must yield None");
+    }
+
+    #[tokio::test]
+    async fn peek_session_id_none_for_non_oauth_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+
+        let sid = SecretStore::peek_session_id(&store, &SecretRef::Env("FOO".into())).await;
+        assert!(sid.is_none(), "non-oauth ref must yield None");
     }
 }

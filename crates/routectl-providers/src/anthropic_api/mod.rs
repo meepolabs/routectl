@@ -121,6 +121,15 @@ pub struct AnthropicApiConfig {
     /// `[providers.X].max_thinking_entry_bytes` TOML knob; falls back
     /// to `DEFAULT_MAX_THINKING_ENTRY_BYTES` (1 MiB) when unset.
     pub max_thinking_entry_bytes: usize,
+    /// Stable per-credential Claude Code session id, stamped as the
+    /// `x-claude-code-session-id` header on the OauthBearer
+    /// api.anthropic.com surface. `Some` only when the provider's
+    /// `oauth://anthropic` credential carries a session_id minted at
+    /// login; resolved once at build time via
+    /// `SecretStore::peek_session_id`. `None` for ApiKey providers, a
+    /// non-Anthropic base, or a credential that has none -- in every
+    /// such case `build_headers` stamps no session-id header.
+    pub session_id: Option<String>,
 }
 
 impl std::fmt::Debug for AnthropicApiConfig {
@@ -143,6 +152,9 @@ impl std::fmt::Debug for AnthropicApiConfig {
             )
             .field("context_management", &self.context_management)
             .field("max_thinking_entry_bytes", &self.max_thinking_entry_bytes)
+            // Presence only: the session_id correlates a human's turns to
+            // the upstream upstream, so its value never enters logs.
+            .field("session_id", &self.session_id.is_some())
             .finish()
     }
 }
@@ -184,6 +196,7 @@ impl AnthropicApiConfig {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: Self::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         }
     }
 }
@@ -352,6 +365,37 @@ impl AnthropicApiProvider {
             {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
             }
+
+            // Claude Code session identity. These fire only on the
+            // OauthBearer Claude-Code surface AND only when talking to
+            // api.anthropic.com, so a non-Anthropic base (a third-party
+            // /anthropic surface, a proxy) never receives the Claude-Code
+            // session id. Stamped in the same "inserted first" phase as
+            // the identity defaults so an operator `header_extras` entry
+            // still overrides (the apply loop below replaces) and a
+            // forwarded client header overrides after that.
+            //   - x-client-request-id: one fresh uuid per request (the
+            //     upstream pairs it with the turn).
+            //   - x-claude-code-session-id: the stable per-credential id
+            //     minted at login; the upstream uses it to correlate a
+            //     human's turns. Omitted when the credential has none.
+            if is_anthropic_api_host(&self.cfg.base_url) {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                crate::http_client::insert_header(
+                    &mut header_map,
+                    &self.cfg.id,
+                    "x-client-request-id",
+                    &request_id,
+                );
+                if let Some(sid) = &self.cfg.session_id {
+                    crate::http_client::insert_header(
+                        &mut header_map,
+                        &self.cfg.id,
+                        "x-claude-code-session-id",
+                        sid,
+                    );
+                }
+            }
         }
 
         // Prefer the router-composed map for non-beta headers; fall
@@ -399,6 +443,41 @@ impl AnthropicApiProvider {
         }
         rb
     }
+}
+
+/// True when `base_url`'s host is exactly `api.anthropic.com` -- the only
+/// surface that should receive the Claude-Code session identity headers.
+///
+/// A precise host match, NOT a substring test: `base_url.contains(
+/// "api.anthropic.com")` would also match an operator-misconfigured
+/// `https://api.anthropic.com.example.com` (a sibling-domain takeover) or
+/// `https://proxy.example/api.anthropic.com` (host in the path), either of
+/// which would leak the stable per-credential session id to a non-Anthropic
+/// host. `base_url` is trusted operator config, so this is defense in depth
+/// on a ban-risk identity surface rather than a fix for attacker input.
+///
+/// The host is the authority between the scheme and the first `/?#`, minus
+/// any `user@` credentials and `:port`. Kept dependency-free (no `url`
+/// crate) since the shape is fixed and validated upstream by
+/// `validate_base_url_scheme`.
+fn is_anthropic_api_host(base_url: &str) -> bool {
+    let after_scheme = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+        .unwrap_or(base_url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop optional `user:pass@` credentials, then the optional `:port`.
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or(authority)
+        .split(':')
+        .next()
+        .unwrap_or(authority);
+    host.eq_ignore_ascii_case("api.anthropic.com")
 }
 
 /// Resolve the client-level `User-Agent` for an anthropic-api provider.
@@ -1049,6 +1128,7 @@ mod tests {
             forward_client_headers,
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         }
     }
 
@@ -1164,6 +1244,7 @@ mod tests {
             forward_client_headers: vec!["x-claude-code-session-id".into()],
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "from-client")]);
@@ -1193,6 +1274,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         // ChatRequest is #[non_exhaustive]; mutate after default().
@@ -1229,6 +1311,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = ChatRequest::default();
@@ -1267,6 +1350,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         // ChatRequest is #[non_exhaustive]; mutate after default().
@@ -1305,6 +1389,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = ChatRequest::default();
@@ -1352,6 +1437,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         }
     }
 
@@ -1451,6 +1537,182 @@ mod tests {
             resolve_user_agent(Some("op-ua/9.9"), AuthKind::OauthBearer).as_deref(),
             Some("op-ua/9.9"),
             "operator override must win over the SDK default",
+        );
+    }
+
+    /// Build an oauth-bearer config with an explicit base_url and an
+    /// optional session_id, plus optional header_extras. Used by the
+    /// Claude-Code session-identity header tests.
+    fn oauth_cfg_with_session(
+        base_url: &str,
+        session_id: Option<String>,
+        header_extras: Vec<(String, String)>,
+    ) -> AnthropicApiConfig {
+        AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("oat-token")),
+            base_url: base_url.into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::OauthBearer,
+            header_extras,
+            user_agent: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
+            context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id,
+        }
+    }
+
+    /// Two requests through an OauthBearer api.anthropic.com provider
+    /// carrying a session_id must stamp the SAME `x-claude-code-session-id`
+    /// (stable per credential) and DIFFERENT, valid-uuid
+    /// `x-client-request-id` values (fresh per request).
+    #[test]
+    fn oauth_anthropic_base_stamps_stable_session_and_fresh_request_id() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("session-stable-123".into()),
+            Vec::new(),
+        ));
+        let req = ChatRequest::default();
+
+        let sid_1 = outbound_header_value(&provider, &req, "x-claude-code-session-id");
+        let sid_2 = outbound_header_value(&provider, &req, "x-claude-code-session-id");
+        assert_eq!(sid_1.as_deref(), Some("session-stable-123"));
+        assert_eq!(
+            sid_1, sid_2,
+            "session-id must be stable across requests on one credential"
+        );
+
+        let rid_1 = outbound_header_value(&provider, &req, "x-client-request-id")
+            .expect("x-client-request-id must be present");
+        let rid_2 = outbound_header_value(&provider, &req, "x-client-request-id")
+            .expect("x-client-request-id must be present");
+        assert_ne!(
+            rid_1, rid_2,
+            "x-client-request-id must be fresh per request"
+        );
+        assert!(
+            uuid::Uuid::parse_str(&rid_1).is_ok(),
+            "x-client-request-id must be a valid uuid; got {rid_1}"
+        );
+        assert!(
+            uuid::Uuid::parse_str(&rid_2).is_ok(),
+            "x-client-request-id must be a valid uuid; got {rid_2}"
+        );
+    }
+
+    /// The ApiKey surface is the raw API, not the Claude-Code SDK client:
+    /// neither session-identity header is stamped.
+    #[test]
+    fn api_key_path_stamps_no_session_identity_headers() {
+        // cfg_with_allowlist builds an ApiKey config on the
+        // api.anthropic.com base.
+        let provider = AnthropicApiProvider::new(cfg_with_allowlist(Vec::new()));
+        let req = ChatRequest::default();
+        assert!(
+            outbound_header_value(&provider, &req, "x-client-request-id").is_none(),
+            "ApiKey path must not stamp x-client-request-id",
+        );
+        assert!(
+            outbound_header_value(&provider, &req, "x-claude-code-session-id").is_none(),
+            "ApiKey path must not stamp x-claude-code-session-id",
+        );
+    }
+
+    /// OauthBearer but a non-anthropic base (a third-party /anthropic
+    /// surface): the Claude-Code session identity must NOT leak there.
+    #[test]
+    fn oauth_non_anthropic_base_stamps_no_session_identity_headers() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://example.invalid",
+            Some("session-stable-123".into()),
+            Vec::new(),
+        ));
+        let req = ChatRequest::default();
+        assert!(
+            outbound_header_value(&provider, &req, "x-client-request-id").is_none(),
+            "non-anthropic base must not stamp x-client-request-id",
+        );
+        assert!(
+            outbound_header_value(&provider, &req, "x-claude-code-session-id").is_none(),
+            "non-anthropic base must not stamp x-claude-code-session-id",
+        );
+    }
+
+    /// An operator `header_extras` entry for `x-claude-code-session-id`
+    /// OVERRIDES the built-in value: the identity stamping is in the
+    /// "inserted first" phase, the header_extras apply loop runs after
+    /// and replaces.
+    #[test]
+    fn operator_header_extras_overrides_built_in_session_id() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("built-in-session".into()),
+            vec![(
+                "x-claude-code-session-id".into(),
+                "from-operator-config".into(),
+            )],
+        ));
+        let req = ChatRequest::default();
+        let value = outbound_header_value(&provider, &req, "x-claude-code-session-id")
+            .expect("session-id header must be present");
+        assert_eq!(
+            value, "from-operator-config",
+            "operator header_extras must override the built-in session id; got {value}"
+        );
+    }
+
+    #[test]
+    fn is_anthropic_api_host_matches_only_the_exact_host() {
+        // Exact host, with and without a path / port, matches.
+        assert!(is_anthropic_api_host("https://api.anthropic.com"));
+        assert!(is_anthropic_api_host(
+            "https://api.anthropic.com/v1/messages"
+        ));
+        assert!(is_anthropic_api_host("https://api.anthropic.com:443/v1"));
+        assert!(is_anthropic_api_host("https://API.Anthropic.Com")); // case-insensitive host
+                                                                     // Sibling-domain takeover and host-in-path must NOT match.
+        assert!(!is_anthropic_api_host(
+            "https://api.anthropic.com.evil.example"
+        ));
+        assert!(!is_anthropic_api_host(
+            "https://proxy.example/api.anthropic.com"
+        ));
+        assert!(!is_anthropic_api_host(
+            "https://evil.example#api.anthropic.com"
+        ));
+        assert!(!is_anthropic_api_host(
+            "https://evil.example?h=api.anthropic.com"
+        ));
+        assert!(!is_anthropic_api_host("https://anthropic.com"));
+        // A credentials prefix on the authority is stripped before the host
+        // check, so it cannot be used to smuggle a different real host.
+        assert!(is_anthropic_api_host("https://user:pass@api.anthropic.com"));
+        assert!(!is_anthropic_api_host(
+            "https://api.anthropic.com@evil.example"
+        ));
+    }
+
+    /// A non-anthropic base that merely CONTAINS the host substring must
+    /// not stamp the Claude-Code session identity (defends the precise
+    /// host check end-to-end through build_headers).
+    #[test]
+    fn lookalike_anthropic_base_stamps_no_session_identity_headers() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com.evil.example",
+            Some("session-stable-123".into()),
+            Vec::new(),
+        ));
+        let req = ChatRequest::default();
+        assert!(
+            outbound_header_value(&provider, &req, "x-client-request-id").is_none(),
+            "a look-alike host must not stamp x-client-request-id",
+        );
+        assert!(
+            outbound_header_value(&provider, &req, "x-claude-code-session-id").is_none(),
+            "a look-alike host must not stamp x-claude-code-session-id",
         );
     }
 }

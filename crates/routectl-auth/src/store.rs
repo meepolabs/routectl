@@ -46,4 +46,16 @@ pub trait SecretStore: Send + Sync {
     async fn list_seats(&self, secret_ref: &SecretRef) -> Result<Vec<SecretRef>> {
         Ok(vec![secret_ref.clone()])
     }
+
+    /// Best-effort read of the per-credential `session_id` recorded at
+    /// login, without exposing the secret itself. Returns `None` by
+    /// default: `env://`, `file://`, and `literal:` refs carry no
+    /// session metadata. The OAuth store overrides this to return the
+    /// `session_id` of the named seat's record, so the anthropic-api
+    /// factory can stamp the Claude-Code session-id header from a
+    /// logged-in `oauth://anthropic` session. A non-oauth ref or a
+    /// missing record yields `None`.
+    async fn peek_session_id(&self, _secret_ref: &SecretRef) -> Option<String> {
+        None
+    }
 }

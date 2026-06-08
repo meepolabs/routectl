@@ -216,6 +216,25 @@ async fn build_provider_inner(
             // (semantically equivalent to the pre-v0.7 `api_key:
             // String` field).
             let auth = resolve_token_source(&secrets, api_key_ref).await?;
+            // Resolve the stable per-credential Claude Code session id
+            // for the OauthBearer surface only. `api_key_ref` already
+            // carries the seat label (`build_seat_targets` rebuilds each
+            // labeled seat with its own `oauth://anthropic#label` ref), so
+            // `peek_session_id` resolves THIS seat's session_id with no
+            // extra fallback. ApiKey providers (and a non-oauth ref) get
+            // None. The ref already parsed cleanly inside
+            // `resolve_token_source` above, so a parse error here is
+            // unreachable; treat it as "no session id" rather than fail
+            // the build.
+            let session_id =
+                if *auth_kind == routectl_providers::anthropic_api::AuthKind::OauthBearer {
+                    match SecretRef::parse(api_key_ref) {
+                        Ok(sr) => secrets.peek_session_id(&sr).await,
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
             let cfg = AnthropicApiConfig {
                 id: format!("anthropic-api:{name}"),
                 auth,
@@ -234,6 +253,7 @@ async fn build_provider_inner(
                     name,
                     *max_thinking_entry_bytes,
                 ),
+                session_id,
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }

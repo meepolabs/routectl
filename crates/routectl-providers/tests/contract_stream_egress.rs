@@ -60,6 +60,7 @@ fn anthropic_api_provider(base_url: &str) -> AnthropicApiProvider {
         forward_client_headers: Vec::new(),
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+        session_id: None,
     })
 }
 

@@ -37,6 +37,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         AnthropicApiProvider::new(cfg)
     }
@@ -1292,6 +1293,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1328,6 +1330,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1357,6 +1360,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1395,6 +1399,7 @@ mod tests {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = base_req("claude-3-opus", vec![user_msg("hello")]);
