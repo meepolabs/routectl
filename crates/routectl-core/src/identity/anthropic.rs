@@ -9,10 +9,12 @@
 //! these keys OVERRIDES the default (the build_headers loop inserts
 //! after these).
 //!
-//! `anthropic-beta` is intentionally NOT a default: it feeds the
-//! three-source beta compose (ingress + provider + model) handled in
-//! the egress `build_headers`, so it stays an explicit `header_extras`
-//! entry for operators who need it.
+//! `anthropic-beta` is NOT among the `header_extras` identity defaults
+//! (it feeds the three-source beta compose in egress `build_headers`).
+//! However, a separate floor function --
+//! `default_claude_code_anthropic_betas()` -- provides a pinned set of
+//! beta flags that the composer merges on the OauthBearer +
+//! api.anthropic.com surface before the context_management strip.
 //!
 //! The version literals below are the "ship with routectl, bump each
 //! release" values. Roll them forward when the upstream Claude Code SDK
@@ -78,6 +80,24 @@ pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str
         ("x-stainless-retry-count", "0"),
         ("x-stainless-arch", stainless_arch()),
         ("x-stainless-os", stainless_os()),
+    ]
+}
+
+/// Pinned Claude Code beta flags forming a floor for the OauthBearer
+/// surface when talking to api.anthropic.com. Merged into the composed
+/// anthropic-beta header before the context_management strip, bypassing
+/// the ingress allowlist (these are operator-equivalent pins).
+pub fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
+    &[
+        "claude-code-20250219",
+        "oauth-2025-04-20",
+        "interleaved-thinking-2025-05-14",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "structured-outputs-2025-12-15",
+        "fast-mode-2026-02-01",
+        "redact-thinking-2026-02-12",
+        "token-efficient-tools-2026-03-28",
     ]
 }
 
@@ -152,5 +172,28 @@ mod tests {
         assert_ne!(arch, "aarch64", "arch must be mapped to Node shape");
         assert_ne!(os, "linux", "os must be mapped to capitalized shape");
         assert_ne!(os, "macos", "os must be mapped to capitalized shape");
+    }
+
+    #[test]
+    fn anthropic_betas_floor_contains_all_nine_pinned_flags() {
+        let betas = default_claude_code_anthropic_betas();
+        assert_eq!(betas.len(), 9, "floor must carry exactly 9 pinned betas");
+        let expected = [
+            "claude-code-20250219",
+            "oauth-2025-04-20",
+            "interleaved-thinking-2025-05-14",
+            "context-management-2025-06-27",
+            "prompt-caching-scope-2026-01-05",
+            "structured-outputs-2025-12-15",
+            "fast-mode-2026-02-01",
+            "redact-thinking-2026-02-12",
+            "token-efficient-tools-2026-03-28",
+        ];
+        for flag in &expected {
+            assert!(
+                betas.contains(flag),
+                "floor must contain {flag}; got: {betas:?}"
+            );
+        }
     }
 }

@@ -59,8 +59,9 @@ pub enum AuthKind {
     ApiKey,
     /// OAuth bearer for subscription tokens (e.g. Claude Code's
     /// `sk-ant-oat01-...` access token). Sends `Authorization: Bearer <key>`.
-    /// You must declare the `anthropic-beta: oauth-2025-04-20` gate
-    /// yourself via `extra_headers` -- routectl no longer auto-injects it.
+    /// The required `anthropic-beta: oauth-2025-04-20` gate is auto-injected
+    /// via the pinned beta floor in `build_headers` for the
+    /// api.anthropic.com surface -- no manual `extra_headers` needed.
     OauthBearer,
 }
 
@@ -319,6 +320,25 @@ impl AnthropicApiProvider {
             let t = entry.trim();
             if !t.is_empty() && beta_seen.insert(t.to_string()) {
                 merged_betas.push(t.to_string());
+            }
+        }
+
+        // Pinned Claude Code beta floor for the OauthBearer +
+        // api.anthropic.com surface. These are operator-equivalent pins
+        // (not client-requested), so they bypass the `allowed_betas`
+        // allowlist by construction -- they never pass through
+        // `filter_anthropic_betas`. Notably `oauth-2025-04-20` is
+        // REQUIRED for OAuth to function on api.anthropic.com, so a
+        // zero-config oauth-bearer provider works without the operator
+        // hand-declaring it. Composed BEFORE the context_management strip
+        // below so the emulation path can still remove
+        // `context-management-2025-06-27` when active.
+        if self.cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&self.cfg.base_url)
+        {
+            for t in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
+                if beta_seen.insert(t.to_string()) {
+                    merged_betas.push(t.to_string());
+                }
             }
         }
 
@@ -1729,6 +1749,115 @@ mod tests {
         assert!(
             outbound_header_value(&provider, &req, "x-claude-code-session-id").is_none(),
             "a look-alike host must not stamp x-claude-code-session-id",
+        );
+    }
+
+    // -- Beta floor tests --------------------------------------------------
+
+    /// On OauthBearer + api.anthropic.com, all 9 pinned floor betas
+    /// appear in the outbound `anthropic-beta` header.
+    #[test]
+    fn beta_floor_all_nine_present_on_oauth_anthropic_host() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        let req = ChatRequest::default();
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+        for expected in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
+            assert!(
+                betas.contains(expected),
+                "floor beta {expected} must be present on oauth+anthropic host; got: {value}"
+            );
+        }
+    }
+
+    /// When context_management emulation is active, the
+    /// `context-management-2025-06-27` floor beta is stripped from the
+    /// outbound header (the emulation path handles the semantics, so
+    /// forwarding it upstream would cause a 400 on non-Anthropic hosts).
+    #[test]
+    fn beta_floor_context_management_stripped_when_emulation_active() {
+        let cfg = AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("oat-token")),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::OauthBearer,
+            header_extras: Vec::new(),
+            user_agent: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
+            context_management: true,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
+        };
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = ChatRequest::default();
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+        assert!(
+            !betas.contains(&context_management::CONTEXT_MANAGEMENT_BETA),
+            "context-management beta must be stripped when emulation is active; got: {value}"
+        );
+        // Other floor betas must still be present.
+        assert!(
+            betas.contains(&"oauth-2025-04-20"),
+            "non-stripped floor betas must still be present; got: {value}"
+        );
+    }
+
+    /// On OauthBearer with a non-Anthropic base, the floor betas must
+    /// NOT appear -- the floor is scoped to api.anthropic.com only.
+    #[test]
+    fn beta_floor_absent_on_non_anthropic_host() {
+        let cfg = AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("oat-token")),
+            base_url: "https://proxy.example.com/".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::OauthBearer,
+            header_extras: Vec::new(),
+            user_agent: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
+            context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
+        };
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = ChatRequest::default();
+        // No client betas, no operator betas -> header absent entirely.
+        assert!(
+            outbound_header_value(&provider, &req, "anthropic-beta").is_none(),
+            "beta floor must NOT appear on a non-anthropic host"
+        );
+    }
+
+    /// On ApiKey (even with api.anthropic.com base), the floor betas
+    /// must NOT appear -- the floor is scoped to OauthBearer only.
+    #[test]
+    fn beta_floor_absent_on_api_key_auth() {
+        let cfg = AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("test-key")),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::ApiKey,
+            header_extras: Vec::new(),
+            user_agent: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
+            context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
+        };
+        let provider = AnthropicApiProvider::new(cfg);
+        let req = ChatRequest::default();
+        // No client betas, no operator betas -> header absent entirely.
+        assert!(
+            outbound_header_value(&provider, &req, "anthropic-beta").is_none(),
+            "beta floor must NOT appear on the api-key path"
         );
     }
 }
