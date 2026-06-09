@@ -33,6 +33,11 @@ allow = [
     # approved, FSF-free, permissive (no source-distribution clause for
     # binary releases). Treated equivalently to MIT/BSD here.
     "Zlib",
+    # xxhash-rust (XXH64 for the billing-header checksum on the anthropic
+    # egress) ships under the Boost Software License. OSI-approved,
+    # FSF-free, permissive -- no copyleft and no binary-attribution
+    # requirement. Treated equivalently to MIT/BSD here.
+    "BSL-1.0",
 ]
 confidence-threshold = 0.93
 
