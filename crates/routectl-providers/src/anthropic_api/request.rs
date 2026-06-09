@@ -65,7 +65,15 @@ use super::tools::translate_tool_choice;
 // `filter_anthropic_betas` the same way; keeping these paths stable
 // means those call sites need no edits across the file split.
 pub(crate) use super::extras::{build_thinking, filter_anthropic_betas};
-pub(crate) use super::system::{lift_legacy_system, translate_system};
+pub(crate) use super::system::translate_system;
+// `lift_legacy_system` (the unfiltered lift) is consumed only by the
+// Bedrock Converse egress; the anthropic-api orchestrator below uses the
+// billing-aware `lift_legacy_system_stripped`. Gate the re-export so the
+// lean (no-bedrock) build does not flag it as unused.
+#[cfg(feature = "bedrock")]
+pub(crate) use super::system::lift_legacy_system;
+
+use super::system::lift_legacy_system_stripped;
 pub(crate) use super::tools::translate_tool;
 
 // `effort_ratio` and `is_routectl_managed_key` are surfaced only for the
@@ -224,11 +232,44 @@ pub(crate) fn normalize(
 
     // Prefer canonical req.system; fall back to lifting Role::System
     // messages for direct callers that bypass an ingress.
-    let system = req
+    //
+    // Strip the Claude Code billing/attribution block unconditionally.
+    // An anthropic-api provider can be pointed at a third-party host
+    // (api-key OR oauth, non-Anthropic base_url); the OAuth-gated cloak
+    // would not fire there, so the client fingerprint would otherwise
+    // leak. Stripping here -- on the always-run normalize path -- closes
+    // that for every anthropic-api egress.
+    let mut billing_dropped = false;
+    let filtered_system = req
         .system
         .as_ref()
-        .map(translate_system)
-        .or_else(|| lift_legacy_system(&req.messages));
+        .and_then(|s| crate::system_filter::strip_billing_attribution(s, &mut billing_dropped));
+    if billing_dropped {
+        tracing::warn!(
+            provider = id,
+            "anthropic-api egress: Claude Code billing/attribution system block dropped",
+        );
+    }
+    let system = filtered_system.as_ref().map(translate_system).or_else(|| {
+        // Legacy lift: strip the billing block from the lifted text too.
+        // lift_legacy_system joins Role::System messages into a single
+        // AnthropicSystem::Text. Filter each message's text through the
+        // same billing predicate so the fingerprint never reaches a
+        // third-party host via this path either. A separate flag keeps
+        // the WARN one-per-strip: the req.system branch above already
+        // warned if it dropped, and that branch is mutually exclusive
+        // with this fallback running at all.
+        let mut legacy_dropped = false;
+        let lifted_content = lift_legacy_system_stripped(&req.messages, &mut legacy_dropped);
+        if legacy_dropped {
+            tracing::warn!(
+                provider = id,
+                "anthropic-api egress: Claude Code billing/attribution system block \
+                     dropped (legacy Role::System path)",
+            );
+        }
+        lifted_content.as_ref().map(translate_system)
+    });
 
     let mut anthropic_messages = translate_messages(id, &messages)?;
 
@@ -557,18 +598,20 @@ mod context_management_normalize_tests {
         );
     }
 
-    /// Negative guard: the anthropic-api egress must NOT strip the Claude
-    /// Code billing/attribution system block. The block belongs to
-    /// Anthropic and is forwarded unchanged on the all-Anthropic path;
-    /// only the NON-Anthropic egresses (openai-compat, bedrock) strip it.
+    /// The anthropic-api egress strips the Claude Code billing/attribution
+    /// system block unconditionally in normalize -- it runs for ALL
+    /// anthropic-api requests, including those routed to a third-party
+    /// host (e.g. a `/anthropic`-compatible upstream), so the client
+    /// fingerprint never reaches a non-Anthropic party. The retained
+    /// system blocks are forwarded in order.
     #[test]
-    fn normalize_forwards_billing_system_block_unchanged() {
+    fn normalize_strips_billing_system_block() {
         use routectl_core::{SystemBlock, SystemContent};
         let mut req = simple_req();
         req.system = Some(SystemContent::Blocks(vec![
             SystemBlock {
                 kind: "text".into(),
-                text: "x-anthropic-billing-header: v=1; fp=keepme".into(),
+                text: "x-anthropic-billing-header: v=1; fp=secret".into(),
                 cache_control: None,
                 citations: None,
             },
@@ -584,11 +627,125 @@ mod context_management_normalize_tests {
         let sys = body["system"].as_array().expect("system survives as array");
         assert_eq!(
             sys.len(),
-            2,
-            "anthropic-api egress must forward BOTH system blocks (no billing strip); got: {body}"
+            1,
+            "billing block must be stripped, leaving only the prompt block; got: {body}"
         );
-        assert_eq!(sys[0]["text"], "x-anthropic-billing-header: v=1; fp=keepme");
-        assert_eq!(sys[1]["text"], "you are helpful");
+        assert_eq!(sys[0]["text"], "you are helpful");
+    }
+
+    /// A pure-billing `Text` system collapses to absent: the whole string
+    /// is the fingerprint-bearing block, so the `system` key is dropped.
+    #[test]
+    fn normalize_drops_pure_billing_text_system() {
+        use routectl_core::SystemContent;
+        let mut req = simple_req();
+        req.system = Some(SystemContent::Text(
+            "x-anthropic-billing-header: v=1; fp=secret".into(),
+        ));
+        let body =
+            normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+        assert!(
+            body.get("system").is_none() || body["system"].is_null(),
+            "pure-billing Text system must collapse to absent; got: {body}"
+        );
+    }
+
+    /// Legacy-path defense-in-depth: when `req.system` is None, the billing
+    /// block carried in a `Role::System` message must still be stripped
+    /// before it is lifted into the Anthropic `system`. The HTTP ingress
+    /// always lands system in `req.system` (covered above); this pins the
+    /// direct-caller / legacy gap so the Claude Code fingerprint never
+    /// reaches a third-party anthropic-api host via the lift fallback.
+    #[test]
+    fn normalize_strips_billing_from_legacy_system_message() {
+        use routectl_core::Role;
+        let mut req = simple_req();
+        // req.system stays None: force the lift_legacy_system fallback.
+        req.system = None;
+        req.messages = vec![
+            Message {
+                refusal: None,
+                role: Role::System,
+                content: MessageContent::Text("x-anthropic-billing-header: v=1; fp=secret".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::System,
+                content: MessageContent::Text("you are helpful".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let body =
+            normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+        let sys = body
+            .get("system")
+            .and_then(|s| s.as_str())
+            .expect("legacy lift produces a flat-text system");
+        assert!(
+            !sys.contains("x-anthropic-billing-header:"),
+            "billing block must be stripped from the lifted legacy system; got: {sys:?}"
+        );
+        assert!(
+            sys.contains("you are helpful"),
+            "the non-billing system prompt must survive the strip; got: {sys:?}"
+        );
+    }
+
+    /// A `Role::System` message whose ONLY content is the billing block
+    /// must collapse to an absent `system` on the legacy lift path -- the
+    /// fingerprint is the whole prompt, so nothing lands upstream.
+    #[test]
+    fn normalize_drops_pure_billing_legacy_system_message() {
+        use routectl_core::Role;
+        let mut req = simple_req();
+        req.system = None;
+        req.messages = vec![
+            Message {
+                refusal: None,
+                role: Role::System,
+                content: MessageContent::Text("x-anthropic-billing-header: v=1; fp=secret".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hello".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ];
+        let body =
+            normalize("test", &req, false, &[], false, None).expect("normalize must succeed");
+        assert!(
+            body.get("system").is_none() || body["system"].is_null(),
+            "a pure-billing legacy system must collapse to absent; got: {body}"
+        );
     }
 
     /// Soft-fail: when context_management=true and the thinking cache has
@@ -2101,6 +2258,56 @@ mod multi_turn_tool_use_tests {
             body["tool_choice"],
             json!({"type": "tool", "name": "web_search"})
         );
+    }
+
+    #[test]
+    fn adaptive_thinking_forced_tool_choice_strips_thinking_and_output_config_effort() {
+        // Arrange: the adaptive-thinking path emits both `thinking:
+        // {type:adaptive}` AND a top-level `output_config: {effort}`.
+        // A forcing tool_choice must strip BOTH -- `output_config.effort`
+        // is only valid alongside adaptive thinking, so an orphaned
+        // effort 400s.
+        let req = req_with_thinking_and_tool_choice(Some(json!({"type": "tool", "name": "ws"})));
+
+        // Act: adaptive=true so build_output_config emits output_config.effort.
+        let body = normalize("test", &req, /* adaptive= */ true, &[], false, None).unwrap();
+
+        // Assert: thinking dropped AND the orphaned effort dropped.
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be stripped when tool_choice forces tool use, got: {body}"
+        );
+        assert!(
+            body.get("output_config")
+                .and_then(|oc| oc.get("effort"))
+                .is_none(),
+            "output_config.effort must be stripped alongside thinking, got: {body}"
+        );
+    }
+
+    #[test]
+    fn forced_tool_choice_strips_effort_but_preserves_sibling_format() {
+        // Arrange: adaptive output_config.effort plus a structured-output
+        // `format` sibling layered in via provider_extras. The strip must
+        // drop only effort; format is orthogonal and must survive.
+        let mut req =
+            req_with_thinking_and_tool_choice(Some(json!({"type": "tool", "name": "ws"})));
+        req.provider_extras = Some(json!({
+            "output_config": {
+                "format": {"type": "json_schema", "schema": {"type": "object"}}
+            }
+        }));
+
+        // Act
+        let body = normalize("test", &req, /* adaptive= */ true, &[], false, None).unwrap();
+
+        // Assert: thinking + effort gone, format preserved.
+        assert!(body.get("thinking").is_none(), "thinking stripped: {body}");
+        let oc = body
+            .get("output_config")
+            .expect("output_config preserved for format");
+        assert!(oc.get("effort").is_none(), "effort stripped: {oc}");
+        assert_eq!(oc["format"]["type"], "json_schema");
     }
 
     #[test]

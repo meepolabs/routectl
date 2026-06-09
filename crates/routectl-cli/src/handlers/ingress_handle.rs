@@ -424,6 +424,17 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             tracing::error!(error = %e, "internal error suppressed in HTTP response");
             "internal error".to_string()
         }
+        // The `Error::Upstream` Display string embeds the internal
+        // provider config section name (routing topology) and the raw
+        // upstream body (which can carry per-tenant rate-limit detail
+        // and upstream-side metadata). Log the full error server-side
+        // and return only the HTTP status plus the upstream's own
+        // top-level `error.message` / `error.type` when the body parsed
+        // as JSON -- mirroring the streaming path's discipline.
+        Error::Upstream { status, body, .. } => {
+            tracing::error!(error = %e, "upstream error sanitized in HTTP response");
+            sanitize_upstream_for_client(*status, body)
+        }
         _ => e.to_string(),
     };
     // Lift the upstream classifier so an SDK that branches on
@@ -447,6 +458,41 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         upstream_type,
         upstream_code,
     )
+}
+
+/// Build a client-safe message for an `Error::Upstream`. STRIPS the
+/// internal provider config section name and the raw upstream response
+/// body. When the body parsed as JSON with a top-level `error.message`
+/// (or, failing that, `error.type`), surface that short upstream-authored
+/// classifier alongside the HTTP status; otherwise surface the status
+/// alone.
+///
+/// Counterpart to `sanitize_stream_error_for_client` on the streaming
+/// path: both refuse to forward the provider name or the raw body. The
+/// non-streaming path can afford the upstream's own top-level
+/// `error.message` because the egress already parsed it from the wire,
+/// but never a sibling key or the raw dump.
+fn sanitize_upstream_for_client(status: u16, body: &str) -> String {
+    if let Some(detail) = upstream_error_detail(body) {
+        format!("upstream error (HTTP {status}): {detail}")
+    } else {
+        format!("upstream error (HTTP {status})")
+    }
+}
+
+/// Extract the upstream's own top-level `error.message` (preferred) or
+/// `error.type` from a JSON error body. Returns `None` for non-JSON
+/// bodies or JSON without a top-level `error` object carrying one of
+/// those string fields, so the caller falls back to a status-only
+/// message rather than leaking sibling keys or the raw body.
+fn upstream_error_detail(body: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(body).ok()?;
+    let err_obj = parsed.get("error")?;
+    err_obj
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| err_obj.get("type").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {

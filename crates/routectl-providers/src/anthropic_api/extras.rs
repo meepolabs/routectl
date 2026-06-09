@@ -461,6 +461,14 @@ pub(super) fn reconcile_output_config_effort(
         }
         return;
     }
+    remove_output_config_effort(body);
+}
+
+/// Remove `output_config.effort` from `body`, preserving any orthogonal
+/// sibling (e.g. structured-output `format`). When `effort` was the only
+/// sub-key, the now-empty `output_config` object is removed entirely so
+/// the wire body stays clean. A no-op when neither key is present.
+fn remove_output_config_effort(body: &mut Value) {
     let Some(obj) = body.as_object_mut() else {
         return;
     };
@@ -517,6 +525,11 @@ pub(super) fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body
         return;
     };
     obj.remove("thinking");
+    // On the adaptive path, `output_config.effort` is only valid
+    // alongside `thinking:{type:adaptive}`. Stripping thinking without it
+    // leaves an orphan that Anthropic 400s. Drop the effort sub-key too;
+    // any orthogonal sibling (e.g. structured-output `format`) survives.
+    remove_output_config_effort(body);
     tracing::debug!(
         provider = provider_id,
         tool_choice_type = %ttype,

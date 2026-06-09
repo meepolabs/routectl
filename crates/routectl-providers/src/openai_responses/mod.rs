@@ -32,7 +32,7 @@
 //! `{"detail":"Stream must be set to true"}`. The public api-key
 //! endpoint accepts both, but forcing uniformly keeps one code path.
 //! Both auth surfaces share the same SSE drain extracting the
-//! `response` field from `response.completed`.
+//! `response` field from `response.completed` or `response.incomplete`.
 
 use std::sync::Arc;
 
@@ -511,13 +511,16 @@ impl Provider for OpenAiResponsesProvider {
             ));
         }
 
-        // Drain the SSE stream until a terminal event lands. Three
+        // Drain the SSE stream until a terminal event lands. Four
         // terminal events to distinguish:
-        //   response.completed -> success: extract `response`, return Ok.
-        //   response.failed    -> Err::upstream from the response.error.
-        //   response.cancelled -> Err::upstream (cancellation surfaces
-        //                         as an explicit error, not silent
-        //                         success; clients can retry).
+        //   response.completed  -> success: extract `response`, return Ok.
+        //   response.incomplete -> success-with-cutoff: extract `response`
+        //                          (the cutoff surfaces downstream as
+        //                          finish_reason "length", not an error).
+        //   response.failed     -> Err::upstream from the response.error.
+        //   response.cancelled  -> Err::upstream (cancellation surfaces
+        //                          as an explicit error, not silent
+        //                          success; clients can retry).
         //
         // The chatgpt-oauth backend ships the actual model output via
         // `response.output_item.done` events and ships
@@ -550,7 +553,10 @@ impl Provider for OpenAiResponsesProvider {
                         accumulated_items.push(item.clone());
                     }
                 }
-                "response.completed" | "response.failed" | "response.cancelled" => {
+                "response.completed"
+                | "response.incomplete"
+                | "response.failed"
+                | "response.cancelled" => {
                     if let Some(r) = parsed.get("response") {
                         completed_body = Some(r.clone());
                     }
@@ -566,8 +572,8 @@ impl Provider for OpenAiResponsesProvider {
             //   - terminal_kind = None: the stream exhausted without
             //     ever firing a terminal event (truncation, premature
             //     close, network drop).
-            //   - terminal_kind = Some(failed|cancelled|completed): the
-            //     terminal event fired but did NOT carry a `response`
+            //   - terminal_kind = Some(failed|cancelled|completed|incomplete):
+            //     the terminal event fired but did NOT carry a `response`
             //     field (malformed upstream payload).
             // Surface the actual cause so operators don't chase a
             // ghost stream-truncation when the real issue is a
@@ -585,8 +591,14 @@ impl Provider for OpenAiResponsesProvider {
         // events when the terminal body left it empty. The
         // chatgpt-oauth backend ships an empty array on
         // `response.completed` even when output_tokens > 0; the actual
-        // items only appear in the per-item done events.
-        if terminal_kind.as_deref() == Some("response.completed") && !accumulated_items.is_empty() {
+        // items only appear in the per-item done events. Applies to
+        // `response.incomplete` too (truncation is success-with-cutoff,
+        // same backfill need).
+        let backfill_terminal = matches!(
+            terminal_kind.as_deref(),
+            Some("response.completed") | Some("response.incomplete")
+        );
+        if backfill_terminal && !accumulated_items.is_empty() {
             let needs_backfill = raw_body
                 .get("output")
                 .and_then(Value::as_array)
@@ -883,6 +895,121 @@ mod e2e_tests {
             resp.routectl_provider.as_deref(),
             Some("openai-responses:test")
         );
+    }
+
+    /// Pin: when the model hits `max_output_tokens` the Responses API
+    /// emits `response.incomplete` (status "incomplete",
+    /// incomplete_details.reason "max_output_tokens") as the terminal
+    /// SSE event. `complete()` must treat it as a successful
+    /// truncated completion -- return Ok(ChatResponse) with
+    /// finish_reason="length" and usage populated -- NOT an
+    /// "stream ended without a terminal event" error. Mirrors the
+    /// streaming `stream()` path (handle_incomplete -> handle_completed).
+    #[tokio::test]
+    async fn complete_response_incomplete_returns_length_finish_reason() {
+        // Arrange
+        let server = MockServer::start().await;
+        let incomplete_body = serde_json::json!({
+            "id": "resp_inc",
+            "object": "response",
+            "status": "incomplete",
+            "model": "gpt-5-codex",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [{
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "partial"}]
+            }],
+            "usage": {"input_tokens": 5, "output_tokens": 64, "total_tokens": 69}
+        });
+        let event_body = format!(
+            "data: {{\"type\":\"response.incomplete\",\"response\":{}}}\n\n",
+            serde_json::to_string(&incomplete_body).unwrap()
+        );
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(event_body),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        // Act
+        let resp = provider
+            .complete(base_req())
+            .await
+            .expect("incomplete must yield Ok, not a terminal-event error");
+
+        // Assert: truncation maps to finish_reason="length" and usage
+        // survives.
+        assert_eq!(resp.id, "resp_inc");
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("length"));
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "partial"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        let usage = resp.usage.expect("usage present on incomplete response");
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 64);
+    }
+
+    /// Pin: `response.incomplete` whose terminal body carries an empty
+    /// `output` array backfills from accumulated `output_item.done`
+    /// events, same as the `response.completed` path -- so a truncated
+    /// streamed turn still surfaces its content.
+    #[tokio::test]
+    async fn complete_incomplete_backfills_output_from_item_done_events() {
+        // Arrange
+        let server = MockServer::start().await;
+        let item_done = serde_json::json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "streamed"}]
+            }
+        });
+        // Terminal incomplete event with an EMPTY output array (the
+        // chatgpt-oauth backend pattern).
+        let incomplete_body = serde_json::json!({
+            "id": "resp_inc2",
+            "object": "response",
+            "status": "incomplete",
+            "model": "gpt-5-codex",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [],
+            "usage": {"input_tokens": 3, "output_tokens": 32, "total_tokens": 35}
+        });
+        let event_body = format!(
+            "data: {}\n\ndata: {{\"type\":\"response.incomplete\",\"response\":{}}}\n\n",
+            serde_json::to_string(&item_done).unwrap(),
+            serde_json::to_string(&incomplete_body).unwrap()
+        );
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(event_body),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        // Act
+        let resp = provider.complete(base_req()).await.expect("complete");
+
+        // Assert: the backfilled item content surfaces; finish is length.
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("length"));
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "streamed"),
+            other => panic!("expected backfilled Text, got {other:?}"),
+        }
     }
 
     /// Pin: when the SSE stream's terminal event is `response.failed`,

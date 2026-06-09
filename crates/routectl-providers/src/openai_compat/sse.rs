@@ -212,6 +212,23 @@ impl ThinkTagAccumulator {
         }
     }
 
+    /// Drain any held-back `pending` bytes without interpreting them as
+    /// tag syntax. Called once at stream end (`[DONE]` or upstream
+    /// close): the accumulator holds back a partial-tag suffix waiting
+    /// to see if a `<think>` / `</think>` tag completes on the next
+    /// chunk, but if the stream terminates first those bytes are real
+    /// visible content the client must still receive. Returns `None`
+    /// when nothing is buffered (the common case) so the flush is a
+    /// no-op on healthy streams. Drains the buffer, so a second call
+    /// returns `None`.
+    pub fn take_pending(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.pending))
+        }
+    }
+
     /// Process one raw SSE data value. Returns `Ok(None)` for `[DONE]` / keepalive.
     pub fn process(&mut self, provider_id: &str, raw: &str) -> Result<Option<ChatChunk>> {
         let trimmed = raw.trim();
@@ -726,6 +743,42 @@ mod tests {
             .unwrap();
         // Combined `<thanks!` is not a tag; whole thing flows visibly.
         assert_eq!(c2.choices[0].delta.content.as_deref(), Some("<thanks!"));
+    }
+
+    /// Pin: held-back pending bytes that are a prefix of `<think>` but
+    /// never complete must be recoverable at stream end via
+    /// `take_pending`. Without a flush, those bytes (real visible
+    /// content) are silently dropped when the stream terminates while
+    /// still holding a partial-tag suffix.
+    #[test]
+    fn take_pending_flushes_held_back_partial_open_tag() {
+        let mut acc = ThinkTagAccumulator::new();
+
+        // A chunk ending in `<thi` holds the partial tag back: nothing
+        // visible is emitted on this chunk.
+        let c = acc
+            .process("t", &delta_chunk(Some("hello<thi"), None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.choices[0].delta.content.as_deref(), Some("hello"));
+
+        // Stream ends here (no further chunk to complete the tag).
+        // take_pending must surface the held-back `<thi`.
+        assert_eq!(acc.take_pending().as_deref(), Some("<thi"));
+        // Draining is idempotent: a second call returns None.
+        assert!(acc.take_pending().is_none());
+    }
+
+    /// `take_pending` returns None when nothing is buffered, so the
+    /// stream-end flush is a no-op on the common case.
+    #[test]
+    fn take_pending_is_none_when_buffer_empty() {
+        let mut acc = ThinkTagAccumulator::new();
+        let _ = acc
+            .process("t", &delta_chunk(Some("plain visible text"), None))
+            .unwrap()
+            .unwrap();
+        assert!(acc.take_pending().is_none());
     }
 
     // --- Terminal-chunk usage sub-bag lift tests ---

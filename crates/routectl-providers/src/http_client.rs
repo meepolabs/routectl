@@ -13,6 +13,24 @@
 
 use reqwest::Client;
 
+/// Idle read timeout applied to every shared client. reqwest's
+/// `read_timeout` is per-read: the timer resets after each successful
+/// read, so this caps the gap BETWEEN bytes/chunks, not the total
+/// stream duration. That distinction matters -- a total `timeout` would
+/// kill long extended-thinking streams that legitimately run for
+/// minutes. This is purely a leak safety net: if an upstream stops
+/// sending but keeps the TCP connection open mid-stream, the spawned
+/// render task would otherwise block forever on the next read. 300s is
+/// far longer than any legitimate inter-byte gap (thinking streams emit
+/// periodic deltas/keepalives well inside this window), so a healthy
+/// stream never trips it. Not configurable in v1: a single safe default
+/// is enough and a knob would invite operators to set it too tight.
+///
+/// Separate concern from any first-byte timeout: first-byte covers the
+/// initial response delay before the stream opens; this covers a hang
+/// once bytes have started flowing.
+pub(crate) const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Build a `reqwest::Client` with the given optional User-Agent.
 ///
 /// `None` keeps reqwest's default UA. Use this anywhere a provider
@@ -56,7 +74,13 @@ fn common_builder(user_agent: Option<&str>) -> reqwest::ClientBuilder {
         // default would negotiate down to an older protocol against
         // a misconfigured proxy or an in-the-middle box. Cheap, no
         // operational impact.
-        .min_tls_version(reqwest::tls::Version::TLS_1_2);
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        // Per-read idle timeout (resets after each successful read);
+        // a mid-stream hang where the upstream stops sending but holds
+        // the TCP connection open would otherwise leak the render task.
+        // NOT a total-duration cap -- safe for long thinking streams.
+        // See STREAM_READ_TIMEOUT.
+        .read_timeout(STREAM_READ_TIMEOUT);
     if let Some(ua) = user_agent {
         builder = builder.user_agent(ua);
     }
@@ -274,9 +298,23 @@ pub fn apply_header_extras(
 mod tests {
     use super::{
         apply_header_extras, insert_header, is_auth_header, is_managed_header,
-        is_reserved_extra_header, AUTH_HEADERS, MANAGED_HEADERS,
+        is_reserved_extra_header, AUTH_HEADERS, MANAGED_HEADERS, STREAM_READ_TIMEOUT,
     };
     use reqwest::header::HeaderMap;
+
+    #[test]
+    fn stream_read_timeout_is_generous_idle_cap() {
+        assert_eq!(
+            STREAM_READ_TIMEOUT,
+            std::time::Duration::from_secs(300),
+            "streaming idle read timeout must be 300s",
+        );
+    }
+
+    #[test]
+    fn build_applies_without_panicking_with_read_timeout() {
+        let _client = super::build(Some("test-ua"));
+    }
 
     #[test]
     fn insert_header_inserts_valid_pair() {

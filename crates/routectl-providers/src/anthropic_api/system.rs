@@ -5,12 +5,18 @@
 //! cache_control and citations; `lift_legacy_system` is the
 //! backwards-compat fallback that lifts `Role::System` messages into a
 //! flat `AnthropicSystem::Text` for direct callers that bypass an
-//! ingress. Both are `pub(crate)` so the Bedrock Converse egress can
-//! reuse the canonical-side mapping (single source of truth).
+//! ingress. `lift_legacy_system_stripped` is the billing-aware variant
+//! used by the anthropic-api egress: it drops the Claude Code
+//! billing/attribution block per-message before joining so the
+//! fingerprint never reaches a third-party host via the lift fallback.
+//! All are `pub(crate)` so the Bedrock Converse egress can reuse the
+//! canonical-side mapping (single source of truth).
 
 use routectl_core::{Message, MessageContent, Role, SystemContent};
 
 use super::types::{AnthropicSystem, AnthropicSystemBlock};
+
+use crate::system_filter::is_billing_attribution_block;
 
 /// Convert canonical `SystemContent` to wire `AnthropicSystem`. Preserves
 /// per-block cache_control and citations.
@@ -31,17 +37,12 @@ pub(crate) fn translate_system(s: &SystemContent) -> AnthropicSystem {
     }
 }
 
-/// Backwards-compat fallback: lift Role::System messages out of the
-/// messages array into a flat AnthropicSystem::Text. Used only when
-/// `req.system` is None. Returns None when no System messages are
-/// present, or when all System messages contain only non-text content
-/// (Parts without text blocks, Null) -- avoids emitting a meaningless
-/// `system: ""` upstream and the extra newlines from joining blanks.
-///
-/// `pub(crate)` so the Bedrock Converse egress can reuse the same
-/// legacy-shape fallback (single source of truth).
-pub(crate) fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
-    let texts: Vec<String> = messages
+/// Collect the per-message system texts from the canonical `Role::System`
+/// messages, preserving order. Drops empty/blank texts (and non-text Parts)
+/// so a meaningless `system: ""` never lands upstream. One entry per
+/// surviving System message -- the caller joins or filters them.
+fn collect_system_texts(messages: &[Message]) -> Vec<String> {
+    messages
         .iter()
         .filter(|m| matches!(m.role, Role::System))
         .filter_map(|m| match &m.content {
@@ -81,10 +82,126 @@ pub(crate) fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem
             }
             MessageContent::Null => None,
         })
-        .collect();
+        .collect()
+}
+
+/// Backwards-compat fallback: lift Role::System messages out of the
+/// messages array into a flat AnthropicSystem::Text. Used only when
+/// `req.system` is None. Returns None when no System messages are
+/// present, or when all System messages contain only non-text content
+/// (Parts without text blocks, Null) -- avoids emitting a meaningless
+/// `system: ""` upstream and the extra newlines from joining blanks.
+///
+/// `pub(crate)` so the Bedrock Converse egress can reuse the same
+/// legacy-shape fallback (single source of truth). Gated on the
+/// `bedrock` feature because the anthropic-api egress uses the
+/// billing-aware `lift_legacy_system_stripped`; Converse is the only
+/// remaining caller of the unfiltered lift.
+#[cfg(feature = "bedrock")]
+pub(crate) fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
+    let texts = collect_system_texts(messages);
     if texts.is_empty() {
         None
     } else {
         Some(AnthropicSystem::Text(texts.join("\n")))
+    }
+}
+
+/// Billing-aware variant of `lift_legacy_system`: lifts Role::System
+/// messages but drops any whose text is a Claude Code billing/attribution
+/// block BEFORE joining. The strip must run per-message -- once joined, a
+/// billing block fused with a real prompt no longer matches the
+/// leading-prefix predicate. Sets `dropped = true` when at least one block
+/// was removed so the caller can emit a single contents-free WARN. Returns
+/// None when nothing survives the strip (the system collapses to absent).
+pub(crate) fn lift_legacy_system_stripped(
+    messages: &[Message],
+    dropped: &mut bool,
+) -> Option<SystemContent> {
+    let mut kept: Vec<String> = Vec::new();
+    for text in collect_system_texts(messages) {
+        if is_billing_attribution_block(&text) {
+            *dropped = true;
+        } else {
+            kept.push(text);
+        }
+    }
+    if kept.is_empty() {
+        None
+    } else {
+        Some(SystemContent::Text(kept.join("\n")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sys_msg(text: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::System,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    #[test]
+    fn stripped_drops_billing_keeps_normal() {
+        let msgs = vec![
+            sys_msg("x-anthropic-billing-header: v=1; fp=abc"),
+            sys_msg("you are helpful"),
+        ];
+        let mut dropped = false;
+        let out = lift_legacy_system_stripped(&msgs, &mut dropped);
+        assert!(dropped);
+        let text = match out.expect("non-billing prompt survives") {
+            SystemContent::Text(t) => t,
+            other => panic!("expected Text, got {other:?}"),
+        };
+        assert!(!text.contains("x-anthropic-billing-header:"));
+        assert!(text.contains("you are helpful"));
+    }
+
+    #[test]
+    fn stripped_pure_billing_collapses_to_none() {
+        let msgs = vec![sys_msg("x-anthropic-billing-header: v=1; fp=abc")];
+        let mut dropped = false;
+        let out = lift_legacy_system_stripped(&msgs, &mut dropped);
+        assert!(dropped);
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn stripped_no_system_messages_returns_none() {
+        let msgs: Vec<Message> = vec![];
+        let mut dropped = false;
+        let out = lift_legacy_system_stripped(&msgs, &mut dropped);
+        assert!(!dropped);
+        assert!(out.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "bedrock")]
+    fn original_lift_still_includes_billing_text() {
+        // Regression pin: the unfiltered lift_legacy_system keeps billing
+        // text -- it is the caller's responsibility to strip when needed.
+        // Bedrock-gated alongside the function it exercises.
+        let msgs = vec![
+            sys_msg("x-anthropic-billing-header: v=1; fp=abc"),
+            sys_msg("you are helpful"),
+        ];
+        let out = lift_legacy_system(&msgs).expect("messages produce a system");
+        match out {
+            AnthropicSystem::Text(t) => {
+                assert!(t.contains("x-anthropic-billing-header:"));
+                assert!(t.contains("you are helpful"));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 }

@@ -117,6 +117,220 @@ async fn openai_envelope_unchanged_regression_pin() {
         .contains("nonesuch"));
 }
 
+// -------- map_error: non-streaming upstream message sanitization ----
+//
+// The non-streaming `map_error` path must not leak the internal
+// provider config section name (routing topology) or the raw upstream
+// response body (per-tenant rate-limit detail, upstream-side metadata)
+// into the client-facing error envelope. It mirrors the streaming
+// path's discipline: surface only the HTTP status plus, when the
+// upstream body parsed as JSON with a top-level `error.message` /
+// `error.type`, that short classifier.
+
+#[tokio::test]
+async fn map_error_upstream_strips_provider_name_and_raw_body() {
+    // Arrange: an Upstream error whose Display string carries the
+    // internal config section name and a raw body with tenant detail
+    // in a sibling key the upstream did not intend for the client.
+    let err = Error::Upstream {
+        provider: "anthropic_oauth_prod".into(),
+        status: 429,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        body: "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"},\
+               \"internal_quota\":\"tenant-12345 exceeded 4000/min\"}"
+            .into(),
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("anthropic_oauth_prod"),
+        "internal provider config name must not leak: {msg:?}"
+    );
+    assert!(
+        !msg.contains("tenant-12345"),
+        "raw upstream body must not leak: {msg:?}"
+    );
+    assert!(
+        !msg.contains("internal_quota"),
+        "raw upstream body keys must not leak: {msg:?}"
+    );
+    assert!(
+        msg.contains("429"),
+        "HTTP status preserved for triage: {msg:?}"
+    );
+}
+
+#[tokio::test]
+async fn map_error_upstream_surfaces_top_level_error_message_from_json_body() {
+    // Arrange: an upstream JSON body with a benign top-level
+    // `error.message`. The sanitizer may surface that short message
+    // (it is the upstream's own client-facing text) but never the
+    // provider config name.
+    let err = Error::Upstream {
+        provider: "openai_prod".into(),
+        status: 400,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        body: "{\"error\":{\"type\":\"invalid_request_error\",\
+               \"message\":\"max_tokens is too large\"}}"
+            .into(),
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("openai_prod"),
+        "internal provider config name must not leak: {msg:?}"
+    );
+    assert!(
+        msg.contains("max_tokens is too large"),
+        "upstream top-level error.message should surface: {msg:?}"
+    );
+    assert!(
+        msg.contains("400"),
+        "HTTP status preserved for triage: {msg:?}"
+    );
+}
+
+#[tokio::test]
+async fn map_error_upstream_non_json_body_yields_status_only_message() {
+    // Arrange: a non-JSON upstream body (e.g. an HTML 502 page or a
+    // plain-text gateway error). There is no top-level error.message
+    // to surface, so the sanitizer falls back to a status-only message
+    // and drops the body entirely.
+    let err = Error::Upstream {
+        provider: "bedrock_prod".into(),
+        status: 502,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        body: "<html><body>upstream-host-name gateway timeout</body></html>".into(),
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::OpenAi, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("bedrock_prod"),
+        "internal provider config name must not leak: {msg:?}"
+    );
+    assert!(
+        !msg.contains("upstream-host-name"),
+        "raw non-JSON body must not leak: {msg:?}"
+    );
+    assert!(
+        !msg.contains("<html>"),
+        "raw body markup must not leak: {msg:?}"
+    );
+    assert!(
+        msg.contains("502"),
+        "HTTP status preserved for triage: {msg:?}"
+    );
+}
+
+#[tokio::test]
+async fn map_error_upstream_anthropic_envelope_also_sanitizes_message() {
+    // Arrange: the Anthropic envelope path must sanitize the message
+    // too -- both dialects funnel through the same `public_message`.
+    let err = Error::Upstream {
+        provider: "anthropic_oauth_prod".into(),
+        status: 529,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        body: "{\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"},\
+               \"x-internal\":\"tenant-99 burst\"}"
+            .into(),
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("anthropic_oauth_prod"),
+        "internal provider config name must not leak: {msg:?}"
+    );
+    assert!(
+        !msg.contains("tenant-99"),
+        "raw upstream body must not leak: {msg:?}"
+    );
+    assert!(msg.contains("529"), "HTTP status preserved: {msg:?}");
+    // The Anthropic error.type mapping is unchanged by the message
+    // sanitization (529 -> overloaded_error).
+    assert_eq!(body["error"]["type"], "overloaded_error");
+}
+
+// -------- sanitize_upstream_for_client (unit) -----------------------
+
+#[test]
+fn sanitize_upstream_for_client_prefers_top_level_error_message() {
+    // Arrange + Act
+    let out = sanitize_upstream_for_client(
+        400,
+        "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad field\"}}",
+    );
+
+    // Assert
+    assert!(out.contains("400"), "status present: {out:?}");
+    assert!(out.contains("bad field"), "message surfaced: {out:?}");
+}
+
+#[test]
+fn sanitize_upstream_for_client_falls_back_to_error_type() {
+    // Arrange: a body with a top-level error.type but no message.
+    // Act
+    let out = sanitize_upstream_for_client(503, "{\"error\":{\"type\":\"overloaded_error\"}}");
+
+    // Assert
+    assert!(out.contains("503"), "status present: {out:?}");
+    assert!(out.contains("overloaded_error"), "type surfaced: {out:?}");
+}
+
+#[test]
+fn sanitize_upstream_for_client_status_only_for_non_json() {
+    // Arrange + Act
+    let out = sanitize_upstream_for_client(502, "raw gateway page with host names");
+
+    // Assert
+    assert!(out.contains("502"), "status present: {out:?}");
+    assert!(
+        !out.contains("host names"),
+        "raw non-JSON body must not appear: {out:?}"
+    );
+}
+
+#[test]
+fn sanitize_upstream_for_client_status_only_for_json_without_error_object() {
+    // Arrange: valid JSON but no top-level `error` object to mine.
+    // Act
+    let out = sanitize_upstream_for_client(500, "{\"detail\":\"tenant-7 internal trace\"}");
+
+    // Assert
+    assert!(out.contains("500"), "status present: {out:?}");
+    assert!(
+        !out.contains("tenant-7"),
+        "sibling body keys must not leak: {out:?}"
+    );
+}
+
 // -------- Layer B: OpenAI ingress preserves upstream type/code -------
 
 #[tokio::test]

@@ -2,15 +2,17 @@
 //!
 //! The real Claude Code client injects an in-band `system` text block
 //! whose text begins with `x-anthropic-billing-header:` (carrying its
-//! version + a client fingerprint). On an Anthropic-ingress request that
-//! egresses to a NON-Anthropic upstream (openai-compat, bedrock), routectl
-//! would otherwise forward that fingerprint to a third party. This module
-//! provides the predicate that identifies the block and a helper that drops
-//! it from a canonical `SystemContent`, so each non-Anthropic egress can
-//! strip it before flatten/translation.
+//! version + a client fingerprint). routectl must not forward that
+//! fingerprint to any upstream that isn't the genuine Anthropic billing
+//! party, so every egress strips it before flatten/translation. This
+//! module provides the predicate that identifies the block and a helper
+//! that drops it from a canonical `SystemContent`.
 //!
-//! The anthropic-api egress does NOT use this filter: the block belongs to
-//! Anthropic and is forwarded unchanged on the all-Anthropic path.
+//! Used by all egresses (openai-compat, bedrock, openai-responses, and
+//! anthropic-api). The anthropic-api egress strips unconditionally too:
+//! an anthropic-api provider can be pointed at a third-party host, where
+//! the OAuth-gated identity cloak does not fire, so the strip has to run
+//! on the always-on normalize path rather than inside the cloak.
 
 use routectl_core::{SystemBlock, SystemContent};
 

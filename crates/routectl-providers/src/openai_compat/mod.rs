@@ -452,11 +452,15 @@ impl Provider for OpenAiCompatProvider {
             // carry distinct `index` values instead of collapsing onto 0.
             // RawThinkTag threads its own counter inside ThinkTagAccumulator.
             let mut reasoning_index: u32 = 0;
-            // Running concatenation of `delta.content` text across chunks.
-            // The terminal chunk (the one carrying `finish_reason`) gets
-            // the matched_stop_sequence applied just before yield, mirroring
+            // Per-choice running concatenation of `delta.content` text,
+            // indexed by `choice.index` and grown on demand. The terminal
+            // chunk (the one carrying `finish_reason`) gets the
+            // matched_stop_sequence applied just before yield, mirroring
             // what the non-streaming path does after `normalize_response`.
-            let mut accumulated_text = String::new();
+            // Per-choice (not one shared buffer) so an `n > 1` response
+            // never bleeds one choice's content into another choice's
+            // suffix match.
+            let mut accumulated_text: Vec<String> = Vec::new();
             while let Some(event_result) = event_stream.next().await {
                 let event = match event_result {
                     Ok(e) => e,
@@ -475,6 +479,11 @@ impl Provider for OpenAiCompatProvider {
                     // providers (e.g. OpenCode-Go) emit cost-tracking
                     // trailer chunks after it, which we must not try to
                     // parse as ChatChunk.
+                    if dialect == ReasoningDialect::RawThinkTag {
+                        if let Some(pending) = think_acc.take_pending() {
+                            yield Ok(flush_pending_chunk(&pending));
+                        }
+                    }
                     return;
                 }
                 if trimmed.is_empty() {
@@ -497,7 +506,11 @@ impl Provider for OpenAiCompatProvider {
                         if request_stop.is_some() {
                             for choice in chunk.choices.iter() {
                                 if let Some(t) = choice.delta.content.as_deref() {
-                                    accumulated_text.push_str(t);
+                                    accumulate_choice_text(
+                                        &mut accumulated_text,
+                                        choice.index,
+                                        t,
+                                    );
                                 }
                             }
                         }
@@ -505,7 +518,8 @@ impl Provider for OpenAiCompatProvider {
                         // that carries the terminal finish_reason and no
                         // matched_stop_sequence yet. The non-streaming
                         // path runs the same recovery in `complete()`
-                        // after `normalize_response`.
+                        // after `normalize_response`. Each choice matches
+                        // against its OWN accumulated buffer.
                         if let Some(stops) = request_stop.as_deref() {
                             for choice in chunk.choices.iter_mut() {
                                 if choice.matched_stop_sequence.is_some() {
@@ -514,16 +528,23 @@ impl Provider for OpenAiCompatProvider {
                                 if choice.finish_reason.as_deref() != Some("stop") {
                                     continue;
                                 }
+                                let text = accumulated_text
+                                    .get(choice.index as usize)
+                                    .map(String::as_str);
                                 choice.matched_stop_sequence =
-                                    response::detect_matched_stop_sequence(
-                                        Some(accumulated_text.as_str()),
-                                        stops,
-                                    );
+                                    response::detect_matched_stop_sequence(text, stops);
                             }
                         }
                         yield Ok(chunk);
                     }
                     Err(e) => yield Err(e),
+                }
+            }
+            // Normal stream exhaustion (upstream closed without [DONE]).
+            // Same flush logic as the [DONE] path above.
+            if dialect == ReasoningDialect::RawThinkTag {
+                if let Some(pending) = think_acc.take_pending() {
+                    yield Ok(flush_pending_chunk(&pending));
                 }
             }
         };
@@ -535,6 +556,58 @@ impl Provider for OpenAiCompatProvider {
             self.cfg.id.clone(),
         ))
     }
+}
+
+/// Build a content-only `ChatChunk` from the ThinkTagAccumulator's
+/// pending buffer. Called at stream-end when the accumulator held back
+/// bytes waiting to see if a `<think>` / `</think>` tag completes --
+/// but the stream terminated first. Those bytes are real visible
+/// content the client must receive.
+///
+/// The flushed content is attributed to choice 0: RawThinkTag is a
+/// single-choice dialect in practice (the providers that embed
+/// `<think>` tags do not fan out n>1), so there is no per-choice index
+/// to carry through here.
+fn flush_pending_chunk(text: &str) -> ChatChunk {
+    use routectl_core::schema::{ChunkChoice, ChunkDelta};
+    ChatChunk {
+        id: String::new(),
+        model: String::new(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                content: Some(text.to_string()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        opaque_events: Vec::new(),
+        upstream_meta: None,
+    }
+}
+
+/// Upper bound on the per-choice stream accumulator index. A request's
+/// legitimate max index is n-1 where n (the `n` sampling param) is small;
+/// 128 is far above any real fan-out. A malicious or buggy upstream that
+/// echoes `choice.index = 1_000_000` would otherwise force a huge Vec
+/// allocation via `resize`. Out-of-range indices are skipped.
+const MAX_STREAM_CHOICES: usize = 128;
+
+/// Grow the per-choice accumulator and append text for the given choice
+/// index. The vec is lazily expanded so the common n=1 case allocates
+/// only one entry. Indices at or above `MAX_STREAM_CHOICES` are dropped
+/// to bound the allocation against a hostile upstream.
+fn accumulate_choice_text(buffers: &mut Vec<String>, index: u32, text: &str) {
+    let idx = index as usize;
+    if idx >= MAX_STREAM_CHOICES {
+        return;
+    }
+    if buffers.len() <= idx {
+        buffers.resize(idx + 1, String::new());
+    }
+    buffers[idx].push_str(text);
 }
 
 /// Ensure `body.stream_options.include_usage = true` on outgoing
@@ -607,7 +680,10 @@ fn parse_openai_error_classifier(body_text: &str) -> (Option<String>, Option<Str
 
 #[cfg(test)]
 mod helper_tests {
-    use super::{ensure_stream_options_include_usage, parse_openai_error_classifier};
+    use super::{
+        accumulate_choice_text, ensure_stream_options_include_usage, parse_openai_error_classifier,
+        MAX_STREAM_CHOICES,
+    };
     use serde_json::json;
 
     #[test]
@@ -706,5 +782,57 @@ mod helper_tests {
         // Assert
         assert!(upstream_type.is_none());
         assert!(upstream_code.is_none());
+    }
+
+    #[test]
+    fn accumulate_grows_buffer_for_in_range_index() {
+        // Arrange
+        let mut buffers: Vec<String> = Vec::new();
+
+        // Act
+        accumulate_choice_text(&mut buffers, 0, "hello ");
+        accumulate_choice_text(&mut buffers, 0, "world");
+        accumulate_choice_text(&mut buffers, 2, "third");
+
+        // Assert: index 2 lazily grows the vec to length 3; text appends.
+        assert_eq!(buffers.len(), 3);
+        assert_eq!(buffers[0], "hello world");
+        assert_eq!(buffers[1], "");
+        assert_eq!(buffers[2], "third");
+    }
+
+    #[test]
+    fn accumulate_skips_out_of_range_index_without_over_allocating() {
+        // A hostile upstream echoes a wildly out-of-range choice.index.
+        // The accumulator must neither panic nor resize the buffer to
+        // millions of entries -- it drops the write and stays bounded.
+        let mut buffers: Vec<String> = Vec::new();
+
+        accumulate_choice_text(&mut buffers, 10_000, "evil");
+
+        assert!(
+            buffers.is_empty(),
+            "out-of-range index must not allocate any entries, got len {}",
+            buffers.len()
+        );
+    }
+
+    #[test]
+    fn accumulate_admits_highest_in_range_index_and_rejects_the_cap() {
+        // Boundary: index == MAX_STREAM_CHOICES - 1 is the last admitted
+        // index; index == MAX_STREAM_CHOICES is the first rejected one.
+        let mut buffers: Vec<String> = Vec::new();
+
+        accumulate_choice_text(&mut buffers, (MAX_STREAM_CHOICES - 1) as u32, "edge");
+        assert_eq!(buffers.len(), MAX_STREAM_CHOICES);
+        assert_eq!(buffers[MAX_STREAM_CHOICES - 1], "edge");
+
+        // The cap index itself is dropped; the buffer does not grow.
+        accumulate_choice_text(&mut buffers, MAX_STREAM_CHOICES as u32, "over");
+        assert_eq!(
+            buffers.len(),
+            MAX_STREAM_CHOICES,
+            "index == cap must be rejected, buffer must not grow"
+        );
     }
 }

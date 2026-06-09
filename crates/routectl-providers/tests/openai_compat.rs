@@ -421,6 +421,117 @@ async fn stream_raw_think_tag_state_machine_across_chunks() {
     assert_eq!(reasoning, "partial thought");
 }
 
+/// Pin: when a RawThinkTag stream ends (`[DONE]`) while the accumulator
+/// is still holding back bytes that are a prefix of `<think>` (e.g.
+/// `<thi`), those bytes are real visible content and must reach the
+/// client. Before the flush they were silently dropped at the `[DONE]`
+/// exit. Upstream emits `hello<thi` then `[DONE]` and never completes
+/// the tag; the client must receive the full `hello<thi`.
+#[tokio::test]
+async fn stream_raw_think_tag_flushes_pending_on_done() {
+    let server = MockServer::start().await;
+
+    // One chunk whose content ends in a partial `<think>` prefix, then
+    // a bare `[DONE]` -- the tag never completes.
+    let sse_body = concat!(
+        "data: {\"id\":\"t1\",\"model\":\"qwq-32b\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello<thi\"},\"finish_reason\":null}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = make_provider(&server.uri(), ReasoningDialect::RawThinkTag);
+    let mut stream = provider.stream(user_request("qwq-32b")).await.unwrap();
+
+    let mut outside = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        for choice in &chunk.choices {
+            if let Some(c) = &choice.delta.content {
+                outside.push_str(c);
+            }
+        }
+    }
+
+    // All bytes survive: the held-back `<thi` is flushed at [DONE].
+    assert_eq!(outside, "hello<thi");
+}
+
+/// Pin: for `n > 1` the streaming stop-sequence heuristic must track
+/// per-choice content, not one shared buffer. Choice 0 streams `fooEND`
+/// (ends with the configured stop -> matches); choice 1 streams `bar`
+/// (no stop -> must NOT match). A single shared accumulator would bleed
+/// choice 0's `END` suffix into choice 1's match, producing a false
+/// positive on choice 1.
+///
+/// Two stop sequences are configured so the single-stop fallback in
+/// `detect_matched_stop_sequence` cannot fire: this isolates the
+/// per-choice suffix-match contract, not the single-fence fallback.
+#[tokio::test]
+async fn stream_stop_sequence_heuristic_is_per_choice_for_n_gt_1() {
+    let server = MockServer::start().await;
+
+    // Two choices interleaved across content chunks, then a terminal
+    // chunk carrying finish_reason="stop" for both. Choice 0 -> "fooEND",
+    // choice 1 -> "bar".
+    let sse_body = concat!(
+        "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"foo\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"bar\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"END\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"},{\"index\":1,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = make_provider(&server.uri(), ReasoningDialect::OpenAi);
+    let mut req = user_request("m");
+    req.n = Some(2);
+    req.stop = Some(vec!["END".to_string(), "STOP".to_string()]);
+
+    let mut stream = provider.stream(req).await.unwrap();
+
+    // Collect the matched_stop_sequence per choice index from the
+    // terminal chunk (the one carrying finish_reason="stop").
+    let mut matched: std::collections::HashMap<u32, Option<String>> =
+        std::collections::HashMap::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        for choice in &chunk.choices {
+            if choice.finish_reason.as_deref() == Some("stop") {
+                matched.insert(choice.index, choice.matched_stop_sequence.clone());
+            }
+        }
+    }
+
+    assert_eq!(
+        matched.get(&0).cloned().flatten().as_deref(),
+        Some("END"),
+        "choice 0 streamed 'fooEND' -> must match the stop sequence",
+    );
+    assert_eq!(
+        matched.get(&1).cloned().flatten(),
+        None,
+        "choice 1 streamed 'bar' -> must NOT match (no per-choice bleed)",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // DeepSeek multi-turn: outgoing body must not contain reasoning_content
 // ---------------------------------------------------------------------------

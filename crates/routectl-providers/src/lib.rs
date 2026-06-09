@@ -64,10 +64,14 @@ pub(crate) mod tool_id;
 pub(crate) mod tool_calls;
 
 // Shared filter that drops the Claude Code billing/attribution system
-// block before a NON-Anthropic egress forwards it. Gated on the egresses
-// that strip it (openai-compat, bedrock); the anthropic-api egress keeps
-// forwarding the block and does not consume this module.
-#[cfg(any(feature = "openai-compat", feature = "bedrock"))]
+// block before any egress forwards it to an upstream. Used by every
+// provider egress (openai-compat, bedrock, openai-responses, anthropic-api).
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "bedrock",
+    feature = "openai-responses",
+    feature = "anthropic-api"
+))]
 pub(crate) mod system_filter;
 
 // Body re-signer for the billing-header checksum. When routectl mutates

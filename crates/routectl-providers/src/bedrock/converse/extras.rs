@@ -295,6 +295,17 @@ fn strip_thinking_when_tool_choice_forces_use(
         return;
     }
     if bag.remove("thinking").is_some() {
+        // On the adaptive path, `output_config.effort` is only valid
+        // alongside `thinking:{type:adaptive}`. Stripping thinking without
+        // it leaves an orphan that Anthropic (via Converse) 400s. Drop the
+        // effort sub-key; any orthogonal sibling (e.g. `format`) survives.
+        if let Some(oc_val) = bag.get_mut("output_config") {
+            if let Some(oc_obj) = oc_val.as_object_mut() {
+                if oc_obj.remove("effort").is_some() && oc_obj.is_empty() {
+                    bag.remove("output_config");
+                }
+            }
+        }
         let variant = match tool_choice {
             Some(ConverseToolChoice::Any { .. }) => "any",
             Some(ConverseToolChoice::Tool { .. }) => "tool",
@@ -315,7 +326,10 @@ fn strip_thinking_when_tool_choice_forces_use(
 #[cfg(test)]
 mod tests {
     use super::super::types::{ConverseSpecificTool, ConverseToolChoice, EmptyObject};
-    use super::{build_additional_fields, is_converse_managed_key};
+    use super::{
+        build_additional_fields, is_converse_managed_key,
+        strip_thinking_when_tool_choice_forces_use,
+    };
     use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
     use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
 
@@ -498,35 +512,85 @@ mod tests {
     }
 
     #[test]
-    fn tool_choice_any_without_thinking_no_op() {
-        // Regression guard: when reasoning is absent (no thinking
-        // composed), the strip is harmless and the bag is either None
-        // or thinking-absent.
-        let cfg = fake_cfg();
-        let req = ChatRequest {
-            model: "anthropic.claude-sonnet-4-5".into(),
-            messages: vec![Message {
-                refusal: None,
-                role: Role::User,
-                content: MessageContent::Text("hi".into()),
-                reasoning: None,
-                reasoning_details: vec![],
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            }],
-            max_tokens: Some(2048),
-            ..Default::default()
-        };
-        let tc = ConverseToolChoice::Any {
-            any: EmptyObject {},
+    fn adaptive_forced_tool_choice_strips_thinking_and_output_config_effort() {
+        // Arrange: adaptive thinking emits both `thinking:{type:adaptive}`
+        // AND `output_config:{effort}` into the bag. A forcing toolChoice
+        // must strip BOTH -- output_config.effort is only valid alongside
+        // adaptive thinking, so an orphaned effort 400s on Anthropic.
+        let mut cfg = fake_cfg();
+        cfg.adaptive_thinking = Some(true);
+        let req = req_with_thinking();
+        let tc = ConverseToolChoice::Tool {
+            tool: ConverseSpecificTool {
+                name: "web_search".into(),
+            },
         };
 
+        // Act
         let bag = build_additional_fields(&cfg, &req, Some(&tc));
 
+        // Assert: thinking gone AND the orphaned output_config.effort gone.
         assert!(
             bag_thinking_absent(&bag),
-            "thinking must be absent when no reasoning was set, got: {bag:?}"
+            "thinking must be stripped on adaptive forced tool_choice, got: {bag:?}"
         );
+        let effort_present = bag
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|o| o.get("output_config"))
+            .and_then(|oc| oc.get("effort"))
+            .is_some();
+        assert!(
+            !effort_present,
+            "output_config.effort must be stripped alongside thinking, got: {bag:?}"
+        );
+    }
+
+    #[test]
+    fn forced_tool_choice_strips_effort_but_preserves_sibling_format() {
+        // Arrange: directly invoke the strip function on a bag carrying
+        // adaptive thinking + output_config with both effort and a
+        // structured-output format sibling. The strip must drop only
+        // effort; format is orthogonal and must survive -- parallel to
+        // the anthropic_api request.rs test
+        // `forced_tool_choice_strips_effort_but_preserves_sibling_format`.
+        use serde_json::{json, Map};
+
+        let cfg = fake_cfg();
+        let mut bag: Map<String, serde_json::Value> = Map::new();
+        bag.insert("thinking".to_string(), json!({"type": "adaptive"}));
+        bag.insert(
+            "output_config".to_string(),
+            json!({
+                "effort": "high",
+                "format": {
+                    "type": "json_schema",
+                    "schema": {"type": "object", "required": ["x"]}
+                }
+            }),
+        );
+        let tc = ConverseToolChoice::Tool {
+            tool: ConverseSpecificTool {
+                name: "web_search".into(),
+            },
+        };
+
+        // Act
+        strip_thinking_when_tool_choice_forces_use(&cfg, &mut bag, Some(&tc));
+
+        // Assert: thinking gone, effort gone, format preserved.
+        assert!(
+            !bag.contains_key("thinking"),
+            "thinking must be stripped; got: {bag:?}"
+        );
+        let oc = bag
+            .get("output_config")
+            .expect("output_config must survive when format sibling remains");
+        assert!(
+            oc.get("effort").is_none(),
+            "effort must be stripped; got: {oc}"
+        );
+        assert_eq!(oc["format"]["type"], "json_schema");
+        assert_eq!(oc["format"]["schema"]["required"][0], "x");
     }
 }

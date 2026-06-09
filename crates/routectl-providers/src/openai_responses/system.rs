@@ -23,7 +23,17 @@ use routectl_core::{ChatRequest, SystemContent};
 /// "no system prompt").
 pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
     let s = req.system.as_ref()?;
-    match s {
+    // Drop the Claude Code billing/attribution block before flatten:
+    // OpenAI is a third-party upstream and must not receive the client
+    // fingerprint the block carries.
+    let mut billing_dropped = false;
+    let filtered = crate::system_filter::strip_billing_attribution(s, &mut billing_dropped)?;
+    if billing_dropped {
+        tracing::warn!(
+            "openai-responses egress: Claude Code billing/attribution system block dropped",
+        );
+    }
+    match &filtered {
         SystemContent::Text(t) if t.is_empty() => None,
         SystemContent::Text(t) => Some(t.clone()),
         SystemContent::Blocks(blocks) => {
@@ -54,5 +64,94 @@ fn warn_on_cache_control_loss(blocks: &[routectl_core::SystemBlock]) {
             "openai-responses: dropping cache_control on system block(s); \
              Responses API has no prompt-cache breakpoint surface yet"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use routectl_core::{ChatRequest, SystemBlock, SystemContent};
+
+    fn block(text: &str) -> SystemBlock {
+        SystemBlock {
+            kind: "text".into(),
+            text: text.into(),
+            cache_control: None,
+            citations: None,
+        }
+    }
+
+    fn req_with_system(system: SystemContent) -> ChatRequest {
+        ChatRequest {
+            system: Some(system),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn strips_billing_block_before_flattening_blocks() {
+        // Arrange: a billing/attribution block (carrying the client
+        // fingerprint) sits alongside a real prompt block. OpenAI is a
+        // third-party upstream and must not receive the fingerprint.
+        let req = req_with_system(SystemContent::Blocks(vec![
+            block("x-anthropic-billing-header: v=1; fp=secret"),
+            block("you are helpful"),
+        ]));
+
+        // Act
+        let instructions = translate_system(&req).expect("prompt block survives");
+
+        // Assert: only the real prompt reaches instructions.
+        assert_eq!(instructions, "you are helpful");
+        assert!(
+            !instructions.contains("fp="),
+            "fingerprint must not leak: {instructions}"
+        );
+    }
+
+    #[test]
+    fn pure_billing_blocks_collapse_to_none() {
+        // Arrange: the only system content is the billing block.
+        let req = req_with_system(SystemContent::Blocks(vec![block(
+            "x-anthropic-billing-header: v=1; fp=secret",
+        )]));
+
+        // Act
+        let instructions = translate_system(&req);
+
+        // Assert: nothing survives, so no instructions field.
+        assert!(
+            instructions.is_none(),
+            "a pure-billing system must collapse to None, got: {instructions:?}"
+        );
+    }
+
+    #[test]
+    fn pure_billing_text_system_collapses_to_none() {
+        // Arrange: a Text-variant system that is itself the billing block.
+        let req = req_with_system(SystemContent::Text(
+            "x-anthropic-billing-header: v=1; fp=secret".into(),
+        ));
+
+        // Act
+        let instructions = translate_system(&req);
+
+        // Assert
+        assert!(
+            instructions.is_none(),
+            "pure-billing Text system must collapse to None, got: {instructions:?}"
+        );
+    }
+
+    #[test]
+    fn flattens_multiple_prompt_blocks_with_blank_line() {
+        // Arrange: two non-billing blocks must join with a blank line.
+        let req = req_with_system(SystemContent::Blocks(vec![block("first"), block("second")]));
+
+        // Act
+        let instructions = translate_system(&req).expect("blocks survive");
+
+        // Assert
+        assert_eq!(instructions, "first\n\nsecond");
     }
 }
