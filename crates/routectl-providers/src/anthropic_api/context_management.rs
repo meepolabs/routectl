@@ -159,6 +159,11 @@ pub(crate) fn lookup_thinking(
     let entry = guard.get_mut(&key)?;
     let now = std::time::Instant::now();
     if now >= entry.expires_at {
+        // Expired: evict the dead entry rather than leaving it occupying a
+        // slot. `get_mut` already promoted it to MRU, so without this pop
+        // the stale entry would sit at the front of the eviction queue and
+        // crowd out live entries under cache pressure.
+        guard.pop(&key);
         return None;
     }
     entry.expires_at = now + entry.ttl;

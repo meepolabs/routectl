@@ -903,6 +903,54 @@ fn opaque_event_delta_without_prior_start_warns_and_skips() {
 // "non-UTF-8 raw bytes get skipped" too is overspecification of an
 // internal defensive guard. Skipped intentionally.
 
+/// LOW-2 fix: an opaque content block opened via an opaque
+/// ContentBlockStart but never closed (the upstream stream ended cleanly
+/// before its ContentBlockStop arrived) must be closed at EOS. Before the
+/// fix, `render_eos` closed only the canonical `state.open` block and left
+/// the opaque block unclosed on the wire before `message_stop`. After the
+/// fix, `render_eos` emits a `content_block_stop` for each lingering
+/// opaque entry, clears the map, then emits `message_stop`.
+#[test]
+fn render_eos_closes_lingering_opaque_block_before_message_stop() {
+    use routectl_core::OpaqueSseEvent;
+    let mut state = ingress().new_stream_state();
+    // Open an opaque block (start only, no stop). The egress would
+    // attach a ContentBlockStop normally; here the stream ends first.
+    let chunk = opaque_only_chunk(vec![OpaqueSseEvent::ContentBlockStart {
+        upstream_index: 3,
+        type_tag: "server_tool_use".into(),
+        raw_data: br#"{"type":"server_tool_use","id":"srv_01","name":"web_search","input":{}}"#
+            .to_vec(),
+    }]);
+    let _ = ingress().render_chunk(chunk, state.as_mut()).unwrap();
+
+    // Act: natural EOS.
+    let eos_events = ingress().render_eos(state.as_mut());
+    let names: Vec<&str> = eos_events
+        .iter()
+        .filter_map(|e| e.event.as_deref())
+        .collect();
+
+    // Assert: the opaque block is closed before message_stop.
+    assert_eq!(
+        names,
+        vec!["content_block_stop", "message_stop"],
+        "lingering opaque block must be closed before message_stop; got {names:?}"
+    );
+    // The content_block_stop must carry the opaque block's ingress index
+    // (0, the first allocated index on a fresh state).
+    let stop_event = eos_events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("content_block_stop"))
+        .expect("content_block_stop emitted");
+    let payload: Value = serde_json::from_str(&stop_event.data).unwrap();
+    assert_eq!(
+        payload["index"], 0,
+        "content_block_stop must reference the opaque block's ingress index"
+    );
+    assert_eq!(payload["type"], "content_block_stop");
+}
+
 // -------- terminal-error event on upstream mid-stream failure --------
 
 /// Mid-stream upstream failure on the Anthropic ingress: the adapter
@@ -1205,4 +1253,45 @@ fn render_error_eos_after_normal_finish_emits_nothing() {
         late_events.is_empty(),
         "render_error_eos after normal finish must emit no events, got: {late_events:?}"
     );
+}
+
+/// LOW-1 fix: closing `message_delta` must carry `output_tokens` even when
+/// the upstream `UsageDelta` omits `completion_tokens`. Symmetric with the
+/// existing `input_tokens` always-emit behavior -- Anthropic spec requires
+/// both fields; when absent, default to 0.
+#[test]
+fn message_delta_missing_completion_tokens_still_emits_output_tokens_zero() {
+    use routectl_core::UsageDelta;
+    let mut s = fresh_state();
+    let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
+    // UsageDelta with prompt_tokens but NO completion_tokens.
+    let closing = ChatChunk {
+        id: "msg_01".into(),
+        model: "claude-opus-4-7".into(),
+        choices: vec![],
+        usage: Some(UsageDelta {
+            prompt_tokens: Some(10),
+            completion_tokens: None,
+            total_tokens: None,
+            ..Default::default()
+        }),
+        opaque_events: Vec::new(),
+        upstream_meta: None,
+    };
+    let events = render_chunk_internal(closing, &mut s).unwrap();
+    let delta_event = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_delta"))
+        .expect("message_delta emitted");
+    let payload: Value = serde_json::from_str(&delta_event.data).unwrap();
+    assert!(
+        !payload["usage"]["output_tokens"].is_null(),
+        "output_tokens must appear on the closing delta even when completion_tokens is absent"
+    );
+    assert_eq!(
+        payload["usage"]["output_tokens"], 0,
+        "absent completion_tokens must default output_tokens to 0"
+    );
+    // input_tokens must still be present (existing behavior).
+    assert_eq!(payload["usage"]["input_tokens"], 10);
 }

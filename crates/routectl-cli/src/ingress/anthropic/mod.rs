@@ -254,6 +254,16 @@ impl IngressAdapter for AnthropicIngress {
         if !s.finished {
             flush_tool_blocks(s, &mut events);
             close_open_block(s, &mut events);
+            // Close any opaque blocks left open (the upstream stream ended
+            // before their ContentBlockStop arrived). Emit one
+            // content_block_stop per lingering entry so the wire never has
+            // an unclosed block before message_stop.
+            for (_, ingress_index) in std::mem::take(&mut s.opaque_index_map) {
+                events.push(SseEvent::named(
+                    "content_block_stop",
+                    format!("{{\"type\":\"content_block_stop\",\"index\":{ingress_index}}}"),
+                ));
+            }
             // Flush a deferred finish_reason (no usage chunk arrived).
             if let Some(fr) = s.pending_finish_reason.take() {
                 let matched = s.pending_matched_stop_sequence.take();

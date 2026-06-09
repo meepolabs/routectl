@@ -262,6 +262,18 @@ where
                         // whole buffer if it's smaller than the advertised
                         // length), reset the decoder, and continue.
                         //
+                        // When `smithy_has_prelude_buffered` is true, smithy
+                        // already consumed the 12-byte prelude on a prior
+                        // Incomplete return and we drained it from `buffer`.
+                        // So `buffer[0..4]` is now the START OF THE HEADERS
+                        // section, NOT a frame `total_length` -- reading it
+                        // as an advertised length yields garbage and would
+                        // drive a mis-aligned `split_to`. In that state the
+                        // only safe recovery is to clear the buffer (treat
+                        // advertised as 0); the upstream marks a new frame
+                        // boundary on the next send, so at most one extra
+                        // frame is lost.
+                        //
                         // Log hygiene: the 12-byte prelude (always
                         // non-content: total_length, headers_length,
                         // prelude_crc) is safe to emit at WARN for
@@ -269,7 +281,7 @@ where
                         // carry model output and must NOT go to a
                         // third-party log SaaS at WARN; it is gated at TRACE
                         // instead.
-                        let advertised = if buffer.len() >= 4 {
+                        let advertised = if !smithy_has_prelude_buffered && buffer.len() >= 4 {
                             u32::from_be_bytes([
                                 buffer[0], buffer[1], buffer[2], buffer[3],
                             ]) as usize
@@ -585,6 +597,67 @@ mod tests {
         assert_eq!(
             count, 1,
             "on_eof flush chunk should be yielded exactly once"
+        );
+    }
+
+    /// LOW-4: a frame that splits at the 12-byte prelude boundary and then
+    /// delivers corrupt continuation bytes drives smithy's `decode_frame`
+    /// into its `Err` arm while we have already drained the prelude
+    /// (`smithy_has_prelude_buffered == true`). In that state `buffer[0..4]`
+    /// is the HEADERS section, not a frame `total_length`, so the recovery
+    /// must NOT read it as an advertised length. The fix forces
+    /// `advertised = 0` whenever the prelude is buffered, so the recovery
+    /// clears the buffer and realigns on the next frame boundary instead of
+    /// `split_to`-ing a garbage count.
+    ///
+    /// This test exercises that exact code path (corrupt body after a
+    /// prelude-only chunk) and asserts the driver recovers -- it neither
+    /// panics nor surfaces a fatal error, and a following intact frame
+    /// still reaches the handler. It does NOT assert the precise byte count
+    /// drained on recovery: the old (buggy) and new code both eventually
+    /// re-sync because the upstream marks a fresh frame boundary on each
+    /// send, so the only observable difference is "one extra frame lost"
+    /// under specific garbage-length values -- a best-effort recovery
+    /// property, not a hard alignment invariant, and not cleanly
+    /// distinguishable without coupling to smithy's internal CRC behavior.
+    #[tokio::test]
+    async fn error_with_prelude_buffered_recovers_cleanly() {
+        // A valid frame, split so chunk 1 is exactly the 12-byte prelude.
+        let good = encode("messageStart", r#"{"role":"assistant"}"#);
+        assert!(good.len() > 12, "frame must exceed its 12B prelude");
+        let prelude = &good[..12];
+        // Corrupt continuation: same LENGTH as the real frame body (so
+        // smithy attempts a full decode rather than waiting for more
+        // bytes) but byte-flipped so the trailing message CRC fails and
+        // decode_frame returns Err while smithy_has_prelude_buffered is
+        // true.
+        let corrupt_tail: Vec<u8> = good[12..].iter().map(|b| b ^ 0xFF).collect();
+        // A following intact frame must still reach the handler after
+        // recovery realigns the buffer.
+        let recovery = encode("messageStop", r#"{"stopReason":"end_turn"}"#);
+
+        let byte_stream = futures::stream::iter(vec![
+            Ok(Bytes::copy_from_slice(prelude)),
+            Ok(Bytes::from(corrupt_tail)),
+            Ok(Bytes::from(recovery)),
+        ]);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handler = RecordingHandler { tx };
+        let mut chunks =
+            decode_frames("test".to_string(), byte_stream, handler, FrameLabel::Invoke);
+
+        // The corrupt frame is skipped (no fatal error reaches the client).
+        while let Some(item) = chunks.next().await {
+            if let Err(e) = item {
+                panic!("decode-error recovery must not surface a fatal error: {e:?}");
+            }
+        }
+        let seen: Vec<String> = rx.try_iter().collect();
+        assert!(
+            seen.contains(&"messageStop".to_string()),
+            "after a prelude-buffered decode error, the next intact frame \
+             must still decode; got {seen:?}"
         );
     }
 }

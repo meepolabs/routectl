@@ -211,6 +211,44 @@ fn ttl_expiry_returns_none() {
     assert!(result.is_none(), "expected None for expired entry");
 }
 
+/// LOW-3 fix: looking up an expired entry must EVICT it, not merely return
+/// None. Before the fix, `lookup_thinking` used `get_mut` (which promotes
+/// to MRU) and returned None on expiry without removing the entry --
+/// leaving a dead entry occupying an MRU slot. After the fix the expired
+/// entry is popped from the cache, so `len()` drops and a subsequent
+/// `peek` returns None.
+#[test]
+fn lookup_evicts_expired_entry() {
+    let cache = small_cache(4);
+    let key = ("provider-c".to_string(), "tool-stale".to_string());
+    let entry = ThinkingCacheEntry {
+        thinking: make_thinking("stale"),
+        expires_at: Instant::now() - Duration::from_secs(1),
+        ttl: Duration::from_secs(3600),
+    };
+    cache.write().expect("lock").put(key.clone(), entry);
+    assert_eq!(
+        cache.read().expect("lock").len(),
+        1,
+        "entry present before lookup"
+    );
+
+    // Act: lookup an expired entry.
+    let result = lookup_thinking(&cache, "provider-c", "tool-stale");
+
+    // Assert: None returned AND the entry is gone from the cache.
+    assert!(result.is_none(), "expired lookup must return None");
+    assert_eq!(
+        cache.read().expect("lock").len(),
+        0,
+        "expired entry must be evicted on lookup, not left occupying a slot"
+    );
+    assert!(
+        cache.write().expect("lock").peek(&key).is_none(),
+        "subsequent peek of the evicted key must return None"
+    );
+}
+
 /// When the cache is full (cap = N) and one more entry is inserted,
 /// the LRU entry (the first one inserted) must be evicted. The most
 /// recent N entries must still be present.

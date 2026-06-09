@@ -807,11 +807,20 @@ fn build_tool_message(msg: &Message) -> Result<ConverseMessage> {
     // `normalize_tool_calls`) so a result for an OpenAI-origin id still
     // correlates after both map to the same `[a-zA-Z0-9_-]+` value.
     let tool_use_id = crate::tool_id::sanitize_tool_id(&tool_use_id).into_owned();
-    let content = match &msg.content {
+    let mut content = match &msg.content {
         MessageContent::Text(t) => vec![ConverseToolResultContent::Text { text: t.clone() }],
         MessageContent::Parts(parts) => parts.iter().map(translate_part_for_tool_result).collect(),
         MessageContent::Null => Vec::new(),
     };
+    // AWS Converse requires at least 1 element in toolResult.content.
+    // Null content (and the degenerate empty-Parts case) default to a
+    // single empty-string text block rather than producing `content: []`
+    // which AWS rejects.
+    if content.is_empty() {
+        content.push(ConverseToolResultContent::Text {
+            text: String::new(),
+        });
+    }
     Ok(ConverseMessage {
         role: "user".to_string(),
         content: vec![ConverseContentBlock::ToolResult {
@@ -1704,5 +1713,55 @@ mod tests {
             .expect("toolResult block must be present");
         assert_eq!(tool_use_id, "call_abc-1_2");
         assert_eq!(tool_result_id, "call_abc-1_2");
+    }
+
+    /// LOW-5 fix: a `Role::Tool` message with `MessageContent::Null` must
+    /// emit a `toolResult.content` carrying exactly ONE empty-string text
+    /// block, not an empty array. AWS Converse rejects
+    /// `toolResult.content: []` ("Member must have at least 1 element").
+    /// This matches the anthropic-api egress, which emits an empty-string
+    /// text block for the same Null case.
+    #[test]
+    fn build_tool_message_null_content_emits_single_empty_text_block() {
+        // Arrange: a tool message with Null content and a valid id.
+        let msg = Message {
+            refusal: None,
+            role: Role::Tool,
+            content: MessageContent::Null,
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: Some("tu_null".into()),
+            tool_calls: None,
+        };
+
+        // Act
+        let result = build_tool_message(&msg).expect("Null-content tool message must translate");
+
+        // Assert
+        let tool_result = result
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ConverseContentBlock::ToolResult { tool_result } => Some(tool_result),
+                _ => None,
+            })
+            .expect("toolResult block must be present");
+        assert_eq!(
+            tool_result.content.len(),
+            1,
+            "Null content must yield exactly one content element (AWS requires >=1), \
+             got: {:?}",
+            tool_result.content
+        );
+        match &tool_result.content[0] {
+            ConverseToolResultContent::Text { text } => {
+                assert_eq!(
+                    text, "",
+                    "the single element must be an empty-string text block"
+                );
+            }
+            other => panic!("expected an empty Text block, got {other:?}"),
+        }
     }
 }

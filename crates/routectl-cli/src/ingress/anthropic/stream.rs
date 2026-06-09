@@ -609,19 +609,20 @@ pub(super) fn emit_message_delta(
         // value, and downstream consumers need it because routectl's
         // emit_message_start hardcodes {input_tokens:0, output_tokens:0}.
         //
-        // Fix #1: always emit `input_tokens` on the closing delta.
-        // Anthropic requires the field; when the upstream UsageDelta
-        // carries no `prompt_tokens`, default the raw value to 0 rather
-        // than omitting the key entirely.
+        // Always emit both `input_tokens` and `output_tokens` on the
+        // closing delta. Anthropic requires both fields; when the
+        // upstream UsageDelta omits either, default to 0 rather than
+        // omitting the key entirely.
         let raw_input = u
             .prompt_tokens
             .unwrap_or(0)
             .saturating_sub(u.cache_creation_input_tokens.unwrap_or(0))
             .saturating_sub(u.cache_read_input_tokens.unwrap_or(0));
         wire_usage.insert("input_tokens".into(), json!(raw_input));
-        if let Some(n) = u.completion_tokens {
-            wire_usage.insert("output_tokens".into(), json!(n));
-        }
+        wire_usage.insert(
+            "output_tokens".into(),
+            json!(u.completion_tokens.unwrap_or(0)),
+        );
         if let Some(n) = u.cache_creation_input_tokens {
             wire_usage.insert("cache_creation_input_tokens".into(), json!(n));
         }
@@ -638,10 +639,11 @@ pub(super) fn emit_message_delta(
             }
             wire_usage.insert("cache_creation".into(), Value::Object(cc));
         }
-        // Fix #2: only attach `usage` to the payload when the map carries
-        // at least one key. After fix #1, `input_tokens` is always
-        // present, so this guard is defensive -- it prevents a degenerate
-        // empty `usage: {}` object should the construction logic change.
+        // Guard: only attach `usage` to the payload when the map carries
+        // at least one key. Both `input_tokens` and `output_tokens` are
+        // always present above, so this is defensive -- it prevents a
+        // degenerate empty `usage: {}` object should the construction
+        // logic change.
         if !wire_usage.is_empty() {
             payload.insert("usage".into(), Value::Object(wire_usage));
         }
