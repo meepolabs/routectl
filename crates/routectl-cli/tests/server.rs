@@ -1,4 +1,4 @@
-//! Integration tests for the routectl axum server (C6).
+//! Integration tests for the routectl axum server.
 //!
 //! Each test spins up a wiremock mock upstream and a routectl server bound to
 //! 127.0.0.1:0 (OS-assigned port). Tests use `reqwest` to exercise the routes.

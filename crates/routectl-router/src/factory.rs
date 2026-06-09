@@ -710,7 +710,7 @@ async fn resolve_token_source(
 /// Holds the original `SecretRef` and an `Arc` to the store so each
 /// `token()` call dispatches back through `SecretStore::get` -- which
 /// for `oauth://` refs lands in `OAuthStore` (in-memory cache + future
-/// a prior change refresh). The store is `Arc`-shared with the rest of routectl
+/// refresh). The store is `Arc`-shared with the rest of routectl
 /// so we never duplicate the credentials file in memory.
 struct ManagedToken {
     secret_ref: SecretRef,

@@ -375,10 +375,8 @@ pub(super) fn parse_token_response_json(body: &str, flow: TokenFlow) -> OAuthRes
 ///
 /// `flow` decides whether to mint a `session_id`. A fresh exchange
 /// (login) mints a new one; a refresh leaves it `None` so the OAuth
-/// store preserves the prior value. The upstream upstream expects
-/// one stable session-id across the credential's lifetime, so a refresh
-/// that re-minted it would re-trigger re-authentication. Mirrors the codex flow's
-/// per-credential session id.
+/// store preserves the prior value, stable across the credential's
+/// lifetime. Mirrors the codex flow's per-credential session id.
 fn map_to_record(parsed: Resp, flow: TokenFlow) -> TokenRecord {
     let now = unix_now();
     let scopes = parsed
@@ -545,8 +543,8 @@ mod tests {
 
     #[test]
     fn exchange_mints_a_valid_uuid_session_id() {
-        // A fresh login (Exchange) mints a per-credential session_id so
-        // the upstream upstream can correlate the human's turns.
+        // A fresh login (Exchange) mints a per-credential session_id; a
+        // refresh leaves it None.
         let body = r#"{
             "access_token": "AT",
             "refresh_token": "RT",
@@ -568,7 +566,7 @@ mod tests {
     fn refresh_leaves_session_id_none() {
         // A refresh must NOT mint a session_id -- the store preserves the
         // prior value, keeping the id stable across rotations. Re-minting
-        // here would break stability and re-trigger re-authentication.
+        // here would break session-id stability across rotations.
         let body = r#"{
             "access_token": "AT",
             "refresh_token": "RT",

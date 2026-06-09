@@ -128,8 +128,8 @@ pub struct TokenRecord {
     /// `session-id` HTTP header on outbound openai-responses requests
     /// when the bearer is a chatgpt-oauth JWT. Mirrors codex CLI's
     /// `ModelClientState::session_id` -- routectl stamps one value per
-    /// credential lifetime so the upstream upstream can correlate a
-    /// human's turns under one stable session.
+    /// credential lifetime so requests share a stable session, mirroring
+    /// the codex CLI session id.
     ///
     /// Generated lazily on first use (factory-driven backfill) for
     /// records minted by routectl < v0.7.1 that pre-date this field;

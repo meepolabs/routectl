@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn decode_callback_state_mismatch_uses_provider_id() {
         // If a future provider with a different id calls decode_callback
-        // (codex in a prior change), the StateMismatch must report THAT provider's
+        // (codex), the StateMismatch must report THAT provider's
         // id, not a hardcoded "anthropic".
         let q = CallbackQuery {
             code: Some("CODE".into()),

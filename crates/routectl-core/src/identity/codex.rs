@@ -1,12 +1,13 @@
 //! Codex CLI HTTP fingerprint -- the `codex` half of the provider
 //! identity module.
 //!
-//! Codex's upstream invalidates routectl-managed ChatGPT-OAuth
-//! sessions when the HTTP fingerprint of routectl-emitted requests
-//! drifts from what a real `codex_cli_rs` install would emit. This
-//! module supplies the static pieces of that fingerprint: the
-//! User-Agent shape, the `originator` header, and the residency
-//! header. Two consumers read them:
+//! The chatgpt.com backend requires a consistent codex client
+//! identity across requests: when the HTTP identity of
+//! routectl-emitted requests drifts from what a real `codex_cli_rs`
+//! install would emit, the upstream rejects the routectl-managed
+//! ChatGPT-OAuth session. This module supplies the static pieces of
+//! that identity: the User-Agent shape, the `originator` header, and
+//! the residency header. Two consumers read them:
 //!
 //!   - the OAuth refresh client (`oauth::store`), which must stamp
 //!     the same fingerprint on the token-endpoint roundtrip; and
@@ -26,7 +27,7 @@
 //!
 //! - `<X.Y.Z>` is `PINNED_CODEX_VERSION`, the codex CLI version routectl
 //!   currently mimics. Bump this whenever the upstream codex CLI's
-//!   `[workspace.package].version` rolls forward; upstream drift
+//!   `[workspace.package].version` rolls forward; client-identity drift
 //!   detection is "current vs stale" so a stale literal here will start
 //!   getting flagged again.
 //! - `<os_type>` mirrors `os_info::OsType`'s display values: "Linux",
@@ -41,8 +42,8 @@
 //! The default headers (`originator`, `x-openai-internal-codex-residency`)
 //! mirror `default_client.rs::default_headers`. They MUST appear on every
 //! routectl HTTP request that claims `originator: codex_cli_rs`,
-//! including the OAuth refresh POST -- the upstream inspects the
-//! token-endpoint roundtrip too.
+//! including the OAuth refresh POST -- the token endpoint requires
+//! these headers on the refresh POST too.
 
 use std::sync::OnceLock;
 
@@ -105,8 +106,8 @@ fn os_type() -> &'static str {
 /// (`uname -r` shape). macOS uses `sw_vers -productVersion`. Windows
 /// returns "unknown" since the standard library does not expose the
 /// build number and shelling out to `cmd /c ver` from a daemon is
-/// noisy. The upstream only inspects routectl traffic from
-/// chatgpt.com sessions, so a Windows-imperfect literal is acceptable
+/// noisy. The codex identity headers apply to routectl traffic on the
+/// chatgpt.com surface, so a Windows-imperfect literal is acceptable
 /// until a real Windows operator surfaces.
 fn os_version() -> String {
     match std::env::consts::OS {
@@ -183,7 +184,8 @@ fn terminal_token() -> String {
 /// Returns the codex client-level default headers as `(name, value)`
 /// pairs that any HTTP client claiming `originator: codex_cli_rs`
 /// MUST attach. Both the openai-responses egress client and the OAuth
-/// refresh client consume this -- the upstream inspects both.
+/// refresh client consume this -- the token endpoint requires these on
+/// both the responses API client and the refresh client.
 ///
 /// Authorization is intentionally absent: it is a per-request header
 /// injected by the auth dispatcher, not a client-level default.
@@ -206,8 +208,8 @@ pub fn codex_default_headers() -> [(&'static str, &'static str); 2] {
 /// generated per request and always win.
 ///
 /// `version` tracks `PINNED_CODEX_VERSION`; bump that constant each
-/// release so the wire fingerprint stays current (the chatgpt.com risk
-/// system flags stale fingerprints).
+/// release so the wire identity stays current (the chatgpt.com backend
+/// flags stale identities).
 pub fn default_identity_headers() -> [(&'static str, &'static str); 3] {
     [
         (ORIGINATOR_HEADER_NAME, CODEX_ORIGINATOR),

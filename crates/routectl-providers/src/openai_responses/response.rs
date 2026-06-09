@@ -318,7 +318,7 @@ fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageConte
     }
 }
 
-/// finish_reason mapping per the the relevant stage spec.
+/// Maps upstream status + incomplete_reason to a canonical finish_reason.
 pub(crate) fn map_finish_reason(
     status: Option<&str>,
     incomplete_reason: Option<&str>,

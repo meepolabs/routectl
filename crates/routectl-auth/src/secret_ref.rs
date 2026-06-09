@@ -337,7 +337,7 @@ mod tests {
         let err = SecretRef::parse(fake).unwrap_err();
         let msg = err.to_string();
         assert!(
-            !msg.contains("supersecret"),
+            !msg.contains("unprefixed-secret"),
             "error must not leak secret material: {msg}"
         );
         assert!(

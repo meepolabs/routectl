@@ -54,7 +54,7 @@ async fn bearer_key_resolves_to_bearer_variant() {
 #[tokio::test]
 async fn static_creds_resolve_to_sigv4_variant() {
     let creds = BedrockCreds::Static {
-        access_key: "testkey-redacted".into(),
+        access_key: "testkey-stream-001".into(),
         secret_key: "test-secret-key".into(),
         session_token: None,
     };
@@ -70,7 +70,7 @@ async fn static_creds_resolve_to_sigv4_variant() {
 #[tokio::test]
 async fn static_creds_with_session_token_resolve_to_sigv4_variant() {
     let creds = BedrockCreds::Static {
-        access_key: "testkey-redacted".into(),
+        access_key: "testkey-stream-002".into(),
         secret_key: "test-secret-key".into(),
         session_token: Some("test-session-token".into()),
     };
@@ -89,7 +89,7 @@ async fn static_creds_with_session_token_resolve_to_sigv4_variant() {
 #[tokio::test]
 async fn static_creds_resolve_succeeds_across_regions() {
     let creds = BedrockCreds::Static {
-        access_key: "testkey-redacted".into(),
+        access_key: "testkey-stream-003".into(),
         secret_key: "test-secret-key".into(),
         session_token: None,
     };

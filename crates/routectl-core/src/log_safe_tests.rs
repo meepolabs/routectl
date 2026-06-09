@@ -1003,8 +1003,7 @@ fn redact_replaces_bare_x_api_key_with_redacted() {
     // Anthropic-API api keys ride on `x-api-key` rather than the
     // Bearer scheme. Replace with the bare `[REDACTED]` (no scheme to
     // preserve).
-    let mut headers =
-        super::headers_to_json([("x-api-key", b"test-api-key-not-real".as_slice())]);
+    let mut headers = super::headers_to_json([("x-api-key", b"test-api-key-not-real".as_slice())]);
     super::redact_outgoing_header_values(&mut headers);
     let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
     assert_eq!(pair[0].as_str(), Some("x-api-key"));

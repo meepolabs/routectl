@@ -1,4 +1,4 @@
-# Secret scanning -- adopted from shared conventions baseline.
+# Secret scanning.
 #
 # Runs on every PR + push to main/develop, plus a weekly full-history
 # scan to catch anything historical that slipped past the diff scan

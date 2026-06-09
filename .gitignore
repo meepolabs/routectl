@@ -20,9 +20,7 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Local triage scratch -- findings + bug list from operator live debugging
-# sessions. Not for public repo (contains environment-specific context
-# like provider names + alias chains).
+# Local scratch notes -- environment-specific, never commit
 issues.md
 
 # Captured live-traffic fixtures (raw, unsanitized bodies). Per-request
@@ -32,9 +30,6 @@ issues.md
 # corpus is per-contributor and local-only by design; the repo ships
 # the harness and the capture script, not the data.
 crates/routectl-cli/tests/fixtures/captured/
-# local-tooling per-task worktrees + runtime state
-.local-tooling/
-
 # Claude Code per-project session state (scheduled tasks, local
 # settings, transient scratch). Never commit -- machine-specific.
 .claude/

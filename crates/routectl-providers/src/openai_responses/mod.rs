@@ -84,7 +84,6 @@ pub enum AuthKind {
     #[default]
     ChatgptOauth,
     /// Standard OpenAI API key against `api.openai.com/v1/responses`.
-    /// Wired in the relevant stage.
     ApiKey,
     /// AWS Bedrock Mantle proxy (OpenAI-shape):
     /// `Authorization: Bearer <bearer>` using the long-term Bedrock API
@@ -128,7 +127,7 @@ pub struct OpenAiResponsesConfig {
     pub header_extras: Vec<(String, String)>,
     /// Override the User-Agent. `None` -> codex CLI's UA shape
     /// (`codex_cli_rs/<X.Y.Z> (...) <terminal>`) so the chatgpt.com
-    /// upstream does not flag the fingerprint as drifted.
+    /// backend sees a consistent codex client identity.
     pub user_agent: Option<String>,
     /// Stable per-credential codex session id, stamped as the
     /// `session-id` header on the ChatgptOauth surface. `Some` only when
@@ -155,8 +154,8 @@ impl std::fmt::Debug for OpenAiResponsesConfig {
             .field("auth_kind", &self.auth_kind)
             .field("header_extras_len", &self.header_extras.len())
             .field("user_agent", &self.user_agent)
-            // Presence only: the session_id correlates a human's turns to
-            // the upstream upstream, so its value never enters logs.
+            // Presence only: the session_id ties requests to one logical
+            // session; treat it as sensitive so its value never enters logs.
             .field("session_id", &self.session_id.is_some())
             .finish()
     }
@@ -281,12 +280,11 @@ impl OpenAiResponsesProvider {
             for (k, v) in default_codex_identity_headers() {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
             }
-            // Stable per-credential id minted at login; the codex risk
-            // system uses it to correlate one human's turns. Inserted in
-            // the defaults phase (before the header_extras loop) so an
-            // operator `header_extras` entry for `session-id` still wins,
-            // and omitted when the credential carries none. Value never
-            // logged.
+            // Stable per-credential id minted at login; ties requests to
+            // one logical session. Inserted in the defaults phase (before
+            // the header_extras loop) so an operator `header_extras` entry
+            // for `session-id` still wins, and omitted when the credential
+            // carries none. Value never logged.
             if let Some(sid) = &self.cfg.session_id {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, "session-id", sid);
             }

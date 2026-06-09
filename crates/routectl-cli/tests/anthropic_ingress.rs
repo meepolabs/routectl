@@ -621,12 +621,13 @@ async fn x_routectl_alias_header_overrides_aliases_map() {
 }
 
 // ---------------------------------------------------------------------------
-// Review-fix regressions (CRITICAL + HIGH from v0.4.0 review)
+// Regression tests: body size cap, health-endpoint auth bypass, tool-def
+// cache_control breakpoint counting
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn body_exceeding_size_cap_rejected_with_413() {
-    // note: body cap on /v1/messages. Configure a small 1 MiB
+    // Body cap on /v1/messages. Configure a small 1 MiB
     // cap so we don't have to ship a 33+ MiB payload to defeat the
     // documented 32 MiB default.
     let mut config_owned =
@@ -655,7 +656,7 @@ async fn body_exceeding_size_cap_rejected_with_413() {
 
 #[tokio::test]
 async fn health_endpoint_bypasses_auth() {
-    // note: /health stays public so liveness probes work even
+    // /health stays public so liveness probes work even
     // when [server.auth].tokens is configured.
     let config = anthropic_proxy_config(
         "http://127.0.0.1:1",
@@ -671,7 +672,7 @@ async fn health_endpoint_bypasses_auth() {
 
 #[tokio::test]
 async fn tool_def_other_cache_control_counts_toward_breakpoint_cap() {
-    // note: ToolDef::Other (Anthropic builtin tools) carrying
+    // ToolDef::Other (Anthropic builtin tools) carrying
     // cache_control was previously invisible to the breakpoint
     // counter, so a request could exceed the 4-cap silently.
     let config = anthropic_proxy_config("http://127.0.0.1:1", None, BTreeMap::new());

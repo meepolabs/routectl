@@ -1149,7 +1149,7 @@ async fn bedrock_converse_stream_matrix() {
 //
 // Skips cleanly when either env var is absent.
 // The chatgpt-oauth Responses endpoint is stream-only: complete() internally
-// forces stream=true and collects to a single ChatResponse (the relevant stage fix).
+// forces stream=true and collects to a single ChatResponse.
 
 const OPENAI_RESPONSES_BASE: &str = "https://chatgpt.com/backend-api/codex";
 

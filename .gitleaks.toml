@@ -1,4 +1,4 @@
-# gitleaks config -- adopted from shared conventions baseline.
+# gitleaks config.
 #
 # Inherits the default ruleset and adds project-specific allowlist
 # patterns for files that legitimately contain hex/base64-looking

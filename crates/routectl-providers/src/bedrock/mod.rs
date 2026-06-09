@@ -761,7 +761,7 @@ mod tests {
     #[test]
     fn bedrock_creds_debug_redacts_static_secrets() {
         let creds = BedrockCreds::Static {
-            access_key: "testkey-redacted".into(),
+            access_key: "testkey-example-xyz".into(),
             secret_key: "SECRET-NEVER-SHOW".into(),
             session_token: Some("SESSION-NEVER-SHOW".into()),
         };
@@ -775,7 +775,7 @@ mod tests {
             "debug leaked session_token: {s}"
         );
         assert!(
-            s.contains("AKIA"),
+            s.contains("test"),
             "expected access-key prefix in debug output: {s}"
         );
         assert!(s.contains("redacted"), "expected redaction marker: {s}");
@@ -802,7 +802,7 @@ mod tests {
             model_id: "anthropic.claude-haiku-4-5".into(),
             api_shape: BedrockApiShape::Invoke,
             creds: BedrockCreds::Static {
-                access_key: "testkey-redacted".into(),
+                access_key: "testkey-example-xyz".into(),
                 secret_key: "DEBUG-LEAK-CANARY".into(),
                 session_token: None,
             },

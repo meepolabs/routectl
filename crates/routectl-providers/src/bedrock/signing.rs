@@ -233,7 +233,7 @@ mod tests {
     async fn static_creds_path_attaches_sigv4_authorization_and_amz_date() {
         let resolved = resolve(
             &BedrockCreds::Static {
-                access_key: "testkey-redacted".into(),
+                access_key: "testkey-sign-xyz".into(),
                 secret_key: "test-secret-key".into(),
                 session_token: None,
             },
@@ -279,7 +279,7 @@ mod tests {
         // opaque to debug. We surface the offending header name up-front.
         let resolved = resolve(
             &BedrockCreds::Static {
-                access_key: "testkey-redacted".into(),
+                access_key: "testkey-sign-xyz".into(),
                 secret_key: "test-secret-key".into(),
                 session_token: None,
             },
@@ -313,7 +313,7 @@ mod tests {
     async fn static_creds_with_session_token_includes_security_token_header() {
         let resolved = resolve(
             &BedrockCreds::Static {
-                access_key: "testkey-redacted".into(),
+                access_key: "testkey-sign-xyz".into(),
                 secret_key: "test-secret-key".into(),
                 session_token: Some("session-token-test".into()),
             },

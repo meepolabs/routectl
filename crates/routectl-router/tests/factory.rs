@@ -555,7 +555,7 @@ creds = { kind = "default-chain" }
     #[test]
     fn bedrock_redact_secrets_clears_literals_only() {
         let mut creds = BedrockCredsConfig::Static {
-            access_key_ref: "literal:testkey-redacted".into(),
+            access_key_ref: "literal:testkey-actual-xyz".into(),
             secret_key_ref: "env://AWS_SECRET_ACCESS_KEY".into(),
             session_token_ref: Some("literal:abc123".into()),
         };

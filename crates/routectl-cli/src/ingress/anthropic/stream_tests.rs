@@ -618,7 +618,7 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
 
 #[test]
 fn stream_tool_call_index_above_cap_returns_streaming_error() {
-    // note: tool_blocks Vec growth bound.
+    // tool_blocks Vec growth bound.
     use routectl_core::{ChunkChoice, ChunkDelta};
     let chunk = ChatChunk {
         id: "msg_01".into(),

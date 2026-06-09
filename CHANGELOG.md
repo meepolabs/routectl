@@ -14,12 +14,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `oauth-bearer` anthropic-api: emits `x-stainless-*`, `x-app`, `anthropic-dangerous-direct-browser-access` (dynamic OS/arch); `user_agent` defaults to `claude-cli/<version>` when unset.
   - Superseded `OpenAiResponsesConfig` fields (`session_id`, `installation_id`, `originator`) are now auto-generated or carried via `header_extras`.
 
-- **codex CLI client-header parity (chatgpt.com surface).** The `openai-responses` codex egress and its OAuth refresh client present every client-relevant header as codex CLI does, fixing sessions invalidated within minutes and re-authenticated.
+- **codex CLI client-header parity (chatgpt.com surface).** The `openai-responses` codex egress and its OAuth refresh client present every required codex CLI client header, fixing sessions the upstream rejected within minutes and required re-authentication to recover.
   - New `routectl-core::codex_fingerprint` module: single source of truth for the codex `User-Agent`, the `originator`/residency defaults, and the process-global `x-codex-window-id`.
   - Per-request headers stamped: `version`, `session-id`, `x-codex-installation-id`, `x-codex-window-id`, `thread-id`, `x-client-request-id`.
   - `session_id` is per-credential: persisted on the `credentials.json` token record, minted on `routectl login codex`, lazy-backfilled into older records, preserved across refresh.
   - Static identity headers ride the config-overridable defaults above (overridable via `header_extras`); `thread-id` / `x-client-request-id` are a fresh UUIDv4 per turn.
-  - Pinned codex version and the client-header lockstep contract are documented in `docs/PROVIDER-QUIRKS.md`.
+  - Pinned codex version and the client-header contract are documented in `docs/PROVIDER-QUIRKS.md`.
 
 - **`bedrock-mantle` bearer-token auth on the `openai-responses` provider.** New `auth_kind = "bedrock-mantle"` replaces the prior `NotImplemented` stub.
   - Unlocks AWS Bedrock GPT-5.5 (and future Mantle-hosted Responses models) with no new provider kind.
@@ -126,7 +126,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Secret-ref values redacted from error messages.** `SecretRef::parse` and the listener-token resolver embedded the raw reference in error strings; they now report only a validated scheme prefix (or, for listener tokens, the entry position).
 
-- **Operator `header_extras` cannot override codex client headers** on the ChatGPT-OAuth path, keeping the client parity contract intact.
+- **Operator `header_extras` cannot override codex client headers** on the ChatGPT-OAuth path, keeping the client-header contract intact.
 
 - **Per-entry size bound on the anthropic-api thinking cache.** Oversized writes are rejected with a WARN (the next turn recovers as it would on a TTL eviction), preventing unbounded LRU growth. Truncation was rejected -- it would corrupt the opaque continuity signature on Anthropic thinking blocks.
 

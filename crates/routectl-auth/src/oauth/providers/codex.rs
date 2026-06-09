@@ -42,7 +42,7 @@ const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 /// Scopes the codex CLI requests. `offline_access` is the load-bearing
 /// one for routectl's refresh flow (it is what makes the token endpoint
 /// mint a refresh_token); the others mirror the official CLI's grant so
-/// the resulting tokens are consistent from a real codex login.
+/// the token endpoint issues the same capabilities.
 const SCOPES: &[&str] = &[
     "openid",
     "profile",
@@ -499,10 +499,9 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         .unwrap_or_default();
 
     // Fresh exchange (prior_refresh == None) mints a new session_id;
-    // a refresh leaves it None and the OAuth store preserves the
-    // prior session_id so it stays stable across the credential's
-    // lifetime. Mirrors codex CLI's per-credential session id, which
-    // the upstream upstream uses to correlate a human's turns.
+    // a refresh leaves it None so the OAuth store preserves the prior
+    // session_id, stable across the credential's lifetime (matching
+    // codex CLI).
     let session_id = match prior_refresh {
         None => Some(uuid::Uuid::new_v4().to_string()),
         Some(_) => None,

@@ -153,8 +153,8 @@ impl std::fmt::Debug for AnthropicApiConfig {
             )
             .field("context_management", &self.context_management)
             .field("max_thinking_entry_bytes", &self.max_thinking_entry_bytes)
-            // Presence only: the session_id correlates a human's turns to
-            // the upstream upstream, so its value never enters logs.
+            // Presence only: the session_id ties requests to one logical
+            // session; treat as sensitive so its value never enters logs.
             .field("session_id", &self.session_id.is_some())
             .finish()
     }
@@ -397,8 +397,9 @@ impl AnthropicApiProvider {
             //   - x-client-request-id: one fresh uuid per request (the
             //     upstream pairs it with the turn).
             //   - x-claude-code-session-id: the stable per-credential id
-            //     minted at login; the upstream uses it to correlate a
-            //     human's turns. Omitted when the credential has none.
+            //     minted at login; ties requests to one logical session,
+            //     stable across the credential's lifetime. Omitted when the
+            //     credential has none.
             if is_anthropic_api_host(&self.cfg.base_url) {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 crate::http_client::insert_header(
@@ -471,10 +472,11 @@ impl AnthropicApiProvider {
 /// A precise host match, NOT a substring test: `base_url.contains(
 /// "api.anthropic.com")` would also match an operator-misconfigured
 /// `https://api.anthropic.com.example.com` (a sibling-domain takeover) or
-/// `https://proxy.example/api.anthropic.com` (host in the path), either of
-/// which would leak the stable per-credential session id to a non-Anthropic
-/// host. `base_url` is trusted operator config, so this is defense in depth
-/// on a ban-risk identity surface rather than a fix for attacker input.
+/// `https://proxy.example/api.anthropic.com` (host in the path). An exact
+/// host match avoids sending the session-id headers to an unintended host
+/// when `base_url` is misconfigured. `base_url` is trusted operator config,
+/// so this is defense in depth on a ban-risk identity surface rather than a
+/// fix for attacker input.
 ///
 /// The host is the authority between the scheme and the first `/?#`, minus
 /// any `user@` credentials and `:port`. Kept dependency-free (no `url`
@@ -575,7 +577,7 @@ impl Provider for AnthropicApiProvider {
         // Per-request token resolution: for static refs this hits
         // the in-memory `StaticToken` cache; for `oauth://<provider>`
         // refs this dives into `OAuthStore` and resolves the current
-        // value (including the v0.7+ refresh path landing in a prior change).
+        // value (including the v0.7+ refresh path).
         let token = self.cfg.auth.token().await?;
 
         // Serialize first so the billing-header checksum can be re-signed

@@ -31,8 +31,7 @@ fn outgoing_emit_redacts_authorization_and_x_api_key() {
         "OnceLock must freeze to true after the env var is set first"
     );
 
-    let live_jwt =
-        b"Bearer test-bearer-token-not-real";
+    let live_jwt = b"Bearer test-bearer-token-not-real";
     let api_key = b"test-api-key-not-real";
     let beta = b"context-management-2026-05-29";
     let outgoing_headers = headers_to_json([
@@ -63,12 +62,8 @@ fn outgoing_emit_redacts_authorization_and_x_api_key() {
 
     // Bearer JWT must NOT appear; the redacted shell must.
     assert!(
-        !headers.contains("redacted-token"),
-        "JWT leaked into headers field: {headers}"
-    );
-    assert!(
-        !headers.contains("payload-with-account-id-and-jti"),
-        "JWT payload leaked into headers field: {headers}"
+        !headers.contains("test-bearer-token-not-real"),
+        "bearer token leaked into headers field: {headers}"
     );
     assert!(
         headers.contains("Bearer [REDACTED]"),

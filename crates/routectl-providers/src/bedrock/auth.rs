@@ -151,7 +151,7 @@ mod tests {
     #[tokio::test]
     async fn static_creds_resolve_to_sigv4_variant_with_static_provider() {
         let creds = BedrockCreds::Static {
-            access_key: "testkey-redacted".into(),
+            access_key: "testkey-access-xyz".into(),
             secret_key: "testkey-secret-xyz".into(),
             session_token: Some("session-test".into()),
         };
@@ -161,7 +161,7 @@ mod tests {
             _ => panic!("expected Sigv4"),
         };
         let fetched = provider.provide_credentials().await.expect("provide");
-        assert_eq!(fetched.access_key_id(), "testkey-redacted");
+        assert_eq!(fetched.access_key_id(), "testkey-access-xyz");
         assert_eq!(fetched.secret_access_key(), "testkey-secret-xyz");
         assert_eq!(fetched.session_token(), Some("session-test"));
     }

@@ -282,25 +282,25 @@ reasoning_dialect = "openai"
 
 ### chatgpt-oauth (`openai-responses` provider, `chatgpt.com/backend-api/codex` surface)
 
-The `openai-responses` provider in `chatgpt-oauth` mode is **intentionally a header-level parity of the codex CLI**. The chatgpt.com backend gates the Codex / ChatGPT-Pro responses API behind a client-header match: the User-Agent literal, the `originator` value, the per-process identity headers, and the OAuth refresh client's own header set must all match what the official codex CLI sends. Drift on any single value risks OpenAI session rejection and re-authentication to recover -- not a recoverable build error, an upstream-level rejection event.
+The `openai-responses` provider in `chatgpt-oauth` mode **pins the codex CLI client header contract**. The chatgpt.com backend requires requests to the Codex / ChatGPT-Pro responses API to match that contract: the User-Agent literal, the `originator` value, the per-process identity headers, and the OAuth refresh client's own header set must all match what the codex CLI sends. If any of these values drift, the upstream may reject requests or require re-authentication -- this is a client-compatibility constraint, not a recoverable build error.
 
-**Pinned codex version (client parity source of truth)**:
+**Pinned client version (source of truth)**:
 
 - Tag: `rust-v0.136.0` (most recent codex Rust release tag at adoption)
 - Commit: `d36a3ead3c896d0552207763ef483262bce9ac73`
 - Source: the `version` field on `codex-rs/cli/Cargo.toml` in the upstream codex repo (workspace `version = "0.0.0"` is the tip-of-tree dev placeholder; the tag pin above is what routectl encodes against)
 
-Both the client parity worktree and any future maintainer must arrive at the same pin independently from this file. Treat the pin as locked.
+Keep this pin in sync with the codex CLI version routectl targets; treat it as locked.
 
-**Headers that MUST stay in lockstep with codex** (any deviation triggers the fingerprint-mismatch enforcement):
+**Headers that MUST stay in lockstep with codex** (any deviation breaks the client-compatibility contract):
 
 | Header                              | Source in codex-rs                                            | Notes                                                                |
 |-------------------------------------|---------------------------------------------------------------|----------------------------------------------------------------------|
-| `Authorization`                     | injected by routectl's auth layer per request                 | OAuth bearer JWT (`Bearer <jwt>`); resolved per request from the token store. Redacted to `Bearer [REDACTED]` in TRACE-level outgoing-headers logs. NOT a fingerprint constant -- the value rotates on every refresh -- but the header is mandatory and absence triggers a 401 immediately. |
+| `Authorization`                     | injected by routectl's auth layer per request                 | OAuth bearer JWT (`Bearer <jwt>`); resolved per request from the token store. Redacted to `Bearer [REDACTED]` in TRACE-level outgoing-headers logs. NOT a pinned constant -- the value rotates on every refresh -- but the header is mandatory and absence triggers a 401 immediately. |
 | `ChatGPT-Account-Id`                | injected by routectl's auth layer per request                 | The `chatgpt_account_id` claim parsed out of the bearer JWT; mandatory account-routing header. Stable per account. |
 | `User-Agent`                        | `login/src/auth/default_client.rs::get_codex_user_agent`      | `<originator>/<build_version> (<os_type> <os_version>; <arch>) <terminal>`; build_version is `CARGO_PKG_VERSION` of the codex binary, not routectl's. |
 | `originator`                        | `login/src/auth/default_client.rs::DEFAULT_ORIGINATOR`        | Constant `"codex_cli_rs"` for first-party CLI traffic.               |
-| `version` / per-request build tag   | passed through `CodexRequestBuilder` per call                 | Matches the codex CLI build version the operator is matching.   |
+| `version` / per-request build tag   | passed through `CodexRequestBuilder` per call                 | Matches the targeted codex CLI build version.                        |
 | `session_id`                        | `core/src/client.rs::ModelClientState`                        | Stable per process; never reset within a routectl process lifetime.  |
 | `x-codex-installation-id`           | `core/src/client.rs::X_CODEX_INSTALLATION_ID_HEADER`          | Stable per install (persisted under `~/.config/routectl/`).          |
 | `x-codex-window-id`                 | `core/src/client.rs::X_CODEX_WINDOW_ID_HEADER`                | Per-window correlation; codex bumps on each new shell window.        |
@@ -308,7 +308,7 @@ Both the client parity worktree and any future maintainer must arrive at the sam
 | `x-client-request-id`               | `codex-api/src/endpoint/responses.rs:92`                      | Per-request UUID; carries the `thread_id` for upstream correlation.  |
 | `x-openai-internal-codex-residency` | `login/src/auth/default_client.rs::RESIDENCY_HEADER_NAME`     | Set when `--residency us` is configured; absent otherwise.           |
 
-The OAuth refresh client (used for `grant_type=refresh_token` POSTs to `https://auth.openai.com/oauth/token`) carries its OWN header set distinct from the responses-API client; both are in scope for the client parity.
+The OAuth refresh client (used for `grant_type=refresh_token` POSTs to `https://auth.openai.com/oauth/token`) carries its OWN header set distinct from the responses-API client; both must carry the pinned codex client headers.
 
 **Defense-in-depth for the bearer JWT**: the `authorization` header on every outgoing request to `chatgpt.com/backend-api/codex` carries an OAuth access-token JWT that embeds `chatgpt_account_id`, `email`, `session_id`, `jti`, and `plan_type`. Routectl's outgoing-headers TRACE log redacts this value to `Bearer [REDACTED]` before any line is emitted (see `routectl_core::log_safe::redact_outgoing_header_values`); the same redaction applies to `x-api-key` and `proxy-authorization`. Operators keep the value local; no log destination ever sees it.
 
@@ -323,7 +323,7 @@ The OAuth refresh client (used for `grant_type=refresh_token` POSTs to `https://
 - Header constants:            `core/src/client.rs`
 - Responses-API request:       `codex-api/src/endpoint/responses.rs`
 
-**Session-rejection risk**: future deviations (a UA bump on the routectl side that codex did not ship; a missing identity header; a refresh-client header re-ordering visible to TLS-level differences) are NOT debuggable as build / wire errors. The first symptom is an OpenAI account in a "needs re-authentication" lockout state and a refresh endpoint that 401s on every retry. Recovery requires the operator to re-authenticate through the ChatGPT web UI. Treat any change here with the same gravity as a database migration on a production system.
+**Compatibility-contract risk**: future deviations (a UA bump on the routectl side that codex did not ship; a missing identity header; a refresh-client header re-ordering) are NOT debuggable as build / wire errors. The first symptom is a refresh endpoint that 401s on every retry. A mismatch with the targeted codex client contract can cause the upstream to reject the refresh token and require the operator to re-authenticate through the ChatGPT web UI. Treat any change here with the same gravity as a database migration on a production system.
 
 ## Cross-cutting timing notes
 

@@ -25,11 +25,8 @@ use crate::{SecretRef, SecretStore};
 
 /// Re-read window: a `get()` call within `near_expiry(REFRESH_LEAD_SECS)`
 /// of expiry triggers a refresh through `refresh_under_lock`. 300s
-/// matches codex CLI's 5-minute lead in
-/// `codex-rs/login/src/auth/manager.rs:87` -- routectl's chatgpt-oauth
-/// refresh path runs through the same upstream path as a real
-/// codex CLI, so emitting refresh POSTs at the same expiry-window keeps
-/// the temporal fingerprint consistent. Wide enough that the
+/// matches codex CLI's 5-minute refresh lead in
+/// `codex-rs/login/src/auth/manager.rs:87`. Wide enough that the
 /// refresh POST + atomic disk write completes before expiry on a
 /// healthy network; narrow enough that most requests serve from the
 /// in-memory cache without touching the token endpoint. Operators on
@@ -119,24 +116,21 @@ impl OAuthStore {
         // Treat any 3xx from the token endpoint as an upstream
         // failure rather than silently re-sending the secret.
         //
-        // Default headers carry the codex CLI HTTP fingerprint
-        // (originator: codex_cli_rs, x-openai-internal-codex-residency:
-        // us, codex-style User-Agent). The chatgpt.com upstream
-        // inspects every routectl-emitted request claiming
-        // `originator: codex_cli_rs` -- including the OAuth refresh
-        // POST -- and invalidates sessions whose client identity drifts
-        // from a real codex install. Anthropic and any future non-codex
-        // OAuth provider see these too; the headers are inert for them
-        // (no impact on the Anthropic token endpoint) but pinning a
-        // single client keeps the refresh hot path simple.
+        // The refresh client must carry the originator, residency, and
+        // User-Agent the token endpoint requires for chatgpt-oauth
+        // refresh (originator: codex_cli_rs,
+        // x-openai-internal-codex-residency: us, codex-style
+        // User-Agent). Anthropic and any future non-codex OAuth provider
+        // see these too; the headers are inert for them (no impact on
+        // the Anthropic token endpoint) but a single pinned client keeps
+        // refresh simple.
         let mut default_headers = reqwest::header::HeaderMap::new();
         for (name, value) in routectl_core::identity::codex::codex_default_headers() {
             // The constants are valid header name/value pairs today.
             // Promote any future regression that breaks them into a
-            // process-startup panic so a silent drop cannot crack the
-            // codex_cli_rs client parity contract by removing the
-            // originator or residency header from the OAuth refresh
-            // client without operator-visible signal.
+            // process-startup panic so a silent drop cannot remove the
+            // required originator or residency header from the OAuth
+            // refresh client without an operator-visible signal.
             let header_name = name
                 .parse::<reqwest::header::HeaderName>()
                 .expect("codex_fingerprint constant must be a valid header name");
@@ -462,10 +456,10 @@ impl OAuthStore {
         // Preserve the per-credential `session_id` across token
         // rotation. The OAuthFlow trait has no slot for the prior
         // record, so the codex flow always returns a record whose
-        // `session_id` is None on refresh; the upstream upstream
-        // expects one stable session-id across the credential's
-        // lifetime, so a refresh that flipped it would re-trigger
-        // re-authentication. Backfilling here also covers the v0.7.0 -> v0.7.1
+        // `session_id` is None on refresh; upstream expects one stable
+        // session-id across the credential's lifetime, so refresh
+        // preserves the prior value. Backfilling here also covers the
+        // v0.7.0 -> v0.7.1
         // migration: pre-existing records have None; the next refresh
         // (lazy or forced) does NOT mint a fresh session_id, leaving
         // the per-provider factory path to fill it on first use.
@@ -1639,11 +1633,9 @@ mod tests {
         );
     }
 
-    /// The OAuth refresh client must carry the codex CLI HTTP
-    /// fingerprint on every request. The chatgpt.com upstream
-    /// inspects token-endpoint round-trips too: a refresh POST
-    /// missing originator + residency or with a non-codex UA
-    /// invalidates the session even though the bearer is fine.
+    /// The OAuth refresh client must carry the required originator +
+    /// residency headers and codex User-Agent on every token-endpoint
+    /// request.
     #[tokio::test]
     async fn refresh_client_carries_codex_fingerprint_headers() {
         use wiremock::matchers::any;

@@ -2,15 +2,14 @@
 //!
 //! This module implements the routectl-side of an OAuth 2.0 PKCE flow
 //! (RFC 7636) for upstream LLM providers that gate API access behind a
-//! subscription-OAuth surface (Anthropic claude.ai today; OpenAI Codex
-//! lands in a prior change).
+//! subscription-OAuth surface (Anthropic claude.ai; OpenAI Codex
+//! (chatgpt.com)).
 //!
 //! Operators run `routectl login <provider>` once; routectl spawns a
 //! local callback server, drives the browser flow, exchanges the
 //! authorization code for tokens, and stores them in
-//! `~/.config/routectl/credentials.json`. a prior change reads tokens via
-//! `OAuthStore` and surfaces clear "near-expiry" guidance; refresh +
-//! 401 retry land in a prior change.
+//! `~/.config/routectl/credentials.json`. routectl reads tokens via
+//! `OAuthStore`, refreshes near expiry, and retries on 401.
 //!
 //! Module layout:
 //! - `types.rs`: `TokenRecord`, `CredentialsFile`, `AccountInfo`,
@@ -20,11 +19,11 @@
 //! - `pkce.rs`: code verifier, code challenge (SHA-256, base64url-no-pad),
 //!   CSRF state token. `OsRng`-sourced; never logged.
 //! - `store.rs`: `OAuthStore` -- the `SecretStore` impl that owns the
-//!   in-memory cache + (in a prior change) the refresh single-flight gate.
+//!   in-memory cache and the refresh single-flight gate.
 //! - `login.rs`: callback `axum` sub-app + `webbrowser` launch + flow
 //!   driver.
-//! - `providers/`: per-upstream `OAuthFlow` impls (claude.ai today;
-//!   chatgpt.com in a prior change).
+//! - `providers/`: per-upstream `OAuthFlow` impls (claude.ai and
+//!   chatgpt.com).
 
 pub(crate) mod file_io;
 pub(crate) mod login;

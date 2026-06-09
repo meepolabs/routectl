@@ -421,7 +421,7 @@ mod tests {
     async fn composite_dispatches_oauth_on_auth_failure_to_oauth_store() {
         // Composite must route on_auth_failure for oauth:// refs to the
         // OAuthStore arm, not the MemoryStore default no-op. The
-        // OAuthStore returns an error in a prior change (refresh deferred); we
+        // OAuthStore returns an error when refresh is unavailable; we
         // assert that signal reaches the caller -- proof that the
         // composite did NOT silently absorb it via the no-op fallback.
         let dir = tempfile::tempdir().unwrap();

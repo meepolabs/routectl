@@ -15,7 +15,7 @@
 # State: the script writes the timestamp of the last seen completion
 # to `crates/routectl-cli/tests/fixtures/captured/.last_capture_ts`
 # and resumes from there on the next run, so periodic invocations
-# from the 3-min heartbeat don't re-capture the same requests.
+# don't re-capture the same requests.
 #
 # Usage:
 #   scripts/capture_fixtures.sh [--log /tmp/routectl-trace.log] \
@@ -23,7 +23,7 @@
 #                               [--limit 4] [--force] [--allow-unsafe-out]
 #
 # `--limit N` caps the number of NEW requests captured this run
-# (the periodic hook passes 4 to mirror the heartbeat's window).
+# (periodic runs typically pass a small limit).
 # `--force` ignores the resume marker and re-captures from the start
 # of the log.
 # `--out` is confined to the default captured dir (which is gitignored)

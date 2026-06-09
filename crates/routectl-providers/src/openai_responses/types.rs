@@ -8,8 +8,8 @@
 //!   - `https://api.openai.com/v1/responses`
 //!     (standard API key / `auth_kind = "api-key"`)
 //!
-//! Response-side types land in the relevant stage (`response_types.rs`); this file
-//! covers only the egress request shape so the relevant stage can complete the
+//! Response-side types live in `response_types.rs`; this file
+//! covers only the egress request shape; the response side completes the
 //! translation pipeline.
 //!
 //! Reference: `codex-rs/codex-api/src/common.rs::ResponsesApiRequest`
