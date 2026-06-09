@@ -2944,6 +2944,7 @@ mod three_source_anthropic_beta_lift_tests {
                 usage: Some(routectl_core::Usage::default()),
                 routectl_provider: None,
                 extras: Default::default(),
+                upstream_meta: None,
             })
         }
         async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
@@ -2955,6 +2956,7 @@ mod three_source_anthropic_beta_lift_tests {
                     choices: vec![],
                     usage: None,
                     opaque_events: Vec::new(),
+                    upstream_meta: None,
                 })
             });
             Ok(s.boxed())
@@ -3114,6 +3116,7 @@ mod reasoning_passthrough_tests {
                 usage: Some(routectl_core::Usage::default()),
                 routectl_provider: None,
                 extras: Default::default(),
+                upstream_meta: None,
             })
         }
         async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
@@ -3233,6 +3236,7 @@ mod resolved_models_tests {
                 usage: Some(routectl_core::Usage::default()),
                 routectl_provider: None,
                 extras: Default::default(),
+                upstream_meta: None,
             })
         }
         async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
@@ -3707,6 +3711,7 @@ mod seat_pool_dispatch_tests {
                 usage: Some(routectl_core::Usage::default()),
                 routectl_provider: None,
                 extras: Default::default(),
+                upstream_meta: None,
             })
         }
         async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
@@ -4103,6 +4108,7 @@ mod feature_filter_tests {
                 usage: Some(routectl_core::Usage::default()),
                 routectl_provider: None,
                 extras: Default::default(),
+                upstream_meta: None,
             })
         }
         async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
@@ -4399,6 +4405,7 @@ mod auth_failure_recovery_tests {
                     usage: Some(routectl_core::Usage::default()),
                     routectl_provider: None,
                     extras: Default::default(),
+                    upstream_meta: None,
                 })
             }
         }
@@ -4885,6 +4892,7 @@ mod circuit_breaker_slot_release_tests {
                 usage: Some(routectl_core::Usage::default()),
                 routectl_provider: None,
                 extras: Default::default(),
+                upstream_meta: None,
             })
         }
         async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {

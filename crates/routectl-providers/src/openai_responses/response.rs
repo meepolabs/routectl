@@ -92,6 +92,7 @@ pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<Ch
         usage,
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     })
 }
 

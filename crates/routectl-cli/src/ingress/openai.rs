@@ -711,6 +711,7 @@ mod tests {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         };
         let mut state = OpenAiIngress.new_stream_state();
         let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
@@ -1012,6 +1013,7 @@ mod tests {
             usage: None,
             routectl_provider: Some("test".into()),
             extras: Default::default(),
+            upstream_meta: None,
         };
         let v = OpenAiIngress.render_response(resp).unwrap();
         assert_eq!(v["id"], "chatcmpl-1");
@@ -1071,6 +1073,7 @@ mod tests {
             usage: None,
             routectl_provider: Some("anthropic-api".into()),
             extras: Default::default(),
+            upstream_meta: None,
         }
     }
 
@@ -1240,6 +1243,7 @@ mod tests {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         };
         let mut state = OpenAiIngress.new_stream_state();
 
@@ -1558,6 +1562,7 @@ mod tests {
             usage: None,
             routectl_provider: None,
             extras: Default::default(),
+            upstream_meta: None,
         };
         let v = OpenAiIngress.render_response(resp).unwrap();
         let choice = &v["choices"][0];
@@ -1582,6 +1587,7 @@ mod tests {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         };
         let mut state = OpenAiIngress.new_stream_state();
         let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
@@ -1624,6 +1630,7 @@ mod tests {
             usage: None,
             routectl_provider: None,
             extras: Default::default(),
+            upstream_meta: None,
         };
 
         // Act
@@ -1658,6 +1665,7 @@ mod tests {
             }),
             routectl_provider: Some("anthropic-api".into()),
             extras: Default::default(),
+            upstream_meta: None,
         };
 
         // Act
@@ -1691,6 +1699,7 @@ mod tests {
             }),
             routectl_provider: None,
             extras: Default::default(),
+            upstream_meta: None,
         };
 
         // Act

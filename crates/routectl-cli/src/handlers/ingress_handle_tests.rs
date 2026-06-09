@@ -290,6 +290,7 @@ fn streaming_text_chunk(text: &str) -> routectl_core::ChatChunk {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     }
 }
 

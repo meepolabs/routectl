@@ -99,6 +99,7 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         // response wire-render only needs the fields surfaced on
         // the canonical ChatResponse.
         extras: Default::default(),
+        upstream_meta: None,
     })
 }
 

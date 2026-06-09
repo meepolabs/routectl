@@ -109,6 +109,11 @@ pub(super) fn render_messages_response(resp: ChatResponse) -> Value {
         if k == "stop_details" {
             continue;
         }
+        // Reserved transport-internal carrier name; must never reach a
+        // client even if an upstream coincidentally uses the same key.
+        if k == "upstream_meta" {
+            continue;
+        }
         body.entry(k.clone()).or_insert_with(|| v.clone());
     }
 

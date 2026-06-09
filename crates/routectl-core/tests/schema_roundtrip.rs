@@ -3,6 +3,7 @@
 
 use routectl_core::{
     cache_control::{Breakpoint, BreakpointPosition},
+    upstream_meta::{AnthropicUnifiedQuota, UpstreamMeta},
     CacheControl, ChatChunk, ChatRequest, ChatResponse, ContentPart, KnownContentPart,
     OpaqueSseEvent, Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, SystemBlock,
     SystemContent, ToolDef,
@@ -559,4 +560,77 @@ fn chatchunk_opaque_events_round_trip_drops_to_empty() {
     let restored: ChatChunk = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.id, "chunk-1");
     assert!(restored.opaque_events.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// ChatResponse/ChatChunk.upstream_meta: skip-serialized transport-internal
+// quota/overage carrier. Anthropic egress writes; usage-accounting reads.
+// Never on the client-facing wire.
+// ---------------------------------------------------------------------------
+
+fn sample_upstream_meta() -> UpstreamMeta {
+    // AnthropicUnifiedQuota is `#[non_exhaustive]`: an out-of-crate
+    // consumer mutates fields on the default value rather than using a
+    // struct expression.
+    let mut quota = AnthropicUnifiedQuota::default();
+    quota.status = Some("allowed".into());
+    quota.representative_claim = Some("overage".into());
+    UpstreamMeta::from_anthropic_unified(quota)
+}
+
+#[test]
+fn chatresponse_upstream_meta_never_serializes() {
+    // Arrange: a default response has no upstream_meta key, and a
+    // populated upstream_meta must also be omitted (the field is
+    // `#[serde(skip)]`).
+    let default_json = serde_json::to_value(ChatResponse::default()).unwrap();
+    assert!(default_json.get("upstream_meta").is_none());
+
+    let resp = ChatResponse {
+        upstream_meta: Some(sample_upstream_meta()),
+        ..Default::default()
+    };
+
+    // Act
+    let serialized = serde_json::to_value(&resp).unwrap();
+
+    // Assert
+    assert!(
+        serialized.get("upstream_meta").is_none(),
+        "upstream_meta must never reach the wire: {serialized}"
+    );
+}
+
+#[test]
+fn chatchunk_upstream_meta_never_serializes() {
+    // Arrange
+    let chunk = ChatChunk {
+        upstream_meta: Some(sample_upstream_meta()),
+        ..Default::default()
+    };
+
+    // Act
+    let serialized = serde_json::to_value(&chunk).unwrap();
+
+    // Assert
+    assert!(
+        serialized.get("upstream_meta").is_none(),
+        "upstream_meta must never reach the wire: {serialized}"
+    );
+}
+
+#[test]
+fn chatresponse_upstream_meta_round_trip_drops_to_none() {
+    // Round-trip contract: serializing a ChatResponse with a populated
+    // upstream_meta and deserializing back yields upstream_meta = None.
+    // The carrier is in-process only; ser/de erases it.
+    let resp = ChatResponse {
+        id: "resp-1".into(),
+        upstream_meta: Some(sample_upstream_meta()),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&resp).unwrap();
+    let restored: ChatResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.id, "resp-1");
+    assert!(restored.upstream_meta.is_none());
 }

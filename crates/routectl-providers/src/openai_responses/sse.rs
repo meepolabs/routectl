@@ -209,6 +209,7 @@ impl ResponsesStreamState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }]
     }
 
@@ -559,6 +560,7 @@ impl ResponsesStreamState {
             }],
             usage: usage_delta,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }])
     }
 
@@ -627,6 +629,7 @@ impl ResponsesStreamState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 
@@ -658,6 +661,7 @@ impl ResponsesStreamState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 
@@ -684,6 +688,7 @@ impl ResponsesStreamState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 
@@ -714,6 +719,7 @@ impl ResponsesStreamState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 
@@ -744,6 +750,7 @@ impl ResponsesStreamState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 }

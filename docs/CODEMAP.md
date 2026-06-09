@@ -16,6 +16,7 @@ listed at the bottom of each crate.
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider trait, log helpers, and the canonical-key allowlist
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`, `ChatChunk`, `Message`, `ReasoningDetail`, `Usage`, `RoutectlInternal`
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for unknown Anthropic SSE bytes (skip-serialized; preserves unknown content_block types verbatim through the canonical pipeline so Anthropic ingress can re-emit byte-for-byte)
+- `src/upstream_meta.rs` -- transport-internal `UpstreamMeta` carrier (skip-serialized on `ChatResponse`/`ChatChunk`) for non-canonical upstream metadata; today the provider-namespaced `AnthropicUnifiedQuota` (the `anthropic-ratelimit-unified-*` quota/overage family, raw strings + `extras` forward-compat + `is_overage()`)
 - `src/content_part.rs` -- typed `ContentPart` enum (text/image/document/tool_use/tool_result/thinking/Other) for `MessageContent::Parts`
 - `src/system_content.rs` -- typed top-level `system` field (flat string OR array of `SystemBlock` with per-block cache_control)
 - `src/tool_def.rs` -- typed `ToolDef::Custom(CustomTool)` + `ToolDef::Other(Value)` with `from_openai_function` interop
@@ -69,6 +70,7 @@ listed at the bottom of each crate.
 - `src/anthropic_api/sse_unknown.rs` -- forward-compat handling for unknown SSE content blocks plus the per-block-index invariant; opens `OpenBlockKind::Unknown`, drops misattributed deltas
 - `src/anthropic_api/types_sse.rs` -- forward-compat catchalls (`Other(Value)` arms) on the three strict-tagged Anthropic SSE enums (`SseEvent`, `SseContentBlockStart`, `SseDelta`); extracted from `types.rs` for the 800-LOC ceiling
 - `src/anthropic_api/parts.rs` -- image-source translation (data-URI -> base64) and trailing-Text-after-tool_use stripping
+- `src/anthropic_api/ratelimit_unified.rs` -- tolerant parser for the `anthropic-ratelimit-unified-*` quota/overage response-header family (`parse_unified_quota` -> `AnthropicUnifiedQuota`; None when absent, non-UTF8 values skipped, unknown suffixes captured in `extras`) plus the once-per-flip overage state machine (`classify_overage_transition`); wired into the egress complete/stream dir-3 sites
 
 ### openai_compat
 
@@ -144,7 +146,8 @@ listed at the bottom of each crate.
 ### Tests
 
 - `tests/common/mod.rs` -- thin re-export shim of `routectl_core::test_utils` (the single source of truth for the canonical scenario builders); enabled via the `test-utils` dev-dependency feature on core
-- `tests/anthropic_api.rs` -- wiremock-based complete + stream tests for Anthropic Messages API egress
+- `tests/anthropic_api.rs` -- wiremock-based complete + stream tests for Anthropic Messages API egress (incl. `anthropic-ratelimit-unified-*` quota carrier wire-in: complete populates `ChatResponse.upstream_meta`, stream carries it on the first chunk only, absent family yields None)
+- `tests/anthropic_overage_tracing.rs` -- captured-subscriber tracing coverage for the overage-flip log: a flip into overage emits one WARN with the non-secret quota fields, steady state is silent, recovery emits one INFO; isolated binary so the thread-local capture subscriber does not leak
 - `tests/context_management.rs` -- wiremock-driven complete() + streaming end-to-end for context-management emulation; asserts beta-header strip, context_management body-key strip, and thinking-block injection; gated on `#[cfg(feature = "anthropic-api")]` (run with `--features test-utils` to exercise helpers that pre-populate the thinking cache)
 - `tests/openai_compat.rs` -- wiremock-based complete + stream tests for openai-compat egress (DeepSeek multi-turn, etc.)
 - `tests/bedrock_streaming.rs` -- scoped Bedrock integration tests over the public credential-resolution / auth-dispatch API (`bedrock::auth::resolve` Bearer vs SigV4 variants across regions)

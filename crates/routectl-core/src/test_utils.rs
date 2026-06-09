@@ -243,6 +243,7 @@ pub mod scenarios {
             usage: None,
             routectl_provider: None,
             extras: Default::default(),
+            upstream_meta: None,
         }
     }
 
@@ -267,6 +268,7 @@ pub mod scenarios {
             usage: None,
             routectl_provider: None,
             extras: Default::default(),
+            upstream_meta: None,
         }
     }
 
@@ -397,6 +399,7 @@ pub mod scenarios {
             usage: None,
             routectl_provider: None,
             extras: Default::default(),
+            upstream_meta: None,
         }
     }
 }

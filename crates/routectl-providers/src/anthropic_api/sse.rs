@@ -277,6 +277,7 @@ impl SseState {
                             }],
                             usage: None,
                             opaque_events: Vec::new(),
+                            upstream_meta: None,
                         }));
                     }
                     SseContentBlockStart::Other(value) => {
@@ -386,6 +387,7 @@ impl SseState {
                                 }],
                                 usage: None,
                                 opaque_events: Vec::new(),
+                                upstream_meta: None,
                             })
                         }
                     }
@@ -523,6 +525,7 @@ impl SseState {
                     }],
                     usage: usage_delta,
                     opaque_events: Vec::new(),
+                    upstream_meta: None,
                 }))
             }
 
@@ -595,6 +598,7 @@ impl SseState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 
@@ -620,6 +624,7 @@ impl SseState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 
@@ -655,6 +660,7 @@ impl SseState {
             }],
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 
@@ -673,6 +679,7 @@ impl SseState {
             choices: Vec::new(),
             usage: None,
             opaque_events: Vec::new(),
+            upstream_meta: None,
         }
     }
 }
@@ -724,6 +731,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
                 }],
                 usage: None,
                 opaque_events: Vec::new(),
+                upstream_meta: None,
             }));
         }
     }
@@ -756,6 +764,7 @@ pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChun
                 }],
                 usage: None,
                 opaque_events: Vec::new(),
+                upstream_meta: None,
             }));
         }
     }

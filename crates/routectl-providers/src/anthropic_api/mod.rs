@@ -30,6 +30,7 @@ pub(crate) mod context_management;
 mod extras;
 mod messages;
 pub(crate) mod parts;
+mod ratelimit_unified;
 pub mod request;
 pub mod response;
 pub mod sse;
@@ -214,6 +215,13 @@ pub struct AnthropicApiProvider {
     /// `x-claude-code-session-id` header, and the device/account fields
     /// feed the minted metadata `user_id` on the non-CC cloak path.
     identity: Option<cloak::ClaudeCodeIdentity>,
+    /// Last-seen `anthropic-ratelimit-unified-representative-claim` for
+    /// this provider instance. Drives the once-per-flip overage log:
+    /// steady state is silent, a flip into "overage" warns, a flip back
+    /// out informs. Concurrent requests share one instance, so the state
+    /// is mutex-guarded. `None` means no unified-family response has been
+    /// observed yet.
+    last_representative_claim: std::sync::Mutex<Option<String>>,
 }
 
 impl AnthropicApiProvider {
@@ -238,6 +246,7 @@ impl AnthropicApiProvider {
             client,
             thinking_cache,
             identity,
+            last_representative_claim: std::sync::Mutex::new(None),
         }
     }
 
@@ -509,6 +518,72 @@ impl AnthropicApiProvider {
             .any(|(n, _)| n.eq_ignore_ascii_case("x-claude-code-session-id"));
         cloak::cloak_oauth_egress(body, req, identity, is_non_cc);
     }
+
+    /// Parse the `anthropic-ratelimit-unified-*` quota family from an
+    /// upstream response's headers, run the once-per-flip overage
+    /// detection, and return the parsed quota wrapped in `UpstreamMeta`
+    /// for attachment to the canonical response. `None` when the family
+    /// is absent (api-key path, or any non-subscription response).
+    /// Shared by the complete() and stream() paths so the flip log and
+    /// the carrier attach identically on both.
+    fn observe_unified_quota(
+        &self,
+        headers: &reqwest::header::HeaderMap,
+    ) -> Option<routectl_core::UpstreamMeta> {
+        let quota = ratelimit_unified::parse_unified_quota(headers)?;
+        self.log_overage_flip(&quota);
+        Some(routectl_core::UpstreamMeta::from_anthropic_unified(quota))
+    }
+
+    /// Update the per-instance last-seen `representative-claim` and emit
+    /// one structured log on a billing-attribution flip. Entry into
+    /// overage warns; recovery out of overage informs; steady state is
+    /// silent (no per-request flood). Only non-secret quota strings are
+    /// logged -- never tokens or credentials.
+    fn log_overage_flip(&self, quota: &routectl_core::AnthropicUnifiedQuota) {
+        let current_claim = quota.representative_claim.as_deref();
+        let transition = {
+            let mut guard = match self.last_representative_claim.lock() {
+                Ok(g) => g,
+                // A poisoned mutex (a prior panic) must not break quota
+                // logging; recover the inner value and carry on.
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let t = ratelimit_unified::classify_overage_transition(guard.as_deref(), current_claim);
+            *guard = current_claim.map(str::to_string);
+            t
+        };
+        let claim = current_claim.unwrap_or("");
+        let overage_status = quota.overage_status.as_deref().unwrap_or("");
+        let utilization = quota.utilization.as_deref().unwrap_or("");
+        let overage_utilization = quota.overage_utilization.as_deref().unwrap_or("");
+        let reset = quota.reset.as_deref().unwrap_or("");
+        match transition {
+            Some(ratelimit_unified::OverageTransition::EnteredOverage) => {
+                tracing::warn!(
+                    provider = %self.cfg.id,
+                    representative_claim = %claim,
+                    overage_status = %overage_status,
+                    utilization = %utilization,
+                    overage_utilization = %overage_utilization,
+                    reset = %reset,
+                    "anthropic subscription billing flipped to overage",
+                );
+            }
+            Some(ratelimit_unified::OverageTransition::RecoveredFromOverage) => {
+                tracing::info!(
+                    provider = %self.cfg.id,
+                    representative_claim = %claim,
+                    overage_status = %overage_status,
+                    utilization = %utilization,
+                    overage_utilization = %overage_utilization,
+                    reset = %reset,
+                    "anthropic subscription billing recovered from overage",
+                );
+            }
+            None => {}
+        }
+    }
 }
 
 /// True when `base_url`'s host is exactly `api.anthropic.com` -- the only
@@ -705,6 +780,10 @@ impl Provider for AnthropicApiProvider {
         // consume (resp.json() takes ownership). Opt-in via
         // ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
+        // Parse the anthropic-ratelimit-unified-* quota family from the
+        // same headers (BEFORE the body consume) and run the overage-flip
+        // log. Returns None on the api-key path (family absent).
+        let upstream_meta = self.observe_unified_quota(resp.headers());
         let raw_body: Value = resp
             .json()
             .await
@@ -721,6 +800,7 @@ impl Provider for AnthropicApiProvider {
         };
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
+        chat_resp.upstream_meta = upstream_meta;
         // Context-management cache write. Extracts (tool_use_id, thinking)
         // pairs from the upstream content blocks and inserts them into the
         // shared thinking cache for re-injection on the next turn. The write
@@ -828,6 +908,14 @@ impl Provider for AnthropicApiProvider {
         // Opt-in via ROUTECTL_TRACE_HEADERS.
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
 
+        // Parse the anthropic-ratelimit-unified-* quota family from the
+        // response head (BEFORE `resp` is moved into the byte stream) and
+        // run the overage-flip log once here. The parsed carrier is
+        // attached to the FIRST canonical chunk yielded by the stream;
+        // consumers must not assume it on later chunks. None on the
+        // api-key path (family absent).
+        let mut pending_upstream_meta = self.observe_unified_quota(resp.headers());
+
         let provider_id = self.cfg.id.clone();
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
@@ -899,7 +987,15 @@ impl Provider for AnthropicApiProvider {
                                 yield Err(e);
                                 return;
                             }
-                            Ok(Some(chunk)) => yield Ok(chunk),
+                            Ok(Some(mut chunk)) => {
+                                // Attach the unified-quota carrier to the
+                                // FIRST canonical chunk only; `take()`
+                                // leaves None for every subsequent chunk.
+                                if pending_upstream_meta.is_some() {
+                                    chunk.upstream_meta = pending_upstream_meta.take();
+                                }
+                                yield Ok(chunk);
+                            }
                             Ok(None) => {}
                         }
                     }

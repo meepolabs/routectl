@@ -202,6 +202,7 @@ fn openai_render_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
 
     let v = OpenAiIngress

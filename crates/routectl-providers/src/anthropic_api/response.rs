@@ -282,6 +282,7 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
         usage,
         routectl_provider: None,
         extras: resp.extras,
+        upstream_meta: None,
     })
 }
 

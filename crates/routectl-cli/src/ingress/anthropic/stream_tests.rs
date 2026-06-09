@@ -50,6 +50,7 @@ fn stream_second_finish_reason_drops_when_pending_already_set() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let flush_events = render_chunk_internal(usage_chunk, &mut s).unwrap();
     let flush_names: Vec<&str> = flush_events
@@ -89,6 +90,7 @@ fn stream_chunks_after_message_stop_are_dropped() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let close_events = render_chunk_internal(closing, &mut s).unwrap();
     let close_names: Vec<&str> = close_events
@@ -117,6 +119,7 @@ fn stream_chunks_after_message_stop_are_dropped() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let stray_events = render_chunk_internal(stray_usage, &mut s).unwrap();
     assert!(
@@ -154,6 +157,7 @@ fn text_chunk(text: &str, finish: Option<&str>) -> ChatChunk {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     }
 }
 
@@ -227,6 +231,7 @@ fn stream_finish_with_inline_usage_emits_immediately() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let events = render_chunk_internal(closing, &mut s).unwrap();
     let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
@@ -266,6 +271,7 @@ fn stream_finish_then_separate_usage_chunk_emits_single_delta() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let usage_events = render_chunk_internal(usage_chunk, &mut s).unwrap();
     let usage_names: Vec<&str> = usage_events
@@ -324,6 +330,7 @@ fn stream_two_concurrent_tool_calls_each_get_their_own_block() {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let mut s = fresh_state();
     let events = render_chunk_internal(chunk, &mut s).unwrap();
@@ -365,6 +372,7 @@ fn stream_interleaved_tool_call_chunks_flush_in_valid_order_at_finish() {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     // Second chunk carries inline usage so the renderer emits
     // message_delta + message_stop immediately. Hosts that split
@@ -398,6 +406,7 @@ fn stream_interleaved_tool_call_chunks_flush_in_valid_order_at_finish() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
 
     let _ = render_chunk_internal(first, &mut s).unwrap();
@@ -429,6 +438,7 @@ fn usage_only_chunk_emits_null_stop_reason() {
         choices: vec![],
         usage: Some(UsageDelta::default()),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let events = render_chunk_internal(usage_only, &mut s).unwrap();
     let payload: Value = serde_json::from_str(&events[0].data).unwrap();
@@ -456,6 +466,7 @@ fn stream_content_filter_finish_emits_refusal_stop_reason() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let events = render_chunk_internal(closing, &mut s).unwrap();
     let delta_event = events
@@ -497,6 +508,7 @@ fn message_delta_renders_raw_input_tokens_per_anthropic_spec() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let events = render_chunk_internal(closing, &mut s).unwrap();
     let delta_event = events
@@ -545,6 +557,7 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let second = ChatChunk {
         id: "msg_01".into(),
@@ -566,6 +579,7 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
 
     let mut s = fresh_state();
@@ -639,6 +653,7 @@ fn stream_tool_call_index_above_cap_returns_streaming_error() {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let mut s = fresh_state();
     let err = render_chunk_internal(chunk, &mut s).unwrap_err();
@@ -661,6 +676,7 @@ fn opaque_only_chunk(events: Vec<routectl_core::OpaqueSseEvent>) -> ChatChunk {
         choices: vec![],
         usage: None,
         opaque_events: events,
+        upstream_meta: None,
     }
 }
 
@@ -856,6 +872,7 @@ fn opaque_event_delta_without_prior_start_warns_and_skips() {
             upstream_index: 99,
             raw_delta: b"{\"type\":\"input_json_delta\"}".to_vec(),
         }],
+        upstream_meta: None,
     };
     let mut s = fresh_state();
 
@@ -1038,6 +1055,7 @@ fn message_delta_missing_prompt_tokens_still_emits_input_tokens_zero() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let events = render_chunk_internal(closing, &mut s).unwrap();
     let delta_event = events
@@ -1072,6 +1090,7 @@ fn message_delta_all_none_usage_emits_input_tokens_not_empty_object() {
         choices: vec![],
         usage: Some(UsageDelta::default()),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let events = render_chunk_internal(chunk, &mut s).unwrap();
     let delta_event = events
@@ -1124,6 +1143,7 @@ fn message_start_uses_req_model_when_chunk_carries_no_model() {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
 
     // Act
@@ -1170,6 +1190,7 @@ fn render_error_eos_after_normal_finish_emits_nothing() {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     };
     let _ = render_chunk_internal(closing, &mut s).unwrap();
     assert!(s.finished, "stream must be finished after normal close");

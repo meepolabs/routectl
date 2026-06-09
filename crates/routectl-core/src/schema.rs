@@ -380,6 +380,14 @@ pub struct ChatResponse {
     /// code edits.
     #[serde(default, flatten, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extras: serde_json::Map<String, serde_json::Value>,
+    /// Transport-internal carrier for non-canonical upstream metadata
+    /// (today: Anthropic's `anthropic-ratelimit-unified-*` quota/overage
+    /// family parsed off the anthropic-api egress response headers).
+    /// Skip-serialized so the client-facing wire shape is unchanged for
+    /// every consumer; populated only on the egress path and read by
+    /// usage-accounting observability. See `crate::upstream_meta`.
+    #[serde(skip)]
+    pub upstream_meta: Option<crate::upstream_meta::UpstreamMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -491,6 +499,14 @@ pub struct ChatChunk {
     /// blocks anyway).
     #[serde(skip)]
     pub opaque_events: Vec<crate::schema_opaque::OpaqueSseEvent>,
+    /// Transport-internal carrier for non-canonical upstream metadata
+    /// (today: Anthropic's `anthropic-ratelimit-unified-*` quota/overage
+    /// family). On a stream this is set ONLY on the FIRST canonical chunk
+    /// yielded (the response head is where the headers are available);
+    /// consumers must NOT assume it on later chunks. Skip-serialized so
+    /// the wire shape is unchanged. See `crate::upstream_meta`.
+    #[serde(skip)]
+    pub upstream_meta: Option<crate::upstream_meta::UpstreamMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

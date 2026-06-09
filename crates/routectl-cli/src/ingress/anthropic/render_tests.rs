@@ -36,6 +36,7 @@ fn render_response_emits_messages_shape() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     assert_eq!(v["id"], "msg_01");
@@ -107,6 +108,7 @@ fn render_response_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() 
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
@@ -174,6 +176,7 @@ fn render_response_emits_tool_use_from_tool_calls_when_parts_has_no_tool_use() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
@@ -236,6 +239,7 @@ fn render_response_dedupes_tool_use_when_parts_carries_other_typed_tool_use() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
@@ -297,6 +301,7 @@ fn render_response_does_not_dedupe_other_tool_use_when_id_missing() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
@@ -354,6 +359,7 @@ fn render_response_omits_signature_key_when_payload_has_none() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
@@ -413,6 +419,7 @@ fn render_response_emits_signature_verbatim_when_payload_has_one() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
@@ -465,6 +472,7 @@ fn render_response_summary_kind_omits_signature_key_when_absent() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     let content = v["content"].as_array().expect("content is array");
@@ -524,6 +532,7 @@ fn render_response_omits_absent_cache_fields_from_usage() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     let usage = v["usage"].as_object().expect("usage is present");
@@ -590,6 +599,7 @@ fn render_response_emits_cache_fields_when_present() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     // Raw input = 180 - 50 - 30 = 100.
@@ -639,6 +649,7 @@ fn content_filter_finish_renders_refusal_stop_reason() {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     let v = AnthropicIngress.render_response(resp).unwrap();
     assert_eq!(v["stop_reason"], "refusal");
@@ -688,6 +699,7 @@ fn render_single_tool_call(arguments: &str) -> Value {
         }),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     };
     AnthropicIngress.render_response(resp).unwrap()
 }
@@ -733,4 +745,53 @@ fn valid_tool_call_arguments_render_input_unchanged() {
         .find(|b| b["type"] == "tool_use")
         .expect("tool_use block present");
     assert_eq!(tu["input"], json!({"x": 1}));
+}
+
+/// `upstream_meta` is routectl's transport-internal carrier name. The
+/// typed field is `#[serde(skip)]`, but `ChatResponse.extras` is
+/// `#[serde(flatten)]`, so an upstream Anthropic body carrying a
+/// top-level key literally named `upstream_meta` would land in `extras`
+/// and otherwise be re-emitted by the forward-compat loop. Pin that the
+/// Anthropic render drops the reserved name so it never reaches a client.
+#[test]
+fn render_response_drops_reserved_upstream_meta_key_from_extras() {
+    use routectl_core::{schema::Choice, Message, MessageContent, Role, Usage};
+    let mut extras = serde_json::Map::new();
+    extras.insert("upstream_meta".into(), json!({"leaked": "should not ship"}));
+    let resp = ChatResponse {
+        id: "msg_reserved".into(),
+        model: "claude-opus-4-7".into(),
+        created: 0,
+        choices: vec![Choice {
+            logprobs: None,
+            index: 0,
+            message: Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 2,
+            total_tokens: 7,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras,
+        upstream_meta: None,
+    };
+    let v = AnthropicIngress.render_response(resp).unwrap();
+    let obj = v.as_object().expect("rendered body is a JSON object");
+    assert!(
+        !obj.contains_key("upstream_meta"),
+        "reserved upstream_meta key must never reach the rendered body, got: {obj:?}"
+    );
 }

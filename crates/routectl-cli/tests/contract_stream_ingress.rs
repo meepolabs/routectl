@@ -57,6 +57,7 @@ fn content_chunk(text: &str) -> ChatChunk {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     }
 }
 
@@ -76,6 +77,7 @@ fn finish_only_chunk(fr: &str) -> ChatChunk {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     }
 }
 
@@ -95,6 +97,7 @@ fn usage_only_chunk(prompt: u32, completion: u32) -> ChatChunk {
             ..Default::default()
         }),
         opaque_events: Vec::new(),
+        upstream_meta: None,
     }
 }
 

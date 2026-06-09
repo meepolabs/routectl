@@ -143,6 +143,7 @@ impl Provider for MockProvider {
                         },
                         OpaqueSseEvent::ContentBlockStop { upstream_index: 0 },
                     ],
+                    upstream_meta: None,
                 };
                 let text_chunk = ok_chunk(&id, &req.model, "Hello");
                 let chunks = vec![opaque_chunk, text_chunk];
@@ -176,6 +177,7 @@ fn ok_response(id: &str, model: &str) -> ChatResponse {
         usage: Some(Usage::default()),
         routectl_provider: None,
         extras: Default::default(),
+        upstream_meta: None,
     }
 }
 
@@ -194,6 +196,7 @@ fn ok_chunk(id: &str, model: &str, content: &str) -> ChatChunk {
         }],
         usage: None,
         opaque_events: Vec::new(),
+        upstream_meta: None,
     }
 }
 
