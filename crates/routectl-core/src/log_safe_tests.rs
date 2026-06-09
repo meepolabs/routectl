@@ -489,6 +489,35 @@ fn redact_openai_responses_response_body_output_array_recurses() {
 }
 
 #[test]
+fn redact_metadata_user_id_collapsed_when_on_verbatim_when_off() {
+    // The non-CC cloak writes `metadata.user_id` as a JSON string
+    // carrying device_id / account_uuid / session_id. The session_id
+    // is a login-session secret, so with redaction ON the value must
+    // collapse to the `<redacted len=N>` placeholder. With redaction
+    // OFF (fixture-capture posture) the raw value is left verbatim, and
+    // sibling keys are untouched either way.
+    let raw_user_id = r#"{"device_id":"abc","account_uuid":"def","session_id":"ghi"}"#;
+    let body = json!({
+        "model": "claude-sonnet-4-5",
+        "metadata": {"user_id": raw_user_id, "other": "keep-me"},
+    });
+
+    // ON: user_id collapsed, sibling + structural keys intact.
+    let on = redact_prompts_with_flag(&body, true);
+    assert_eq!(
+        on["metadata"]["user_id"],
+        json!(format!("<redacted len={}>", raw_user_id.chars().count()))
+    );
+    assert_eq!(on["metadata"]["other"], "keep-me");
+    assert_eq!(on["model"], "claude-sonnet-4-5");
+
+    // OFF: body cloned unchanged (fixture capture relies on the raw value).
+    let off = redact_prompts_with_flag(&body, false);
+    assert_eq!(off["metadata"]["user_id"], raw_user_id);
+    assert_eq!(off, body);
+}
+
+#[test]
 fn redact_unknown_shape_passes_through_unchanged() {
     // Unrelated JSON: nothing to redact, structure intact.
     let body = json!({"foo": 1, "bar": ["a", "b"], "baz": {"q": true}});

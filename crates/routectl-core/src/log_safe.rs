@@ -528,6 +528,15 @@ fn redact_value(v: &mut serde_json::Value) {
                             redact_value(entry);
                         }
                     }
+                    // Anthropic `metadata.user_id`: a JSON string carrying
+                    // device_id / account_uuid / session_id. The session_id
+                    // is a login-session secret (already elided in
+                    // AnthropicApiConfig's Debug); collapse the leaf so it
+                    // does not flow verbatim into a TRACE body. String leaf
+                    // only; recurse otherwise.
+                    "user_id" => {
+                        redact_string_or_recurse(entry);
+                    }
                     _ => redact_value(entry),
                 }
             }

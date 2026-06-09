@@ -25,6 +25,7 @@ use routectl_core::{
     StaticToken, TokenCount, TokenSource,
 };
 
+mod cloak;
 pub(crate) mod context_management;
 mod extras;
 mod messages;
@@ -206,6 +207,13 @@ pub struct AnthropicApiProvider {
     cfg: AnthropicApiConfig,
     client: Client,
     thinking_cache: std::sync::Arc<std::sync::RwLock<context_management::ThinkingCache>>,
+    /// Stable Claude Code identity minted once per provider instance.
+    /// `Some` only on the OauthBearer + api.anthropic.com surface (the
+    /// cloak target); `None` for every other auth kind or host. The
+    /// minted `session_id` (which prefers `cfg.session_id`) drives the
+    /// `x-claude-code-session-id` header, and the device/account fields
+    /// feed the minted metadata `user_id` on the non-CC cloak path.
+    identity: Option<cloak::ClaudeCodeIdentity>,
 }
 
 impl AnthropicApiProvider {
@@ -215,10 +223,21 @@ impl AnthropicApiProvider {
         let cap = std::num::NonZeroUsize::new(context_management::THINKING_CACHE_CAP)
             .expect("THINKING_CACHE_CAP is non-zero");
         let thinking_cache = std::sync::Arc::new(std::sync::RwLock::new(lru::LruCache::new(cap)));
+        // Mint the cloak identity once, only on the OAuth anthropic-api
+        // surface. The minted session_id prefers cfg.session_id (the
+        // login-minted value) and falls back to a fresh uuid so a
+        // credential without one still presents a stable session.
+        let identity =
+            if cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&cfg.base_url) {
+                Some(cloak::ClaudeCodeIdentity::mint(cfg.session_id.as_deref()))
+            } else {
+                None
+            };
         Self {
             cfg,
             client,
             thinking_cache,
+            identity,
         }
     }
 
@@ -396,10 +415,12 @@ impl AnthropicApiProvider {
             // forwarded client header overrides after that.
             //   - x-client-request-id: one fresh uuid per request (the
             //     upstream pairs it with the turn).
-            //   - x-claude-code-session-id: the stable per-credential id
-            //     minted at login; ties requests to one logical session,
-            //     stable across the credential's lifetime. Omitted when the
-            //     credential has none.
+            //   - x-claude-code-session-id: the provider's effective
+            //     session id (the minted identity's session_id, which
+            //     prefers cfg.session_id and falls back to a stable minted
+            //     uuid). Stamped only on this OAuth + anthropic-host path,
+            //     where `self.identity` is always `Some`. A forwarded
+            //     client header still overrides via the apply loop below.
             if is_anthropic_api_host(&self.cfg.base_url) {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 crate::http_client::insert_header(
@@ -408,7 +429,7 @@ impl AnthropicApiProvider {
                     "x-client-request-id",
                     &request_id,
                 );
-                if let Some(sid) = &self.cfg.session_id {
+                if let Some(sid) = self.identity.as_ref().map(|i| &i.session_id) {
                     crate::http_client::insert_header(
                         &mut header_map,
                         &self.cfg.id,
@@ -463,6 +484,30 @@ impl AnthropicApiProvider {
             rb = rb.headers(header_map);
         }
         rb
+    }
+
+    /// Apply the Claude Code identity cloak to the outgoing body on the
+    /// OAuth anthropic-api surface. Gated on `OauthBearer +
+    /// is_anthropic_api_host` -- the same surface where `self.identity` is
+    /// `Some`; a no-op on every other path. `is_non_cc` is true when the
+    /// inbound request did NOT carry an `x-claude-code-session-id` capture
+    /// (a genuine Claude Code client always does), so a non-CC client
+    /// gets the identity block + minted metadata while a genuine CC client
+    /// only has its billing block stripped.
+    fn cloak_body(&self, body: &mut Value, req: &ChatRequest) {
+        if self.cfg.auth_kind != AuthKind::OauthBearer || !is_anthropic_api_host(&self.cfg.base_url)
+        {
+            return;
+        }
+        let Some(identity) = self.identity.as_ref() else {
+            return;
+        };
+        let is_non_cc = !req
+            .routectl_internal
+            .claude_code_headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("x-claude-code-session-id"));
+        cloak::cloak_oauth_egress(body, req, identity, is_non_cc);
     }
 }
 
@@ -563,6 +608,12 @@ impl Provider for AnthropicApiProvider {
             // egress.
             obj.remove("anthropic_beta");
         }
+
+        // Cloak the outgoing body on the OAuth anthropic-api surface:
+        // always strip the billing block; for a non-CC client also stamp
+        // the identity system block and metadata user_id. Runs after
+        // normalize_request and before serialize/resign.
+        self.cloak_body(&mut body, &req);
 
         // Emit the outgoing body at trace level so a grep by
         // request_id correlates ingress -> egress -> upstream
@@ -706,6 +757,11 @@ impl Provider for AnthropicApiProvider {
             // header carries them via build_headers.
             obj.remove("anthropic_beta");
         }
+
+        // See complete(): cloak the OAuth anthropic-api body before
+        // serialize/resign (billing strip always; identity + metadata for
+        // a non-CC client).
+        self.cloak_body(&mut body, &req);
 
         // NOTE: this trace reflects the pre-resign body; the cch token
         // in the transmitted bytes differs after resign_cch_in_place.
@@ -899,7 +955,12 @@ impl Provider for AnthropicApiProvider {
     /// merged beta surface as the messages endpoint.
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
-        let normalized = self.normalize_request(&req)?;
+        let mut normalized = self.normalize_request(&req)?;
+        // Cloak before build_count_tokens_body reads `normalized`. The
+        // metadata user_id is dropped by the count_tokens allowlist (it is
+        // not in that schema), but the system-identity stamp and the
+        // billing strip still apply to the forwarded `system`.
+        self.cloak_body(&mut normalized, &req);
         let body = build_count_tokens_body(&normalized);
 
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
@@ -1591,7 +1652,7 @@ mod tests {
     fn oauth_bearer_user_agent_defaults_to_claude_cli() {
         assert_eq!(
             resolve_user_agent(None, AuthKind::OauthBearer).as_deref(),
-            Some("claude-cli/2.1.167 (external, sdk-cli)"),
+            Some("claude-cli/2.1.169 (external, cli)"),
             "oauth-bearer with no override must default to the Claude Code SDK UA",
         );
         assert_eq!(
@@ -1687,6 +1748,31 @@ mod tests {
         );
     }
 
+    /// With `cfg.session_id = None` on the OauthBearer + api.anthropic.com
+    /// surface, the minted identity supplies a stable session id, so a
+    /// `x-claude-code-session-id` header IS now stamped (mint-when-absent)
+    /// and is the SAME across two requests (one identity per provider).
+    #[test]
+    fn oauth_anthropic_base_mints_stable_session_when_cfg_absent() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            None,
+            Vec::new(),
+        ));
+        let req = ChatRequest::default();
+        let sid_1 = outbound_header_value(&provider, &req, "x-claude-code-session-id")
+            .expect("a session id must be minted when cfg.session_id is None");
+        let sid_2 = outbound_header_value(&provider, &req, "x-claude-code-session-id")
+            .expect("a session id must be minted when cfg.session_id is None");
+        assert_eq!(
+            sid_1, sid_2,
+            "minted session id must be stable across requests"
+        );
+        assert!(
+            uuid::Uuid::parse_str(&sid_1).is_ok(),
+            "minted session id must be a valid uuid; got {sid_1}"
+        );
+    }
     /// OauthBearer but a non-anthropic base (a third-party /anthropic
     /// surface): the Claude-Code session identity must NOT leak there.
     #[test]
@@ -1784,10 +1870,10 @@ mod tests {
 
     // -- Beta floor tests --------------------------------------------------
 
-    /// On OauthBearer + api.anthropic.com, all 9 pinned floor betas
+    /// On OauthBearer + api.anthropic.com, all pinned floor betas
     /// appear in the outbound `anthropic-beta` header.
     #[test]
-    fn beta_floor_all_nine_present_on_oauth_anthropic_host() {
+    fn beta_floor_all_pinned_present_on_oauth_anthropic_host() {
         let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
         let req = ChatRequest::default();
         let value = outbound_header_value(&provider, &req, "anthropic-beta")
@@ -1888,6 +1974,139 @@ mod tests {
         assert!(
             outbound_header_value(&provider, &req, "anthropic-beta").is_none(),
             "beta floor must NOT appear on the api-key path"
+        );
+    }
+
+    // -- cloak_body gate + body rewrite ------------------------------------
+
+    /// Body carrying a Claude Code billing block + a client system block,
+    /// used by the cloak_body tests so both the billing strip and the
+    /// (non-)identity-stamp are observable in one body.
+    fn cloak_test_body() -> Value {
+        serde_json::json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: v=1; cch=abcde;"},
+                {"type": "text", "text": "client system prompt"},
+            ]
+        })
+    }
+
+    /// True when any `system` block's text starts with the billing prefix.
+    fn body_has_billing(body: &Value) -> bool {
+        body["system"]
+            .as_array()
+            .map(|arr| {
+                arr.iter().any(|b| {
+                    b["text"]
+                        .as_str()
+                        .map(|t| t.trim_start().starts_with("x-anthropic-billing-header:"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// (a) OauthBearer + api.anthropic.com + NON-CC req (no captured
+    /// `x-claude-code-session-id`): the body gains the interactive identity
+    /// as `system[0]`, mints `metadata.user_id`, AND strips the billing block.
+    #[test]
+    fn cloak_body_non_cc_stamps_identity_and_metadata_and_strips_billing() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("session-stable-123".into()),
+            Vec::new(),
+        ));
+        // Non-CC: no x-claude-code-session-id captured.
+        let req = req_with_claude_code_headers(vec![("x-claude-code-agent-id", "aid-7")]);
+        let mut body = cloak_test_body();
+
+        provider.cloak_body(&mut body, &req);
+
+        // Identity stamped as the first system block.
+        assert_eq!(
+            body["system"][0]["text"],
+            "You are Claude Code, Anthropic's official CLI for Claude."
+        );
+        // Client system block preserved after the prepended identity.
+        assert_eq!(body["system"][1]["text"], "client system prompt");
+        // Metadata user_id minted.
+        assert!(
+            body["metadata"]["user_id"].is_string(),
+            "non-CC cloak must mint metadata.user_id"
+        );
+        // Billing block stripped.
+        assert!(
+            !body_has_billing(&body),
+            "billing block must be stripped on the non-CC path"
+        );
+    }
+
+    /// (b) OauthBearer + api.anthropic.com + GENUINE-CC req (captured
+    /// `x-claude-code-session-id`): the billing block is stripped, but NO
+    /// identity stamp and NO metadata mint.
+    #[test]
+    fn cloak_body_genuine_cc_strips_billing_only() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("session-stable-123".into()),
+            Vec::new(),
+        ));
+        // Genuine CC: the session-id header is present in the capture.
+        let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+        let mut body = cloak_test_body();
+
+        provider.cloak_body(&mut body, &req);
+
+        // Billing block stripped, leaving only the client system block.
+        let arr = body["system"].as_array().expect("system is array");
+        assert_eq!(arr.len(), 1, "only the client system block must remain");
+        assert_eq!(arr[0]["text"], "client system prompt");
+        assert!(
+            !body_has_billing(&body),
+            "billing block must be stripped on the genuine-CC path"
+        );
+        // No identity stamp, no metadata mint.
+        assert!(
+            body.get("metadata").is_none(),
+            "genuine-CC path must not mint metadata"
+        );
+    }
+
+    /// (c) ApiKey path (api.anthropic.com): the gate skips, so the body is
+    /// completely untouched -- billing block stays, no identity, no metadata.
+    #[test]
+    fn cloak_body_api_key_path_leaves_body_untouched() {
+        let provider = AnthropicApiProvider::new(cfg_with_allowlist(Vec::new()));
+        let req = req_with_claude_code_headers(Vec::new());
+        let mut body = cloak_test_body();
+        let before = body.clone();
+
+        provider.cloak_body(&mut body, &req);
+
+        assert_eq!(
+            body, before,
+            "ApiKey path must leave the body untouched (gate skips)"
+        );
+    }
+
+    /// (d) OauthBearer + NON-anthropic host: the gate skips, so the body is
+    /// completely untouched.
+    #[test]
+    fn cloak_body_non_anthropic_host_leaves_body_untouched() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://example.invalid",
+            Some("session-stable-123".into()),
+            Vec::new(),
+        ));
+        let req = req_with_claude_code_headers(Vec::new());
+        let mut body = cloak_test_body();
+        let before = body.clone();
+
+        provider.cloak_body(&mut body, &req);
+
+        assert_eq!(
+            body, before,
+            "non-anthropic host must leave the body untouched (gate skips)"
         );
     }
 }

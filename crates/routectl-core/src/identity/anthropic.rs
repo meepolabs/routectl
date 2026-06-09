@@ -21,7 +21,7 @@
 //! advances so the wire fingerprint stays current.
 
 /// Claude Code CLI version routectl mimics in the default User-Agent.
-const CLAUDE_CLI_VERSION: &str = "2.1.167";
+const CLAUDE_CLI_VERSION: &str = "2.1.169";
 
 /// Stainless SDK package version stamped in `x-stainless-package-version`.
 const STAINLESS_PACKAGE_VERSION: &str = "0.94.0";
@@ -37,7 +37,7 @@ const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
 /// process; subsequent calls return the cached value.
 pub fn default_claude_code_user_agent() -> &'static str {
     static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    UA.get_or_init(|| format!("claude-cli/{CLAUDE_CLI_VERSION} (external, sdk-cli)"))
+    UA.get_or_init(|| format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"))
         .as_str()
 }
 
@@ -87,6 +87,9 @@ pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str
 /// surface when talking to api.anthropic.com. Merged into the composed
 /// anthropic-beta header before the context_management strip, bypassing
 /// the ingress allowlist (these are operator-equivalent pins).
+///
+/// 14 corpus-verified flags matching the set genuine Claude Code emits
+/// on the OAuth egress (confirmed against a captured request corpus).
 pub fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
     &[
         "claude-code-20250219",
@@ -98,6 +101,11 @@ pub fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
         "fast-mode-2026-02-01",
         "redact-thinking-2026-02-12",
         "token-efficient-tools-2026-03-28",
+        "context-1m-2025-08-07",
+        "thinking-token-count-2026-05-13",
+        "mid-conversation-system-2026-04-07",
+        "advisor-tool-2026-03-01",
+        "effort-2025-11-24",
     ]
 }
 
@@ -175,9 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_betas_floor_contains_all_nine_pinned_flags() {
+    fn anthropic_betas_floor_contains_all_fourteen_pinned_flags() {
         let betas = default_claude_code_anthropic_betas();
-        assert_eq!(betas.len(), 9, "floor must carry exactly 9 pinned betas");
+        assert_eq!(betas.len(), 14, "floor must carry exactly 14 pinned betas");
         let expected = [
             "claude-code-20250219",
             "oauth-2025-04-20",
@@ -188,6 +196,11 @@ mod tests {
             "fast-mode-2026-02-01",
             "redact-thinking-2026-02-12",
             "token-efficient-tools-2026-03-28",
+            "context-1m-2025-08-07",
+            "thinking-token-count-2026-05-13",
+            "mid-conversation-system-2026-04-07",
+            "advisor-tool-2026-03-01",
+            "effort-2025-11-24",
         ];
         for flag in &expected {
             assert!(
