@@ -77,9 +77,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 uuid = { version = "1", features = ["v4", "v7"] }
 
 # Bounded LRU cache (used by anthropic-api context_management
-# emulation). Pinned >=0.16 to avoid RUSTSEC-2026-0002 (Stacked
+# emulation). Pinned >=0.18 to avoid RUSTSEC-2026-0002 (Stacked
 # Borrows soundness in IterMut on lru < 0.16.3).
-lru = "0.16"
+lru = "0.18"
 
 # Filesystem watch + atomic Router hot-swap. `notify` is the
 # cross-platform fs-watch backend (inotify on Linux, FSEvents on
