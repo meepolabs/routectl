@@ -1,0 +1,633 @@
+//! Read-only windowed aggregation over the usage `requests` table.
+//!
+//! Every query takes an inclusive-exclusive epoch-ms window
+//! `[from_ms, to_ms)` and applies it as `ts_start >= ? AND ts_start < ?`
+//! with BOUND parameters only. This layer is pure data access: it sums and
+//! groups at the finest cost-relevant granularity and hands plain structs
+//! back. All rollup, percentile math, cost computation, and formatting
+//! belong to the caller (the `routectl usage` CLI), not here.
+
+use rusqlite::Row;
+
+use crate::db::UsageDb;
+
+/// Errors raised while querying the usage DB.
+#[derive(Debug, thiserror::Error)]
+pub enum QueryError {
+    /// A SQLite operation failed while reading.
+    #[error("usage query failed: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+/// The group-key columns shared by the aggregate and the raw-latency rows.
+/// `alias` is `NOT NULL` in the schema so it is always present; the rest are
+/// nullable. Plain data; the caller decides how to display or roll these up.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GroupKey {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub upstream: Option<String>,
+    pub alias: String,
+}
+
+/// One aggregate row at the finest cost-relevant granularity:
+/// `(model, provider, upstream, alias)`. Token dims are summed with
+/// COALESCE so NULL counters contribute 0. `server_tool_calls` is the sum
+/// of the integer values inside each row's `server_tool_use` JSON map (via
+/// JSON1 `json_each`), i.e. the total number of server-tool invocations --
+/// not a count of rows that used a server tool.
+#[derive(Debug, Clone)]
+pub struct AggRow {
+    pub key: GroupKey,
+    pub requests: i64,
+    pub ok: i64,
+    pub errors: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_tokens: i64,
+    pub cache_read: i64,
+    pub cache_write_5m: i64,
+    pub cache_write_1h: i64,
+    pub sum_latency_ms: i64,
+    pub max_latency_ms: i64,
+    pub server_tool_calls: i64,
+}
+
+/// The most recent quota-bearing snapshot in the DB. Mirrors the `quota_*`
+/// columns the daemon stamps on a row when an upstream reports quota data.
+#[derive(Debug, Clone)]
+pub struct QuotaSnapshot {
+    pub ts_start: i64,
+    pub claim: Option<String>,
+    pub status: Option<String>,
+    pub overage_status: Option<String>,
+    pub utilization: Option<f64>,
+    pub overage_utilization: Option<f64>,
+    pub reset: Option<i64>,
+}
+
+const AGG_SQL: &str = "\
+SELECT
+    model, provider, upstream, alias,
+    COUNT(*)                                            AS requests,
+    SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
+    SUM(CASE WHEN outcome != 'ok' THEN 1 ELSE 0 END)    AS errors,
+    COALESCE(SUM(input_tokens), 0)                      AS input_tokens,
+    COALESCE(SUM(output_tokens), 0)                     AS output_tokens,
+    COALESCE(SUM(reasoning_tokens), 0)                  AS reasoning_tokens,
+    COALESCE(SUM(cache_read), 0)                        AS cache_read,
+    COALESCE(SUM(cache_write_5m), 0)                    AS cache_write_5m,
+    COALESCE(SUM(cache_write_1h), 0)                    AS cache_write_1h,
+    COALESCE(SUM(latency_ms), 0)                        AS sum_latency_ms,
+    COALESCE(MAX(latency_ms), 0)                        AS max_latency_ms,
+    COALESCE(SUM(
+        CASE WHEN r.server_tool_use IS NOT NULL AND json_valid(r.server_tool_use)
+        THEN (
+            SELECT COALESCE(SUM(je.value), 0)
+            FROM json_each(r.server_tool_use) AS je
+            WHERE typeof(je.value) = 'integer'
+        )
+        ELSE 0 END
+    ), 0)                                               AS server_tool_calls
+FROM requests AS r
+WHERE ts_start >= ?1 AND ts_start < ?2
+GROUP BY model, provider, upstream, alias";
+
+/// Windowed aggregate grouped by `(model, provider, upstream, alias)`.
+/// Rows outside `[from_ms, to_ms)` are excluded. The caller rolls these up
+/// for display and prices them per upstream.
+pub fn aggregate(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<AggRow>, QueryError> {
+    let mut stmt = db.conn().prepare(AGG_SQL)?;
+    let rows = stmt
+        .query_map([from_ms, to_ms], map_agg_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Build an `AggRow` from a result row. The column order matches `AGG_SQL`.
+fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
+    Ok(AggRow {
+        key: GroupKey {
+            model: row.get(0)?,
+            provider: row.get(1)?,
+            upstream: row.get(2)?,
+            alias: row.get(3)?,
+        },
+        requests: row.get(4)?,
+        ok: row.get(5)?,
+        errors: row.get(6)?,
+        input_tokens: row.get(7)?,
+        output_tokens: row.get(8)?,
+        reasoning_tokens: row.get(9)?,
+        cache_read: row.get(10)?,
+        cache_write_5m: row.get(11)?,
+        cache_write_1h: row.get(12)?,
+        sum_latency_ms: row.get(13)?,
+        max_latency_ms: row.get(14)?,
+        server_tool_calls: row.get(15)?,
+    })
+}
+
+const LATEST_QUOTA_SQL: &str = "\
+SELECT ts_start, quota_claim, quota_status, quota_overage_status,
+       quota_utilization, quota_overage_utilization, quota_reset
+FROM requests
+WHERE quota_status IS NOT NULL
+ORDER BY ts_start DESC, rowid DESC
+LIMIT 1";
+
+/// The most recent row carrying quota data (`quota_status IS NOT NULL`),
+/// or `None` if no row has quota data. Not windowed: the CLI's quota line
+/// reflects the latest known snapshot regardless of the report window.
+pub fn latest_quota(db: &UsageDb) -> Result<Option<QuotaSnapshot>, QueryError> {
+    let mut stmt = db.conn().prepare(LATEST_QUOTA_SQL)?;
+    let snapshot = stmt
+        .query_row([], |row| {
+            Ok(QuotaSnapshot {
+                ts_start: row.get(0)?,
+                claim: row.get(1)?,
+                status: row.get(2)?,
+                overage_status: row.get(3)?,
+                utilization: row.get(4)?,
+                overage_utilization: row.get(5)?,
+                reset: row.get(6)?,
+            })
+        })
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    Ok(snapshot)
+}
+
+const LATENCIES_SQL: &str = "\
+SELECT model, provider, upstream, alias, latency_ms
+FROM requests
+WHERE ts_start >= ?1 AND ts_start < ?2 AND latency_ms IS NOT NULL";
+
+/// Raw in-window `latency_ms` values with their group keys, so the CLI can
+/// compute p95/max per display group (SQLite has no percentile function).
+/// Only non-null latencies are returned.
+pub fn latencies(
+    db: &UsageDb,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<(GroupKey, i64)>, QueryError> {
+    let mut stmt = db.conn().prepare(LATENCIES_SQL)?;
+    let rows = stmt
+        .query_map([from_ms, to_ms], |row| {
+            let key = GroupKey {
+                model: row.get(0)?,
+                provider: row.get(1)?,
+                upstream: row.get(2)?,
+                alias: row.get(3)?,
+            };
+            Ok((key, row.get::<_, i64>(4)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{open, open_readonly};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn temp_db_path() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("usage.db");
+        (dir, path)
+    }
+
+    /// Insert a row with explicit group keys, outcome, tokens, latency, and
+    /// optional server_tool_use JSON. Token args are Option to exercise the
+    /// NULL-contributes-0 path.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_row(
+        db: &UsageDb,
+        request_id: &str,
+        ts_start: i64,
+        model: &str,
+        provider: &str,
+        upstream: &str,
+        alias: &str,
+        outcome: &str,
+        input: Option<i64>,
+        output: Option<i64>,
+        latency_ms: i64,
+        server_tool_use: Option<&str>,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, stream, outcome, \
+                 latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+                 input_tokens, output_tokens, server_tool_use) \
+                 VALUES (?1, ?1, ?2, 'openai', 'req-model', ?3, ?4, ?5, ?6, 0, ?7, \
+                 ?8, 0, 0, 1, 0, ?9, ?10, ?11)",
+                rusqlite::params![
+                    ts_start,
+                    request_id,
+                    alias,
+                    model,
+                    provider,
+                    upstream,
+                    outcome,
+                    latency_ms,
+                    input,
+                    output,
+                    server_tool_use,
+                ],
+            )
+            .expect("insert row");
+    }
+
+    fn insert_quota_row(
+        db: &UsageDb,
+        request_id: &str,
+        ts_start: i64,
+        status: &str,
+        utilization: f64,
+        reset: i64,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, quota_status, \
+                 quota_utilization, quota_reset) \
+                 VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 0, 'ok', 0, 0, 0, 1, 0, \
+                 ?3, ?4, ?5)",
+                rusqlite::params![ts_start, request_id, status, utilization, reset],
+            )
+            .expect("insert quota row");
+    }
+
+    fn find_row<'a>(rows: &'a [AggRow], provider: &str, upstream: &str) -> &'a AggRow {
+        rows.iter()
+            .find(|r| {
+                r.key.provider.as_deref() == Some(provider)
+                    && r.key.upstream.as_deref() == Some(upstream)
+            })
+            .expect("group present")
+    }
+
+    #[test]
+    fn aggregate_groups_counts_and_sums_per_group() {
+        // Arrange: two (provider, upstream) pairs, two outcomes, NULL tokens.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        // Group A: provider=pa upstream=ua -- 2 ok + 1 error.
+        insert_row(
+            &db,
+            "a1",
+            100,
+            "m1",
+            "pa",
+            "ua",
+            "al",
+            "ok",
+            Some(10),
+            Some(20),
+            5,
+            None,
+        );
+        insert_row(
+            &db,
+            "a2",
+            110,
+            "m1",
+            "pa",
+            "ua",
+            "al",
+            "ok",
+            Some(5),
+            Some(7),
+            15,
+            None,
+        );
+        insert_row(
+            &db,
+            "a3",
+            120,
+            "m1",
+            "pa",
+            "ua",
+            "al",
+            "upstream_error",
+            None,
+            None,
+            25,
+            None,
+        );
+        // Group B: provider=pb upstream=ub -- 1 ok.
+        insert_row(
+            &db,
+            "b1",
+            130,
+            "m2",
+            "pb",
+            "ub",
+            "al",
+            "ok",
+            Some(3),
+            None,
+            9,
+            None,
+        );
+
+        // Act
+        let rows = aggregate(&db, 0, 1000).expect("aggregate");
+
+        // Assert: two groups.
+        assert_eq!(rows.len(), 2);
+        let a = find_row(&rows, "pa", "ua");
+        assert_eq!(a.requests, 3);
+        assert_eq!(a.ok, 2);
+        assert_eq!(a.errors, 1);
+        // input: 10 + 5 + 0(NULL) = 15; output: 20 + 7 + 0 = 27.
+        assert_eq!(a.input_tokens, 15);
+        assert_eq!(a.output_tokens, 27);
+        assert_eq!(a.sum_latency_ms, 45);
+        assert_eq!(a.max_latency_ms, 25);
+
+        let b = find_row(&rows, "pb", "ub");
+        assert_eq!(b.requests, 1);
+        assert_eq!(b.ok, 1);
+        assert_eq!(b.errors, 0);
+        assert_eq!(b.input_tokens, 3);
+        // output was NULL -> 0.
+        assert_eq!(b.output_tokens, 0);
+    }
+
+    #[test]
+    fn aggregate_excludes_rows_outside_window() {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_row(
+            &db,
+            "in",
+            500,
+            "m",
+            "p",
+            "u",
+            "a",
+            "ok",
+            Some(1),
+            Some(1),
+            1,
+            None,
+        );
+        insert_row(
+            &db,
+            "lo",
+            99,
+            "m",
+            "p",
+            "u",
+            "a",
+            "ok",
+            Some(1),
+            Some(1),
+            1,
+            None,
+        );
+        insert_row(
+            &db,
+            "hi",
+            1000,
+            "m",
+            "p",
+            "u",
+            "a",
+            "ok",
+            Some(1),
+            Some(1),
+            1,
+            None,
+        );
+
+        // Act: window [100, 1000) excludes ts 99 and ts 1000.
+        let rows = aggregate(&db, 100, 1000).expect("aggregate");
+
+        // Assert
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].requests, 1);
+    }
+
+    #[test]
+    fn aggregate_sums_server_tool_calls_from_json() {
+        // Arrange: two rows whose server_tool_use JSON maps carry int counts.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_row(
+            &db,
+            "s1",
+            100,
+            "m",
+            "p",
+            "u",
+            "a",
+            "ok",
+            None,
+            None,
+            1,
+            Some(r#"{"web_search": 2, "code_exec": 1}"#),
+        );
+        insert_row(
+            &db,
+            "s2",
+            110,
+            "m",
+            "p",
+            "u",
+            "a",
+            "ok",
+            None,
+            None,
+            1,
+            Some(r#"{"web_search": 3}"#),
+        );
+        // A row with no server tools contributes 0.
+        insert_row(
+            &db, "s3", 120, "m", "p", "u", "a", "ok", None, None, 1, None,
+        );
+
+        // Act
+        let rows = aggregate(&db, 0, 1000).expect("aggregate");
+
+        // Assert: 2 + 1 + 3 = 6 invocations across the group.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].server_tool_calls, 6);
+    }
+
+    #[test]
+    fn latest_quota_returns_most_recent_quota_row() {
+        // Arrange: two quota rows at different ts_start.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_quota_row(&db, "q-old", 100, "active", 0.10, 5_000);
+        insert_quota_row(&db, "q-new", 200, "throttled", 0.90, 9_000);
+        // A non-quota row must be ignored.
+        insert_row(
+            &db, "plain", 300, "m", "p", "u", "a", "ok", None, None, 1, None,
+        );
+
+        // Act
+        let snap = latest_quota(&db).expect("query").expect("some snapshot");
+
+        // Assert: the newer quota row wins.
+        assert_eq!(snap.ts_start, 200);
+        assert_eq!(snap.status.as_deref(), Some("throttled"));
+        assert_eq!(snap.utilization, Some(0.90));
+        assert_eq!(snap.reset, Some(9_000));
+    }
+
+    #[test]
+    fn latest_quota_returns_none_when_no_quota_rows() {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_row(
+            &db, "plain", 100, "m", "p", "u", "a", "ok", None, None, 1, None,
+        );
+
+        // Act + Assert
+        assert!(latest_quota(&db).expect("query").is_none());
+    }
+
+    #[test]
+    fn latencies_returns_in_window_values_with_keys() {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_row(
+            &db, "l1", 100, "m", "pa", "ua", "al", "ok", None, None, 11, None,
+        );
+        insert_row(
+            &db, "l2", 110, "m", "pa", "ua", "al", "ok", None, None, 22, None,
+        );
+        // Out of window.
+        insert_row(
+            &db, "l3", 5, "m", "pa", "ua", "al", "ok", None, None, 99, None,
+        );
+
+        // Act
+        let rows = latencies(&db, 100, 1000).expect("latencies");
+
+        // Assert: two in-window rows, both carrying their group key.
+        assert_eq!(rows.len(), 2);
+        let values: Vec<i64> = rows.iter().map(|(_, ms)| *ms).collect();
+        assert!(values.contains(&11));
+        assert!(values.contains(&22));
+        assert!(!values.contains(&99));
+        assert_eq!(rows[0].0.provider.as_deref(), Some("pa"));
+        assert_eq!(rows[0].0.upstream.as_deref(), Some("ua"));
+    }
+
+    #[test]
+    fn aggregate_over_readonly_open_matches_seeded_results() {
+        // Arrange: seed via the read-write open, then drop it so the file is
+        // read through the real CLI path (open_readonly).
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_row(
+            &db,
+            "ro-a1",
+            100,
+            "m1",
+            "pa",
+            "ua",
+            "al",
+            "ok",
+            Some(10),
+            Some(20),
+            5,
+            None,
+        );
+        insert_row(
+            &db,
+            "ro-a2",
+            110,
+            "m1",
+            "pa",
+            "ua",
+            "al",
+            "upstream_error",
+            None,
+            None,
+            15,
+            None,
+        );
+        drop(db);
+
+        // Act: read via the read-only open path.
+        let ro = open_readonly(&path).expect("open readonly");
+        let rows = aggregate(&ro, 0, 1000).expect("aggregate");
+
+        // Assert
+        assert_eq!(rows.len(), 1);
+        let a = find_row(&rows, "pa", "ua");
+        assert_eq!(a.requests, 2);
+        assert_eq!(a.ok, 1);
+        assert_eq!(a.errors, 1);
+        assert_eq!(a.input_tokens, 10);
+        assert_eq!(a.output_tokens, 20);
+        assert_eq!(a.sum_latency_ms, 20);
+        assert_eq!(a.max_latency_ms, 15);
+        assert_eq!(a.key.alias, "al");
+    }
+
+    #[test]
+    fn latest_quota_over_readonly_open_matches_seeded_results() {
+        // Arrange: seed quota rows, then drop the writer.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_quota_row(&db, "ro-q-old", 100, "active", 0.10, 5_000);
+        insert_quota_row(&db, "ro-q-new", 200, "throttled", 0.90, 9_000);
+        drop(db);
+
+        // Act
+        let ro = open_readonly(&path).expect("open readonly");
+        let snap = latest_quota(&ro).expect("query").expect("some snapshot");
+
+        // Assert: same most-recent row as the read-write path returns.
+        assert_eq!(snap.ts_start, 200);
+        assert_eq!(snap.status.as_deref(), Some("throttled"));
+        assert_eq!(snap.utilization, Some(0.90));
+        assert_eq!(snap.reset, Some(9_000));
+    }
+
+    #[test]
+    fn latencies_over_readonly_open_matches_seeded_results() {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_row(
+            &db, "ro-l1", 100, "m", "pa", "ua", "al", "ok", None, None, 11, None,
+        );
+        insert_row(
+            &db, "ro-l2", 110, "m", "pa", "ua", "al", "ok", None, None, 22, None,
+        );
+        insert_row(
+            &db, "ro-l3", 5, "m", "pa", "ua", "al", "ok", None, None, 99, None,
+        );
+        drop(db);
+
+        // Act
+        let ro = open_readonly(&path).expect("open readonly");
+        let rows = latencies(&ro, 100, 1000).expect("latencies");
+
+        // Assert: same in-window values as the read-write path.
+        assert_eq!(rows.len(), 2);
+        let values: Vec<i64> = rows.iter().map(|(_, ms)| *ms).collect();
+        assert!(values.contains(&11));
+        assert!(values.contains(&22));
+        assert!(!values.contains(&99));
+        assert_eq!(rows[0].0.alias, "al");
+    }
+}

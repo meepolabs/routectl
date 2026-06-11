@@ -161,8 +161,8 @@ listed at the bottom of each crate.
 ## routectl-router
 
 - `src/lib.rs` -- crate root; re-exports `Config`, `Router`, `ResolvedModel`, factory builders
-- `src/config.rs` -- TOML schema (`Config`, `ProviderEntry`, `ModelEntry`, `AliasValue`, `RetryPolicy`, `ServerAuth`, etc.)
-- `src/factory.rs` -- secret resolution + `build_provider`/`build_resolved_models`; validation guards; OAuth credential-pool expansion (a bare-pool `oauth://<provider>` ref with >1 stored seat builds one seat-pinned provider per seat via `list_seats`)
+- `src/config.rs` -- TOML schema (`Config`, `ProviderEntry`, `ModelEntry`, `AliasValue`, `RetryPolicy`, `ServerAuth`, `RegistryEntry`/`PricingConfig` pricing table, etc.); `Config::pricing_for` resolves an upstream-id glob (provider-scoped beats agnostic, then longest-prefix) to a `&PricingConfig`; `ProviderEntry::api_key_ref()` exposes the primary key ref (`None` for Bedrock) so the usage CLI can detect `oauth://` subscription providers
+- `src/factory.rs` -- secret resolution + `build_provider`/`build_resolved_models`; validation guards (incl. `validate_registry_patterns`, rejecting malformed `[registry]` glob keys at startup); OAuth credential-pool expansion (a bare-pool `oauth://<provider>` ref with >1 stored seat builds one seat-pinned provider per seat via `list_seats`)
 - `src/glob.rs` -- `[aliases]` table suffix-glob parser + longest-prefix lookup index (`AliasPattern`, `PrefixIndex`)
 - `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`; optional `seats` slice (one `SeatTarget` per OAuth pool seat, `None` for the single-seat / non-pooled case)
 - `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch; `expand_chain_to_targets` expands a pooled model into one per-seat `DispatchTarget` (seat order from `seat_pool`); `rate_limit_reset_hint` (clamp an `Error::Upstream.retry_after` to the configured ceiling) + `park_provider` (open the breaker for a honored reset) thread upstream resets into the three dispatch loops
@@ -202,8 +202,9 @@ listed at the bottom of each crate.
 
 Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a single background writer thread that persists one row per routed request to a local SQLite DB. The hot path never blocks/awaits/panics; overflow and disabled-gate drops are counted, not surfaced.
 
-- `src/lib.rs` -- crate root; re-exports `UsageHandle`/`UsageCounters`, `UsageRecord`/`Outcome`, `UsageWriter`/`CHANNEL_CAPACITY`, `UsageDb`/`open`, `prune`/`PruneOutcome`, schema + migrate constants
+- `src/lib.rs` -- crate root; re-exports `UsageHandle`/`UsageCounters`, `UsageRecord`/`Outcome`, `UsageWriter`/`CHANNEL_CAPACITY`, `UsageDb`/`open`/`open_readonly`, `aggregate`/`latencies`/`latest_quota`/`AggRow`/`GroupKey`/`QuotaSnapshot`, `prune`/`PruneOutcome`, `estimate_cost`/`estimate_cost_tokens`/`CostBreakdown`/`Rates`, schema + migrate constants
 - `src/record.rs` -- `UsageRecord` (one field per capture column; epoch-ms `i64` timestamps, nullable `Option<T>` columns) and the closed `Outcome` enum (`ok`, `upstream_error`, `client_disconnect`, `timeout`, `cancelled`, `gate_blocked`) with `as_str`/`FromStr` wire tokens that mirror the DB CHECK constraint
+- `src/cost.rs` -- pure leaf-safe cost estimation: `estimate_cost(&UsageRecord, &Rates)` and the aggregate-token entry point `estimate_cost_tokens(input, output, reasoning, cache_read, cache_write_5m, cache_write_1h, &Rates) -> Option<CostBreakdown>` (the record path converts its `Option<u64>` fields to `i64` and delegates; per-dimension `tokens * rate / 1e6`, `None` when the rate table is fully unpriced, `Some(0.0)` when priced with no tokens; reasoning excluded -- billed as output upstream); `Rates` is a usage-owned mirror of the router `PricingConfig` so the crate stays a leaf
 - `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never blocks/awaits/panics -- safe from `Drop`), runtime-flippable `enabled` gate, shared lock-free `UsageCounters` (enqueued / dropped_full / dropped_disabled / persisted / write_errors / prune_errors)
 - `src/writer.rs` -- `UsageWriter`: opens the DB once at boot (degrades to a no-op drain loop on open failure), drains the bounded channel on a dedicated thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`
 - `src/db.rs` -- `UsageDb` wrapper + `open`: connection setup (WAL, foreign keys), the `INSERT OR IGNORE` write keyed on the UNIQUE `request_id` (idempotency), schema-presence assertions
@@ -213,7 +214,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 
 ## routectl-cli
 
-- `src/main.rs` -- clap CLI entry point; dispatches `serve` / `login` / `logout` / `refresh` / `whoami` / `test` / `config` subcommands
+- `src/main.rs` -- clap CLI entry point; dispatches `serve` / `login` / `logout` / `refresh` / `whoami` / `test` / `config` / `usage` subcommands
 - `src/lib.rs` -- library surface exposing `commands`, `handlers`, `ingress`, `server` modules to integration tests
 
 ### server
@@ -246,7 +247,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 
 ### commands
 
-- `src/commands/mod.rs` -- groups CLI subcommand entry points (test, config, login, logout, refresh, whoami; `serve` lives in `crate::server`)
+- `src/commands/mod.rs` -- groups CLI subcommand entry points (test, config, login, logout, refresh, whoami, usage; `serve` lives in `crate::server`)
 - `src/commands/config.rs` -- `routectl config check/show/example` (secret resolution, alias chain validation)
 - `src/commands/test.rs` -- `routectl test <target>` one-shot completion against an alias or model nickname
 - `src/commands/login.rs` -- `routectl login <provider> [--label <name>]` runs the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via `OAuthStore`; `--label` registers an additional seat without overwriting the default; `--print-url` headless flow guarded against providers without a paste-back landing page
@@ -254,6 +255,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 - `src/commands/refresh.rs` -- `routectl refresh <provider> [--label <name>]` -- forces a refresh of one seat through the per-seat single-flight gate, regardless of expiry
 - `src/commands/whoami.rs` -- `routectl whoami` -- prints OAuth seat state grouped by provider (default seat as `<provider> (default)`, labeled seats as `<provider>#<label>`), each with its own expiry; exits 0 when at least one seat is logged in, 2 otherwise
 - `src/commands/seat.rs` -- shared `--label` validation for the seat-aware OAuth commands (rejects empty/whitespace labels, mirroring the `oauth://` ref parser)
+- `src/commands/usage.rs` -- `routectl usage` read surface over the usage DB (read-only). Calendar windows (`--today`/`--this-week` (Monday-start ISO week)/`--this-month`/`--all`) and ad-hoc `--since D [--until E]` ranges computed in LOCAL time against an injectable `now` (testable window-math fns); no flag + no `--since` prints a multi-window summary. `build_window_report` aggregates, rolls fine `AggRow`s up to `--by model|provider|alias` (or a single total), and bifurcates cost: a provider whose `[providers.X] api_key_ref` starts `oauth://` is subscription (`n/a (subscription)`, no $), an API-key provider prices its summed tokens via `Config::pricing_for` -> `estimate_cost_tokens` (`$X.XX` or `n/a` when unpriced). `--detail` adds cache-write split + nearest-rank p95/max latency + wall-time + server-tool counts. Footer: cache-hit-rate (`cache_read / (cache_read + input)`, divide-by-zero guarded) and error count. `OpenError::NoData` -> friendly stdout + exit 0; `VersionTooNew` -> hard error
 
 ### Tests
 

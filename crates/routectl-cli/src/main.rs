@@ -123,6 +123,44 @@ enum Cmd {
         #[command(subcommand)]
         action: ConfigCmd,
     },
+    /// Summarize recorded usage from the local usage DB (read-only).
+    ///
+    /// With no window flag and no `--since`, prints a multi-window
+    /// summary (today / this week / this month / all time). Calendar
+    /// windows use LOCAL time; the week starts Monday.
+    Usage {
+        /// Usage since local midnight today.
+        #[arg(long, group = "window")]
+        today: bool,
+        /// Usage since Monday 00:00 local of the current week.
+        #[arg(long = "this-week", group = "window")]
+        this_week: bool,
+        /// Usage since the 1st of the current month, 00:00 local.
+        #[arg(long = "this-month", group = "window")]
+        this_month: bool,
+        /// All recorded usage.
+        #[arg(long, group = "window")]
+        all: bool,
+        /// Ad-hoc range start (YYYY-MM-DD, local). Conflicts with the
+        /// window flags.
+        #[arg(long, conflicts_with = "window")]
+        since: Option<String>,
+        /// Ad-hoc range end (YYYY-MM-DD, local). Defaults to now.
+        /// Only valid with `--since`.
+        #[arg(long, requires = "since")]
+        until: Option<String>,
+        /// Break the report down by this dimension instead of a single
+        /// total row.
+        #[arg(long, value_parser = ["model", "provider", "alias"])]
+        by: Option<String>,
+        /// Show extra columns (cache-write split, p95/max latency, total
+        /// wall-time, server-tool counts).
+        #[arg(long)]
+        detail: bool,
+        /// Override the usage DB path. Defaults to `[usage] db_path`.
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -236,6 +274,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Cmd::Usage {
+            today,
+            this_week,
+            this_month,
+            all,
+            since,
+            until,
+            by,
+            detail,
+            db,
+        } => {
+            let config = load_config(cli.config.as_deref())?;
+            let window = if today {
+                commands::usage::WindowFlag::Today
+            } else if this_week {
+                commands::usage::WindowFlag::ThisWeek
+            } else if this_month {
+                commands::usage::WindowFlag::ThisMonth
+            } else if all {
+                commands::usage::WindowFlag::All
+            } else {
+                commands::usage::WindowFlag::None
+            };
+            let args = commands::usage::UsageArgs {
+                window,
+                since,
+                until,
+                by: by.as_deref().and_then(commands::usage::GroupDim::parse),
+                detail,
+                db,
+            };
+            if let Err(e) = commands::usage::run(&config, &args) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())

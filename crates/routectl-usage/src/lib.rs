@@ -7,17 +7,21 @@
 //! call `try_send`, which never blocks; a dedicated OS thread owns the
 //! blocking connection and performs the INSERTs.
 
+mod cost;
 mod db;
 mod handle;
 mod migrate;
+mod query;
 mod record;
 mod retention;
 mod schema;
 mod writer;
 
-pub use db::{open, OpenError, UsageDb};
+pub use cost::{estimate_cost, estimate_cost_tokens, CostBreakdown, Rates};
+pub use db::{open, open_readonly, OpenError, UsageDb};
 pub use handle::{UsageCounters, UsageHandle};
 pub use migrate::MigrateError;
+pub use query::{aggregate, latencies, latest_quota, AggRow, GroupKey, QueryError, QuotaSnapshot};
 pub use record::{Outcome, ParseOutcomeError, UsageRecord};
 pub use retention::{prune, PruneOutcome};
 pub use schema::{META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION};

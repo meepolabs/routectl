@@ -10,9 +10,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::migrate::{migrate_to_current, MigrateError};
+use crate::schema::SCHEMA_VERSION;
 
 /// Owns an open usage-DB connection. The later writer task takes
 /// ownership of this wrapper.
@@ -74,6 +75,18 @@ pub enum OpenError {
     /// The migrate-on-open ladder failed.
     #[error("usage db migration failed: {0}")]
     Migrate(#[from] MigrateError),
+
+    /// The read-only viewer found no usage data yet: either the file is
+    /// absent or the `requests` table has never been created. The CLI can
+    /// turn this into a friendly "no usage data yet" message.
+    #[error("no usage data yet at {path}")]
+    NoData { path: String },
+
+    /// The on-disk DB reports a schema version newer than this binary
+    /// understands. A read-only viewer refuses to guess at a future
+    /// layout rather than silently misread it.
+    #[error("usage db schema version {found} is newer than supported {supported}")]
+    VersionTooNew { found: i64, supported: i64 },
 }
 
 /// Current wall-clock time as epoch milliseconds. Saturates to 0 if the
@@ -200,6 +213,77 @@ pub fn open(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
     );
 
     Ok(UsageDb { conn, path })
+}
+
+/// Open the usage DB at `path` for reading only. Unlike `open`, this does
+/// NOT create the file, chmod it, switch journal modes, or migrate -- the
+/// daemon is the sole writer and may be live; a viewer must not mutate the
+/// file out from under it. WAL readers do not block the writer, but a busy
+/// timeout is still set for safety. A missing file or a missing `requests`
+/// table surfaces as `NoData` so the CLI can print a friendly message; a
+/// DB newer than this binary surfaces as `VersionTooNew` rather than being
+/// misread.
+pub fn open_readonly(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
+    let path = path.as_ref().to_path_buf();
+    if !path.exists() {
+        return Err(OpenError::NoData {
+            path: path.display().to_string(),
+        });
+    }
+
+    let conn =
+        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|source| {
+            OpenError::Open {
+                path: path.display().to_string(),
+                source,
+            }
+        })?;
+
+    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))
+        .map_err(OpenError::Pragma)?;
+
+    verify_readable_version(&conn)?;
+    ensure_requests_table(&conn, &path)?;
+
+    Ok(UsageDb { conn, path })
+}
+
+/// Reject a DB whose on-disk `PRAGMA user_version` is newer than this
+/// binary understands. Equal-or-older is readable by a non-migrating
+/// viewer.
+fn verify_readable_version(conn: &Connection) -> Result<(), OpenError> {
+    let found: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(OpenError::Pragma)?;
+    if found > SCHEMA_VERSION {
+        return Err(OpenError::VersionTooNew {
+            found,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    Ok(())
+}
+
+/// Treat a DB that exists but has no `requests` table (a fresh,
+/// never-written file) as having no usage data yet. A missing table makes
+/// the existence probe return zero rows (`QueryReturnedNoRows`); any other
+/// SQLite error (corruption, I/O, lock) is a real failure and must surface
+/// as such rather than being masked as "no data".
+fn ensure_requests_table(conn: &Connection, path: &Path) -> Result<(), OpenError> {
+    match conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='requests'",
+        [],
+        |_| Ok(()),
+    ) {
+        Ok(()) => Ok(()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(OpenError::NoData {
+            path: path.display().to_string(),
+        }),
+        Err(source) => Err(OpenError::Open {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
 }
 
 /// SQLite busy timeout for this open path, in milliseconds. The
@@ -625,5 +709,105 @@ mod tests {
     #[test]
     fn usage_record_field_count_is_referenced() {
         let _ = std::mem::size_of::<UsageRecord>();
+    }
+
+    #[test]
+    fn open_readonly_on_nonexistent_path_returns_no_data() {
+        // Arrange: a path that does not exist.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("absent.db");
+
+        // Act
+        let result = open_readonly(&path);
+
+        // Assert: NoData, and the file was NOT created.
+        assert!(matches!(result, Err(OpenError::NoData { .. })));
+        assert!(!path.exists(), "open_readonly must not create the file");
+    }
+
+    #[test]
+    fn open_readonly_on_fresh_unwritten_db_returns_no_data() {
+        // Arrange: a file exists but has no `requests` table.
+        let (_dir, path) = temp_db_path();
+        let _conn = Connection::open(&path).expect("create empty sqlite file");
+
+        // Act
+        let result = open_readonly(&path);
+
+        // Assert
+        assert!(matches!(result, Err(OpenError::NoData { .. })));
+    }
+
+    #[test]
+    fn open_readonly_reads_a_seeded_db() {
+        // Arrange: seed via the read-write open path.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("seed db");
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count) \
+                 VALUES (10, 20, 'r-ro', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0)",
+                [],
+            )
+            .expect("seed row");
+        drop(db);
+
+        // Act
+        let ro = open_readonly(&path).expect("open readonly");
+
+        // Assert
+        let count: i64 = ro
+            .conn()
+            .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn open_readonly_rejects_newer_version() {
+        // Arrange: seed a normal DB, then bump user_version above support.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("seed db");
+        db.conn()
+            .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
+            .expect("bump version");
+        drop(db);
+
+        // Act
+        let result = open_readonly(&path);
+
+        // Assert
+        assert!(matches!(result, Err(OpenError::VersionTooNew { .. })));
+    }
+
+    #[test]
+    fn open_readonly_accepts_equal_version() {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("seed db");
+        drop(db);
+
+        // Act + Assert: equal version is readable by a non-migrating viewer.
+        let ro = open_readonly(&path);
+        assert!(ro.is_ok());
+    }
+
+    #[test]
+    fn open_readonly_sets_busy_timeout() {
+        // Arrange
+        let (_dir, path) = temp_db_path();
+        drop(open(&path).expect("seed db"));
+
+        // Act
+        let ro = open_readonly(&path).expect("open readonly");
+        let timeout: i64 = ro
+            .conn()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .expect("read busy_timeout");
+
+        // Assert
+        assert_eq!(timeout, BUSY_TIMEOUT_MS as i64);
     }
 }

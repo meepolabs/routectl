@@ -14,8 +14,9 @@ pub mod runtime_state;
 pub(crate) mod seat_pool;
 
 pub use config::{
-    AliasValue, Config, HistoryReasoning, LogConfig, ModelEntry, ProviderEntry,
-    ProviderRuntimePolicy, ReasoningDialect, RetryPolicy, ServerAuth, ServerConfig, UsageConfig,
+    AliasValue, Config, HistoryReasoning, LogConfig, ModelEntry, PricingConfig, ProviderEntry,
+    ProviderRuntimePolicy, ReasoningDialect, RegistryEntry, RetryPolicy, ServerAuth, ServerConfig,
+    UsageConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
@@ -23,7 +24,8 @@ pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig}
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
     build_provider, build_provider_with_options, build_resolved_models,
-    validate_alias_chain_targets, validate_reasoning_defaults, validate_retry_policy, BuildOptions,
+    validate_alias_chain_targets, validate_reasoning_defaults, validate_registry_patterns,
+    validate_retry_policy, BuildOptions,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use resolved::ResolvedModel;

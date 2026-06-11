@@ -499,6 +499,10 @@ pub(crate) async fn build_router_from_config(
     // letting the silently-ignored denylist mask operator intent.
     routectl_router::validate_retry_policy(&config)?;
 
+    // Reject malformed `[registry]` glob keys at startup so query-time
+    // cost resolution never silently skips a key it cannot parse.
+    routectl_router::validate_registry_patterns(&config)?;
+
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
         .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
@@ -960,6 +964,10 @@ async fn read_parse_validate_config(path: &Path) -> Option<Arc<Config>> {
     }
     if let Err(e) = routectl_router::validate_retry_policy(&new_config) {
         tracing::warn!(error = %e, "config reload rejected by validate_retry_policy; keeping previous config");
+        return None;
+    }
+    if let Err(e) = routectl_router::validate_registry_patterns(&new_config) {
+        tracing::warn!(error = %e, "config reload rejected by validate_registry_patterns; keeping previous config");
         return None;
     }
 

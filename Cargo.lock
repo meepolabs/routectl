@@ -2448,6 +2448,7 @@ dependencies = [
  "routectl-providers",
  "routectl-router",
  "routectl-usage",
+ "rusqlite",
  "serde",
  "serde_json",
  "serial_test",

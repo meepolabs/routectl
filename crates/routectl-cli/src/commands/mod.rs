@@ -9,4 +9,5 @@ pub mod logout;
 pub mod refresh;
 pub mod seat;
 pub mod test;
+pub mod usage;
 pub mod whoami;

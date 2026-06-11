@@ -43,6 +43,9 @@ sections:
 
 [usage]               # usage-accounting subsystem: enabled, db_path,
                       # retention_days. Optional.
+
+[registry."<glob>"]   # per-upstream pricing for cost estimation.
+                      # Optional; no defaults shipped.
 ```
 
 [`examples/config.toml`](../examples/config.toml) is a working
@@ -836,6 +839,110 @@ retention_days = 90                     # prune rows older than this; default 90
 - `retention_days` -- on daemon startup, rows older than this many days
   are pruned from the database. Hot-reloads; the new value applies at
   the next startup-time prune.
+
+## Pricing registry (`[registry."<pattern>".pricing]`)
+
+The optional `[registry]` table supplies per-upstream prices so usage
+rows can carry a cost estimate. routectl ships **no price defaults** --
+an upstream with no matching entry is simply unpriced. Cost is computed
+at **query time**, never persisted, so correcting a price later
+retroactively fixes the cost of every historical row priced by that
+entry.
+
+```toml
+[registry."deepseek-*"]
+# optional provider scope; omit to price the upstream for any provider
+provider = "my-deepseek"
+
+[registry."deepseek-*".pricing]
+input_per_mtok          = 0.27   # USD per million input tokens
+output_per_mtok         = 1.10   # USD per million output tokens
+cache_read_per_mtok     = 0.07   # USD per million cache-read tokens
+cache_write_5m_per_mtok = 0.50   # USD per million 5-minute cache-write tokens
+cache_write_1h_per_mtok = 0.90   # USD per million 1-hour cache-write tokens
+```
+
+All five `*_per_mtok` fields are optional and expressed in USD per
+million tokens. A field left unset means that dimension is unpriced and
+contributes nothing to the estimate. There is intentionally no reasoning
+rate: reasoning tokens are billed as output upstream, so they are never
+a separate cost dimension.
+
+**Key semantics.** Each `[registry]` key is an upstream-id glob, parsed
+the same way alias keys are:
+
+- an **exact** id (`"deepseek-chat"`) matches that id only;
+- a **trailing-`*` prefix** (`"deepseek-*"`) matches any id starting
+  with the prefix.
+
+Bare `*` and embedded asterisks (`"a*b"`) are rejected at startup by
+`config check` and by `serve`/`test`. When several keys match one
+upstream, the resolver picks the best by:
+
+1. **provider scope first** -- an entry whose `provider` equals the
+   request's provider beats a provider-agnostic entry (no `provider`).
+   An entry scoped to a *different* provider is never eligible.
+2. **longest matching prefix next** -- among entries of equal scope, the
+   longest prefix wins. An exact key behaves like a maximal-length
+   prefix, so an exact match beats any shorter prefix.
+
+The optional `provider` scope lets the same upstream id served by two
+different providers be priced differently -- give each a distinct key
+(the table is keyed by pattern string) and set `provider` on the scoped
+one.
+
+## Reading usage (`routectl usage`)
+
+`routectl usage` is the read surface over the usage database. It opens
+the DB **read-only** (never writes, never migrates, safe to run while the
+daemon is live) and prints an aligned ASCII report.
+
+```bash
+./routectl usage                       # multi-window summary (default)
+./routectl usage --today               # one calendar window
+./routectl usage --this-week --by provider
+./routectl usage --since 2026-06-01 --until 2026-06-07 --detail
+./routectl usage --all --db /path/to/usage.db
+```
+
+**Windows (LOCAL time).** Exactly one window selector may be given:
+
+| Flag           | Range                                            |
+|----------------|--------------------------------------------------|
+| `--today`      | local midnight today -> now                      |
+| `--this-week`  | Monday 00:00 of the current ISO week -> now      |
+| `--this-month` | the 1st at 00:00 -> now                           |
+| `--all`        | all recorded rows                                |
+| `--since D [--until E]` | `D` 00:00 -> end of `E` (or now if omitted), local |
+
+The ISO week starts **Monday**. With no window flag and no `--since`,
+the command prints a multi-window summary (today / this week / this
+month / all time) as separate blocks. There are no rolling
+1h/24h/7d/30d windows.
+
+**Breakdown.** `--by model|provider|alias` rolls the rows up to that
+dimension; omit `--by` for a single total row. `--detail` adds extra
+columns: the 5m/1h cache-write split, p95 (nearest-rank) and max
+latency, total wall-time (summed `latency_ms`), and server-tool counts.
+
+**Cost.** Cost is derived from `[registry]` pricing at read time. The
+dollar column has three states:
+
+- `$X.XX` -- an API-key provider with a matching `[registry]` price.
+- `n/a (subscription)` -- a managed-OAuth provider (its
+  `[providers.X] api_key_ref` starts with `oauth://`). Subscription usage
+  has no per-token dollar cost; the **quota line** under the table is the
+  real spend signal.
+- `n/a` -- an API-key provider whose upstream has no `[registry]` price.
+
+A footer reports the window's cache-hit-rate
+(`cache_read / (cache_read + input)`) and error count.
+
+If the database does not exist yet (or has never been written), the
+command prints `no usage data yet (...)` and exits 0 -- it is not an
+error. A database written by a newer routectl than the running binary is
+refused with a clear error rather than misread. `--db` overrides the
+`[usage] db_path` for one invocation.
 
 ## Validating config
 

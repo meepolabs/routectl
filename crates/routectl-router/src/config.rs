@@ -76,6 +76,18 @@ pub struct Config {
     /// under the user config dir, 90-day retention.
     #[serde(default)]
     pub usage: UsageConfig,
+
+    /// Operator-facing `[registry]` pricing table. Each key is an
+    /// upstream-id glob (an exact id or a trailing-`*` prefix, parsed
+    /// via `AliasPattern`); each value carries optional per-million-token
+    /// pricing and an optional `provider` scope. routectl ships NO price
+    /// defaults -- an unlisted upstream is simply unpriced. Cost is
+    /// derived at QUERY time from this table, so correcting a price later
+    /// retroactively fixes the cost of historical rows. The table is
+    /// named `[registry.*]` deliberately (room to grow capability
+    /// metadata later); only pricing is wired today.
+    #[serde(default)]
+    pub registry: BTreeMap<String, RegistryEntry>,
 }
 
 /// Operator-facing `[log]` config block. Each field mirrors a
@@ -170,6 +182,90 @@ fn default_usage_db_path() -> PathBuf {
         },
     };
     base.join("routectl").join("usage.db")
+}
+
+/// Per-million-token pricing for one `[registry.*]` entry. All fields
+/// are USD per million tokens and all are optional -- routectl ships no
+/// price defaults, so any field left unset means "this dimension is
+/// unpriced" and contributes nothing to a derived cost. Cost is computed
+/// at query time, never persisted, so a corrected price retroactively
+/// fixes historical rows.
+///
+/// `Eq` is deliberately NOT derived: `f64` is not `Eq`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PricingConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_per_mtok: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_per_mtok: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_per_mtok: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m_per_mtok: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_per_mtok: Option<f64>,
+}
+
+/// One row in the `[registry]` table. Keyed by an upstream-id glob
+/// (exact id or trailing-`*` prefix). Carries optional pricing and an
+/// optional `provider` scope so the same upstream id served by two
+/// providers can be priced differently. The block is named `[registry.*]`
+/// deliberately to leave room for future capability metadata (e.g.
+/// `[registry.*.capabilities]`); only `pricing` is built today.
+///
+/// `Eq` is deliberately NOT derived: `PricingConfig` carries `f64`.
+///
+/// Unknown fields are tolerated here (no `deny_unknown_fields`): the
+/// block is intended to grow a future `[registry.*.capabilities]`
+/// sub-table, so a newer config carrying that key must not fail against
+/// an older binary. `PricingConfig` still rejects typos (its field set
+/// is stable).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RegistryEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<PricingConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+impl Config {
+    /// Resolve the best pricing for an upstream id served by a given
+    /// provider. Walks the `[registry]` table, keeps only eligible
+    /// entries (pattern matches `upstream`, the entry HAS pricing, and
+    /// the entry's provider scope is either this provider or agnostic),
+    /// and returns the best match.
+    ///
+    /// Ordering: a provider-scoped match beats a provider-agnostic one;
+    /// among equal scope, the longest matching prefix wins (an exact key
+    /// has a prefix length equal to the full id, so it naturally beats a
+    /// shorter prefix). When scope AND prefix length tie -- an Exact key
+    /// and a same-length Prefix key both matching the same upstream -- the
+    /// Exact key wins (it is the more specific intent). An entry scoped to
+    /// some OTHER provider is never eligible. Keys that fail to parse are
+    /// skipped here -- startup validation (`validate_registry_patterns`)
+    /// rejects them.
+    pub fn pricing_for(&self, upstream: &str, provider: &str) -> Option<&PricingConfig> {
+        self.registry
+            .iter()
+            .filter_map(|(key, entry)| {
+                let pricing = entry.pricing.as_ref()?;
+                let pattern = crate::glob::AliasPattern::parse(key).ok()?;
+                if !pattern.matches(upstream) {
+                    return None;
+                }
+                let scoped = match entry.provider.as_deref() {
+                    Some(p) if p == provider => true,
+                    Some(_) => return None,
+                    None => false,
+                };
+                let is_exact = matches!(pattern, crate::glob::AliasPattern::Exact(_));
+                Some((scoped, pattern.prefix_len(), is_exact, pricing))
+            })
+            .max_by_key(|(scoped, prefix_len, is_exact, _)| (*scoped, *prefix_len, *is_exact))
+            .map(|(_, _, _, pricing)| pricing)
+    }
 }
 
 /// One row in the `[models]` table. Carries the nickname-to-upstream
@@ -873,6 +969,21 @@ impl ProviderEntry {
             Self::Bedrock { .. } => "bedrock",
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses { .. } => "openai-responses",
+        }
+    }
+
+    /// The primary `api_key_ref` URI for this entry, or `None` for
+    /// variants with no single canonical key slot (Bedrock). The usage
+    /// CLI inspects this to detect a subscription provider (an
+    /// `oauth://`-prefixed ref), which has no per-token dollar cost.
+    pub fn api_key_ref(&self) -> Option<&str> {
+        match self {
+            Self::OpenaiCompat { api_key_ref, .. } => Some(api_key_ref),
+            Self::AnthropicApi { api_key_ref, .. } => Some(api_key_ref),
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses { api_key_ref, .. } => Some(api_key_ref),
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { .. } => None,
         }
     }
 
@@ -2811,5 +2922,187 @@ bogus_key = 1
         let result = toml::from_str::<Config>(toml_text);
         // Assert
         assert!(result.is_err(), "unknown [usage] key must reject; got Ok");
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    //! Tests for the `[registry.*]` pricing table: parsing, the
+    //! `deny_unknown_fields` guard inside `[pricing]`, and the
+    //! `Config::pricing_for` glob resolver.
+
+    use super::Config;
+
+    #[test]
+    fn registry_pricing_block_parses() {
+        // Arrange
+        let toml_text = r#"
+[registry."deepseek-*"]
+
+[registry."deepseek-*".pricing]
+input_per_mtok = 0.27
+output_per_mtok = 1.1
+cache_read_per_mtok = 0.07
+cache_write_5m_per_mtok = 0.5
+cache_write_1h_per_mtok = 0.9
+"#;
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse registry block");
+
+        // Assert
+        let entry = cfg.registry.get("deepseek-*").expect("entry present");
+        let pricing = entry.pricing.as_ref().expect("pricing present");
+        assert_eq!(pricing.input_per_mtok, Some(0.27));
+        assert_eq!(pricing.output_per_mtok, Some(1.1));
+        assert_eq!(pricing.cache_read_per_mtok, Some(0.07));
+        assert_eq!(pricing.cache_write_5m_per_mtok, Some(0.5));
+        assert_eq!(pricing.cache_write_1h_per_mtok, Some(0.9));
+        assert!(entry.provider.is_none());
+    }
+
+    #[test]
+    fn registry_pricing_rejects_unknown_field() {
+        // Arrange: typo'd `inputs_per_mtok` inside [pricing].
+        let toml_text = r#"
+[registry."deepseek-*".pricing]
+inputs_per_mtok = 0.27
+"#;
+        // Act
+        let result = toml::from_str::<Config>(toml_text);
+
+        // Assert
+        assert!(
+            result.is_err(),
+            "unknown [registry.*.pricing] key must reject; got Ok"
+        );
+    }
+
+    fn priced(input: f64) -> super::PricingConfig {
+        super::PricingConfig {
+            input_per_mtok: Some(input),
+            ..super::PricingConfig::default()
+        }
+    }
+
+    fn config_with_registry(entries: Vec<(&str, Option<&str>, super::PricingConfig)>) -> Config {
+        let mut cfg = Config::default();
+        for (key, provider, pricing) in entries {
+            cfg.registry.insert(
+                key.to_string(),
+                super::RegistryEntry {
+                    pricing: Some(pricing),
+                    provider: provider.map(str::to_string),
+                },
+            );
+        }
+        cfg
+    }
+
+    #[test]
+    fn pricing_for_exact_beats_prefix() {
+        // Arrange
+        let cfg = config_with_registry(vec![
+            ("deepseek-*", None, priced(1.0)),
+            ("deepseek-chat", None, priced(2.0)),
+        ]);
+
+        // Act
+        let pricing = cfg.pricing_for("deepseek-chat", "any").expect("match");
+
+        // Assert: the exact key wins over the prefix.
+        assert_eq!(pricing.input_per_mtok, Some(2.0));
+    }
+
+    /// Equal-length Exact-vs-Prefix tie: key `"deepseek*"` parses to a
+    /// Prefix with stored prefix "deepseek" (len 8) and key `"deepseek"`
+    /// parses to an Exact (len 8). Both match upstream "deepseek" with an
+    /// IDENTICAL prefix_len, so scope and length cannot break the tie --
+    /// the Exact entry must win on the is_exact tie-break.
+    #[test]
+    fn pricing_for_exact_beats_equal_length_prefix() {
+        // Arrange
+        let cfg = config_with_registry(vec![
+            ("deepseek*", None, priced(1.0)),
+            ("deepseek", None, priced(2.0)),
+        ]);
+
+        // Act
+        let pricing = cfg.pricing_for("deepseek", "any").expect("match");
+
+        // Assert: the exact entry wins the equal-length tie.
+        assert_eq!(pricing.input_per_mtok, Some(2.0));
+    }
+
+    #[test]
+    fn pricing_for_longer_prefix_beats_shorter() {
+        // Arrange
+        let cfg = config_with_registry(vec![
+            ("deep*", None, priced(1.0)),
+            ("deepseek-*", None, priced(2.0)),
+        ]);
+
+        // Act
+        let pricing = cfg.pricing_for("deepseek-chat", "any").expect("match");
+
+        // Assert
+        assert_eq!(pricing.input_per_mtok, Some(2.0));
+    }
+
+    #[test]
+    fn pricing_for_provider_scoped_preferred_over_agnostic() {
+        // Arrange: two entries match the same upstream -- one agnostic,
+        // one scoped to `vendor-a`. They use distinct glob keys (the
+        // table is keyed by pattern string, so a same-pattern collision
+        // would dedupe; provider scoping rides on distinct keys).
+        let cfg = config_with_registry(vec![
+            ("deepseek-*", None, priced(1.0)),
+            ("deepseek-c*", Some("vendor-a"), priced(2.0)),
+        ]);
+
+        // Act + Assert: matching provider gets the scoped price even
+        // though it is the SHORTER-matching... here the scoped key is
+        // longer, but scope is the primary key so verify scope wins by
+        // making the agnostic key at least as long.
+        let scoped = cfg
+            .pricing_for("deepseek-chat", "vendor-a")
+            .expect("scoped match");
+        assert_eq!(scoped.input_per_mtok, Some(2.0));
+
+        // A different provider falls back to the agnostic entry; the
+        // entry scoped to vendor-a is NOT eligible for vendor-b.
+        let agnostic = cfg
+            .pricing_for("deepseek-chat", "vendor-b")
+            .expect("agnostic match");
+        assert_eq!(agnostic.input_per_mtok, Some(1.0));
+    }
+
+    #[test]
+    fn pricing_for_scope_beats_longer_agnostic_prefix() {
+        // Arrange: the agnostic entry has the LONGER prefix; scope must
+        // still win because provider-scope is the primary sort key.
+        let cfg = config_with_registry(vec![
+            ("deepseek-chat-v3", None, priced(1.0)),
+            ("deepseek-*", Some("vendor-a"), priced(2.0)),
+        ]);
+
+        // Act
+        let scoped = cfg
+            .pricing_for("deepseek-chat-v3", "vendor-a")
+            .expect("scoped match");
+
+        // Assert: scope beats the longer agnostic prefix.
+        assert_eq!(scoped.input_per_mtok, Some(2.0));
+    }
+
+    #[test]
+    fn pricing_for_no_match_returns_none() {
+        // Arrange
+        let cfg = config_with_registry(vec![("deepseek-*", None, priced(1.0))]);
+
+        // Act
+        let result = cfg.pricing_for("gpt-4o", "any");
+
+        // Assert
+        assert!(result.is_none(), "no glob matches => None");
     }
 }

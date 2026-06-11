@@ -63,6 +63,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 insta.workspace = true
 tempfile = "3"
 serial_test = "3"
+# Used by the `routectl usage` command tests to seed rows directly into a
+# temp usage DB via raw SQL. Test-only; the release binary never links it.
+rusqlite = { version = "0.37", features = ["bundled"] }
 # Used by the `oauth://codex` live-matrix test to decode the
 # `chatgpt_account_id` claim out of a real ChatGPT bearer JWT.
 base64 = "0.22"

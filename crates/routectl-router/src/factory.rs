@@ -528,14 +528,7 @@ async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
 /// their creds shape is multi-field and the caller doesn't need a
 /// single canonical SecretRef for the self-heal hook today.
 fn primary_api_key_uri(entry: &ProviderEntry) -> Option<&str> {
-    match entry {
-        ProviderEntry::OpenaiCompat { api_key_ref, .. } => Some(api_key_ref),
-        ProviderEntry::AnthropicApi { api_key_ref, .. } => Some(api_key_ref),
-        #[cfg(feature = "openai-responses")]
-        ProviderEntry::OpenaiResponses { api_key_ref, .. } => Some(api_key_ref),
-        #[cfg(feature = "bedrock")]
-        ProviderEntry::Bedrock { .. } => None,
-    }
+    entry.api_key_ref()
 }
 
 /// Clone a provider entry with its primary `api_key_ref` swapped for a
@@ -1484,6 +1477,24 @@ pub fn validate_retry_policy(config: &crate::config::Config) -> Result<()> {
              these`)"
                 .into(),
         ));
+    }
+    Ok(())
+}
+
+/// Validate that every `[registry]` key is a well-formed upstream-id
+/// glob -- an exact id or a single trailing-`*` prefix. Embedded or bare
+/// asterisks are rejected here at startup so the cost resolver
+/// (`Config::pricing_for`) never silently skips a malformed key at query
+/// time. The error names the offending key verbatim so an operator
+/// running `routectl config check` sees exactly which key to fix.
+///
+/// Call once per process startup alongside the other validators.
+pub fn validate_registry_patterns(config: &crate::config::Config) -> Result<()> {
+    use routectl_core::Error;
+
+    for key in config.registry.keys() {
+        crate::glob::AliasPattern::parse(key)
+            .map_err(|e| Error::Config(format!("[registry.{key}]: invalid pattern: {e}")))?;
     }
     Ok(())
 }
@@ -3196,5 +3207,47 @@ mod anthropic_api_config_propagation_tests {
             !cfg_with_flag.context_management,
             "context_management must default to false in AnthropicApiConfig"
         );
+    }
+}
+
+#[cfg(test)]
+mod validate_registry_patterns_tests {
+    //! Tests for the `[registry]` glob-key validator: a malformed glob
+    //! must reject at startup; well-formed exact and trailing-`*` keys
+    //! must pass.
+
+    use super::validate_registry_patterns;
+    use crate::config::{Config, RegistryEntry};
+
+    fn config_with_keys(keys: &[&str]) -> Config {
+        let mut cfg = Config::default();
+        for key in keys {
+            cfg.registry
+                .insert(key.to_string(), RegistryEntry::default());
+        }
+        cfg
+    }
+
+    #[test]
+    fn rejects_embedded_asterisk_key() {
+        // Arrange: `a*b` has an asterisk in a non-trailing position.
+        let cfg = config_with_keys(&["a*b"]);
+
+        // Act
+        let err = validate_registry_patterns(&cfg).unwrap_err();
+
+        // Assert
+        let msg = err.to_string();
+        assert!(msg.contains("[registry.a*b]"), "msg: {msg}");
+        assert!(msg.contains("invalid pattern"), "msg: {msg}");
+    }
+
+    #[test]
+    fn accepts_exact_and_trailing_star_keys() {
+        // Arrange
+        let cfg = config_with_keys(&["deepseek-chat", "claude-opus-*"]);
+
+        // Act + Assert
+        validate_registry_patterns(&cfg).expect("clean registry keys must validate");
     }
 }
