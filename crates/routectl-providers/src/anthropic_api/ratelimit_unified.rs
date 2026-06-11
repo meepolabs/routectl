@@ -5,11 +5,15 @@
 //! forward-compat. A weird header value must NEVER fail a request.
 //!
 //! Header reference: the unified family is emitted on the OAuth
-//! subscription path (`anthropic-ratelimit-unified-status`,
-//! `-representative-claim`, `-utilization`, `-overage-status`,
-//! `-overage-utilization`, `-reset`, plus any future suffix). The
-//! api-key path does not emit the family, so `parse_unified_quota`
-//! returns `None` there.
+//! subscription path. BARE suffixes: `-status`, `-reset`,
+//! `-representative-claim`, `-overage-status`, `-overage-utilization`,
+//! `-overage-reset`, `-fallback-percentage`. WINDOWED suffixes:
+//! `-5h-status`, `-5h-utilization`, `-5h-reset`, `-7d-status`,
+//! `-7d-utilization`, `-7d-reset`. There is NO bare `-utilization`
+//! header. `quota.utilization` is sourced from the 5h window (the
+//! operational subscription signal); the 7d window and the per-window
+//! status/reset suffixes land in `extras`. The api-key path does not
+//! emit the family, so `parse_unified_quota` returns `None` there.
 
 use reqwest::header::HeaderMap;
 
@@ -92,7 +96,11 @@ fn assign_suffix(quota: &mut AnthropicUnifiedQuota, suffix: &str, value: String)
     match suffix {
         "status" => quota.status = Some(value),
         "overage-status" => quota.overage_status = Some(value),
-        "utilization" => quota.utilization = Some(value),
+        // The 5h window is the operational subscription signal; route it
+        // to `utilization`. There is no bare `-utilization` header on the
+        // OAuth path. The 7d window and per-window status/reset stay in
+        // `extras` for forward-compat.
+        "5h-utilization" => quota.utilization = Some(value),
         "overage-utilization" => quota.overage_utilization = Some(value),
         "representative-claim" => quota.representative_claim = Some(value),
         "reset" => quota.reset = Some(value),
@@ -122,7 +130,7 @@ mod tests {
         let map = headers(&[
             ("anthropic-ratelimit-unified-status", "allowed"),
             ("anthropic-ratelimit-unified-overage-status", "allowed"),
-            ("anthropic-ratelimit-unified-utilization", "0.42"),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
             ("anthropic-ratelimit-unified-overage-utilization", "0.10"),
             (
                 "anthropic-ratelimit-unified-representative-claim",
@@ -141,6 +149,56 @@ mod tests {
         assert_eq!(quota.overage_utilization.as_deref(), Some("0.10"));
         assert_eq!(quota.representative_claim.as_deref(), Some("five_hour"));
         assert_eq!(quota.reset.as_deref(), Some("2026-06-09T12:00:00Z"));
+        assert!(quota.extras.is_empty());
+    }
+
+    #[test]
+    fn sources_utilization_from_5h_window_and_extras_the_7d_window() {
+        // Arrange: the real OAuth shape -- a bare status, a 5h
+        // utilization, and a 7d utilization. The 5h window is the
+        // operational subscription signal routed to `utilization`; the
+        // 7d window stays in `extras`.
+        let map = headers(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.21"),
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.30"),
+        ]);
+
+        // Act
+        let quota = parse_unified_quota(&map).expect("family present");
+
+        // Assert
+        assert_eq!(quota.utilization.as_deref(), Some("0.21"));
+        assert_eq!(quota.status.as_deref(), Some("allowed"));
+        assert_eq!(
+            quota.extras,
+            vec![("7d-utilization".to_string(), "0.30".to_string())],
+            "7d window must land in extras, not utilization"
+        );
+    }
+
+    #[test]
+    fn bare_suffixes_map_to_their_typed_fields() {
+        // Arrange: a regression guard that the BARE suffixes still route
+        // to their typed fields after the 5h-utilization remap.
+        let map = headers(&[
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-reset", "2026-06-09T12:00:00Z"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "five_hour",
+            ),
+            ("anthropic-ratelimit-unified-overage-utilization", "0.0"),
+        ]);
+
+        // Act
+        let quota = parse_unified_quota(&map).expect("family present");
+
+        // Assert
+        assert_eq!(quota.status.as_deref(), Some("allowed"));
+        assert_eq!(quota.reset.as_deref(), Some("2026-06-09T12:00:00Z"));
+        assert_eq!(quota.representative_claim.as_deref(), Some("five_hour"));
+        assert_eq!(quota.overage_utilization.as_deref(), Some("0.0"));
         assert!(quota.extras.is_empty());
     }
 
@@ -192,7 +250,7 @@ mod tests {
         // the valid one is still captured.
         let mut map = headers(&[("anthropic-ratelimit-unified-status", "allowed")]);
         map.insert(
-            HeaderName::from_static("anthropic-ratelimit-unified-utilization"),
+            HeaderName::from_static("anthropic-ratelimit-unified-5h-utilization"),
             HeaderValue::from_bytes(&[0xff, 0xfe]).expect("non-utf8 header value"),
         );
 

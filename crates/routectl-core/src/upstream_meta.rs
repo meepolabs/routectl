@@ -60,19 +60,24 @@ impl UpstreamMeta {
 /// Header-to-field mapping (suffix after `anthropic-ratelimit-unified-`):
 ///   - `status` -> `status`
 ///   - `overage-status` -> `overage_status`
-///   - `utilization` -> `utilization`
+///   - `5h-utilization` -> `utilization` (the 5h window is the
+///     operational subscription signal; there is no bare `-utilization`)
 ///   - `overage-utilization` -> `overage_utilization`
 ///   - `representative-claim` -> `representative_claim`
 ///   - `reset` -> `reset`
 ///
-/// Any other `anthropic-ratelimit-unified-<suffix>` header lands in
-/// `extras` as `(suffix, value)` so a future suffix is observable
-/// without a code change.
+/// Any other `anthropic-ratelimit-unified-<suffix>` header (the 7d
+/// window, the per-window status/reset suffixes, the fallback-percentage,
+/// or any future suffix) lands in `extras` as `(suffix, value)` so it is
+/// observable without a code change.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct AnthropicUnifiedQuota {
     pub status: Option<String>,
     pub overage_status: Option<String>,
+    /// 5h-window utilization (a decimal fraction string like "0.21"),
+    /// the operational subscription signal. Sourced from the
+    /// `-5h-utilization` header; there is no bare `-utilization` header.
     pub utilization: Option<String>,
     pub overage_utilization: Option<String>,
     pub representative_claim: Option<String>,

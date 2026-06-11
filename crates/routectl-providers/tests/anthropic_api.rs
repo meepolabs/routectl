@@ -1616,7 +1616,7 @@ mod tests {
     const UNIFIED_HEADERS: &[(&str, &str)] = &[
         ("anthropic-ratelimit-unified-status", "allowed"),
         ("anthropic-ratelimit-unified-overage-status", "allowed"),
-        ("anthropic-ratelimit-unified-utilization", "0.42"),
+        ("anthropic-ratelimit-unified-5h-utilization", "0.42"),
         ("anthropic-ratelimit-unified-overage-utilization", "0.00"),
         (
             "anthropic-ratelimit-unified-representative-claim",
