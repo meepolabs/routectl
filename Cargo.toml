@@ -6,6 +6,7 @@ members = [
     "crates/routectl-router",
     "crates/routectl-auth",
     "crates/routectl-cli",
+    "crates/routectl-usage",
 ]
 
 [workspace.package]

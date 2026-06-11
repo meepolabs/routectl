@@ -503,6 +503,11 @@ impl SseState {
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
                         cache_creation,
+                        // Server-tool counts arrive on message_delta only
+                        // (not message_start), so there is nothing
+                        // captured to merge -- lift the delta value
+                        // straight through.
+                        server_tool_use: usage.as_ref().and_then(|u| u.server_tool_use.clone()),
                         ..Default::default()
                     })
                 } else {

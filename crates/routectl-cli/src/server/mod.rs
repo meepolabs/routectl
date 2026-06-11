@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -6,6 +6,7 @@ use axum::Router as AxumRouter;
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{Config, Router};
+use routectl_usage::{UsageHandle, UsageWriter, CHANNEL_CAPACITY};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
@@ -32,8 +33,34 @@ pub use secrets::CompositeStore;
 /// has any read site outside the handler path (in `build_axum_router`,
 /// where it is now read directly from the live config at the same
 /// wiring step).
+///
+/// `usage` is the `Clone` producer handle for the usage-accounting
+/// writer. It lives DIRECTLY on `AppState`, NOT inside the
+/// `Arc<ArcSwap<Router>>`, so a Router hot-swap never rebuilds or
+/// disturbs the writer (which owns a DB handle opened once at boot).
+/// The owning `UsageWriter` (the shutdown handle) is kept in the
+/// `serve_on_listener` scope, not here.
 pub struct AppState {
     pub router: Arc<ArcSwap<Router>>,
+    pub usage: UsageHandle,
+}
+
+impl AppState {
+    /// Test-only constructor: wraps `router` with a usage handle backed
+    /// by a writer pointed at an isolated in-tempdir DB, so handler unit
+    /// tests that build `AppState` directly never touch the real
+    /// `~/.config/routectl/usage.db`. The owning `UsageWriter` is
+    /// detached (dropped) -- the handle stays usable (it accepts-and-drops
+    /// once the channel closes), which is all a non-usage handler test
+    /// needs. Returns the `TempDir` guard; keep it alive for the test.
+    #[cfg(test)]
+    pub fn for_test(router: Arc<ArcSwap<Router>>) -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("usage tempdir");
+        let (usage, _writer) =
+            UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0, false);
+        let state = Arc::new(AppState { router, usage });
+        (state, dir)
+    }
 }
 
 /// Validate that `host` is loopback or that `unsafe_public` has been set.
@@ -169,8 +196,19 @@ pub async fn serve_on_listener(
 
     let max_body_bytes = compute_max_body_bytes(&config);
     let router_swap = Arc::new(ArcSwap::from_pointee(router));
+
+    // Start the usage writer BEFORE building AppState. The writer opens
+    // the DB once here and owns it for the daemon's lifetime; the
+    // returned `UsageHandle` goes onto AppState (outside the ArcSwap, so
+    // a Router hot-swap never disturbs it) while the owning `UsageWriter`
+    // stays in this scope as the shutdown handle. The writer is started
+    // unconditionally -- even when `usage.enabled == false` -- so the
+    // runtime gate can flip live on reload without a restart.
+    let (usage_handle, usage_writer) = build_usage_writer(&config);
+
     let state = Arc::new(AppState {
         router: router_swap.clone(),
+        usage: usage_handle.clone(),
     });
 
     // Wire the file-watch + SIGHUP reload coordinator. Shutdown is
@@ -184,6 +222,7 @@ pub async fn serve_on_listener(
         oauth_store,
         secrets.clone(),
         router_swap.clone(),
+        usage_handle,
         shutdown_rx,
     );
 
@@ -191,13 +230,86 @@ pub async fn serve_on_listener(
 
     let serve_result = serve_with_bounded_drain(listener, app).await;
 
-    // Signal every reload-side task to shut down. Drop the handles
-    // last so a hung task does not block server return; tokio
-    // detaches them with the runtime.
+    // Graceful-shutdown ordering matters for a clean usage drain. The
+    // writer thread exits only when its mpsc channel closes, i.e. when
+    // EVERY `UsageHandle` clone (each holding a sender) is dropped and
+    // the writer's own sender is closed. Two clones outlive the server
+    // loop: the one inside `AppState` (already gone -- `app` consumed it
+    // above) and the one the reload coordinator task carries. So:
+    //   1. server stopped accepting (above),
+    //   2. signal the reload-side tasks to stop,
+    //   3. AWAIT them so the coordinator's `UsageHandle` clone is dropped,
+    //   4. THEN drain -- at which point the only remaining sender is the
+    //      one inside `usage_writer`, so closing it lets the thread
+    //      drain-and-exit well within its bounded deadline.
     let _ = shutdown_tx.send(());
-    drop(reload_handles);
+    await_reload_tasks(reload_handles).await;
+
+    // Drain queued usage rows after the server stops accepting and every
+    // producer-side handle is gone. The blocking 5s drain MUST run off a
+    // runtime worker, so it is dispatched via spawn_blocking; a JoinError
+    // is logged, never panicked on. The writer's own bounded deadline
+    // keeps a wedged DB from hanging here.
+    drain_usage_writer(usage_writer).await;
 
     serve_result
+}
+
+/// Upper bound on how long graceful shutdown waits for a single
+/// reload-side task (file watcher, SIGHUP listener, coordinator) to
+/// observe the shutdown signal and return. Each task selects on the
+/// shutdown `watch` channel and exits promptly, so this is a safety
+/// cap, not the expected wait. Awaiting (not just dropping) the
+/// coordinator handle is what releases its `UsageHandle` clone before
+/// the usage drain runs.
+const RELOAD_TASK_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Await each reload-side task to completion under a bounded per-task
+/// deadline so their owned state -- notably the coordinator's
+/// `UsageHandle` clone -- is dropped before the usage drain begins. A
+/// `JoinError` or an elapsed timeout is logged and skipped; a wedged
+/// task is left detached rather than blocking shutdown.
+async fn await_reload_tasks(handles: Vec<tokio::task::JoinHandle<()>>) {
+    for handle in handles {
+        match tokio::time::timeout(RELOAD_TASK_SHUTDOWN_DEADLINE, handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "reload task join failed during shutdown");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    deadline_secs = RELOAD_TASK_SHUTDOWN_DEADLINE.as_secs(),
+                    "reload task did not stop within deadline; detaching and continuing",
+                );
+            }
+        }
+    }
+}
+
+/// Construct the usage writer from `config.usage`. Always starts the
+/// writer (even when disabled) so the runtime enabled-gate can flip
+/// without a restart; construction never hard-fails (a DB open error
+/// degrades the writer to a no-op drain loop internally).
+fn build_usage_writer(config: &Config) -> (UsageHandle, UsageWriter) {
+    UsageWriter::start(
+        config.usage.db_path.clone(),
+        CHANNEL_CAPACITY,
+        config.usage.retention_days,
+        config.usage.enabled,
+    )
+}
+
+/// Flush queued usage rows on graceful shutdown. `UsageWriter::shutdown`
+/// blocks up to ~5s draining and joining the writer thread, so it must
+/// not run on a runtime worker -- dispatch it via `spawn_blocking`. A
+/// `JoinError` (the blocking task panicked or was cancelled) is logged,
+/// never propagated as a panic.
+async fn drain_usage_writer(usage_writer: UsageWriter) {
+    tracing::info!("draining usage writer before shutdown");
+    match tokio::task::spawn_blocking(move || usage_writer.shutdown()).await {
+        Ok(()) => tracing::info!("usage writer drained"),
+        Err(e) => tracing::error!(error = %e, "usage writer drain task failed"),
+    }
 }
 
 /// Upper bound on how long the graceful drain waits for in-flight
@@ -506,6 +618,7 @@ fn spawn_reload_pipeline(
     oauth_store: Option<Arc<routectl_auth::OAuthStore>>,
     secrets: Arc<dyn SecretStore>,
     router_swap: Arc<ArcSwap<Router>>,
+    usage: UsageHandle,
     shutdown_rx: watch::Receiver<()>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -546,10 +659,13 @@ fn spawn_reload_pipeline(
 
     let coordinator_handle = tokio::spawn(run_reload_coordinator(
         initial_config,
-        config_path,
-        oauth_store,
-        secrets,
-        router_swap,
+        ReloadContext {
+            config_path,
+            oauth_store,
+            secrets,
+            router_swap,
+            usage,
+        },
         reload_rx,
         shutdown_rx,
     ));
@@ -591,15 +707,24 @@ async fn run_sighup_listener(tx: mpsc::Sender<ReloadRequest>, mut shutdown: watc
     }
 }
 
+/// Long-lived dependencies the reload coordinator carries across every
+/// `ReloadRequest`. Bundling them keeps the coordinator and its helpers
+/// under the argument-count ceiling; the `current_config` it diffs
+/// against evolves per reload and stays a separate loop variable.
+struct ReloadContext {
+    config_path: Option<PathBuf>,
+    oauth_store: Option<Arc<routectl_auth::OAuthStore>>,
+    secrets: Arc<dyn SecretStore>,
+    router_swap: Arc<ArcSwap<Router>>,
+    usage: UsageHandle,
+}
+
 /// Drain `ReloadRequest`s and apply them. Each request is processed
 /// to completion before the next is read so a Router swap and a
 /// credentials reload do not interleave.
 async fn run_reload_coordinator(
     mut current_config: Arc<Config>,
-    config_path: Option<PathBuf>,
-    oauth_store: Option<Arc<routectl_auth::OAuthStore>>,
-    secrets: Arc<dyn SecretStore>,
-    router_swap: Arc<ArcSwap<Router>>,
+    ctx: ReloadContext,
     mut reload_rx: mpsc::Receiver<ReloadRequest>,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -611,19 +736,20 @@ async fn run_reload_coordinator(
                 match req {
                     ReloadRequest::Credentials => {
                         handle_credentials_reload(
-                            &oauth_store,
+                            &ctx.oauth_store,
                             &current_config,
-                            secrets.clone(),
-                            &router_swap,
+                            ctx.secrets.clone(),
+                            &ctx.router_swap,
                         )
                         .await;
                     }
                     ReloadRequest::Config => {
                         if let Some(new_config) = handle_config_reload(
-                            config_path.as_ref(),
+                            ctx.config_path.as_deref(),
                             &current_config,
-                            secrets.clone(),
-                            &router_swap,
+                            ctx.secrets.clone(),
+                            &ctx.router_swap,
+                            &ctx.usage,
                         ).await {
                             current_config = new_config;
                         }
@@ -729,10 +855,11 @@ async fn rebuild_router_for_seat_change(
 /// `Arc<Config>` so the coordinator can diff future reloads against
 /// the live config rather than the original-startup config.
 async fn handle_config_reload(
-    config_path: Option<&PathBuf>,
+    config_path: Option<&Path>,
     current_config: &Arc<Config>,
     secrets: Arc<dyn SecretStore>,
     router_swap: &Arc<ArcSwap<Router>>,
+    usage: &UsageHandle,
 ) -> Option<Arc<Config>> {
     let Some(path) = config_path else {
         tracing::debug!("config reload requested but no config path was registered; ignoring",);
@@ -758,6 +885,14 @@ async fn handle_config_reload(
     new_router.carry_over_runtime_state_from(&router_swap.load_full());
 
     router_swap.store(Arc::new(new_router));
+
+    // Flip the usage capture gate live. `db_path` is restart-required
+    // (the writer holds the DB handle opened at boot, so it is NOT
+    // re-opened here); `retention_days` needs no live action (the prune
+    // is startup-only, so a changed value takes effect at the next
+    // daemon start). Only `enabled` flips at runtime.
+    usage.set_enabled(new_config.usage.enabled);
+
     tracing::info!(
         path = %path.display(),
         "config reloaded; router rebuilt and swapped",
@@ -778,7 +913,7 @@ async fn handle_config_reload(
 /// emits a warn on any failure so the coordinator can keep the previous
 /// config installed. Pulled out of `handle_config_reload` to keep that
 /// function focused on the swap + diff phases.
-async fn read_parse_validate_config(path: &PathBuf) -> Option<Arc<Config>> {
+async fn read_parse_validate_config(path: &Path) -> Option<Arc<Config>> {
     let text = match tokio::fs::read_to_string(path).await {
         Ok(t) => t,
         Err(e) => {
@@ -837,7 +972,7 @@ async fn read_parse_validate_config(path: &PathBuf) -> Option<Arc<Config>> {
 /// that store credentials in plain TOML still start. Operators running
 /// in shared environments should restrict the file to `0600`.
 #[cfg(unix)]
-fn warn_if_config_world_readable(path: &PathBuf, config: &Config, raw_text: &str) {
+fn warn_if_config_world_readable(path: &Path, config: &Config, raw_text: &str) {
     use std::os::unix::fs::MetadataExt;
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -909,12 +1044,28 @@ fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'stati
         out.push("log.redact_prompts");
     }
 
+    if prev.usage.db_path != next.usage.db_path {
+        out.push("usage.db_path");
+    }
+
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Point a config's usage DB at a per-test tempdir so server tests
+    /// never touch the real `~/.config/routectl/usage.db` (the
+    /// `UsageConfig` default). Returns the `TempDir` guard the caller
+    /// MUST keep alive for the test's duration. Isolating the path --
+    /// rather than disabling usage -- keeps the writer wiring exercised.
+    #[cfg(test)]
+    fn isolate_usage_db(config: &mut Config) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("usage tempdir");
+        config.usage.db_path = dir.path().join("usage.db");
+        dir
+    }
 
     #[test]
     fn is_loopback_covers_full_127_range() {
@@ -973,6 +1124,33 @@ mod tests {
         next.log.redact_prompts = Some(true);
         let changes = collect_restart_required_changes(&prev, &next);
         assert!(changes.contains(&"log.redact_prompts"), "got {changes:?}");
+
+        // usage.db_path change -> restart-required.
+        prev = Config::default();
+        next = Config::default();
+        next.usage.db_path = std::path::PathBuf::from("/tmp/other-usage.db");
+        let changes = collect_restart_required_changes(&prev, &next);
+        assert!(changes.contains(&"usage.db_path"), "got {changes:?}");
+
+        // usage.enabled change -> hot-reload, NOT restart-required.
+        prev = Config::default();
+        next = Config::default();
+        next.usage.enabled = !prev.usage.enabled;
+        let changes = collect_restart_required_changes(&prev, &next);
+        assert!(
+            !changes.contains(&"usage.enabled") && changes.is_empty(),
+            "enabled must hot-reload; got {changes:?}"
+        );
+
+        // usage.retention_days change -> hot-reload, NOT restart-required.
+        prev = Config::default();
+        next = Config::default();
+        next.usage.retention_days = prev.usage.retention_days + 1;
+        let changes = collect_restart_required_changes(&prev, &next);
+        assert!(
+            !changes.contains(&"usage.retention_days") && changes.is_empty(),
+            "retention_days must hot-reload; got {changes:?}"
+        );
     }
 
     #[tokio::test]
@@ -1070,7 +1248,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral loopback port");
-        let config = Arc::new(Config::default());
+        let mut config = Config::default();
+        let _usage_dir = isolate_usage_db(&mut config);
+        let config = Arc::new(config);
         let server = tokio::spawn(async move { serve_on_listener(config, listener, None).await });
 
         // Let the server install its signal handler and enter serve.
@@ -1367,5 +1547,289 @@ default = "claude"
             Arc::ptr_eq(&before, &after),
             "a failed credentials reload must keep the previous router"
         );
+    }
+
+    // ---- Usage writer: boot, hot-reload enabled-gate, shutdown drain ----
+
+    /// Minimal on-disk config text with the usage block's `enabled` set
+    /// to `enabled` and `db_path` pointed at `db_path`, so a config
+    /// reload picks up an isolated DB and a flippable gate.
+    #[cfg(test)]
+    fn usage_config_text(enabled: bool, db_path: &std::path::Path) -> String {
+        format!(
+            "[server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+             [usage]\nenabled = {enabled}\ndb_path = \"{}\"\nretention_days = 0\n",
+            db_path.display()
+        )
+    }
+
+    /// A config reload that flips `usage.enabled` true -> false must flip
+    /// the live gate WITHOUT rebuilding the writer: the same `UsageHandle`
+    /// the daemon holds reports `is_enabled() == false` after the reload,
+    /// and the Router Arc is swapped (proving the reload ran).
+    #[tokio::test]
+    async fn config_reload_flips_usage_enabled_gate_live() {
+        // Arrange: a temp DB + a config file starting enabled=true, and a
+        // writer/handle pair the daemon would own across the reload.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("usage.db");
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, usage_config_text(false, &db_path)).unwrap();
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let mut start_config = Config::default();
+        start_config.usage.db_path = db_path.clone();
+        start_config.usage.enabled = true;
+        let start_config = Arc::new(start_config);
+        let (usage, _writer) = build_usage_writer(&start_config);
+        assert!(usage.is_enabled(), "writer must start enabled");
+
+        let router = build_router_from_config(start_config.clone(), secrets.clone())
+            .await
+            .expect("initial router build");
+        let swap = Arc::new(ArcSwap::from_pointee(router));
+        let before_router = swap.load_full();
+
+        // Act: reload the on-disk config (enabled=false).
+        let new_config =
+            handle_config_reload(Some(&cfg_path), &start_config, secrets, &swap, &usage)
+                .await
+                .expect("config reload must apply");
+
+        // Assert: gate flipped live (same handle), router swapped.
+        assert!(!new_config.usage.enabled);
+        assert!(
+            !usage.is_enabled(),
+            "reload must flip the live usage gate to disabled"
+        );
+        let after_router = swap.load_full();
+        assert!(
+            !Arc::ptr_eq(&before_router, &after_router),
+            "config reload must swap the router"
+        );
+    }
+
+    /// Boot wiring: the writer/handle are constructed before the ArcSwap
+    /// and a Router hot-swap must NOT disturb the usage handle. We hold a
+    /// handle, swap the Router under it, and assert the handle's gate and
+    /// counters object survive the swap unchanged (handler call sites keep
+    /// a stable usage handle across any number of Router rebuilds).
+    #[tokio::test]
+    async fn router_hot_swap_does_not_disturb_usage_handle() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.usage.db_path = dir.path().join("usage.db");
+        let config = Arc::new(config);
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let (usage, _writer) = build_usage_writer(&config);
+
+        let r1 = build_router_from_config(config.clone(), secrets.clone())
+            .await
+            .unwrap();
+        let swap = Arc::new(ArcSwap::from_pointee(r1));
+        let counters_ptr = Arc::as_ptr(usage.counters());
+        usage.set_enabled(true);
+
+        // Act: swap a freshly-built Router under the same handle.
+        let r2 = build_router_from_config(config.clone(), secrets)
+            .await
+            .unwrap();
+        swap.store(Arc::new(r2));
+
+        // Assert: the handle's gate and shared counters are untouched by
+        // the Router swap (same counters allocation, gate value preserved).
+        assert!(usage.is_enabled(), "router swap must not flip the gate");
+        assert_eq!(
+            counters_ptr,
+            Arc::as_ptr(usage.counters()),
+            "router swap must not rebuild the usage handle's counters"
+        );
+    }
+
+    /// Graceful shutdown must drain queued usage rows to the (temp) DB
+    /// before returning, and complete within the writer's bounded
+    /// deadline. Drives `drain_usage_writer` (the spawn_blocking path the
+    /// serve loop uses) directly with rows already queued.
+    #[tokio::test]
+    async fn drain_usage_writer_flushes_queued_rows() {
+        // Arrange: a live writer at a temp DB with rows queued behind it.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("usage.db");
+        let mut config = Config::default();
+        config.usage.db_path = db_path.clone();
+        config.usage.enabled = true;
+        config.usage.retention_days = 0;
+        let config = Arc::new(config);
+        let (usage, writer) = build_usage_writer(&config);
+
+        let n = 25usize;
+        for i in 0..n {
+            usage.try_send(sample_usage_record(&format!("drain-{i}")));
+        }
+        // Drop the producer handle so the channel closes once the writer
+        // drops its sender -- mirrors serve return, where the app owning
+        // the handle is dropped before the drain runs.
+        drop(usage);
+
+        // Act: the serve loop's drain dispatch must flush + return within
+        // the bounded deadline.
+        let start = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            drain_usage_writer(writer),
+        )
+        .await
+        .expect("drain must complete within the bounded deadline");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(7),
+            "drain exceeded the bounded deadline"
+        );
+
+        // Assert: every queued row landed in the temp DB.
+        let count: i64 = rusqlite_count(&db_path);
+        assert_eq!(count, n as i64, "all queued rows must be flushed on drain");
+    }
+
+    /// Shutdown with no rows queued must still complete within the
+    /// writer's bounded deadline. With the producer handle dropped (the
+    /// serve-return steady state) the empty channel closes and the drain
+    /// returns promptly rather than waiting out the full deadline.
+    #[tokio::test]
+    async fn drain_usage_writer_empty_queue_returns_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.usage.db_path = dir.path().join("usage.db");
+        let config = Arc::new(config);
+        let (usage, writer) = build_usage_writer(&config);
+        // Drop the producer handle so the channel can close once the
+        // writer drops its own sender -- the steady state after the axum
+        // app (which owned the only handle) is dropped on serve return.
+        drop(usage);
+
+        let start = std::time::Instant::now();
+        drain_usage_writer(writer).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "empty-queue drain must return promptly once the handle is dropped"
+        );
+    }
+
+    /// Models the production shutdown topology the other drain tests
+    /// miss: a SECOND `UsageHandle` clone (the reload coordinator's, in
+    /// real wiring) is alive in a background task when the drain begins
+    /// and is only dropped after a brief delay. The drain must still
+    /// complete cleanly within the bounded deadline (no timeout-warn
+    /// path) once that clone goes away, and every queued row must land.
+    /// The existing `drain_usage_writer_flushes_queued_rows` drops the
+    /// sole handle up front, which hides this race.
+    #[tokio::test]
+    async fn drain_usage_writer_completes_with_concurrent_handle() {
+        // Arrange: a live writer at a temp DB with rows queued behind it.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("usage.db");
+        let mut config = Config::default();
+        config.usage.db_path = db_path.clone();
+        config.usage.enabled = true;
+        config.usage.retention_days = 0;
+        let config = Arc::new(config);
+        let (usage, writer) = build_usage_writer(&config);
+
+        let n = 25usize;
+        for i in 0..n {
+            usage.try_send(sample_usage_record(&format!("concurrent-{i}")));
+        }
+
+        // Hold a second handle clone alive in a background task that
+        // releases it after a brief delay -- the channel stays open until
+        // BOTH this clone and the writer's own sender are gone.
+        let second = usage.clone();
+        let dropper = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            drop(second);
+        });
+        // Drop the primary producer handle now; the background clone is
+        // still keeping the channel open.
+        drop(usage);
+
+        // Act: the drain must flush and return within the bounded deadline
+        // once the lingering clone is released.
+        let start = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            drain_usage_writer(writer),
+        )
+        .await
+        .expect("drain must complete within the bounded deadline");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(7),
+            "drain exceeded the bounded deadline despite the clone being released"
+        );
+        let _ = dropper.await;
+
+        // Assert: every queued row landed despite the concurrent handle.
+        let count: i64 = rusqlite_count(&db_path);
+        assert_eq!(count, n as i64, "all queued rows must be flushed on drain");
+    }
+
+    /// Read `SELECT COUNT(*)` from the usage DB at `path`. Test helper.
+    #[cfg(test)]
+    fn rusqlite_count(path: &std::path::Path) -> i64 {
+        use routectl_usage::open;
+        let db = open(path).expect("open usage db for read");
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+            .expect("count rows")
+    }
+
+    /// Build a minimal valid `UsageRecord` with the given id for drain
+    /// tests. Mirrors the writer crate's own fixture shape.
+    #[cfg(test)]
+    fn sample_usage_record(request_id: &str) -> routectl_usage::UsageRecord {
+        use routectl_usage::{Outcome, UsageRecord};
+        UsageRecord {
+            ts_start: 0,
+            ts_end: 0,
+            request_id: request_id.to_string(),
+            ingress_dialect: "openai".to_string(),
+            requested_model: "m".to_string(),
+            alias: "a".to_string(),
+            model: None,
+            upstream: None,
+            provider: None,
+            provider_kind: None,
+            seat: None,
+            session_id: None,
+            stream: false,
+            max_tokens_req: None,
+            tool_count: 0,
+            thinking_req: None,
+            thinking_req_kind: None,
+            msg_count: 1,
+            service_tier: None,
+            outcome: Outcome::Ok,
+            http_status: None,
+            error_class: None,
+            finish_reason: None,
+            attempt_count: 1,
+            fallback_count: 0,
+            latency_ms: 0,
+            ttfb_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            cache_read: None,
+            cache_write_5m: None,
+            cache_write_1h: None,
+            server_tool_use: None,
+            quota_claim: None,
+            quota_status: None,
+            quota_overage_status: None,
+            quota_utilization: None,
+            quota_overage_utilization: None,
+            quota_reset: None,
+            quota_extras: None,
+            extra: None,
+        }
     }
 }

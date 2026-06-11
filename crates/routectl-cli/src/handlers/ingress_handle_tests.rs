@@ -23,6 +23,161 @@
 use super::*;
 use axum::body::to_bytes;
 use routectl_core::Error;
+use routectl_usage::{Outcome, UsageWriter, CHANNEL_CAPACITY};
+
+/// A tempdir-backed usage writer + handle for capture tests. Holding the
+/// `TempDir` keeps the DB path alive; `flush_and_read` drains the writer
+/// and reads the single emitted row back so tests can assert the per-
+/// outcome matrix against the persisted record (the real contract).
+struct CaptureRig {
+    handle: Option<UsageHandle>,
+    writer: Option<UsageWriter>,
+    db_path: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl CaptureRig {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("usage tempdir");
+        let db_path = dir.path().join("usage.db");
+        // retention_days=0 (no prune), enabled=true so try_send accepts.
+        let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+        Self {
+            handle: Some(handle),
+            writer: Some(writer),
+            db_path,
+            _dir: dir,
+        }
+    }
+
+    /// Build a `UsageCapture` over a draft for this rig's handle. The
+    /// draft is seeded from `req` exactly as the production boundary does.
+    fn capture(
+        &self,
+        dialect: &str,
+        req: &routectl_core::ChatRequest,
+        request_id: &str,
+    ) -> UsageCapture {
+        let draft = build_usage_draft(dialect, req, request_id.to_string(), None);
+        let handle = self.handle.clone().expect("rig handle present");
+        UsageCapture::new(draft, handle, dialect.to_string())
+    }
+
+    /// Drop the producer handle, drain the writer, and return every
+    /// persisted row. The matrix tests assert exactly one row.
+    ///
+    /// `UsageWriter::shutdown` joins the writer thread and is blocking, so
+    /// it must not run on a runtime worker. Offload it to a blocking thread
+    /// via `spawn_blocking` (works on any runtime flavor, including the
+    /// default current-thread one) rather than calling it inline.
+    async fn flush_and_read(mut self) -> Vec<PersistedRow> {
+        // Drop our handle clone so the channel can close once the writer
+        // drops its own sender during shutdown.
+        drop(self.handle.take());
+        let writer = self.writer.take().expect("writer present");
+        tokio::task::spawn_blocking(move || writer.shutdown())
+            .await
+            .expect("usage writer shutdown task");
+        let db = routectl_usage::open(&self.db_path).expect("open usage db");
+        read_rows(&db)
+    }
+}
+
+/// The subset of persisted columns the matrix tests assert on.
+#[derive(Debug)]
+struct PersistedRow {
+    request_id: String,
+    outcome: String,
+    ttfb_ms: Option<i64>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    attempt_count: i64,
+    fallback_count: i64,
+    provider: Option<String>,
+    alias: String,
+}
+
+fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
+    let mut stmt = db
+        .conn()
+        .prepare(
+            "SELECT request_id, outcome, ttfb_ms, input_tokens, output_tokens, \
+             attempt_count, fallback_count, provider, alias FROM requests \
+             ORDER BY rowid",
+        )
+        .expect("prepare select");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(PersistedRow {
+                request_id: r.get(0)?,
+                outcome: r.get(1)?,
+                ttfb_ms: r.get(2)?,
+                input_tokens: r.get(3)?,
+                output_tokens: r.get(4)?,
+                attempt_count: r.get(5)?,
+                fallback_count: r.get(6)?,
+                provider: r.get(7)?,
+                alias: r.get(8)?,
+            })
+        })
+        .expect("query rows")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("collect rows");
+    rows
+}
+
+/// Minimal canonical request for capture tests.
+fn sample_request(model: &str, stream: bool) -> routectl_core::ChatRequest {
+    routectl_core::ChatRequest {
+        model: model.to_string(),
+        messages: vec![message()],
+        stream: Some(stream),
+        ..Default::default()
+    }
+}
+
+/// A bare user message for request/response fixtures (Message has no Default).
+fn message() -> routectl_core::Message {
+    use routectl_core::{MessageContent, Role};
+    routectl_core::Message {
+        role: Role::User,
+        content: MessageContent::Text("hi".into()),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+        refusal: None,
+    }
+}
+
+/// A `DispatchMeta`-like fixture. The real type is `#[non_exhaustive]`
+/// and built by the router, so capture tests that need a meta drive the
+/// guard through `observe_meta` using a router-produced meta where
+/// possible; where a synthetic meta is required the gate-blocked vs
+/// upstream-error distinction is exercised via `outcome_for_dispatch_err`
+/// over a real router dispatch in the integration tests. The unit tests
+/// below drive the guard's token / outcome / ttfb stamping directly.
+fn ok_response_with_usage(prompt: u32, completion: u32) -> routectl_core::ChatResponse {
+    routectl_core::ChatResponse {
+        id: "resp-1".into(),
+        model: "m".into(),
+        choices: vec![routectl_core::Choice {
+            index: 0,
+            message: message(),
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+            logprobs: None,
+        }],
+        usage: Some(routectl_core::Usage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
 
 async fn body_to_value(resp: Response) -> Value {
     let bytes = to_bytes(resp.into_body(), 8 * 1024).await.unwrap();
@@ -543,7 +698,9 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act
-    render_stream_task(upstream, AnthropicIngress, "anthropic".into(), tx).await;
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-stream-err");
+    render_stream_task(upstream, AnthropicIngress, capture, tx).await;
     let events = drain(rx).await;
 
     // Assert: prefix chunk events + terminal error event.
@@ -607,7 +764,9 @@ async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act
-    render_stream_task(upstream, OpenAiIngress, "openai".into(), tx).await;
+    let rig = CaptureRig::new();
+    let capture = rig.capture("openai", &sample_request("m", true), "req-openai-err");
+    render_stream_task(upstream, OpenAiIngress, capture, tx).await;
     let events = drain(rx).await;
 
     // Assert: three events. OpenAI emits unnamed (bare data:)
@@ -651,7 +810,9 @@ async fn render_stream_task_natural_eos_emits_render_eos_not_error() {
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act
-    render_stream_task(upstream, OpenAiIngress, "openai".into(), tx).await;
+    let rig = CaptureRig::new();
+    let capture = rig.capture("openai", &sample_request("m", true), "req-openai-eos");
+    render_stream_task(upstream, OpenAiIngress, capture, tx).await;
     let events = drain(rx).await;
 
     // Assert: chunk + [DONE]. No error chunk.
@@ -755,7 +916,9 @@ async fn render_stream_task_anthropic_render_chunk_failure_emits_terminal_error(
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act
-    render_stream_task(upstream, adapter, "anthropic".into(), tx).await;
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-render-fail");
+    render_stream_task(upstream, adapter, capture, tx).await;
     let events = drain(rx).await;
 
     // Assert: prefix chunk events from the first chunk, then the
@@ -788,4 +951,330 @@ async fn render_stream_task_anthropic_render_chunk_failure_emits_terminal_error(
     // string for non-Upstream errors (Error::Streaming has no HTTP
     // status to surface).
     assert_eq!(msg, "upstream stream error");
+
+    // The chunk-render failure leaves the guard un-finalized, so Drop
+    // stamps the `client_disconnect` fallback: we never delivered a
+    // complete stream. Exactly one row, tagged for this request.
+    let rows = rig.flush_and_read().await;
+    assert_eq!(rows.len(), 1, "exactly one row on render-failure exit");
+    assert_eq!(rows[0].outcome, "client_disconnect");
+    assert_eq!(rows[0].request_id, "req-render-fail");
+}
+
+// ============ UsageCapture: per-outcome matrix (the core contract) ====
+//
+// Each test drives ONE exit path through the guard and asserts EXACTLY
+// ONE persisted row with the expected outcome. The gate_blocked vs
+// upstream_error dispatch distinction (which depends on a router-built
+// `DispatchMeta`, a `#[non_exhaustive]` type the router alone constructs)
+// is covered end-to-end in `tests/server.rs` against a real dispatch.
+
+/// Non-streaming clean completion -> exactly one `ok` row, with ttfb
+/// populated (response ready == first byte) and tokens lifted from the
+/// ChatResponse usage. request_id round-trips onto the row.
+#[tokio::test]
+async fn capture_non_stream_ok_emits_single_ok_row() {
+    // Arrange
+    let rig = CaptureRig::new();
+    let req = sample_request("alias-x", false);
+    let mut capture = rig.capture("openai", &req, "req-ok-1");
+
+    // Act: simulate the production complete path.
+    capture.mark_first_byte();
+    capture.observe_response(&ok_response_with_usage(11, 7));
+    capture.finalize(Outcome::Ok);
+    drop(capture);
+    let rows = rig.flush_and_read().await;
+
+    // Assert
+    assert_eq!(rows.len(), 1, "exactly one row per request");
+    let row = &rows[0];
+    assert_eq!(row.outcome, "ok");
+    assert_eq!(row.request_id, "req-ok-1");
+    assert_eq!(row.input_tokens, Some(11));
+    assert_eq!(row.output_tokens, Some(7));
+    assert!(
+        row.ttfb_ms.is_some(),
+        "ttfb populated when a response exists"
+    );
+}
+
+/// Non-streaming render/serialization failure AFTER a good upstream
+/// response: the row must be `upstream_error`, NOT `ok`. The guard sets
+/// http_status=200 on `observe_response`, but a failed `render_response`
+/// means the client receives an error, so `complete_response` calls
+/// `observe_error` + `finalize(UpstreamError)` instead of the `ok`
+/// finalize. This pins that exact ordering produces a single
+/// `upstream_error` row. Pre-fix, `finalize(Ok)` fired before the render
+/// check and this row would have said `ok` + http_status=200 while the
+/// client got a 502.
+#[tokio::test]
+async fn capture_non_stream_render_failure_emits_upstream_error_row() {
+    // Arrange
+    let rig = CaptureRig::new();
+    let req = sample_request("alias-x", false);
+    let mut capture = rig.capture("openai", &req, "req-render-502");
+
+    // Act: mirror complete_response's render-Err ordering. The response
+    // was good (200 stamped) but serialization failed, so we observe the
+    // render error and finalize as upstream_error WITHOUT a prior
+    // finalize(Ok).
+    capture.mark_first_byte();
+    capture.observe_response(&ok_response_with_usage(5, 3));
+    let render_err = Error::Internal("render serialization failed".into());
+    capture.observe_error(&render_err);
+    capture.finalize(Outcome::UpstreamError);
+    drop(capture);
+    let rows = rig.flush_and_read().await;
+
+    // Assert: exactly one row, and it is upstream_error (not ok).
+    assert_eq!(rows.len(), 1, "exactly one row per request");
+    assert_eq!(
+        rows[0].outcome, "upstream_error",
+        "render failure must not persist outcome=ok"
+    );
+    assert_eq!(rows[0].request_id, "req-render-502");
+}
+#[tokio::test]
+async fn capture_finalize_then_drop_does_not_double_send() {
+    // Arrange
+    let rig = CaptureRig::new();
+    let req = sample_request("a", false);
+    let mut capture = rig.capture("openai", &req, "req-once");
+
+    // Act: explicit finalize, THEN drop.
+    capture.observe_response(&ok_response_with_usage(1, 1));
+    capture.finalize(Outcome::Ok);
+    drop(capture); // Drop sees finalized=true -> no-op.
+    let rows = rig.flush_and_read().await;
+
+    // Assert
+    assert_eq!(rows.len(), 1, "finalize + Drop must emit exactly one row");
+    assert_eq!(rows[0].outcome, "ok");
+}
+
+/// A guard dropped without an explicit finalize (client hangup / task
+/// cancellation) -> exactly one `client_disconnect` row via the Drop
+/// fallback.
+#[tokio::test]
+async fn capture_drop_without_finalize_emits_client_disconnect() {
+    // Arrange
+    let rig = CaptureRig::new();
+    let req = sample_request("a", true);
+    let capture = rig.capture("anthropic", &req, "req-dropped");
+
+    // Act: drop without finalizing.
+    drop(capture);
+    let rows = rig.flush_and_read().await;
+
+    // Assert
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, "client_disconnect");
+    assert_eq!(rows[0].request_id, "req-dropped");
+    assert!(
+        rows[0].ttfb_ms.is_none(),
+        "no first byte was marked -> ttfb None"
+    );
+}
+
+/// Streaming natural EOS through `render_stream_task` -> exactly one `ok`
+/// row, ttfb populated (first chunk), tokens lifted from the chunk usage.
+#[tokio::test]
+async fn capture_stream_natural_eos_emits_single_ok_row() {
+    use crate::ingress::openai::OpenAiIngress;
+
+    // Arrange: one usage-bearing chunk, then natural EOS.
+    let chunk = {
+        let mut c = streaming_text_chunk("hi");
+        c.usage = Some(routectl_core::UsageDelta {
+            prompt_tokens: Some(9),
+            completion_tokens: Some(4),
+            total_tokens: Some(13),
+            ..Default::default()
+        });
+        c
+    };
+    let upstream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
+        Box::pin(futures::stream::iter(vec![Ok(chunk)]));
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    let rig = CaptureRig::new();
+    let capture = rig.capture("openai", &sample_request("a", true), "req-stream-ok");
+
+    // Act
+    render_stream_task(upstream, OpenAiIngress, capture, tx).await;
+    let _ = drain(rx).await;
+    let rows = rig.flush_and_read().await;
+
+    // Assert
+    assert_eq!(rows.len(), 1, "exactly one row per stream");
+    assert_eq!(rows[0].outcome, "ok");
+    assert_eq!(rows[0].request_id, "req-stream-ok");
+    assert_eq!(rows[0].input_tokens, Some(9));
+    assert_eq!(rows[0].output_tokens, Some(4));
+    assert!(rows[0].ttfb_ms.is_some(), "first chunk sets ttfb");
+}
+
+/// Streaming mid-stream upstream error through `render_stream_task` ->
+/// exactly one `upstream_error` row (one Ok chunk then an Err).
+#[tokio::test]
+async fn capture_stream_mid_stream_error_emits_upstream_error_row() {
+    use crate::ingress::openai::OpenAiIngress;
+
+    // Arrange: one chunk, then a mid-stream upstream error.
+    let upstream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
+        Box::pin(futures::stream::iter(vec![
+            Ok(streaming_text_chunk("partial")),
+            Err(Error::upstream("p", 503, "boom")),
+        ]));
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    let rig = CaptureRig::new();
+    let capture = rig.capture("openai", &sample_request("a", true), "req-stream-mid-err");
+
+    // Act
+    render_stream_task(upstream, OpenAiIngress, capture, tx).await;
+    let _ = drain(rx).await;
+    let rows = rig.flush_and_read().await;
+
+    // Assert
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, "upstream_error");
+    assert_eq!(rows[0].request_id, "req-stream-mid-err");
+}
+
+/// `outcome_for_dispatch_err` over a real router-built `DispatchMeta`:
+/// an unreachable provider yields a meta with `attempt_count > 0`, which
+/// must map to `upstream_error` (NOT gate_blocked). Drives the actual
+/// router so the meta is genuine, not synthesized.
+#[tokio::test]
+async fn dispatch_err_with_attempts_maps_to_upstream_error() {
+    use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    // Arrange: a single unreachable provider, no fallback, one attempt.
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".to_string(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        retry,
+        ..Default::default()
+    });
+    let router = build_test_router(config).await;
+
+    // Act: drive a real dispatch THROUGH the capture guard so the
+    // persisted row carries the router-built DispatchMeta fields.
+    let rig = CaptureRig::new();
+    let req = sample_request("a", false);
+    let mut capture = rig.capture("openai", &req, "req-upstream-err");
+    let dispatched = router
+        .complete_with_options(req.clone(), Default::default())
+        .await;
+    capture.observe_meta(&dispatched.meta);
+    let err = dispatched
+        .result
+        .expect_err("unreachable provider must error");
+    capture.observe_error(&err);
+    let mapped = outcome_for_dispatch_err(&dispatched.meta);
+    capture.finalize(mapped);
+    drop(capture);
+    let rows = rig.flush_and_read().await;
+
+    // Assert: a real upstream attempt was made, so attempts > 0 ->
+    // upstream_error (the dispatch-failure mapping under test). The
+    // DispatchMeta fields (attempt_count, fallback_count, provider,
+    // alias) land on the persisted row.
+    assert_eq!(mapped, Outcome::UpstreamError);
+    assert!(
+        dispatched.meta.attempt_count > 0,
+        "an upstream attempt was charged: {:?}",
+        dispatched.meta.attempt_count
+    );
+    assert_eq!(rows.len(), 1, "exactly one row");
+    let row = &rows[0];
+    assert_eq!(row.outcome, "upstream_error");
+    assert_eq!(row.request_id, "req-upstream-err");
+    assert_eq!(row.alias, "a", "resolved_alias lands on the row");
+    assert_eq!(row.provider.as_deref(), Some("p"), "served_provider lands");
+    assert_eq!(row.attempt_count, dispatched.meta.attempt_count as i64);
+    assert_eq!(row.fallback_count, dispatched.meta.fallback_count as i64);
+}
+
+/// `outcome_for_dispatch_err` for a gate-blocked dispatch: with the RPM
+/// gate set to 1/min, the SECOND dispatch is refused BEFORE any upstream
+/// contact, so `attempt_count == 0` -> gate_blocked. Single-entry chain
+/// so there is no fallback to bump the attempt count.
+#[tokio::test]
+async fn dispatch_err_gate_blocked_maps_to_gate_blocked() {
+    use routectl_router::{
+        AliasValue, Config, ModelEntry, ProviderEntry, ProviderRuntimePolicy, RetryPolicy,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    // Arrange: rpm_limit=1 so the second dispatch is RPM-gated.
+    let mut runtime = ProviderRuntimePolicy::default();
+    runtime.rpm_limit = Some(1);
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".to_string(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k").with_runtime(runtime),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        retry,
+        ..Default::default()
+    });
+    let router = build_test_router(config).await;
+
+    // Act: first dispatch consumes the only RPM token (and fails against
+    // the unreachable upstream); the second is gate-blocked pre-dispatch.
+    let _first = router
+        .complete_with_options(sample_request("a", false), Default::default())
+        .await;
+    let dispatched = router
+        .complete_with_options(sample_request("a", false), Default::default())
+        .await;
+
+    // Assert: gate refused before any upstream contact on the second.
+    assert!(dispatched.result.is_err());
+    assert_eq!(
+        dispatched.meta.attempt_count, 0,
+        "gate fires before any upstream attempt"
+    );
+    assert_eq!(
+        outcome_for_dispatch_err(&dispatched.meta),
+        Outcome::GateBlocked
+    );
+}
+
+/// Build a `Router` from `config` for the dispatch-meta tests, wiring an
+/// in-memory secret store (the `literal:` ref resolves through it).
+async fn build_test_router(
+    config: std::sync::Arc<routectl_router::Config>,
+) -> routectl_router::Router {
+    use routectl_auth::{MemoryStore, SecretStore};
+    use std::sync::Arc;
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    crate::server::build_router_from_config(config, secrets)
+        .await
+        .expect("build router")
 }

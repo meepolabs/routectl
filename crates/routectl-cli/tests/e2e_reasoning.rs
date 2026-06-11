@@ -19,7 +19,10 @@ use tokio::net::TcpListener;
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod common;
+
 async fn spawn(config: Arc<Config>) -> String {
+    let config = common::isolate_usage_db(config);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod common;
+
 mod helpers {
     use std::sync::Arc;
 
@@ -19,7 +21,14 @@ mod helpers {
 
     /// Bind to 127.0.0.1:0, spawn the server in a background tokio task,
     /// return the bound base URL (e.g. "http://127.0.0.1:54321").
+    ///
+    /// The config's usage DB is redirected to a unique per-process path
+    /// (via `common::isolate_usage_db`) before serving so the now-live
+    /// usage writer never touches the real `~/.config/routectl/usage.db`
+    /// (the `UsageConfig` default). See `common::isolate_usage_db` for why
+    /// that path is persistent / leaked rather than guarded.
     pub async fn spawn_test_server(config: Arc<Config>) -> String {
+        let config = crate::common::isolate_usage_db(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let base_url = format!("http://{addr}");
@@ -600,7 +609,6 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
     // can't resolve must NOT block startup. This is the intended
     // partial-config workflow (multiple providers in TOML, only
     // some active in the current env).
-    use tokio::net::TcpListener;
     let mut providers = BTreeMap::new();
     providers.insert(
         "broken".into(),
@@ -627,16 +635,14 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
         ..Default::default()
     });
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = routectl_cli::server::serve_on_listener(config, listener, None).await;
-    });
+    // Route through spawn_test_server so the (booted) usage writer is
+    // isolated to a tempdir DB, not the real on-disk path.
+    let base = helpers::spawn_test_server(config).await;
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
     // /health returns 200 -> server actually started despite the
     // unreferenced broken provider.
-    let resp = reqwest::get(format!("http://{addr}/health")).await.unwrap();
+    let resp = reqwest::get(format!("{base}/health")).await.unwrap();
     assert_eq!(resp.status(), 200);
 }
 

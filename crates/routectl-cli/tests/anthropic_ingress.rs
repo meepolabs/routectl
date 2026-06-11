@@ -25,6 +25,8 @@ use serde_json::{json, Value};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod common;
+
 mod helpers {
     use std::sync::Arc;
 
@@ -32,6 +34,7 @@ mod helpers {
     use tokio::net::TcpListener;
 
     pub async fn spawn(config: Arc<Config>) -> String {
+        let config = crate::common::isolate_usage_db(config);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let base_url = format!("http://{addr}");

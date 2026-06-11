@@ -236,6 +236,7 @@ fn translate_usage(u: &AnthropicUsage) -> Usage {
             ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
             ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
         }),
+        server_tool_use: u.server_tool_use.clone(),
         extras: u.extras.clone(),
     }
 }
@@ -529,5 +530,51 @@ mod tests {
             Some(&json!("standard")),
             "service_tier must survive translate_usage into Usage.extras"
         );
+    }
+
+    #[test]
+    fn usage_server_tool_use_populates_typed_field() {
+        // Anthropic reports server-side tool invocation counts (e.g.
+        // web_search) in `usage.server_tool_use`. The complete-path
+        // normalizer must lift that object onto the typed canonical
+        // field so the usage-accounting layer can store it.
+        let raw = json!({
+            "id": "msg_st",
+            "model": "claude-opus-4-7",
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 1,
+                "server_tool_use": {"web_search_requests": 2}
+            }
+        });
+        let resp = normalize("test", raw).unwrap();
+        let u = resp.usage.expect("usage present");
+        assert_eq!(
+            u.server_tool_use,
+            Some(json!({"web_search_requests": 2})),
+            "server_tool_use must populate the typed canonical field"
+        );
+        // Forward-compat invariant: server_tool_use is lifted OUT of
+        // extras into the typed slot, not duplicated into both.
+        assert!(
+            u.extras.get("server_tool_use").is_none(),
+            "server_tool_use must not also land in extras"
+        );
+    }
+
+    #[test]
+    fn usage_without_server_tool_use_leaves_field_none() {
+        let raw = json!({
+            "id": "msg_no_stu",
+            "model": "claude-opus-4-7",
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 1}
+        });
+        let resp = normalize("test", raw).unwrap();
+        let u = resp.usage.expect("usage present");
+        assert_eq!(u.server_tool_use, None);
     }
 }

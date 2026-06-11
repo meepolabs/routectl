@@ -2,6 +2,7 @@
 //! by default, overridable via `--config <path>` or `ROUTECTL_CONFIG`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use routectl_providers::anthropic_api::AuthKind;
 #[cfg(feature = "openai-responses")]
@@ -68,6 +69,13 @@ pub struct Config {
     /// of this block -- it stays env-only.
     #[serde(default)]
     pub log: LogConfig,
+
+    /// Operator-facing `[usage]` block. Controls the usage-accounting
+    /// subsystem (per-request token/cost rows persisted to a local
+    /// SQLite db). A missing block keeps all defaults: enabled, a db
+    /// under the user config dir, 90-day retention.
+    #[serde(default)]
+    pub usage: UsageConfig,
 }
 
 /// Operator-facing `[log]` config block. Each field mirrors a
@@ -104,6 +112,64 @@ pub struct LogConfig {
     /// off (verbatim bodies in TRACE).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redact_prompts: Option<bool>,
+}
+
+/// Operator-facing `[usage]` config block. Controls the
+/// usage-accounting subsystem. Each field carries a default, so a
+/// config with no `[usage]` block deserializes to the same value as
+/// `UsageConfig::default()`.
+///
+/// Reload semantics: `db_path` is restart-required (the writer opens
+/// the db at boot and holds the handle); `enabled` and
+/// `retention_days` hot-reload on the next config swap. See
+/// `collect_restart_required_changes` in the CLI server module for the
+/// classification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UsageConfig {
+    /// Master switch for the usage-accounting subsystem. Default on.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// SQLite database path for persisted usage rows. Defaults to
+    /// `<config-dir>/routectl/usage.db` with the user config dir
+    /// resolved from `XDG_CONFIG_HOME` or `HOME` -- no literal `~`
+    /// ever reaches SQLite.
+    #[serde(default = "default_usage_db_path")]
+    pub db_path: PathBuf,
+    /// Rows older than this many days are pruned on daemon startup.
+    /// Default 90.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            db_path: default_usage_db_path(),
+            retention_days: default_retention_days(),
+        }
+    }
+}
+
+fn default_retention_days() -> u32 {
+    90
+}
+
+/// Resolve the default usage-db path the same way the codebase
+/// resolves `credentials.json` / `config.toml`: `XDG_CONFIG_HOME` when
+/// set, else `$HOME/.config`, else a relative `.config` fallback.
+/// Returns an absolute, `~`-free path so callers can hand it straight
+/// to SQLite.
+fn default_usage_db_path() -> PathBuf {
+    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
+        _ => match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => PathBuf::from(home).join(".config"),
+            _ => PathBuf::from(".config"),
+        },
+    };
+    base.join("routectl").join("usage.db")
 }
 
 /// One row in the `[models]` table. Carries the nickname-to-upstream
@@ -795,6 +861,21 @@ pub enum BedrockCredsConfig {
 }
 
 impl ProviderEntry {
+    /// Stable config-key token naming this entry's provider kind. Matches
+    /// the `kind = "..."` discriminant in the TOML provider table, so the
+    /// returned value round-trips with operator configuration and is safe
+    /// to surface in usage accounting / logs.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::OpenaiCompat { .. } => "openai-compat",
+            Self::AnthropicApi { .. } => "anthropic-api",
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock { .. } => "bedrock",
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses { .. } => "openai-responses",
+        }
+    }
+
     /// Get the runtime policy attached to this entry. Centralizes the
     /// match so the router doesn't repeat it.
     pub fn runtime(&self) -> &ProviderRuntimePolicy {
@@ -1380,6 +1461,37 @@ mod tests {
     fn wrong_variant_setter_panics() {
         let _ = ProviderEntry::openai_compat("https://example.com/v1", "literal:test")
             .with_anthropic_version("2023-06-01");
+    }
+
+    #[test]
+    fn kind_str_returns_stable_config_tokens() {
+        assert_eq!(
+            ProviderEntry::openai_compat("https://example.com/v1", "literal:k").kind_str(),
+            "openai-compat",
+        );
+        assert_eq!(
+            ProviderEntry::anthropic_api("literal:k").kind_str(),
+            "anthropic-api",
+        );
+        #[cfg(feature = "openai-responses")]
+        assert_eq!(
+            ProviderEntry::openai_responses("literal:k").kind_str(),
+            "openai-responses",
+        );
+        #[cfg(feature = "bedrock")]
+        {
+            let bedrock = ProviderEntry::Bedrock {
+                region: "us-east-1".into(),
+                api_shape: super::BedrockApiShapeConfig::default(),
+                creds: super::BedrockCredsConfig::DefaultChain,
+                user_agent: None,
+                header_extras: std::collections::BTreeMap::new(),
+                payload_extras: None,
+                anthropic_beta: Vec::new(),
+                runtime: Default::default(),
+            };
+            assert_eq!(bedrock.kind_str(), "bedrock");
+        }
     }
 
     #[test]
@@ -2635,5 +2747,69 @@ seat_selection = "bogus"
             super::ProviderRuntimePolicy::default().seat_selection,
             SeatSelection::FillFirst
         );
+    }
+
+    /// A config with no `[usage]` block deserializes to the documented
+    /// defaults: enabled, 90-day retention, and a db under the resolved
+    /// user config dir with no literal `~` left in the path.
+    #[test]
+    fn usage_block_absent_yields_defaults() {
+        // Arrange: a config that mentions usage nowhere.
+        let toml_text = r#"
+[server]
+host = "127.0.0.1"
+"#;
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse without usage block");
+
+        // Assert
+        assert!(cfg.usage.enabled, "enabled must default true");
+        assert_eq!(cfg.usage.retention_days, 90);
+        let db = cfg.usage.db_path.to_string_lossy();
+        assert!(
+            db.ends_with("routectl/usage.db"),
+            "db_path must end with routectl/usage.db; got {db}"
+        );
+        assert!(
+            !db.contains('~'),
+            "no literal ~ may reach the path; got {db}"
+        );
+    }
+
+    /// Explicit `[usage]` values override every default.
+    #[test]
+    fn usage_block_explicit_overrides_defaults() {
+        // Arrange
+        let toml_text = r#"
+[usage]
+enabled = false
+db_path = "/var/lib/routectl/usage.db"
+retention_days = 7
+"#;
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse explicit usage block");
+
+        // Assert
+        assert!(!cfg.usage.enabled);
+        assert_eq!(
+            cfg.usage.db_path,
+            std::path::PathBuf::from("/var/lib/routectl/usage.db")
+        );
+        assert_eq!(cfg.usage.retention_days, 7);
+    }
+
+    /// `deny_unknown_fields` rejects a typo'd key inside `[usage]`.
+    #[test]
+    fn usage_block_rejects_unknown_field() {
+        // Arrange
+        let toml_text = r#"
+[usage]
+enabled = true
+bogus_key = 1
+"#;
+        // Act
+        let result = toml::from_str::<Config>(toml_text);
+        // Assert
+        assert!(result.is_err(), "unknown [usage] key must reject; got Ok");
     }
 }

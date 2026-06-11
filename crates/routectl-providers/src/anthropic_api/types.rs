@@ -469,6 +469,12 @@ pub(crate) struct AnthropicUsage {
     pub(crate) cache_creation: Option<AnthropicCacheCreation>,
     #[serde(default)]
     pub(crate) reasoning_tokens: Option<u32>,
+    /// Server-side tool invocation counts (e.g. `web_search_requests`).
+    /// Pulled out of the flatten-extras catchall so the egress
+    /// normalizer can lift it onto the typed canonical
+    /// `Usage.server_tool_use` field. Opaque JSON for forward-compat.
+    #[serde(default)]
+    pub(crate) server_tool_use: Option<Value>,
     /// Forward-compat catchall for `usage` sub-fields routectl
     /// doesn't yet have a typed slot for. Captures `service_tier`
     /// (returned by every Anthropic / Bedrock-Invoke response) and
@@ -533,6 +539,11 @@ pub(crate) struct SseDeltaUsage {
     pub(crate) cache_read_input_tokens: Option<u32>,
     #[serde(default)]
     pub(crate) cache_creation: Option<AnthropicCacheCreation>,
+    /// Server-side tool invocation counts streamed on
+    /// `message_delta.usage`. Opaque JSON lifted onto the canonical
+    /// chunk usage's `server_tool_use` field.
+    #[serde(default)]
+    pub(crate) server_tool_use: Option<Value>,
 }
 
 #[cfg(test)]

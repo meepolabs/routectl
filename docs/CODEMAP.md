@@ -198,6 +198,19 @@ listed at the bottom of each crate.
 - `tests/secret_resolution.rs` -- `SecretRef::parse` happy/error paths plus `MemoryStore` env/file resolution
 - `tests/codex_refresh_tracing.rs` -- refresh-flow tracing coverage for the codex (chatgpt-oauth) provider; drives the response decoder through the success and 401-`refresh_token_expired` paths under a captured subscriber, asserting the contractual structured fields (status, `new_refresh_token_present`, sha8) emit without leaking token values
 
+## routectl-usage
+
+Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a single background writer thread that persists one row per routed request to a local SQLite DB. The hot path never blocks/awaits/panics; overflow and disabled-gate drops are counted, not surfaced.
+
+- `src/lib.rs` -- crate root; re-exports `UsageHandle`/`UsageCounters`, `UsageRecord`/`Outcome`, `UsageWriter`/`CHANNEL_CAPACITY`, `UsageDb`/`open`, `prune`/`PruneOutcome`, schema + migrate constants
+- `src/record.rs` -- `UsageRecord` (one field per capture column; epoch-ms `i64` timestamps, nullable `Option<T>` columns) and the closed `Outcome` enum (`ok`, `upstream_error`, `client_disconnect`, `timeout`, `cancelled`, `gate_blocked`) with `as_str`/`FromStr` wire tokens that mirror the DB CHECK constraint
+- `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never blocks/awaits/panics -- safe from `Drop`), runtime-flippable `enabled` gate, shared lock-free `UsageCounters` (enqueued / dropped_full / dropped_disabled / persisted / write_errors / prune_errors)
+- `src/writer.rs` -- `UsageWriter`: opens the DB once at boot (degrades to a no-op drain loop on open failure), drains the bounded channel on a dedicated thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`
+- `src/db.rs` -- `UsageDb` wrapper + `open`: connection setup (WAL, foreign keys), the `INSERT OR IGNORE` write keyed on the UNIQUE `request_id` (idempotency), schema-presence assertions
+- `src/schema.rs` -- `requests` table DDL (the capture columns + `request_id UNIQUE` idempotency key + `outcome` CHECK), `meta` table, `SCHEMA_VERSION`
+- `src/migrate.rs` -- forward-only schema migration / version stamping against the `meta` table
+- `src/retention.rs` -- `prune` (startup-only, best-effort) dropping rows older than the configured retention window; `PruneOutcome` counters
+
 ## routectl-cli
 
 - `src/main.rs` -- clap CLI entry point; dispatches `serve` / `login` / `logout` / `refresh` / `whoami` / `test` / `config` subcommands
@@ -219,7 +232,8 @@ listed at the bottom of each crate.
 - `src/handlers/chat_completions.rs` -- `POST /v1/chat/completions` thin wrapper around `ingress_handle` with `OpenAiIngress`
 - `src/handlers/messages.rs` -- `POST /v1/messages` thin wrapper around `ingress_handle` with `AnthropicIngress`
 - `src/handlers/messages_count_tokens.rs` -- `POST /v1/messages/count_tokens` proxy through the FIRST provider in the dispatch chain only (no fallback walk; tokenizer-specific count must match the chosen model)
-- `src/handlers/ingress_handle.rs` -- generic ingress driver: parse + route + render; SSE streaming with cancellation
+- `src/handlers/ingress_handle.rs` -- generic ingress driver: parse + route + render; SSE streaming with cancellation. Constructs the `UsageCapture` guard (now defined in `usage_capture.rs`) at the boundary and drives its `observe_*` / `finalize` calls across the non-stream (`complete_response`) and stream (`stream_response` / `render_stream_task`) paths
+- `src/handlers/usage_capture.rs` -- `UsageCapture`, the unified RAII capture guard (replaces the former `EgressStreamSummary`) that records exactly ONE `UsageRecord` per request on both ingress paths: a draft is seeded from the request shape + `RequestId` (`build_usage_draft`), the dispatch/token/quota/outcome columns are stamped from `DispatchMeta` + `ChatResponse`/`ChatChunk` + `UpstreamMeta`, `finalize(outcome)` emits the row once (idempotent), and the Drop fallback stamps `client_disconnect` for a cancelled/disconnected request. Also subsumes the egress stream trace-summary line. Owns the outcome-mapping helpers (`outcome_for_dispatch_err`, `error_class_of`)
 
 ### ingress
 

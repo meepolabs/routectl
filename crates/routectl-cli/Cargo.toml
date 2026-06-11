@@ -17,6 +17,7 @@ routectl-core.workspace = true
 routectl-providers = { workspace = true, default-features = false, features = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"] }
 routectl-router.workspace = true
 routectl-auth.workspace = true
+routectl-usage = { path = "../routectl-usage" }
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
 clap.workspace = true

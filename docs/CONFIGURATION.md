@@ -13,7 +13,7 @@ overlays merge, what's reserved.
 
 ## Top-level shape
 
-A routectl config is a single TOML file with up to seven top-level
+A routectl config is a single TOML file with up to eight top-level
 sections:
 
 ```toml
@@ -40,6 +40,9 @@ sections:
                       # redact_prompts). Optional. The env-filter
                       # directive ROUTECTL_LOG is intentionally
                       # env-only and is NOT part of this block.
+
+[usage]               # usage-accounting subsystem: enabled, db_path,
+                      # retention_days. Optional.
 ```
 
 [`examples/config.toml`](../examples/config.toml) is a working
@@ -802,6 +805,37 @@ seeder fires a single `info` line per knob at boot
 (`ROUTECTL_LOG_REDACT_PROMPTS resolved`,
 `ROUTECTL_TRACE_BODY_BYTES resolved`, `ROUTECTL_TRACE_HEADERS
 resolved`) so operators can confirm the effective value once.
+
+## Usage accounting (`[usage]`)
+
+The optional `[usage]` block controls the usage-accounting subsystem,
+which persists one row per request (token counts, cost) to a local
+SQLite database. A missing block keeps every default below.
+
+```toml
+[usage]
+enabled = true                          # master switch; default true
+db_path = "/home/you/.config/routectl/usage.db"  # default resolved path
+retention_days = 90                     # prune rows older than this; default 90
+```
+
+| Knob             | Default                          | Reload    |
+|------------------|----------------------------------|-----------|
+| `enabled`        | `true`                           | hot       |
+| `db_path`        | `<config-dir>/routectl/usage.db` | restart   |
+| `retention_days` | `90`                             | hot       |
+
+- `enabled` -- master switch for the subsystem. Hot-reloads on the
+  next config swap; no restart needed to turn accounting on or off.
+- `db_path` -- the SQLite database file. The default resolves the user
+  config dir from `XDG_CONFIG_HOME` (else `$HOME/.config`), so no
+  literal `~` ever reaches SQLite. **Restart-required**: the writer
+  opens the database at startup and holds the handle, so a `db_path`
+  change is classified restart-required and is reported as
+  `usage.db_path` on hot-reload rather than taking effect live.
+- `retention_days` -- on daemon startup, rows older than this many days
+  are pruned from the database. Hot-reloads; the new value applies at
+  the next startup-time prune.
 
 ## Validating config
 

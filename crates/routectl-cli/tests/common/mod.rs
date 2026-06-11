@@ -16,3 +16,38 @@ pub mod replay;
 // those compilation units, which is expected for a shared module.
 #[allow(unused_imports)]
 pub use routectl_core::test_utils::*;
+
+/// Return a copy of `config` whose `usage.db_path` points at a unique,
+/// per-process path so a booted server's usage writer NEVER touches the
+/// real `~/.config/routectl/usage.db` (the `UsageConfig` default).
+///
+/// The base dir is created once per test process (`OnceLock`) under
+/// `$TMPDIR/routectl-usage-test-<pid>` and the per-call filename is made
+/// unique by an atomic counter. The dir is deliberately persistent and
+/// leaked rather than guarded by a `tempfile::TempDir`: each server runs
+/// detached for the whole test process and the tests never await its
+/// shutdown, so a scoped guard could drop (and delete the path) while the
+/// writer still holds the open DB handle. A small per-process dir left on
+/// disk is the accepted cost of avoiding that race.
+#[allow(dead_code)]
+pub fn isolate_usage_db(
+    config: std::sync::Arc<routectl_router::Config>,
+) -> std::sync::Arc<routectl_router::Config> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    static BASE: OnceLock<std::path::PathBuf> = OnceLock::new();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let base = BASE.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("routectl-usage-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create per-process usage test dir");
+        dir
+    });
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = base.join(format!("usage-{n}.db"));
+
+    let mut cfg = (*config).clone();
+    cfg.usage.db_path = path;
+    std::sync::Arc::new(cfg)
+}

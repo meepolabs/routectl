@@ -787,6 +787,30 @@ mod tests {
     }
 
     #[test]
+    fn complete_usage_carries_server_tool_use() {
+        let provider = make_provider("https://api.anthropic.com");
+        let raw = json!({
+            "id": "msg_stu",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-opus",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "server_tool_use": {"web_search_requests": 3}
+            },
+            "content": [{"type": "text", "text": "Hi"}]
+        });
+        let resp = provider.normalize_response(raw).unwrap();
+        let usage = resp.usage.unwrap();
+        assert_eq!(
+            usage.server_tool_use,
+            Some(json!({"web_search_requests": 3}))
+        );
+    }
+
+    #[test]
     fn redacted_thinking_maps_to_encrypted_kind() {
         let provider = make_provider("https://api.anthropic.com");
         let raw = json!({
@@ -978,6 +1002,32 @@ mod tests {
         assert_eq!(
             finish.choices[0].finish_reason.as_deref(),
             Some("tool_calls")
+        );
+    }
+
+    /// Stream contract: `server_tool_use` on the closing
+    /// `message_delta.usage` lands on the canonical chunk usage.
+    #[test]
+    fn sse_server_tool_use_lands_on_chunk_usage() {
+        use routectl_providers::anthropic_api::sse::SseState;
+
+        let mut state = SseState::default();
+        let pid = "test";
+        let mut chunks = Vec::new();
+        let events = vec![
+            r#"{"type":"message_start","message":{"id":"msg_stu","model":"claude-3-opus","usage":{"input_tokens":20,"output_tokens":0}}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7,"server_tool_use":{"web_search_requests":5}}}"#,
+        ];
+        for event_data in &events {
+            if let Some(chunk) = state.parse_event(pid, event_data).unwrap() {
+                chunks.push(chunk);
+            }
+        }
+        let closing = chunks.last().unwrap();
+        let usage = closing.usage.as_ref().expect("usage on closing chunk");
+        assert_eq!(
+            usage.server_tool_use,
+            Some(json!({"web_search_requests": 5}))
         );
     }
 

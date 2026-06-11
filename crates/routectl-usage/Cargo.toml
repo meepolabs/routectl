@@ -1,0 +1,31 @@
+[package]
+name = "routectl-usage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Usage-accounting persistence types for routectl."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Only the `sync` feature is needed at build time: the bounded mpsc
+# channel between the async producer side and the dedicated blocking
+# writer thread. No tokio runtime is started by this crate -- the
+# consumer thread uses `blocking_recv` on its own OS thread, and the
+# producer's `try_send` is runtime-agnostic.
+tokio = { workspace = true, features = ["sync"] }
+# `bundled` compiles SQLite from vendored source, so there is no
+# system libsqlite dependency. This dep lives only in routectl-usage;
+# the lean provider build does not pull it in.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
+# Tests drive `try_send` from an async context and need a runtime; the
+# `macros` + `rt` features power `#[tokio::test]`.
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

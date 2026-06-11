@@ -15,7 +15,7 @@ pub(crate) mod seat_pool;
 
 pub use config::{
     AliasValue, Config, HistoryReasoning, LogConfig, ModelEntry, ProviderEntry,
-    ProviderRuntimePolicy, ReasoningDialect, RetryPolicy, ServerAuth, ServerConfig,
+    ProviderRuntimePolicy, ReasoningDialect, RetryPolicy, ServerAuth, ServerConfig, UsageConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
@@ -27,4 +27,4 @@ pub use factory::{
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use resolved::ResolvedModel;
-pub use router::{Router, RouterOptions};
+pub use router::{DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions};

@@ -127,9 +127,8 @@ mod tests {
             ..Default::default()
         });
         let router = Router::new(config);
-        let state = Arc::new(AppState {
-            router: Arc::new(arc_swap::ArcSwap::from_pointee(router)),
-        });
+        let (state, _usage_dir) =
+            AppState::for_test(Arc::new(arc_swap::ArcSwap::from_pointee(router)));
 
         let Json(body) = list_models(State(state)).await;
         assert_eq!(body["object"], "list");

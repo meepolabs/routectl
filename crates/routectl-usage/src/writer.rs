@@ -1,0 +1,805 @@
+//! The off-hot-path bounded writer task.
+//!
+//! A dedicated OS thread owns the (blocking) `rusqlite` connection and is
+//! the single writer to the usage DB. It receives `UsageRecord`s over a
+//! bounded `tokio::sync::mpsc` channel via `blocking_recv` -- so the
+//! blocking SQLite writes never run on a tokio runtime worker, and the
+//! async producer side never blocks. A DB failure degrades the subsystem
+//! (log + count + keep draining) rather than crashing the proxy. On
+//! shutdown the sender is dropped, the thread drains the already-queued
+//! rows under a bounded deadline, and the thread is joined.
+
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rusqlite::Connection;
+use tokio::sync::mpsc;
+
+use crate::db::{self, UsageDb};
+use crate::handle::{UsageCounters, UsageHandle};
+use crate::record::UsageRecord;
+use crate::retention::{self, PruneOutcome};
+
+/// Bounded capacity of the producer -> writer channel. Sized to absorb a
+/// short burst without back-pressuring callers; overflow drops a row
+/// rather than blocking the hot path.
+pub const CHANNEL_CAPACITY: usize = 2048;
+
+/// Upper bound on how long shutdown waits for the consumer thread to
+/// drain queued rows before abandoning them. Keeps a wedged DB from
+/// hanging daemon shutdown.
+const SHUTDOWN_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Log an ERROR about write failures at most this often (every Nth
+/// error), in addition to the always-logged degraded-state transition.
+const WRITE_ERROR_LOG_INTERVAL: u64 = 1024;
+
+/// Shutdown handle for the writer subsystem. Not `Clone` -- the daemon
+/// owns exactly one and calls [`UsageWriter::shutdown`] once on teardown.
+///
+/// When the consumer thread could not be spawned the writer is
+/// constructed in a degraded form (`done`/`join` are `None`); both
+/// `shutdown` and `Drop` then no-op.
+pub struct UsageWriter {
+    sender: Option<mpsc::Sender<UsageRecord>>,
+    done: Option<std::sync::mpsc::Receiver<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
+    counters: Arc<UsageCounters>,
+}
+
+impl UsageWriter {
+    /// Start the writer subsystem.
+    ///
+    /// Opens the DB at `db_path` (degrading to a no-DB drain loop if the
+    /// open fails -- construction never hard-fails), runs the one-shot
+    /// startup retention prune, spawns the dedicated consumer thread, and
+    /// returns the `Clone` [`UsageHandle`] for callers plus this shutdown
+    /// handle. The writer thread is always spawned, even when
+    /// `initial_enabled` is false -- the gate is checked per-record on the
+    /// producer side so it can be flipped at runtime.
+    pub fn start(
+        db_path: PathBuf,
+        capacity: usize,
+        retention_days: u32,
+        initial_enabled: bool,
+    ) -> (UsageHandle, UsageWriter) {
+        let counters = Arc::new(UsageCounters::default());
+        let enabled = Arc::new(AtomicBool::new(initial_enabled));
+        let (tx, rx) = mpsc::channel::<UsageRecord>(capacity.max(1));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        let thread_counters = Arc::clone(&counters);
+        let spawn_result = std::thread::Builder::new()
+            .name("routectl-usage-writer".to_string())
+            .spawn(move || {
+                run_writer(db_path, retention_days, rx, thread_counters);
+                let _ = done_tx.send(());
+            });
+
+        let join = match spawn_result {
+            Ok(join) => join,
+            Err(err) => {
+                counters.incr_write_errors();
+                tracing::error!(
+                    target: "routectl_usage::writer",
+                    error = %err,
+                    "usage writer thread spawn failed -- running degraded (records will be dropped)"
+                );
+                return Self::degraded(tx, enabled, counters);
+            }
+        };
+
+        let handle = UsageHandle::new(tx.clone(), enabled, Arc::clone(&counters));
+        let writer = UsageWriter {
+            sender: Some(tx),
+            done: Some(done_rx),
+            join: Some(join),
+            counters,
+        };
+        (handle, writer)
+    }
+
+    /// Build a degraded handle/writer pair with no consumer thread.
+    ///
+    /// Used when the OS refuses to spawn the writer thread. The handle's
+    /// `try_send` accepts-and-drops (the receiver `rx` was already moved
+    /// into the failed spawn closure and dropped, so the channel is
+    /// closed); the writer's `shutdown`/`Drop` no-op because there is no
+    /// thread to drain or join.
+    fn degraded(
+        sender: mpsc::Sender<UsageRecord>,
+        enabled: Arc<AtomicBool>,
+        counters: Arc<UsageCounters>,
+    ) -> (UsageHandle, UsageWriter) {
+        let handle = UsageHandle::new(sender, enabled, Arc::clone(&counters));
+        let writer = UsageWriter {
+            sender: None,
+            done: None,
+            join: None,
+            counters,
+        };
+        (handle, writer)
+    }
+
+    /// Read-only view of the shared health counters.
+    pub fn counters(&self) -> &Arc<UsageCounters> {
+        &self.counters
+    }
+
+    /// Close the channel, drain queued rows under a bounded deadline, and
+    /// join the consumer thread.
+    ///
+    /// Dropping the sender lets the consumer's `blocking_recv` return
+    /// `None` once the queue empties, so a healthy DB drains fully. If the
+    /// DB is wedged the drain is abandoned after [`SHUTDOWN_DRAIN_DEADLINE`]
+    /// and the thread is left detached so shutdown never hangs.
+    ///
+    /// # Blocking
+    ///
+    /// This performs a blocking drain of up to [`SHUTDOWN_DRAIN_DEADLINE`]
+    /// and MUST be called from a blocking context. The daemon dispatches it
+    /// via `tokio::task::spawn_blocking`; it must NEVER be called directly
+    /// on an async runtime worker, or it can stall that worker for the full
+    /// deadline. (`Drop` is non-blocking and is the safe fallback if an
+    /// explicit shutdown was missed.)
+    pub fn shutdown(mut self) {
+        self.shutdown_inner();
+    }
+
+    fn shutdown_inner(&mut self) {
+        // Drop the sender so the consumer's recv loop can terminate.
+        self.sender.take();
+        // A degraded writer (no thread) has nothing to drain or join.
+        let Some(done) = self.done.take() else {
+            return;
+        };
+        let persisted_before = self.counters.persisted();
+
+        match done.recv_timeout(SHUTDOWN_DRAIN_DEADLINE) {
+            Ok(()) => {
+                self.join_once();
+                tracing::info!(
+                    target: "routectl_usage::writer",
+                    flushed = self.counters.persisted() - persisted_before,
+                    "usage writer drained and stopped"
+                );
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                // The thread ended without signalling done -- it panicked.
+                // Join now (instant: it is already gone) to surface the
+                // panic payload instead of silently abandoning it.
+                if let Some(Err(_)) = self.join.take().map(|j| j.join()) {
+                    tracing::error!(
+                        target: "routectl_usage::writer",
+                        "usage writer thread panicked during drain"
+                    );
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                tracing::warn!(
+                    target: "routectl_usage::writer",
+                    deadline_secs = SHUTDOWN_DRAIN_DEADLINE.as_secs(),
+                    flushed = self.counters.persisted() - persisted_before,
+                    "usage writer drain deadline exceeded -- abandoning queued rows"
+                );
+            }
+        }
+    }
+
+    /// Join the consumer thread at most once. Safe to call after a prior
+    /// shutdown took the handle (double-shutdown / shutdown-then-Drop).
+    fn join_once(&mut self) {
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for UsageWriter {
+    /// Non-blocking teardown: signal the consumer to stop by dropping the
+    /// sender, then return immediately. Rows still queued at drop may be
+    /// lost -- at-most-once durability is the accepted contract. The 5s
+    /// drain + join lives only in the explicit [`UsageWriter::shutdown`],
+    /// so dropping a writer on a runtime worker never stalls it.
+    fn drop(&mut self) {
+        self.sender.take();
+    }
+}
+
+/// Current wall-clock time as epoch milliseconds (saturating).
+fn now_epoch_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// Consumer-thread entry point: open the DB (or degrade), prune once,
+/// then drain the channel until all senders are gone.
+fn run_writer(
+    db_path: PathBuf,
+    retention_days: u32,
+    mut rx: mpsc::Receiver<UsageRecord>,
+    counters: Arc<UsageCounters>,
+) {
+    let mut state = WriterState::open(db_path, &counters);
+    state.prune_once(retention_days, &counters);
+
+    while let Some(record) = rx.blocking_recv() {
+        state.persist(&record, &counters);
+    }
+}
+
+/// Per-thread mutable state: the (optional) connection plus the
+/// healthy/degraded flag for transition logging.
+struct WriterState {
+    conn: Option<Connection>,
+    degraded: bool,
+}
+
+impl WriterState {
+    /// Open the DB, degrading to a no-connection drain loop on failure.
+    /// A failed open is logged once and counted; the thread keeps running
+    /// so callers are never affected.
+    fn open(db_path: PathBuf, counters: &Arc<UsageCounters>) -> Self {
+        match db::open(&db_path) {
+            Ok(db) => Self {
+                conn: Some(UsageDb::into_conn(db)),
+                degraded: false,
+            },
+            Err(err) => {
+                counters.incr_write_errors();
+                tracing::error!(
+                    target: "routectl_usage::writer",
+                    error = %err,
+                    "usage db open failed -- running degraded (records will be dropped)"
+                );
+                Self {
+                    conn: None,
+                    degraded: true,
+                }
+            }
+        }
+    }
+
+    /// Run the one-shot startup retention prune. Best-effort: failures log
+    /// a WARN and bump a counter but never abort the writer.
+    fn prune_once(&self, retention_days: u32, counters: &Arc<UsageCounters>) {
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        match retention::prune(conn, retention_days, now_epoch_ms()) {
+            Ok(PruneOutcome::Pruned { deleted }) => tracing::info!(
+                target: "routectl_usage::writer",
+                deleted,
+                retention_days,
+                "usage retention prune complete"
+            ),
+            Ok(PruneOutcome::Skipped) => {}
+            Err(err) => {
+                counters.incr_prune_errors();
+                tracing::warn!(
+                    target: "routectl_usage::writer",
+                    error = %err,
+                    "usage retention prune failed -- continuing"
+                );
+            }
+        }
+    }
+
+    /// Persist one record, tracking degraded-state transitions. A real
+    /// insert (1 row) bumps `persisted`; an `INSERT OR IGNORE` no-op (0
+    /// rows -- duplicate request_id) is healthy but not counted. A write
+    /// error (or a missing connection) drops the row, counts the error,
+    /// and -- on the healthy->degraded edge -- logs once at ERROR.
+    fn persist(&mut self, record: &UsageRecord, counters: &Arc<UsageCounters>) {
+        let Some(conn) = self.conn.as_ref() else {
+            self.record_failure(None, counters);
+            return;
+        };
+        match insert_record(conn, record) {
+            Ok(1) => {
+                counters.incr_persisted();
+                self.mark_healthy();
+            }
+            Ok(0) => {
+                // Duplicate request_id collapsed by INSERT OR IGNORE: the
+                // write succeeded (DB is healthy) but no new row landed, so
+                // it must not inflate the persisted counter.
+                self.mark_healthy();
+                tracing::debug!(
+                    target: "routectl_usage::writer",
+                    "usage writer ignored duplicate request_id"
+                );
+            }
+            Ok(n) => {
+                // A single-row INSERT can only affect 0 or 1 rows; anything
+                // else is impossible. Treat defensively in production.
+                debug_assert!(false, "insert_record affected {n} rows");
+                self.mark_healthy();
+                tracing::error!(
+                    target: "routectl_usage::writer",
+                    rows = n,
+                    "usage writer insert affected unexpected row count"
+                );
+            }
+            Err(err) => self.record_failure(Some(err), counters),
+        }
+    }
+
+    /// Count a write failure, emit a rate-limited ERROR, and log the
+    /// healthy->degraded transition exactly once on its leading edge.
+    fn record_failure(&mut self, err: Option<rusqlite::Error>, counters: &Arc<UsageCounters>) {
+        let prior = counters.incr_write_errors();
+        if !self.degraded {
+            self.degraded = true;
+            tracing::error!(
+                target: "routectl_usage::writer",
+                error = err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
+                "usage writer degraded -- dropping rows it cannot persist"
+            );
+        } else if (prior + 1) % WRITE_ERROR_LOG_INTERVAL == 0 {
+            tracing::error!(
+                target: "routectl_usage::writer",
+                write_errors = prior + 1,
+                "usage writer still degraded"
+            );
+        }
+    }
+
+    /// Log the degraded->healthy recovery edge exactly once.
+    fn mark_healthy(&mut self) {
+        if self.degraded {
+            self.degraded = false;
+            tracing::info!(
+                target: "routectl_usage::writer",
+                "usage writer recovered -- persisting rows again"
+            );
+        }
+    }
+}
+
+/// Serialize an optional JSON value column to owned TEXT, or `None` for a
+/// SQL NULL. A serialization failure degrades to NULL rather than failing
+/// the whole row.
+fn json_text(value: &Option<serde_json::Value>) -> Option<String> {
+    value.as_ref().and_then(|v| serde_json::to_string(v).ok())
+}
+
+/// `INSERT OR IGNORE` one record, binding every column from
+/// `UsageRecord` in schema order. Duplicate `request_id`s are silently
+/// ignored (the idempotency contract). All values are bound parameters.
+/// Returns the number of rows actually inserted (1 for a new row, 0 for
+/// an ignored duplicate).
+fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::Error> {
+    let server_tool_use = json_text(&r.server_tool_use);
+    let quota_extras = json_text(&r.quota_extras);
+    let extra = json_text(&r.extra);
+    conn.execute(
+        INSERT_SQL,
+        rusqlite::params![
+            r.ts_start,
+            r.ts_end,
+            r.request_id,
+            r.ingress_dialect,
+            r.requested_model,
+            r.alias,
+            r.model,
+            r.upstream,
+            r.provider,
+            r.provider_kind,
+            r.seat,
+            r.session_id,
+            r.stream as i64,
+            r.max_tokens_req,
+            r.tool_count,
+            r.thinking_req,
+            r.thinking_req_kind,
+            r.msg_count,
+            r.service_tier,
+            r.outcome.as_str(),
+            r.http_status,
+            r.error_class,
+            r.finish_reason,
+            r.attempt_count,
+            r.fallback_count,
+            r.latency_ms,
+            r.ttfb_ms,
+            r.input_tokens,
+            r.output_tokens,
+            r.reasoning_tokens,
+            r.cache_read,
+            r.cache_write_5m,
+            r.cache_write_1h,
+            server_tool_use,
+            r.quota_claim,
+            r.quota_status,
+            r.quota_overage_status,
+            r.quota_utilization,
+            r.quota_overage_utilization,
+            r.quota_reset,
+            quota_extras,
+            extra,
+        ],
+    )
+}
+
+/// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
+/// `schema.rs` exactly; `?1..?42` positions match the params list above.
+const INSERT_SQL: &str = "\
+INSERT OR IGNORE INTO requests (
+    ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
+    model, upstream, provider, provider_kind, seat, session_id,
+    stream, max_tokens_req, tool_count, thinking_req, thinking_req_kind,
+    msg_count, service_tier,
+    outcome, http_status, error_class, finish_reason, attempt_count, fallback_count,
+    latency_ms, ttfb_ms,
+    input_tokens, output_tokens, reasoning_tokens, cache_read, cache_write_5m,
+    cache_write_1h, server_tool_use,
+    quota_claim, quota_status, quota_overage_status, quota_utilization,
+    quota_overage_utilization, quota_reset, quota_extras,
+    extra
+) VALUES (
+    ?1, ?2, ?3, ?4, ?5, ?6,
+    ?7, ?8, ?9, ?10, ?11, ?12,
+    ?13, ?14, ?15, ?16, ?17,
+    ?18, ?19,
+    ?20, ?21, ?22, ?23, ?24, ?25,
+    ?26, ?27,
+    ?28, ?29, ?30, ?31, ?32,
+    ?33, ?34,
+    ?35, ?36, ?37, ?38,
+    ?39, ?40, ?41,
+    ?42
+)";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::Outcome;
+    use rusqlite::Connection;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Build a minimal valid record with the given id; `enrich` lets a
+    /// test populate the columns it asserts on.
+    fn record(request_id: &str) -> UsageRecord {
+        UsageRecord {
+            ts_start: 0,
+            ts_end: 0,
+            request_id: request_id.to_string(),
+            ingress_dialect: "openai".to_string(),
+            requested_model: "m".to_string(),
+            alias: "a".to_string(),
+            model: None,
+            upstream: None,
+            provider: None,
+            provider_kind: None,
+            seat: None,
+            session_id: None,
+            stream: false,
+            max_tokens_req: None,
+            tool_count: 0,
+            thinking_req: None,
+            thinking_req_kind: None,
+            msg_count: 1,
+            service_tier: None,
+            outcome: Outcome::Ok,
+            http_status: None,
+            error_class: None,
+            finish_reason: None,
+            attempt_count: 1,
+            fallback_count: 0,
+            latency_ms: 0,
+            ttfb_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            cache_read: None,
+            cache_write_5m: None,
+            cache_write_1h: None,
+            server_tool_use: None,
+            quota_claim: None,
+            quota_status: None,
+            quota_overage_status: None,
+            quota_utilization: None,
+            quota_overage_utilization: None,
+            quota_reset: None,
+            quota_extras: None,
+            extra: None,
+        }
+    }
+
+    fn temp_path() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("usage.db");
+        (dir, path)
+    }
+
+    fn row_count(path: &PathBuf) -> i64 {
+        let conn = Connection::open(path).expect("read open");
+        conn.query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+            .expect("count")
+    }
+
+    /// Spin until the persisted counter reaches `want` or a deadline
+    /// passes; returns whether it was reached.
+    fn wait_persisted(counters: &Arc<UsageCounters>, want: u64) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while counters.persisted() < want {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    #[tokio::test]
+    async fn try_send_round_trips_a_representative_row() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let mut rec = record("rt-1");
+        rec.outcome = Outcome::Timeout;
+        rec.stream = true;
+        rec.input_tokens = Some(42);
+        rec.quota_extras = Some(json!({"plan": "pro"}));
+
+        // Act
+        handle.try_send(rec);
+        assert!(wait_persisted(handle.counters(), 1), "row not persisted");
+        writer.shutdown();
+
+        // Assert: exact bound values for the representative row.
+        let conn = Connection::open(&path).expect("read");
+        let (outcome, stream, input, extras): (String, i64, i64, String) = conn
+            .query_row(
+                "SELECT outcome, stream, input_tokens, quota_extras FROM requests WHERE request_id='rt-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!(outcome, "timeout");
+        assert_eq!(stream, 1);
+        assert_eq!(input, 42);
+        assert_eq!(extras, "{\"plan\":\"pro\"}");
+    }
+
+    #[tokio::test]
+    async fn duplicate_request_id_persists_one_row() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+
+        // Act
+        handle.try_send(record("dup"));
+        handle.try_send(record("dup"));
+        assert!(wait_persisted(handle.counters(), 1), "first not persisted");
+        writer.shutdown();
+
+        // Assert: INSERT OR IGNORE collapsed the duplicate, and the
+        // persisted counter reflects the single real insert (not the
+        // ignored duplicate).
+        assert_eq!(row_count(&path), 1);
+        assert_eq!(handle.counters().persisted(), 1);
+    }
+
+    #[tokio::test]
+    async fn disabled_gate_drops_without_overflow_count() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, false);
+
+        // Act: disabled -> dropped at the gate.
+        handle.try_send(record("gated"));
+        // Flip on at runtime; subsequent records write with no restart.
+        handle.set_enabled(true);
+        handle.try_send(record("live"));
+        assert!(wait_persisted(handle.counters(), 1), "live not persisted");
+        writer.shutdown();
+
+        // Assert
+        assert_eq!(handle.counters().dropped_disabled(), 1);
+        assert_eq!(handle.counters().dropped_full(), 0);
+        assert_eq!(row_count(&path), 1);
+    }
+
+    #[tokio::test]
+    async fn unopenable_db_degrades_but_handle_still_accepts() {
+        // Arrange: point at a path whose parent is a file, so open fails.
+        let dir = TempDir::new().expect("tempdir");
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").expect("write blocker");
+        let bad_path = blocker.join("usage.db");
+        let (handle, writer) = UsageWriter::start(bad_path, CHANNEL_CAPACITY, 0, true);
+
+        // Act: try_send must not panic or error even with no DB.
+        handle.try_send(record("degraded"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while handle.counters().write_errors() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no write error counted"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        writer.shutdown();
+
+        // Assert: open failure + dropped row both counted; nothing persisted.
+        assert!(handle.counters().write_errors() >= 1);
+        assert_eq!(handle.counters().persisted(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_queued_rows() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+
+        // Act: enqueue many, then shut down and let the bounded drain run.
+        let n = 200;
+        for i in 0..n {
+            handle.try_send(record(&format!("drain-{i}")));
+        }
+        writer.shutdown();
+
+        // Assert: a healthy DB drains every queued row before stopping.
+        assert_eq!(row_count(&path), n as i64);
+    }
+
+    #[tokio::test]
+    async fn full_channel_drops_and_counts_without_blocking() {
+        // Arrange: a handle over a channel whose receiver is never polled,
+        // so the queue fills and stays full.
+        let capacity = 2usize;
+        let (tx, _rx) = mpsc::channel::<UsageRecord>(capacity);
+        let counters = Arc::new(UsageCounters::default());
+        let enabled = Arc::new(AtomicBool::new(true));
+        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters));
+
+        // Act: send well past capacity, timing the loop to prove try_send
+        // never blocks (a blocking send against a full channel would dwarf
+        // this bound).
+        let sends = 50usize;
+        let start = std::time::Instant::now();
+        for i in 0..sends {
+            handle.try_send(record(&format!("full-{i}")));
+        }
+        let elapsed = start.elapsed();
+
+        // Assert: completed far under any blocking threshold; exact split
+        // of enqueued (capacity) vs overflow drops (the rest).
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "send loop blocked: took {elapsed:?} for {sends} sends"
+        );
+        assert_eq!(counters.dropped_disabled(), 0);
+        assert_eq!(counters.enqueued(), capacity as u64);
+        assert_eq!(counters.dropped_full(), (sends - capacity) as u64);
+    }
+
+    #[tokio::test]
+    async fn drop_without_shutdown_is_non_blocking() {
+        // Arrange: a live writer with rows queued behind it.
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        for i in 0..100 {
+            handle.try_send(record(&format!("drop-{i}")));
+        }
+
+        // Act: drop the writer instead of calling shutdown. Drop must
+        // signal-and-detach, never run the 5s drain.
+        let start = std::time::Instant::now();
+        drop(writer);
+        let elapsed = start.elapsed();
+
+        // Assert: returns effectively instantly (well under the 5s drain
+        // deadline); at-most-once durability means queued rows may be lost.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Drop blocked: took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_then_drop_does_not_double_join() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        handle.try_send(record("once"));
+        assert!(wait_persisted(handle.counters(), 1), "row not persisted");
+
+        // Act + Assert: explicit shutdown takes the join handle and
+        // sender; the implicit Drop that runs as `shutdown` returns must
+        // not panic or re-join (join/sender already taken).
+        writer.shutdown();
+    }
+
+    #[test]
+    fn degraded_writer_shutdown_is_noop() {
+        // Arrange: a degraded pair as produced on thread-spawn failure.
+        // The receiver is dropped to mirror the real path, where `rx` was
+        // moved into the spawn closure that never ran -- so the channel is
+        // closed and sends accept-and-drop.
+        let (tx, rx) = mpsc::channel::<UsageRecord>(2);
+        drop(rx);
+        let counters = Arc::new(UsageCounters::default());
+        let enabled = Arc::new(AtomicBool::new(true));
+        let (handle, writer) = UsageWriter::degraded(tx, enabled, counters);
+
+        // Act: try_send accepts-and-drops (channel closed -> overflow);
+        // shutdown returns immediately with no thread to join.
+        handle.try_send(record("degraded"));
+        let start = std::time::Instant::now();
+        writer.shutdown();
+
+        // Assert
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert_eq!(handle.counters().dropped_full(), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_prune_deletes_old_keeps_new() {
+        // Arrange: seed an old and a new row directly, then start the
+        // writer with a retention window that should drop the old one.
+        let (_dir, path) = temp_path();
+        {
+            let db = crate::db::open(&path).expect("seed open");
+            let now = now_epoch_ms();
+            let day = 86_400_000i64;
+            for (id, ts) in [("old", now - 40 * day), ("new", now - day)] {
+                db.conn()
+                    .execute(
+                        "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                         requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                         msg_count, attempt_count, fallback_count) \
+                         VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 0, 'ok', 0, 0, 0, 1, 0)",
+                        rusqlite::params![ts, id],
+                    )
+                    .expect("seed insert");
+            }
+        }
+
+        // Act: 30-day retention prunes "old" at startup.
+        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 30, true);
+        writer.shutdown();
+
+        // Assert
+        let conn = Connection::open(&path).expect("read");
+        let survivor: String = conn
+            .query_row("SELECT request_id FROM requests", [], |r| r.get(0))
+            .expect("survivor");
+        assert_eq!(survivor, "new");
+        assert_eq!(row_count(&path), 1);
+    }
+
+    #[tokio::test]
+    async fn retention_zero_keeps_everything_at_startup() {
+        // Arrange
+        let (_dir, path) = temp_path();
+        {
+            let db = crate::db::open(&path).expect("seed open");
+            db.conn()
+                .execute(
+                    "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                     requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                     msg_count, attempt_count, fallback_count) \
+                     VALUES (0, 0, 'ancient', 'openai', 'm', 'a', 0, 'ok', 0, 0, 0, 1, 0)",
+                    [],
+                )
+                .expect("seed insert");
+        }
+
+        // Act
+        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        writer.shutdown();
+
+        // Assert: retention=0 means no prune.
+        assert_eq!(row_count(&path), 1);
+    }
+}

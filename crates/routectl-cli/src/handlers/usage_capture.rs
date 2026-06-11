@@ -1,0 +1,404 @@
+//! Usage-capture RAII guard and its draft-construction / outcome-mapping
+//! helpers.
+//!
+//! `UsageCapture` records EXACTLY ONE `UsageRecord` per request on every
+//! visible exit path. A draft is seeded from the request shape + identity
+//! at the handler boundary (`build_usage_draft`), the dispatch / token /
+//! quota / outcome columns are stamped via `observe_*`, and `finalize`
+//! emits the row once (idempotent). The Drop fallback stamps the
+//! `client_disconnect` outcome for a cancelled / disconnected request.
+//!
+//! Extracted from `ingress_handle.rs` to keep both files under the
+//! project's 800-line ceiling. The two handler functions
+//! (`complete_response`, `stream_response`) and `render_stream_task`
+//! stay in `ingress_handle.rs` and call into this module.
+
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use routectl_core::Error;
+use routectl_router::DispatchMeta;
+use routectl_usage::{Outcome, UsageHandle, UsageRecord};
+use serde_json::Value;
+
+/// Seed a `UsageRecord` draft from the request shape + identity, before
+/// dispatch. The dispatch / token / outcome / timing columns are stamped
+/// later by `UsageCapture`. `ts_start` is the wall-clock epoch-ms when the
+/// row is born; identity + shape columns come straight off `req`.
+pub(crate) fn build_usage_draft(
+    ingress_dialect: &str,
+    req: &routectl_core::ChatRequest,
+    request_id: String,
+    session_id: Option<String>,
+) -> UsageRecord {
+    let (thinking_req, thinking_req_kind) = thinking_of(req);
+    UsageRecord {
+        ts_start: epoch_ms_now(),
+        ts_end: 0,
+        request_id,
+        ingress_dialect: ingress_dialect.to_string(),
+        requested_model: req.model.clone(),
+        // `alias` is overwritten from `meta.resolved_alias` on dispatch;
+        // seed it with the raw wire model so a pre-dispatch row still
+        // names the route the caller asked for.
+        alias: req.model.clone(),
+        model: None,
+        upstream: None,
+        provider: None,
+        provider_kind: None,
+        seat: None,
+        session_id,
+        stream: req.stream == Some(true),
+        max_tokens_req: req.max_tokens,
+        tool_count: req
+            .tools
+            .as_ref()
+            .map(|t| u32::try_from(t.len()).unwrap_or(u32::MAX))
+            .unwrap_or(0),
+        thinking_req,
+        thinking_req_kind,
+        msg_count: u32::try_from(req.messages.len()).unwrap_or(u32::MAX),
+        service_tier: None,
+        outcome: Outcome::ClientDisconnect,
+        http_status: None,
+        error_class: None,
+        finish_reason: None,
+        attempt_count: 0,
+        fallback_count: 0,
+        latency_ms: 0,
+        ttfb_ms: None,
+        input_tokens: None,
+        output_tokens: None,
+        reasoning_tokens: None,
+        cache_read: None,
+        cache_write_5m: None,
+        cache_write_1h: None,
+        server_tool_use: None,
+        quota_claim: None,
+        quota_status: None,
+        quota_overage_status: None,
+        quota_utilization: None,
+        quota_overage_utilization: None,
+        quota_reset: None,
+        quota_extras: None,
+        extra: None,
+    }
+}
+
+/// Derive the `(thinking_req, thinking_req_kind)` columns from the
+/// request's reasoning config. A budget request (`max_tokens` set) records
+/// the budget value under `"budget_tokens"`; an effort request records
+/// `"effort"` with no numeric budget. Both an absent reasoning block AND a
+/// `Some(reasoning)` carrying neither `max_tokens` nor `effort` yield
+/// `(None, None)`.
+fn thinking_of(req: &routectl_core::ChatRequest) -> (Option<u32>, Option<String>) {
+    match &req.reasoning {
+        Some(r) if r.max_tokens.is_some() => (r.max_tokens, Some("budget_tokens".to_string())),
+        Some(r) if r.effort.is_some() => (None, Some("effort".to_string())),
+        _ => (None, None),
+    }
+}
+
+/// Current wall-clock time as epoch milliseconds. Uses `i64::try_from`
+/// (never a lossy `as`); a pre-epoch / overflowing clock yields 0 rather
+/// than a wrapped value.
+pub(crate) fn epoch_ms_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// Map a dispatch `Err` to its terminal `Outcome` using the documented
+/// `DispatchMeta` contract: `attempt_count == 0` means the gate / breaker
+/// refused before any upstream contact (`gate_blocked`); any attempt that
+/// reached an upstream and failed is `upstream_error`. Timeouts surface as
+/// a status-0 upstream error with `attempt_count > 0`, so they fold into
+/// `upstream_error` here -- inc2 does NOT separately classify `timeout`
+/// (the router error carries no distinguishable timeout marker).
+pub(crate) fn outcome_for_dispatch_err(meta: &DispatchMeta) -> Outcome {
+    if meta.attempt_count == 0 {
+        Outcome::GateBlocked
+    } else {
+        Outcome::UpstreamError
+    }
+}
+
+/// Short, stable error-class token for the `error_class` column. Never
+/// the Display string (which can embed provider names / upstream bodies);
+/// just the routectl error variant family.
+pub(crate) fn error_class_of(e: &Error) -> &'static str {
+    match e {
+        Error::Upstream { .. } => "upstream",
+        Error::Streaming(_) => "streaming",
+        Error::Validation(_) => "validation",
+        Error::Auth(_) => "auth",
+        Error::Config(_) => "config",
+        Error::Internal(_) => "internal",
+        Error::NotImplemented(_, _) => "not_implemented",
+        Error::UnknownAlias(_) => "unknown_alias",
+        Error::UnknownProvider(_) => "unknown_provider",
+        Error::NormalizeRequest(_, _) => "normalize_request",
+        Error::NormalizeResponse(_, _) => "normalize_response",
+        _ => "other",
+    }
+}
+
+/// Unified RAII capture guard: holds the in-progress `UsageRecord` draft
+/// and emits EXACTLY ONE row per request on every visible exit path.
+///
+/// Lifecycle:
+///   - constructed at the handler boundary with the pre-seeded draft,
+///   - `observe_*` stamps dispatch / token / quota / outcome columns,
+///   - `finalize(outcome)` stamps timing + outcome and `try_send`s the
+///     row ONCE (idempotent: a second call is a no-op),
+///   - `Drop`, if not yet finalized, finalizes with the
+///     `client_disconnect` fallback so a cancelled / disconnected request
+///     still emits a row.
+///
+/// The `finalized` field is the inverse-flag: a normal exit sets it via
+/// `finalize`; an abnormal exit (client hangup, render-send failure, task
+/// cancellation -- where Drop runs without our code path) leaves it false
+/// and Drop stamps the fallback outcome. `cancelled` is folded into
+/// `client_disconnect`: inc2 cannot reliably distinguish a task
+/// cancellation from a client hangup inside Drop, so it does not separate
+/// them.
+///
+/// `try_send` never blocks / awaits / panics, so calling `finalize` from
+/// Drop is safe. The guard also subsumes the old `EgressStreamSummary`
+/// egress trace-summary line (emitted from `finalize`) so operators keep
+/// the matching `direction=egress` summary for every stream.
+pub(crate) struct UsageCapture {
+    record: UsageRecord,
+    usage: UsageHandle,
+    ingress_id: String,
+    start: Instant,
+    first_byte: Option<Instant>,
+    finalized: bool,
+    // Stream-summary observation state (mirrors the old
+    // EgressStreamSummary): chunk count + last finish_reason for the
+    // egress trace line.
+    chunks: u64,
+    last_finish: Option<String>,
+    last_prompt: u32,
+    last_completion: u32,
+    last_total: u32,
+}
+
+impl UsageCapture {
+    pub(crate) fn new(record: UsageRecord, usage: UsageHandle, ingress_id: String) -> Self {
+        Self {
+            record,
+            usage,
+            ingress_id,
+            start: Instant::now(),
+            first_byte: None,
+            finalized: false,
+            chunks: 0,
+            last_finish: None,
+            last_prompt: 0,
+            last_completion: 0,
+            last_total: 0,
+        }
+    }
+
+    /// Record the first-byte marker (first stream chunk, or the
+    /// non-streaming response becoming ready). Idempotent: only the first
+    /// call sticks, so ttfb measures time-to-first-byte.
+    pub(crate) fn mark_first_byte(&mut self) {
+        if self.first_byte.is_none() {
+            self.first_byte = Some(Instant::now());
+        }
+    }
+
+    /// Stamp the dispatch-derived columns from `DispatchMeta`. Valid on
+    /// both the success and the all-failed paths.
+    pub(crate) fn observe_meta(&mut self, meta: &DispatchMeta) {
+        self.record.alias = meta.resolved_alias.clone();
+        self.record.attempt_count = meta.attempt_count;
+        self.record.fallback_count = meta.fallback_count;
+        self.record.provider = meta.served_provider.clone();
+        self.record.provider_kind = meta.served_provider_kind.clone();
+        self.record.model = meta.served_model.clone();
+        self.record.upstream = meta.served_upstream.clone();
+    }
+
+    /// Stamp the token / quota / finish columns from a non-streaming
+    /// `ChatResponse`. HTTP status is fixed at 200 for a delivered body.
+    pub(crate) fn observe_response(&mut self, resp: &routectl_core::ChatResponse) {
+        self.record.http_status = Some(200);
+        self.record.finish_reason = resp
+            .choices
+            .iter()
+            .rev()
+            .find_map(|c| c.finish_reason.clone());
+        if let Some(u) = &resp.usage {
+            self.record.input_tokens = Some(u.prompt_tokens as u64);
+            self.record.output_tokens = Some(u.completion_tokens as u64);
+            self.record.reasoning_tokens = u.reasoning_tokens.map(|v| v as u64);
+            self.record.cache_read = u.cache_read_input_tokens.map(|v| v as u64);
+            if let Some(cc) = &u.cache_creation {
+                self.record.cache_write_5m = cc.ephemeral_5m_input_tokens.map(|v| v as u64);
+                self.record.cache_write_1h = cc.ephemeral_1h_input_tokens.map(|v| v as u64);
+            }
+            self.record.server_tool_use = u.server_tool_use.clone();
+            // Anthropic returns `service_tier` in the usage extras
+            // forward-compat sweep; lift it when present.
+            self.record.service_tier = u
+                .extras
+                .get("service_tier")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        self.observe_quota(resp.upstream_meta.as_ref());
+    }
+
+    /// Stamp token / quota / finish columns from one stream chunk, and
+    /// advance the egress trace-summary tallies. Quota rides only on the
+    /// first chunk's `upstream_meta`; tokens accumulate (last-writer-wins
+    /// on the cumulative counters Anthropic emits at end-of-stream).
+    pub(crate) fn observe_chunk(&mut self, chunk: &routectl_core::ChatChunk) {
+        self.chunks += 1;
+        for choice in chunk.choices.iter().rev() {
+            if let Some(fr) = &choice.finish_reason {
+                self.last_finish = Some(fr.clone());
+                self.record.finish_reason = Some(fr.clone());
+                break;
+            }
+        }
+        if let Some(u) = &chunk.usage {
+            if let Some(p) = u.prompt_tokens {
+                self.last_prompt = p;
+                self.record.input_tokens = Some(p as u64);
+            }
+            if let Some(c) = u.completion_tokens {
+                self.last_completion = c;
+                self.record.output_tokens = Some(c as u64);
+            }
+            if let Some(t) = u.total_tokens {
+                self.last_total = t;
+            }
+            if let Some(r) = u.reasoning_tokens {
+                self.record.reasoning_tokens = Some(r as u64);
+            }
+            if let Some(cr) = u.cache_read_input_tokens {
+                self.record.cache_read = Some(cr as u64);
+            }
+            if let Some(cc) = &u.cache_creation {
+                if let Some(v) = cc.ephemeral_5m_input_tokens {
+                    self.record.cache_write_5m = Some(v as u64);
+                }
+                if let Some(v) = cc.ephemeral_1h_input_tokens {
+                    self.record.cache_write_1h = Some(v as u64);
+                }
+            }
+            if u.server_tool_use.is_some() {
+                self.record.server_tool_use = u.server_tool_use.clone();
+            }
+        }
+        self.observe_quota(chunk.upstream_meta.as_ref());
+    }
+
+    /// Lift the Anthropic unified quota snapshot into the QUOTA columns.
+    /// No-op for non-Anthropic upstreams / when absent. Numeric utilization
+    /// fields parse from their raw header strings; an unparseable value
+    /// stays `None` rather than failing the row.
+    fn observe_quota(&mut self, meta: Option<&routectl_core::upstream_meta::UpstreamMeta>) {
+        let Some(q) = meta.and_then(|m| m.anthropic_unified.as_ref()) else {
+            return;
+        };
+        self.record.quota_claim = q.representative_claim.clone();
+        self.record.quota_status = q.status.clone();
+        self.record.quota_overage_status = q.overage_status.clone();
+        self.record.quota_utilization = q.utilization.as_deref().and_then(|s| s.parse().ok());
+        self.record.quota_overage_utilization = q
+            .overage_utilization
+            .as_deref()
+            .and_then(|s| s.parse().ok());
+        self.record.quota_reset = q.reset.as_deref().and_then(|s| s.parse().ok());
+        if !q.extras.is_empty() {
+            self.record.quota_extras = Some(Value::Object(
+                q.extras
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect(),
+            ));
+        }
+    }
+
+    /// Stamp the outcome-detail columns from a dispatch / stream error:
+    /// the upstream HTTP status (when the error carries one) and the short
+    /// error-class token. Never the Display string.
+    pub(crate) fn observe_error(&mut self, e: &Error) {
+        if let Error::Upstream { status, .. } = e {
+            // A status-0 upstream error is a local gate / timeout sentinel,
+            // not a real HTTP code; leave http_status None in that case.
+            if *status != 0 {
+                self.record.http_status = Some(*status);
+            }
+        }
+        self.record.error_class = Some(error_class_of(e).to_string());
+    }
+
+    /// Stamp timing + outcome and emit the row exactly once. Idempotent:
+    /// a second call (e.g. Drop after an explicit finalize) is a no-op.
+    /// Never blocks / awaits / panics -- safe from Drop.
+    pub(crate) fn finalize(&mut self, outcome: Outcome) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+        self.record.outcome = outcome;
+        self.record.ts_end = epoch_ms_now();
+        self.record.latency_ms = i64::try_from(self.start.elapsed().as_millis()).unwrap_or(0);
+        self.record.ttfb_ms = self
+            .first_byte
+            .map(|fb| i64::try_from(fb.duration_since(self.start).as_millis()).unwrap_or(0));
+        self.emit_egress_summary();
+        self.usage.try_send(self.record.clone());
+    }
+
+    /// Emit the single `direction=egress` stream trace-summary line that
+    /// the old `EgressStreamSummary` produced. Counts/ids/finish only --
+    /// never message content. A non-clean exit (no observed finish) reports
+    /// `"truncated"` so operators can still enumerate cuts.
+    fn emit_egress_summary(&self) {
+        if self.chunks == 0 && self.last_finish.is_none() {
+            // Non-streaming or pre-upstream exit: no stream to summarize.
+            return;
+        }
+        let usage = (self.last_prompt != 0 || self.last_completion != 0 || self.last_total != 0)
+            .then_some(routectl_core::Usage {
+                prompt_tokens: self.last_prompt,
+                completion_tokens: self.last_completion,
+                total_tokens: self.last_total,
+                ..Default::default()
+            });
+        let finish_reason = if matches!(self.record.outcome, Outcome::Ok) {
+            self.last_finish.as_deref()
+        } else {
+            Some("truncated")
+        };
+        routectl_core::trace_stream_summary(
+            "egress",
+            "ingress",
+            &self.ingress_id,
+            self.chunks,
+            finish_reason,
+            usage.as_ref(),
+        );
+    }
+}
+
+impl Drop for UsageCapture {
+    fn drop(&mut self) {
+        // Inverse-flag fallback: any drop without a prior `finalize` is an
+        // abnormal exit (client hangup, render-send failure, task
+        // cancellation). Stamp `client_disconnect` and emit the one row.
+        // `cancelled` is folded in here -- Drop cannot reliably tell a
+        // cancellation from a hangup.
+        if !self.finalized {
+            self.finalize(Outcome::ClientDisconnect);
+        }
+    }
+}

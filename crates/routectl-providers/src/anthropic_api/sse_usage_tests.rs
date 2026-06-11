@@ -336,3 +336,80 @@ fn message_delta_partial_cache_creation_object_merges_per_ttl() {
     // this would be None (whole-object replacement lost it).
     assert_eq!(cc.ephemeral_1h_input_tokens, Some(100));
 }
+
+/// Anthropic reports server-side tool invocation counts in
+/// `message_delta.usage.server_tool_use`. The streaming usage
+/// normalizer must lift that object onto the canonical chunk usage
+/// so the usage-accounting layer sees it at end-of-stream.
+#[test]
+fn message_delta_carries_server_tool_use_onto_chunk_usage() {
+    let mut state = SseState::default();
+    let _ = state
+        .parse_event(
+            "test",
+            r#"{
+                "type":"message_start",
+                "message": {
+                    "id":"msg_01","type":"message","role":"assistant",
+                    "content":[],"model":"claude-opus-4-7",
+                    "stop_reason":null,"stop_sequence":null,
+                    "usage": {"input_tokens": 10, "output_tokens": 0}
+                }
+            }"#,
+        )
+        .unwrap();
+    let chunk = state
+        .parse_event(
+            "test",
+            r#"{
+                "type":"message_delta",
+                "delta": {"stop_reason":"end_turn","stop_sequence":null},
+                "usage": {
+                    "output_tokens": 5,
+                    "server_tool_use": {"web_search_requests": 4}
+                }
+            }"#,
+        )
+        .unwrap()
+        .expect("closing chunk");
+    let usage = chunk.usage.expect("usage");
+    assert_eq!(
+        usage.server_tool_use,
+        Some(serde_json::json!({"web_search_requests": 4})),
+        "server_tool_use must ride the canonical chunk usage"
+    );
+}
+
+/// Absent `server_tool_use` on the streamed usage leaves the canonical
+/// chunk field None (no regression on the common path).
+#[test]
+fn message_delta_without_server_tool_use_leaves_field_none() {
+    let mut state = SseState::default();
+    let _ = state
+        .parse_event(
+            "test",
+            r#"{
+                "type":"message_start",
+                "message": {
+                    "id":"msg_01","type":"message","role":"assistant",
+                    "content":[],"model":"claude-opus-4-7",
+                    "stop_reason":null,"stop_sequence":null,
+                    "usage": {"input_tokens": 10, "output_tokens": 0}
+                }
+            }"#,
+        )
+        .unwrap();
+    let chunk = state
+        .parse_event(
+            "test",
+            r#"{
+                "type":"message_delta",
+                "delta": {"stop_reason":"end_turn","stop_sequence":null},
+                "usage": {"output_tokens": 5}
+            }"#,
+        )
+        .unwrap()
+        .expect("closing chunk");
+    let usage = chunk.usage.expect("usage");
+    assert_eq!(usage.server_tool_use, None);
+}

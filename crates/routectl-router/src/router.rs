@@ -125,6 +125,108 @@ impl RouterOptions {
     }
 }
 
+/// Router-scoped accounting facts about how a single dispatch was
+/// served. Returned alongside the result on BOTH the success and the
+/// all-attempts-failed paths so a caller can record per-request usage
+/// without re-deriving these facts (which would otherwise be trapped in
+/// the dispatch loop's locals and lost on the error return).
+///
+/// This is deliberately separate from the provider-scoped
+/// `UpstreamMeta` carrier: those facts describe ONE upstream response,
+/// while these describe the WHOLE chain walk (how many attempts, how
+/// many fallback hops, which target was terminal).
+///
+/// `#[non_exhaustive]` so new accounting fields can be added without
+/// breaking downstream construction.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct DispatchMeta {
+    /// Total upstream attempts charged across the entire chain walk:
+    /// every per-provider retry on every chain entry that was actually
+    /// dispatched. Zero only when no upstream was touched (e.g. a chain
+    /// entry with no built provider, or a pre-dispatch gate failure on
+    /// the only entry).
+    ///
+    /// Also zero for a gate-blocked dispatch (the gate fires before any
+    /// upstream contact); `served_provider` may still be `Some` in that
+    /// case, naming the provider the gate refused.
+    pub attempt_count: u32,
+    /// Number of fallback hops to a LATER chain entry. Zero when the
+    /// first dispatched target served the request or was the terminal
+    /// failure; incremented once per move to a subsequent chain entry.
+    pub fallback_count: u32,
+    /// Config key (a `[providers]` name) of the provider that produced
+    /// the success OR was the terminal error. `None` only when no
+    /// provider was touched (resolution / feature-gate failure before
+    /// any dispatch).
+    pub served_provider: Option<String>,
+    /// Stable provider-kind token (`anthropic-api` | `openai-compat` |
+    /// `bedrock` | `openai-responses`) of `served_provider`. `None`
+    /// under the same conditions as `served_provider`, or when the
+    /// served target carried no provider-kind (legacy path).
+    pub served_provider_kind: Option<String>,
+    /// Served model nickname -- the operator-facing model label of the
+    /// target that served or terminally failed. `None` when no provider
+    /// was touched.
+    pub served_model: Option<String>,
+    /// Served wire model id -- the upstream id actually sent to the
+    /// provider. `None` when no provider was touched.
+    pub served_upstream: Option<String>,
+    /// The resolved alias key the request routed under (the incoming
+    /// `req.model`). Always populated, even when resolution then failed.
+    pub resolved_alias: String,
+}
+
+impl DispatchMeta {
+    /// Construct meta for an alias whose chain walk touched no provider
+    /// yet (all served_* fields default to `None`, counters to zero).
+    /// Callers populate the served_* fields and counters as the walk
+    /// progresses.
+    fn for_alias(alias: &str) -> Self {
+        Self {
+            attempt_count: 0,
+            fallback_count: 0,
+            served_provider: None,
+            served_provider_kind: None,
+            served_model: None,
+            served_upstream: None,
+            resolved_alias: alias.to_string(),
+        }
+    }
+
+    /// Record the target currently being dispatched as the served /
+    /// terminal target. Called on each chain entry the loop actually
+    /// dispatches to, so on the all-failed path the LAST dispatched
+    /// target is the terminal one.
+    fn mark_target(&mut self, target: &DispatchTarget) {
+        self.served_provider = Some(target.provider_name.clone());
+        self.served_provider_kind = target.provider_kind.map(|k| k.to_string());
+        self.served_model = target.nickname.clone();
+        self.served_upstream = Some(target.upstream.clone());
+    }
+}
+
+/// `complete_with_options` return: the non-streaming dispatch result
+/// paired with its router-scoped [`DispatchMeta`]. Meta is valid on
+/// both the `Ok` and `Err` arms of `result`. This carrier is a fixed
+/// two-field pair (`meta`, `result`) so callers can destructure it;
+/// the growth point is [`DispatchMeta`], not this wrapper.
+#[derive(Debug)]
+pub struct Dispatched {
+    pub meta: DispatchMeta,
+    pub result: Result<ChatResponse>,
+}
+
+/// `stream_with_options` return: the streaming dispatch result paired
+/// with its router-scoped [`DispatchMeta`]. The served_* fields are
+/// captured synchronously when the winning upstream's first chunk
+/// arrives, so they are valid before the stream body is consumed. A
+/// fixed two-field pair for the same reason as [`Dispatched`].
+pub struct DispatchedStream {
+    pub meta: DispatchMeta,
+    pub result: Result<BoxStream<'static, Result<ChatChunk>>>,
+}
+
 /// One hop in the resolved dispatch chain. Built from either a
 /// `Arc<ResolvedModel>` (v0.6.0 path) or a parsed `provider:model`
 /// literal (legacy path). The dispatch loop reads from this struct
@@ -138,6 +240,14 @@ impl RouterOptions {
 struct DispatchTarget {
     /// Operator-facing provider name (a key in `[providers]`).
     provider_name: String,
+    /// Stable provider-kind config token for this target's provider
+    /// (`anthropic-api` | `openai-compat` | `bedrock` |
+    /// `openai-responses`), copied from `ProviderEntry::kind_str()`
+    /// when the chain is expanded. Surfaced through `DispatchMeta` so
+    /// usage accounting can record WHICH egress kind served. `None`
+    /// when the provider entry could not be looked up (a legacy /
+    /// direct-construction path that never set it).
+    provider_kind: Option<&'static str>,
     /// Key into `Router.state` for the per-attempt rate-limit + circuit-
     /// breaker check.
     state_key: String,
@@ -538,6 +648,13 @@ impl Router {
                 Some(seats) => self.push_seat_targets(&m, seats, &mut out),
             }
         }
+        for target in &mut out {
+            target.provider_kind = self
+                .config
+                .providers
+                .get(&target.provider_name)
+                .map(|e| e.kind_str());
+        }
         out
     }
 
@@ -663,13 +780,27 @@ impl Router {
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         self.complete_with_options(req, RouterOptions::default())
             .await
+            .result
     }
 
+    #[must_use]
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
-    pub async fn complete_with_options(
+    pub async fn complete_with_options(&self, req: ChatRequest, opts: RouterOptions) -> Dispatched {
+        let mut meta = DispatchMeta::for_alias(&req.model);
+        let result = self.complete_inner(req, opts, &mut meta).await;
+        Dispatched { meta, result }
+    }
+
+    /// Dispatch-loop body for `complete_with_options`. Mutates `meta` as
+    /// the chain is walked -- `attempt_count` on every upstream attempt,
+    /// `fallback_count` on every hop to a later entry, and the served_*
+    /// fields on each dispatched target -- so the caller's `meta` is
+    /// correct at every early return, including the all-failed Err path.
+    async fn complete_inner(
         &self,
         req: ChatRequest,
         opts: RouterOptions,
+        meta: &mut DispatchMeta,
     ) -> Result<ChatResponse> {
         let chain = self.dispatch_chain_for_request(&req)?;
         let chain_len = chain.len();
@@ -694,6 +825,13 @@ impl Router {
                 }
                 continue;
             };
+            // This entry is being dispatched: record it as the terminal
+            // target (overwritten by a later entry on fallback) and count
+            // the hop. `chain_idx` is the index into the resolved chain;
+            // a non-zero index means at least one earlier entry was tried
+            // or skipped, i.e. we fell back to reach here.
+            meta.mark_target(target);
+            meta.fallback_count = chain_idx as u32;
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
@@ -758,6 +896,7 @@ impl Router {
                 )
                 .await;
                 attempts_made += 1;
+                meta.attempt_count += 1;
 
                 match result {
                     Ok(mut resp) => {
@@ -1104,17 +1243,34 @@ impl Router {
     pub async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         self.stream_with_options(req, RouterOptions::default())
             .await
+            .result
     }
 
     /// Streaming counterpart. Fallback only happens BEFORE the first
     /// chunk reaches us; once the upstream has emitted a chunk,
     /// mid-stream errors propagate. Gate checks (rate limit / breaker)
     /// run before the upstream is touched.
+    #[must_use]
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn stream_with_options(
         &self,
         req: ChatRequest,
         opts: RouterOptions,
+    ) -> DispatchedStream {
+        let mut meta = DispatchMeta::for_alias(&req.model);
+        let result = self.stream_inner(req, opts, &mut meta).await;
+        DispatchedStream { meta, result }
+    }
+
+    /// Dispatch-loop body for `stream_with_options`. Mutates `meta` as
+    /// the chain is walked. The served_* fields are captured at the
+    /// `Ok(stream)` arm (the winning target is known synchronously,
+    /// before any stream body is consumed).
+    async fn stream_inner(
+        &self,
+        req: ChatRequest,
+        opts: RouterOptions,
+        meta: &mut DispatchMeta,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let chain = self.dispatch_chain_for_request(&req)?;
         let chain_len = chain.len();
@@ -1135,6 +1291,11 @@ impl Router {
                 }
                 continue;
             };
+            // This entry is being dispatched: record it as the terminal
+            // target (overwritten by a later entry on fallback) and count
+            // the hop -- see `complete_inner` for the `chain_idx` rationale.
+            meta.mark_target(target);
+            meta.fallback_count = chain_idx as u32;
 
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
@@ -1192,6 +1353,7 @@ impl Router {
                 )
                 .await;
                 attempts_made += 1;
+                meta.attempt_count += 1;
                 match r {
                     Ok(stream) => {
                         let state = self.state.get(state_key).cloned();
@@ -1821,6 +1983,7 @@ fn is_managed_reserved(name: &str) -> bool {
 fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
     DispatchTarget {
         provider_name: m.provider_name.clone(),
+        provider_kind: None,
         // v0.6.0 dispatch keys the breaker by nickname so two models
         // on one provider quarantine independently.
         state_key: m.nickname.clone(),
@@ -1850,6 +2013,7 @@ fn dispatch_target_for_seat(
 ) -> DispatchTarget {
     DispatchTarget {
         provider_name: m.provider_name.clone(),
+        provider_kind: None,
         state_key: seat.state_key.clone(),
         upstream: m.upstream.clone(),
         provider: Some(seat.provider.clone()),
@@ -2764,6 +2928,7 @@ mod merge_header_extras_tests {
 
         let target = DispatchTarget {
             provider_name: "test-prov".into(),
+            provider_kind: Some("anthropic-api"),
             state_key: "nick".into(),
             upstream: "claude-x".into(),
             provider: None,

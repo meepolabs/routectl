@@ -435,6 +435,14 @@ pub struct Usage {
     /// Per-TTL breakdown of cache creations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation: Option<CacheCreation>,
+    /// Server-side tool invocation counts (e.g. Anthropic's
+    /// `web_search_requests`). Anthropic reports this as a
+    /// `server_tool_use` object on the usage payload; routectl keeps it
+    /// as an opaque JSON value so new server-tool kinds flow through
+    /// without a schema change. Absent on upstreams that don't report
+    /// it -- skip-serialized when None so the wire output is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tool_use: Option<serde_json::Value>,
     /// Forward-compat catchall for usage sub-fields canonical doesn't
     /// model. Anthropic's `service_tier` (returned on every response)
     /// and any future spec additions deserialize here and serialize
@@ -557,6 +565,12 @@ pub struct UsageDelta {
     pub cache_read_input_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation: Option<CacheCreation>,
+    /// Server-side tool invocation counts streamed in Anthropic's
+    /// `message_delta.usage.server_tool_use`. Opaque JSON for
+    /// forward-compat; skip-serialized when None so the wire shape is
+    /// unchanged for the common no-server-tool path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tool_use: Option<serde_json::Value>,
 }
 
 /// Top-level reasoning content on an assistant message. Mirrors OpenRouter's
@@ -744,5 +758,44 @@ mod tests {
         };
         let out = serde_json::to_value(&choice).unwrap();
         assert!(out.get("logprobs").is_none(), "got {out}");
+    }
+
+    /// `Usage.server_tool_use` absent must serialize to NO `server_tool_use`
+    /// key, keeping the wire output byte-identical for the common path
+    /// where the upstream did not invoke a server-side tool.
+    #[test]
+    fn usage_server_tool_use_absent_is_omitted_on_serialize() {
+        let usage = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            ..Default::default()
+        };
+        let out = serde_json::to_value(&usage).unwrap();
+        assert!(
+            out.get("server_tool_use").is_none(),
+            "absent server_tool_use must stay absent on the wire, got {out}"
+        );
+    }
+
+    /// When present, `server_tool_use` round-trips through the canonical
+    /// `Usage` as an opaque JSON object (forward-compatible with new
+    /// server-tool kinds).
+    #[test]
+    fn usage_server_tool_use_round_trips() {
+        let usage = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            server_tool_use: Some(json!({"web_search_requests": 3})),
+            ..Default::default()
+        };
+        let out = serde_json::to_value(&usage).unwrap();
+        assert_eq!(out["server_tool_use"]["web_search_requests"], 3);
+        let back: Usage = serde_json::from_value(out).unwrap();
+        assert_eq!(
+            back.server_tool_use,
+            Some(json!({"web_search_requests": 3}))
+        );
     }
 }

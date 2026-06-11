@@ -15,18 +15,27 @@ use axum::Json;
 use futures::StreamExt;
 use routectl_core::Error;
 use routectl_router::RouterOptions;
+use routectl_usage::{Outcome, UsageHandle, UsageRecord};
 use serde_json::{json, Value};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
+use crate::handlers::usage_capture::{build_usage_draft, outcome_for_dispatch_err, UsageCapture};
 use crate::ingress::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
+use crate::server::request_id::RequestId;
 use crate::server::AppState;
 
 const DISABLE_FALLBACKS_HEADER: &str = "x-routectl-disable-fallbacks";
 
+/// Inbound header that claude-code stamps with its logical session id.
+/// Captured best-effort for the usage row's `session_id`; absent or
+/// non-UTF-8 values yield `None`.
+const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
+
 pub async fn ingress_handle<A: IngressAdapter + 'static>(
     state: Arc<AppState>,
     headers: HeaderMap,
+    request_id: Option<RequestId>,
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
     adapter: A,
 ) -> Response {
@@ -65,12 +74,39 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // TRACE are both on (mirrors routectl_providers::header_trace).
     trace_ingress_headers_of(adapter.id(), &headers);
 
+    // Seed the usage-capture draft from the request shape + identity
+    // BEFORE dispatch, so a row is emitted on every exit path including
+    // a pre-dispatch gate block (where no DispatchMeta-derived served_*
+    // fields exist yet). The dispatch + token + outcome fields are
+    // stamped later by the capture guard.
+    let request_id = request_id.map(|r| r.0).unwrap_or_default();
+    let session_id = session_id_of(&headers);
+    let draft = build_usage_draft(adapter.id(), &req, request_id, session_id);
+
     let streaming = req.stream == Some(true);
     if streaming {
-        stream_response(router, req, opts, adapter).await
+        stream_response(router, req, opts, adapter, state.usage.clone(), draft).await
     } else {
-        complete_response(router, req, opts, adapter, envelope).await
+        complete_response(
+            router,
+            req,
+            opts,
+            adapter,
+            envelope,
+            state.usage.clone(),
+            draft,
+        )
+        .await
     }
+}
+
+/// Best-effort logical session id from the inbound
+/// `x-claude-code-session-id` header. `None` when absent or non-UTF-8.
+fn session_id_of(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(SESSION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
 /// Treat a header value as truthy when set to "1", "true", or "yes"
@@ -126,26 +162,51 @@ async fn complete_response<A: IngressAdapter>(
     opts: RouterOptions,
     adapter: A,
     envelope: ErrorEnvelopeShape,
+    usage: UsageHandle,
+    draft: UsageRecord,
 ) -> Response {
-    match router.complete_with_options(req, opts).await {
-        Ok(resp) => match adapter.render_response(resp) {
-            Ok(body) => {
-                // Trace-level egress body for triage. Single
-                // call site covers both ingresses (openai/anthropic)
-                // because every non-streaming response funnels through
-                // here after canonical -> wire serialization.
-                routectl_core::trace_egress_body(adapter.id(), &body);
-                let resp = (StatusCode::OK, Json(body)).into_response();
-                // Dir 4: egress response headers, captured from the
-                // built response so the trace reflects what the client
-                // receives. Read before returning (no borrow conflict;
-                // the helper only reads `resp.headers()`).
-                trace_egress_headers_of(adapter.id(), &resp);
-                resp
+    let mut capture = UsageCapture::new(draft, usage, adapter.id().to_string());
+    let dispatched = router.complete_with_options(req, opts).await;
+    capture.observe_meta(&dispatched.meta);
+    match dispatched.result {
+        Ok(resp) => {
+            // Non-streaming first byte == the response being ready.
+            capture.mark_first_byte();
+            capture.observe_response(&resp);
+            match adapter.render_response(resp) {
+                Ok(body) => {
+                    // Upstream delivered AND we serialized it: this is the
+                    // only path where the client receives 200 + body, so
+                    // finalize `ok` here rather than before the render.
+                    capture.finalize(Outcome::Ok);
+                    // Trace-level egress body for triage. Single
+                    // call site covers both ingresses (openai/anthropic)
+                    // because every non-streaming response funnels through
+                    // here after canonical -> wire serialization.
+                    routectl_core::trace_egress_body(adapter.id(), &body);
+                    let resp = (StatusCode::OK, Json(body)).into_response();
+                    // Dir 4: egress response headers, captured from the
+                    // built response so the trace reflects what the client
+                    // receives. Read before returning (no borrow conflict;
+                    // the helper only reads `resp.headers()`).
+                    trace_egress_headers_of(adapter.id(), &resp);
+                    resp
+                }
+                Err(e) => {
+                    // Upstream gave a good response but we could not
+                    // serialize it to wire bytes -> the client receives an
+                    // error, so the row must not say `ok`.
+                    capture.observe_error(&e);
+                    capture.finalize(Outcome::UpstreamError);
+                    map_error(envelope, e)
+                }
             }
-            Err(e) => map_error(envelope, e),
-        },
-        Err(e) => map_error(envelope, e),
+        }
+        Err(e) => {
+            capture.observe_error(&e);
+            capture.finalize(outcome_for_dispatch_err(&dispatched.meta));
+            map_error(envelope, e)
+        }
     }
 }
 
@@ -154,13 +215,23 @@ async fn stream_response<A: IngressAdapter + 'static>(
     req: routectl_core::ChatRequest,
     opts: RouterOptions,
     adapter: A,
+    usage: UsageHandle,
+    draft: UsageRecord,
 ) -> Response {
     let envelope = adapter.error_envelope_shape();
-    let stream_result = router.stream_with_options(req, opts).await;
+    let mut capture = UsageCapture::new(draft, usage, adapter.id().to_string());
+    let dispatched = router.stream_with_options(req, opts).await;
+    capture.observe_meta(&dispatched.meta);
 
-    let upstream = match stream_result {
+    let upstream = match dispatched.result {
         Ok(s) => s,
-        Err(e) => return map_error(envelope, e),
+        Err(e) => {
+            // Stream never started: classify off the meta + error and
+            // emit the row here (no chunk task to carry the guard).
+            capture.observe_error(&e);
+            capture.finalize(outcome_for_dispatch_err(&dispatched.meta));
+            return map_error(envelope, e);
+        }
     };
 
     // Inner channel carries our `SseEvent` type so the rendering loop
@@ -178,12 +249,14 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // failures lands without correlation context. Operators grepping
     // `request_id=<id>` would lose the streaming-error trail.
     let parent_span = tracing::Span::current();
-    let ingress_id = adapter.id().to_string();
-    // Clone for the post-spawn dir-4 egress-headers trace; `ingress_id`
-    // itself moves into the spawned render task (EgressStreamSummary),
-    // as does `adapter`, so neither is reachable after the spawn.
-    let egress_id = ingress_id.clone();
-    tokio::spawn(render_stream_task(upstream, adapter, ingress_id, tx).instrument(parent_span));
+    let egress_id = adapter.id().to_string();
+    // The capture guard moves INTO the render task so it finalizes on
+    // every stream exit (natural EOS, mid-stream error, client
+    // disconnect, task cancellation -- the last two via the Drop
+    // fallback). `adapter` moves in too, so neither is reachable after
+    // the spawn; the dir-4 egress-headers trace uses the pre-spawn
+    // `egress_id` clone.
+    tokio::spawn(render_stream_task(upstream, adapter, capture, tx).instrument(parent_span));
 
     let receiver_stream =
         ReceiverStream::new(rx).map(|ev| Ok::<Event, std::convert::Infallible>(sse_to_axum(ev)));
@@ -225,35 +298,37 @@ async fn stream_response<A: IngressAdapter + 'static>(
 async fn render_stream_task<A: IngressAdapter>(
     upstream: futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
     adapter: A,
-    ingress_id: String,
+    mut capture: UsageCapture,
     tx: tokio::sync::mpsc::Sender<SseEvent>,
 ) {
     let mut upstream = upstream;
     let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state();
-    // Stream summary state. RAII guard so the summary
-    // fires on EVERY exit path (clean close, render error,
-    // upstream mid-stream error, client disconnect, runtime
-    // task cancellation). Truncation detection uses an
-    // inverse-flag pattern: the natural EOS path calls
-    // `mark_clean_close()`; any other exit (including ones
-    // we cannot explicitly mark, like task cancellation)
-    // leaves `clean_close = false` and Drop synthesizes
-    // `finish_reason="truncated"` so operators can
-    // distinguish a clean close from a cut.
-    let mut summary = EgressStreamSummary::new(ingress_id);
+    // The capture guard is the RAII summary + usage row for this
+    // stream. It fires on EVERY exit path (clean close, render error,
+    // upstream mid-stream error, client disconnect, runtime task
+    // cancellation). Truncation / outcome detection uses an inverse-flag
+    // pattern: the natural EOS path calls `finalize(Outcome::Ok)`; a
+    // mid-stream upstream error calls `finalize(Outcome::UpstreamError)`;
+    // any exit we cannot explicitly mark (client disconnect on a `tx`
+    // send failure, render failure, task cancellation) leaves the guard
+    // un-finalized and Drop stamps the `client_disconnect` fallback. So
+    // exactly one row lands per stream, mapped to the right outcome.
     while let Some(item) = upstream.next().await {
         match item {
             Ok(chunk) => {
-                summary.observe(&chunk);
+                // First chunk == the first byte the client can receive:
+                // mark TTFB and lift the quota/usage carried on the
+                // stream head BEFORE rendering.
+                capture.mark_first_byte();
+                capture.observe_chunk(&chunk);
                 match adapter.render_chunk(chunk, state.as_mut()) {
                     Ok(events) => {
                         for ev in events {
                             if tx.send(ev).await.is_err() {
-                                // Client disconnected mid-stream.
-                                // Drop emits truncated by
-                                // default (clean_close stays
-                                // false), so no explicit
-                                // marker call is needed.
+                                // Client disconnected mid-stream. The
+                                // guard stays un-finalized, so Drop
+                                // stamps `client_disconnect` -- no
+                                // explicit call needed.
                                 return;
                             }
                         }
@@ -264,12 +339,12 @@ async fn render_stream_task<A: IngressAdapter>(
                         // events). Emit the dialect-specific terminal
                         // error event so the client sees a clean
                         // FAILURE rather than a truncated stream and
-                        // does not retry. The drop summary still
-                        // reports `finish_reason=truncated` via the
-                        // inverse-flag pattern. The send-failure
+                        // does not retry. The guard stays un-finalized,
+                        // so Drop stamps `client_disconnect` (we never
+                        // delivered a complete stream). The send-failure
                         // result is intentionally discarded: if the
-                        // client already disconnected, the Drop on
-                        // EgressStreamSummary still fires.
+                        // client already disconnected, the guard Drop
+                        // still fires.
                         tracing::error!(error = ?e, "ingress chunk render failed");
                         let render_err = routectl_core::Error::Streaming(e.to_string());
                         let safe_msg = sanitize_stream_error_for_client(&render_err);
@@ -285,18 +360,23 @@ async fn render_stream_task<A: IngressAdapter>(
                 // Path 2: upstream stream errored mid-stream. Emit the
                 // dialect-specific terminal ERROR event (see the
                 // function-level rustdoc above for the SUCCESS-vs-ERROR
-                // EOS distinction and the rationale).
+                // EOS distinction and the rationale). A mid-stream error
+                // is a definite upstream fault, so finalize the row as
+                // `upstream_error` regardless of whether the terminal
+                // event reaches the client.
                 tracing::error!(
                     error = ?e,
                     "upstream stream error -- emitting terminal error event"
                 );
                 let safe_msg = sanitize_stream_error_for_client(&e);
                 let class = crate::ingress::StreamErrorClass::from_error(&e);
+                capture.observe_error(&e);
+                capture.finalize(Outcome::UpstreamError);
                 for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                     if tx.send(ev).await.is_err() {
-                        // Client disconnected before we could
-                        // deliver the terminal error event. Drop
-                        // emits truncated.
+                        // Client disconnected before we could deliver the
+                        // terminal error event. The row is already
+                        // finalized; Drop is a no-op.
                         return;
                     }
                 }
@@ -306,18 +386,14 @@ async fn render_stream_task<A: IngressAdapter>(
     }
     for ev in adapter.render_eos(state.as_mut()) {
         if tx.send(ev).await.is_err() {
-            // Client disconnected during EOS render. Drop
-            // emits truncated.
+            // Client disconnected during EOS render. The guard stays
+            // un-finalized, so Drop stamps `client_disconnect`.
             return;
         }
     }
-    // Natural EOS reached. Mark clean close so the Drop
-    // emit reports the observed finish_reason rather than
-    // synthesizing "truncated".
-    summary.mark_clean_close();
-    // Clean close. The egress stream summary fires on Drop;
-    // no explicit emit needed here.
-    drop(summary);
+    // Natural EOS reached. Finalize the row as a clean completion; the
+    // egress trace-summary fires from inside `finalize`.
+    capture.finalize(Outcome::Ok);
 }
 
 /// Map a routectl `Error` to a short, client-safe summary suitable
@@ -627,129 +703,6 @@ fn anthropic_vocab_member(t: &str) -> Option<&'static str> {
         "api_error" => Some("api_error"),
         "overloaded_error" => Some("overloaded_error"),
         _ => None,
-    }
-}
-
-/// RAII guard that emits a single `direction=egress` stream summary on
-/// drop. Complements the upstream-side
-/// `routectl_core::StreamWithSummary` RAII guarantee: every exit path
-/// of the spawned SSE-render task emits a summary so operators see a
-/// matching `direction=egress` line for every `direction=upstream`
-/// line.
-///
-/// Note the deliberate divergence from `StreamWithSummary`: the
-/// upstream guard preserves the observed `last_finish` on cancellation
-/// (it reports what the provider sent before drop). This guard
-/// OVERRIDES `last_finish` with `"truncated"` whenever
-/// `clean_close == false` so the egress side authoritatively reports
-/// whether the client received a complete stream. Operators
-/// correlating an egress `truncated` line with the upstream summary
-/// see the actual upstream finish_reason on the upstream side.
-///
-/// Truncation detection uses an inverse-flag pattern: the guard
-/// starts with `clean_close = false`, and `mark_clean_close()` is
-/// called only at the natural exit point. Drop emits
-/// `finish_reason="truncated"` whenever `clean_close` is still
-/// false -- which automatically covers ALL abnormal exit paths
-/// including ones we cannot explicitly mark (most importantly
-/// runtime task cancellation, where the future is dropped without
-/// running any of our code paths first). Explicit error paths can
-/// still call no special method; Drop alone handles them.
-///
-/// `chunks` semantics: counted on `observe()` BEFORE the chunk is
-/// rendered to SSE events and sent to the client. On a disconnect
-/// during `tx.send()`, `chunks` includes the unsent final chunk --
-/// it measures upstream chunks the egress task processed, NOT
-/// chunks the client successfully received. Operators reading the
-/// summary should treat `chunks` as a work-done counter, not a
-/// delivery counter.
-struct EgressStreamSummary {
-    ingress_id: String,
-    chunks: u64,
-    last_finish: Option<String>,
-    last_prompt: u32,
-    last_completion: u32,
-    last_total: u32,
-    clean_close: bool,
-}
-
-impl EgressStreamSummary {
-    fn new(ingress_id: String) -> Self {
-        Self {
-            ingress_id,
-            chunks: 0,
-            last_finish: None,
-            last_prompt: 0,
-            last_completion: 0,
-            last_total: 0,
-            clean_close: false,
-        }
-    }
-
-    fn observe(&mut self, chunk: &routectl_core::ChatChunk) {
-        self.chunks += 1;
-        // Reverse-scan for the last non-None finish_reason, matching
-        // the upstream-side StreamWithSummary semantics. Multi-choice
-        // streams may carry the terminal finish on a non-last choice.
-        for choice in chunk.choices.iter().rev() {
-            if let Some(fr) = &choice.finish_reason {
-                self.last_finish = Some(fr.clone());
-                break;
-            }
-        }
-        if let Some(u) = &chunk.usage {
-            if let Some(p) = u.prompt_tokens {
-                self.last_prompt = p;
-            }
-            if let Some(c) = u.completion_tokens {
-                self.last_completion = c;
-            }
-            if let Some(t) = u.total_tokens {
-                self.last_total = t;
-            }
-        }
-    }
-
-    /// Mark this stream as having reached the natural EOS. Drop will
-    /// emit the summary with the observed `finish_reason` instead of
-    /// the synthetic `"truncated"` value used for abnormal exits.
-    fn mark_clean_close(&mut self) {
-        self.clean_close = true;
-    }
-}
-
-impl Drop for EgressStreamSummary {
-    fn drop(&mut self) {
-        let usage = (self.last_prompt != 0 || self.last_completion != 0 || self.last_total != 0)
-            .then_some(routectl_core::Usage {
-                prompt_tokens: self.last_prompt,
-                completion_tokens: self.last_completion,
-                total_tokens: self.last_total,
-                ..Default::default()
-            });
-        // Inverse-flag truncation detection: any drop without a
-        // matching `mark_clean_close()` is a non-clean exit. Covers
-        // explicit error returns AND task cancellation (where Drop
-        // runs without our code path running first). The egress
-        // summary is authoritative on egress-side completion --
-        // override any observed `last_finish` with `"truncated"`
-        // when `clean_close == false` so operators can grep
-        // `direction=egress finish_reason=truncated` to enumerate
-        // cuts. The upstream-side summary still carries the
-        // observed upstream finish_reason for correlation.
-        let finish_reason = if self.clean_close {
-            self.last_finish.as_deref()
-        } else {
-            Some("truncated")
-        };
-        routectl_core::trace_stream_summary(
-            "egress",
-            "ingress",
-            &self.ingress_id,
-            self.chunks,
-            finish_reason,
-            usage.as_ref(),
-        );
     }
 }
 

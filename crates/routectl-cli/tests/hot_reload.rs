@@ -17,6 +17,8 @@ use tokio::net::TcpListener;
 use wiremock::matchers::{header, method, path as wiremock_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod common;
+
 // -----------------------------------------------------------------
 // Test rig
 // -----------------------------------------------------------------
@@ -65,6 +67,7 @@ async fn spawn_watched_server(initial_alias: &str) -> (String, PathBuf, tempfile
     std::fs::write(&config_path, config_text_with_alias(initial_alias)).unwrap();
 
     let config = parse_config(&config_text_with_alias(initial_alias));
+    let config = common::isolate_usage_db(config);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -355,6 +358,7 @@ async fn spawn_server_with_config_text(config_text: &str) -> (String, tempfile::
     std::fs::write(&config_path, config_text).unwrap();
 
     let config = parse_config(config_text);
+    let config = common::isolate_usage_db(config);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
