@@ -133,6 +133,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
 | `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> 64000 baseline); anthropic-api + bedrock-invoke only |
+| `response_model`               | `[models.X]`        | Option<string>, default None; override the `model` field in HTTP responses sent to the client (hides the upstream provider's model name) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
@@ -612,6 +613,42 @@ upstream = "us.anthropic.claude-haiku-4-5-v1:0"
 # inherits provider's 60s; no per-model override
 # effort_levels defaults to ["low","medium","high"]
 ```
+
+## response_model (response model override)
+
+`response_model` on `[models.X]` overrides the `model` field in every
+HTTP response sent to the client — both non-streaming and streaming,
+both OpenAI Chat Completions and Anthropic Messages dialects.
+
+When set, routectl replaces the upstream's model identifier (e.g.
+`"deepseek-chat"`) with this value before serializing the response
+body. Absent / `None` (the default) passes the upstream's model string
+through verbatim.
+
+### Use case: opaque proxy / multi-tenant
+
+Your clients send `model: "claude-haiku-*"`, routectl routes to
+DeepSeek V4 Flash, and the response still says `model: "claude-haiku-*"`.
+The actual upstream provider is hidden from the client.
+
+```toml
+[models.fast]
+provider       = "deepseek"
+upstream       = "deepseek-chat"
+response_model = "claude-haiku-4-5-20251001"
+```
+
+### What the client sees
+
+| Response field | Without override | With `response_model` |
+|---|---|---|
+| `model` (body) | `"deepseek-chat"` | `"claude-haiku-4-5-20251001"` |
+| `routectl_provider` (body, OpenAI only) | `"deepseek"` | `"deepseek"` (unchanged) |
+
+The `routectl_provider` field is a separate routectl-extension field
+and is **not** affected by this setting. If you need to suppress that
+as well, see the field's `skip_serializing_if` annotation in
+`ChatResponse`.
 
 ## history_reasoning (reasoning echo-back)
 

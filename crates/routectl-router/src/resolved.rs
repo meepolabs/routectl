@@ -90,6 +90,10 @@ pub struct ResolvedModel {
     /// hardcoded 64000 baseline. Projected from
     /// `[models.X] max_output_tokens`.
     pub max_output_tokens: u32,
+    /// Override for the `model` field in HTTP responses sent to the
+    /// client. When `Some(...)`, the router replaces the upstream's
+    /// model string with this value before serializing the response body.
+    pub response_model: Option<String>,
     /// Source `SecretRef` used to resolve this model's primary auth
     /// credential at provider-build time. Retained on the resolved
     /// model so the router can wire 401 self-heal back through the
@@ -120,6 +124,7 @@ impl ResolvedModel {
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
             max_output_tokens: 0,
+            response_model: None,
             auth_secret_ref: None,
         }
     }
@@ -187,6 +192,14 @@ impl ResolvedModel {
         self.auth_secret_ref = Some(sr);
         self
     }
+
+    /// Set the response model override. When set, every HTTP response
+    /// body's `model` field is replaced with this value before it reaches
+    /// the client.
+    pub fn with_response_model(mut self, model: impl Into<String>) -> Self {
+        self.response_model = Some(model.into());
+        self
+    }
 }
 
 impl std::fmt::Debug for ResolvedModel {
@@ -214,6 +227,7 @@ impl std::fmt::Debug for ResolvedModel {
                 &self.stream_first_byte_timeout_ms,
             )
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("response_model", &self.response_model)
             .field(
                 "auth_secret_ref",
                 &self.auth_secret_ref.as_ref().map(|sr| sr.to_string()),

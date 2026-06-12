@@ -171,6 +171,9 @@ struct DispatchTarget {
     /// override -- `apply_layered_overlays` falls through to the
     /// server-side default.
     max_output_tokens: u32,
+    /// Override for the `model` field in HTTP responses sent to the
+    /// client. Threaded from `ResolvedModel.response_model`.
+    response_model: Option<String>,
 }
 
 impl Router {
@@ -635,6 +638,9 @@ impl Router {
                     Ok(mut resp) => {
                         self.record_success(state_key);
                         resp.routectl_provider = Some(provider_name.to_string());
+                        if let Some(ref override_model) = target.response_model {
+                            resp.model.clone_from(override_model);
+                        }
                         return Ok(resp);
                     }
                     Err(e) => {
@@ -1024,8 +1030,17 @@ impl Router {
                         let cancel_is_failure = state
                             .as_ref()
                             .is_some_and(|st| st.lock().half_open_probe_in_flight());
+                        let overridden = if let Some(ref override_model) = target.response_model {
+                            let cloned = override_model.clone();
+                            let mapped = stream.map(move |chunk| {
+                                chunk.map(|c| ChatChunk { model: cloned.clone(), ..c })
+                            });
+                            Box::pin(mapped) as BoxStream<'static, Result<ChatChunk>>
+                        } else {
+                            stream
+                        };
                         return Ok(wrap_with_breaker_accounting(
-                            stream,
+                            overridden,
                             state,
                             cancel_is_failure,
                         ));
@@ -1641,6 +1656,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
         max_thinking_budget: m.max_thinking_budget,
         max_output_tokens: m.max_output_tokens,
+        response_model: m.response_model.clone(),
     }
 }
 
@@ -2532,6 +2548,7 @@ mod merge_header_extras_tests {
             stream_first_byte_timeout_ms: None,
             max_thinking_budget: 0,
             max_output_tokens: 0,
+            response_model: None,
         };
 
         let mut req = req_with_betas(vec!["client-beta"]);
@@ -3019,6 +3036,35 @@ mod resolved_models_tests {
         let resp = router.complete(req).await.expect("ok");
         assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic"));
         assert_eq!(resp.model, "claude-haiku-4-5");
+    }
+
+    #[tokio::test]
+    async fn response_model_override_replaces_model_field() {
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "deepseek-test".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "fast".to_string(),
+            Arc::new(
+                ResolvedModel::new("fast", "deepseek", p, "deepseek-chat")
+                    .with_response_model("claude-haiku-4-5-20251001"),
+            ),
+        );
+        let cfg = Arc::new(Config::default());
+        let mut router = Router::new(cfg);
+        router.install_resolved_models(models);
+        let req = ChatRequest {
+            model: "fast".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        // model field is overridden
+        assert_eq!(resp.model, "claude-haiku-4-5-20251001");
+        // routectl_provider is unaffected by the override
+        assert_eq!(resp.routectl_provider.as_deref(), Some("deepseek"));
     }
 
     #[tokio::test]

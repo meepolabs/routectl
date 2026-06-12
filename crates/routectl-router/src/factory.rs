@@ -825,6 +825,9 @@ pub async fn build_resolved_models(
         if let Some(tokens) = entry.max_output_tokens {
             resolved = resolved.with_max_output_tokens(tokens);
         }
+        if let Some(ref model) = entry.response_model {
+            resolved = resolved.with_response_model(model.clone());
+        }
         if let Some(uri) = primary_api_key_uri(provider_entry) {
             if let Ok(sr) = SecretRef::parse(uri) {
                 resolved = resolved.with_auth_secret_ref(sr);

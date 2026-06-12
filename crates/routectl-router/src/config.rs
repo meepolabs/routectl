@@ -266,6 +266,22 @@ pub struct ModelEntry {
     /// principle: do not inject where the upstream already handles it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+
+    /// Override the `model` field in HTTP responses sent to the client.
+    /// When set, routectl replaces the upstream's model identifier
+    /// (e.g. `"deepseek-chat"`) with this value before serializing the
+    /// response body. Affects both non-streaming and streaming responses,
+    /// and both OpenAI Chat Completions and Anthropic Messages dialects.
+    ///
+    /// Use case: hide the actual upstream provider from client-visible
+    /// response bodies in multi-tenant or opaque-proxy deployments.
+    /// The client sends `model: "claude-haiku-*"`, routectl routes to
+    /// another provider, and the response still says `"claude-haiku-*"`.
+    ///
+    /// Absent / `None` (the default): pass through the upstream's model
+    /// string verbatim (existing behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_model: Option<String>,
 }
 
 impl ModelEntry {
@@ -284,6 +300,7 @@ impl ModelEntry {
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
             max_output_tokens: None,
+            response_model: None,
         }
     }
 
@@ -362,6 +379,14 @@ impl ModelEntry {
             "max_output_tokens must be > 0; 0 would 400 every anthropic-api request",
         );
         self.max_output_tokens = Some(tokens);
+        self
+    }
+
+    /// Set the response model override. When set, every HTTP response
+    /// body's `model` field is replaced with this value before it reaches
+    /// the client. See field doc for use cases.
+    pub fn with_response_model(mut self, model: impl Into<String>) -> Self {
+        self.response_model = Some(model.into());
         self
     }
 }
