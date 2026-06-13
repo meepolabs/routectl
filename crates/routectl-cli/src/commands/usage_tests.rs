@@ -543,3 +543,8 @@ fn detail_computes_p95_per_group() {
     assert_eq!(t.p95_latency_ms, Some(19));
     assert_eq!(t.max_latency_ms, 20);
 }
+
+// The render-layer, quota-line, --since-title, and --by-model tests live in
+// a sibling file to keep each file under the size ceiling. They compile into
+// THIS module via include!, so the helpers above stay in scope.
+include!("usage_render_tests.rs");
