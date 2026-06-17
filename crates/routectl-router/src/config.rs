@@ -429,6 +429,16 @@ pub struct ModelEntry {
     /// principle: do not inject where the upstream already handles it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+
+    /// Operator-declared label echoed back in the response `model`
+    /// field for this model. `None` (the default) makes the response
+    /// echo the client's requested alias (`req.model`); `Some(label)`
+    /// overrides that with a fixed public-facing string. An empty
+    /// string is treated as unset (falls through to `req.model`). Does
+    /// not affect internal accounting / observability, which key off
+    /// `DispatchMeta.served_model` / `served_upstream`, not `resp.model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_model: Option<String>,
 }
 
 impl ModelEntry {
@@ -447,6 +457,7 @@ impl ModelEntry {
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
             max_output_tokens: None,
+            reported_model: None,
         }
     }
 
@@ -525,6 +536,14 @@ impl ModelEntry {
             "max_output_tokens must be > 0; 0 would 400 every anthropic-api request",
         );
         self.max_output_tokens = Some(tokens);
+        self
+    }
+
+    /// Set the client-visible label echoed in the response `model`
+    /// field. Free-form string; an empty string is treated as unset
+    /// at stamp time (falls through to the client's requested alias).
+    pub fn with_reported_model(mut self, label: impl Into<String>) -> Self {
+        self.reported_model = Some(label.into());
         self
     }
 }

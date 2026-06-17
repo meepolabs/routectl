@@ -49,6 +49,51 @@ fn render_response_emits_messages_shape() {
     assert_eq!(v["usage"]["output_tokens"], 5);
 }
 
+/// Ingress-layer serialization pin: the Anthropic ingress renders
+/// `resp.model` verbatim into the non-streaming response body. The
+/// relabel itself happens upstream in the router (which rewrites
+/// `resp.model` to the client-visible label -- requested alias by
+/// default, or a per-model `reported_model` override). This test proves
+/// only that whatever label the response carries is passed through
+/// unchanged into the rendered `model` field; router-integration
+/// coverage lives in tests/router.rs and src/router.rs.
+#[test]
+fn render_response_surfaces_router_model_label_verbatim() {
+    use routectl_core::{schema::Choice, Message, Role, Usage};
+    // Arrange: a response stamped with a client-visible label.
+    let resp = ChatResponse {
+        id: "msg_01".into(),
+        model: "public-label".into(),
+        created: 0,
+        choices: vec![Choice {
+            logprobs: None,
+            index: 0,
+            message: Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("hi there".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage::default()),
+        routectl_provider: None,
+        extras: Default::default(),
+        upstream_meta: None,
+    };
+
+    // Act
+    let v = AnthropicIngress.render_response(resp).unwrap();
+
+    // Assert
+    assert_eq!(v["model"], "public-label");
+}
+
 /// Bug D (cc-via-* 2026-05-18): openai-responses and anthropic-api
 /// non-streaming responses populate BOTH `msg.tool_calls`
 /// (OpenAI shape) AND a typed `ContentPart::ToolUse` on

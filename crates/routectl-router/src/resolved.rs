@@ -90,6 +90,13 @@ pub struct ResolvedModel {
     /// hardcoded 64000 baseline. Projected from
     /// `[models.X] max_output_tokens`.
     pub max_output_tokens: u32,
+    /// Operator-declared label echoed back in the response `model`
+    /// field. `None` makes the response echo the client's requested
+    /// alias (`req.model`); `Some(label)` overrides with a fixed
+    /// public-facing string. An empty string is treated as unset at
+    /// stamp time. Projected from `[models.X] reported_model`. Does
+    /// not affect internal accounting / observability.
+    pub reported_model: Option<String>,
     /// Source `SecretRef` used to resolve this model's primary auth
     /// credential at provider-build time. Retained on the resolved
     /// model so the router can wire 401 self-heal back through the
@@ -130,6 +137,7 @@ impl ResolvedModel {
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
             max_output_tokens: 0,
+            reported_model: None,
             auth_secret_ref: None,
             seats: None,
         }
@@ -191,6 +199,14 @@ impl ResolvedModel {
         self
     }
 
+    /// Set the client-visible label echoed in the response `model`
+    /// field. `None` echoes the client's requested alias; an empty
+    /// string is treated as unset at stamp time.
+    pub fn with_reported_model(mut self, label: impl Into<String>) -> Self {
+        self.reported_model = Some(label.into());
+        self
+    }
+
     /// Attach the source `SecretRef` that resolved this model's
     /// primary auth credential. Used by the 401 self-heal path so a
     /// refresh hook can run against the originating store.
@@ -234,6 +250,7 @@ impl std::fmt::Debug for ResolvedModel {
                 &self.stream_first_byte_timeout_ms,
             )
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("reported_model", &self.reported_model)
             .field(
                 "auth_secret_ref",
                 &self.auth_secret_ref.as_ref().map(|sr| sr.to_string()),

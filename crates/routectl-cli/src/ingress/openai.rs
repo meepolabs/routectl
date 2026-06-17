@@ -720,6 +720,44 @@ mod tests {
         assert!(events[0].data.contains("\"content\":\"hello\""));
     }
 
+    /// Ingress-layer serialization pin: the OpenAI ingress renders
+    /// `chunk.model` verbatim into each streaming frame. The relabel
+    /// itself happens upstream in the router (which rewrites `chunk.model`
+    /// to the client-visible label -- requested alias by default, or a
+    /// per-model `reported_model` override). This test proves only that
+    /// whatever label the chunk carries is passed through unchanged into
+    /// the serialized body; router-integration coverage lives in
+    /// tests/router.rs and src/router.rs.
+    #[test]
+    fn render_chunk_surfaces_rewritten_chunk_model_label() {
+        // Arrange: a chunk stamped with a client-visible label.
+        let chunk = ChatChunk {
+            id: "chatcmpl-1".into(),
+            model: "public-label".into(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta {
+                    content: Some("hello".into()),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: Vec::new(),
+            upstream_meta: None,
+        };
+        let mut state = OpenAiIngress.new_stream_state();
+
+        // Act
+        let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
+
+        // Assert: the serialized frame carries the canonical chunk.model.
+        assert_eq!(events.len(), 1);
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(payload["model"], "public-label");
+    }
+
     #[test]
     fn render_eos_emits_done_sentinel() {
         let mut state = OpenAiIngress.new_stream_state();
@@ -1106,6 +1144,39 @@ mod tests {
         );
         // The lone text part collapses to a plain content string.
         assert_eq!(msg["content"], "Checking weather.");
+    }
+
+    /// The OpenAI ingress renders `resp.model` verbatim. Since the
+    /// router rewrites `resp.model` to the client-visible label
+    /// (requested alias by default, or the per-model `reported_model`
+    /// override), the rendered body surfaces that label rather than the
+    /// upstream wire id. Pin that the ingress passes it through.
+    #[test]
+    fn render_response_surfaces_router_model_label_verbatim() {
+        // Arrange: a response stamped with a client-visible label.
+        let mut resp = response_with_choices(vec![Choice {
+            logprobs: None,
+            index: 0,
+            message: Message {
+                refusal: None,
+                role: routectl_core::Role::Assistant,
+                content: MessageContent::Text("ok".into()),
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("stop".into()),
+            matched_stop_sequence: None,
+        }]);
+        resp.model = "public-label".into();
+
+        // Act
+        let v = OpenAiIngress.render_response(resp).unwrap();
+
+        // Assert
+        assert_eq!(v["model"], "public-label");
     }
 
     /// When the assistant turn is purely a tool call (a ToolUse part and

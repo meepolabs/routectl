@@ -296,6 +296,12 @@ struct DispatchTarget {
     /// override -- `apply_layered_overlays` falls through to the
     /// server-side default.
     max_output_tokens: u32,
+    /// Operator-declared label echoed back in the response `model`
+    /// field. Threaded from `ResolvedModel.reported_model`. `None`
+    /// (or an empty string) makes the response echo the client's
+    /// requested alias; `Some(non-empty)` overrides it. Does not
+    /// affect `DispatchMeta` accounting.
+    reported_model: Option<String>,
 }
 
 impl Router {
@@ -910,6 +916,11 @@ impl Router {
                     Ok(mut resp) => {
                         self.record_success(state_key);
                         resp.routectl_provider = Some(provider_name.to_string());
+                        // Client-visible label: the serving target's
+                        // `reported_model` override when set (and non-empty),
+                        // else the client's requested alias. Internal
+                        // accounting keys off `DispatchMeta`, not this field.
+                        resp.model = resolve_reported_model(target, &req.model);
                         return Ok(resp);
                     }
                     Err(e) => {
@@ -1408,7 +1419,22 @@ impl Router {
                                 st.lock().record_success();
                             }
                         }
-                        return Ok(wrap_with_breaker_accounting(stream, state));
+                        // Stamp the client-visible label on every Ok chunk
+                        // (including the terminal / usage-only chunk) before
+                        // the breaker wrap. The closure owns the label String
+                        // (moved in via `move`) to satisfy the 'static
+                        // BoxStream bound; `chunk.model` needs an owned String,
+                        // so the label is cloned per Ok chunk. `Err` passes
+                        // through byte-for-byte unchanged.
+                        let label = resolve_reported_model(target, &req.model);
+                        let relabeled = stream.map(move |item| match item {
+                            Ok(mut chunk) => {
+                                chunk.model = label.clone();
+                                Ok(chunk)
+                            }
+                            Err(e) => Err(e),
+                        });
+                        return Ok(wrap_with_breaker_accounting(relabeled.boxed(), state));
                     }
                     Err(e) => {
                         // Auth-401 single-flight refresh + retry once
@@ -2034,6 +2060,19 @@ fn is_managed_reserved(name: &str) -> bool {
     MANAGED_HEADERS.contains(&lc.as_str())
 }
 
+/// Resolve the client-visible response `model` label for a served
+/// dispatch target. Returns the target's `reported_model` override
+/// when set to a non-empty string, otherwise the client's requested
+/// alias (`req_model`). An empty override string is treated as unset.
+/// Computed once per request so a fallback chain / multi-chunk stream
+/// carries one stable label.
+fn resolve_reported_model(target: &DispatchTarget, req_model: &str) -> String {
+    match target.reported_model.as_deref() {
+        Some(label) if !label.is_empty() => label.to_string(),
+        _ => req_model.to_string(),
+    }
+}
+
 /// Convert a chain of `Arc<ResolvedModel>` into the `DispatchTarget`
 /// shape the dispatch loop walks. Hoisted out of `dispatch_chain`
 /// so the three resolution branches share one builder.
@@ -2054,6 +2093,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
         max_thinking_budget: m.max_thinking_budget,
         max_output_tokens: m.max_output_tokens,
+        reported_model: m.reported_model.clone(),
         model: m,
     }
 }
@@ -2081,6 +2121,7 @@ fn dispatch_target_for_seat(
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
         max_thinking_budget: m.max_thinking_budget,
         max_output_tokens: m.max_output_tokens,
+        reported_model: m.reported_model.clone(),
         model: m.clone(),
     }
 }
@@ -3486,6 +3527,246 @@ mod resolved_models_tests {
         router
     }
 
+    #[test]
+    fn reported_model_survives_config_resolved_dispatch_relay() {
+        // Structural-relay sanity check: a configured `reported_model`
+        // rides the 4-hop relay (ModelEntry -> ResolvedModel ->
+        // DispatchTarget) including the seat-pinned dispatch path used by
+        // pooled-OAuth models. The end-to-end BEHAVIOR coverage (that the
+        // override actually surfaces in resp.model) lives in
+        // `seat_backed_complete_honors_reported_model_override`.
+        let entry =
+            crate::config::ModelEntry::new("p1", "wire-model").with_reported_model("public-label");
+        assert_eq!(entry.reported_model.as_deref(), Some("public-label"));
+
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "p1".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut resolved = ResolvedModel::new("m1", "p1", p.clone(), "wire-model");
+        if let Some(label) = entry.reported_model.as_ref() {
+            resolved = resolved.with_reported_model(label.clone());
+        }
+        assert_eq!(resolved.reported_model.as_deref(), Some("public-label"));
+
+        let m = Arc::new(resolved);
+        let direct = into_one_dispatch_target(m.clone());
+        assert_eq!(direct.reported_model.as_deref(), Some("public-label"));
+
+        let seat = crate::seat_pool::SeatTarget {
+            label: Some("seat-a".into()),
+            state_key: "m1#seat-a".into(),
+            provider: p.clone(),
+            auth_secret_ref: None,
+        };
+        let via_seat = dispatch_target_for_seat(&m, &seat);
+        assert_eq!(via_seat.reported_model.as_deref(), Some("public-label"));
+    }
+
+    /// Minimal streaming-capable provider for the seat-path end-to-end
+    /// tests. Emits a text chunk followed by a usage-only terminal tail
+    /// chunk, mirroring a real provider; both carry the upstream wire id
+    /// in `model`, so the router's per-chunk relabel (including the
+    /// terminal chunk) is the only thing that can change it.
+    struct StreamingProvider {
+        id: String,
+    }
+
+    #[async_trait]
+    impl Provider for StreamingProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                id: format!("ok-{}", self.id),
+                model: req.model,
+                created: 0,
+                choices: vec![Choice {
+                    logprobs: None,
+                    index: 0,
+                    message: Message {
+                        refusal: None,
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+                upstream_meta: None,
+            })
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            let model = req.model.clone();
+            let id = self.id.clone();
+            let text = ChatChunk {
+                id: format!("chunk-{id}"),
+                model: model.clone(),
+                choices: vec![routectl_core::ChunkChoice {
+                    index: 0,
+                    delta: routectl_core::ChunkDelta {
+                        content: Some("ok".into()),
+                        ..Default::default()
+                    },
+                    finish_reason: None,
+                    matched_stop_sequence: None,
+                }],
+                usage: None,
+                opaque_events: Vec::new(),
+                upstream_meta: None,
+            };
+            let tail = ChatChunk {
+                id: format!("chunk-{id}-tail"),
+                model,
+                choices: Vec::new(),
+                usage: Some(routectl_core::UsageDelta::default()),
+                opaque_events: Vec::new(),
+                upstream_meta: None,
+            };
+            Ok(futures::stream::iter(vec![Ok(text), Ok(tail)]).boxed())
+        }
+    }
+
+    /// Build a router whose single model nickname is pooled onto a fixed
+    /// set of seats. Mirrors the factory's seat-expansion path
+    /// (`ResolvedModel::with_seats`) so dispatch walks the seat-pinned
+    /// `DispatchTarget`s, the path used by pooled-OAuth models. An
+    /// optional `reported_model` override is threaded onto the model.
+    fn router_with_pooled_model(
+        nickname: &str,
+        provider_name: &str,
+        upstream: &str,
+        provider: Arc<dyn Provider>,
+        seat_labels: &[&str],
+        reported_model: Option<&str>,
+    ) -> Router {
+        let cfg = Arc::new(Config::default());
+        let mut router = Router::new(cfg);
+
+        let seats: Vec<crate::seat_pool::SeatTarget> = seat_labels
+            .iter()
+            .map(|label| crate::seat_pool::SeatTarget {
+                label: Some((*label).to_string()),
+                state_key: crate::seat_pool::seat_state_key(nickname, Some(label)),
+                provider: provider.clone(),
+                auth_secret_ref: None,
+            })
+            .collect();
+
+        let mut resolved = ResolvedModel::new(nickname, provider_name, provider, upstream)
+            .with_seats(seats.into());
+        if let Some(label) = reported_model {
+            resolved = resolved.with_reported_model(label);
+        }
+
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(nickname.to_string(), Arc::new(resolved));
+        router.install_resolved_models(models);
+        router
+    }
+
+    #[tokio::test]
+    async fn seat_backed_complete_echoes_client_alias_by_default() {
+        // A pooled (seat-backed) model with no `reported_model` override
+        // must echo the client's requested alias in resp.model, even
+        // though dispatch went through a seat-pinned DispatchTarget whose
+        // upstream wire id differs from the alias.
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "oauth-pool".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_with_pooled_model(
+            "opus",
+            "anthropic-oauth",
+            "claude-opus-4-7-wire",
+            p.clone(),
+            &["seat-a", "seat-b"],
+            None,
+        );
+        let req = ChatRequest {
+            model: "opus".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        // Default flip: the seat-served response echoes the requested
+        // alias, not the upstream wire id.
+        assert_eq!(resp.model, "opus");
+    }
+
+    #[tokio::test]
+    async fn seat_backed_complete_honors_reported_model_override() {
+        // A pooled model WITH a `reported_model` override must surface
+        // that override in resp.model on the seat-served path.
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "oauth-pool".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_with_pooled_model(
+            "opus",
+            "anthropic-oauth",
+            "claude-opus-4-7-wire",
+            p.clone(),
+            &["seat-a", "seat-b"],
+            Some("public-opus"),
+        );
+        let req = ChatRequest {
+            model: "opus".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        assert_eq!(resp.model, "public-opus");
+    }
+
+    #[tokio::test]
+    async fn seat_backed_stream_relabels_chunk_model() {
+        // The seat-served streaming path must relabel every chunk.model
+        // to the client-visible label. Default (no override) echoes the
+        // requested alias.
+        let p: Arc<dyn Provider> = Arc::new(StreamingProvider {
+            id: "oauth-pool".into(),
+        });
+        let router = router_with_pooled_model(
+            "opus",
+            "anthropic-oauth",
+            "claude-opus-4-7-wire",
+            p.clone(),
+            &["seat-a", "seat-b"],
+            None,
+        );
+        let req = ChatRequest {
+            model: "opus".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let mut stream = router.stream(req).await.expect("stream opens");
+        // Per-chunk relabel: every seat-served chunk, including the
+        // usage-only terminal tail, carries the requested alias rather
+        // than the upstream wire id the provider stamped.
+        let mut count = 0;
+        while let Some(item) = stream.next().await {
+            let chunk = item.expect("ok");
+            assert_eq!(chunk.model, "opus");
+            count += 1;
+        }
+        assert_eq!(count, 2, "text + terminal");
+    }
+
     #[tokio::test]
     async fn dispatch_resolves_wire_string_to_nickname_directly() {
         let p: Arc<dyn Provider> = Arc::new(CountedProvider {
@@ -3501,7 +3782,9 @@ mod resolved_models_tests {
         };
         let resp = router.complete(req).await.expect("ok");
         assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic"));
-        assert_eq!(resp.model, "claude-haiku-4-5");
+        // Default flip: the response echoes the client's requested
+        // alias, not the upstream wire model id.
+        assert_eq!(resp.model, "haiku");
     }
 
     #[tokio::test]
@@ -3677,7 +3960,9 @@ mod resolved_models_tests {
         // Alias wins: dispatch landed on the `backup` model's
         // provider, not the direct `foo` model's provider.
         assert_eq!(resp.routectl_provider.as_deref(), Some("p-alias"));
-        assert_eq!(resp.model, "u-alias");
+        // Default flip: the response echoes the client's requested
+        // alias (`foo`), not the served upstream wire model id.
+        assert_eq!(resp.model, "foo");
     }
 
     // ----- Recursive alias-chain resolution (Task #5) -----
@@ -3748,7 +4033,9 @@ mod resolved_models_tests {
         };
         let resp = router.complete(req).await.expect("ok");
         assert_eq!(resp.routectl_provider.as_deref(), Some("p-x"));
-        assert_eq!(resp.model, "u-x");
+        // Default flip: the response echoes the client's requested
+        // wire model (`a`), not the resolved upstream id (`u-x`).
+        assert_eq!(resp.model, "a");
     }
 
     #[tokio::test]

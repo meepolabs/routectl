@@ -139,6 +139,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
 | `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> 64000 baseline); anthropic-api + bedrock-invoke only |
+| `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
@@ -612,6 +613,42 @@ upstream          = "claude-opus-4"
 # omitting max_tokens do not 400.
 max_output_tokens = 32000
 ```
+
+**`reported_model` (Option<String>, default None) -- response `model` label**
+
+The `model` field routectl echoes back in responses (and on every
+streaming chunk, including the terminal usage-only chunk) is the
+*client-visible label*, decoupled from the upstream wire model id:
+
+- **Default (no `reported_model` set):** the response `model` echoes the
+  client's requested alias verbatim -- the exact string the client sent
+  (or the `x-routectl-alias` header override). A client asking for
+  `deepseek-chat` and routed to upstream `deepseek-v3` sees
+  `"model": "deepseek-chat"` in the response, not the upstream id.
+
+- **Override (`reported_model = "label"`):** the served model's
+  `reported_model` wins, pinning a fixed public-facing string regardless
+  of which alias the client used. An empty string (`reported_model = ""`)
+  is treated as unset and falls through to the requested alias.
+
+The label is computed once per request from the model that actually
+served it, so a fallback chain or a multi-chunk stream carries one stable
+label across every hop and chunk.
+
+```toml
+[models.deepseek]
+provider       = "deepseek"
+upstream       = "deepseek-v3"
+# Clients see "fast-chat" no matter which alias routed here.
+reported_model = "fast-chat"
+```
+
+This affects only the client-visible `model` field. Internal accounting
+and observability (usage capture, pricing) key off the served model and
+upstream recorded in dispatch metadata, not the response `model` field,
+and are unchanged. The `routectl_provider` field remains the intentional
+transparency channel naming the provider that answered; it is unaffected
+by `reported_model`.
 
 Two other per-model overrides live on `[models.X]`:
 

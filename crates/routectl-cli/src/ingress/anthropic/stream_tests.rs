@@ -1228,6 +1228,45 @@ fn message_start_uses_req_model_when_chunk_carries_no_model() {
     );
 }
 
+/// The router rewrites `chunk.model` on every chunk to the client-visible
+/// label (requested alias by default, or a `reported_model` override).
+/// The Anthropic stream ingress caches the first chunk's model into
+/// `msg_model` and surfaces it on `message_start`, so the rendered SSE
+/// reflects the rewritten label rather than the upstream wire id.
+#[test]
+fn message_start_surfaces_rewritten_chunk_model_label() {
+    use routectl_core::{ChunkChoice, ChunkDelta};
+    // Arrange: a chunk carrying the router-rewritten label.
+    let mut s = fresh_state();
+    let chunk = ChatChunk {
+        id: "msg_01".into(),
+        model: "public-label".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta {
+                content: Some("hi".into()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        opaque_events: Vec::new(),
+        upstream_meta: None,
+    };
+
+    // Act
+    let events = render_chunk_internal(chunk, &mut s).unwrap();
+
+    // Assert
+    let start = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_start"))
+        .expect("message_start emitted");
+    let payload: Value = serde_json::from_str(&start.data).unwrap();
+    assert_eq!(payload["message"]["model"], "public-label");
+}
+
 /// Finding #5 (bug): `render_error_eos_internal` called after a normal
 /// clean finish (where `state.finished` is already true) must return an
 /// empty event list -- not push a second terminal `event: error` frame.
