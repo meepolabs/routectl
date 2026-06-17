@@ -162,8 +162,6 @@ Step-by-step example: "OpenAI launches o5-mini on OpenRouter."
        pattern: "o5",
        kind: MatchKind::Prefix,
        drops_sampling_params: true,
-       requires_reasoning_effort: true,
-       ..ModelProfile::DEFAULT
    },
    ```
 

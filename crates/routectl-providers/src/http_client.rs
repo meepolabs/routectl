@@ -31,6 +31,13 @@ use reqwest::Client;
 /// once bytes have started flowing.
 pub(crate) const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Connect (TCP + TLS handshake) timeout for every shared client.
+/// Caps only the initial connection (not per-read). A hung connect to
+/// an unreachable upstream would otherwise stall paths not wrapped by
+/// the router request-timeout. 10s is generous for a public handshake
+/// and short enough to fail a black-holed connect fast.
+pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Build a `reqwest::Client` with the given optional User-Agent.
 ///
 /// `None` keeps reqwest's default UA. Use this anywhere a provider
@@ -80,7 +87,11 @@ fn common_builder(user_agent: Option<&str>) -> reqwest::ClientBuilder {
         // the TCP connection open would otherwise leak the render task.
         // NOT a total-duration cap -- safe for long thinking streams.
         // See STREAM_READ_TIMEOUT.
-        .read_timeout(STREAM_READ_TIMEOUT);
+        .read_timeout(STREAM_READ_TIMEOUT)
+        // Connect-only cap: a hung TCP/TLS handshake to a black-holed
+        // upstream would otherwise stall indefinitely on paths not
+        // wrapped by the router request-timeout. See CONNECT_TIMEOUT.
+        .connect_timeout(CONNECT_TIMEOUT);
     if let Some(ua) = user_agent {
         builder = builder.user_agent(ua);
     }
@@ -187,20 +198,6 @@ pub fn effective_header_extras(
     }
 }
 
-/// True if the given header name is reserved for routectl's own
-/// management and must not be set via user `extra_headers`. Union of
-/// [`is_auth_header`] and [`is_managed_header`]. Callers that need to
-/// distinguish the two reasons (so they can emit different log
-/// messages) should call the split predicates directly.
-///
-/// In-tree callers all use the split predicates; this union is kept
-/// for external library consumers that need the legacy single-check
-/// shape.
-#[allow(dead_code)]
-pub fn is_reserved_extra_header(name: &str) -> bool {
-    is_auth_header(name) || is_managed_header(name)
-}
-
 /// Insert a header name+value into a `HeaderMap`, replacing any
 /// existing entry with the same (case-insensitive) name. Skips the
 /// entry with a WARN if either the name or value cannot be parsed
@@ -297,8 +294,8 @@ pub fn apply_header_extras(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_header_extras, insert_header, is_auth_header, is_managed_header,
-        is_reserved_extra_header, AUTH_HEADERS, MANAGED_HEADERS, STREAM_READ_TIMEOUT,
+        apply_header_extras, insert_header, is_auth_header, is_managed_header, AUTH_HEADERS,
+        CONNECT_TIMEOUT, MANAGED_HEADERS, STREAM_READ_TIMEOUT,
     };
     use reqwest::header::HeaderMap;
 
@@ -308,6 +305,15 @@ mod tests {
             STREAM_READ_TIMEOUT,
             std::time::Duration::from_secs(300),
             "streaming idle read timeout must be 300s",
+        );
+    }
+
+    #[test]
+    fn connect_timeout_is_short_handshake_cap() {
+        assert_eq!(
+            CONNECT_TIMEOUT,
+            std::time::Duration::from_secs(10),
+            "connect (TCP + TLS) timeout must be 10s",
         );
     }
 
@@ -516,20 +522,6 @@ mod tests {
                 "{name:?} must NOT classify as managed"
             );
         }
-    }
-
-    #[test]
-    fn is_reserved_extra_header_unions_both() {
-        // Every member of either slice flows through the union.
-        for &h in AUTH_HEADERS.iter().chain(MANAGED_HEADERS.iter()) {
-            assert!(
-                is_reserved_extra_header(h),
-                "{h:?} should classify as reserved"
-            );
-        }
-        // A non-reserved header is not part of the union.
-        assert!(!is_reserved_extra_header("x-request-id"));
-        assert!(!is_reserved_extra_header("user-agent"));
     }
 
     #[test]

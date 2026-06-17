@@ -63,9 +63,9 @@ fn user_request(model: &str) -> routectl_core::ChatRequest {
 async fn extra_headers_reserved_name_does_not_override_authorization() {
     // TOML-supplied `extra_headers = { "authorization" = "..." }` must not
     // bypass the provider's Bearer auth. HeaderMap::insert replaces by
-    // name, so without the is_reserved_extra_header guard this would
-    // silently override the auth header and ship the user-supplied value
-    // upstream.
+    // name, so without the is_auth_header skip path in apply_header_extras
+    // this would silently override the auth header and ship the
+    // user-supplied value upstream.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))

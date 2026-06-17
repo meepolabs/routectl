@@ -48,7 +48,7 @@ listed at the bottom of each crate.
 ### Top-level
 
 - `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`
-- `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, requires_reasoning_effort, uses_chat_template_kwargs, etc.)
+- `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin and User-Agent override
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller `reasoning.effort` against per-model `effort_levels` (rounds toward most-capable above max, least-capable below min); single source of truth across openai-compat, anthropic-api, bedrock, openai-responses
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream -> routectl) emit sites

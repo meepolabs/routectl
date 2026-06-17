@@ -53,21 +53,6 @@ pub struct ModelProfile {
     /// and DeepSeek `reasoner` variants which 400 on these params.
     /// Read by `openai_compat::request`.
     pub drops_sampling_params: bool,
-
-    /// Translate `reasoning.effort` to the provider's effort param.
-    /// Today the openai dialect always does this when `effort` is set;
-    /// the flag is here to make the policy explicit and to support a
-    /// future provider that needs effort-only-when-allowed. Declared in
-    /// the table but not yet consumed by any provider's request path.
-    #[allow(dead_code)]
-    pub requires_reasoning_effort: bool,
-
-    /// Forward `chat_template_kwargs` (vLLM/DashScope/some NIM endpoints).
-    /// Set on a per-model basis when the model is served by a thinking
-    /// model that needs `enable_thinking`. Declared in the table but not
-    /// yet consumed by any provider's request path.
-    #[allow(dead_code)]
-    pub uses_chat_template_kwargs: bool,
 }
 
 impl ModelProfile {
@@ -77,8 +62,6 @@ impl ModelProfile {
         pattern: "",
         kind: MatchKind::Prefix,
         drops_sampling_params: false,
-        requires_reasoning_effort: false,
-        uses_chat_template_kwargs: false,
     };
 
     /// Test the profile's pattern against a (lowercase) model id.
@@ -94,34 +77,39 @@ impl ModelProfile {
 /// first match wins, so list more-specific patterns before
 /// less-specific ones if collisions are possible.
 pub const PROFILES: &[ModelProfile] = &[
-    // OpenAI reasoning-only series: drop sampling params, expect reasoning_effort.
+    // OpenAI reasoning-only series: drop sampling params (400 otherwise).
     ModelProfile {
         pattern: "o1",
         kind: MatchKind::Prefix,
         drops_sampling_params: true,
-        requires_reasoning_effort: true,
-        ..ModelProfile::DEFAULT
     },
     ModelProfile {
         pattern: "o3",
         kind: MatchKind::Prefix,
         drops_sampling_params: true,
-        requires_reasoning_effort: true,
-        ..ModelProfile::DEFAULT
     },
     ModelProfile {
         pattern: "o4",
         kind: MatchKind::Prefix,
         drops_sampling_params: true,
-        requires_reasoning_effort: true,
-        ..ModelProfile::DEFAULT
+    },
+    // Non-reasoning GPT-5 chat variants -- accept sampling params, unlike
+    // the reasoning gpt-5 line. Listed before the gpt-5 catch-all so the
+    // longer prefixes win (first match in order).
+    ModelProfile {
+        pattern: "gpt-5-chat",
+        kind: MatchKind::Prefix,
+        drops_sampling_params: false,
+    },
+    ModelProfile {
+        pattern: "gpt-5.4",
+        kind: MatchKind::Prefix,
+        drops_sampling_params: false,
     },
     ModelProfile {
         pattern: "gpt-5",
         kind: MatchKind::Prefix,
         drops_sampling_params: true,
-        requires_reasoning_effort: true,
-        ..ModelProfile::DEFAULT
     },
     // DeepSeek reasoner variants. Substring so `reasoner-r2`, `coder-reasoner`,
     // etc. are all picked up automatically.
@@ -129,7 +117,6 @@ pub const PROFILES: &[ModelProfile] = &[
         pattern: "reasoner",
         kind: MatchKind::Substring,
         drops_sampling_params: true,
-        ..ModelProfile::DEFAULT
     },
 ];
 
@@ -158,14 +145,12 @@ mod tests {
     fn openai_o1_matches_prefix() {
         let p = profile_for("o1");
         assert!(p.drops_sampling_params);
-        assert!(p.requires_reasoning_effort);
     }
 
     #[test]
     fn openai_o3_mini_matches_prefix() {
         let p = profile_for("o3-mini");
         assert!(p.drops_sampling_params);
-        assert!(p.requires_reasoning_effort);
     }
 
     #[test]
@@ -178,21 +163,60 @@ mod tests {
     fn openai_gpt5_matches_prefix() {
         let p = profile_for("gpt-5");
         assert!(p.drops_sampling_params);
-        assert!(p.requires_reasoning_effort);
+    }
+
+    #[test]
+    fn openai_gpt5_chat_keeps_sampling_params() {
+        // gpt-5-chat-latest is a NON-reasoning chat model that accepts
+        // temperature/top_p/penalties. The longer gpt-5-chat prefix is
+        // listed before the gpt-5 catch-all so it wins on first match.
+        let p = profile_for("gpt-5-chat-latest");
+        assert!(!p.drops_sampling_params);
+    }
+
+    #[test]
+    fn openai_gpt5_codex_still_drops_sampling_params() {
+        // Reasoning gpt-5 variant: must keep dropping. Guards the
+        // gpt-5-chat row from being over-broad (it must not catch -codex).
+        let p = profile_for("gpt-5-codex");
+        assert!(p.drops_sampling_params);
+    }
+
+    #[test]
+    fn openai_gpt5_4_keeps_sampling_params() {
+        // gpt-5.4 is a NON-reasoning flagship chat model that accepts
+        // temperature/top_p/penalties. The gpt-5.4 prefix is listed
+        // before the gpt-5 catch-all so it wins on first match.
+        let p = profile_for("gpt-5.4");
+        assert!(!p.drops_sampling_params);
+    }
+
+    #[test]
+    fn openai_gpt5_4_mini_keeps_sampling_params() {
+        // Faster/cheaper non-reasoning variant covered by the same prefix.
+        let p = profile_for("gpt-5.4-mini");
+        assert!(!p.drops_sampling_params);
+    }
+
+    #[test]
+    fn openai_gpt5_3_codex_still_drops_sampling_params() {
+        // Reasoning dotted-version variant: must keep dropping. Guards the
+        // gpt-5.4 row from over-matching (it must not catch gpt-5.3-codex,
+        // which still falls through to the gpt-5 catch-all).
+        let p = profile_for("gpt-5.3-codex");
+        assert!(p.drops_sampling_params);
     }
 
     #[test]
     fn openai_gpt4_does_not_match() {
         let p = profile_for("gpt-4o-mini");
         assert!(!p.drops_sampling_params);
-        assert!(!p.requires_reasoning_effort);
     }
 
     #[test]
     fn deepseek_reasoner_matches_substring() {
         let p = profile_for("deepseek-reasoner");
         assert!(p.drops_sampling_params);
-        assert!(!p.requires_reasoning_effort);
     }
 
     #[test]
@@ -218,7 +242,5 @@ mod tests {
     fn unknown_model_returns_default() {
         let p = profile_for("totally-unknown-model-xyz");
         assert!(!p.drops_sampling_params);
-        assert!(!p.requires_reasoning_effort);
-        assert!(!p.uses_chat_template_kwargs);
     }
 }
