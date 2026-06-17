@@ -124,6 +124,21 @@ pub(crate) fn outcome_for_dispatch_err(meta: &DispatchMeta) -> Outcome {
     }
 }
 
+/// Cache-EXCLUSIVE new input for the DB `input_tokens` column. This is
+/// the exact inverse of `anthropic_api::response::sum_prompt_tokens`,
+/// which folds new + cache-read + cache-creation into the cache-INCLUSIVE
+/// canonical `prompt_tokens`. cost.rs prices `input_tokens`, `cache_read`,
+/// and `cache_write_*` as DISJOINT dimensions, so the row must store only
+/// the NEW input here -- subtracting the AGGREGATE cache-creation total
+/// (`cache_creation_input_tokens`), never the per-TTL breakdown (which is
+/// often absent and would under-subtract). Saturating so a malformed
+/// upstream tally can never wrap.
+pub(crate) fn cache_exclusive_input(prompt: u32, cache_read: u32, cache_creation: u32) -> u32 {
+    prompt
+        .saturating_sub(cache_read)
+        .saturating_sub(cache_creation)
+}
+
 /// Short, stable error-class token for the `error_class` column. Never
 /// the Display string (which can embed provider names / upstream bodies);
 /// just the routectl error variant family.
@@ -233,7 +248,16 @@ impl UsageCapture {
             .rev()
             .find_map(|c| c.finish_reason.clone());
         if let Some(u) = &resp.usage {
-            self.record.input_tokens = Some(u.prompt_tokens as u64);
+            // Store cache-EXCLUSIVE new input: the canonical `prompt_tokens`
+            // is cache-inclusive, but cost.rs prices input / cache_read /
+            // cache_write_* as disjoint dimensions. Subtract the aggregate
+            // cache-read + cache-creation totals so cached tokens are not
+            // billed twice. A fully-cached prompt yields a real Some(0).
+            self.record.input_tokens = Some(cache_exclusive_input(
+                u.prompt_tokens,
+                u.cache_read_input_tokens.unwrap_or(0),
+                u.cache_creation_input_tokens.unwrap_or(0),
+            ) as u64);
             self.record.output_tokens = Some(u.completion_tokens as u64);
             self.record.reasoning_tokens = u.reasoning_tokens.map(|v| v as u64);
             self.record.cache_read = u.cache_read_input_tokens.map(|v| v as u64);
@@ -269,7 +293,16 @@ impl UsageCapture {
         if let Some(u) = &chunk.usage {
             if let Some(p) = u.prompt_tokens {
                 self.last_prompt = p;
-                self.record.input_tokens = Some(p as u64);
+                // Cache-exclusive new input, derived from THIS delta's own
+                // cache fields (Anthropic sends prompt + cache together on
+                // the terminal message_delta), so the per-chunk derivation
+                // stays atomic. `last_prompt` keeps the raw cache-inclusive
+                // value for the egress trace summary.
+                self.record.input_tokens = Some(cache_exclusive_input(
+                    p,
+                    u.cache_read_input_tokens.unwrap_or(0),
+                    u.cache_creation_input_tokens.unwrap_or(0),
+                ) as u64);
             }
             if let Some(c) = u.completion_tokens {
                 self.last_completion = c;
@@ -402,3 +435,7 @@ impl Drop for UsageCapture {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "usage_capture_tests.rs"]
+mod tests;

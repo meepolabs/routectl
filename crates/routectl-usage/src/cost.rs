@@ -414,4 +414,42 @@ mod tests {
         assert_eq!(breakdown.output_usd, 0.0);
         assert_eq!(breakdown.total_usd, 6.0);
     }
+
+    /// End-to-end regression pin for the cache-double-count fix. After the
+    /// capture-site fix, the `input_tokens` column holds cache-EXCLUSIVE
+    /// new input (here 100), with cache_read (600) and cache_write_5m (300)
+    /// as separate disjoint dimensions. The total must price each dimension
+    /// ONCE -- NOT the pre-fix figure where a cache-inclusive `input_tokens`
+    /// of 1000 re-charged the 600 read + 300 write tokens at the input rate.
+    #[test]
+    fn cache_exclusive_input_is_not_double_counted() {
+        // Arrange: a post-fix row. input_tokens is the new input only.
+        let record = record_with_tokens(
+            Some(100), // cache-exclusive new input
+            Some(200), // output
+            Some(600), // cache_read
+            Some(300), // cache_write_5m
+            None,      // cache_write_1h: no 1h write
+        );
+        let rates = all_rates();
+
+        // Act
+        let breakdown = estimate_cost(&record, &rates).expect("priced");
+
+        // Assert: each dimension priced exactly once at its own rate.
+        let expected = 100.0 * 3.0 / 1_000_000.0      // input
+            + 200.0 * 15.0 / 1_000_000.0              // output
+            + 600.0 * 0.3 / 1_000_000.0               // cache_read
+            + 300.0 * 3.75 / 1_000_000.0; // cache_write_5m
+        assert_eq!(breakdown.total_usd, expected);
+
+        // And explicitly NOT the pre-fix double-count, where a
+        // cache-inclusive input_tokens of 1000 would have re-priced the
+        // 600 read + 300 write tokens at the input rate.
+        let pre_fix_double_count = 1000.0 * 3.0 / 1_000_000.0
+            + 200.0 * 15.0 / 1_000_000.0
+            + 600.0 * 0.3 / 1_000_000.0
+            + 300.0 * 3.75 / 1_000_000.0;
+        assert_ne!(breakdown.total_usd, pre_fix_double_count);
+    }
 }
