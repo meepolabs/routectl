@@ -73,6 +73,15 @@ pub(crate) mod frame;
 pub mod invoke;
 pub mod signing;
 
+/// The client-fingerprint body key both Bedrock seams strip. Anthropic's
+/// `metadata` block carries client identity (`user_id`, `account_uuid`)
+/// that must not reach AWS -- a third-party upstream. Shared by the
+/// Invoke seam (`invoke::normalize_request`) and the Converse seam
+/// (`converse::extras::insert_provider_extras`) so the two cannot drift
+/// on the key name. Stripped only on the CLIENT path; an operator that
+/// deliberately sets `metadata` via provider config keeps it.
+pub(crate) const CLIENT_FINGERPRINT_METADATA_KEY: &str = "metadata";
+
 /// How routectl talks to Bedrock for a given provider entry.
 ///
 /// `Invoke` sends the per-vendor body shape directly (e.g. Anthropic
@@ -542,17 +551,18 @@ impl Provider for BedrockProvider {
     }
 }
 
-/// Best-effort parse of a Bedrock error response body. Tries the common
-/// JSON shapes (`/message`, `/Message`, `/error/message`) and falls back
-/// to the raw text when the body isn't JSON (gateway 5xx, HTML auth-redirect
-/// pages, etc.). Used by both `complete()` and `stream()` so the two paths
-/// surface the same error text to callers.
+/// Best-effort parse of a Bedrock error response body into the message
+/// routectl surfaces to the CLIENT. Used by both `complete()` and
+/// `stream()` so the two paths return the same text.
 ///
-/// Side effect: emits a structured `tracing::warn!` (or `error!` for 5xx)
-/// classifying the failure. 401 -> "auth rejected". 403 -> attempts to
-/// extract the IAM action from the AWS-formatted "User: ... is not
-/// authorized to perform: <action>" body and surfaces it. 400 ->
-/// "validation error" with body excerpt. 5xx -> "upstream 5xx".
+/// Redaction contract: a Bedrock 403 body names the principal ARN,
+/// account id, and resource ARN. None of those reach the client -- only
+/// the IAM action (the actionable bit) survives. All other statuses are
+/// sanitized and capped at `MAX_LOG_BODY_EXCERPT` so an unbounded raw
+/// upstream body never reaches the caller.
+///
+/// Side effect: emits a structured `tracing::warn!` classifying the
+/// failure (full action + principal-present flag stays server-side).
 async fn parse_upstream_error_body(
     provider_kind: &str,
     provider: &str,
@@ -562,28 +572,65 @@ async fn parse_upstream_error_body(
     let body_text = resp.text().await.unwrap_or_default();
     log_bedrock_upstream_error(provider, status, &body_text);
     // Emit the full upstream error body at debug level alongside the
-    // status-specific WARN above. The WARN excerpt (256-char cap via
+    // status-specific WARN above. The WARN excerpt (cap via
     // sanitize_for_log) keeps `routectl-warn.log` scannable; DEBUG gives
     // operators field-level detail when they flip log level during triage.
     routectl_core::debug_upstream_error_body(provider_kind, provider, status, &body_text);
 
-    serde_json::from_str::<Value>(&body_text)
-        .ok()
-        .as_ref()
-        .and_then(|v| {
-            v.pointer("/message")
-                .or_else(|| v.pointer("/Message"))
-                .or_else(|| v.pointer("/error/message"))
-                .and_then(|x| x.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| {
-            if body_text.is_empty() {
-                "upstream error (empty body)".into()
-            } else {
-                body_text
-            }
-        })
+    classify_client_error_message(status, &body_text)
+}
+
+/// Build the CLIENT-facing error message from a Bedrock upstream body.
+/// Shares the 403-vs-other split with `log_bedrock_upstream_error` via
+/// `classify_bedrock_error` so the client path and log path cannot
+/// drift on classification.
+///
+/// - **403** -> generic "bedrock access denied", optionally suffixed
+///   with the extracted IAM action. NEVER the principal ARN, account
+///   id, or resource ARN.
+/// - **other** -> sanitized body excerpt capped at `MAX_LOG_BODY_EXCERPT`.
+fn classify_client_error_message(status: u16, body: &str) -> String {
+    match classify_bedrock_error(status, body) {
+        BedrockErrorClass::AccessDenied { action, .. } => match action {
+            Some(action) => format!("bedrock access denied: missing IAM action {action}"),
+            None => "bedrock access denied".to_string(),
+        },
+        BedrockErrorClass::Other => routectl_core::sanitize_upstream_body_with_cap(
+            body,
+            routectl_core::MAX_LOG_BODY_EXCERPT,
+        ),
+    }
+}
+
+/// Shared 403-vs-other classification for a Bedrock upstream error. Both
+/// the client-facing message (`classify_client_error_message`) and the
+/// structured log line (`log_bedrock_upstream_error`) derive from this
+/// single source so the two cannot drift. For a 403 it pre-extracts the
+/// IAM action (sanitized) and whether a principal field is present; the
+/// log path surfaces both, the client path surfaces only the action.
+enum BedrockErrorClass {
+    AccessDenied {
+        action: Option<String>,
+        principal_present: bool,
+    },
+    Other,
+}
+
+fn classify_bedrock_error(status: u16, body: &str) -> BedrockErrorClass {
+    if status == 403 {
+        // Sanitize the extracted action since it's a substring of an
+        // upstream-controlled body. AWS error messages are machine-
+        // generated today, but a compromised endpoint could embed
+        // control chars; defense-in-depth.
+        let action = extract_iam_action(body).map(|s| sanitize_for_log(&s));
+        let principal_present = body.contains("User:") || body.contains("Principal:");
+        BedrockErrorClass::AccessDenied {
+            action,
+            principal_present,
+        }
+    } else {
+        BedrockErrorClass::Other
+    }
 }
 
 /// Classify a Bedrock upstream error and emit a structured log line.
@@ -597,13 +644,14 @@ async fn parse_upstream_error_body(
 ///   if `bedrock-runtime:InvokeModelWithResponseStream` shows up here,
 ///   the user knows their IAM policy allows InvokeModel but not the
 ///   streaming variant -- a common gotcha.
-/// - **400** -> WARN, "validation error" with body excerpt capped at
-///   256 chars
+/// - **400** -> WARN, "validation error" with body excerpt
 /// - **5xx** -> WARN, "upstream 5xx" (transient AWS issues)
 /// - other 4xx -> WARN, generic "upstream error"
 ///
 /// Body excerpt is bounded to keep log lines scannable. Never logs
 /// credential material because Bedrock error bodies don't contain any.
+/// The 403 action / principal-present fields come from the shared
+/// `classify_bedrock_error` so the client and log paths stay aligned.
 fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
     // sanitize_upstream_body_with_cap trims edges, collapses HTML pages to
     // a short marker, and caps length. It does NOT filter mid-string control
@@ -622,12 +670,16 @@ fn log_bedrock_upstream_error(provider: &str, status: u16, body: &str) {
             );
         }
         403 => {
-            // Sanitize the extracted action since it's a substring of
-            // an upstream-controlled body. AWS error messages are
-            // machine-generated today, but a compromised endpoint
-            // could embed control chars; defense-in-depth.
-            let action = extract_iam_action(body).map(|s| sanitize_for_log(&s));
-            let principal_present = body.contains("User:") || body.contains("Principal:");
+            // A 403 always classifies as AccessDenied (see
+            // `classify_bedrock_error`), so destructure that variant
+            // directly rather than re-matching on a dead Other arm.
+            let BedrockErrorClass::AccessDenied {
+                action,
+                principal_present,
+            } = classify_bedrock_error(status, body)
+            else {
+                unreachable!("classify_bedrock_error returns AccessDenied for status 403")
+            };
             tracing::warn!(
                 provider = %provider,
                 status,
@@ -825,5 +877,75 @@ mod tests {
     fn bedrock_creds_default_chain_debug_is_safe() {
         let s = format!("{:?}", BedrockCreds::DefaultChain);
         assert_eq!(s, "BedrockCreds::DefaultChain");
+    }
+
+    #[test]
+    fn client_403_message_carries_action_not_principal_arn() {
+        // A real AWS 403 body names the principal ARN, account id, and
+        // resource ARN. The client-facing message must surface ONLY the
+        // IAM action -- never the principal/account/resource identifiers.
+        let body = "User: arn:aws:iam::123456789012:role/AppRole is not \
+                    authorized to perform: bedrock-runtime:InvokeModel on \
+                    resource: arn:aws:bedrock:us-east-1::foundation-model/\
+                    anthropic.claude-haiku-4-5";
+        let msg = classify_client_error_message(403, body);
+        assert!(
+            msg.contains("bedrock-runtime:InvokeModel"),
+            "client message should carry the IAM action: {msg}"
+        );
+        assert!(
+            !msg.contains("arn:aws:iam"),
+            "client message leaked the principal ARN: {msg}"
+        );
+        assert!(
+            !msg.contains("123456789012"),
+            "client message leaked the account id: {msg}"
+        );
+        assert!(
+            !msg.contains("foundation-model"),
+            "client message leaked the resource ARN: {msg}"
+        );
+    }
+
+    #[test]
+    fn client_403_without_action_is_generic_no_arn_leak() {
+        // A 403 body that doesn't match the `perform: ` template yields
+        // a generic message with NO body leak.
+        let body = "User: arn:aws:iam::123456789012:role/AppRole denied for \
+                    some other reason";
+        let msg = classify_client_error_message(403, body);
+        assert!(
+            !msg.contains("arn:aws:iam"),
+            "generic 403 message leaked the principal ARN: {msg}"
+        );
+        assert!(
+            !msg.contains("123456789012"),
+            "generic 403 message leaked the account id: {msg}"
+        );
+        assert_eq!(msg, "bedrock access denied");
+    }
+
+    #[test]
+    fn client_non_403_message_capped_at_max_excerpt() {
+        // A non-403 oversized body is sanitized and capped so an
+        // unbounded raw body never reaches the client. The cap helper
+        // keeps at most MAX_LOG_BODY_EXCERPT body chars plus a short
+        // fixed truncation marker -- bounded regardless of input size.
+        const MARKER_LEN: usize = "... [truncated]".len();
+        let oversized = routectl_core::MAX_LOG_BODY_EXCERPT * 4;
+        let body = "x".repeat(oversized);
+        let msg = classify_client_error_message(400, &body);
+        assert!(
+            msg.len() <= routectl_core::MAX_LOG_BODY_EXCERPT + MARKER_LEN,
+            "non-403 client message exceeded the bounded excerpt: {} > {}",
+            msg.len(),
+            routectl_core::MAX_LOG_BODY_EXCERPT + MARKER_LEN
+        );
+        assert!(
+            msg.len() < oversized,
+            "non-403 client message was not truncated: {} (input {})",
+            msg.len(),
+            oversized
+        );
     }
 }

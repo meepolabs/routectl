@@ -46,6 +46,17 @@ pub(super) fn build_additional_fields(
 ) -> Option<Value> {
     let mut bag: Map<String, Value> = Map::new();
 
+    // Bag-insertion ordering invariant (security-relevant): the client
+    // path (`insert_provider_extras`) MUST run before the operator path
+    // (`insert_operator_extras`), and `insert_operator_extras` uses
+    // `entry().or_insert_with()` (first-writer-wins). Together these give
+    // the intentional client-wins-over-operator precedence -- a client
+    // `metadata` is skipped, and operator config fills only keys nothing
+    // earlier set. INVARIANT: no insertion step added before
+    // `insert_operator_extras` may write an operator-configurable key
+    // (e.g. `metadata`, `top_k`), or the operator's config value would be
+    // silently shadowed. Do not reorder these calls or relax the
+    // `or_insert_with` semantics.
     insert_thinking(cfg, req, &mut bag);
     insert_anthropic_beta(cfg, req, &mut bag);
     insert_top_level_cache_control(req, &mut bag);
@@ -141,6 +152,21 @@ fn insert_provider_extras(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<
                 key = %k,
                 "forward-compat extra would override routectl-managed key; \
                  dropped (Converse)"
+            );
+            continue;
+        }
+        // Skip the Anthropic `metadata` block on the CLIENT path. It
+        // carries the client fingerprint (`user_id`, `account_uuid`)
+        // and Bedrock is always a third-party upstream. Operator-set
+        // metadata flows through `insert_operator_extras` (not gated
+        // here) -- that is the operator's deliberate choice. Shared key
+        // with the Invoke seam via
+        // `crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY`.
+        if k == crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY {
+            tracing::debug!(
+                provider = %cfg.id,
+                "stripped client metadata fingerprint from Converse \
+                 additionalModelRequestFields (third-party upstream)"
             );
             continue;
         }
@@ -358,9 +384,70 @@ mod tests {
 
     #[test]
     fn non_managed_keys_pass_through() {
-        for k in ["top_k", "metadata", "service_tier", "container"] {
+        for k in ["top_k", "service_tier", "container"] {
             assert!(!is_converse_managed_key(k), "expected {k:?} NOT managed");
         }
+    }
+
+    /// The Anthropic `metadata` block carries client identity
+    /// (`user_id`, `account_uuid`) and must NOT reach AWS via the
+    /// CLIENT provider_extras path -- Bedrock is always a third-party
+    /// upstream. `insert_provider_extras` skips it so it never lands in
+    /// `additionalModelRequestFields`. (Operator-set metadata via config
+    /// flows through `insert_operator_extras`, which is NOT gated here.)
+    #[test]
+    fn client_metadata_fingerprint_skipped_from_converse_bag() {
+        use serde_json::{json, Map};
+        // Arrange: client supplies a metadata fingerprint via
+        // provider_extras and sets req.user (the canonical mirror).
+        let cfg = fake_cfg();
+        let mut req = req_with_thinking();
+        req.user = Some("u-1".into());
+        req.provider_extras = Some(json!({
+            "metadata": {"user_id": "u-1", "account_uuid": "a-2"}
+        }));
+
+        // Act: drive insert_provider_extras directly so the assertion
+        // targets the client path in isolation.
+        let mut bag: Map<String, serde_json::Value> = Map::new();
+        super::insert_provider_extras(&cfg, &req, &mut bag);
+
+        // Assert: no metadata key, and no fingerprint substring.
+        assert!(
+            !bag.contains_key("metadata"),
+            "client metadata fingerprint leaked into Converse bag: {bag:?}"
+        );
+        let serialized = serde_json::Value::Object(bag).to_string();
+        assert!(
+            !serialized.contains("u-1"),
+            "user_id fingerprint leaked into Converse bag: {serialized}"
+        );
+        assert!(
+            !serialized.contains("a-2"),
+            "account_uuid fingerprint leaked into Converse bag: {serialized}"
+        );
+    }
+
+    /// Operator-deliberate `metadata` set via
+    /// `additional_model_request_fields` is the operator's choice and
+    /// survives into the bag -- the skip applies ONLY to the client
+    /// provider_extras path, not `insert_operator_extras`.
+    #[test]
+    fn operator_metadata_survives_in_converse_bag() {
+        use serde_json::{json, Map};
+        let mut cfg = fake_cfg();
+        cfg.additional_model_request_fields = Some(json!({
+            "metadata": {"trace": "operator-set"}
+        }));
+
+        let mut bag: Map<String, serde_json::Value> = Map::new();
+        super::insert_operator_extras(&cfg, &mut bag);
+
+        assert_eq!(
+            bag.get("metadata").and_then(|m| m.get("trace")),
+            Some(&serde_json::Value::String("operator-set".into())),
+            "operator-deliberate metadata must survive: {bag:?}"
+        );
     }
 
     // -----------------------------------------------------------------

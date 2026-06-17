@@ -136,6 +136,18 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // leave routectl here.
     strip_billing_system_field(&cfg.id, obj);
 
+    // Drop the Anthropic `metadata` block before the body hits AWS. It
+    // carries the client fingerprint (`user_id`, `account_uuid`) lifted
+    // from the inbound request via the Anthropic ingress forward-compat
+    // sweep (provider_extras -> body, merged inside the shared
+    // normalizer above). Bedrock is always a third-party upstream, so
+    // the CLIENT-path strip is unconditional. An operator who
+    // deliberately set `metadata` via `additional_model_request_fields`
+    // keeps it -- that is the operator's choice, not a client
+    // fingerprint. Shared key with the Converse seam via
+    // `super::CLIENT_FINGERPRINT_METADATA_KEY`.
+    strip_client_metadata(obj, cfg.additional_model_request_fields.as_ref());
+
     // Bedrock's InvokeModel takes the model identifier in the URL path
     // (`/model/{model_id}/invoke`), not the body. The Anthropic API
     // path requires it in the body, which `anthropic_api::request::
@@ -236,6 +248,28 @@ fn strip_billing_system_field(id: &str, obj: &mut serde_json::Map<String, Value>
         None => {
             obj.remove("system");
         }
+    }
+}
+
+/// Drop the client-fingerprint `metadata` block from the assembled
+/// Bedrock-Invoke body. The block (carrying `user_id` / `account_uuid`)
+/// rides in via the Anthropic ingress forward-compat sweep, so it is
+/// always client-derived. An operator who deliberately set `metadata`
+/// via `additional_model_request_fields` keeps it -- that config value
+/// is restored after the strip. Shares the key name with the Converse
+/// seam via `super::CLIENT_FINGERPRINT_METADATA_KEY`.
+fn strip_client_metadata(
+    obj: &mut serde_json::Map<String, Value>,
+    operator_extras: Option<&Value>,
+) {
+    let key = super::CLIENT_FINGERPRINT_METADATA_KEY;
+    let operator_metadata = operator_extras
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get(key))
+        .cloned();
+    obj.remove(key);
+    if let Some(v) = operator_metadata {
+        obj.insert(key.to_string(), v);
     }
 }
 
@@ -720,6 +754,87 @@ mod tests {
         assert_eq!(
             sys[0]["text"],
             "intro x-anthropic-billing-header: not at start"
+        );
+    }
+
+    /// The Anthropic `metadata` block carries client identity
+    /// (`user_id`, `account_uuid`) and must NOT reach AWS -- a
+    /// third-party upstream. It arrives via `provider_extras` (the
+    /// Anthropic ingress forward-compat sweep), merges into the body
+    /// inside `anthropic_api::request::normalize`, and is then stripped
+    /// unconditionally on the Bedrock-Invoke seam.
+    #[test]
+    fn client_metadata_fingerprint_stripped_from_invoke_body() {
+        use serde_json::json;
+        // Arrange: client supplies a metadata fingerprint via
+        // provider_extras and sets req.user (the canonical mirror).
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.user = Some("u-1".into());
+        req.provider_extras = Some(json!({
+            "metadata": {"user_id": "u-1", "account_uuid": "a-2"}
+        }));
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert: no metadata key, and no fingerprint substring anywhere.
+        assert!(
+            body.get("metadata").is_none(),
+            "client metadata fingerprint leaked to Bedrock-Invoke body: {body}"
+        );
+        let serialized = body.to_string();
+        assert!(
+            !serialized.contains("u-1"),
+            "user_id fingerprint leaked into Invoke body: {serialized}"
+        );
+        assert!(
+            !serialized.contains("a-2"),
+            "account_uuid fingerprint leaked into Invoke body: {serialized}"
+        );
+    }
+
+    /// Mirror of the Converse `operator_metadata_survives_in_converse_bag`:
+    /// operator-config `metadata` (set via
+    /// `additional_model_request_fields`) SURVIVES the strip while a
+    /// client `metadata` fingerprint (via `provider_extras`) is removed.
+    /// Pins that `strip_client_metadata` restores from the OPERATOR
+    /// CONFIG, not from the assembled body -- the security-critical
+    /// property is that operator intent is sourced from cfg, never from
+    /// the client-derived obj.
+    #[test]
+    fn operator_metadata_survives_while_client_metadata_stripped_from_invoke_body() {
+        use serde_json::json;
+        // Arrange: operator deliberately sets metadata via config; client
+        // supplies its own metadata fingerprint via provider_extras.
+        let mut cfg = fake_cfg();
+        cfg.additional_model_request_fields = Some(json!({"metadata": {"trace": "operator-set"}}));
+        let mut req = user_req();
+        req.user = Some("u-1".into());
+        req.provider_extras = Some(json!({
+            "metadata": {"user_id": "u-1", "account_uuid": "a-2"}
+        }));
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert: operator metadata survives, client fingerprint is gone.
+        assert_eq!(
+            body["metadata"]["trace"], "operator-set",
+            "operator-deliberate metadata must survive: {body}"
+        );
+        assert!(
+            body["metadata"].get("user_id").is_none(),
+            "client metadata fingerprint must not survive: {body}"
+        );
+        let serialized = body.to_string();
+        assert!(
+            !serialized.contains("u-1"),
+            "user_id fingerprint leaked into Invoke body: {serialized}"
+        );
+        assert!(
+            !serialized.contains("a-2"),
+            "account_uuid fingerprint leaked into Invoke body: {serialized}"
         );
     }
 }

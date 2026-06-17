@@ -618,18 +618,14 @@ fn translate_document(
     // A canonical text-source document carries a plain UTF-8 body, so we
     // base64-encode it here -- a valid Anthropic shape would otherwise be
     // dropped rather than forwarded to the model.
-    let bytes = match kind {
-        "base64" => raw_data.to_string(),
-        "text" => B64_STANDARD.encode(raw_data.as_bytes()),
-        other => {
-            tracing::warn!(
-                provider = id,
-                source_type = %other,
-                "dropping unsupported document source type on Converse egress; \
-                 AWS Converse JSON wire accepts only base64 or text sources"
-            );
-            return None;
-        }
+    let Some(bytes) = normalize_document_source_bytes(kind, raw_data) else {
+        tracing::warn!(
+            provider = id,
+            source_type = %kind,
+            "dropping unsupported document source type on Converse egress; \
+             AWS Converse JSON wire accepts only base64 or text sources"
+        );
+        return None;
     };
     let Some(format) = media_type_to_document_format(media_type) else {
         tracing::warn!(
@@ -695,6 +691,21 @@ fn sanitize_document_name(title: Option<&str>) -> String {
         "document".to_string()
     } else {
         cleaned
+    }
+}
+
+/// Normalize a canonical document source's bytes to the base64 form AWS
+/// Converse's JSON wire requires. `base64` sources pass through verbatim;
+/// `text` sources are base64-encoded (a plain UTF-8 body would otherwise
+/// be rejected); any other source type returns None (caller drops the
+/// document or falls back to a JSON wrap). Shared by `translate_document`
+/// (request blocks) and both tool_result document paths so the three
+/// cannot drift on encoding.
+fn normalize_document_source_bytes(kind: &str, data: &str) -> Option<String> {
+    match kind {
+        "base64" => Some(data.to_string()),
+        "text" => Some(B64_STANDARD.encode(data.as_bytes())),
+        _ => None,
     }
 }
 
@@ -766,6 +777,10 @@ fn translate_tool_result_array_element(v: &Value) -> ConverseToolResultContent {
                 return ConverseToolResultContent::Json { json: v.clone() };
             };
             let s_obj = source.as_object();
+            let kind = s_obj
+                .and_then(|m| m.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("base64");
             let media_type = s_obj
                 .and_then(|m| m.get("media_type"))
                 .and_then(|m| m.as_str())
@@ -777,12 +792,18 @@ fn translate_tool_result_array_element(v: &Value) -> ConverseToolResultContent {
             let Some(format) = media_type_to_document_format(media_type) else {
                 return ConverseToolResultContent::Json { json: v.clone() };
             };
+            // AWS Converse's JSON wire only accepts base64 source bytes;
+            // a text source must be encoded (shared with translate_document
+            // and document_to_tool_result via normalize_document_source_bytes).
+            let Some(bytes) = normalize_document_source_bytes(kind, data) else {
+                return ConverseToolResultContent::Json { json: v.clone() };
+            };
             let title = obj.get("title").and_then(|t| t.as_str());
             ConverseToolResultContent::Document {
                 document: serde_json::json!({
                     "format": format,
                     "name": sanitize_document_name(title),
-                    "source": {"bytes": data},
+                    "source": {"bytes": bytes},
                 }),
             }
         }
@@ -891,25 +912,25 @@ fn image_source_to_tool_result(source: &Value) -> Option<ConverseToolResultConte
 }
 
 /// Translate a canonical Document part (source + title) into the AWS
-/// toolResult `Document` variant. Returns None for non-base64 sources
-/// or unmappable media types.
+/// toolResult `Document` variant. Returns None for unmappable media
+/// types or unsupported source types. Text sources are base64-encoded
+/// (shared with `translate_document` and the tool_result array path via
+/// `normalize_document_source_bytes`).
 fn document_to_tool_result(
     source: &Value,
     title: Option<&str>,
 ) -> Option<ConverseToolResultContent> {
     let obj = source.as_object()?;
     let kind = obj.get("type").and_then(|v| v.as_str())?;
-    if kind != "base64" {
-        return None;
-    }
     let media_type = obj.get("media_type").and_then(|v| v.as_str()).unwrap_or("");
     let data = obj.get("data").and_then(|v| v.as_str()).unwrap_or("");
     let format = media_type_to_document_format(media_type)?;
+    let bytes = normalize_document_source_bytes(kind, data)?;
     Some(ConverseToolResultContent::Document {
         document: serde_json::json!({
             "format": format,
             "name": sanitize_document_name(title),
-            "source": {"bytes": data},
+            "source": {"bytes": bytes},
         }),
     })
 }
@@ -1763,5 +1784,78 @@ mod tests {
             }
             other => panic!("expected an empty Text block, got {other:?}"),
         }
+    }
+
+    /// A `{type:"text"}` document source inside a tool_result content
+    /// ARRAY must be base64-encoded on the wire (AWS Converse JSON only
+    /// accepts base64 source bytes), matching `translate_document` for
+    /// the same input. Previously the array path forwarded the raw text
+    /// verbatim -> AWS rejected the malformed source.
+    #[test]
+    fn text_source_document_in_tool_result_array_is_base64_encoded() {
+        let element = json!({
+            "type": "document",
+            "source": {"type": "text", "media_type": "text/plain", "data": "hello"},
+            "title": "notes",
+        });
+        let out = translate_tool_result_array_element(&element);
+        let ConverseToolResultContent::Document { document } = out else {
+            panic!("expected a Document toolResult variant, got: {out:?}");
+        };
+        assert_eq!(
+            document["source"]["bytes"],
+            B64_STANDARD.encode("hello"),
+            "text source must be base64-encoded to match translate_document: {document}"
+        );
+    }
+
+    /// `document_to_tool_result` (the canonical Parts path) must apply
+    /// the same text-source base64 normalization. Previously a text
+    /// source returned None (dropped to the JSON fallback).
+    #[test]
+    fn text_source_document_to_tool_result_is_base64_encoded() {
+        let source = json!({"type": "text", "media_type": "text/plain", "data": "hello"});
+        let out = document_to_tool_result(&source, Some("notes"))
+            .expect("text source must now translate to a Document variant, not None");
+        let ConverseToolResultContent::Document { document } = out else {
+            panic!("expected a Document toolResult variant, got: {out:?}");
+        };
+        assert_eq!(
+            document["source"]["bytes"],
+            B64_STANDARD.encode("hello"),
+            "text source must be base64-encoded: {document}"
+        );
+    }
+
+    /// A `base64` source must NOT be double-encoded on either
+    /// tool_result path -- the bytes pass through verbatim.
+    #[test]
+    fn base64_source_document_not_double_encoded_on_tool_result_paths() {
+        let already = B64_STANDARD.encode("hello");
+
+        let element = json!({
+            "type": "document",
+            "source": {"type": "base64", "media_type": "text/plain", "data": already},
+            "title": "notes",
+        });
+        let out = translate_tool_result_array_element(&element);
+        let ConverseToolResultContent::Document { document } = out else {
+            panic!("array path: expected Document variant, got: {out:?}");
+        };
+        assert_eq!(
+            document["source"]["bytes"], already,
+            "array path double-encoded a base64 source: {document}"
+        );
+
+        let source = json!({"type": "base64", "media_type": "text/plain", "data": already});
+        let out = document_to_tool_result(&source, Some("notes"))
+            .expect("base64 source must translate to a Document variant");
+        let ConverseToolResultContent::Document { document } = out else {
+            panic!("Parts path: expected Document variant, got: {out:?}");
+        };
+        assert_eq!(
+            document["source"]["bytes"], already,
+            "Parts path double-encoded a base64 source: {document}"
+        );
     }
 }

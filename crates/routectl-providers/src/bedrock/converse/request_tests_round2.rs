@@ -129,12 +129,14 @@ fn provider_extras_merge_into_additional_model_request_fields() {
     // sweeps unknown top-level keys into provider_extras) must
     // survive to additionalModelRequestFields verbatim PROVIDED the
     // operator has the field on `[bedrock] allowed_body_fields`.
-    // Without this merge, fields like `context_management`,
-    // `output_config.format`, and `metadata` disappear silently
-    // between ingress and Converse egress. Fields NOT on the operator
-    // list (e.g. `mcp_servers`, `container`) are dropped; see
-    // `body_fields_filter_drops_disallowed_keys_on_converse` for
-    // that contract.
+    // Without this merge, fields like `context_management` and
+    // `output_config.format` disappear silently between ingress and
+    // Converse egress. Fields NOT on the operator list (e.g.
+    // `mcp_servers`, `container`) are dropped; see
+    // `body_fields_filter_drops_disallowed_keys_on_converse` for that
+    // contract. The client `metadata` fingerprint is stripped
+    // unconditionally on this seam (see
+    // `client_metadata_fingerprint_skipped_from_converse_bag`).
     let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),
@@ -156,7 +158,10 @@ fn provider_extras_merge_into_additional_model_request_fields() {
         bag["context_management"]["strategy"], "summarize",
         "got {body}"
     );
-    assert_eq!(bag["metadata"]["user_id"], "u-1", "got {body}");
+    assert!(
+        !bag.contains_key("metadata"),
+        "client metadata fingerprint must be stripped on the Converse seam: {body}"
+    );
     assert_eq!(bag["top_k"], 40, "got {body}");
 }
 
@@ -216,7 +221,7 @@ fn provider_extras_cannot_override_managed_keys_on_converse() {
             "thinking": {"type": "evil"},
             "anthropic_beta": ["pwn"],
             // long-tail key MUST pass through:
-            "metadata": {"user_id": "u-1"},
+            "top_k": 40,
         })),
         ..Default::default()
     };
@@ -234,7 +239,7 @@ fn provider_extras_cannot_override_managed_keys_on_converse() {
             "thinking override leaked: {body}"
         );
         // Long-tail extras DO land.
-        assert_eq!(b["metadata"]["user_id"], "u-1", "got {body}");
+        assert_eq!(b["top_k"], 40, "got {body}");
     }
 }
 

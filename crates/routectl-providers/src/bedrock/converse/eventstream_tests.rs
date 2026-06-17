@@ -180,6 +180,78 @@ fn reasoning_signature_after_text_uses_same_detail_index() {
     assert_eq!(detail.payload["signature"], "sig");
 }
 
+/// Streamed redacted reasoning must carry a monotonic detail
+/// index drawn from the same counter the text-reasoning path uses, so
+/// sort-by-index preserves wire order. A redacted block after a text-
+/// reasoning block at index N>0 gets index Some(>N).
+#[test]
+fn redacted_reasoning_detail_carries_monotonic_index_after_text_reasoning() {
+    let mut state = ConverseStreamState::default();
+
+    // Two text-reasoning blocks so the counter advances past 0: block 0
+    // -> detail_index 0, block 1 -> detail_index 1 (this is N).
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":0}"#,
+        &mut state,
+    );
+    let _ = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,"delta":{"reasoningContent":{"text":"a"}}}"#,
+        &mut state,
+    );
+    let stop0 = run("contentBlockStop", r#"{"contentBlockIndex":0}"#, &mut state);
+
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":1}"#,
+        &mut state,
+    );
+    let _ = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":1,"delta":{"reasoningContent":{"text":"b"}}}"#,
+        &mut state,
+    );
+    let stop1 = run("contentBlockStop", r#"{"contentBlockIndex":1}"#, &mut state);
+
+    let n = stop1[0].choices[0].delta.reasoning_details[0]
+        .index
+        .expect("text reasoning detail must carry an index");
+    assert!(n > 0, "second text-reasoning block must land at index N>0");
+    let _ = stop0; // first block establishes the counter at 0.
+
+    // A redacted block on a third index.
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":2}"#,
+        &mut state,
+    );
+    let redacted = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":2,"delta":{"reasoningContent":{"redactedContent":"AAECAwQF"}}}"#,
+        &mut state,
+    );
+
+    // Assert: redacted detail carries Some(index) strictly > N.
+    let redacted_detail = &redacted[0].choices[0].delta.reasoning_details[0];
+    let r_index = redacted_detail
+        .index
+        .expect("redacted reasoning detail must carry an index");
+    assert!(
+        r_index > n,
+        "redacted detail index {r_index} must be strictly greater than text index {n}"
+    );
+
+    // Sort-by-index preserves wire order: text (N) before redacted (>N).
+    let mut indices = vec![n, r_index];
+    indices.sort_unstable();
+    assert_eq!(
+        indices,
+        vec![n, r_index],
+        "sort-by-index must preserve wire order (text before redacted)"
+    );
+}
+
 #[test]
 fn message_stop_capture_then_metadata_emits_closing_chunk_with_finish_and_usage() {
     // Arrange

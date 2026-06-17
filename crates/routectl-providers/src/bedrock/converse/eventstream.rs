@@ -414,8 +414,15 @@ fn handle_block_delta(
             }
             if let Some(redacted) = reasoning_content.redacted_content {
                 // Redacted reasoning has no text/signature pair; emit
-                // immediately as today.
-                chunks.push(reasoning_redacted_chunk(redacted));
+                // immediately. Allocate a fresh detail index from the
+                // shared counter (the same one the text-reasoning path
+                // increments above) so the redacted ReasoningDetail
+                // carries Some(index) and sort-by-index preserves wire
+                // order -- without it the detail's index is None and a
+                // stable sort cannot place it relative to text blocks.
+                let di = state.next_detail_index;
+                state.next_detail_index += 1;
+                chunks.push(reasoning_redacted_chunk(di, redacted));
             }
             chunks
         }
@@ -582,12 +589,12 @@ fn reasoning_terminal_chunk(
     }
 }
 
-fn reasoning_redacted_chunk(data: String) -> ChatChunk {
+fn reasoning_redacted_chunk(detail_index: u32, data: String) -> ChatChunk {
     let detail = ReasoningDetail {
         kind: ReasoningDetailKind::Encrypted,
         id: Some(Uuid::new_v4().to_string()),
         format: Some(ANTHROPIC_FORMAT.to_string()),
-        index: None,
+        index: Some(detail_index),
         payload: json!({"data": data}),
     };
     ChatChunk {
