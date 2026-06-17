@@ -403,65 +403,74 @@ pub(super) fn is_routectl_managed_key(key: &str) -> bool {
         )
 }
 
-/// Post-merge sub-key reconcile for `output_config.effort`.
+/// Late enforcer of the output_config.effort invariant:
+/// `output_config.effort` is present IFF the assembled body carries
+/// `thinking` with `type == "adaptive"`. Reads ground truth from the
+/// BODY, not from a (possibly stale) `adaptive` flag -- earlier passes
+/// (cache-miss soft-fail, tool_choice strip) may have removed `thinking`
+/// after `build_output_config` ran, so the only reliable signal is the
+/// final assembled body. This must run LAST among the body mutations
+/// touching thinking/output_config.
 ///
-/// Non-adaptive branch: when the model does NOT support adaptive
-/// thinking (`supports_adaptive_thinking=false`), remove
-/// `body.output_config.effort` so non-Opus models (Sonnet 4.5,
-/// Haiku 4.5) don't 400 with `This model does not support the effort
-/// parameter.` cc emits `output_config: {effort: "high"}` on every
-/// request regardless of the routed model, and the forward-compat
-/// sweep through `provider_extras` puts it back in the outgoing body
-/// verbatim. This is the symmetric counterpart to
-/// `build_output_config`, which only emits the effort sub-key when
-/// adaptive is on.
+/// No adaptive thinking in the body: drop any orphan
+/// `output_config.effort` (preserving a sibling `output_config.format`,
+/// and removing a now-empty `output_config`). Delegates to
+/// `remove_output_config_effort`.
 ///
-/// Adaptive branch: re-clamp `body.output_config.effort` against the
-/// operator's `effort_levels` cap. `derive_effort` already clamped on
-/// the typed pre-merge struct, but `merge_provider_extras` may have
-/// overwritten the clamped value with a raw caller-supplied
-/// `output_config.effort` (claude-code 2.1.153+ sends
-/// `output_config: {effort: "max"}` on every request, and the ingress
-/// preserves the whole `output_config` object verbatim in
-/// `provider_extras` so orthogonal sub-keys like
-/// `output_config.format` pass through). Without this re-clamp the
-/// operator's cost cap is silently bypassed. Empty `effort_levels`
-/// means intentional pass-through and skips the re-clamp.
-///
-/// `output_config.format` (structured-output) and other sibling sub-
-/// fields are preserved on both branches -- they're orthogonal to the
-/// effort beta and supported across the model family. On the non-
-/// adaptive branch, if `effort` was the only sub-key, the now-empty
-/// `output_config` object is also removed so the wire body stays
-/// clean.
-pub(super) fn reconcile_output_config_effort(
-    body: &mut Value,
-    adaptive: bool,
-    effort_levels: &[String],
-) {
-    if adaptive {
-        if effort_levels.is_empty() {
-            return;
-        }
-        let Some(obj) = body.as_object_mut() else {
-            return;
-        };
-        let Some(oc) = obj.get_mut("output_config").and_then(|v| v.as_object_mut()) else {
-            return;
-        };
-        let Some(effort_val) = oc.get_mut("effort") else {
-            return;
-        };
-        let Some(current) = effort_val.as_str() else {
-            return;
-        };
-        let clamped = clamp_effort_to_supported(current, effort_levels);
-        if clamped.as_ref() != current {
-            *effort_val = Value::String(clamped.into_owned());
-        }
+/// Adaptive thinking present: guarantee `output_config.effort` exists.
+/// Re-inject from `derive_effort(req)` when absent (e.g. provider_extras
+/// supplied an `output_config` with only `format`); when present, re-
+/// clamp against the operator's `effort_levels` exactly as before
+/// (`merge_provider_extras` may have overwritten the pre-merge clamped
+/// value with a raw caller-supplied `effort`). Empty `effort_levels`
+/// skips the re-clamp but still guarantees presence (pass-through).
+pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value) {
+    if !body_has_adaptive_thinking(body) {
+        remove_output_config_effort(body);
         return;
     }
-    remove_output_config_effort(body);
+    let effort_levels = &req.routectl_internal.effort_levels;
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let oc = obj
+        .entry("output_config")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(oc) = oc.as_object_mut() else {
+        return;
+    };
+    match oc
+        .get("effort")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        None => {
+            oc.insert("effort".to_string(), Value::String(derive_effort(req)));
+        }
+        Some(current) => {
+            if !effort_levels.is_empty() {
+                let clamped = clamp_effort_to_supported(&current, effort_levels);
+                if clamped.as_ref() != current {
+                    oc.insert("effort".to_string(), Value::String(clamped.into_owned()));
+                }
+            }
+        }
+    }
+}
+
+/// True iff `body.thinking.type == "adaptive"`.
+///
+/// INVARIANT: this trusts `thinking` read straight from the assembled
+/// body, safe only because `is_routectl_managed_key` keeps "thinking"
+/// routectl-managed and so blocks `provider_extras` from injecting a
+/// forged `thinking: {type: "adaptive"}`. If "thinking" is ever dropped
+/// from that set, provider_extras could forge adaptive here and trigger
+/// spurious effort re-injection -- the two MUST stay in sync.
+fn body_has_adaptive_thinking(body: &Value) -> bool {
+    body.get("thinking")
+        .and_then(|t| t.get("type"))
+        .and_then(Value::as_str)
+        == Some("adaptive")
 }
 
 /// Remove `output_config.effort` from `body`, preserving any orthogonal
@@ -499,6 +508,11 @@ fn remove_output_config_effort(body: &mut Value) {
 /// successfully, just without thinking. `auto`, `none`, and absent
 /// `tool_choice` do not trigger the strip.
 ///
+/// This function touches only `thinking`. A now-orphan
+/// `output_config.effort` (valid only alongside adaptive thinking) is
+/// dropped by `reconcile_output_config_effort`, the late enforcer that
+/// runs after this and reads the final body shape.
+///
 /// Runs after `merge_provider_extras` so the check operates on the
 /// final wire body, regardless of whether `thinking` was composed by
 /// `build_thinking` or layered in by some future provider-extras path
@@ -525,11 +539,6 @@ pub(super) fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body
         return;
     };
     obj.remove("thinking");
-    // On the adaptive path, `output_config.effort` is only valid
-    // alongside `thinking:{type:adaptive}`. Stripping thinking without it
-    // leaves an orphan that Anthropic 400s. Drop the effort sub-key too;
-    // any orthogonal sibling (e.g. structured-output `format`) survives.
-    remove_output_config_effort(body);
     tracing::debug!(
         provider = provider_id,
         tool_choice_type = %ttype,

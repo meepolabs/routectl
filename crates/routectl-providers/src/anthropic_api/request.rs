@@ -193,6 +193,9 @@ fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::Cac
 // Top-level normalize
 // ---------------------------------------------------------------------------
 
+/// `adaptive` now controls ONLY the thinking wire shape via `build_thinking`;
+/// it no longer drives `output_config.effort` reconciliation, which the late
+/// enforcer `reconcile_output_config_effort` derives from the assembled body.
 pub(crate) fn normalize(
     id: &str,
     req: &ChatRequest,
@@ -384,8 +387,13 @@ pub(crate) fn normalize(
             }
         }
     }
-    reconcile_output_config_effort(&mut body, adaptive, &req.routectl_internal.effort_levels);
     strip_thinking_when_tool_choice_forces_use(id, &mut body);
+    // Late enforcer, runs LAST: output_config.effort is present IFF the
+    // assembled body carries thinking with type == adaptive. Reads the
+    // final body shape, so any earlier pass that stripped thinking
+    // (cache-miss soft-fail above, tool_choice strip just now) is
+    // correctly reflected -- no stale `adaptive` flag is trusted.
+    reconcile_output_config_effort(req, &mut body);
     Ok(body)
 }
 
@@ -570,6 +578,23 @@ mod context_management_normalize_tests {
 
     fn small_cache(cap: usize) -> RwLock<ThinkingCache> {
         RwLock::new(lru::LruCache::new(NonZeroUsize::new(cap).expect("cap > 0")))
+    }
+
+    /// Adaptive variant of `req_with_tool_use_history_and_cm`: same
+    /// tool_use history + context_management edits, but with an
+    /// `effort` set so the adaptive path produces an
+    /// `output_config.effort` PRE-strip. Used to prove the cache-miss
+    /// soft-fail strip drops the now-orphan `output_config.effort`,
+    /// not merely that it is absent-by-default.
+    fn req_with_tool_use_history_and_cm_adaptive() -> ChatRequest {
+        let mut req = req_with_tool_use_history_and_cm();
+        req.reasoning = Some(ReasoningConfig {
+            enabled: Some(true),
+            max_tokens: None,
+            effort: Some("high".into()),
+            exclude: None,
+        });
+        req
     }
 
     /// When context_management=true, the `context_management` body key
@@ -764,7 +789,30 @@ mod context_management_normalize_tests {
         );
     }
 
-    /// No soft-fail when the cache has an entry for the qualifying
+    /// Adaptive cache-miss path: the body carries
+    /// `output_config.effort` PRE-strip (adaptive=true + effort set),
+    /// and the soft-fail strip removes `thinking`. The late enforcer
+    /// must then observe that thinking is gone and drop the now-orphan
+    /// `output_config.effort`. Asserts BOTH thinking absent AND
+    /// output_config.effort absent -- proving the orphan is dropped,
+    /// not just absent-by-default.
+    #[test]
+    fn normalize_soft_fail_drops_orphan_output_config_effort_on_cache_miss() {
+        let req = req_with_tool_use_history_and_cm_adaptive();
+        let cache = Arc::new(small_cache(8)); // nothing seeded -> cache miss
+        let body = normalize("test", &req, true, &[], true, Some(&cache))
+            .expect("normalize must succeed even on cache miss");
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be stripped on cache miss; got: {body}"
+        );
+        assert!(
+            body.get("output_config")
+                .and_then(|oc| oc.get("effort"))
+                .is_none(),
+            "orphan output_config.effort must be dropped once thinking is stripped; got: {body}"
+        );
+    }
     /// tool_use id: the `thinking` key must remain in the outgoing body.
     #[test]
     fn normalize_no_soft_fail_when_cache_hits() {
@@ -2171,19 +2219,30 @@ mod multi_turn_tool_use_tests {
     /// Adaptive providers (Opus 4.7 with supports_adaptive_thinking=true)
     /// must preserve `output_config.effort` -- the model accepts it. Pin
     /// this so a future refactor doesn't accidentally strip on the
-    /// adaptive path too.
+    /// adaptive path too. The request carries `reasoning` so adaptive
+    /// thinking is actually composed: the late enforcer keys off the
+    /// assembled body's `thinking.type == adaptive`, so effort is only
+    /// valid (and preserved) when thinking is genuinely present.
     #[test]
     fn output_config_effort_preserved_on_adaptive_provider() {
+        use routectl_core::ReasoningConfig;
         let req = ChatRequest {
             model: "claude-opus-4-7".into(),
             messages: vec![user_msg("hi")],
             max_tokens: Some(64),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
             provider_extras: Some(json!({
                 "output_config": {"effort": "high"}
             })),
             ..Default::default()
         };
         let body = normalize("test", &req, /* adaptive= */ true, &[], false, None).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
         let oc = body.get("output_config").expect("output_config preserved");
         assert_eq!(oc["effort"], "high");
     }
@@ -2910,6 +2969,136 @@ mod multi_turn_tool_use_tests {
         assert!(
             body.get("top_p").is_none(),
             "top_p must be dropped while thinking is active, got {body:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Late enforcer of the output_config.effort invariant.
+    //
+    // After the reorder, `reconcile_output_config_effort` runs LAST in
+    // normalize and reads ground truth from the assembled body, not the
+    // stale `adaptive` arg: output_config.effort is present IFF the body
+    // carries thinking with type == adaptive.
+    // -----------------------------------------------------------------
+
+    /// Adaptive model whose `provider_extras` carries an
+    /// `output_config: {format: ...}` with NO `effort` sub-key. The
+    /// assembled body has `thinking.type == adaptive`, so the late
+    /// enforcer must re-inject `output_config.effort` from
+    /// `derive_effort` (clamped) while preserving the sibling `format`.
+    #[test]
+    fn adaptive_reinjects_effort_when_provider_extras_omits_it() {
+        use routectl_core::ReasoningConfig;
+        use serde_json::json;
+        let mut req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            provider_extras: Some(json!({
+                "output_config": {
+                    "format": {"type": "json_schema", "schema": {"type": "object"}}
+                }
+            })),
+            ..Default::default()
+        };
+        req.routectl_internal.effort_levels = std::sync::Arc::from(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ]);
+
+        let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        let oc = body
+            .get("output_config")
+            .expect("output_config present on adaptive path");
+        assert_eq!(
+            oc["effort"], "high",
+            "effort must be re-injected from derive_effort when provider_extras omits it; got: {oc}"
+        );
+        assert_eq!(
+            oc["format"]["type"], "json_schema",
+            "sibling format must be preserved; got: {oc}"
+        );
+    }
+
+    /// (tool_choice latent) Adaptive thinking + a forcing `tool_choice`
+    /// (`type:"tool"`). The late enforcer must observe that thinking was
+    /// stripped from the body and drop the now-orphan
+    /// `output_config.effort` -- even though the enforcer no longer runs
+    /// any effort removal inside `strip_thinking_when_tool_choice_forces_use`.
+    #[test]
+    fn adaptive_forced_tool_choice_drops_orphan_effort_via_late_enforcer() {
+        use routectl_core::ReasoningConfig;
+        use serde_json::json;
+        let req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(2048),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            tool_choice: Some(json!({"type": "tool", "name": "web_search"})),
+            ..Default::default()
+        };
+
+        let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be stripped when tool_choice forces tool use, got: {body}"
+        );
+        assert!(
+            body.get("output_config")
+                .and_then(|oc| oc.get("effort"))
+                .is_none(),
+            "orphan output_config.effort must be dropped by the late enforcer, got: {body}"
+        );
+    }
+
+    /// (positive regression-pin) A normal adaptive request whose effort
+    /// exceeds the operator cap: the late enforcer guarantees presence
+    /// AND clamps to the cap.
+    #[test]
+    fn adaptive_effort_over_cap_clamped_by_late_enforcer() {
+        use routectl_core::ReasoningConfig;
+        let mut req = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![user_msg("hi")],
+            max_tokens: Some(1024),
+            reasoning: Some(ReasoningConfig {
+                effort: Some("max".into()),
+                max_tokens: None,
+                exclude: None,
+                enabled: Some(true),
+            }),
+            ..Default::default()
+        };
+        req.routectl_internal.effort_levels = std::sync::Arc::from(vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+        ]);
+
+        let body = normalize("test", &req, true, &[], false, None).expect("normalize must succeed");
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        let oc = body
+            .get("output_config")
+            .expect("output_config present on adaptive path");
+        assert_eq!(
+            oc["effort"], "high",
+            "effort must be present and clamped to the operator cap; got: {oc}"
         );
     }
 }

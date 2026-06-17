@@ -27,7 +27,6 @@
 //! `type` tag and the rest of the payload, both of which the SSE
 //! state machine needs.
 
-use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -126,7 +125,22 @@ impl<'de> Deserialize<'de> for SseEvent {
         if !is_known {
             return Ok(SseEvent::Other(v));
         }
-        let known: Known = serde_json::from_value(v).map_err(D::Error::custom)?;
+        let known: Known = match serde_json::from_value(v.clone()) {
+            Ok(known) => known,
+            Err(e) => {
+                // Known tag, malformed payload: soft-fall to Other rather
+                // than hard-error. A hard error propagates as
+                // Error::Streaming and tears down the rest of the stream.
+                let wire_type = v.get("type").and_then(|t| t.as_str());
+                tracing::debug!(
+                    wire_type,
+                    error = %e,
+                    "anthropic SSE event: known tag failed typed deserialize; \
+                     preserving raw Value as Other",
+                );
+                return Ok(SseEvent::Other(v));
+            }
+        };
         Ok(match known {
             Known::MessageStart { message } => SseEvent::MessageStart { message },
             Known::ContentBlockStart {
@@ -211,7 +225,19 @@ impl<'de> Deserialize<'de> for SseContentBlockStart {
         if !is_known {
             return Ok(SseContentBlockStart::Other(v));
         }
-        let known: Known = serde_json::from_value(v).map_err(D::Error::custom)?;
+        let known: Known = match serde_json::from_value(v.clone()) {
+            Ok(known) => known,
+            Err(e) => {
+                let wire_type = v.get("type").and_then(|t| t.as_str());
+                tracing::debug!(
+                    wire_type,
+                    error = %e,
+                    "anthropic SSE content_block: known tag failed typed deserialize; \
+                     preserving raw Value as Other",
+                );
+                return Ok(SseContentBlockStart::Other(v));
+            }
+        };
         Ok(match known {
             Known::Text { text } => SseContentBlockStart::Text { text },
             Known::Thinking { thinking } => SseContentBlockStart::Thinking { thinking },
@@ -276,7 +302,19 @@ impl<'de> Deserialize<'de> for SseDelta {
         if !is_known {
             return Ok(SseDelta::Other(v));
         }
-        let known: Known = serde_json::from_value(v).map_err(D::Error::custom)?;
+        let known: Known = match serde_json::from_value(v.clone()) {
+            Ok(known) => known,
+            Err(e) => {
+                let wire_type = v.get("type").and_then(|t| t.as_str());
+                tracing::debug!(
+                    wire_type,
+                    error = %e,
+                    "anthropic SSE delta: known tag failed typed deserialize; \
+                     preserving raw Value as Other",
+                );
+                return Ok(SseDelta::Other(v));
+            }
+        };
         Ok(match known {
             Known::TextDelta { text } => SseDelta::TextDelta { text },
             Known::ThinkingDelta { thinking } => SseDelta::ThinkingDelta { thinking },
@@ -520,6 +558,89 @@ mod tests {
         match parsed {
             SseDelta::TextDelta { text } => assert_eq!(text, "hello"),
             other => panic!("expected TextDelta, got: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Soft-fallback: a KNOWN tag whose payload fails to deserialize into
+    // the typed mirror must land in Other(Value) (full Value preserved),
+    // NOT hard-error -- a hard error propagates as Error::Streaming and
+    // tears down the rest of the stream.
+    // -----------------------------------------------------------------
+
+    /// `content_block_delta` is a known SseEvent tag, but here its
+    /// nested `delta` is missing the required `text` field for
+    /// `text_delta`. The whole event must soft-fall to
+    /// `SseEvent::Other` with the raw Value preserved.
+    #[test]
+    fn sse_event_known_tag_malformed_payload_soft_falls_to_other() {
+        // Arrange: known event tag, but `index` is the wrong type
+        // (string, not u32) so the typed mirror fails to deserialize.
+        let raw = json!({
+            "type": "content_block_delta",
+            "index": "not-a-number",
+            "delta": {"type": "text_delta", "text": "hi"},
+        });
+
+        // Act
+        let parsed: SseEvent = serde_json::from_value(raw.clone())
+            .expect("known-tag malformed payload must NOT hard-error");
+
+        // Assert
+        match parsed {
+            SseEvent::Other(v) => {
+                assert_eq!(
+                    v.get("type").and_then(Value::as_str),
+                    Some("content_block_delta"),
+                );
+                assert_eq!(v, raw, "Other must hold the full wire Value verbatim");
+            }
+            other => panic!("expected SseEvent::Other on malformed known tag, got: {other:?}"),
+        }
+    }
+
+    /// `tool_use` is a known content_block tag, but here `id` is the
+    /// wrong type (number, not string). Must soft-fall to
+    /// `SseContentBlockStart::Other`.
+    #[test]
+    fn sse_content_block_start_known_tag_malformed_payload_soft_falls_to_other() {
+        // Arrange
+        let raw = json!({"type": "tool_use", "id": 42, "name": "calc"});
+
+        // Act
+        let parsed: SseContentBlockStart = serde_json::from_value(raw.clone())
+            .expect("known-tag malformed payload must NOT hard-error");
+
+        // Assert
+        match parsed {
+            SseContentBlockStart::Other(v) => {
+                assert_eq!(v.get("type").and_then(Value::as_str), Some("tool_use"));
+                assert_eq!(v, raw, "Other must hold the full wire Value verbatim");
+            }
+            other => panic!(
+                "expected SseContentBlockStart::Other on malformed known tag, got: {other:?}"
+            ),
+        }
+    }
+
+    /// `text_delta` is a known delta tag, but its required `text` field
+    /// is absent. Must soft-fall to `SseDelta::Other`.
+    #[test]
+    fn sse_delta_known_tag_malformed_payload_soft_falls_to_other() {
+        // Arrange: missing the required `text` field.
+        let raw = json!({"type": "text_delta"});
+
+        // Act
+        let parsed: SseDelta = serde_json::from_value(raw.clone())
+            .expect("known-tag malformed payload must NOT hard-error");
+
+        // Assert
+        match parsed {
+            SseDelta::Other(v) => {
+                assert_eq!(v.get("type").and_then(Value::as_str), Some("text_delta"));
+                assert_eq!(v, raw, "Other must hold the full wire Value verbatim");
+            }
+            other => panic!("expected SseDelta::Other on malformed known tag, got: {other:?}"),
         }
     }
 }

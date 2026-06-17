@@ -19,12 +19,17 @@ const BILLING_PREFIX: &[u8] = b"x-anthropic-billing-header:";
 /// Token that precedes the 5-hex checksum inside the billing block.
 const CCH_TOKEN: &[u8] = b"cch=";
 
-/// Serialized boundary that opens the messages array. routectl's body
-/// always serializes the `system` array (where the billing block lives)
-/// before `messages`, so a billing prefix found at or after this boundary
-/// is a false positive inside user-controlled message text, not the real
-/// system-level block -- and must not be signed.
-const MESSAGES_KEY: &[u8] = b"\"messages\":";
+/// Serialized marker that opens the `system` field. routectl's body
+/// serializes object keys alphabetically (serde_json's `Value` is a
+/// `BTreeMap`, no `preserve_order`), so `messages` precedes `system` on
+/// the wire. The real billing block always lives inside `system`; we
+/// restrict the billing-prefix / cch search to the bytes from this
+/// marker onward so a billing-looking prefix inside user-controlled
+/// `messages` text never matches. Covers both the string
+/// (`"system":"...billing..."`) and array
+/// (`"system":[{"type":"text","text":"...billing..."}]`) shapes -- both
+/// have the billing prefix after this marker.
+const SYSTEM_KEY: &[u8] = b"\"system\":";
 
 /// Width of the hex checksum (5 lowercase hex chars).
 const CCH_HEX_LEN: usize = 5;
@@ -56,17 +61,17 @@ const ZERO_HEX: u8 = b'0';
 /// hex run) is a silent no-op. Infallible: never panics, never errors.
 /// The buffer length is unchanged.
 pub(crate) fn resign_cch_in_place(body: &mut [u8]) {
-    let Some(prefix_at) = find_subslice(body, BILLING_PREFIX) else {
+    // The real billing block lives inside `system`. Scope the search to
+    // the bytes from the `"system":` marker onward; a billing prefix in
+    // user-controlled `messages` text (which serializes BEFORE `system`)
+    // must not match.
+    let Some(sys_at) = find_subslice(body, SYSTEM_KEY) else {
         return;
     };
-
-    // Reject a billing prefix that appears inside (or after) the messages
-    // array: that is user-controlled text, not the real system-level block.
-    if let Some(msg_at) = find_subslice(body, MESSAGES_KEY) {
-        if prefix_at >= msg_at {
-            return;
-        }
-    }
+    let Some(rel_prefix) = find_subslice(&body[sys_at..], BILLING_PREFIX) else {
+        return;
+    };
+    let prefix_at = sys_at + rel_prefix;
 
     let Some(hex_at) = find_cch_hex_start(body, prefix_at) else {
         return;
@@ -293,5 +298,65 @@ mod tests {
         resign_cch_in_place(&mut body);
 
         assert_eq!(body.len(), len_before);
+    }
+
+    // -----------------------------------------------------------------
+    // System-scoped search. serde_json serializes object keys
+    // alphabetically (BTreeMap), so in a real body `messages` precedes
+    // `system`. The signer must locate the billing block via the
+    // `"system":` marker, not reject it because a `messages` key sorts
+    // earlier.
+    // -----------------------------------------------------------------
+
+    /// Realistic alphabetical key order: `messages` is serialized BEFORE
+    /// `system`. A billing block living in a `system` ARRAY must still be
+    /// re-signed -- the old `messages`-position guard rejected this.
+    #[test]
+    fn signs_billing_block_in_system_array_with_messages_first() {
+        let mut body =
+            br#"{"max_tokens":64,"messages":[{"role":"user","content":"hi"}],"model":"m","system":[{"type":"text","text":"x-anthropic-billing-header: v=1; cch=fffff; end"}]}"#
+                .to_vec();
+        let before = body.clone();
+
+        resign_cch_in_place(&mut body);
+
+        // The signed cch changed off its placeholder.
+        assert_ne!(body, before, "cch must be re-signed in the system array");
+        assert!(
+            find_subslice(&body, b"cch=fffff;").is_none(),
+            "placeholder cch must be overwritten",
+        );
+    }
+
+    /// A billing block carried as a `system` STRING (not an array) must
+    /// also be re-signed, again with `messages` sorted earlier.
+    #[test]
+    fn signs_billing_block_in_system_string_with_messages_first() {
+        let mut body =
+            br#"{"messages":[{"role":"user","content":"hi"}],"model":"m","system":"x-anthropic-billing-header: v=1; cch=fffff; end"}"#
+                .to_vec();
+        let before = body.clone();
+
+        resign_cch_in_place(&mut body);
+
+        assert_ne!(body, before, "cch must be re-signed in the system string");
+        assert!(
+            find_subslice(&body, b"cch=fffff;").is_none(),
+            "placeholder cch must be overwritten",
+        );
+    }
+
+    /// No `system` key at all: no-op, bytes identical. Preserves the
+    /// silent-no-op-on-non-matching-shapes contract.
+    #[test]
+    fn noop_when_no_system_key() {
+        let original =
+            br#"{"messages":[{"role":"user","content":"x-anthropic-billing-header: cch=12345;"}],"model":"m"}"#
+                .to_vec();
+        let mut body = original.clone();
+
+        resign_cch_in_place(&mut body);
+
+        assert_eq!(body, original, "no system key -> no-op");
     }
 }
