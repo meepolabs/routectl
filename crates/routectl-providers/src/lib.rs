@@ -28,6 +28,18 @@ pub mod effort;
 // feature-gated build.
 pub(crate) mod header_trace;
 
+// Shared WARN emitter for upstream HTTP failures. Folds the
+// 401/403-vs-else auth-warn split into one place so every egress emits
+// the same message wording and field shape. Gated on the egress
+// features that produce upstream errors (every provider does).
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "bedrock",
+    feature = "openai-responses"
+))]
+pub(crate) mod upstream_log;
+
 // Shared parser for the standard HTTP `Retry-After` response header.
 // Gated on the provider features that bring in `reqwest` + `chrono`
 // (every provider does); the router consumes the parsed `Duration` via

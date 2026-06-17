@@ -388,7 +388,11 @@ impl UsageCapture {
             .first_byte
             .map(|fb| i64::try_from(fb.duration_since(self.start).as_millis()).unwrap_or(0));
         self.emit_egress_summary();
-        self.usage.try_send(self.record.clone());
+        // Move the owned record into the channel rather than cloning a
+        // wide ~40-column struct (some columns carry JSON Value trees).
+        // `finalized` is already set above, so the only later access --
+        // Drop -- short-circuits and never touches the taken record.
+        self.usage.try_send(std::mem::take(&mut self.record));
     }
 
     /// Emit the single `direction=egress` stream trace-summary line that

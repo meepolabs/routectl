@@ -204,3 +204,77 @@ fn observe_response_fully_cached_prompt_stores_zero() {
     // Assert: a fully-cached prompt is a real Some(0), not None.
     assert_eq!(cap.record.input_tokens, Some(0_u64));
 }
+
+/// Spin until the writer has persisted `want` rows or a deadline passes.
+fn wait_persisted(handle: &UsageHandle, want: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while handle.counters().persisted() < want {
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
+}
+
+/// A `UsageCapture` plus the handle (so tests can poll the persisted
+/// counter) and the writer (so tests can drain it to disk on shutdown).
+fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, tempfile::TempDir) {
+    let req = routectl_core::ChatRequest {
+        model: "m".to_string(),
+        messages: vec![Message {
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: Vec::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            refusal: None,
+        }],
+        ..Default::default()
+    };
+    let draft = build_usage_draft("anthropic", &req, "req-take".to_string(), None);
+    let (handle, writer, dir) = dummy_handle();
+    let cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    (cap, handle, writer, dir)
+}
+
+#[tokio::test]
+async fn finalize_moves_record_and_emits_one_row() {
+    // Arrange
+    let (mut cap, handle, writer, _dir) = capture_with_handle();
+
+    // Act: a single finalize moves the owned record into the channel.
+    cap.finalize(Outcome::Ok);
+    drop(cap);
+
+    // Assert: exactly one row reaches the writer.
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    writer.shutdown();
+    assert_eq!(
+        handle.counters().persisted(),
+        1,
+        "finalize must emit exactly one row"
+    );
+}
+
+#[tokio::test]
+async fn finalize_then_drop_still_one_row() {
+    // Arrange
+    let (mut cap, handle, writer, _dir) = capture_with_handle();
+
+    // Act: explicit finalize sets `finalized`; the trailing Drop sees the
+    // flag and short-circuits (never touches the moved-out record).
+    cap.finalize(Outcome::Ok);
+    drop(cap);
+
+    // Assert: the Drop guard does NOT emit a second row.
+    assert!(wait_persisted(&handle, 1), "row not persisted");
+    writer.shutdown();
+    assert_eq!(
+        handle.counters().persisted(),
+        1,
+        "finalize-then-drop must persist exactly one row"
+    );
+}

@@ -660,22 +660,15 @@ fn map_openai_compat_upstream_error(
     let sanitized = extract_upstream_message(body_text);
     let safe_excerpt = sanitize_for_log(&sanitized);
     // Extend the auth-only WARN to all 4xx/5xx so an operator never has to
-    // guess WHY a request failed.
-    if status == 401 || status == 403 {
-        tracing::warn!(
-            provider = %provider_id,
-            status,
-            body_excerpt = %safe_excerpt,
-            "openai-compat upstream auth failed",
-        );
-    } else {
-        tracing::warn!(
-            provider = %provider_id,
-            status,
-            body_excerpt = %safe_excerpt,
-            "openai-compat upstream error",
-        );
-    }
+    // guess WHY a request failed. openai-compat carries no AuthKind, so
+    // the auth_kind field is omitted.
+    crate::upstream_log::warn_upstream_failure(
+        provider_id,
+        status,
+        None,
+        &safe_excerpt,
+        "openai-compat",
+    );
     Error::upstream_full(
         provider_id,
         status,

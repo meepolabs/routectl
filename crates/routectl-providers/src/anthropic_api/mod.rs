@@ -749,30 +749,18 @@ impl Provider for AnthropicApiProvider {
         if status >= 400 {
             let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
             // Extend the auth-only WARN to all 4xx/5xx so an operator
-            // never has to guess WHY a request failed. Auth failures
-            // keep the auth_kind field for parity with the documented
-            // log shape; other errors get a generic "anthropic
-            // upstream error" tag. Sanitize before tracing: the
-            // upstream may return attacker-controlled bytes (CRLF,
-            // control chars, very long lines) that would otherwise
+            // never has to guess WHY a request failed. Sanitize before
+            // tracing: the upstream may return attacker-controlled bytes
+            // (CRLF, control chars, very long lines) that would otherwise
             // forge log lines on text-format subscribers.
             let safe_excerpt = sanitize_for_log(&msg);
-            if status == 401 || status == 403 {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %safe_excerpt,
-                    "anthropic upstream auth failed",
-                );
-            } else {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "anthropic upstream error",
-                );
-            }
+            crate::upstream_log::warn_upstream_failure(
+                &self.cfg.id,
+                status,
+                Some(&self.cfg.auth_kind),
+                &safe_excerpt,
+                "anthropic",
+            );
             return Err(err);
         }
 
@@ -883,22 +871,13 @@ impl Provider for AnthropicApiProvider {
             // same reason as `complete()`.
             let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
             let safe_excerpt = sanitize_for_log(&msg);
-            if status == 401 || status == 403 {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %safe_excerpt,
-                    "anthropic upstream auth failed",
-                );
-            } else {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "anthropic upstream error",
-                );
-            }
+            crate::upstream_log::warn_upstream_failure(
+                &self.cfg.id,
+                status,
+                Some(&self.cfg.auth_kind),
+                &safe_excerpt,
+                "anthropic",
+            );
             return Err(err);
         }
 
@@ -1093,22 +1072,13 @@ impl Provider for AnthropicApiProvider {
             // emit them verbatim into operator logs. Same posture as
             // the `complete()` and `stream()` paths above.
             let safe_excerpt = sanitize_for_log(&msg);
-            if status == 401 || status == 403 {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %safe_excerpt,
-                    "anthropic count_tokens upstream auth failed",
-                );
-            } else {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "anthropic count_tokens upstream error",
-                );
-            }
+            crate::upstream_log::warn_upstream_failure(
+                &self.cfg.id,
+                status,
+                Some(&self.cfg.auth_kind),
+                &safe_excerpt,
+                "anthropic count_tokens",
+            );
             return Err(err);
         }
 

@@ -478,14 +478,8 @@ fn body_has_adaptive_thinking(body: &Value) -> bool {
 /// sub-key, the now-empty `output_config` object is removed entirely so
 /// the wire body stays clean. A no-op when neither key is present.
 fn remove_output_config_effort(body: &mut Value) {
-    let Some(obj) = body.as_object_mut() else {
-        return;
-    };
-    let Some(oc) = obj.get_mut("output_config").and_then(|v| v.as_object_mut()) else {
-        return;
-    };
-    if oc.remove("effort").is_some() && oc.is_empty() {
-        obj.remove("output_config");
+    if let Some(obj) = body.as_object_mut() {
+        crate::effort::drop_orphaned_output_config_effort(obj);
     }
 }
 

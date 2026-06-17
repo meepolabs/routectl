@@ -470,44 +470,16 @@ impl Provider for OpenAiResponsesProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            // Capture the header hint BEFORE `resp.text()` moves the
-            // body, gated on rate-limit statuses.
-            let header_hint = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
+            // Capture the headers BEFORE `resp.text()` moves the body;
+            // the shared mapper reads the rate-limit hint off them.
+            let headers = resp.headers().clone();
             let body_text = resp.text().await.unwrap_or_default();
-            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
-            let msg = build_error_excerpt(&body_text);
-            let safe_excerpt = sanitize_for_log(&msg);
-            if status == 401 || status == 403 {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %safe_excerpt,
-                    "openai-responses upstream auth failed",
-                );
-            } else {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "openai-responses upstream error",
-                );
-            }
-            // The Codex usage-limit body wins over the header hint: it
-            // carries the 5-hour-cap reset, which Retry-After does not.
-            let codex_hint = serde_json::from_str::<Value>(&body_text)
-                .ok()
-                .and_then(|v| crate::openai_responses::response::codex_reset_hint(&v));
-            let retry_after = codex_hint.or(header_hint);
-            return Err(Error::upstream_with_retry_after(
+            return Err(map_responses_upstream_error(
                 &self.cfg.id,
                 status,
-                msg,
-                retry_after,
+                &headers,
+                &self.cfg.auth_kind,
+                &body_text,
             ));
         }
 
@@ -700,44 +672,16 @@ impl Provider for OpenAiResponsesProvider {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            // Capture the header hint BEFORE `resp.text()` moves the
-            // body, gated on rate-limit statuses.
-            let header_hint = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
+            // Capture the headers BEFORE `resp.text()` moves the body;
+            // the shared mapper reads the rate-limit hint off them.
+            let headers = resp.headers().clone();
             let body_text = resp.text().await.unwrap_or_default();
-            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
-            let msg = build_error_excerpt(&body_text);
-            let safe_excerpt = sanitize_for_log(&msg);
-            if status == 401 || status == 403 {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    auth_kind = ?self.cfg.auth_kind,
-                    body_excerpt = %safe_excerpt,
-                    "openai-responses upstream auth failed",
-                );
-            } else {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "openai-responses upstream error",
-                );
-            }
-            // The Codex usage-limit body wins over the header hint: it
-            // carries the 5-hour-cap reset, which Retry-After does not.
-            let codex_hint = serde_json::from_str::<Value>(&body_text)
-                .ok()
-                .and_then(|v| crate::openai_responses::response::codex_reset_hint(&v));
-            let retry_after = codex_hint.or(header_hint);
-            return Err(Error::upstream_with_retry_after(
+            return Err(map_responses_upstream_error(
                 &self.cfg.id,
                 status,
-                msg,
-                retry_after,
+                &headers,
+                &self.cfg.auth_kind,
+                &body_text,
             ));
         }
 
@@ -814,6 +758,52 @@ fn build_error_excerpt(body_text: &str) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| sanitize_upstream_body(body_text))
+}
+
+/// Map a non-success Responses-API HTTP response into a canonical
+/// `Error::Upstream`. Single source of truth shared by both
+/// `complete()` and `stream()`: computes the rate-limit-gated header
+/// reset hint, resolves the Codex usage-limit body hint (which wins over
+/// the header because it carries the 5-hour-cap reset that Retry-After
+/// does not), folds the 401/403-vs-else WARN split, and emits the full
+/// upstream body once at debug level so call sites do not duplicate it.
+///
+/// `headers` MUST be read from the response BEFORE the body is consumed
+/// (`resp.text()` moves the body). This ordering is a programmer
+/// convention: `headers` is an owned `HeaderMap` clone here, so the
+/// compiler does not couple it to the body move. Both call sites clone
+/// the headers before calling `resp.text()`.
+fn map_responses_upstream_error(
+    provider_id: &str,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    auth_kind: &AuthKind,
+    body_text: &str,
+) -> Error {
+    // Reset hint from response headers, gated on rate-limit statuses so a
+    // stray Retry-After on a 400 doesn't park the provider.
+    let header_hint = if crate::retry_after::is_rate_limit_status(status) {
+        crate::retry_after::parse_retry_after(headers)
+    } else {
+        None
+    };
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
+    let msg = build_error_excerpt(body_text);
+    let safe_excerpt = sanitize_for_log(&msg);
+    crate::upstream_log::warn_upstream_failure(
+        provider_id,
+        status,
+        Some(auth_kind),
+        &safe_excerpt,
+        "openai-responses",
+    );
+    // The Codex usage-limit body wins over the header hint: it carries
+    // the 5-hour-cap reset, which Retry-After does not.
+    let codex_hint = serde_json::from_str::<Value>(body_text)
+        .ok()
+        .and_then(|v| crate::openai_responses::response::codex_reset_hint(&v));
+    let retry_after = codex_hint.or(header_hint);
+    Error::upstream_with_retry_after(provider_id, status, msg, retry_after)
 }
 
 // ---------------------------------------------------------------------------
@@ -1330,8 +1320,9 @@ mod e2e_tests {
 
 #[cfg(test)]
 mod excerpt_tests {
-    use super::build_error_excerpt;
-    use routectl_core::sanitize_for_log;
+    use super::{build_error_excerpt, map_responses_upstream_error, AuthKind};
+    use reqwest::header::HeaderMap;
+    use routectl_core::{sanitize_for_log, Error};
 
     #[test]
     fn excerpt_sanitizes_crlf_and_ansi() {
@@ -1350,6 +1341,65 @@ mod excerpt_tests {
             !safe_excerpt.contains('\x1b'),
             "ESC in excerpt: {safe_excerpt:?}"
         );
+    }
+
+    /// The shared mapper drives both `complete()` and `stream()`. A plain
+    /// rate-limit body with a parseable `Retry-After` must surface that
+    /// reset on the canonical error from the single helper.
+    #[test]
+    fn map_upstream_error_preserves_retry_after_for_both_callers() {
+        // Arrange: a 429 with a header reset hint, no codex body hint.
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+        let body = r#"{"error":{"type":"rate_limit_exceeded","message":"slow down"}}"#;
+
+        // Act
+        let err = map_responses_upstream_error("p", 429, &headers, &AuthKind::ApiKey, body);
+
+        // Assert
+        match err {
+            Error::Upstream {
+                status,
+                retry_after,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 429);
+                assert_eq!(retry_after, Some(std::time::Duration::from_secs(30)));
+                assert!(
+                    body.contains("slow down"),
+                    "message must reach body: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// The Codex usage-limit body carries the 5-hour-cap reset and must
+    /// win over the header `Retry-After`. Proves the codex-hint resolution
+    /// stays INSIDE the extracted helper for both callers.
+    #[test]
+    fn map_upstream_error_codex_body_hint_wins_over_header() {
+        // Arrange: a header hint of 30s AND a codex usage-limit body whose
+        // resets_in_seconds is 7200 -- the body must win.
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+        let body = r#"{"error":{"type":"usage_limit_reached","resets_in_seconds":7200,"message":"capped"}}"#;
+
+        // Act
+        let err = map_responses_upstream_error("p", 429, &headers, &AuthKind::ChatgptOauth, body);
+
+        // Assert: the body's 7200s reset, not the header's 30s.
+        match err {
+            Error::Upstream { retry_after, .. } => {
+                assert_eq!(
+                    retry_after,
+                    Some(std::time::Duration::from_secs(7200)),
+                    "codex body hint must override the header Retry-After"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
     }
 }
 

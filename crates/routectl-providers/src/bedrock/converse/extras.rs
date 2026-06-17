@@ -325,13 +325,7 @@ fn strip_thinking_when_tool_choice_forces_use(
         // alongside `thinking:{type:adaptive}`. Stripping thinking without
         // it leaves an orphan that Anthropic (via Converse) 400s. Drop the
         // effort sub-key; any orthogonal sibling (e.g. `format`) survives.
-        if let Some(oc_val) = bag.get_mut("output_config") {
-            if let Some(oc_obj) = oc_val.as_object_mut() {
-                if oc_obj.remove("effort").is_some() && oc_obj.is_empty() {
-                    bag.remove("output_config");
-                }
-            }
-        }
+        crate::effort::drop_orphaned_output_config_effort(bag);
         let variant = match tool_choice {
             Some(ConverseToolChoice::Any { .. }) => "any",
             Some(ConverseToolChoice::Tool { .. }) => "tool",

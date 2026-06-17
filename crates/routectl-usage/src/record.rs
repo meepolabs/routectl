@@ -14,11 +14,20 @@ use serde_json::Value;
 /// source of truth for the DB `outcome` CHECK constraint -- a later
 /// schema task mirrors the lowercase tokens returned by `as_str`. Add
 /// a variant here only alongside the matching schema migration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Ok,
     UpstreamError,
+    // `#[default]` resolves to the real, persisted `ClientDisconnect`
+    // outcome -- chosen because it is the abnormal-exit sentinel the
+    // finalize/Drop path already stamps via `mem::take` for a
+    // finalize-less exit. CAUTION: this default is NOT an inert
+    // placeholder. A default-constructed `Outcome`/`UsageRecord` that
+    // reaches the persistence path is silently written as
+    // `ClientDisconnect`, so default-construction must never feed the
+    // DB writer except on that abnormal-exit path.
+    #[default]
     ClientDisconnect,
     Timeout,
     Cancelled,
@@ -74,7 +83,7 @@ impl TryFrom<&str> for Outcome {
 /// Timestamps are epoch-millis UTC (`i64`). JSON-text columns are
 /// `serde_json::Value`. Token counts are unsigned (`u64`) and nullable
 /// because not every upstream reports every counter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageRecord {
     // IDENTITY
     pub ts_start: i64,

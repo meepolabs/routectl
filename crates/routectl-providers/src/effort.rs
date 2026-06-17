@@ -164,6 +164,27 @@ fn lowest_supported(supported: &[String]) -> &str {
         .expect("supported is non-empty -- precondition violated")
 }
 
+/// Pure JSON utility: remove `output_config.effort` from `obj`, and
+/// drop the now-empty `output_config` object only if removing `effort`
+/// actually removed something. Any orthogonal sibling (e.g.
+/// structured-output `format`) is preserved, and a caller-supplied empty
+/// `output_config {}` that carried no `effort` is left untouched.
+///
+/// This encodes NO business rule about WHEN orphaned effort should be
+/// dropped -- each call site decides that and calls this only when the
+/// strip is warranted.
+#[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
+pub(crate) fn drop_orphaned_output_config_effort(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let Some(oc) = obj.get_mut("output_config").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    if oc.remove("effort").is_some() && oc.is_empty() {
+        obj.remove("output_config");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "openai-responses")]
@@ -301,5 +322,56 @@ mod tests {
         assert_eq!(level_from_budget(32768), "xhigh");
         assert_eq!(level_from_budget(32769), "max");
         assert_eq!(level_from_budget(128000), "max");
+    }
+}
+
+#[cfg(test)]
+#[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
+mod orphan_effort_tests {
+    use super::drop_orphaned_output_config_effort;
+    use serde_json::{json, Value};
+
+    fn as_map(v: &mut Value) -> &mut serde_json::Map<String, Value> {
+        v.as_object_mut().expect("object")
+    }
+
+    // effort is the sole sub-key -> the empty output_config is removed.
+    #[test]
+    fn effort_only_removes_output_config() {
+        let mut body = json!({"model": "m", "output_config": {"effort": "high"}});
+        drop_orphaned_output_config_effort(as_map(&mut body));
+        assert!(body.get("output_config").is_none(), "got: {body}");
+        assert_eq!(body["model"], "m", "siblings outside output_config survive");
+    }
+
+    // effort plus an orthogonal sibling -> effort goes, format + the
+    // output_config object survive.
+    #[test]
+    fn effort_with_format_sibling_keeps_format() {
+        let mut body =
+            json!({"output_config": {"effort": "max", "format": {"type": "json_schema"}}});
+        drop_orphaned_output_config_effort(as_map(&mut body));
+        assert!(body["output_config"].get("effort").is_none(), "got: {body}");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
+
+    // No effort present -> a caller-supplied empty output_config{} is NOT
+    // removed (the gate keys on `remove("effort").is_some()`).
+    #[test]
+    fn no_effort_leaves_empty_output_config_untouched() {
+        let mut body = json!({"output_config": {}});
+        drop_orphaned_output_config_effort(as_map(&mut body));
+        assert!(
+            body.get("output_config").is_some(),
+            "empty output_config without effort must survive: {body}"
+        );
+    }
+
+    // No output_config at all -> total no-op.
+    #[test]
+    fn absent_output_config_is_a_noop() {
+        let mut body = json!({"model": "m"});
+        drop_orphaned_output_config_effort(as_map(&mut body));
+        assert_eq!(body, json!({"model": "m"}));
     }
 }
