@@ -44,8 +44,38 @@ mod tool_use;
 mod tools;
 
 use serde_json::Map;
+use tracing::warn;
 
-use routectl_core::{ChatRequest, Result};
+use routectl_core::{ChatRequest, Error, Result};
+
+/// Reject (strict) or warn-and-drop (lenient) a canonical-only shape
+/// that has no OpenAI-compat wire representation.
+///
+/// `context` names the lift site (e.g. "message 2 image block"); `what`
+/// names the unrepresentable shape (e.g. "document content block"). In
+/// strict mode the two compose into a `strict_translation` validation
+/// error; in lenient mode they feed a structured warn before the caller
+/// drops the offending shape.
+pub(crate) fn reject_or_drop_unrepresentable(
+    id: &str,
+    strict: bool,
+    context: &str,
+    what: &str,
+) -> Result<()> {
+    if strict {
+        return Err(Error::Validation(format!(
+            "strict_translation: provider `{id}`: {context}: {what} \
+             cannot be represented on the OpenAI-compat wire"
+        )));
+    }
+    warn!(
+        provider = id,
+        context = context,
+        what = what,
+        "openai-compat egress: dropping unrepresentable shape"
+    );
+    Ok(())
+}
 
 /// Uniform lift-function pointer type. Every sub-module's `lift` must
 /// match this shape so it can be stored in `LIFT_STEPS`.
@@ -241,6 +271,64 @@ mod order_test {
             msgs.len(),
             2,
             "message count must be preserved after lift_all"
+        );
+    }
+
+    /// Guards the dependency on LIFT_STEPS order: the `tools` step
+    /// must run BEFORE `tool_choice` so that `tool_choice::lift` reads a
+    /// populated `obj["tools"]`. A forcing tool_choice with real tools must
+    /// therefore survive the full lift end-to-end. If a future reorder put
+    /// tool_choice ahead of tools, the guard would see empty wire tools and
+    /// drop the forcing choice -- this test would fail.
+    #[test]
+    fn lift_all_forcing_tool_choice_with_tools_survives() {
+        use routectl_core::{CustomTool, ToolDef};
+
+        // Arrange -- a request with a real custom tool AND a forcing
+        // (`required`) tool_choice.
+        let tool = ToolDef::Custom(CustomTool {
+            name: "calculator".into(),
+            description: Some("do math".into()),
+            input_schema: json!({"type": "object", "properties": {}}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        });
+        let req = ChatRequest {
+            model: "m".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("go".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            tools: Some(vec![tool]),
+            tool_choice: Some(json!("required")),
+            ..Default::default()
+        };
+        let mut obj: Map<String, Value> = serde_json::from_value(json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "go"}]
+        }))
+        .unwrap();
+
+        // Act
+        lift_all("test", &mut obj, &req, false).unwrap();
+
+        // Assert -- tools step populated obj["tools"] before tool_choice::lift
+        // ran, so the forcing choice was NOT dropped by the forcing-choice guard.
+        let tools = obj["tools"].as_array().expect("tools must be on the wire");
+        assert_eq!(tools.len(), 1, "the custom tool must reach the wire");
+        assert_eq!(
+            obj.get("tool_choice"),
+            Some(&json!("required")),
+            "forcing tool_choice must survive when tools are present (LIFT_STEPS \
+             must run tools before tool_choice)"
         );
     }
 }

@@ -23,9 +23,10 @@
 //! When `content` is a string (legacy shape), no-op.
 
 use serde_json::{Map, Value};
-use tracing::warn;
 
-use routectl_core::{ChatRequest, Error, Result};
+use routectl_core::{ChatRequest, Result};
+
+use super::reject_or_drop_unrepresentable;
 
 pub fn lift(
     id: &str,
@@ -74,33 +75,21 @@ fn rewrite_parts(id: &str, msg_idx: usize, parts: &mut Vec<Value>, strict: bool)
             PartKind::AnthropicImage => match rewrite_image_part(&part) {
                 Some(rewritten) => parts.push(rewritten),
                 None => {
-                    if strict {
-                        return Err(Error::Validation(format!(
-                            "strict_translation: provider `{id}`: message {msg_idx} \
-                                 image block has unsupported source shape \
-                                 (expected base64 or url): {part}"
-                        )));
-                    }
-                    warn!(
-                        provider = id,
-                        message_index = msg_idx,
-                        "openai-compat egress: dropping image block with unsupported source shape"
-                    );
+                    reject_or_drop_unrepresentable(
+                        id,
+                        strict,
+                        &format!("message {msg_idx}"),
+                        "image block with unsupported source shape (expected base64 or url)",
+                    )?;
                 }
             },
             PartKind::Document => {
-                if strict {
-                    return Err(Error::Validation(format!(
-                        "strict_translation: provider `{id}`: message {msg_idx} \
-                         document content block cannot be represented on the \
-                         OpenAI-compat wire"
-                    )));
-                }
-                warn!(
-                    provider = id,
-                    message_index = msg_idx,
-                    "openai-compat egress: dropping document content block (no OpenAI equivalent)"
-                );
+                reject_or_drop_unrepresentable(
+                    id,
+                    strict,
+                    &format!("message {msg_idx}"),
+                    "document content block (no OpenAI equivalent)",
+                )?;
             }
             PartKind::Other => {
                 parts.push(part);

@@ -7,9 +7,10 @@
 //! so a pass-through of an OpenAI-in request produces byte-identical output.
 
 use serde_json::Value;
-use tracing::warn;
 
-use routectl_core::{ChatRequest, CustomTool, Error, Result, ToolDef};
+use routectl_core::{ChatRequest, CustomTool, Result, ToolDef};
+
+use super::reject_or_drop_unrepresentable;
 
 pub fn lift(
     id: &str,
@@ -47,19 +48,12 @@ pub fn lift(
                         .and_then(|o| o.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("");
-                    if strict {
-                        return Err(Error::Validation(format!(
-                            "strict_translation: provider `{id}`: Anthropic builtin / \
-                             non-custom tool `{builtin}` cannot be represented on the \
-                             OpenAI-compat wire"
-                        )));
-                    }
-                    warn!(
-                        provider = id,
-                        builtin = builtin,
-                        tool_name = tool_name,
-                        "dropping anthropic-builtin tool on openai-compat egress"
-                    );
+                    reject_or_drop_unrepresentable(
+                        id,
+                        strict,
+                        &format!("tool `{tool_name}`"),
+                        &format!("Anthropic builtin / non-custom tool `{builtin}`"),
+                    )?;
                     // Do not push -- tool is dropped.
                 }
             }

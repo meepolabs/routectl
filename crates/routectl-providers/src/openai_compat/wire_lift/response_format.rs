@@ -76,9 +76,13 @@ fn translate_format(format: &Value) -> Option<Value> {
     match kind {
         "json_schema" => {
             let schema = obj.get("schema").cloned()?;
+            let name = obj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("response");
             Some(serde_json::json!({
                 "type": "json_schema",
-                "json_schema": {"schema": schema, "strict": true}
+                "json_schema": {"name": name, "schema": schema, "strict": true}
             }))
         }
         "json_object" => Some(serde_json::json!({"type": "json_object"})),
@@ -131,10 +135,39 @@ mod tests {
         let rf = &obj["response_format"];
         assert_eq!(rf["type"], "json_schema");
         assert_eq!(rf["json_schema"]["strict"], true);
+        assert_eq!(
+            rf["json_schema"]["name"], "response",
+            "missing source name must default to \"response\""
+        );
         assert_eq!(rf["json_schema"]["schema"]["type"], "object");
         assert_eq!(
             rf["json_schema"]["schema"]["properties"]["x"]["type"],
             "integer"
+        );
+    }
+
+    #[test]
+    fn json_schema_format_carries_source_name() {
+        // Arrange -- the source format supplies an explicit name.
+        let extras = json!({
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "weather_report",
+                    "schema": {"type": "object", "properties": {"x": {"type": "integer"}}}
+                }
+            }
+        });
+        let req = req_with_extras(Some(extras));
+        let mut obj = Map::new();
+
+        // Act
+        lift("test", &mut obj, &req, false).unwrap();
+
+        // Assert -- the supplied name is carried through verbatim.
+        assert_eq!(
+            obj["response_format"]["json_schema"]["name"],
+            "weather_report"
         );
     }
 

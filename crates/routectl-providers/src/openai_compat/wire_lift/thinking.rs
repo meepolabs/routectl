@@ -145,10 +145,13 @@ fn rewrite_assistant_thinking(msg: &mut Map<String, Value>) {
         return;
     }
 
-    // Replace content with surviving parts (or remove if empty -- the
-    // tool_use lift downstream handles content collapse to string/null).
+    // Replace content with surviving parts. When nothing survives, set
+    // content to null (not an empty array): a bare `content: []` 400s some
+    // strict OpenAI-compat hosts, and the downstream tool_use lift's
+    // content-collapse only normalizes string/array, not the empty-array
+    // edge. Mixed content (surviving non-empty) still emits the array.
     if surviving.is_empty() {
-        msg.insert("content".into(), Value::Array(Vec::new()));
+        msg.insert("content".into(), Value::Null);
     } else {
         msg.insert("content".into(), Value::Array(surviving));
     }
@@ -215,7 +218,7 @@ mod tests {
         assert_eq!(details[0]["text"], "step 1");
         assert_eq!(details[0]["signature"], "sig-a");
         assert_eq!(details[0]["format"], ANTHROPIC_FORMAT);
-        assert_eq!(msg["content"], json!([]));
+        assert_eq!(msg["content"], Value::Null);
     }
 
     /// Mixed assistant content: thinking + text + tool_use. Thinking
@@ -254,7 +257,7 @@ mod tests {
         assert_eq!(details.len(), 1);
         assert_eq!(details[0]["type"], "reasoning.encrypted");
         assert_eq!(details[0]["data"], "opaque-base64");
-        assert_eq!(msg["content"], json!([]));
+        assert_eq!(msg["content"], Value::Null);
     }
 
     /// Both kinds in the same message preserve order via `index`.

@@ -30,11 +30,13 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, Error, Result};
 
+use super::reject_or_drop_unrepresentable;
+
 pub fn lift(
     id: &str,
     obj: &mut Map<String, Value>,
     _req: &ChatRequest,
-    _strict: bool,
+    strict: bool,
 ) -> Result<()> {
     let messages = match obj.remove("messages") {
         Some(Value::Array(arr)) => arr,
@@ -47,13 +49,13 @@ pub fn lift(
 
     let mut rewritten: Vec<Value> = Vec::with_capacity(messages.len());
     for msg in messages {
-        rewrite_message(id, msg, &mut rewritten)?;
+        rewrite_message(id, msg, strict, &mut rewritten)?;
     }
     obj.insert("messages".into(), Value::Array(rewritten));
     Ok(())
 }
 
-fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) -> Result<()> {
+fn rewrite_message(id: &str, msg: Value, strict: bool, out: &mut Vec<Value>) -> Result<()> {
     let role_is_user = msg
         .as_object()
         .and_then(|o| o.get("role"))
@@ -64,23 +66,24 @@ fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) -> Result<()> {
         return Ok(());
     }
     // Only act when content is an array carrying at least one tool_result.
-    let parts_clone = msg
+    // Check on a BORROW first so messages with no tool_result pay no clone.
+    let has_tool_result = msg
         .as_object()
         .and_then(|o| o.get("content"))
         .and_then(|c| c.as_array())
-        .cloned();
-    let parts = match parts_clone {
-        Some(p) => p,
-        None => {
-            out.push(msg);
-            return Ok(());
-        }
-    };
-    let has_tool_result = parts.iter().any(part_is_tool_result);
+        .is_some_and(|parts| parts.iter().any(part_is_tool_result));
     if !has_tool_result {
         out.push(msg);
         return Ok(());
     }
+    // A tool_result is present: take ownership of the parts now.
+    let parts = match msg.as_object().and_then(|o| o.get("content")) {
+        Some(Value::Array(parts)) => parts.clone(),
+        _ => {
+            out.push(msg);
+            return Ok(());
+        }
+    };
 
     // Split the user message into a sequence of (user-text-chunk, tool-msg)
     // entries preserving original order.
@@ -88,7 +91,7 @@ fn rewrite_message(id: &str, msg: Value, out: &mut Vec<Value>) -> Result<()> {
     for part in parts {
         if part_is_tool_result(&part) {
             flush_user_chunk(&msg, &mut pending_user_chunk, out);
-            if let Some(tool_msg) = build_tool_message(id, &part)? {
+            if let Some(tool_msg) = build_tool_message(id, &part, strict)? {
                 out.push(tool_msg);
             }
         } else {
@@ -137,7 +140,7 @@ fn is_text_block(part: &Value) -> bool {
         == Some("text")
 }
 
-fn build_tool_message(id: &str, part: &Value) -> Result<Option<Value>> {
+fn build_tool_message(id: &str, part: &Value, strict: bool) -> Result<Option<Value>> {
     let obj = match part.as_object() {
         Some(o) => o,
         None => return Ok(None),
@@ -152,16 +155,49 @@ fn build_tool_message(id: &str, part: &Value) -> Result<Option<Value>> {
             ));
         }
     };
+    let is_error = obj
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let content = obj
         .get("content")
         .cloned()
         .unwrap_or(Value::String(String::new()));
-    let content = translate_tool_result_content(content);
+    let content = translate_tool_result_content(id, content, strict)?;
+    let content = if is_error {
+        mark_error_content(content)
+    } else {
+        content
+    };
     Ok(Some(serde_json::json!({
         "role": "tool",
         "tool_call_id": tool_use_id,
         "content": content
     })))
+}
+
+/// Prefix a tool_result payload with an `Error:` marker so the upstream
+/// model sees the failure signal that Anthropic carries via the
+/// `is_error` flag (OpenAI tool messages have no such field).
+/// - String content -> `format!("Error: {s}")`.
+/// - Array content -> prepend a leading `{"type":"text","text":"Error: "}`
+///   block so the marker survives multimodal payloads.
+/// - Any other shape -> wrapped as a leading error text block + the value.
+fn mark_error_content(content: Value) -> Value {
+    // At the only call site, `translate_tool_result_content` has already
+    // stringified scalar / object content, so in practice only the String
+    // and Array arms are reachable here; the `other` arm is defensive.
+    match content {
+        Value::String(s) => Value::String(format!("Error: {s}")),
+        Value::Array(mut arr) => {
+            arr.insert(0, serde_json::json!({"type": "text", "text": "Error: "}));
+            Value::Array(arr)
+        }
+        other => Value::Array(vec![
+            serde_json::json!({"type": "text", "text": "Error: "}),
+            other,
+        ]),
+    }
 }
 
 /// Translate a tool_result content payload for OpenAI:
@@ -171,41 +207,68 @@ fn build_tool_message(id: &str, part: &Value) -> Result<Option<Value>> {
 ///   accept only a string.
 /// - Array with an image block -> array, with Anthropic image shapes
 ///   lifted to image_url shape (mirrors the `content` lift, which
-///   doesn't recurse into tool_result).
+///   doesn't recurse into tool_result). Unrepresentable inner blocks
+///   (document, unknown image source) are dropped (lenient) or rejected
+///   (strict) via `reject_or_drop_unrepresentable`.
 /// - Object / scalar -> stringified JSON
-fn translate_tool_result_content(content: Value) -> Value {
+fn translate_tool_result_content(id: &str, content: Value, strict: bool) -> Result<Value> {
     match content {
-        Value::String(_) => content,
+        Value::String(_) => Ok(content),
         Value::Array(arr) => {
             if !arr.is_empty() && arr.iter().all(is_text_block) {
-                let joined = arr
-                    .iter()
-                    .map(|b| b["text"].as_str().unwrap_or(""))
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                return Value::String(joined);
+                let texts = arr.iter().map(|b| b["text"].as_str().unwrap_or(""));
+                let sep = "\n\n";
+                let cap = texts.clone().map(str::len).sum::<usize>()
+                    + sep.len() * arr.len().saturating_sub(1);
+                let mut joined = String::with_capacity(cap);
+                for (i, text) in texts.enumerate() {
+                    if i > 0 {
+                        joined.push_str(sep);
+                    }
+                    joined.push_str(text);
+                }
+                return Ok(Value::String(joined));
             }
-            let lifted: Vec<Value> = arr.into_iter().map(lift_inner_block).collect();
-            Value::Array(lifted)
+            let mut lifted: Vec<Value> = Vec::with_capacity(arr.len());
+            for block in arr {
+                if let Some(out) = lift_inner_block(id, block, strict)? {
+                    lifted.push(out);
+                }
+            }
+            Ok(Value::Array(lifted))
         }
         // Object or scalar: encode as string for OpenAI's wire (which
         // expects string content on tool messages outside of multimodal).
-        other => Value::String(other.to_string()),
+        other => Ok(Value::String(other.to_string())),
     }
 }
 
-fn lift_inner_block(block: Value) -> Value {
+/// Lift one inner tool_result content block to OpenAI wire shape.
+/// Returns `Ok(None)` when the block is dropped (lenient mode) and
+/// `Err` when strict mode rejects an unrepresentable shape. Recognized
+/// base64 / url image blocks lift to `image_url`; all other recognized
+/// blocks pass through with Anthropic-only `cache_control` stripped.
+fn lift_inner_block(id: &str, block: Value, strict: bool) -> Result<Option<Value>> {
     let Some(obj) = block.as_object() else {
-        return block;
+        return Ok(Some(block));
     };
     let Some(t) = obj.get("type").and_then(|v| v.as_str()) else {
-        return block;
+        return Ok(Some(block));
     };
+    if t == "document" {
+        reject_or_drop_unrepresentable(
+            id,
+            strict,
+            "tool_result block",
+            "document content block (no OpenAI equivalent)",
+        )?;
+        return Ok(None);
+    }
     if t != "image" {
-        return block;
+        return Ok(Some(strip_cache_control(block)));
     }
     let Some(source) = obj.get("source").and_then(|v| v.as_object()) else {
-        return block;
+        return Ok(Some(strip_cache_control(block)));
     };
     let url = match source.get("type").and_then(|v| v.as_str()) {
         Some("base64") => {
@@ -218,14 +281,40 @@ fn lift_inner_block(block: Value) -> Value {
         }
         Some("url") => match source.get("url").and_then(|v| v.as_str()) {
             Some(u) => u.to_string(),
-            None => return block,
+            None => {
+                reject_or_drop_unrepresentable(
+                    id,
+                    strict,
+                    "tool_result block",
+                    "image block with url source missing `url`",
+                )?;
+                return Ok(None);
+            }
         },
-        _ => return block,
+        _ => {
+            reject_or_drop_unrepresentable(
+                id,
+                strict,
+                "tool_result block",
+                "image block with unsupported source shape (expected base64 or url)",
+            )?;
+            return Ok(None);
+        }
     };
-    serde_json::json!({
+    Ok(Some(serde_json::json!({
         "type": "image_url",
         "image_url": {"url": url}
-    })
+    })))
+}
+
+/// Strip the Anthropic-only `cache_control` field from a content block,
+/// mirroring the top-level strip in `content.rs`. Non-object blocks pass
+/// through unchanged.
+fn strip_cache_control(mut block: Value) -> Value {
+    if let Some(obj) = block.as_object_mut() {
+        obj.remove("cache_control");
+    }
+    block
 }
 
 #[cfg(test)]
@@ -508,5 +597,252 @@ mod tests {
 
         // Assert
         assert!(obj.get("messages").is_none());
+    }
+
+    /// Strict variant of `run_result` for the strict-mode error paths.
+    fn run_result_strict(messages: Value) -> routectl_core::Result<Map<String, Value>> {
+        let req = empty_req();
+        let mut obj = Map::new();
+        obj.insert("messages".into(), messages);
+        lift("test", &mut obj, &req, true)?;
+        Ok(obj)
+    }
+
+    /// cache_control on an inner tool_result block (kept in array
+    /// form by a sibling image) must be stripped from the wire, mirroring
+    /// the top-level content strip.
+    #[test]
+    fn inner_block_cache_control_is_stripped() {
+        // Arrange -- a text block carrying cache_control plus an image so
+        // the array form survives (text-only collapses to a string).
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let content = obj["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert!(
+            content[0].get("cache_control").is_none(),
+            "cache_control must be stripped from the inner block"
+        );
+    }
+
+    /// An inner image block with an unrecognized source shape is
+    /// dropped in lenient mode -- the raw Anthropic image must not reach
+    /// the wire.
+    #[test]
+    fn inner_image_unknown_source_dropped_lenient() {
+        // Arrange -- image with an unsupported source type, plus a real
+        // image so the array form is preserved.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {"type": "weird_unknown_source"}},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert -- only the recognized image survives, lifted to image_url.
+        let content = obj["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "unknown-source image must be dropped");
+        assert_eq!(content[0]["type"], "image_url");
+    }
+
+    /// The url-source-missing-url image is dropped in lenient mode.
+    #[test]
+    fn inner_image_url_missing_url_dropped_lenient() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {"type": "url"}},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let content = obj["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "url-missing-url image must be dropped");
+        assert_eq!(content[0]["type"], "image_url");
+    }
+
+    /// Strict mode rejects the unrepresentable inner image.
+    #[test]
+    fn inner_image_unknown_source_strict_errors() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {"type": "weird_unknown_source"}},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let res = run_result_strict(messages);
+
+        // Assert
+        assert!(
+            res.is_err(),
+            "strict mode must reject unknown inner image source"
+        );
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("strict_translation"));
+    }
+
+    /// A nested document block inside a tool_result is dropped
+    /// in lenient mode -- it must not reach the wire.
+    #[test]
+    fn inner_document_block_dropped_lenient() {
+        // Arrange -- document block plus an image so the array survives.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "document", "source": {
+                        "type": "base64", "media_type": "application/pdf", "data": "AA=="
+                    }},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert -- document gone, image lifted.
+        let content = obj["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "document block must be dropped");
+        assert_eq!(content[0]["type"], "image_url");
+    }
+
+    /// Strict mode rejects a nested document block.
+    #[test]
+    fn inner_document_block_strict_errors() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "document", "source": {
+                        "type": "base64", "media_type": "application/pdf", "data": "AA=="
+                    }},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                ]}
+            ]}
+        ]);
+
+        // Act
+        let res = run_result_strict(messages);
+
+        // Assert
+        assert!(res.is_err(), "strict mode must reject inner document block");
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("strict_translation"));
+        assert!(msg.contains("document"));
+    }
+
+    /// is_error with string content prefixes "Error: ".
+    #[test]
+    fn is_error_string_content_prefixed() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": true,
+                 "content": "boom"}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        let content = obj["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("Error: "),
+            "is_error string content must start with 'Error: ', got: {content}"
+        );
+        assert_eq!(content, "Error: boom");
+    }
+
+    /// is_error with array content prepends a leading error
+    /// text block.
+    #[test]
+    fn is_error_array_content_prepends_error_block() {
+        // Arrange -- array kept in array form via an image block.
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": true,
+                 "content": [
+                    {"type": "text", "text": "details"},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "ZZ=="
+                    }}
+                 ]}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert -- first block is the injected error text marker, and the
+        // original blocks (details text + lifted image) survive in order.
+        let content = obj["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(
+            content.len(),
+            3,
+            "error marker is prepended ahead of the two original blocks"
+        );
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Error: ");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "details");
+        assert_eq!(content[2]["type"], "image_url");
+        assert_eq!(content[2]["image_url"]["url"], "data:image/png;base64,ZZ==");
+    }
+
+    /// Absence of is_error leaves content unchanged.
+    #[test]
+    fn no_is_error_leaves_content_unchanged() {
+        // Arrange
+        let messages = json!([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+            ]}
+        ]);
+
+        // Act
+        let obj = run(messages);
+
+        // Assert
+        assert_eq!(obj["messages"][0]["content"], json!("ok"));
     }
 }
