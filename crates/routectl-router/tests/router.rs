@@ -1153,15 +1153,21 @@ async fn client_errors_do_not_charge_the_circuit_breaker() {
     );
 }
 
-/// H3 fix: a stream that emits one chunk and then errors should NOT
-/// mark the provider healthy. The breaker counter should reflect the
-/// failure recorded on the in-stream error.
+/// A stream that emits one chunk and then errors mid-stream still
+/// CHARGES the breaker: under the first-chunk-close contract the
+/// delivered first chunk closes the breaker, but the mid-stream error
+/// is then recorded and re-trips it per the configured threshold. With
+/// `circuit_failures = 1` a single first-chunk-then-error stream trips
+/// p1's breaker, quarantining it so the next request falls through to
+/// p2. (Higher thresholds tolerate more first-chunk-then-error flaps
+/// before tripping -- the documented fast-flap tradeoff of closing on
+/// the first chunk.)
 #[tokio::test]
 async fn stream_mid_failure_charges_the_breaker() {
     use futures::StreamExt;
     // Provider whose stream emits one chunk then errors mid-stream on
-    // every call. Three calls in a row -> breaker should trip after 2
-    // failures (per circuit_failures = 2).
+    // every call. circuit_failures = 1 -> a single mid-stream error
+    // (after the first-chunk close) re-trips the breaker.
     let p1 = MockProvider::new(
         "p1",
         vec![
@@ -1177,7 +1183,7 @@ async fn stream_mid_failure_charges_the_breaker() {
     let mut runtime = BTreeMap::new();
     runtime.insert("p1".into(), {
         let mut rt = ProviderRuntimePolicy::default();
-        rt.circuit_failures = Some(2);
+        rt.circuit_failures = Some(1);
         rt.circuit_cooldown_ms = Some(60_000);
         rt
     });
@@ -1195,8 +1201,10 @@ async fn stream_mid_failure_charges_the_breaker() {
         runtime,
     );
 
-    // First request: starts streaming from p1, gets one chunk, errors.
-    // Drain the stream so the wrapper records the failure.
+    // First request: starts streaming from p1, gets one chunk (closes
+    // the breaker), then errors mid-stream. The mid-stream error is
+    // charged and re-trips the breaker (threshold 1). Drain the stream
+    // so the wrapper records the failure.
     let mut s = r.stream(req("fast")).await.expect("stream open");
     let mut count = 0;
     while s.next().await.is_some() {
@@ -1205,12 +1213,7 @@ async fn stream_mid_failure_charges_the_breaker() {
     drop(s);
     assert!(count >= 2, "expected at least one chunk + one error");
 
-    // Second request: same outcome, breaker hits threshold (2).
-    let mut s = r.stream(req("fast")).await.expect("stream open");
-    while s.next().await.is_some() {}
-    drop(s);
-
-    // Third request: p1's circuit is now open. The router should
+    // Second request: p1's circuit is now open. The router should
     // gate-block p1 and fall through to p2 without ever calling p1.
     let calls_before = p1.calls();
     let mut s = r.stream(req("fast")).await.expect("stream open");
@@ -1225,6 +1228,91 @@ async fn stream_mid_failure_charges_the_breaker() {
         p1.calls(),
         calls_before,
         "p1 must be skipped while breaker is open"
+    );
+}
+
+/// On a HEALTHY (closed) breaker, mid-stream failures must
+/// accumulate toward `circuit_failures` across multiple streams. The
+/// first chunk of a healthy-state stream must NOT reset the failure
+/// counter -- only a half-open probe's first chunk releases the slot and
+/// closes the breaker. With `circuit_failures = 3`, three consecutive
+/// first-chunk-then-mid-error streams must TRIP p1's breaker, so the
+/// fourth request is gate-blocked and falls through to p2.
+///
+/// RED before the gating fix: the call-site `record_success` fired
+/// UNCONDITIONALLY on every first chunk, zeroing `consecutive_failures`
+/// before each mid-stream `record_failure` could accumulate. The counter
+/// never reached 3, the breaker never tripped, and p1 kept being dialed.
+#[tokio::test]
+async fn healthy_stream_mid_failures_accumulate_to_trip_the_breaker() {
+    use futures::StreamExt;
+    // p1 errors mid-stream (after one chunk) on every call. p2 answers
+    // cleanly. circuit_failures = 3 -> three mid-stream errors trip p1.
+    let p1 = MockProvider::new(
+        "p1",
+        vec![
+            Behavior::StreamMidErrors,
+            Behavior::StreamMidErrors,
+            Behavior::StreamMidErrors,
+            Behavior::StreamMidErrors,
+        ],
+    );
+    let p2 = MockProvider::new("p2", vec![Behavior::Ok, Behavior::Ok, Behavior::Ok]);
+    let mut aliases = BTreeMap::new();
+    let (k, v) = chain_alias("fast", &["m1", "m2"]);
+    aliases.insert(k, v);
+    let mut runtime = BTreeMap::new();
+    runtime.insert("p1".into(), {
+        let mut rt = ProviderRuntimePolicy::default();
+        rt.circuit_failures = Some(3);
+        rt.circuit_cooldown_ms = Some(60_000);
+        rt
+    });
+    let r = build_router_v6_full(
+        aliases,
+        vec![
+            ("m1".into(), "p1".into(), "m".into()),
+            ("m2".into(), "p2".into(), "m".into()),
+        ],
+        vec![
+            ("p1".into(), p1.clone() as Arc<dyn Provider>),
+            ("p2".into(), p2.clone() as Arc<dyn Provider>),
+        ],
+        default_test_retry(),
+        runtime,
+    );
+
+    // Drive three first-chunk-then-mid-error streams from p1. Drain each
+    // so the wrap records the mid-stream failure. The breaker starts
+    // CLOSED, so these are healthy-state streams: the first chunk must
+    // NOT reset the counter; each mid-stream error accumulates 1 -> 2 ->
+    // 3 and the third trips the breaker.
+    for i in 0..3 {
+        let mut s = r.stream(req("fast")).await.expect("stream open");
+        while s.next().await.is_some() {}
+        drop(s);
+        assert!(
+            p1.calls() > i,
+            "p1 must be dialed for healthy-state stream {i}"
+        );
+    }
+    let p1_after_trip = p1.calls();
+
+    // Fourth request: p1's breaker must now be OPEN. The router
+    // gate-blocks p1 and falls through to p2 without dialing p1 again.
+    let mut s = r.stream(req("fast")).await.expect("stream open");
+    let mut got_chunk = false;
+    while let Some(item) = s.next().await {
+        if item.is_ok() {
+            got_chunk = true;
+        }
+    }
+    assert!(got_chunk, "p2 answers once p1's breaker has tripped");
+    assert_eq!(
+        p1.calls(),
+        p1_after_trip,
+        "p1 must be quarantined after 3 accumulated mid-stream failures; \
+         the first chunk of a healthy-state stream must not reset the counter",
     );
 }
 

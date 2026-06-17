@@ -270,13 +270,14 @@ struct DispatchTarget {
     effort_levels: std::sync::Arc<[String]>,
     /// Model nickname for tracing.
     nickname: Option<String>,
-    /// Per-model `header_extras`. Merged with the provider's
-    /// `header_extras` at dispatch (model wins on key collision;
-    /// list-valued post-pass for `anthropic-beta`).
-    model_header_extras: BTreeMap<String, String>,
-    /// Per-model `payload_extras`. Deep-merged with the provider's
-    /// `payload_extras` (model wins on leaf collision).
-    model_payload_extras: Option<Value>,
+    /// The shared resolved model this target dispatches to. Carried as
+    /// `Arc<ResolvedModel>` so the per-request dispatch hop is a
+    /// refcount bump rather than a deep clone of the model's
+    /// `header_extras` (a `BTreeMap`) + `payload_extras` (a JSON
+    /// `Value`). `apply_layered_overlays` reads `model.header_extras` /
+    /// `model.payload_extras` by shared ref into a fresh merged map and
+    /// never mutates them, so sharing the Arc across requests is safe.
+    model: Arc<ResolvedModel>,
     /// Per-model openai-compat reasoning dialect. `None` falls back
     /// to the egress's own default.
     reasoning_dialect: Option<ReasoningDialect>,
@@ -644,7 +645,7 @@ impl Router {
         let mut out: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
         for m in chain {
             match m.seats.as_ref() {
-                None => out.push(into_one_dispatch_target(m.clone())),
+                None => out.push(into_one_dispatch_target(m)),
                 Some(seats) => self.push_seat_targets(&m, seats, &mut out),
             }
         }
@@ -870,7 +871,14 @@ impl Router {
                         error = ?gate_err,
                         "gate blocked",
                     );
-                    last_err = Some(gate_err);
+                    // Keep the FIRST real error: a synthetic gate error
+                    // (status 0 "circuit breaker open" / RPM) on a later
+                    // chain entry must not overwrite an earlier entry's
+                    // genuine upstream failure, or the client sees the
+                    // synthetic error instead of the real 503/timeout.
+                    if last_err.is_none() {
+                        last_err = Some(gate_err);
+                    }
                     if opts.disable_fallbacks {
                         break 'chain;
                     }
@@ -1338,12 +1346,26 @@ impl Router {
                         error = ?gate_err,
                         "stream gate blocked",
                     );
-                    last_err = Some(gate_err);
+                    // Keep the FIRST real error: a synthetic gate error
+                    // (status 0 "circuit breaker open" / RPM) on a later
+                    // chain entry must not overwrite an earlier entry's
+                    // genuine upstream failure, or the client sees the
+                    // synthetic error instead of the real 503/timeout.
+                    if last_err.is_none() {
+                        last_err = Some(gate_err);
+                    }
                     if opts.disable_fallbacks {
                         break 'chain;
                     }
                     continue 'chain;
                 }
+
+                // Gate granted Allow. Capture NOW whether this dispatch
+                // claimed the half-open probe slot: only a probe's first
+                // chunk should close + release the breaker at the Ok arm
+                // below. Reading the flag at first-chunk time instead
+                // would race a concurrent dispatch.
+                let was_half_open_probe = self.is_half_open_probe(state_key);
 
                 let r = try_stream_with_first_chunk(
                     provider_name,
@@ -1356,15 +1378,37 @@ impl Router {
                 meta.attempt_count += 1;
                 match r {
                     Ok(stream) => {
+                        // A half-open PROBE that produced a first chunk has
+                        // proven the upstream live -- close the breaker NOW
+                        // (release the single probe slot) rather than
+                        // holding it for the whole stream duration, which
+                        // would lock out all concurrent requests to this
+                        // model until the stream ends. Gate this on
+                        // `was_half_open_probe`: for a HEALTHY (closed)
+                        // breaker the first chunk must NOT reset the failure
+                        // counter, or mid-stream errors could never
+                        // accumulate toward the threshold (each stream's
+                        // first-chunk reset would zero the count).
+                        //
+                        // Closing here clears the half-open flag, so a
+                        // mid-stream failure recorded by the wrap below is
+                        // counted as a normal failure accumulating toward
+                        // `circuit_failures` -- a probe that delivered one
+                        // chunk then errors does NOT get a special immediate
+                        // re-trip. With circuit_failures = 1 a single
+                        // post-close mid-stream error re-quarantines at once
+                        // (fast-flap); with >= 2 a still-degraded upstream
+                        // may serve up to that many first-chunk-then-error
+                        // streams before re-opening -- the throughput-vs-
+                        // quarantine tradeoff of closing on the first chunk
+                        // (see runtime_state.rs).
                         let state = self.state.get(state_key).cloned();
-                        let cancel_is_failure = state
-                            .as_ref()
-                            .is_some_and(|st| st.lock().half_open_probe_in_flight());
-                        return Ok(wrap_with_breaker_accounting(
-                            stream,
-                            state,
-                            cancel_is_failure,
-                        ));
+                        if was_half_open_probe {
+                            if let Some(st) = state.as_ref() {
+                                st.lock().record_success();
+                            }
+                        }
+                        return Ok(wrap_with_breaker_accounting(stream, state));
                     }
                     Err(e) => {
                         // Auth-401 single-flight refresh + retry once
@@ -1562,6 +1606,19 @@ impl Router {
         }
     }
 
+    /// True when this model's breaker currently holds a half-open probe
+    /// slot in flight. Read immediately after the gate grants a dispatch
+    /// to capture whether THIS dispatch was admitted as the half-open
+    /// probe; the captured value is then carried to the first-chunk Ok
+    /// arm (reading the flag there instead would race a concurrent
+    /// dispatch that claimed or released the slot in between). A no-op
+    /// `false` when the breaker is closed or the model has no state slot.
+    fn is_half_open_probe(&self, state_key: &str) -> bool {
+        self.state
+            .get(state_key)
+            .is_some_and(|state| state.lock().half_open_probe_in_flight())
+    }
+
     /// Resolve the retry policy for the wire `model` field. v0.6.0
     /// removed per-alias retry overrides; the only retry policy is
     /// the top-level `[retry]` table. Pre-v0.6.0 each `[aliases.X]`
@@ -1636,13 +1693,13 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     merge_header_extras(
         &target.provider_name,
         provider_headers,
-        &target.model_header_extras,
+        &target.model.header_extras,
         req,
     );
     merge_payload_extras(
         &target.provider_name,
         provider_payload,
-        target.model_payload_extras.as_ref(),
+        target.model.payload_extras.as_ref(),
         req,
     );
 
@@ -1687,7 +1744,7 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // `req.anthropic_beta` itself stays the full union (composed by
     // `merge_header_extras`) so Bedrock's `filter_bedrock_betas` and the
     // log-safe summary still see the complete set.
-    internal.operator_betas = operator_betas(provider_headers, &target.model_header_extras);
+    internal.operator_betas = operator_betas(provider_headers, &target.model.header_extras);
     req.routectl_internal = internal;
 }
 
@@ -1992,13 +2049,12 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
         nickname: Some(m.nickname.clone()),
-        model_header_extras: m.header_extras.clone(),
-        model_payload_extras: m.payload_extras.clone(),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
         max_thinking_budget: m.max_thinking_budget,
         max_output_tokens: m.max_output_tokens,
+        model: m,
     }
 }
 
@@ -2020,13 +2076,12 @@ fn dispatch_target_for_seat(
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
         nickname: Some(m.nickname.clone()),
-        model_header_extras: m.header_extras.clone(),
-        model_payload_extras: m.payload_extras.clone(),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
         stream_first_byte_timeout_ms: m.stream_first_byte_timeout_ms,
         max_thinking_budget: m.max_thinking_budget,
         max_output_tokens: m.max_output_tokens,
+        model: m.clone(),
     }
 }
 
@@ -2063,29 +2118,28 @@ async fn run_with_timeout(
 /// completion (None / EOS) and records ONE failure on the first error
 /// that bubbles out of the stream. Subsequent errors do not double-count.
 ///
-/// Consumer cancellation after the first upstream chunk is treated as a
-/// success for steady-state traffic, but still counts as a failure for a
-/// half-open probe because the breaker has not observed a full recovery yet.
+/// For a half-open PROBE the call site already closed the breaker on the
+/// first chunk, so a mid-stream failure here re-trips it and a
+/// clean completion / consumer cancellation is a benign re-zeroing of the
+/// just-closed breaker. For a HEALTHY (closed) breaker the call site did
+/// NOT touch the breaker, so this wrap is where mid-stream failures
+/// accumulate toward the threshold (and a clean completion resets the
+/// counter). Consumer cancellation before any error is treated as success
+/// in both cases.
 fn wrap_with_breaker_accounting(
     inner: BoxStream<'static, Result<ChatChunk>>,
     state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
-    cancel_is_failure: bool,
 ) -> BoxStream<'static, Result<ChatChunk>> {
     use futures::stream::StreamExt as _;
     struct BreakerAccounting {
         state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
-        cancel_is_failure: bool,
         settled: bool,
     }
 
     impl BreakerAccounting {
-        fn new(
-            state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
-            cancel_is_failure: bool,
-        ) -> Self {
+        fn new(state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>) -> Self {
             Self {
                 state,
-                cancel_is_failure,
                 settled: false,
             }
         }
@@ -2116,17 +2170,18 @@ fn wrap_with_breaker_accounting(
 
     impl Drop for BreakerAccounting {
         fn drop(&mut self) {
+            // Clean completion OR consumer cancellation before any error:
+            // both record success. For a probe stream the breaker is
+            // already closed (call-site first-chunk close), so this is a
+            // no-op re-zeroing; for a healthy-breaker stream this resets
+            // any accumulated failure count on a fully-consumed success.
             if !self.settled {
-                if self.cancel_is_failure {
-                    self.record_failure();
-                } else {
-                    self.record_success();
-                }
+                self.record_success();
             }
         }
     }
 
-    let mut accounting = BreakerAccounting::new(state, cancel_is_failure);
+    let mut accounting = BreakerAccounting::new(state);
     let s = async_stream::stream! {
         let mut inner = inner;
         while let Some(item) = inner.next().await {
@@ -2723,6 +2778,38 @@ mod merge_header_extras_tests {
     //! Unit tests for the v0.6.0 `merge_header_extras` helper.
     use super::*;
 
+    /// Minimal provider stub so the `apply_layered_overlays` fixture can
+    /// build a real `Arc<ResolvedModel>` (which requires an
+    /// `Arc<dyn Provider>`). None of its methods are called by
+    /// `apply_layered_overlays`, which reads only the model's config
+    /// overlays.
+    struct StubProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for StubProvider {
+        fn id(&self) -> &str {
+            "stub"
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response("stub", "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            unreachable!()
+        }
+        async fn stream(
+            &self,
+            _: ChatRequest,
+        ) -> Result<futures::stream::BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!()
+        }
+    }
+
     fn req_with_betas(betas: Vec<&str>) -> ChatRequest {
         ChatRequest {
             model: "any".into(),
@@ -2926,23 +3013,11 @@ mod merge_header_extras_tests {
                 .with_header_extras(map(&[("anthropic-beta", "prov-beta")])),
         );
 
-        let target = DispatchTarget {
-            provider_name: "test-prov".into(),
-            provider_kind: Some("anthropic-api"),
-            state_key: "nick".into(),
-            upstream: "claude-x".into(),
-            provider: None,
-            supports_adaptive_thinking: false,
-            effort_levels: std::sync::Arc::from(Vec::<String>::new()),
-            nickname: Some("nick".into()),
-            model_header_extras: map(&[("anthropic-beta", "model-beta")]),
-            model_payload_extras: None,
-            reasoning_dialect: None,
-            history_reasoning: None,
-            stream_first_byte_timeout_ms: None,
-            max_thinking_budget: 0,
-            max_output_tokens: 0,
-        };
+        let model: Arc<ResolvedModel> = Arc::new(
+            ResolvedModel::new("nick", "test-prov", Arc::new(StubProvider), "claude-x")
+                .with_header_extras(map(&[("anthropic-beta", "model-beta")])),
+        );
+        let target = into_one_dispatch_target(model);
 
         let mut req = req_with_betas(vec!["client-beta"]);
         apply_layered_overlays(&config, &target, &mut req);
@@ -3814,6 +3889,179 @@ mod resolved_models_tests {
             Err(other) => panic!("expected Error::Config from depth cap, got {other:?}"),
             Ok(_) => panic!("expected Error::Config from depth cap, got Ok(...)"),
         }
+    }
+}
+
+#[cfg(test)]
+mod gate_error_does_not_mask_real_error_tests {
+    //! When the LAST chain entry is gate-refused (breaker open /
+    //! RPM) but an EARLIER entry produced a real upstream error, the
+    //! client must see the real error, not the synthetic "circuit
+    //! breaker open" gate error. The fix keeps the first real error in
+    //! `last_err` instead of overwriting it with the gate error.
+    use super::*;
+    use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy, RetryPolicy};
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
+    use std::collections::BTreeMap;
+
+    /// Provider that fails both complete + stream-open with a real,
+    /// fallbackable 503 carrying a distinctive message.
+    struct Real503Provider {
+        id: String,
+    }
+
+    #[async_trait]
+    impl Provider for Real503Provider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            Err(Error::upstream(&self.id, 503, "real upstream down"))
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            Err(Error::upstream(&self.id, 503, "real upstream down"))
+        }
+    }
+
+    /// Provider for the second chain entry. Its breaker is force-opened
+    /// before dispatch, so its body is never reached -- the gate refuses
+    /// first.
+    struct UnreachedProvider {
+        id: String,
+    }
+
+    #[async_trait]
+    impl Provider for UnreachedProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            unreachable!("gate must refuse entry2 before its body runs")
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            unreachable!("gate must refuse entry2 before its body runs")
+        }
+    }
+
+    /// Build a router with a two-entry chain `flow = [entry1, entry2]`.
+    /// entry1 fails 503; entry2 has a breaker and is force-opened so its
+    /// gate refuses. Global retry is capped at one attempt so entry1
+    /// fails fast without burning backoff sleeps.
+    fn router_with_two_entry_chain() -> Router {
+        let mut config = Config {
+            retry: RetryPolicy {
+                max_attempts: 1,
+                ..RetryPolicy::default()
+            },
+            ..Config::default()
+        };
+        config.aliases.insert(
+            "flow".into(),
+            AliasValue::Chain(vec!["entry1".into(), "entry2".into()]),
+        );
+        config.providers.insert(
+            "p2".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                user_agent: None,
+                runtime: ProviderRuntimePolicy {
+                    circuit_failures: Some(1),
+                    circuit_cooldown_ms: Some(60_000),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let mut router = Router::new(Arc::new(config));
+        let p1: Arc<dyn Provider> = Arc::new(Real503Provider { id: "p1".into() });
+        let p2: Arc<dyn Provider> = Arc::new(UnreachedProvider { id: "p2".into() });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "entry1".into(),
+            Arc::new(ResolvedModel::new("entry1", "p1", p1, "u1")),
+        );
+        models.insert(
+            "entry2".into(),
+            Arc::new(ResolvedModel::new("entry2", "p2", p2, "u2")),
+        );
+        router.install_resolved_models(models);
+        // Force entry2's breaker open so its gate refuses on dispatch.
+        assert!(
+            router.force_open_breaker("entry2", std::time::Duration::from_secs(3600)),
+            "entry2 breaker must be force-open-able",
+        );
+        router
+    }
+
+    #[tokio::test]
+    async fn complete_surfaces_real_error_not_gate_error() {
+        let router = router_with_two_entry_chain();
+        let req = ChatRequest {
+            model: "flow".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let err = router
+            .complete(req)
+            .await
+            .expect_err("both entries unavailable -> Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("real upstream down"),
+            "must surface entry1's real 503, got: {msg}"
+        );
+        assert!(
+            !msg.contains("circuit breaker open"),
+            "must NOT surface entry2's synthetic gate error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_surfaces_real_error_not_gate_error() {
+        let router = router_with_two_entry_chain();
+        let req = ChatRequest {
+            model: "flow".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let err = router
+            .stream(req)
+            .await
+            .err()
+            .expect("both entries unavailable -> Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("real upstream down"),
+            "stream must surface entry1's real 503, got: {msg}"
+        );
+        assert!(
+            !msg.contains("circuit breaker open"),
+            "stream must NOT surface entry2's synthetic gate error, got: {msg}"
+        );
     }
 }
 
@@ -4995,6 +5243,171 @@ mod circuit_breaker_slot_release_tests {
             2,
             "second probe must also reach the upstream; a leaked half-open \
              slot would have locked the breaker (CircuitOpen) and skipped it",
+        );
+    }
+
+    /// Streaming provider whose first chunk always arrives, after which
+    /// the stream either completes cleanly (`mid_stream_error = false`)
+    /// or yields one error frame (`mid_stream_error = true`). Lets the
+    /// first-chunk-close tests separate the call-site close (on the
+    /// first chunk) from the wrap's mid-stream accounting.
+    struct FirstChunkProvider {
+        id: String,
+        mid_stream_error: bool,
+        stream_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for FirstChunkProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
+            Ok(None)
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            unreachable!("not exercised by these tests")
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            let id = self.id.clone();
+            let first = ChatChunk {
+                id: "c0".into(),
+                ..Default::default()
+            };
+            if self.mid_stream_error {
+                let err = Error::upstream(&id, 503, "mid-stream boom");
+                let s = futures::stream::iter(vec![Ok(first), Err(err)]);
+                Ok(s.boxed())
+            } else {
+                let second = ChatChunk {
+                    id: "c1".into(),
+                    ..Default::default()
+                };
+                let s = futures::stream::iter(vec![Ok(first), Ok(second)]);
+                Ok(s.boxed())
+            }
+        }
+    }
+
+    fn build_first_chunk_router(mid_stream_error: bool) -> (Router, Arc<AtomicUsize>) {
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn Provider> = Arc::new(FirstChunkProvider {
+            id: "p".into(),
+            mid_stream_error,
+            stream_calls: stream_calls.clone(),
+        });
+        // Threshold 1 with a long baseline cooldown: an OPEN breaker
+        // reads CircuitOpen (so the re-trip / stays-closed assertions are
+        // observable), while `force_open_breaker(.., ZERO)` still makes
+        // the next dispatch the half-open probe. A re-trip via
+        // record_failure restores the long baseline cooldown.
+        let router = build_router_with_breaker(provider, RetryPolicy::default(), 1, 60_000);
+        (router, stream_calls)
+    }
+
+    /// Put the model's breaker into the half-open state for the next
+    /// dispatch: open it with a zero-length park so the cooldown is
+    /// already elapsed and `try_dispatch` claims the single probe slot.
+    fn arm_half_open(router: &Router) {
+        assert!(
+            router.force_open_breaker("m", Duration::ZERO),
+            "model breaker slot must exist",
+        );
+    }
+
+    /// A half-open probe stream that succeeds on its first
+    /// chunk closes the breaker BEFORE the stream is fully consumed.
+    /// Before the fix the probe slot was held for the entire stream
+    /// duration, locking out concurrent requests.
+    #[tokio::test]
+    async fn first_chunk_success_closes_breaker_before_stream_consumed() {
+        let (router, _calls) = build_first_chunk_router(false);
+        arm_half_open(&router);
+
+        let stream = router
+            .stream(plain_req())
+            .await
+            .expect("first-chunk arrives -> Ok stream");
+
+        // The returned stream is UNPOLLED here (not yet consumed). With
+        // the first-chunk-close fix the breaker is already closed: the
+        // half-open slot is released and the circuit is no longer open.
+        assert!(
+            !slot_in_flight(&router),
+            "half-open probe slot must be released on first-chunk success, \
+             not held for the whole stream",
+        );
+        // A closed breaker grants the next dispatch immediately.
+        assert!(
+            !breaker_open_at(&router, Instant::now()),
+            "breaker must read CLOSED after first-chunk probe success",
+        );
+
+        drop(stream);
+    }
+
+    /// After the first-chunk close, N=threshold mid-stream
+    /// error frames re-trip the breaker (the wrap still records the
+    /// mid-stream failure via record_failure).
+    #[tokio::test]
+    async fn mid_stream_error_after_first_chunk_close_retrips_breaker() {
+        let (router, _calls) = build_first_chunk_router(true);
+        arm_half_open(&router);
+
+        let stream = router
+            .stream(plain_req())
+            .await
+            .expect("first-chunk arrives -> Ok stream");
+
+        // Drain the stream: first chunk Ok (already closed the breaker),
+        // then one error frame (threshold = 1) re-trips it.
+        use futures::stream::StreamExt as _;
+        let items: Vec<_> = stream.collect().await;
+        assert_eq!(items.len(), 2, "first chunk + one error frame");
+        assert!(items[0].is_ok(), "first frame is the success chunk");
+        assert!(items[1].is_err(), "second frame is the mid-stream error");
+
+        // The mid-stream error re-tripped the breaker (baseline cooldown
+        // restored): the next dispatch is refused.
+        assert!(
+            breaker_open_at(&router, Instant::now()),
+            "a mid-stream error after first-chunk close must re-trip the breaker",
+        );
+    }
+
+    /// Consumer cancellation (dropping the stream) AFTER a
+    /// first-chunk probe success must NOT re-trip the breaker. Proves the
+    /// `cancel_is_failure` removal is safe: the breaker was already
+    /// closed at the call site, so a cancel is irrelevant to the probe.
+    #[tokio::test]
+    async fn cancel_after_first_chunk_success_does_not_retrip_breaker() {
+        let (router, _calls) = build_first_chunk_router(false);
+        arm_half_open(&router);
+
+        let stream = router
+            .stream(plain_req())
+            .await
+            .expect("first-chunk arrives -> Ok stream");
+
+        // Cancel by dropping the unconsumed stream.
+        drop(stream);
+
+        // The breaker stays CLOSED: the first-chunk success already
+        // closed it, and the drop's benign record_success cannot reopen.
+        assert!(
+            !slot_in_flight(&router),
+            "cancel after first-chunk success must leave the slot released",
+        );
+        assert!(
+            !breaker_open_at(&router, Instant::now()),
+            "cancel after first-chunk success must NOT re-trip the breaker",
         );
     }
 

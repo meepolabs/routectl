@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Server bind config.
     #[serde(default)]
@@ -655,6 +656,7 @@ pub struct BedrockGlobalConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Bind host. Defaults to localhost. Refuses non-loopback unless
     /// `--unsafe-public` is passed on the CLI.
@@ -722,6 +724,7 @@ impl Default for ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ServerAuth {
     /// Allowed tokens, stored as SecretRef URIs. Empty list means
     /// "no auth required" (loopback dev default).
@@ -2716,6 +2719,59 @@ max_output_token = 32000
             msg.contains("max_output_token") || msg.contains("unknown field"),
             "expected unknown-field error; got: {msg}"
         );
+    }
+
+    #[test]
+    fn server_rejects_auths_typo_for_auth_block() {
+        // `[server.auths]` (typo for `[server.auth]`) must be rejected.
+        // Without deny_unknown_fields it parsed fine and left auth
+        // disabled -- a silent auth-disable footgun.
+        use crate::config::Config;
+        let toml_text = r#"
+[server]
+host = "127.0.0.1"
+
+[server.auths]
+tokens = ["literal:abc"]
+"#;
+        let err = toml::from_str::<Config>(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("auths") || msg.contains("unknown field"),
+            "expected unknown-field error naming `auths`; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn server_auth_rejects_token_typo_for_tokens() {
+        // `token` (singular, typo for `tokens`) under `[server.auth]`
+        // must be rejected so a misspelled key cannot silently leave
+        // the listener unauthenticated.
+        use crate::config::Config;
+        let toml_text = r#"
+[server.auth]
+token = ["literal:abc"]
+"#;
+        let err = toml::from_str::<Config>(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("token") || msg.contains("unknown field"),
+            "expected unknown-field error naming the unknown key; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn server_auth_tokens_round_trips() {
+        // A valid `[server.auth]` with the correct `tokens` key still
+        // deserializes after deny_unknown_fields is added.
+        use crate::config::Config;
+        let toml_text = r#"
+[server.auth]
+tokens = ["literal:abc", "env://TOK"]
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("valid auth block parses");
+        let auth = cfg.server.auth.expect("auth present");
+        assert_eq!(auth.tokens, vec!["literal:abc", "env://TOK"]);
     }
 }
 

@@ -999,10 +999,24 @@ pub async fn build_resolved_models(
             resolved = resolved.with_payload_extras(extras.clone());
         }
         if let Some(ms) = entry.stream_first_byte_timeout_ms {
-            resolved = resolved.with_stream_first_byte_timeout_ms(ms);
+            if ms == 0 {
+                tracing::warn!(
+                    model = %nickname,
+                    "[models.{nickname}] stream_first_byte_timeout_ms = 0 would abandon every stream before the first chunk; ignoring the override"
+                );
+            } else {
+                resolved = resolved.with_stream_first_byte_timeout_ms(ms);
+            }
         }
         if let Some(tokens) = entry.max_output_tokens {
-            resolved = resolved.with_max_output_tokens(tokens);
+            if tokens == 0 {
+                tracing::warn!(
+                    model = %nickname,
+                    "[models.{nickname}] max_output_tokens = 0 would 400 every anthropic-shape request; ignoring the override"
+                );
+            } else {
+                resolved = resolved.with_max_output_tokens(tokens);
+            }
         }
         if let Some(uri) = primary_api_key_uri(provider_entry) {
             if let Ok(sr) = SecretRef::parse(uri) {
@@ -1103,6 +1117,25 @@ fn warn_context_management_needs_preserve(
 /// otherwise leak SigV4-signed requests + API keys to a service
 /// that exposes IAM credentials. Defense-in-depth: routectl is a
 /// gateway, not a privileged client of the metadata service.
+/// Extract the embedded IPv4 of an IPv4-COMPATIBLE IPv6 address
+/// (`::a.b.c.d`, the `::/96` prefix -- first six segments all zero),
+/// distinct from the IPv4-MAPPED form (`::ffff:a.b.c.d`) that
+/// `Ipv6Addr::to_ipv4_mapped` already canonicalizes. Returns `None`
+/// for any address whose high six segments are not all zero. The
+/// embedded v4 is read from the last two segments. Callers run the
+/// link-local / loopback predicates on the result so an SSRF target
+/// like `::169.254.169.254` (cloud metadata) cannot slip past in
+/// IPv4-compatible disguise.
+fn ipv4_compatible_embedded(ip: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let seg = ip.segments();
+    if seg[0..6].iter().any(|&s| s != 0) {
+        return None;
+    }
+    Some(std::net::Ipv4Addr::from(
+        ((seg[6] as u32) << 16) | seg[7] as u32,
+    ))
+}
+
 fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -1141,7 +1174,20 @@ fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
     if let Some(host) = url.host() {
         let link_local = match host {
             url::Host::Ipv4(ip) => ip.is_link_local(),
-            url::Host::Ipv6(ip) => (ip.segments()[0] & 0xffc0) == 0xfe80,
+            // Canonicalize an IPv4-mapped IPv6 address
+            // (`::ffff:a.b.c.d`) to its embedded IPv4 before the
+            // link-local test, otherwise `::ffff:169.254.169.254`
+            // slips past the fe80::/10 segment check and can reach
+            // cloud-metadata with credentials.
+            url::Host::Ipv6(ip) => match ip.to_ipv4_mapped() {
+                Some(v4) => v4.is_link_local(),
+                // Not IPv4-mapped: catch the IPv4-COMPATIBLE form
+                // (`::a.b.c.d`) too, then fall back to the fe80::/10
+                // segment check for native IPv6.
+                None => ipv4_compatible_embedded(&ip)
+                    .map(|v4| v4.is_link_local())
+                    .unwrap_or((ip.segments()[0] & 0xffc0) == 0xfe80),
+            },
             url::Host::Domain(_) => false,
         };
         if link_local {
@@ -1168,7 +1214,16 @@ fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
             .host()
             .and_then(|h| match h {
                 url::Host::Ipv4(ip) => Some(ip.is_loopback()),
-                url::Host::Ipv6(ip) => Some(ip.is_loopback()),
+                // Canonicalize an IPv4-mapped IPv6 loopback
+                // (`::ffff:127.0.0.1`) so it is accepted as loopback
+                // http:// just like the bare `127.0.0.1`, rather than
+                // misleadingly rejected as cleartext non-loopback.
+                url::Host::Ipv6(ip) => Some(match ip.to_ipv4_mapped() {
+                    Some(v4) => v4.is_loopback(),
+                    None => ipv4_compatible_embedded(&ip)
+                        .map(|v4| v4.is_loopback())
+                        .unwrap_or(ip.is_loopback()),
+                }),
                 url::Host::Domain(_) => None,
             })
             .unwrap_or(false);
@@ -1499,6 +1554,30 @@ pub fn validate_registry_patterns(config: &crate::config::Config) -> Result<()> 
     Ok(())
 }
 
+/// Validate that every `[aliases]` table key is a well-formed pattern --
+/// an exact wire-model id or a single trailing-`*` prefix. Embedded or
+/// bare asterisks are rejected here at startup; otherwise `Router::new`
+/// warn-and-drops the malformed key and the request mis-routes (the
+/// config check would still report "ok"). The error names the offending
+/// key verbatim so an operator running `routectl config check` sees
+/// exactly which key to fix.
+///
+/// This validates the alias KEYS (the patterns). It is distinct from
+/// `validate_alias_chain_targets`, which validates the alias VALUES
+/// (chain targets resolve to known, selectable models). Both must run.
+///
+/// Every key is parsed -- exact keys parse as `AliasPattern::Exact` and
+/// always pass, so there is no need to gate on `contains('*')`.
+pub fn validate_alias_patterns(config: &crate::config::Config) -> Result<()> {
+    use routectl_core::Error;
+
+    for key in config.aliases.keys() {
+        crate::glob::AliasPattern::parse(key)
+            .map_err(|e| Error::Config(format!("[aliases.{key}]: invalid pattern: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Validate that every entry in `[aliases]` resolves to a known and
 /// selectable `[models.X]` nickname OR another alias key (recursive
 /// expansion). Walks both `AliasValue::Single` and `AliasValue::Chain`;
@@ -1740,6 +1819,49 @@ mod base_url_validation_tests {
     fn https_non_link_local_ipv6_passes() {
         assert!(validate_base_url_scheme("p", "https://[fec0::1]/").is_ok());
         assert!(validate_base_url_scheme("p", "https://[2001:db8::1]/").is_ok());
+    }
+
+    /// Pin: an IPv4-mapped IPv6 form of the cloud-metadata IP
+    /// (`::ffff:169.254.169.254`) must be rejected. The raw IPv6
+    /// link-local check (fe80::/10 on segment[0]) does not catch this
+    /// shape, so it must be canonicalized to its embedded IPv4 first.
+    #[test]
+    fn https_ipv4_mapped_link_local_rejected() {
+        for url in [
+            "https://[::ffff:169.254.169.254]/v1",
+            "https://[::ffff:169.254.0.1]/",
+        ] {
+            let err = validate_base_url_scheme("p", url).unwrap_err();
+            assert!(
+                err.to_string().contains("link-local"),
+                "expected link-local rejection for {url}; got: {err}"
+            );
+        }
+    }
+
+    /// Pin: an IPv4-mapped IPv6 form of a loopback IP
+    /// (`::ffff:127.0.0.1`) is correctly accepted under http:// just
+    /// like the bare `127.0.0.1`, rather than misleadingly rejected.
+    #[test]
+    fn http_ipv4_mapped_loopback_passes() {
+        assert!(validate_base_url_scheme("p", "http://[::ffff:127.0.0.1]/").is_ok());
+        assert!(validate_base_url_scheme("p", "http://[::ffff:127.0.0.1]:8080/v1").is_ok());
+    }
+
+    /// Pin: an IPv4-COMPATIBLE IPv6 form of the cloud-metadata IP
+    /// (`::169.254.169.254`, prefix `::/96`) must be rejected. This is
+    /// distinct from the IPv4-MAPPED form (`::ffff:...`): `to_ipv4_mapped`
+    /// returns None for it, so the link-local guard must also extract the
+    /// embedded IPv4 from the IPv4-compatible form before testing it.
+    #[test]
+    fn https_ipv4_compatible_link_local_rejected() {
+        for url in ["https://[::169.254.169.254]/", "https://[::169.254.0.1]/v1"] {
+            let err = validate_base_url_scheme("p", url).unwrap_err();
+            assert!(
+                err.to_string().contains("link-local"),
+                "expected link-local rejection for {url}; got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -2225,6 +2347,88 @@ mod build_resolved_models_tests {
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
         let opus = models.get("opus").expect("opus entry");
         assert_eq!(opus.stream_first_byte_timeout_ms, Some(300_000));
+    }
+
+    #[tokio::test]
+    async fn zero_stream_first_byte_timeout_ms_is_skipped_not_set() {
+        // `stream_first_byte_timeout_ms = 0` would abandon every stream
+        // before the first chunk. The resolver must WARN and leave the
+        // field None, never propagate Some(0).
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "opus",
+                ModelEntry {
+                    stream_first_byte_timeout_ms: Some(0),
+                    ..ModelEntry::new("anthropic", "claude-opus-4-7")
+                },
+            )],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = models.get("opus").expect("opus entry");
+        assert!(
+            opus.stream_first_byte_timeout_ms.is_none(),
+            "zero must be skipped, not propagated as Some(0)"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_max_output_tokens_is_skipped_not_set() {
+        // `max_output_tokens = 0` would produce a body the upstream
+        // 400s. The resolver must WARN and leave the field at its
+        // unset sentinel (0), never call the setter.
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![(
+                "opus",
+                ModelEntry {
+                    max_output_tokens: Some(0),
+                    ..ModelEntry::new("anthropic", "claude-opus-4-7")
+                },
+            )],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let opus = models.get("opus").expect("opus entry");
+        assert_eq!(
+            opus.max_output_tokens, 0,
+            "zero must be skipped, leaving the unset sentinel 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonzero_and_none_timeout_knobs_behave_as_before() {
+        // Non-zero values set the field; absent values leave it unset.
+        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![
+                (
+                    "set",
+                    ModelEntry::new("anthropic", "claude-opus-4-7")
+                        .with_stream_first_byte_timeout_ms(5_000)
+                        .with_max_output_tokens(32_000),
+                ),
+                ("unset", ModelEntry::new("anthropic", "claude-haiku-4-5")),
+            ],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty(), "expected no failures: {failed:?}");
+        let set = models.get("set").expect("set entry");
+        assert_eq!(set.stream_first_byte_timeout_ms, Some(5_000));
+        assert_eq!(set.max_output_tokens, 32_000);
+        let unset = models.get("unset").expect("unset entry");
+        assert!(unset.stream_first_byte_timeout_ms.is_none());
+        assert_eq!(unset.max_output_tokens, 0);
     }
 
     #[tokio::test]
@@ -3249,5 +3453,50 @@ mod validate_registry_patterns_tests {
 
         // Act + Assert
         validate_registry_patterns(&cfg).expect("clean registry keys must validate");
+    }
+}
+
+#[cfg(test)]
+mod validate_alias_patterns_tests {
+    //! Tests for the `[aliases]` glob-key validator: a malformed glob
+    //! key (bare or embedded `*`) must reject at startup; well-formed
+    //! exact and trailing-`*` keys must pass.
+
+    use super::validate_alias_patterns;
+    use crate::config::{AliasValue, Config};
+
+    fn config_with_alias_keys(keys: &[&str]) -> Config {
+        let mut cfg = Config::default();
+        for key in keys {
+            cfg.aliases
+                .insert(key.to_string(), AliasValue::Single("some-model".into()));
+        }
+        cfg
+    }
+
+    #[test]
+    fn rejects_embedded_asterisk_key() {
+        // `foo*bar` has an asterisk in a non-trailing position; the
+        // pattern parser rejects it.
+        let cfg = config_with_alias_keys(&["foo*bar"]);
+        let err = validate_alias_patterns(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("[aliases.foo*bar]"), "msg: {msg}");
+        assert!(msg.contains("invalid pattern"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_bare_asterisk_key() {
+        let cfg = config_with_alias_keys(&["*"]);
+        let err = validate_alias_patterns(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("[aliases.*]"), "msg: {msg}");
+        assert!(msg.contains("invalid pattern"), "msg: {msg}");
+    }
+
+    #[test]
+    fn accepts_exact_and_trailing_star_keys() {
+        let cfg = config_with_alias_keys(&["claude-opus-4-7-20251022", "claude-opus-*"]);
+        validate_alias_patterns(&cfg).expect("clean alias keys must validate");
     }
 }

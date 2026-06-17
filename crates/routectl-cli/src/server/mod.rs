@@ -504,6 +504,12 @@ pub(crate) async fn build_router_from_config(
     // the operator the offending alias + nickname pair upfront.
     routectl_router::validate_alias_chain_targets(&config)?;
 
+    // Reject malformed `[aliases]` glob keys (embedded/bare asterisks)
+    // at startup. Without this, `Router::new` warn-and-drops the
+    // malformed key and the request mis-routes while `config check`
+    // still reports ok.
+    routectl_router::validate_alias_patterns(&config)?;
+
     // Reject `[retry]` blocks that set both `retry_allowlist` and
     // `retry_denylist`. The two are mutually exclusive predicates;
     // failing here surfaces the conflict at startup rather than
@@ -971,6 +977,10 @@ async fn read_parse_validate_config(path: &Path) -> Option<Arc<Config>> {
     }
     if let Err(e) = routectl_router::validate_alias_chain_targets(&new_config) {
         tracing::warn!(error = %e, "config reload rejected by validate_alias_chain_targets; keeping previous config");
+        return None;
+    }
+    if let Err(e) = routectl_router::validate_alias_patterns(&new_config) {
+        tracing::warn!(error = %e, "config reload rejected by validate_alias_patterns; keeping previous config");
         return None;
     }
     if let Err(e) = routectl_router::validate_retry_policy(&new_config) {

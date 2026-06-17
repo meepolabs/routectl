@@ -3,8 +3,9 @@
 use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{
-    validate_alias_chain_targets, validate_bedrock_global_config, validate_reasoning_defaults,
-    validate_registry_patterns, validate_retry_policy, Config, ProviderEntry,
+    validate_alias_chain_targets, validate_alias_patterns, validate_bedrock_global_config,
+    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy, Config,
+    ProviderEntry,
 };
 
 use crate::server::CompositeStore;
@@ -61,6 +62,9 @@ pub async fn check(config: &Config) -> Result<()> {
     // `[bedrock] allowed_body_fields` would see "ok" and only discover
     // the failure when starting the server. Surface the same errors here.
     if let Err(e) = validate_alias_chain_targets(config) {
+        errors.push(e.to_string());
+    }
+    if let Err(e) = validate_alias_patterns(config) {
         errors.push(e.to_string());
     }
     if let Err(e) = validate_reasoning_defaults(config) {

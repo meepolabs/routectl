@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use routectl_core::{schema::MessageContent, ChatRequest, Error, Message, Result, Role};
 use routectl_router::{
-    build_resolved_models, validate_alias_chain_targets, validate_bedrock_global_config,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy, BuildOptions,
-    Config, Router,
+    build_resolved_models, validate_alias_chain_targets, validate_alias_patterns,
+    validate_bedrock_global_config, validate_reasoning_defaults, validate_registry_patterns,
+    validate_retry_policy, BuildOptions, Config, Router,
 };
 
 use crate::server::CompositeStore;
@@ -37,6 +37,11 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     // misconfigured alias produces the same precise startup error
     // instead of an UnknownAlias at dispatch time.
     validate_alias_chain_targets(&config)?;
+
+    // Reject malformed `[aliases]` glob keys (embedded/bare asterisks)
+    // before Router::new warn-and-drops them and the request mis-routes.
+    // Mirrors the serve-side guard.
+    validate_alias_patterns(&config)?;
 
     // Reject `[retry]` blocks that set both `retry_allowlist` and
     // `retry_denylist`. Mirrors the serve-side guard so
