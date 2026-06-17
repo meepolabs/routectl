@@ -4,9 +4,8 @@
 //! which content block is currently open so that deltas are attributed to the
 //! correct block type (text / thinking / tool_use).
 //!
-//! The normalize_chunk method on the trait is stateless (one raw line -> one
-//! option). The actual stateful accumulation lives inside the stream() method
-//! in mod.rs which owns an SseState and drives parse_event() directly.
+//! The stateful accumulation lives inside the stream() method in mod.rs which
+//! owns an SseState and drives parse_event() directly.
 
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -687,94 +686,6 @@ impl SseState {
             upstream_meta: None,
         }
     }
-}
-
-/// Stateless single-event parse -- used by the trait's normalize_chunk.
-/// Since Anthropic SSE carries both an "event:" line and a "data:" line,
-/// and eventsource-stream gives us the data payload separately, we just
-/// parse the data JSON. Without state we can only handle text_delta and
-/// message_delta safely.
-///
-/// **WARNING: do not use this for production streaming.** Production
-/// callers should use `AnthropicApiProvider::stream` which owns a
-/// stateful `SseState` and correctly maps thinking deltas, tool-use
-/// deltas, signature deltas, and in-stream `error` events to surfaces
-/// the router can act on. This function intentionally returns
-/// `Ok(None)` for every event type that requires state OR an error
-/// signal -- including `error` events. Routing through here would
-/// hide upstream failures from the router's circuit breaker.
-pub fn parse_stateless(_provider_id: &str, data: &str) -> Result<Option<ChatChunk>> {
-    // Delegate to a throw-away state so we don't lose the id/model.
-    // This is intentionally limited; the stateful path in stream() is preferred.
-    let v: Value =
-        serde_json::from_str(data).map_err(|e| Error::Streaming(format!("bad sse json: {e}")))?;
-
-    let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-    if event_type == "content_block_delta" {
-        let delta_type = v
-            .pointer("/delta/type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
-        if delta_type == "text_delta" {
-            let text = v
-                .pointer("/delta/text")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string();
-            return Ok(Some(ChatChunk {
-                id: "stream".to_string(),
-                model: "unknown".to_string(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: ChunkDelta {
-                        content: Some(text),
-                        ..Default::default()
-                    },
-                    finish_reason: None,
-                    matched_stop_sequence: None,
-                }],
-                usage: None,
-                opaque_events: Vec::new(),
-                upstream_meta: None,
-            }));
-        }
-    }
-
-    // For message_delta carrying stop_reason:
-    if event_type == "message_delta" {
-        let stop_reason = v.pointer("/delta/stop_reason").and_then(|r| r.as_str());
-        let finish_reason = map_stop_reason(stop_reason);
-        if finish_reason.is_some() {
-            // Mirror the stateful `SseState::MessageDelta` path: lift
-            // the matched `stop_sequence` only when the upstream
-            // stopped for that reason, so the Anthropic ingress can
-            // render `stop_reason:"stop_sequence"` instead of the
-            // lossy `end_turn` mapping.
-            let matched_stop_sequence = match stop_reason {
-                Some("stop_sequence") => v
-                    .pointer("/delta/stop_sequence")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string()),
-                _ => None,
-            };
-            return Ok(Some(ChatChunk {
-                id: "stream".to_string(),
-                model: "unknown".to_string(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: ChunkDelta::default(),
-                    finish_reason,
-                    matched_stop_sequence,
-                }],
-                usage: None,
-                opaque_events: Vec::new(),
-                upstream_meta: None,
-            }));
-        }
-    }
-
-    Ok(None)
 }
 
 // In-stream error and ping contract tests. Compiled as a child module

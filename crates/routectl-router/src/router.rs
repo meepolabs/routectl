@@ -2796,9 +2796,6 @@ mod merge_header_extras_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response("stub", "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
             unreachable!()
         }
@@ -3155,9 +3152,6 @@ mod three_source_anthropic_beta_lift_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
             let model = req.model.clone();
             self.captured.lock().push(req);
@@ -3328,9 +3322,6 @@ mod reasoning_passthrough_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response("capturing", "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
             self.captured.lock().unwrap().push(req);
             Ok(ChatResponse {
@@ -3448,9 +3439,6 @@ mod resolved_models_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ChatResponse {
@@ -3555,9 +3543,6 @@ mod resolved_models_tests {
             }
             fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
                 Err(Error::normalize_response(&self.id, "unused"))
-            }
-            fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-                Ok(None)
             }
             async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
                 Err(Error::upstream(&self.id, 0, "always fails"))
@@ -3924,9 +3909,6 @@ mod gate_error_does_not_mask_real_error_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
             Err(Error::upstream(&self.id, 503, "real upstream down"))
         }
@@ -3952,9 +3934,6 @@ mod gate_error_does_not_mask_real_error_tests {
         }
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
-        }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
         }
         async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
             unreachable!("gate must refuse entry2 before its body runs")
@@ -4095,9 +4074,6 @@ mod seat_pool_dispatch_tests {
         }
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
-        }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
         }
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -4391,9 +4367,6 @@ mod count_tokens_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             unreachable!()
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
             unreachable!()
         }
@@ -4490,9 +4463,6 @@ mod feature_filter_tests {
         }
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
-        }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
         }
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
             let model = req.model.clone();
@@ -4787,9 +4757,6 @@ mod auth_failure_recovery_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
             let n = self.complete_calls.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
@@ -4971,9 +4938,6 @@ mod auth_failure_recovery_tests {
             fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
                 Err(Error::normalize_response(&self.id, "unused"))
             }
-            fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-                Ok(None)
-            }
             async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
                 self.complete_calls.fetch_add(1, Ordering::SeqCst);
                 Err(Error::upstream(&self.id, 401, "still 401"))
@@ -5050,9 +5014,6 @@ mod circuit_breaker_slot_release_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(Error::upstream(&self.id, 429, "rate limited"))
@@ -5085,9 +5046,6 @@ mod circuit_breaker_slot_release_tests {
         }
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
-        }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
         }
         async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -5268,9 +5226,6 @@ mod circuit_breaker_slot_release_tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
             unreachable!("not exercised by these tests")
         }
@@ -5438,9 +5393,6 @@ mod circuit_breaker_slot_release_tests {
         }
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
-        }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
         }
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
             let n = self.complete_calls.fetch_add(1, Ordering::SeqCst);

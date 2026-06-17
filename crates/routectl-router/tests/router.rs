@@ -84,9 +84,6 @@ impl Provider for MockProvider {
     fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
         Err(Error::normalize_response(&self.id, "unused"))
     }
-    fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-        Ok(None)
-    }
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         match self.next_behavior() {
             Behavior::Ok => Ok(ok_response(&self.id, &req.model)),
@@ -748,9 +745,6 @@ async fn request_timeout_translates_to_network_error_and_retries() {
         }
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
-        }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
         }
         async fn complete(&self, _req: ChatRequest) -> Result<ChatResponse> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -1839,10 +1833,6 @@ mod max_output_tokens_resolution {
 
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
-        }
-
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
         }
 
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {

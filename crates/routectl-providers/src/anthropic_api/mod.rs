@@ -662,11 +662,6 @@ impl Provider for AnthropicApiProvider {
         response::normalize(&self.cfg.id, raw)
     }
 
-    /// Stateless single-frame parse. For full streaming use stream().
-    fn normalize_chunk(&self, raw: &str) -> Result<Option<ChatChunk>> {
-        sse::parse_stateless(&self.cfg.id, raw)
-    }
-
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
         let mut body = self.normalize_request(&req)?;

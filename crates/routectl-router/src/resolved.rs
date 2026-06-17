@@ -271,9 +271,6 @@ mod tests {
         fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
             Err(Error::normalize_response(&self.id, "unused"))
         }
-        fn normalize_chunk(&self, _: &str) -> Result<Option<ChatChunk>> {
-            Ok(None)
-        }
         async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
             unreachable!()
         }

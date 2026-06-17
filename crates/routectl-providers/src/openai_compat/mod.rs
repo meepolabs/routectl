@@ -9,19 +9,15 @@
 //!   - `normalize_response`: lift provider-specific reasoning fields into
 //!     `reasoning_details` (DeepSeek `reasoning_content`, vLLM same, `<think>`
 //!     tags for RawThinkTag).
-//!   - `normalize_chunk`: stateless per-frame parsing (see NOTE below).
 //!   - `stream`: owns a `ThinkTagAccumulator` for RawThinkTag state; all other
 //!     dialects delegate to the stateless `parse_event`.
 //!
-//! NOTE on `normalize_chunk` vs `stream` statefulness:
-//!   The `Provider` trait exposes `normalize_chunk(&self, raw: &str)` which is
-//!   stateless by design (takes `&self`, no `&mut self`). The `<think>` tag
-//!   state machine needs to track whether we are inside or outside a tag
-//!   across multiple SSE chunks. This cannot live in `normalize_chunk`.
-//!   Solution: `normalize_chunk` handles the stateless dialects (DeepSeek,
-//!   vLLM, OpenAI, etc.) and is a no-op dispatcher for RawThinkTag.
-//!   The stateful `ThinkTagAccumulator` lives inside `stream()` as a local
-//!   variable captured by the stream future.
+//! NOTE on `stream` statefulness:
+//!   The `<think>` tag state machine needs to track whether we are inside or
+//!   outside a tag across multiple SSE chunks. The stateless `parse_event`
+//!   handles the stateless dialects (DeepSeek, vLLM, OpenAI, etc.); the
+//!   stateful `ThinkTagAccumulator` lives inside `stream()` as a local
+//!   variable captured by the stream future for RawThinkTag.
 
 pub mod dialect;
 pub mod dialects;
@@ -220,25 +216,6 @@ impl Provider for OpenAiCompatProvider {
         // route through `stream()` which captures the per-request
         // dialect into the SSE state machine via `dialect_for(req)`.
         response::normalize(&self.cfg.id, raw, self.cfg.reasoning_dialect)
-    }
-
-    /// Stateless per-chunk normalization. Falls back to the
-    /// config-side dialect when called outside an active `stream()`
-    /// (no request context available). `stream()` itself captures the
-    /// per-request dialect from `req.routectl_internal`.
-    fn normalize_chunk(&self, raw: &str) -> Result<Option<ChatChunk>> {
-        // Stateless trait fallback: with no cross-chunk state the
-        // reasoning detail index cannot advance here (same inherent
-        // limitation as RawThinkTag's cross-chunk <think> stripping).
-        // The real streaming path is `stream()`, which threads a
-        // persistent per-stream counter.
-        let mut reasoning_index = 0u32;
-        sse::parse_event(
-            &self.cfg.id,
-            raw,
-            self.cfg.reasoning_dialect,
-            &mut reasoning_index,
-        )
     }
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]

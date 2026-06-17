@@ -25,18 +25,6 @@ pub trait Provider: Send + Sync {
     /// `reasoning_details` entries with provider-tagged `format`.
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse>;
 
-    /// Map one streaming SSE chunk to routectl shape. Returns `Ok(None)`
-    /// for keep-alives or non-content frames the caller should drop.
-    ///
-    /// Providers that parse single SSE text lines synchronously (openai-compat,
-    /// anthropic_api) must override this. Providers whose streaming uses a
-    /// binary framing layer that the router decodes internally (Bedrock
-    /// eventstream) can leave this default -- the router never calls it for
-    /// those providers; chunk decoding happens inside `stream()` directly.
-    fn normalize_chunk(&self, _raw: &str) -> Result<Option<ChatChunk>> {
-        Ok(None)
-    }
-
     /// One-shot completion. Implementations call upstream HTTP, then run
     /// `normalize_response` on the raw body.
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse>;
