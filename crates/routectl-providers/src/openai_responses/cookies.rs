@@ -186,24 +186,43 @@ pub fn save_jar(jar: &CookieStoreMutex, path: &Path) -> std::io::Result<usize> {
     Ok(filtered.len())
 }
 
-/// Atomic-ish 0600 write. Writes to a sibling tempfile then renames
-/// over `path` so a crashed save cannot leave a half-written file in
-/// the persistence slot.
+/// Atomic 0600 write. Serializes to a tempfile in the SAME directory as
+/// `path`, fsyncs it, then persists it onto `path` via rename so a
+/// crashed or concurrent save can never promote a half-written jar into
+/// the persistence slot. Mirrors the OAuth credentials writer.
 fn write_file_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    let tmp = path.with_extension("tmp");
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cookie path has no parent",
+        )
+    })?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".chatgpt.tmp.")
+        .suffix(".json")
+        .tempfile_in(parent)?;
+    // On Unix, force 0o600 BEFORE writing so a partial write never has
+    // wider permissions than the final file (defense-in-depth; mkstemp
+    // already creates the tempfile 0600).
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    let mut f = opts.open(&tmp)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    // Re-assert 0o600 on the renamed file as defense-in-depth in case a
+    // paranoid umask stripped bits during persist. Best-effort: the
+    // rename preserves the temp's mode in practice, so a failure here is
+    // not fatal. Mirrors the OAuth credentials writer.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
@@ -311,6 +330,32 @@ mod tests {
         assert_eq!(
             mode, 0o600,
             "cookie file must be 0600 to keep cf cookies private"
+        );
+    }
+
+    #[test]
+    fn save_jar_leaves_no_tempfile_behind() {
+        // Arrange: a jar with one allowlisted cookie, saved twice to the
+        // same dest so any leaked sibling tempfile would accumulate.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("chatgpt.json");
+        let jar = build_jar();
+        touch_jar_with(&jar, "cf_clearance", "v");
+
+        // Act
+        save_jar(&jar, &path).expect("first save");
+        save_jar(&jar, &path).expect("second save");
+
+        // Assert: the atomic-rename write must not leave a sibling
+        // `.chatgpt.tmp.` file in the persistence directory.
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".chatgpt.tmp."))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "atomic cookie write left tempfiles: {leftover:?}"
         );
     }
 

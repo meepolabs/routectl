@@ -12,7 +12,7 @@ description = "Provider implementations for routectl."
 default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"]
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
 "anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru", "dep:base64", "dep:xxhash-rust"]
-"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store"]
+"openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store", "dep:tempfile"]
 # Exposes test-only helpers (e.g. AnthropicApiProvider::seed_thinking_for_test)
 # that must not appear in production builds. Required when running integration
 # tests that pre-populate the thinking cache.
@@ -74,6 +74,13 @@ lru = { workspace = true, optional = true }
 cookie_store = { workspace = true, optional = true }
 reqwest_cookie_store = { workspace = true, optional = true }
 
+# Atomic, 0600 cookie-jar persistence for the openai-responses path.
+# Provides the same-directory tempfile + atomic-rename primitive the
+# OAuth credentials writer uses, so concurrent saves cannot promote a
+# truncated jar over the live file. Pulled in only when the
+# `openai-responses` feature is on.
+tempfile = { version = "3", optional = true }
+
 # AWS SDK / signing crates (used only by the `bedrock` feature). Pinned
 # to specific minor versions so cargo update churn is bounded.
 aws-config = { version = "1.8", optional = true, default-features = false, features = ["behavior-version-latest", "rustls", "credentials-process", "sso"] }
@@ -96,4 +103,4 @@ wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 pretty_assertions = "1"
 insta.workspace = true
-tempfile = "3"
+tracing-test = "0.2"

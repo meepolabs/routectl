@@ -27,12 +27,13 @@ pub(super) fn translate_system(req: &ChatRequest) -> Option<String> {
     // OpenAI is a third-party upstream and must not receive the client
     // fingerprint the block carries.
     let mut billing_dropped = false;
-    let filtered = crate::system_filter::strip_billing_attribution(s, &mut billing_dropped)?;
+    let filtered = crate::system_filter::strip_billing_attribution(s, &mut billing_dropped);
     if billing_dropped {
         tracing::warn!(
             "openai-responses egress: Claude Code billing/attribution system block dropped",
         );
     }
+    let filtered = filtered?;
     match &filtered {
         SystemContent::Text(t) if t.is_empty() => None,
         SystemContent::Text(t) => Some(t.clone()),
@@ -71,6 +72,12 @@ fn warn_on_cache_control_loss(blocks: &[routectl_core::SystemBlock]) {
 mod tests {
     use super::*;
     use routectl_core::{ChatRequest, SystemBlock, SystemContent};
+    // NOTE: tracing-test's `#[traced_test]` installs a GLOBAL default
+    // subscriber; a future test in this crate that calls
+    // `set_global_default` (instead of the thread-local `with_default`)
+    // would pre-empt these `logs_contain` / `logs_assert` checks into
+    // false-passes. Keep new log-asserting tests on `#[traced_test]`.
+    use tracing_test::traced_test;
 
     fn block(text: &str) -> SystemBlock {
         SystemBlock {
@@ -140,6 +147,31 @@ mod tests {
         assert!(
             instructions.is_none(),
             "pure-billing Text system must collapse to None, got: {instructions:?}"
+        );
+    }
+
+    #[traced_test]
+    #[test]
+    fn pure_billing_fires_dropped_warn_even_when_collapsing_to_none() {
+        // Arrange: the only system content is the billing block, so the
+        // function collapses to None. The billing-dropped warn must still
+        // fire (this is the bug the reorder fixes: the `?` short-circuit
+        // previously skipped the warn on exactly this all-billing case).
+        let req = req_with_system(SystemContent::Blocks(vec![block(
+            "x-anthropic-billing-header: v=1; fp=secret",
+        )]));
+
+        // Act
+        let instructions = translate_system(&req);
+
+        // Assert: still None, AND the warn fired.
+        assert!(
+            instructions.is_none(),
+            "pure-billing system must collapse to None, got: {instructions:?}"
+        );
+        assert!(
+            logs_contain("billing/attribution system block dropped"),
+            "billing-dropped warn must fire even when the system collapses to None"
         );
     }
 

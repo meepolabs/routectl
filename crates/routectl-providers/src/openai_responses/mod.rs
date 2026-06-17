@@ -550,7 +550,21 @@ impl Provider for OpenAiResponsesProvider {
             match kind {
                 "response.output_item.done" => {
                     if let Some(item) = parsed.get("item") {
-                        accumulated_items.push(item.clone());
+                        // Bounded-growth guard mirroring the stream path
+                        // (sse.rs): a legitimate turn emits a small handful
+                        // of output items; an adversarial-or-extreme upstream
+                        // could ship thousands. Truncate past the cap with a
+                        // debug log -- do NOT error, so large-but-legit
+                        // responses below the cap still surface.
+                        if accumulated_items.len() >= sse::MAX_OUTPUT_BLOCKS {
+                            tracing::debug!(
+                                provider = %self.cfg.id,
+                                cap = sse::MAX_OUTPUT_BLOCKS,
+                                "openai-responses: output_item.done beyond cap; skipping"
+                            );
+                        } else {
+                            accumulated_items.push(item.clone());
+                        }
                     }
                 }
                 "response.completed"
@@ -814,6 +828,13 @@ mod e2e_tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    // NOTE: tracing-test's `#[traced_test]` installs a GLOBAL default
+    // subscriber; a future test in this crate that calls
+    // `set_global_default` (instead of the thread-local `with_default`)
+    // would pre-empt these `logs_contain` / `logs_assert` checks into
+    // false-passes. Keep new log-asserting tests on `#[traced_test]`.
+    use tracing_test::traced_test;
+
     fn make_provider(base_url: &str) -> OpenAiResponsesProvider {
         let cfg = OpenAiResponsesConfig {
             id: "openai-responses:test".into(),
@@ -1010,6 +1031,94 @@ mod e2e_tests {
             MessageContent::Text(t) => assert_eq!(t, "streamed"),
             other => panic!("expected backfilled Text, got {other:?}"),
         }
+    }
+
+    /// Pin: `complete()` caps the `output_item.done` accumulator at
+    /// `sse::MAX_OUTPUT_BLOCKS`, mirroring the stream path's bounded-
+    /// growth guard. An upstream that ships more done-items than the cap
+    /// (adversarial or extreme) must NOT error -- the call truncates the
+    /// overflow with a debug log and returns Ok, so large-but-legit
+    /// responses below the cap still surface.
+    #[traced_test]
+    #[tokio::test]
+    async fn complete_caps_accumulated_output_items_and_logs() {
+        // Arrange: build an SSE body programmatically with one more
+        // done-item than the cap, followed by a terminal response.completed
+        // carrying an empty output array (the chatgpt-oauth backfill
+        // pattern). The accumulator must stop at MAX_OUTPUT_BLOCKS.
+        let server = MockServer::start().await;
+        let overflow = super::sse::MAX_OUTPUT_BLOCKS + 3;
+        let mut sse = String::new();
+        for i in 0..overflow {
+            let item_done = serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "id": format!("msg_{i}"),
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": format!("t{i}")}]
+                }
+            });
+            sse.push_str(&format!(
+                "data: {}\n\n",
+                serde_json::to_string(&item_done).unwrap()
+            ));
+        }
+        let completed_body = serde_json::json!({
+            "id": "resp_cap",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5-codex",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        });
+        sse.push_str(&format!(
+            "data: {{\"type\":\"response.completed\",\"response\":{}}}\n\n",
+            serde_json::to_string(&completed_body).unwrap()
+        ));
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        // Act: overflow must truncate, not error.
+        let resp = provider
+            .complete(base_req())
+            .await
+            .expect("overflow must yield Ok, not an error");
+
+        // Assert: finishes normally and the cap debug log fired.
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert!(
+            logs_contain("output_item.done beyond cap"),
+            "the accumulator cap debug log must fire on overflow"
+        );
+        // Direct boundary check: the cap log must fire EXACTLY
+        // overflow - MAX_OUTPUT_BLOCKS (== 3) times -- one per skipped
+        // item past the cap. This pins the `>=` guard at exactly
+        // MAX_OUTPUT_BLOCKS: flipping it to `>` keeps one extra item, so
+        // only 2 items overflow and the count drops to 2 (RED).
+        let expected_skips = overflow - super::sse::MAX_OUTPUT_BLOCKS;
+        logs_assert(|lines: &[&str]| {
+            let skips = lines
+                .iter()
+                .filter(|l| l.contains("output_item.done beyond cap"))
+                .count();
+            if skips == expected_skips {
+                Ok(())
+            } else {
+                Err(format!(
+                    "cap log fired {skips} times; expected exactly {expected_skips} \
+                     (accumulator must cap at exactly MAX_OUTPUT_BLOCKS)"
+                ))
+            }
+        });
     }
 
     /// Pin: when the SSE stream's terminal event is `response.failed`,
