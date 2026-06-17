@@ -985,7 +985,7 @@ async fn disable_fallbacks_propagates_first_error() {
 // Tier-2 hardening: gates apply per-attempt, not per-routed-request
 // ---------------------------------------------------------------------------
 
-/// H1 fix: each retry against the same provider should consume one RPM
+/// Each retry against the same provider should consume one RPM
 /// token. With `rpm_limit = 2` and `retry_on_5xx = 3`, a provider that
 /// 503s every time exhausts its bucket on the second attempt and the
 /// router falls through to the next chain entry instead of completing
@@ -1042,7 +1042,7 @@ async fn retries_consume_rpm_tokens_and_fall_through_when_bucket_empty() {
     assert_eq!(p2.calls(), 1);
 }
 
-/// H1 fix: each failed attempt should increment the breaker, not the
+/// Each failed attempt should increment the breaker, not the
 /// whole routed request. With `circuit_failures = 2`, a provider that
 /// 503s repeatedly should trip after the second attempt and the third
 /// attempt should hit a CircuitOpen gate (router falls through).
@@ -1316,7 +1316,7 @@ async fn healthy_stream_mid_failures_accumulate_to_trip_the_breaker() {
     );
 }
 
-/// H2 fix: under concurrent dispatches after cooldown, only ONE caller
+/// Under concurrent dispatches after cooldown, only ONE caller
 /// should hit the upstream as the half-open probe; the other should
 /// see a CircuitOpen gate and fall through.
 // `start_paused` requires the `current_thread` runtime, but this test

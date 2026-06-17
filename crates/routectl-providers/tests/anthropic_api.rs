@@ -1313,7 +1313,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // M1.2: decoupled anthropic-beta from auth_kind
+    // Decoupled anthropic-beta from auth_kind
     // -----------------------------------------------------------------------
 
     fn make_response_body() -> Value {
