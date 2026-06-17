@@ -34,9 +34,11 @@ fn outgoing_emit_redacts_authorization_and_x_api_key() {
     let live_jwt = b"Bearer test-bearer-token-not-real";
     let api_key = b"test-api-key-not-real";
     let beta = b"context-management-2026-05-29";
+    let cookie = b"session=secret-session-not-real";
     let outgoing_headers = headers_to_json([
         ("authorization", live_jwt.as_slice()),
         ("x-api-key", api_key.as_slice()),
+        ("cookie", cookie.as_slice()),
         ("anthropic-beta", beta.as_slice()),
     ]);
 
@@ -74,6 +76,13 @@ fn outgoing_emit_redacts_authorization_and_x_api_key() {
     assert!(
         !headers.contains("test-api-key-not-real"),
         "x-api-key leaked into headers field: {headers}"
+    );
+
+    // The session cookie value must NOT appear -- set-cookie / cookie
+    // carry session credentials and redact on dir-2 too.
+    assert!(
+        !headers.contains("secret-session-not-real"),
+        "cookie value leaked into headers field: {headers}"
     );
 
     // Non-secret headers must round-trip verbatim so anthropic-version /

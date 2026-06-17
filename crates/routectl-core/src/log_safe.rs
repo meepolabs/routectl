@@ -458,6 +458,27 @@ fn redact_value(v: &mut serde_json::Value) {
             if let Some(pv) = map.get_mut("promptVariables") {
                 *pv = redacted_object();
             }
+            // Anthropic `citations`: an array (or object) of citation
+            // entries carrying `cited_text` + `document_title` echoed
+            // from the source document -- user-derived content. Collapse
+            // the whole value wholesale (precedent: promptVariables);
+            // this covers cited_text AND document_title in one move
+            // without per-leaf arms. Keyed off the `citations` key, so
+            // the structural `type:"text"` sibling on a citation-bearing
+            // block still redacts via the per-key sweep.
+            if let Some(citations) = map.get_mut("citations") {
+                *citations = redacted_object();
+            }
+            // Anthropic `document` content block: the top-level `title`
+            // leaf is the user-supplied document title. Redact REGARDLESS
+            // of length (titles are short, so the length-only `data`/`url`
+            // threshold would let them through). The document `source` is
+            // covered by the `data`/`url` arms on recursion.
+            if map.get("type").and_then(|t| t.as_str()) == Some("document") {
+                if let Some(title) = map.get_mut("title") {
+                    redact_long_string_leaf(title, 0);
+                }
+            }
 
             // Per-key sweep. Known user-content keys are redacted at
             // the leaf; everything else recurses.
@@ -502,13 +523,29 @@ fn redact_value(v: &mut serde_json::Value) {
                     // type values; the 256-byte threshold (s.len(), not
                     // chars) is well below any real image payload but
                     // well above any MIME string. Base64 is ASCII so
-                    // bytes == chars in practice.
+                    // bytes == chars in practice. Recurse on non-string
+                    // values (e.g. a structured `data` object).
                     "data" => {
-                        if let serde_json::Value::String(s) = entry {
-                            if s.len() > 256 {
-                                let n = s.chars().count();
-                                *entry = serde_json::Value::String(format!("<redacted len={n}>"));
-                            }
+                        if entry.is_string() {
+                            redact_long_string_leaf(entry, 256);
+                        } else {
+                            redact_value(entry);
+                        }
+                    }
+                    // Upload payload leaf, redacted wherever the key
+                    // appears regardless of parent `type` or length. Two
+                    // wire shapes carry it: the OpenAI Chat `file` block
+                    // (`{type:"file", file:{file_data:"<base64>"}}`) and
+                    // the provider-normalized OpenAI Responses
+                    // `{type:"input_file", file_data:"data:...base64..."}`.
+                    // `file_data` is always an upload payload, never a
+                    // short MIME string (that rides on `media_type` /
+                    // `filename`, which stay visible as structural
+                    // metadata), so redact unconditionally (min_len=0).
+                    // Recurse on non-string values for forward-compat.
+                    "file_data" => {
+                        if entry.is_string() {
+                            redact_long_string_leaf(entry, 0);
                         } else {
                             redact_value(entry);
                         }
@@ -548,12 +585,45 @@ fn redact_value(v: &mut serde_json::Value) {
 /// Replace a string leaf with `<redacted len=N>` (chars count); recurse
 /// otherwise. Used by the keys whose value is "string OR structured":
 /// `system`, `content`, `text`, `thinking`, etc.
+///
+/// Keystone of bare-string array redaction: when the value is an ARRAY reached UNDER a
+/// content-bearing key, bare `Value::String` elements are themselves
+/// redacted via [`redact_content_array`] (e.g. Anthropic
+/// `content: ["..."]`, OpenAI Responses `system: ["..."]` shorthand,
+/// the Responses response `output: ["..."]` rare flat form). This is
+/// the ONLY place bare-string array redaction fires -- it is keyed off
+/// the content-bearing key, NOT the generic Array arm in
+/// [`redact_value`], so non-content arrays (model lists,
+/// `anthropic_beta`, tool defs) are never over-redacted.
 fn redact_string_or_recurse(entry: &mut serde_json::Value) {
-    if let serde_json::Value::String(s) = entry {
-        let n = s.chars().count();
-        *entry = serde_json::Value::String(format!("<redacted len={n}>"));
-    } else {
-        redact_value(entry);
+    match entry {
+        serde_json::Value::String(s) => {
+            let n = s.chars().count();
+            *entry = serde_json::Value::String(format!("<redacted len={n}>"));
+        }
+        serde_json::Value::Array(arr) => redact_content_array(arr),
+        _ => redact_value(entry),
+    }
+}
+
+/// Redact the elements of an array reached UNDER a content-bearing key.
+/// Each element is handled by type so a sentinel cannot slip through a
+/// nested array: bare `Value::String` elements collapse to
+/// `<redacted len=N>`; nested `Value::Array` elements recurse back
+/// into this fn (preserving the content context so their own bare-string
+/// elements still redact); `Value::Object` elements go through
+/// [`redact_value`] so the existing per-key sweep fires on their inner
+/// `text` / `arguments` / etc. leaves.
+fn redact_content_array(arr: &mut [serde_json::Value]) {
+    for elem in arr.iter_mut() {
+        match elem {
+            serde_json::Value::String(s) => {
+                let n = s.chars().count();
+                *elem = serde_json::Value::String(format!("<redacted len={n}>"));
+            }
+            serde_json::Value::Array(inner) => redact_content_array(inner),
+            _ => redact_value(elem),
+        }
     }
 }
 
@@ -561,6 +631,24 @@ fn redact_string_or_recurse(entry: &mut serde_json::Value) {
 /// Converse toolUse input, toolResult json content).
 fn redacted_object() -> serde_json::Value {
     serde_json::json!({"redacted": true})
+}
+
+/// Collapse a string leaf to `<redacted len=N>` (chars count) when it is
+/// a `Value::String` whose BYTE length is `>= min_len`. `min_len = 0`
+/// redacts EVERY string regardless of length, including the empty string
+/// (document.title, file_data -- guaranteed-payload leaves); a non-zero
+/// threshold (256) redacts only strings of at least that many bytes,
+/// skipping short MIME-type / metadata strings while still catching
+/// base64 payloads (image/document source `data`). No-op on non-string
+/// values. Base64 is ASCII so bytes == chars in practice for the
+/// payload case.
+fn redact_long_string_leaf(entry: &mut serde_json::Value, min_len: usize) {
+    if let serde_json::Value::String(s) = entry {
+        if s.len() >= min_len {
+            let n = s.chars().count();
+            *entry = serde_json::Value::String(format!("<redacted len={n}>"));
+        }
+    }
 }
 
 /// Emit a `tracing::trace!` line carrying the ingress request body
@@ -648,8 +736,11 @@ pub fn trace_egress_body(ingress: &str, body: &serde_json::Value) {
 
 // ---------------------------------------------------------------------
 // Header tracing (4 directions). Opt-in via ROUTECTL_TRACE_HEADERS,
-// gated on TRACE, RAW (no redaction) so fixture captures see the real
-// auth / beta / version headers.
+// gated on TRACE. Secret-bearing headers are redacted on the two
+// upstream-facing directions (dir-2 outgoing request, dir-3 upstream
+// response) before emission; dir-1 (ingress) and dir-4 (egress) emit
+// raw so fixture captures see the real client-side beta / version
+// headers.
 //
 // PARSING CONTRACT (scripts/capture_fixtures.sh::extract_headers reads
 // these lines back into per-request fixtures):
@@ -720,9 +811,9 @@ pub fn headers_to_json<'a>(
     )
 }
 
-/// Header names whose VALUES carry a bearer secret on the outgoing
-/// (routectl -> upstream) direction and MUST be redacted before any
-/// log emission. Compared case-insensitively.
+/// Header names whose VALUES carry a secret and MUST be redacted before
+/// any log emission, in EITHER direction (outgoing request or upstream
+/// response). Compared case-insensitively.
 ///
 /// `authorization`            -- `Bearer <jwt>` for OAuth-managed
 ///                                providers (codex / chatgpt-oauth,
@@ -730,14 +821,38 @@ pub fn headers_to_json<'a>(
 /// `x-api-key`                -- Anthropic-API key.
 /// `proxy-authorization`      -- mirror of `authorization` for
 ///                                proxy-tunneled requests.
-const REDACT_HEADER_NAMES: &[&str] = &["authorization", "x-api-key", "proxy-authorization"];
+/// `set-cookie` / `cookie`    -- session credentials on either
+///                                direction (response sets, request
+///                                echoes back).
+const REDACT_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "x-api-key",
+    "proxy-authorization",
+    "set-cookie",
+    "cookie",
+];
 
-/// True if the given header name carries a secret value that the
-/// outgoing-direction header trace MUST redact. Case-insensitive --
+/// `x-amz-*` sub-headers that are SIGNING METADATA, not secrets, and
+/// must stay visible for operator triage of SigV4-signed Bedrock
+/// requests. Everything else under the `x-amz-` prefix (notably
+/// `x-amz-security-token`, the STS session credential) is redacted.
+const X_AMZ_VISIBLE: &[&str] = &["x-amz-date", "x-amz-content-sha256"];
+
+/// True if the given header name carries a secret value that a header
+/// trace MUST redact, in either direction. Case-insensitive --
 /// `Authorization`, `AUTHORIZATION`, and `authorization` all match.
+///
+/// Beyond the fixed [`REDACT_HEADER_NAMES`] set, every `x-amz-`-prefixed
+/// header redacts EXCEPT the non-secret signing-metadata names in
+/// [`X_AMZ_VISIBLE`] (`x-amz-date`, `x-amz-content-sha256`), so the STS
+/// `x-amz-security-token` session credential never flows verbatim into a
+/// trace while the signing metadata stays operator-visible.
 fn is_redact_header(name: &str) -> bool {
     let lc = name.to_ascii_lowercase();
-    REDACT_HEADER_NAMES.contains(&lc.as_str())
+    if REDACT_HEADER_NAMES.contains(&lc.as_str()) {
+        return true;
+    }
+    lc.starts_with("x-amz-") && !X_AMZ_VISIBLE.contains(&lc.as_str())
 }
 
 /// Replacement value for `Bearer <token>` Authorization headers. Keeps
@@ -770,10 +885,11 @@ fn redact_header_value(value: &str) -> String {
 
 /// Walk a `[[name, value], ...]` JSON array (the shape produced by
 /// [`headers_to_json`]) and replace the `value` half of every pair
-/// whose `name` matches [`REDACT_HEADER_NAMES`] (case-insensitive).
-/// Mutates in place. Other entries (and any non-pair shape that slipped
-/// in) are left untouched.
-pub(crate) fn redact_outgoing_header_values(headers: &mut serde_json::Value) {
+/// whose `name` matches [`is_redact_header`] (case-insensitive).
+/// Bidirectional -- used by both the outgoing-request (dir-2) and
+/// upstream-response (dir-3) header traces. Mutates in place. Other
+/// entries (and any non-pair shape that slipped in) are left untouched.
+pub(crate) fn redact_header_values(headers: &mut serde_json::Value) {
     let Some(arr) = headers.as_array_mut() else {
         return;
     };
@@ -822,7 +938,7 @@ pub fn trace_ingress_headers(ingress: &str, headers: &serde_json::Value) {
 /// for a given provider (direction 2: routectl -> upstream). Opt-in via
 /// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. Bearer JWTs and api keys
 /// in `authorization` / `x-api-key` / `proxy-authorization` are
-/// redacted before emission via [`redact_outgoing_header_values`] so
+/// redacted before emission via [`redact_header_values`] so
 /// `journalctl` / log archives never carry a live access token. Other
 /// headers (anthropic-beta, anthropic-version, originator, ...) emit
 /// verbatim since they are not secrets and the fixture-capture
@@ -836,7 +952,7 @@ pub fn trace_outgoing_headers(provider_kind: &str, id: &str, headers: &serde_jso
         return;
     }
     let mut redacted = headers.clone();
-    redact_outgoing_header_values(&mut redacted);
+    redact_header_values(&mut redacted);
     tracing::trace!(
         message = HDR_MSG_OUTGOING,
         provider_kind,
@@ -847,9 +963,14 @@ pub fn trace_outgoing_headers(provider_kind: &str, id: &str, headers: &serde_jso
 
 /// Emit a `tracing::trace!` line carrying the upstream response headers
 /// (direction 3: upstream -> routectl). Opt-in via
-/// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. See
-/// [`trace_ingress_headers`] for the single-line / no-redaction
-/// rationale. `headers` is the LAST field on the line.
+/// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. Secret-bearing headers
+/// (`set-cookie` session credentials, an `authorization` echo, the
+/// `x-amz-security-token` STS credential) are redacted via
+/// [`redact_header_values`] before emission so a response header cannot
+/// leak a replayable secret into the log. Non-secret headers (rate-limit
+/// metadata, `x-amz-date`, ...) round-trip verbatim. See
+/// [`trace_ingress_headers`] for the single-line rationale. `headers`
+/// is the LAST field on the line.
 pub fn trace_upstream_response_headers(provider_kind: &str, id: &str, headers: &serde_json::Value) {
     if !header_trace_should_emit(
         header_trace_enabled(),
@@ -857,11 +978,13 @@ pub fn trace_upstream_response_headers(provider_kind: &str, id: &str, headers: &
     ) {
         return;
     }
+    let mut redacted = headers.clone();
+    redact_header_values(&mut redacted);
     tracing::trace!(
         message = HDR_MSG_UPSTREAM,
         provider_kind,
         provider = id,
-        headers = %serde_json::to_string(headers).unwrap_or_default(),
+        headers = %serde_json::to_string(&redacted).unwrap_or_default(),
     );
 }
 

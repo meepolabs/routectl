@@ -274,6 +274,7 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
+    #[serde(default)]
     pub content: MessageContent,
 
     /// Echoed reasoning from a prior assistant turn (legacy plaintext shape).
@@ -307,7 +308,7 @@ pub struct Message {
     pub refusal: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MessageContent {
     Text(String),
@@ -318,14 +319,11 @@ pub enum MessageContent {
     Parts(Vec<ContentPart>),
     /// Some upstreams (Clarifai-hosted models on OpenRouter, vLLM trailers)
     /// return `"content": null` when the entire output is reasoning. We
-    /// accept it on the wire and serialize back as null.
+    /// accept it on the wire and serialize back as null. Also the default:
+    /// an assistant tool-call turn carries `tool_calls` and no `content`,
+    /// so `#[serde(default)]` on `Message.content` lands here.
+    #[default]
     Null,
-}
-
-impl Default for MessageContent {
-    fn default() -> Self {
-        MessageContent::Text(String::new())
-    }
 }
 
 /// Unified reasoning request config. See OpenRouter docs for provider mapping.
@@ -392,6 +390,7 @@ pub struct ChatResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Choice {
+    #[serde(default)]
     pub index: u32,
     pub message: Message,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -519,6 +518,7 @@ pub struct ChatChunk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkChoice {
+    #[serde(default)]
     pub index: u32,
     pub delta: ChunkDelta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -797,5 +797,80 @@ mod tests {
             back.server_tool_use,
             Some(json!({"web_search_requests": 3}))
         );
+    }
+
+    /// An assistant tool-call turn arrives with `tool_calls` and NO
+    /// `content` key (the OpenAI Chat Completions shape on a function
+    /// call). `#[serde(default)]` on `Message.content` + the
+    /// `MessageContent::Null` default must accept it as Null rather than
+    /// failing deserialization on a missing required field.
+    #[test]
+    fn message_without_content_deserializes_to_null() {
+        let raw = json!({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}"}
+            }]
+        });
+        let msg: Message = serde_json::from_value(raw).unwrap();
+        assert!(
+            matches!(msg.content, MessageContent::Null),
+            "got {:?}",
+            msg.content
+        );
+        assert!(msg.tool_calls.is_some());
+    }
+
+    /// `MessageContent::default()` is now `Null` (was `Text("")`).
+    #[test]
+    fn message_content_default_is_null() {
+        assert!(matches!(MessageContent::default(), MessageContent::Null));
+    }
+
+    /// `Choice.index` is `#[serde(default)]`; an upstream omitting it
+    /// (some minimal response shapes) deserializes to 0 rather than
+    /// 400-ing the whole response.
+    #[test]
+    fn choice_without_index_defaults_to_zero() {
+        let raw = json!({
+            "message": {"role": "assistant", "content": "hi"},
+            "finish_reason": "stop"
+        });
+        let choice: Choice = serde_json::from_value(raw).unwrap();
+        assert_eq!(choice.index, 0);
+    }
+
+    /// `ChunkChoice.index` is `#[serde(default)]`; an SSE chunk omitting
+    /// it deserializes to 0.
+    #[test]
+    fn chunk_choice_without_index_defaults_to_zero() {
+        let raw = json!({
+            "delta": {"content": "tok"}
+        });
+        let choice: ChunkChoice = serde_json::from_value(raw).unwrap();
+        assert_eq!(choice.index, 0);
+    }
+
+    /// A multi-turn message array where one message omits `content`
+    /// (an assistant tool-call turn) deserializes cleanly -- the
+    /// `#[serde(default)]` annotation must not regress the common
+    /// content-present path either.
+    #[test]
+    fn message_array_with_one_content_omission_deserializes() {
+        let raw = json!([
+            {"role": "user", "content": "what files?"},
+            {"role": "assistant", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "ls", "arguments": "{}"}
+            }]},
+            {"role": "tool", "tool_call_id": "c1", "content": "a b c"}
+        ]);
+        let msgs: Vec<Message> = serde_json::from_value(raw).unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert!(matches!(msgs[0].content, MessageContent::Text(_)));
+        assert!(matches!(msgs[1].content, MessageContent::Null));
+        assert!(matches!(msgs[2].content, MessageContent::Text(_)));
     }
 }

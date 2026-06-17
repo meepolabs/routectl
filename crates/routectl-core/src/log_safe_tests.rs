@@ -526,6 +526,234 @@ fn redact_unknown_shape_passes_through_unchanged() {
 }
 
 #[test]
+fn redact_canary_no_sentinel_survives_across_content_surfaces() {
+    // CANARY: every prompt-bearing surface added by the body-redaction
+    // batch must be covered. Each sentinel is unique so a survivor names
+    // the exact leak. Built from raw json! (NOT canonical structs) so it
+    // exercises the pre-canonical wire-shape walk, where an unmodeled
+    // field could otherwise slip through.
+    let doc_data_long = format!("SENTINEL_DOC_DATA{}", "A".repeat(300));
+    let body = json!({
+        "model": "claude-sonnet-4-5",
+        // Bare strings under content-bearing keys.
+        "system": ["SENTINEL_SYSTEM_ARR"],
+        "messages": [{
+            "role": "user",
+            "content": [
+                "SENTINEL_CONTENT_ARR",
+                // OpenAI file block file_data leaf.
+                {"type": "file", "file": {
+                    "filename": "doc.pdf",
+                    "file_data": "SENTINEL_FILE_DATA"
+                }},
+                // content[2]: Anthropic document block. Its top-level
+                // `title` leaf is the user-supplied document title; the
+                // `source.data` is a long base64 payload caught by the
+                // existing `data` arm (256-byte threshold). `citations`
+                // here is config ({enabled:true}), not echoed text.
+                {"type": "document",
+                 "title": "SENTINEL_DOC_TITLE",
+                 "source": {"type": "base64", "media_type": "application/pdf",
+                            "data": doc_data_long.as_str()},
+                 "citations": {"enabled": true}},
+                // content[3]: a text block whose `citations` array echoes
+                // the source document's cited_text + document_title.
+                {"type": "text",
+                 "text": "SENTINEL_CITED_BLOCK_TEXT",
+                 "citations": [
+                     {"type": "char_location",
+                      "cited_text": "SENTINEL_CITED_TEXT",
+                      "document_title": "SENTINEL_CITATION_DOCTITLE"}
+                 ]},
+            ],
+        }],
+        // Responses-shape flat output array of bare strings.
+        "output": ["SENTINEL_OUTPUT_ARR"],
+    });
+
+    let got = redact_prompts_with_flag(&body, true);
+    let serialized = serde_json::to_string(&got).expect("serialize redacted body");
+
+    for sentinel in [
+        "SENTINEL_SYSTEM_ARR",
+        "SENTINEL_CONTENT_ARR",
+        "SENTINEL_FILE_DATA",
+        "SENTINEL_DOC_TITLE",
+        "SENTINEL_DOC_DATA",
+        "SENTINEL_CITED_BLOCK_TEXT",
+        "SENTINEL_CITED_TEXT",
+        "SENTINEL_CITATION_DOCTITLE",
+        "SENTINEL_OUTPUT_ARR",
+    ] {
+        assert!(
+            !serialized.contains(sentinel),
+            "{sentinel} survived redaction: {serialized}"
+        );
+    }
+    // Structural fields stay visible: model, role, file filename, block
+    // type discriminators.
+    assert_eq!(got["model"], "claude-sonnet-4-5");
+    assert_eq!(got["messages"][0]["role"], "user");
+    assert_eq!(
+        got["messages"][0]["content"][1]["file"]["filename"],
+        "doc.pdf"
+    );
+    assert_eq!(got["messages"][0]["content"][1]["type"], "file");
+    assert_eq!(got["messages"][0]["content"][2]["type"], "document");
+    // citations value collapsed wholesale to the opaque marker.
+    assert_eq!(
+        got["messages"][0]["content"][3]["citations"],
+        json!({"redacted": true})
+    );
+}
+
+#[test]
+fn redact_file_data_redacts_under_both_file_and_input_file_shapes() {
+    // file_data is an upload payload and must redact wherever the key
+    // appears, regardless of parent `type`. Two wire shapes carry it:
+    //   - raw OpenAI Chat: {type:"file", file:{file_data:"<base64>"}}
+    //   - provider-normalized OpenAI Responses:
+    //       {type:"input_file", file_data:"data:...base64..."}
+    // The Responses shape has `file_data` directly on the part object
+    // (no nested `file` wrapper), so a structural `type:"file"` special
+    // case missed it -- the generic key arm catches both.
+    let responses_payload = format!("data:application/pdf;base64,{}", "Z".repeat(2000));
+    let body = json!({
+        "messages": [{
+            "role": "user",
+            "content": [
+                // Raw OpenAI Chat file block.
+                {"type": "file", "file": {
+                    "filename": "doc.pdf",
+                    "file_data": "SENTINEL_RAW_FILE_DATA"
+                }},
+                // OpenAI Responses normalized input_file shape.
+                {"type": "input_file",
+                 "filename": "report.pdf",
+                 "file_data": responses_payload},
+            ],
+        }],
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    let serialized = serde_json::to_string(&got).expect("serialize redacted body");
+
+    // The raw upload payload must not survive under either shape.
+    assert!(
+        !serialized.contains("SENTINEL_RAW_FILE_DATA"),
+        "raw file block file_data leaked: {serialized}"
+    );
+    assert!(
+        !serialized.contains("base64,ZZZ"),
+        "input_file base64 payload leaked: {serialized}"
+    );
+
+    // Both file_data leaves collapsed to the placeholder.
+    assert!(got["messages"][0]["content"][0]["file"]["file_data"]
+        .as_str()
+        .expect("raw file_data redacted")
+        .starts_with("<redacted len="));
+    assert!(got["messages"][0]["content"][1]["file_data"]
+        .as_str()
+        .expect("input_file file_data redacted")
+        .starts_with("<redacted len="));
+
+    // Structural metadata stays visible on both shapes.
+    assert_eq!(
+        got["messages"][0]["content"][0]["file"]["filename"],
+        "doc.pdf"
+    );
+    assert_eq!(got["messages"][0]["content"][0]["type"], "file");
+    assert_eq!(got["messages"][0]["content"][1]["filename"], "report.pdf");
+    assert_eq!(got["messages"][0]["content"][1]["type"], "input_file");
+}
+
+#[test]
+fn redact_nested_string_array_under_content_key_does_not_leak() {
+    // CANARY: a nested array under a content-bearing key
+    // (`content: [["SENTINEL_NESTED"]]`) previously routed its inner
+    // array back through the generic redact_value Array arm, which is a
+    // no-op on bare strings -- so the sentinel leaked. redact_content_array
+    // now recurses into nested arrays preserving the content context.
+    let body = json!({
+        "messages": [{
+            "role": "user",
+            "content": [["SENTINEL_NESTED"]],
+        }],
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    let serialized = serde_json::to_string(&got).expect("serialize redacted body");
+    assert!(
+        !serialized.contains("SENTINEL_NESTED"),
+        "nested-array sentinel survived redaction: {serialized}"
+    );
+    // The nested array structure is preserved; only the leaf collapses.
+    assert_eq!(got["messages"][0]["content"][0][0], "<redacted len=15>");
+}
+
+#[test]
+fn redact_does_not_touch_string_array_under_non_content_key() {
+    // NEGATIVE placement guard: bare-string array redaction must
+    // fire ONLY under content-bearing keys. A model-id list, the
+    // anthropic_beta flags, and arbitrary string arrays under non-content
+    // keys MUST survive verbatim -- if bare-string array redaction lived in the generic Array arm
+    // it would over-redact all of these.
+    let body = json!({
+        "models": ["gpt-5", "claude-sonnet-4-5", "gemini-2.5-pro"],
+        "anthropic_beta": ["context-1m-2025-08-07", "prompt-cache-1h"],
+        "stop": ["END", "STOP"],
+        "tags": ["a", "b", "c"],
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    assert_eq!(got, body, "non-content string arrays must survive verbatim");
+}
+
+#[test]
+fn redact_preserves_structural_identifiers_and_returns_input_when_disabled() {
+    // NEGATIVE: model / role / usage / finish_reason and tool names+ids
+    // are operator-triage signal, never content -- they must stay visible
+    // with redaction ON. And with redaction OFF the body is returned
+    // unchanged (the enabled=false short-circuit).
+    let body = json!({
+        "model": "gpt-5",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "the secret answer",
+                "tool_calls": [{
+                    "id": "call_abc",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{\"q\":\"secret\"}"}
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18},
+    });
+
+    // ON: structural identifiers survive; content + arguments redact.
+    let on = redact_prompts_with_flag(&body, true);
+    assert_eq!(on["model"], "gpt-5");
+    assert_eq!(on["choices"][0]["index"], 0);
+    assert_eq!(on["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(on["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(on["usage"]["total_tokens"], 18);
+    let tc = &on["choices"][0]["message"]["tool_calls"][0];
+    assert_eq!(tc["id"], "call_abc");
+    assert_eq!(tc["type"], "function");
+    assert_eq!(tc["function"]["name"], "lookup");
+    assert_eq!(on["choices"][0]["message"]["content"], "<redacted len=17>");
+    assert!(tc["function"]["arguments"]
+        .as_str()
+        .expect("arguments redacted")
+        .starts_with("<redacted len="));
+
+    // OFF: input returned unchanged.
+    let off = redact_prompts_with_flag(&body, false);
+    assert_eq!(off, body);
+}
+
+#[test]
 fn redact_bedrock_converse_tool_use_input() {
     // Bedrock Converse wire shape: {"toolUse": {"toolUseId":...,
     // "name":..., "input": <Value>}} with NO `type` key on the
@@ -1008,7 +1236,7 @@ fn redact_replaces_bearer_authorization_keeps_scheme_prefix() {
         "authorization",
         b"Bearer test-bearer-token-not-real".as_slice(),
     )]);
-    super::redact_outgoing_header_values(&mut headers);
+    super::redact_header_values(&mut headers);
     let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
     assert_eq!(pair[0].as_str(), Some("authorization"));
     assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
@@ -1021,7 +1249,7 @@ fn redact_handles_mixed_case_authorization_header_name() {
     // `AUTHORIZATION`. Match case-insensitively.
     for name in ["Authorization", "AUTHORIZATION", "authorization"] {
         let mut headers = super::headers_to_json([(name, b"Bearer XYZ".as_slice())]);
-        super::redact_outgoing_header_values(&mut headers);
+        super::redact_header_values(&mut headers);
         let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
         assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
     }
@@ -1033,7 +1261,7 @@ fn redact_replaces_bare_x_api_key_with_redacted() {
     // Bearer scheme. Replace with the bare `[REDACTED]` (no scheme to
     // preserve).
     let mut headers = super::headers_to_json([("x-api-key", b"test-api-key-not-real".as_slice())]);
-    super::redact_outgoing_header_values(&mut headers);
+    super::redact_header_values(&mut headers);
     let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
     assert_eq!(pair[0].as_str(), Some("x-api-key"));
     assert_eq!(pair[1].as_str(), Some("[REDACTED]"));
@@ -1054,7 +1282,7 @@ fn redact_preserves_non_secret_headers_verbatim() {
         ),
         ("originator", b"codex_cli_rs".as_slice()),
     ]);
-    super::redact_outgoing_header_values(&mut headers);
+    super::redact_header_values(&mut headers);
     let arr = headers.as_array().unwrap();
     assert_eq!(arr[0][1].as_str(), Some("Bearer [REDACTED]"));
     assert_eq!(arr[1][1].as_str(), Some("2023-06-01"));
@@ -1068,7 +1296,7 @@ fn redact_handles_authorization_value_without_bearer_prefix() {
     // misconfigured upstream) collapses to bare `[REDACTED]` -- we do
     // not want to leak the scheme guess back to the operator.
     let mut headers = super::headers_to_json([("authorization", b"Basic dXNlcjpwYXNz".as_slice())]);
-    super::redact_outgoing_header_values(&mut headers);
+    super::redact_header_values(&mut headers);
     let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
     assert_eq!(pair[1].as_str(), Some("[REDACTED]"));
 }
@@ -1079,7 +1307,7 @@ fn redact_proxy_authorization_header() {
     // upstream connections.
     let mut headers =
         super::headers_to_json([("proxy-authorization", b"Bearer proxy-jwt".as_slice())]);
-    super::redact_outgoing_header_values(&mut headers);
+    super::redact_header_values(&mut headers);
     let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
     assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
 }
@@ -1089,10 +1317,89 @@ fn redact_is_idempotent_on_already_redacted_value() {
     // A second pass over an already-redacted vector must be a no-op
     // (same value -- still secret-shaped, still matches the rule).
     let mut headers = super::headers_to_json([("authorization", b"Bearer [REDACTED]".as_slice())]);
-    super::redact_outgoing_header_values(&mut headers);
-    super::redact_outgoing_header_values(&mut headers);
+    super::redact_header_values(&mut headers);
+    super::redact_header_values(&mut headers);
     let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
     assert_eq!(pair[1].as_str(), Some("Bearer [REDACTED]"));
+}
+
+#[test]
+fn redact_x_amz_security_token_mixed_case_redacted() {
+    // The SigV4 STS session credential rides on `x-amz-security-token`.
+    // Any `x-amz-` header that is NOT signing metadata must redact, and
+    // the name match is case-insensitive so a mixed-case header from a
+    // signing library still collapses.
+    for name in [
+        "x-amz-security-token",
+        "X-Amz-Security-Token",
+        "X-AMZ-SECURITY-TOKEN",
+    ] {
+        let mut headers = super::headers_to_json([(name, b"FwoGZXIvYXdzEXAMPLE".as_slice())]);
+        super::redact_header_values(&mut headers);
+        let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+        assert_eq!(
+            pair[1].as_str(),
+            Some("[REDACTED]"),
+            "{name} should redact to bare [REDACTED]"
+        );
+    }
+}
+
+#[test]
+fn redact_x_amz_signing_metadata_survives_verbatim() {
+    // `x-amz-date` and `x-amz-content-sha256` are non-secret signing
+    // metadata an operator needs to triage a SigV4 request; they must
+    // survive the `x-amz-` prefix redaction rule verbatim.
+    let mut headers = super::headers_to_json([
+        ("x-amz-date", b"20260616T000000Z".as_slice()),
+        (
+            "X-Amz-Content-Sha256",
+            b"e3b0c44298fc1c149afbf4c8996fb924".as_slice(),
+        ),
+        ("x-amz-security-token", b"STSTOKEN".as_slice()),
+    ]);
+    super::redact_header_values(&mut headers);
+    let arr = headers.as_array().unwrap();
+    // Assert by header NAME (case-insensitive), not positional index, so
+    // the test does not silently pass if header ordering changes.
+    let value_for = |name: &str| -> Option<String> {
+        arr.iter().find_map(|entry| {
+            let pair = entry.as_array()?;
+            let n = pair.first()?.as_str()?;
+            if n.eq_ignore_ascii_case(name) {
+                pair.get(1)?.as_str().map(str::to_string)
+            } else {
+                None
+            }
+        })
+    };
+    assert_eq!(value_for("x-amz-date").as_deref(), Some("20260616T000000Z"));
+    assert_eq!(
+        value_for("x-amz-content-sha256").as_deref(),
+        Some("e3b0c44298fc1c149afbf4c8996fb924")
+    );
+    // The session credential alongside the metadata still redacts.
+    assert_eq!(
+        value_for("x-amz-security-token").as_deref(),
+        Some("[REDACTED]")
+    );
+}
+
+#[test]
+fn redact_cookie_and_set_cookie_redacted() {
+    // Session credentials ride on `cookie` (request echo) and
+    // `set-cookie` (response set). Both must redact to the bare marker,
+    // case-insensitively, in either direction.
+    let mut headers = super::headers_to_json([
+        ("set-cookie", b"session=abc123; HttpOnly".as_slice()),
+        ("Cookie", b"session=abc123".as_slice()),
+    ]);
+    super::redact_header_values(&mut headers);
+    let arr = headers.as_array().unwrap();
+    assert_eq!(arr[0][0].as_str(), Some("set-cookie"));
+    assert_eq!(arr[0][1].as_str(), Some("[REDACTED]"));
+    assert_eq!(arr[1][0].as_str(), Some("Cookie"));
+    assert_eq!(arr[1][1].as_str(), Some("[REDACTED]"));
 }
 
 // ---------------------------------------------------------------------

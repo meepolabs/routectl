@@ -38,6 +38,7 @@ listed at the bottom of each crate.
 - `tests/header_trace_emit_disabled.rs` -- emit-path coverage for the four header-trace emitters with tracing OFF; isolated test binary so `header_trace_enabled()` freezes to false in its own process
 - `tests/header_trace_emit_enabled.rs` -- emit-path coverage for `trace_ingress_headers` / `trace_outgoing_headers` / `trace_upstream_response_headers` / `trace_egress_headers` with tracing ENABLED; pairs with the disabled-path test
 - `tests/header_trace_outgoing_redacts.rs` -- end-to-end coverage that `trace_outgoing_headers` collapses a live `authorization` Bearer JWT and `x-api-key` value to `Bearer [REDACTED]` / `[REDACTED]` before emit; isolated binary so the `ROUTECTL_TRACE_HEADERS` OnceLock freezes ON
+- `tests/header_trace_upstream_redacts.rs` -- end-to-end coverage that `trace_upstream_response_headers` (direction 3) collapses a `set-cookie` session credential and the SigV4 `x-amz-security-token` STS credential to `[REDACTED]` before emit, while a non-secret rate-limit header round-trips verbatim; isolated binary so the `ROUTECTL_TRACE_HEADERS` OnceLock freezes ON
 - `tests/log_overrides_redact_prompts.rs` -- resolution-rule coverage for the `redact_prompts` knob (env > `[log]` > default); isolated binary so OnceLock state stays clean
 - `tests/log_overrides_trace_body_bytes.rs` -- resolution-rule coverage for `trace_body_bytes`; isolated binary
 - `tests/log_overrides_trace_headers.rs` -- resolution-rule coverage for `trace_headers`; isolated binary
