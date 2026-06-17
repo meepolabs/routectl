@@ -68,28 +68,45 @@ fn normalize_one(provider: &str, index: usize, call: &Value) -> NormalizedToolCa
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let arguments_raw = function
-        .and_then(|f| f.get("arguments"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("{}");
-    let arguments = if arguments_raw.is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str(arguments_raw).unwrap_or_else(|e| {
-            tracing::warn!(
-                provider = provider,
-                tool_id = %id,
-                error = %e,
-                "tool_call.arguments not valid JSON; wrapping under _arguments for upstream",
-            );
-            json!({ "_arguments": arguments_raw })
-        })
+    // Branch on the wire shape of `function.arguments`. The OpenAI spec
+    // calls for a JSON-encoded string, but some upstreams (and some
+    // egresses on the multi-turn echo path) ship an already-parsed object.
+    // The previous `.as_str()` chain dropped the object case to `"{}"`
+    // and lost the args, breaking the tool loop. Both object-consuming
+    // egresses (Anthropic, Bedrock Converse) want the Value object
+    // directly; the Responses egress re-serializes to a string at its
+    // emit site.
+    let args_ref = function.and_then(|f| f.get("arguments"));
+    let arguments = match args_ref {
+        Some(Value::String(s)) => parse_arguments_string(provider, &id, s),
+        Some(v @ Value::Object(_)) => v.clone(),
+        _ => json!({}),
     };
     NormalizedToolCall {
         id,
         name,
         arguments,
     }
+}
+
+/// Parse the OpenAI-spec stringified `arguments` payload. On parse
+/// failure, wrap the raw text under `{"_arguments": "<raw>"}` and emit a
+/// WARN so the upstream returns a useful error instead of routectl
+/// silently shipping a malformed body. An empty string collapses to an
+/// empty object.
+fn parse_arguments_string(provider: &str, id: &str, raw: &str) -> Value {
+    if raw.is_empty() {
+        return json!({});
+    }
+    serde_json::from_str(raw).unwrap_or_else(|e| {
+        tracing::warn!(
+            provider = provider,
+            tool_id = %id,
+            error = %e,
+            "tool_call.arguments not valid JSON; wrapping under _arguments for upstream",
+        );
+        json!({ "_arguments": raw })
+    })
 }
 
 #[cfg(test)]
@@ -161,6 +178,43 @@ mod tests {
         let calls = vec![json!({
             "id": "call_e",
             "function": {"name": "f", "arguments": ""},
+        })];
+
+        // Act
+        let out = normalize_tool_calls("test", &calls);
+
+        // Assert
+        assert_eq!(out[0].arguments, json!({}));
+    }
+
+    /// An already-parsed object `arguments` value must pass through
+    /// unchanged. The previous `.as_str()` chain dropped this case to
+    /// `{}` and lost the args, breaking the tool loop for any upstream
+    /// that ships objects instead of the spec string.
+    #[test]
+    fn object_arguments_pass_through_unchanged() {
+        // Arrange
+        let calls = vec![json!({
+            "id": "call_obj",
+            "function": {"name": "get_weather", "arguments": {"city": "SF"}},
+        })];
+
+        // Act
+        let out = normalize_tool_calls("test", &calls);
+
+        // Assert
+        assert_eq!(out[0].arguments, json!({"city": "SF"}));
+    }
+
+    /// Missing `arguments` (neither string nor object) defaults to an
+    /// empty object so downstream emit sites don't have to special-case
+    /// a missing key.
+    #[test]
+    fn missing_arguments_yields_empty_object() {
+        // Arrange
+        let calls = vec![json!({
+            "id": "call_m",
+            "function": {"name": "f"},
         })];
 
         // Act

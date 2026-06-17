@@ -586,6 +586,59 @@ async fn anthropic_envelope_passes_through_valid_upstream_type() {
     assert_eq!(body["error"]["type"], "rate_limit_error");
 }
 
+/// Direct table-driven coverage of `anthropic_error_type`: every
+/// status-derived arm maps to the expected Anthropic-vocabulary member.
+/// Pins the full arm table -- including the 429 -> rate_limit_error arm
+/// -- so a future edit to the match cannot silently drop or remap a row.
+#[test]
+fn anthropic_error_type_table_covers_every_arm() {
+    use axum::http::StatusCode;
+
+    let cases: &[(&str, u16, &str)] = &[
+        ("unknown_alias", 404, "not_found_error"),
+        ("unknown_provider", 404, "not_found_error"),
+        ("bad_request", 400, "invalid_request_error"),
+        ("validation_error", 422, "invalid_request_error"),
+        ("payload_too_large", 413, "invalid_request_error"),
+        ("unsupported_media_type", 415, "invalid_request_error"),
+        ("auth_error", 401, "authentication_error"),
+        ("authentication_error", 401, "authentication_error"),
+        ("upstream_error", 401, "authentication_error"),
+        ("upstream_error", 403, "permission_error"),
+        ("upstream_error", 413, "request_too_large"),
+        ("upstream_error", 429, "rate_limit_error"),
+        ("upstream_error", 503, "overloaded_error"),
+        ("upstream_error", 529, "overloaded_error"),
+        ("upstream_error", 502, "api_error"),
+        ("streaming_error", 500, "api_error"),
+        ("bad_gateway", 502, "api_error"),
+        ("something_else", 500, "api_error"),
+    ];
+
+    for (err_type, status, expected) in cases {
+        let st = StatusCode::from_u16(*status).unwrap();
+        let got = anthropic_error_type(err_type, st, None);
+        assert_eq!(
+            got, *expected,
+            "({err_type}, {status}) should map to {expected}, got {got}"
+        );
+    }
+}
+
+/// A 429 upstream surfaces `rate_limit_error` (not `api_error`) on the
+/// non-stream Anthropic envelope, so claude-code's per-`error.type`
+/// backoff fires.
+#[tokio::test]
+async fn anthropic_envelope_429_maps_to_rate_limit_error() {
+    let resp = map_error(
+        ErrorEnvelopeShape::Anthropic,
+        Error::upstream("p", 429, "slow down"),
+    );
+    assert_eq!(resp.status().as_u16(), 429);
+    let body = body_to_value(resp).await;
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+}
+
 // -------- sanitize_stream_error_for_client --------------------------
 
 /// The streaming-error sanitizer must NOT include the upstream
@@ -952,12 +1005,14 @@ async fn render_stream_task_anthropic_render_chunk_failure_emits_terminal_error(
     // status to surface).
     assert_eq!(msg, "upstream stream error");
 
-    // The chunk-render failure leaves the guard un-finalized, so Drop
-    // stamps the `client_disconnect` fallback: we never delivered a
-    // complete stream. Exactly one row, tagged for this request.
+    // The chunk-render failure observes the render error and finalizes
+    // the row as `upstream_error` so the failure surfaces in
+    // `routectl usage` as a non-ok outcome (instead of being mislabeled
+    // as a bare client disconnect). Exactly one row, tagged for this
+    // request.
     let rows = rig.flush_and_read().await;
     assert_eq!(rows.len(), 1, "exactly one row on render-failure exit");
-    assert_eq!(rows[0].outcome, "client_disconnect");
+    assert_eq!(rows[0].outcome, "upstream_error");
     assert_eq!(rows[0].request_id, "req-render-fail");
 }
 

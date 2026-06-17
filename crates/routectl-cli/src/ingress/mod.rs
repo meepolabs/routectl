@@ -13,7 +13,7 @@
 //! The trait is small on purpose: anything beyond translation belongs in
 //! the router (alias resolution, retry, fallback) or core.
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Result};
 use serde_json::Value;
 
@@ -24,16 +24,14 @@ pub mod openai;
 /// field directly to pin routing to a specific configured alias.
 pub const ALIAS_HEADER: &str = "x-routectl-alias";
 
-/// Default wire `error.type` value for a mid-stream upstream failure
-/// when no more specific classification applies. Matches the Anthropic
-/// SSE `error.type` vocabulary (`api_error` / `overloaded_error` / ...)
-/// which both OpenAI and Anthropic clients tolerate. Routed through one
-/// constant so the dialect impls and their tests cannot drift on the
-/// magic string.
+/// Fallback wire `error.type` for a non-status error -- a render or
+/// transport failure that carries no HTTP status to classify. Status-
+/// bearing upstream errors instead map through `anthropic_error_type`.
+/// Matches the Anthropic SSE `error.type` vocabulary
+/// (`api_error` / `overloaded_error` / ...) which both OpenAI and
+/// Anthropic clients tolerate. Routed through one constant so the
+/// dialect impls and their tests cannot drift on the magic string.
 pub(crate) const STREAM_ERROR_TYPE: &str = "api_error";
-
-/// Anthropic SSE `error.type` for an overloaded upstream (503/529).
-pub(crate) const STREAM_OVERLOADED_TYPE: &str = "overloaded_error";
 
 /// Resolved classifier for a mid-stream terminal error event, derived
 /// from the upstream `Error` so the terminal SSE event carries a
@@ -42,9 +40,11 @@ pub(crate) const STREAM_OVERLOADED_TYPE: &str = "overloaded_error";
 /// each dialect's `render_error_eos`, which reads the field matching its
 /// wire shape.
 ///
-/// - `anthropic_type`: the Anthropic-vocabulary `error.type`
-///   (`overloaded_error` for 503/529, else `api_error`), or an
-///   upstream-supplied member when it is already valid Anthropic vocab.
+/// - `anthropic_type`: the Anthropic-vocabulary `error.type` (delegated
+///   to `handlers::ingress_handle::anthropic_error_type` so stream and
+///   non-stream agree on every status -> vocab mapping, including
+///   `rate_limit_error` for 429, `overloaded_error` for 503/529, and
+///   upstream-supplied valid-vocab pass-through).
 /// - `openai_type` / `openai_code`: the upstream's own classifier when
 ///   present, else the Anthropic type / a generic fallback -- mirroring
 ///   the non-stream OpenAI envelope so stream and non-stream agree.
@@ -67,12 +67,13 @@ impl StreamErrorClass {
                 upstream_code,
                 ..
             } => {
-                let anthropic_type = match upstream_type.as_deref().and_then(anthropic_vocab_member)
-                {
-                    Some(member) => member.to_string(),
-                    None if matches!(status, 503 | 529) => STREAM_OVERLOADED_TYPE.to_string(),
-                    None => STREAM_ERROR_TYPE.to_string(),
-                };
+                let st = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
+                let anthropic_type = crate::handlers::ingress_handle::anthropic_error_type(
+                    "upstream_error",
+                    st,
+                    upstream_type.as_deref(),
+                )
+                .to_string();
                 let openai_type = upstream_type
                     .clone()
                     .unwrap_or_else(|| anthropic_type.clone());
@@ -92,23 +93,6 @@ impl StreamErrorClass {
                 openai_code: STREAM_ERROR_TYPE.to_string(),
             },
         }
-    }
-}
-
-/// Return the Anthropic-vocabulary spelling of `t` when `t` is already a
-/// valid Anthropic `error.type` member, else `None`. Kept in sync with
-/// the non-stream `handlers::ingress_handle::anthropic_vocab_member`.
-fn anthropic_vocab_member(t: &str) -> Option<&'static str> {
-    match t {
-        "invalid_request_error" => Some("invalid_request_error"),
-        "authentication_error" => Some("authentication_error"),
-        "permission_error" => Some("permission_error"),
-        "not_found_error" => Some("not_found_error"),
-        "request_too_large" => Some("request_too_large"),
-        "rate_limit_error" => Some("rate_limit_error"),
-        "api_error" => Some("api_error"),
-        "overloaded_error" => Some("overloaded_error"),
-        _ => None,
     }
 }
 
@@ -161,6 +145,61 @@ mod read_alias_header_tests {
     #[test]
     fn empty_header_value_returns_none() {
         assert_eq!(read_alias_header(&h(ALIAS_HEADER, "   ")), None);
+    }
+}
+
+#[cfg(test)]
+mod stream_error_class_tests {
+    use super::*;
+
+    /// The stream-path classifier delegates to the same status -> vocab
+    /// table as the non-stream envelope, so a 429 upstream surfaces
+    /// `rate_limit_error` on the terminal SSE error event instead of the
+    /// generic `api_error`. Pins parity with the non-stream path.
+    #[test]
+    fn upstream_429_maps_to_rate_limit_error() {
+        let class = StreamErrorClass::from_error(&Error::upstream("p", 429, "slow down"));
+        assert_eq!(class.anthropic_type, "rate_limit_error");
+    }
+
+    /// Regression guard: 401/403/413 must keep their specific Anthropic
+    /// types on the stream path (they previously collapsed to
+    /// `api_error` because the stream path hand-rolled a narrower match).
+    #[test]
+    fn upstream_status_maps_to_specific_types() {
+        let cases: &[(u16, &str)] = &[
+            (401, "authentication_error"),
+            (403, "permission_error"),
+            (413, "request_too_large"),
+            (503, "overloaded_error"),
+            (529, "overloaded_error"),
+        ];
+        for (status, expected) in cases {
+            let class = StreamErrorClass::from_error(&Error::upstream("p", *status, "x"));
+            assert_eq!(
+                class.anthropic_type, *expected,
+                "{status} should map to {expected}"
+            );
+        }
+    }
+
+    /// A valid upstream-supplied Anthropic vocab member wins over the
+    /// status-derived guess (502 would otherwise be api_error).
+    #[test]
+    fn valid_upstream_type_passes_through() {
+        let err = Error::upstream_full("p", 502, "x", None, Some("rate_limit_error".into()), None);
+        let class = StreamErrorClass::from_error(&err);
+        assert_eq!(class.anthropic_type, "rate_limit_error");
+    }
+
+    /// Non-`Upstream` errors (no HTTP status) fall back to the generic
+    /// `api_error` bucket on every field.
+    #[test]
+    fn non_upstream_error_falls_back_to_api_error() {
+        let class = StreamErrorClass::from_error(&Error::Streaming("render failed".into()));
+        assert_eq!(class.anthropic_type, STREAM_ERROR_TYPE);
+        assert_eq!(class.openai_type, STREAM_ERROR_TYPE);
+        assert_eq!(class.openai_code, STREAM_ERROR_TYPE);
     }
 }
 

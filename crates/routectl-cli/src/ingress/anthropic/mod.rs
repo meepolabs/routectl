@@ -18,9 +18,9 @@ use std::any::Any;
 use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
+use routectl_core::{CacheCreation, ChatChunk, ChatRequest, ChatResponse, Result};
 
 use super::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass};
 
@@ -156,8 +156,8 @@ mod stream;
 use parse::translate_request;
 use render::render_messages_response;
 use stream::{
-    anthropic_state_mut, close_open_block, emit_message_delta, emit_message_stop,
-    flush_tool_blocks, render_chunk_internal, render_error_eos_internal,
+    anthropic_state_mut, close_open_block, emit_message_delta, emit_message_start,
+    emit_message_stop, flush_tool_blocks, render_chunk_internal, render_error_eos_internal,
 };
 
 /// Reverse of `routectl_providers::anthropic_api::response::map_stop_reason`.
@@ -210,6 +210,39 @@ fn openai_finish_to_anthropic_stop(fr: &str) -> &str {
     }
 }
 
+/// Insert Anthropic's three cache-accounting fields into a usage map
+/// when present. Both the non-streaming `render.rs` and the streaming
+/// `stream.rs` usage emitters write the identical block; this helper
+/// keeps them in lockstep so a future cache-field add lands in one
+/// place. Accepts the three values directly (not the `Usage` /
+/// `UsageDelta` struct) so it works for both call sites without a
+/// trait or generic. The `input_tokens` / `output_tokens` fields are
+/// NOT covered here -- they differ between the two sites (different
+/// defaulting) and stay inline at each call site.
+pub(super) fn cache_fields_into(
+    map: &mut Map<String, Value>,
+    cache_creation_input_tokens: Option<u32>,
+    cache_read_input_tokens: Option<u32>,
+    cache_creation: Option<&CacheCreation>,
+) {
+    if let Some(n) = cache_creation_input_tokens {
+        map.insert("cache_creation_input_tokens".into(), json!(n));
+    }
+    if let Some(n) = cache_read_input_tokens {
+        map.insert("cache_read_input_tokens".into(), json!(n));
+    }
+    if let Some(c) = cache_creation {
+        let mut cc = Map::new();
+        if let Some(n) = c.ephemeral_5m_input_tokens {
+            cc.insert("ephemeral_5m_input_tokens".into(), json!(n));
+        }
+        if let Some(n) = c.ephemeral_1h_input_tokens {
+            cc.insert("ephemeral_1h_input_tokens".into(), json!(n));
+        }
+        map.insert("cache_creation".into(), Value::Object(cc));
+    }
+}
+
 impl IngressAdapter for AnthropicIngress {
     fn id(&self) -> &str {
         "anthropic"
@@ -252,6 +285,15 @@ impl IngressAdapter for AnthropicIngress {
         let s = anthropic_state_mut(state);
         let mut events = Vec::new();
         if !s.finished {
+            // An upstream stream that produced zero chunks still needs a
+            // protocol-valid frame sequence: emit a synthetic
+            // `message_start` before the terminal `message_stop` so
+            // SDK consumers don't see a bare `message_stop` (which the
+            // spec forbids).
+            if !s.started {
+                emit_message_start(s, &mut events);
+                s.started = true;
+            }
             flush_tool_blocks(s, &mut events);
             close_open_block(s, &mut events);
             // Close any opaque blocks left open (the upstream stream ended

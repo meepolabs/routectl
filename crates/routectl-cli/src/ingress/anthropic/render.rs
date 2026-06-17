@@ -2,7 +2,7 @@ use serde_json::{json, Map, Value};
 
 use routectl_core::{ChatResponse, ContentPart, Message, MessageContent};
 
-use super::openai_finish_to_anthropic_stop;
+use super::{cache_fields_into, openai_finish_to_anthropic_stop};
 
 // ---------------------------------------------------------------------------
 // Response rendering
@@ -68,22 +68,12 @@ pub(super) fn render_messages_response(resp: ChatResponse) -> Value {
         let mut usage_map = Map::new();
         usage_map.insert("input_tokens".into(), json!(raw_input));
         usage_map.insert("output_tokens".into(), json!(u.completion_tokens));
-        if let Some(n) = u.cache_creation_input_tokens {
-            usage_map.insert("cache_creation_input_tokens".into(), json!(n));
-        }
-        if let Some(n) = u.cache_read_input_tokens {
-            usage_map.insert("cache_read_input_tokens".into(), json!(n));
-        }
-        if let Some(c) = u.cache_creation.as_ref() {
-            let mut cc = Map::new();
-            if let Some(n) = c.ephemeral_5m_input_tokens {
-                cc.insert("ephemeral_5m_input_tokens".into(), json!(n));
-            }
-            if let Some(n) = c.ephemeral_1h_input_tokens {
-                cc.insert("ephemeral_1h_input_tokens".into(), json!(n));
-            }
-            usage_map.insert("cache_creation".into(), Value::Object(cc));
-        }
+        cache_fields_into(
+            &mut usage_map,
+            u.cache_creation_input_tokens,
+            u.cache_read_input_tokens,
+            u.cache_creation.as_ref(),
+        );
         let mut usage_obj = Value::Object(usage_map);
         // Forward-compat: emit unknown usage sub-fields (e.g.
         // `service_tier`) that flowed into `extras` from upstream.

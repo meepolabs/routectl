@@ -339,16 +339,21 @@ async fn render_stream_task<A: IngressAdapter>(
                         // events). Emit the dialect-specific terminal
                         // error event so the client sees a clean
                         // FAILURE rather than a truncated stream and
-                        // does not retry. The guard stays un-finalized,
-                        // so Drop stamps `client_disconnect` (we never
-                        // delivered a complete stream). The send-failure
+                        // does not retry. Finalize the usage row as
+                        // `upstream_error` (with the render failure
+                        // observed for the row detail) so the row is
+                        // visible to `routectl usage` as a non-ok
+                        // outcome instead of being mislabeled as a
+                        // bare client disconnect. The send-failure
                         // result is intentionally discarded: if the
-                        // client already disconnected, the guard Drop
-                        // still fires.
+                        // client already disconnected, the row is
+                        // already finalized.
                         tracing::error!(error = ?e, "ingress chunk render failed");
                         let render_err = routectl_core::Error::Streaming(e.to_string());
                         let safe_msg = sanitize_stream_error_for_client(&render_err);
                         let class = crate::ingress::StreamErrorClass::from_error(&render_err);
+                        capture.observe_error(&render_err);
+                        capture.finalize(Outcome::UpstreamError);
                         for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                             let _ = tx.send(ev).await;
                         }
@@ -662,9 +667,9 @@ fn error_response(
 /// status-derived guess so stream + non-stream agree and the upstream
 /// signal survives. Otherwise the status table decides: `upstream_error`
 /// at 401/403/413 maps to `authentication_error` / `permission_error` /
-/// `request_too_large`, 503/529 to `overloaded_error`, and everything
-/// else falls back to `api_error`.
-fn anthropic_error_type(
+/// `request_too_large`, 429 to `rate_limit_error`, 503/529 to
+/// `overloaded_error`, and everything else falls back to `api_error`.
+pub(crate) fn anthropic_error_type(
     err_type: &str,
     status: StatusCode,
     upstream_type: Option<&str>,
@@ -682,6 +687,7 @@ fn anthropic_error_type(
         ("upstream_error", 401) => "authentication_error",
         ("upstream_error", 403) => "permission_error",
         ("upstream_error", 413) => "request_too_large",
+        ("upstream_error", 429) => "rate_limit_error",
         ("upstream_error", 503) | ("upstream_error", 529) => "overloaded_error",
         ("upstream_error", _) | ("streaming_error", _) | ("bad_gateway", _) => "api_error",
         (_, _) => "api_error",

@@ -298,6 +298,25 @@ fn stream_eos_emits_message_stop_when_not_yet_finished() {
     assert_eq!(names, vec!["content_block_stop", "message_stop"]);
 }
 
+/// An upstream stream that produced zero chunks must still emit a valid
+/// Anthropic SSE frame sequence: a synthetic `message_start` followed by
+/// `message_stop`. Bare `message_stop` on an empty stream violates the
+/// spec and breaks SDK consumers that count frames.
+#[test]
+fn stream_eos_on_empty_stream_emits_synthetic_message_start_then_stop() {
+    // Arrange: fresh state, no chunks rendered (started=false,
+    // finished=false).
+    let mut state = ingress().new_stream_state();
+
+    // Act
+    let events = ingress().render_eos(state.as_mut());
+
+    // Assert: the frame sequence begins with message_start and ends
+    // with message_stop.
+    let names: Vec<&str> = events.iter().filter_map(|e| e.event.as_deref()).collect();
+    assert_eq!(names, vec!["message_start", "message_stop"]);
+}
+
 #[test]
 fn stream_two_concurrent_tool_calls_each_get_their_own_block() {
     // Verify both tool calls open their own blocks

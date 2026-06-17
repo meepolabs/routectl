@@ -5,8 +5,8 @@ use routectl_core::{ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result};
 use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
 
 use super::{
-    openai_finish_to_anthropic_stop, random_msg_id, AnthropicStreamState, OpenBlockKind,
-    ToolBlockState,
+    cache_fields_into, openai_finish_to_anthropic_stop, random_msg_id, AnthropicStreamState,
+    OpenBlockKind, ToolBlockState,
 };
 
 /// SSE `event:` field name for Anthropic's terminal error event. Per
@@ -295,7 +295,7 @@ fn build_opaque_delta_payload(ingress_index: usize, raw_bytes: &[u8]) -> Option<
     ))
 }
 
-fn emit_message_start(state: &AnthropicStreamState, events: &mut Vec<SseEvent>) {
+pub(super) fn emit_message_start(state: &AnthropicStreamState, events: &mut Vec<SseEvent>) {
     let msg = json!({
         "type": "message_start",
         "message": {
@@ -623,22 +623,12 @@ pub(super) fn emit_message_delta(
             "output_tokens".into(),
             json!(u.completion_tokens.unwrap_or(0)),
         );
-        if let Some(n) = u.cache_creation_input_tokens {
-            wire_usage.insert("cache_creation_input_tokens".into(), json!(n));
-        }
-        if let Some(n) = u.cache_read_input_tokens {
-            wire_usage.insert("cache_read_input_tokens".into(), json!(n));
-        }
-        if let Some(c) = u.cache_creation.as_ref() {
-            let mut cc = Map::new();
-            if let Some(n) = c.ephemeral_5m_input_tokens {
-                cc.insert("ephemeral_5m_input_tokens".into(), json!(n));
-            }
-            if let Some(n) = c.ephemeral_1h_input_tokens {
-                cc.insert("ephemeral_1h_input_tokens".into(), json!(n));
-            }
-            wire_usage.insert("cache_creation".into(), Value::Object(cc));
-        }
+        cache_fields_into(
+            &mut wire_usage,
+            u.cache_creation_input_tokens,
+            u.cache_read_input_tokens,
+            u.cache_creation.as_ref(),
+        );
         // Guard: only attach `usage` to the payload when the map carries
         // at least one key. Both `input_tokens` and `output_tokens` are
         // always present above, so this is defensive -- it prevents a
