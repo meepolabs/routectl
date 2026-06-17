@@ -59,6 +59,9 @@ impl SecretRef {
             return Ok(Self::File(path));
         }
         if let Some(lit) = uri.strip_prefix("literal:") {
+            if lit.is_empty() {
+                return Err(Error::Auth("literal: URI has an empty value".into()));
+            }
             return Ok(Self::Literal(lit.to_string()));
         }
         if let Some(rest) = uri.strip_prefix("oauth://") {
@@ -315,6 +318,29 @@ mod tests {
             dbg.contains("[REDACTED]"),
             "Debug must show redacted marker: {dbg}"
         );
+    }
+
+    #[test]
+    fn rejects_empty_literal() {
+        // Arrange / Act
+        let err = SecretRef::parse("literal:").unwrap_err();
+
+        // Assert: the error names the scheme and the empty value, mirroring
+        // the env:// / file:// empty-guard style.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("literal:") && msg.contains("empty"),
+            "error must name the empty literal: {msg}"
+        );
+    }
+
+    #[test]
+    fn parses_non_empty_literal() {
+        // Arrange / Act
+        let sr = SecretRef::parse("literal:hunter2").unwrap();
+
+        // Assert: a non-empty literal still round-trips to Literal.
+        assert_eq!(sr, SecretRef::Literal("hunter2".into()));
     }
 
     #[test]

@@ -66,9 +66,17 @@ fn parse_literal_valid() {
 }
 
 #[test]
-fn parse_literal_empty_value() {
-    let r = SecretRef::parse("literal:").unwrap();
-    assert_eq!(r, SecretRef::Literal("".into()));
+fn parse_literal_empty_value_is_rejected() {
+    // An empty `literal:` value is rejected at parse time: a `literal:`
+    // that resolves to "" could otherwise silently stand in for a real
+    // secret (e.g. an empty listener token disabling auth). Mirrors the
+    // env:// / file:// empty-guard style.
+    let err = SecretRef::parse("literal:").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("literal:") && msg.contains("empty"),
+        "error must name the empty literal: {msg}"
+    );
 }
 
 #[test]

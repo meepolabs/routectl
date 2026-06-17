@@ -60,6 +60,26 @@ const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
 
 pub(crate) struct Codex;
 
+/// Stamp the codex identity (User-Agent + originator + residency) onto a
+/// single token-endpoint request. The shared OAuth client is
+/// identity-neutral transport; this folds the codex fingerprint in
+/// per-request so it reaches ONLY the codex token endpoint and never
+/// leaks onto another provider's refresh client.
+///
+/// The token endpoint requires originator + residency + a codex-style
+/// User-Agent on BOTH the exchange and refresh POSTs; dropping any of
+/// the three breaks codex login/refresh.
+fn codex_identity(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    let mut rb = rb.header(
+        reqwest::header::USER_AGENT,
+        routectl_core::identity::codex::codex_user_agent(),
+    );
+    for (name, value) in routectl_core::identity::codex::codex_default_headers() {
+        rb = rb.header(name, value);
+    }
+    rb
+}
+
 #[async_trait]
 impl OAuthFlow for Codex {
     fn provider_id(&self) -> &'static str {
@@ -124,8 +144,7 @@ impl OAuthFlow for Codex {
             ("client_id", CLIENT_ID),
             ("code_verifier", verifier),
         ];
-        let resp = http
-            .post(TOKEN_URL)
+        let resp = codex_identity(http.post(TOKEN_URL))
             .form(&form)
             .send()
             .await
@@ -166,8 +185,7 @@ impl OAuthFlow for Codex {
             "codex refresh request"
         );
 
-        let resp = http
-            .post(TOKEN_URL)
+        let resp = codex_identity(http.post(TOKEN_URL))
             .json(&body)
             .send()
             .await
@@ -760,5 +778,56 @@ mod tests {
             extract_error_code(r#"{"code":"refresh_token_expired"}"#).as_deref(),
             Some("refresh_token_expired")
         );
+    }
+
+    #[test]
+    fn codex_identity_stamps_user_agent_originator_and_residency() {
+        use routectl_core::identity::codex::{
+            codex_user_agent, CODEX_ORIGINATOR, ORIGINATOR_HEADER_NAME, RESIDENCY_HEADER_NAME,
+            RESIDENCY_HEADER_VALUE,
+        };
+
+        // Arrange: a fresh, identity-neutral client + bare POST builder.
+        let client = reqwest::Client::new();
+        let req = codex_identity(client.post(TOKEN_URL))
+            .build()
+            .expect("request must build");
+
+        // Act: read the stamped headers off the built request.
+        let headers = req.headers();
+        let ua = headers
+            .get(reqwest::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok());
+        let originator = headers
+            .get(ORIGINATOR_HEADER_NAME)
+            .and_then(|v| v.to_str().ok());
+        let residency = headers
+            .get(RESIDENCY_HEADER_NAME)
+            .and_then(|v| v.to_str().ok());
+
+        // Assert: all three identity signals land on the request.
+        assert_eq!(ua, Some(codex_user_agent()));
+        assert_eq!(originator, Some(CODEX_ORIGINATOR));
+        assert_eq!(residency, Some(RESIDENCY_HEADER_VALUE));
+    }
+
+    #[test]
+    fn codex_identity_folds_in_every_default_header_pair() {
+        use routectl_core::identity::codex::codex_default_headers;
+
+        // Arrange + Act: stamp identity onto a bare builder, build it.
+        let client = reqwest::Client::new();
+        let req = codex_identity(client.post(TOKEN_URL))
+            .build()
+            .expect("request must build");
+        let headers = req.headers();
+
+        // Assert: EXACTLY the pairs from codex_default_headers() land on
+        // the request. Iterating the source array means dropping either
+        // header (originator or residency) from codex_identity fails here.
+        for (name, value) in codex_default_headers() {
+            let got = headers.get(name).and_then(|v| v.to_str().ok());
+            assert_eq!(got, Some(value), "missing or wrong header {name}");
+        }
     }
 }

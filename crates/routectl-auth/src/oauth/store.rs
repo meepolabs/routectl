@@ -116,31 +116,13 @@ impl OAuthStore {
         // Treat any 3xx from the token endpoint as an upstream
         // failure rather than silently re-sending the secret.
         //
-        // The refresh client must carry the originator, residency, and
-        // User-Agent the token endpoint requires for chatgpt-oauth
-        // refresh (originator: codex_cli_rs,
-        // x-openai-internal-codex-residency: us, codex-style
-        // User-Agent). Anthropic and any future non-codex OAuth provider
-        // see these too; the headers are inert for them (no impact on
-        // the Anthropic token endpoint) but a single pinned client keeps
-        // refresh simple.
-        let mut default_headers = reqwest::header::HeaderMap::new();
-        for (name, value) in routectl_core::identity::codex::codex_default_headers() {
-            // The constants are valid header name/value pairs today.
-            // Promote any future regression that breaks them into a
-            // process-startup panic so a silent drop cannot remove the
-            // required originator or residency header from the OAuth
-            // refresh client without an operator-visible signal.
-            let header_name = name
-                .parse::<reqwest::header::HeaderName>()
-                .expect("codex_fingerprint constant must be a valid header name");
-            let header_value = reqwest::header::HeaderValue::from_str(value)
-                .expect("codex_fingerprint constant must be a valid header value");
-            default_headers.insert(header_name, header_value);
-        }
+        // The client is identity-neutral transport: connect/total
+        // timeouts plus no-redirect. Per-provider identity (the codex
+        // originator/residency/User-Agent, or the Anthropic
+        // claude-cli User-Agent) is stamped per-request inside each
+        // `OAuthFlow`, so one provider's fingerprint never leaks onto
+        // another provider's token endpoint.
         let http = reqwest::Client::builder()
-            .user_agent(routectl_core::identity::codex::codex_user_agent())
-            .default_headers(default_headers)
             .connect_timeout(std::time::Duration::from_secs(
                 Self::HTTP_CONNECT_TIMEOUT_SECS,
             ))
@@ -1633,31 +1615,34 @@ mod tests {
         );
     }
 
-    /// The OAuth refresh client must carry the required originator +
-    /// residency headers and codex User-Agent on every token-endpoint
-    /// request.
+    /// The shared OAuth transport client is identity-neutral: it stamps
+    /// NO per-provider fingerprint (no codex originator/residency, no
+    /// codex User-Agent). Per-provider identity is applied per-request
+    /// inside each `OAuthFlow` so one provider's fingerprint never leaks
+    /// onto another provider's token endpoint. (The codex fingerprint is
+    /// now proven present on the codex POSTs by the `codex_identity`
+    /// tests in `providers/codex.rs`.)
     #[tokio::test]
-    async fn refresh_client_carries_codex_fingerprint_headers() {
+    async fn shared_client_is_identity_neutral() {
         use wiremock::matchers::any;
         use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
         // Arrange: stand up an OAuthStore so its production client
-        // builder runs (default headers + UA wired from
-        // routectl_core::identity::codex).
+        // builder runs.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("creds.json");
         let store = OAuthStore::open(&path).await.unwrap();
 
         // Capture the headers of the next inbound request via a
-        // wiremock mock that records the body+headers and answers
-        // 200.
+        // wiremock mock that records the body+headers and answers 200.
         let server = MockServer::start().await;
         Mock::given(any())
             .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
             .mount(&server)
             .await;
 
-        // Act: drive a real request through `store.http()`.
+        // Act: drive a real request through `store.http()` with no
+        // per-request identity stamped.
         let resp = store
             .http()
             .post(server.uri())
@@ -1666,7 +1651,7 @@ mod tests {
             .expect("request send");
         assert_eq!(resp.status().as_u16(), 200);
 
-        // Assert: inspect the recorded request headers via wiremock.
+        // Assert: the recorded request carries NO codex fingerprint.
         let received: Vec<Request> = server.received_requests().await.unwrap();
         assert_eq!(received.len(), 1, "one request reached the mock");
         let req = &received[0];
@@ -1676,20 +1661,22 @@ mod tests {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string)
         };
-        assert_eq!(
-            header("originator").as_deref(),
-            Some("codex_cli_rs"),
-            "refresh client must claim codex_cli_rs originator",
-        );
-        assert_eq!(
-            header("x-openai-internal-codex-residency").as_deref(),
-            Some("us"),
-            "refresh client must pin US residency",
-        );
-        let ua = header("user-agent").expect("UA must be set");
         assert!(
-            ua.starts_with("codex_cli_rs/"),
-            "refresh client UA must start with codex_cli_rs/, got: {ua}",
+            header("originator").is_none(),
+            "shared client must NOT stamp the codex originator header",
+        );
+        assert!(
+            header("x-openai-internal-codex-residency").is_none(),
+            "shared client must NOT stamp the codex residency header",
+        );
+        let ua = header("user-agent");
+        // A None/absent UA also satisfies this: the claim is "the codex UA
+        // prefix is not stamped on the shared client," not "some UA is
+        // always present." map_or(true, ..) makes absence pass by design.
+        assert!(
+            ua.as_deref()
+                .map_or(true, |u| !u.starts_with("codex_cli_rs/")),
+            "shared client must NOT stamp the codex User-Agent, got: {ua:?}",
         );
     }
 

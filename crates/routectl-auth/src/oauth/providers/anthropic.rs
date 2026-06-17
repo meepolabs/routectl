@@ -56,6 +56,21 @@ pub(crate) const SCOPES: &[&str] = &[
 
 pub(crate) struct Anthropic;
 
+/// Stamp the claude.ai identity onto a single token-endpoint request.
+/// The claude.ai OAuth flow needs ONLY the claude-cli User-Agent -- it
+/// must NOT carry the codex fingerprint (originator + residency) nor the
+/// Stainless SDK block (`x-app` + `x-stainless-*`), which belong to the
+/// egress messages surface, not the token endpoint. Folding the single
+/// header in here (consume-and-return, mirroring `codex_identity`) keeps
+/// the two production POST sites byte-identical and gives the regression
+/// tests the real production stamping to assert against.
+fn anthropic_identity(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    rb.header(
+        reqwest::header::USER_AGENT,
+        routectl_core::identity::anthropic::default_claude_code_user_agent(),
+    )
+}
+
 #[async_trait]
 impl OAuthFlow for Anthropic {
     fn provider_id(&self) -> &'static str {
@@ -107,14 +122,15 @@ impl OAuthFlow for Anthropic {
             "redirect_uri": redirect_uri,
             "client_id": CLIENT_ID,
         });
-        let resp = http
-            .post(TOKEN_URL)
-            .header("anthropic-beta", OAUTH_BETA_HEADER)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OAuthError::Network(format!("token endpoint POST: {e}")))?;
+        let resp = anthropic_identity(
+            http.post(TOKEN_URL)
+                .header("anthropic-beta", OAUTH_BETA_HEADER)
+                .header("content-type", "application/json"),
+        )
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| OAuthError::Network(format!("token endpoint POST: {e}")))?;
         decode_token_response(resp, TokenFlow::Exchange).await
     }
 
@@ -142,14 +158,15 @@ impl OAuthFlow for Anthropic {
             "anthropic refresh request"
         );
 
-        let resp = http
-            .post(TOKEN_URL)
-            .header("anthropic-beta", OAUTH_BETA_HEADER)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
+        let resp = anthropic_identity(
+            http.post(TOKEN_URL)
+                .header("anthropic-beta", OAUTH_BETA_HEADER)
+                .header("content-type", "application/json"),
+        )
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
         decode_token_response_traced(resp, &prior_sha8).await
     }
 }
@@ -578,5 +595,63 @@ mod tests {
             rec.session_id.is_none(),
             "refresh must leave session_id None for the store to preserve the prior value"
         );
+    }
+
+    /// Both production token-endpoint POSTs (`exchange_code` and
+    /// `refresh_token`) route their builder through the shared
+    /// `anthropic_identity` helper, so the identity stamping is identical
+    /// for both flows. Exercising the helper directly -- the SAME function
+    /// the production path calls -- covers both POST sites at once; a
+    /// per-flow duplicate would only re-test the helper twice.
+    ///
+    /// Guards three regressions at once:
+    /// 1. the claude-cli User-Agent is present (dropping it would make the
+    ///    token endpoint see an unrecognized client);
+    /// 2. the codex fingerprint (originator + residency) is absent;
+    /// 3. the Stainless SDK block (`x-app` + every `x-stainless-*` key) is
+    ///    absent -- that block belongs to the egress messages surface, not
+    ///    the token endpoint. The excluded names are read from
+    ///    `default_claude_code_identity_headers()` so the assertion tracks
+    ///    the real header set instead of a hand-copied guess.
+    #[test]
+    fn anthropic_identity_stamps_claude_cli_ua_and_nothing_else() {
+        use routectl_core::identity::anthropic::{
+            default_claude_code_identity_headers, default_claude_code_user_agent,
+        };
+
+        // Arrange + Act: stamp identity onto a bare token-endpoint POST
+        // through the production helper, then build it for inspection.
+        let req = anthropic_identity(reqwest::Client::new().post(TOKEN_URL))
+            .build()
+            .expect("identity-stamped request must build");
+        let headers = req.headers();
+        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+
+        // Assert: claude-cli UA present.
+        assert_eq!(
+            header("user-agent"),
+            Some(default_claude_code_user_agent()),
+            "token-endpoint POST must carry the claude-cli User-Agent",
+        );
+
+        // Assert: codex fingerprint absent.
+        assert!(
+            header("originator").is_none(),
+            "token-endpoint POST must NOT carry the codex originator header",
+        );
+        assert!(
+            header("x-openai-internal-codex-residency").is_none(),
+            "token-endpoint POST must NOT carry the codex residency header",
+        );
+
+        // Assert: the entire Stainless SDK block is absent. Iterating the
+        // real default set means adding ANY of those keys (x-app or any
+        // x-stainless-*) to anthropic_identity fails this assertion.
+        for (name, _value) in default_claude_code_identity_headers() {
+            assert!(
+                headers.get(name).is_none(),
+                "token-endpoint POST must NOT carry the Stainless header {name}",
+            );
+        }
     }
 }

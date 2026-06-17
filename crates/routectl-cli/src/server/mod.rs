@@ -454,6 +454,17 @@ async fn resolve_listener_tokens(config: &Config) -> Result<Arc<TokenSet>> {
             .get(&secret_ref)
             .await
             .map_err(|e| Error::Config(format!("[server.auth].tokens entry #{entry}: {e}")))?;
+        // An empty (or all-whitespace) resolved token would silently
+        // disable listener authentication: TokenSet would hold a value
+        // that matches an absent / empty inbound credential. The
+        // literal: parse guard cannot see this -- an env:// / file://
+        // source can resolve to "" at use-time -- so reject it here by
+        // position, never echoing the raw value.
+        if value.trim().is_empty() {
+            return Err(Error::Config(format!(
+                "[server.auth].tokens entry #{entry}: resolved to an empty token; an empty listener token would disable authentication"
+            )));
+        }
         resolved.push(value);
     }
     tracing::info!(
@@ -1186,6 +1197,116 @@ mod tests {
         // the same Config (Arc-shared at construction time).
         assert!(Arc::ptr_eq(&r1.config, &config));
         assert!(Arc::ptr_eq(&r2.config, &config));
+    }
+
+    /// Build a `Config` whose single listener-auth token is the given
+    /// secret URI. Isolates the usage DB so the test never touches the
+    /// real path; returns the config plus the tempdir guard.
+    #[cfg(test)]
+    fn config_with_single_listener_token(uri: &str) -> (Config, tempfile::TempDir) {
+        use routectl_router::{Config, ServerAuth, ServerConfig};
+        let mut config = Config {
+            server: ServerConfig {
+                auth: Some(ServerAuth {
+                    tokens: vec![uri.to_string()],
+                }),
+                ..ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        let dir = isolate_usage_db(&mut config);
+        (config, dir)
+    }
+
+    /// Write `contents` to a 0600 tempfile and return a `file://` URI
+    /// pointing at it plus the `NamedTempFile` guard (kept alive by the
+    /// caller). `file://` is a use-time source the secret-ref parser
+    /// cannot pre-reject for emptiness, and it avoids mutating
+    /// process-global env state (which races with concurrent tests).
+    #[cfg(test)]
+    fn file_token_uri(contents: &str) -> (String, tempfile::NamedTempFile) {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(contents.as_bytes()).expect("write secret file");
+        f.flush().expect("flush");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 600");
+        }
+        let uri = format!("file://{}", f.path().display());
+        (uri, f)
+    }
+
+    #[tokio::test]
+    async fn resolve_listener_tokens_rejects_empty_file_source() {
+        // Arrange: a file:// source the parser CANNOT pre-reject (the URI
+        // is well-formed) whose contents trim to an empty string.
+        let (uri, _file) = file_token_uri("");
+        let (config, _guard) = config_with_single_listener_token(&uri);
+
+        // Act
+        let err = resolve_listener_tokens(&config)
+            .await
+            .expect_err("empty file token must be rejected");
+
+        // Assert: Config error naming entry #1 + the empty-token risk;
+        // never the raw value.
+        match err {
+            Error::Config(msg) => {
+                assert!(msg.contains("entry #1"), "must name the entry: {msg}");
+                assert!(
+                    msg.contains("empty token") && msg.contains("disable authentication"),
+                    "must name the empty-token risk: {msg}"
+                );
+            }
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_listener_tokens_rejects_whitespace_only_file_source() {
+        // Arrange: an all-whitespace file value must ALSO be rejected --
+        // the guard trims before the emptiness check. (The file store
+        // trims trailing whitespace, so seed leading spaces too.)
+        let (uri, _file) = file_token_uri("   \n");
+        let (config, _guard) = config_with_single_listener_token(&uri);
+
+        // Act
+        let err = resolve_listener_tokens(&config)
+            .await
+            .expect_err("whitespace-only file token must be rejected");
+
+        // Assert
+        match err {
+            Error::Config(msg) => {
+                assert!(msg.contains("entry #1"), "must name the entry: {msg}");
+                assert!(
+                    msg.contains("disable authentication"),
+                    "must name the empty-token risk: {msg}"
+                );
+            }
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_listener_tokens_accepts_non_empty_token() {
+        // Arrange: a valid non-empty token must resolve into a TokenSet
+        // without error (positive path).
+        let (uri, _file) = file_token_uri("tok-not-empty");
+        let (config, _guard) = config_with_single_listener_token(&uri);
+
+        // Act
+        let result = resolve_listener_tokens(&config).await;
+
+        // Assert
+        assert!(
+            result.is_ok(),
+            "a non-empty token must build the TokenSet: {result:?}"
+        );
     }
 
     /// SIGHUP-only delivery: drive `run_sighup_listener` directly with no

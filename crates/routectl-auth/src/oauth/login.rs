@@ -346,16 +346,21 @@ fn read_line_capped(max_bytes: usize) -> OAuthResult<String> {
 
 /// Core of `read_line_capped`, factored out so unit tests can drive it
 /// with a `Cursor<&[u8]>` without redirecting stdin.
-fn read_line_from_bufread(
-    mut reader: impl std::io::BufRead,
-    max_bytes: usize,
-) -> OAuthResult<String> {
+fn read_line_from_bufread(reader: impl std::io::BufRead, max_bytes: usize) -> OAuthResult<String> {
+    use std::io::BufRead as _;
+
     let mut line = String::new();
+    // Bound the underlying reader at `max_bytes + 1` BEFORE `read_line`
+    // buffers anything: a newline-free blob is otherwise read in full
+    // (up to EOF) before the cap check, defeating the cap. The `+ 1`
+    // lets an exactly-`max_bytes` line through while still surfacing the
+    // first over-cap byte as `n > max_bytes`.
+    let mut limited = reader.take(max_bytes as u64 + 1);
     // `read_line` appends until the first newline or EOF. On a canonical
     // TTY it returns immediately after the user presses Enter. `n` is the
     // number of raw bytes placed into `line` (including the newline if
     // one was present).
-    let n = reader
+    let n = limited
         .read_line(&mut line)
         .map_err(|e| OAuthError::Io(format!("read stdin: {e}")))?;
     // n == 0 means EOF with no bytes (Ctrl-D on an empty line). Treat as
@@ -610,6 +615,60 @@ mod tests {
         use std::io::Cursor;
         let result = read_line_from_bufread(Cursor::new(b""), 1024).unwrap();
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn read_line_from_bufread_newline_free_over_cap_is_error() {
+        // The cap must fire on a newline-FREE blob longer than max_bytes,
+        // not just a long line that happens to contain a newline. Without
+        // the `take(max_bytes + 1)` bound, `read_line` would buffer the
+        // whole blob (to EOF) before the cap check; with it, the read
+        // stops at max_bytes + 1 and the `n > max_bytes` check fires.
+        use std::io::Cursor;
+        let input = vec![b'x'; 4096]; // no newline anywhere
+        let err = read_line_from_bufread(Cursor::new(input), 64).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "expected cap error on newline-free over-cap input, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_line_from_bufread_unbounded_newline_free_input_is_bounded() {
+        // The load-bearing reason for the `take(max_bytes + 1)` bound: an
+        // unbounded, newline-free reader must NOT be buffered in full. A
+        // `BufReader<Repeat>` yields an endless stream of 'x' with no
+        // newline; the pre-fix `read_line` would loop until OOM. The
+        // bound makes the cap fire after reading only max_bytes + 1 bytes,
+        // so this test returns promptly with the cap error instead of
+        // hanging or exhausting memory.
+        use std::io::BufReader;
+        let infinite = BufReader::new(std::io::repeat(b'x'));
+        let err = read_line_from_bufread(infinite, 64).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unbounded input must hit the cap, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_line_from_bufread_at_cap_newline_free_returns_content() {
+        // A newline-free blob exactly at the cap is NOT an overrun and
+        // round-trips unchanged (the `+ 1` headroom lets the full
+        // max_bytes through).
+        use std::io::Cursor;
+        let input = vec![b'a'; 64];
+        let result = read_line_from_bufread(Cursor::new(input), 64).unwrap();
+        assert_eq!(result, "a".repeat(64));
+    }
+
+    #[test]
+    fn read_line_from_bufread_normal_line_round_trips_stripped() {
+        // A normal line with a trailing \n comes back stripped.
+        use std::io::Cursor;
+        let input = b"hunter2\n";
+        let result = read_line_from_bufread(Cursor::new(input), 1024).unwrap();
+        assert_eq!(result, "hunter2");
     }
 
     // ----- bind_port_candidates tests -----
