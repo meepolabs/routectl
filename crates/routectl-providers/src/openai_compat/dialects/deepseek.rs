@@ -17,39 +17,12 @@ use routectl_core::{ChatRequest, Message, Result};
 
 use super::super::dialect::ReasoningDialect;
 use super::util::{
-    drop_sampling_params, lift_delta_reasoning_content, lift_reasoning_content_field,
-    preserve_history_reasoning_content,
+    derive_reasoning_effort, drop_sampling_params, lift_delta_reasoning_content,
+    lift_reasoning_content_field, preserve_history_reasoning_content,
 };
 use super::Dialect;
 use crate::effort::clamp_effort_to_supported;
 use crate::model_profile::profile_for;
-
-/// Budget threshold (tokens) above which `reasoning.max_tokens`
-/// is mapped to "high" effort; below is "medium".
-const BUDGET_HIGH_THRESHOLD: u32 = 8192;
-
-/// Derive a `reasoning_effort` string from the canonical reasoning config.
-/// Returns `Some(effort)` when the request carries any reasoning signal;
-/// returns `None` when reasoning is absent or explicitly disabled.
-///
-/// Precedence: explicit `effort` > derived from `max_tokens` > None.
-fn derive_reasoning_effort(req: &ChatRequest) -> Option<String> {
-    let r = req.reasoning.as_ref()?;
-    // Explicit effort wins over everything; passthrough verbatim.
-    if let Some(effort) = r.effort.as_deref() {
-        return Some(effort.to_string());
-    }
-    // Derive from max_tokens when effort is absent.
-    if let Some(budget) = r.max_tokens {
-        let effort = if budget >= BUDGET_HIGH_THRESHOLD {
-            "high"
-        } else {
-            "medium"
-        };
-        return Some(effort.to_string());
-    }
-    None
-}
 
 pub struct DeepSeekDialect;
 pub static DEEPSEEK: DeepSeekDialect = DeepSeekDialect;
@@ -297,6 +270,37 @@ mod tests {
         assert!(
             body.get("reasoning_effort").is_none(),
             "no reasoning config must not emit reasoning_effort: {body}"
+        );
+    }
+
+    // Reasoning explicitly disabled must NOT emit reasoning_effort,
+    // even when an effort value is set (e.g. a model output_config default).
+    #[test]
+    fn disabled_reasoning_emits_no_effort() {
+        // Arrange: enabled=false but an effort is still present.
+        let mut req = user_req("deepseek-chat");
+        req.reasoning = Some(ReasoningConfig {
+            effort: Some("high".into()),
+            max_tokens: None,
+            enabled: Some(false),
+            exclude: None,
+        });
+
+        // Act
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::DeepSeek,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Assert: disabled reasoning suppresses the effort entirely.
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "disabled reasoning must not emit reasoning_effort: {body}"
         );
     }
 }

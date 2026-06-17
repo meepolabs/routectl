@@ -9,9 +9,44 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::Value;
 
-use routectl_core::{Error, Message, MessageContent, Result};
+use routectl_core::{ChatRequest, Error, Message, MessageContent, Result};
 
 use crate::openai_compat::util::build_reasoning_detail;
+
+/// Budget threshold (tokens) above which `reasoning.max_tokens`
+/// is mapped to "high" effort; below is "medium". Shared by the
+/// DeepSeek and vLLM dialects, which derive effort identically.
+const BUDGET_HIGH_THRESHOLD: u32 = 8192;
+
+/// Derive a `reasoning_effort` string from the canonical reasoning config.
+/// Returns `Some(effort)` when the request carries a reasoning signal;
+/// returns `None` when reasoning is absent or explicitly disabled.
+///
+/// Precedence: explicit `effort` > derived from `max_tokens` > None.
+///
+/// Shared by the DeepSeek and vLLM dialects (identical derivation).
+pub(super) fn derive_reasoning_effort(req: &ChatRequest) -> Option<String> {
+    let r = req.reasoning.as_ref()?;
+    // Explicitly disabled reasoning must not leak an effort onto the wire,
+    // even when the model's output_config set a default effort level.
+    if r.enabled == Some(false) {
+        return None;
+    }
+    // Explicit effort wins over everything; passthrough verbatim.
+    if let Some(effort) = r.effort.as_deref() {
+        return Some(effort.to_string());
+    }
+    // Derive from max_tokens when effort is absent.
+    if let Some(budget) = r.max_tokens {
+        let effort = if budget >= BUDGET_HIGH_THRESHOLD {
+            "high"
+        } else {
+            "medium"
+        };
+        return Some(effort.to_string());
+    }
+    None
+}
 
 /// Move `msg.reasoning` (a plain string) into a typed
 /// `reasoning_details` block tagged with `format_tag`.
@@ -84,10 +119,12 @@ pub(super) fn lift_delta_reasoning_content(
     format_tag: &str,
     reasoning_index: &mut u32,
 ) -> Result<()> {
-    let choices = val
-        .get_mut("choices")
-        .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| Error::Streaming(format!("provider `{id}`: chunk missing choices")))?;
+    // A usage-only terminal frame (stream_options.include_usage) carries
+    // no `choices` key. Pass it through untouched rather than aborting the
+    // whole stream with a missing-choices error.
+    let Some(choices) = val.get_mut("choices").and_then(|v| v.as_array_mut()) else {
+        return Ok(());
+    };
 
     for choice in choices.iter_mut() {
         let delta = match choice.get_mut("delta").and_then(|v| v.as_object_mut()) {
@@ -474,6 +511,48 @@ mod tests {
         assert_eq!(arr[0]["format"], "openrouter-v1");
         assert_eq!(arr[0]["text"], "thought process");
         assert_eq!(arr[0]["index"], 0);
+    }
+
+    /// derive_reasoning_effort suppresses effort when reasoning is
+    /// explicitly disabled (`enabled == Some(false)`), even if an effort
+    /// value is present. The hoisted single definition guards both
+    /// DeepSeek and vLLM.
+    #[test]
+    fn derive_reasoning_effort_none_when_disabled() {
+        use routectl_core::{ChatRequest, ReasoningConfig};
+        let req = ChatRequest {
+            reasoning: Some(ReasoningConfig {
+                effort: Some("high".into()),
+                max_tokens: Some(16000),
+                enabled: Some(false),
+                exclude: None,
+            }),
+            ..Default::default()
+        };
+        assert!(
+            derive_reasoning_effort(&req).is_none(),
+            "disabled reasoning must derive no effort"
+        );
+    }
+
+    /// A usage-only terminal frame (no `choices` key) must pass
+    /// through `lift_delta_reasoning_content` as `Ok(())` rather than
+    /// aborting the stream with a missing-choices error. The usage object
+    /// is left untouched.
+    #[test]
+    fn lift_delta_reasoning_content_passes_usage_only_frame() {
+        let mut val = json!({
+            "id": "chunk-final",
+            "model": "test",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+        });
+        let mut idx: u32 = 0;
+        let result = lift_delta_reasoning_content("test", &mut val, "deepseek-v1", &mut idx);
+        assert!(result.is_ok(), "usage-only frame must not error");
+        // Usage object preserved verbatim; no choices were synthesized.
+        assert_eq!(val["usage"]["total_tokens"], 30);
+        assert!(val.get("choices").is_none());
+        assert_eq!(idx, 0, "no reasoning detail -> index unchanged");
     }
 
     #[test]

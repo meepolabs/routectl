@@ -276,48 +276,16 @@ impl Provider for OpenAiCompatProvider {
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            // Capture the reset hint from response headers BEFORE
-            // `resp.text()` moves the body, gated on rate-limit statuses.
-            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
+            // Read headers BEFORE `resp.text()` moves the body; the
+            // shared mapper takes `&HeaderMap` and computes the
+            // rate-limit-gated retry_after + classifier + WARN split.
+            let headers = resp.headers().clone();
             let body_text = resp.text().await.unwrap_or_default();
-            // Full upstream error body at debug level. The truncated
-            // WARN excerpt below stays for warn-log scannability.
-            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
-            // Best-effort lift of the upstream classifier so an SDK that
-            // branches on `error.type` / `error.code` keeps the upstream
-            // signal. `code` may be a string or a number on the OpenAI
-            // wire; stringify either. Parse failures leave both None.
-            let (upstream_type, upstream_code) = parse_openai_error_classifier(&body_text);
-            let sanitized = extract_upstream_message(&body_text);
-            let safe_excerpt = sanitize_for_log(&sanitized);
-            // Extend the auth-only WARN to all 4xx/5xx so an operator
-            // never has to guess WHY a request failed.
-            if status == 401 || status == 403 {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "openai-compat upstream auth failed",
-                );
-            } else {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "openai-compat upstream error",
-                );
-            }
-            return Err(Error::upstream_full(
+            return Err(map_openai_compat_upstream_error(
                 &self.cfg.id,
                 status,
-                sanitized,
-                retry_after,
-                upstream_type,
-                upstream_code,
+                &headers,
+                &body_text,
             ));
         }
 
@@ -390,37 +358,16 @@ impl Provider for OpenAiCompatProvider {
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            // Capture the reset hint from response headers BEFORE
-            // `resp.text()` moves the body, gated on rate-limit statuses.
-            let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-                crate::retry_after::parse_retry_after(resp.headers())
-            } else {
-                None
-            };
+            // Read headers BEFORE `resp.text()` moves the body. Shared
+            // with complete(): retry_after is preserved on the stream
+            // path via the same upstream_full mapping.
+            let headers = resp.headers().clone();
             let body_text = resp.text().await.unwrap_or_default();
-            debug_upstream_error_body(PROVIDER_KIND, &self.cfg.id, status, &body_text);
-            let sanitized = extract_upstream_message(&body_text);
-            let safe_excerpt = sanitize_for_log(&sanitized);
-            if status == 401 || status == 403 {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "openai-compat upstream auth failed",
-                );
-            } else {
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    status,
-                    body_excerpt = %safe_excerpt,
-                    "openai-compat upstream error",
-                );
-            }
-            return Err(Error::upstream_with_retry_after(
+            return Err(map_openai_compat_upstream_error(
                 &self.cfg.id,
                 status,
-                sanitized,
-                retry_after,
+                &headers,
+                &body_text,
             ));
         }
 
@@ -678,12 +625,75 @@ fn parse_openai_error_classifier(body_text: &str) -> (Option<String>, Option<Str
     (upstream_type, upstream_code)
 }
 
+/// Map a non-success openai-compat HTTP response into a canonical
+/// `Error::Upstream`. Single source of truth shared by both
+/// `complete()` and `stream()`: computes the rate-limit-gated
+/// `retry_after`, lifts the upstream `error.type` / `error.code`
+/// classifier, sanitizes the message for the error body, and folds the
+/// 401/403-vs-else WARN split. The full upstream body is emitted once at
+/// debug level here so call sites do not duplicate it.
+///
+/// `headers` MUST be read from the response BEFORE the body is consumed
+/// (`resp.text()` moves the body). This ordering is a programmer
+/// convention, NOT enforced by the borrow checker: `headers` is an owned
+/// `HeaderMap` clone here, so the compiler does not couple it to the body
+/// move. Both call sites clone the headers before calling `resp.text()`.
+fn map_openai_compat_upstream_error(
+    provider_id: &str,
+    status: u16,
+    headers: &HeaderMap,
+    body_text: &str,
+) -> Error {
+    // Reset hint from response headers, gated on rate-limit statuses so a
+    // stray Retry-After on a 400 doesn't park the provider.
+    let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+        crate::retry_after::parse_retry_after(headers)
+    } else {
+        None
+    };
+    // Full upstream error body at debug level. The truncated WARN excerpt
+    // below stays for warn-log scannability.
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
+    // Best-effort lift of the upstream classifier so an SDK that branches
+    // on `error.type` / `error.code` keeps the upstream signal.
+    let (upstream_type, upstream_code) = parse_openai_error_classifier(body_text);
+    let sanitized = extract_upstream_message(body_text);
+    let safe_excerpt = sanitize_for_log(&sanitized);
+    // Extend the auth-only WARN to all 4xx/5xx so an operator never has to
+    // guess WHY a request failed.
+    if status == 401 || status == 403 {
+        tracing::warn!(
+            provider = %provider_id,
+            status,
+            body_excerpt = %safe_excerpt,
+            "openai-compat upstream auth failed",
+        );
+    } else {
+        tracing::warn!(
+            provider = %provider_id,
+            status,
+            body_excerpt = %safe_excerpt,
+            "openai-compat upstream error",
+        );
+    }
+    Error::upstream_full(
+        provider_id,
+        status,
+        sanitized,
+        retry_after,
+        upstream_type,
+        upstream_code,
+    )
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::{
-        accumulate_choice_text, ensure_stream_options_include_usage, parse_openai_error_classifier,
-        MAX_STREAM_CHOICES,
+        accumulate_choice_text, ensure_stream_options_include_usage,
+        map_openai_compat_upstream_error, parse_openai_error_classifier, MAX_STREAM_CHOICES,
     };
+    use reqwest::header::HeaderMap;
+    use routectl_core::Error;
     use serde_json::json;
 
     #[test]
@@ -782,6 +792,69 @@ mod helper_tests {
         // Assert
         assert!(upstream_type.is_none());
         assert!(upstream_code.is_none());
+    }
+
+    /// The shared mapper lifts the upstream classifier
+    /// (`error.type` / `error.code`) onto the canonical error. Proves
+    /// stream()/complete() parity: before the fix the stream() path used
+    /// `upstream_with_retry_after`, which dropped both classifier fields
+    /// to None. Driving a 429 rate-limit body through the helper must now
+    /// surface the upstream type and code regardless of caller.
+    #[test]
+    fn map_upstream_error_lifts_classifier_for_both_callers() {
+        // Arrange: a rate-limit error envelope at status 429.
+        let body = r#"{"error":{"type":"rate_limit_exceeded","code":"slow_down","message":"too many requests"}}"#;
+        let headers = HeaderMap::new();
+
+        // Act
+        let err = map_openai_compat_upstream_error("p", 429, &headers, body);
+
+        // Assert
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 429);
+                assert_eq!(upstream_type.as_deref(), Some("rate_limit_exceeded"));
+                assert_eq!(upstream_code.as_deref(), Some("slow_down"));
+                assert!(
+                    body.contains("too many requests"),
+                    "sanitized message must reach the error body, got: {body}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// retry_after preservation: a parseable `Retry-After` on a
+    /// rate-limit status must reach the canonical error from the shared
+    /// helper (the stream() path previously preserved it via
+    /// `upstream_with_retry_after`; the new helper keeps that for both
+    /// callers).
+    #[test]
+    fn map_upstream_error_preserves_retry_after_on_rate_limit() {
+        // Arrange
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+
+        // Act
+        let err = map_openai_compat_upstream_error("p", 429, &headers, "{}");
+
+        // Assert
+        match err {
+            Error::Upstream { retry_after, .. } => {
+                assert_eq!(
+                    retry_after,
+                    Some(std::time::Duration::from_secs(30)),
+                    "retry_after must be preserved for both callers"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
     }
 
     #[test]

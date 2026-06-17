@@ -12,7 +12,7 @@
 
 use serde_json::Value;
 
-use routectl_core::schema::{ChunkChoice, ChunkDelta};
+use routectl_core::schema::{ChunkChoice, ChunkDelta, UsageDelta};
 use routectl_core::{ChatChunk, Error, Result};
 
 use super::dialect::ReasoningDialect;
@@ -49,18 +49,8 @@ pub fn parse_event(
     // emit a JSON error object inside a 200-OK SSE stream rather than a
     // top-level HTTP error. Treating it as a bad ChatChunk deserialize
     // would produce a misleading NormalizeResponse error.
-    if val.get("error").is_some() {
-        let status = val
-            .pointer("/error/code")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u16)
-            .unwrap_or(502);
-        let message = val
-            .pointer("/error/message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("upstream error in stream")
-            .to_string();
-        return Err(Error::upstream(id, status, message));
+    if let Some(err) = detect_error_envelope(id, &val) {
+        return Err(err);
     }
 
     // Coalesce reasoning_content -> reasoning across all delta objects so
@@ -83,6 +73,56 @@ pub fn parse_event(
         .map_err(|e| Error::normalize_response(id, format!("chunk deserialize: {e}")))?;
 
     Ok(Some(chunk))
+}
+
+/// Detect a mid-stream JSON error envelope (`{"error":{...}}`) emitted
+/// inside a 200-OK SSE stream by some upstreams (Azure content filter,
+/// OpenRouter overload, NIM auth-wall). Returns `Some(Error::Upstream)`
+/// when the envelope is present so the caller can short-circuit instead
+/// of treating it as a malformed ChatChunk. Status defaults to 502 when
+/// `error.code` is absent or non-numeric; message defaults to a generic
+/// string. Shared by `parse_event` and `process`.
+fn detect_error_envelope(id: &str, val: &Value) -> Option<Error> {
+    val.get("error")?;
+    let status = val
+        .pointer("/error/code")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(502);
+    let message = val
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("upstream error in stream")
+        .to_string();
+    Some(Error::upstream(id, status, message))
+}
+
+/// Lift OpenAI/DeepSeek usage sub-bags into canonical typed slots and
+/// deserialize the resulting `usage` object into a `UsageDelta`. Returns
+/// `None` when no `usage` key is present (the common non-terminal chunk)
+/// or when deserialization fails. Used by `process()`, which does not
+/// route through serde's full ChatChunk deserialize and would otherwise
+/// drop the terminal usage object entirely.
+///
+/// Best-effort by contract: a malformed `usage` object yields `None`
+/// rather than an error so a bad terminal bag never aborts the stream.
+/// To keep that from being a silent differential vs the loud `parse_event`
+/// serde path, a present-but-undeserializable `usage` key is logged at
+/// debug with the serde error; a missing key stays silent.
+fn extract_chunk_usage(provider_id: &str, val: &mut Value) -> Option<UsageDelta> {
+    lift_chunk_usage_subbags(val);
+    let usage = val.get("usage")?;
+    match serde_json::from_value(usage.clone()) {
+        Ok(delta) => Some(delta),
+        Err(e) => {
+            tracing::debug!(
+                provider = %provider_id,
+                error = %e,
+                "dropping malformed streaming usage object"
+            );
+            None
+        }
+    }
 }
 
 /// JSON-side mirror of `response::lift_and_strip_usage_extras` for the
@@ -236,8 +276,15 @@ impl ThinkTagAccumulator {
             return Ok(None);
         }
 
-        let val: Value = serde_json::from_str(trimmed)
+        let mut val: Value = serde_json::from_str(trimmed)
             .map_err(|e| Error::Streaming(format!("provider `{provider_id}`: SSE JSON: {e}")))?;
+
+        // Mid-stream error envelope: short-circuit before the choices
+        // guard so a `{"error":{...}}` frame with no choices returns an
+        // upstream error instead of falling through to Ok(None).
+        if let Some(err) = detect_error_envelope(provider_id, &val) {
+            return Err(err);
+        }
 
         let chunk_id = val
             .get("id")
@@ -315,11 +362,16 @@ impl ThinkTagAccumulator {
             });
         }
 
+        // Lift the terminal usage object (sub-bags -> canonical) AFTER
+        // the choices loop: `choices_raw` was cloned out of `val`, so
+        // no immutable borrow is live and the `&mut val` lift is safe.
+        let usage = extract_chunk_usage(provider_id, &mut val);
+
         Ok(Some(ChatChunk {
             id: chunk_id,
             model,
             choices: new_choices,
-            usage: None,
+            usage,
             opaque_events: Vec::new(),
             upstream_meta: None,
         }))
@@ -959,6 +1011,93 @@ mod tests {
         let err = parse_event("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
         match err {
             Error::Upstream { status, .. } => assert_eq!(status, 502),
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// An out-of-range numeric `code` (> u16::MAX) must NOT wrap silently
+    /// to a nonsense status -- it falls through to the 502 default. Before
+    /// the `u16::try_from` guard, `as u16` wrapped 70000 to 4464.
+    #[test]
+    fn mid_stream_error_envelope_out_of_range_code_defaults_to_502() {
+        let raw = json!({
+            "error": {
+                "message": "overflowing code",
+                "code": 70000
+            }
+        })
+        .to_string();
+        let err = parse_event("p", &raw, ReasoningDialect::OpenAi, &mut 0).unwrap_err();
+        match err {
+            Error::Upstream { status, .. } => assert_eq!(
+                status, 502,
+                "out-of-range code must default to 502, not wrap"
+            ),
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A terminal chunk driven through `ThinkTagAccumulator::process`
+    /// must carry its `usage` token counts on the emitted `ChatChunk`.
+    /// Before the fix `process()` hardcoded `usage: None`, dropping the
+    /// terminal usage object (and its lifted sub-bag) entirely on the
+    /// RawThinkTag streaming path.
+    #[test]
+    fn process_terminal_chunk_carries_usage_with_subbag_lift() {
+        let mut acc = ThinkTagAccumulator::new();
+        let raw = json!({
+            "id": "chunk-final",
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30,
+                "completion_tokens_details": {"reasoning_tokens": 7}
+            }
+        })
+        .to_string();
+        let chunk = acc.process("t", &raw).unwrap().unwrap();
+        let usage = chunk.usage.expect("terminal usage must reach the chunk");
+        assert_eq!(usage.prompt_tokens, Some(10));
+        assert_eq!(usage.completion_tokens, Some(20));
+        assert_eq!(usage.total_tokens, Some(30));
+        // Sub-bag lift lands the reasoning tokens on the canonical slot.
+        assert_eq!(usage.reasoning_tokens, Some(7));
+    }
+
+    /// A mid-stream error envelope with NO `choices` key must produce
+    /// `Error::Upstream` from `process()` (the RawThinkTag path), not fall
+    /// through to `Ok(None)` via the missing-choices guard.
+    #[test]
+    fn process_mid_stream_error_envelope_returns_upstream_error() {
+        let mut acc = ThinkTagAccumulator::new();
+        let raw = json!({
+            "error": {
+                "message": "forbidden by content policy",
+                "code": 403
+            }
+        })
+        .to_string();
+        let err = acc.process("test-provider", &raw).unwrap_err();
+        match err {
+            Error::Upstream {
+                provider,
+                status,
+                body,
+                ..
+            } => {
+                assert_eq!(provider, "test-provider");
+                assert_eq!(status, 403);
+                assert!(
+                    body.contains("forbidden by content policy"),
+                    "error body must carry the upstream message, got: {body}"
+                );
+            }
             other => panic!("expected Error::Upstream, got: {other:?}"),
         }
     }
