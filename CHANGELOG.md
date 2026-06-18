@@ -19,7 +19,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retroactively; managed-OAuth (subscription) requests show `n/a (subscription)`. Config:
   `enabled`, `db_path` (restart-only), `retention_days`. Cached tokens are billed once
   (input is stored cache-exclusive); quota utilization is sourced from the Anthropic
-  5h-window header.
+  5h-window header. CLI output is humanized (K/M/B token counts, `s`/`m` durations)
+  and broken down per model in every window by default; `--detail` adds the standard
+  latency metrics (time-to-first-token p50/p95 and throughput tok/s) plus the
+  cache-write 5m/1h split, and any metric a provider does not report renders `-`
+  instead of a misleading `0`.
 
 - **OAuth credential pools with per-seat dispatch and `--label` targeting.** `routectl login
   <provider> --label <name>` registers a named seat alongside the default without

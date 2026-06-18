@@ -21,7 +21,7 @@ pub use cost::{estimate_cost, estimate_cost_tokens, CostBreakdown, Rates};
 pub use db::{open, open_readonly, OpenError, UsageDb};
 pub use handle::{UsageCounters, UsageHandle};
 pub use migrate::MigrateError;
-pub use query::{aggregate, latencies, latest_quota, AggRow, GroupKey, QueryError, QuotaSnapshot};
+pub use query::{aggregate, latest_quota, ttfbs, AggRow, GroupKey, QueryError, QuotaSnapshot};
 pub use record::{Outcome, ParseOutcomeError, UsageRecord};
 pub use retention::{prune, PruneOutcome};
 pub use schema::{META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION};

@@ -19,7 +19,7 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 
 use routectl_router::Config;
 use routectl_usage::{
-    aggregate, estimate_cost_tokens, latencies, latest_quota, open_readonly, AggRow, GroupKey,
+    aggregate, estimate_cost_tokens, latest_quota, open_readonly, ttfbs, AggRow, GroupKey,
     OpenError, QueryError, QuotaSnapshot, Rates, UsageDb,
 };
 
@@ -87,6 +87,63 @@ pub enum UsageError {
     Query(#[from] QueryError),
     #[error(transparent)]
     Open(#[from] OpenError),
+}
+
+// --- humanizing formatters ---------------------------------------------
+
+const THOUSAND: i64 = 1_000;
+const MILLION: i64 = 1_000_000;
+const BILLION: i64 = 1_000_000_000;
+const COMPACT_COUNT_FLOOR: i64 = 10_000;
+const MS_PER_SECOND: i64 = 1_000;
+const MS_PER_MINUTE: i64 = 60_000;
+const MS_PER_HOUR: i64 = 3_600_000;
+
+/// Compact a count: below 10_000 the plain integer; otherwise a one-decimal
+/// figure with a K/M/B suffix, trimming a trailing `.0`.
+fn human_count(n: i64) -> String {
+    if n < COMPACT_COUNT_FLOOR {
+        return n.to_string();
+    }
+    let (value, suffix) = if n >= BILLION {
+        (n as f64 / BILLION as f64, "B")
+    } else if n >= MILLION {
+        (n as f64 / MILLION as f64, "M")
+    } else {
+        (n as f64 / THOUSAND as f64, "K")
+    };
+    let body = format!("{value:.1}");
+    let trimmed = body.strip_suffix(".0").unwrap_or(&body);
+    format!("{trimmed}{suffix}")
+}
+
+/// The ms threshold at which the one-decimal seconds format would round up to
+/// `60.0s`; at or above this we use the minute path so no value renders `60.Xs`.
+const SECONDS_ROUND_UP_FLOOR: i64 = 59_950;
+
+/// Humanize a duration in ms: `<1s` as `Nms`, `<1m` as one-decimal seconds,
+/// `<1h` as `MmSSs`, else `HhMMm`. A value that would round to `60.0s` is
+/// promoted to the minute path (`1m00s`) so seconds never render as `>= 60.0s`.
+fn human_ms(ms: i64) -> String {
+    if ms < MS_PER_SECOND {
+        return format!("{ms}ms");
+    }
+    if ms < SECONDS_ROUND_UP_FLOOR {
+        return format!("{:.1}s", ms as f64 / MS_PER_SECOND as f64);
+    }
+    if ms < MS_PER_MINUTE {
+        // The one-decimal seconds format would round this up to `60.0s`; show
+        // it on the minute path instead so seconds never render as `>= 60.0s`.
+        return "1m00s".to_string();
+    }
+    if ms < MS_PER_HOUR {
+        let minutes = ms / MS_PER_MINUTE;
+        let seconds = (ms % MS_PER_MINUTE) / MS_PER_SECOND;
+        return format!("{minutes}m{seconds:02}s");
+    }
+    let hours = ms / MS_PER_HOUR;
+    let minutes = (ms % MS_PER_HOUR) / MS_PER_MINUTE;
+    format!("{hours}h{minutes:02}m")
 }
 
 // --- window math --------------------------------------------------------
@@ -242,13 +299,20 @@ pub struct DisplayRow {
     pub cache_read: i64,
     pub cache_write_5m: i64,
     pub cache_write_1h: i64,
-    pub sum_latency_ms: i64,
-    pub max_latency_ms: i64,
     pub server_tool_calls: i64,
     pub priced_total_usd: Option<f64>,
     pub any_subscription: bool,
     pub any_unpriced: bool,
-    pub p95_latency_ms: Option<i64>,
+    pub ttft_p50_ms: Option<i64>,
+    pub ttft_p95_ms: Option<i64>,
+    pub gen_window_ms: i64,
+    pub gen_output_tokens: i64,
+    pub stream_count: i64,
+    pub reasoning_present: i64,
+    pub cache_read_present: i64,
+    pub cache_write_5m_present: i64,
+    pub cache_write_1h_present: i64,
+    pub server_tool_present: i64,
 }
 
 /// The full report for one window: the display rows, the latest quota
@@ -256,7 +320,7 @@ pub struct DisplayRow {
 #[derive(Debug, Clone)]
 pub struct WindowReport {
     pub title: String,
-    pub by_header: Option<&'static str>,
+    pub by_header: &'static str,
     pub detail: bool,
     pub rows: Vec<DisplayRow>,
     pub quota: Option<QuotaSnapshot>,
@@ -291,6 +355,7 @@ fn rates_from_pricing(p: &routectl_router::PricingConfig) -> Rates {
 }
 
 /// The cost contribution of one fine-grained `AggRow`.
+#[derive(Clone)]
 enum RowCost {
     /// Managed-OAuth subscription row: no per-token dollar cost.
     Subscription,
@@ -332,14 +397,23 @@ fn cost_for_row(config: &Config, row: &AggRow) -> RowCost {
     }
 }
 
-/// The display label for a fine row under a given breakdown dimension. The
-/// total view collapses every row into one `"total"` group.
-fn group_label(key: &GroupKey, by: Option<GroupDim>) -> String {
+/// Per-group time-to-first-token percentiles: label -> (p50, p95) in ms,
+/// each `None` when the group has no streaming samples.
+type TtftMap = BTreeMap<String, (Option<i64>, Option<i64>)>;
+
+/// The display label for a fine row under a given breakdown dimension.
+/// A null model/provider column falls back to `(unattributed)`.
+fn group_label(key: &GroupKey, by: GroupDim) -> String {
     match by {
-        None => "total".to_string(),
-        Some(GroupDim::Model) => key.model.clone().unwrap_or_else(|| "(none)".to_string()),
-        Some(GroupDim::Provider) => key.provider.clone().unwrap_or_else(|| "(none)".to_string()),
-        Some(GroupDim::Alias) => key.alias.clone(),
+        GroupDim::Model => key
+            .model
+            .clone()
+            .unwrap_or_else(|| "(unattributed)".to_string()),
+        GroupDim::Provider => key
+            .provider
+            .clone()
+            .unwrap_or_else(|| "(unattributed)".to_string()),
+        GroupDim::Alias => key.alias.clone(),
     }
 }
 
@@ -356,9 +430,15 @@ struct Acc {
     cache_read: i64,
     cache_write_5m: i64,
     cache_write_1h: i64,
-    sum_latency_ms: i64,
-    max_latency_ms: i64,
     server_tool_calls: i64,
+    gen_window_ms: i64,
+    gen_output_tokens: i64,
+    stream_count: i64,
+    reasoning_present: i64,
+    cache_read_present: i64,
+    cache_write_5m_present: i64,
+    cache_write_1h_present: i64,
+    server_tool_present: i64,
     priced_usd: f64,
     any_priced: bool,
     any_subscription: bool,
@@ -376,9 +456,15 @@ impl Acc {
         self.cache_read += row.cache_read;
         self.cache_write_5m += row.cache_write_5m;
         self.cache_write_1h += row.cache_write_1h;
-        self.sum_latency_ms += row.sum_latency_ms;
-        self.max_latency_ms = self.max_latency_ms.max(row.max_latency_ms);
         self.server_tool_calls += row.server_tool_calls;
+        self.gen_window_ms += row.gen_window_ms;
+        self.gen_output_tokens += row.gen_output_tokens;
+        self.stream_count += row.stream_count;
+        self.reasoning_present += row.reasoning_present;
+        self.cache_read_present += row.cache_read_present;
+        self.cache_write_5m_present += row.cache_write_5m_present;
+        self.cache_write_1h_present += row.cache_write_1h_present;
+        self.server_tool_present += row.server_tool_present;
         match cost {
             RowCost::Subscription => self.any_subscription = true,
             RowCost::Priced(usd) => {
@@ -390,9 +476,9 @@ impl Acc {
     }
 }
 
-/// Build the full window report: aggregate -> rollup to `by` -> cost per
-/// fine row folded into the display group -> quota + footer. Pure over the
-/// DB read; no clap, no stdout.
+/// Build the full window report: aggregate -> rollup to `by` (defaulting to
+/// model) -> cost per fine row folded into the display group -> a window-wide
+/// `total` row -> quota + footer. Pure over the DB read; no clap, no stdout.
 pub fn build_window_report(
     db: &UsageDb,
     config: &Config,
@@ -401,31 +487,35 @@ pub fn build_window_report(
     by: Option<GroupDim>,
     detail: bool,
 ) -> Result<WindowReport, UsageError> {
+    let dim = by.unwrap_or(GroupDim::Model);
     let rows = aggregate(db, bounds.from_ms, bounds.to_ms)?;
 
     let mut groups: BTreeMap<String, Acc> = BTreeMap::new();
+    let mut total = Acc::default();
     for row in &rows {
-        let label = group_label(&row.key, by);
+        let label = group_label(&row.key, dim);
         let cost = cost_for_row(config, row);
-        groups.entry(label).or_default().add(row, cost);
+        groups.entry(label).or_default().add(row, cost.clone());
+        total.add(row, cost);
     }
 
-    let p95 = if detail {
-        compute_p95(db, bounds, by)?
+    let ttft = if detail {
+        compute_ttft(db, bounds, dim)?
     } else {
         BTreeMap::new()
     };
 
-    let display_rows: Vec<DisplayRow> = groups
+    let mut display_rows: Vec<DisplayRow> = groups
         .into_iter()
-        .map(|(label, acc)| finalize_row(label, acc, &p95))
+        .map(|(label, acc)| finalize_row(label, acc, &ttft))
         .collect();
+    display_rows.push(finalize_row("total".to_string(), total, &ttft));
 
     let (cache_hit_rate, total_errors) = footer(&rows);
 
     Ok(WindowReport {
         title,
-        by_header: by.map(|d| d.header()),
+        by_header: dim.header(),
         detail,
         rows: display_rows,
         quota: latest_quota(db)?,
@@ -434,10 +524,13 @@ pub fn build_window_report(
     })
 }
 
-/// Turn one accumulator into a display row, resolving the cost tri-state.
-fn finalize_row(label: String, acc: Acc, p95: &BTreeMap<String, i64>) -> DisplayRow {
+/// Turn one accumulator into a display row, resolving the cost tri-state and
+/// attaching the group's pre-computed TTFT percentiles (if any).
+fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
+    let (ttft_p50_ms, ttft_p95_ms) = ttft.get(&label).copied().unwrap_or((None, None));
     DisplayRow {
-        p95_latency_ms: p95.get(&label).copied(),
+        ttft_p50_ms,
+        ttft_p95_ms,
         priced_total_usd: if acc.any_priced {
             Some(acc.priced_usd)
         } else {
@@ -455,9 +548,15 @@ fn finalize_row(label: String, acc: Acc, p95: &BTreeMap<String, i64>) -> Display
         cache_read: acc.cache_read,
         cache_write_5m: acc.cache_write_5m,
         cache_write_1h: acc.cache_write_1h,
-        sum_latency_ms: acc.sum_latency_ms,
-        max_latency_ms: acc.max_latency_ms,
         server_tool_calls: acc.server_tool_calls,
+        gen_window_ms: acc.gen_window_ms,
+        gen_output_tokens: acc.gen_output_tokens,
+        stream_count: acc.stream_count,
+        reasoning_present: acc.reasoning_present,
+        cache_read_present: acc.cache_read_present,
+        cache_write_5m_present: acc.cache_write_5m_present,
+        cache_write_1h_present: acc.cache_write_1h_present,
+        server_tool_present: acc.server_tool_present,
     }
 }
 
@@ -482,18 +581,23 @@ fn footer(rows: &[AggRow]) -> (Option<f64>, i64) {
     (rate, errors)
 }
 
-/// Per-display-group p95 latency via the nearest-rank method: sort the
-/// in-window latencies for the group ascending and pick the value at index
-/// `ceil(0.95 * n) - 1`. Only computed for `--detail`.
-fn compute_p95(
-    db: &UsageDb,
-    bounds: WindowBounds,
-    by: Option<GroupDim>,
-) -> Result<BTreeMap<String, i64>, UsageError> {
-    let raw = latencies(db, bounds.from_ms, bounds.to_ms)?;
+/// Nearest-rank percentile of a sorted, non-empty slice. `q` is in `[0,1]`;
+/// rank = ceil(q * n), clamped to at least 1, 1-indexed.
+fn nearest_rank(sorted: &[i64], q: f64) -> i64 {
+    let n = sorted.len();
+    let rank = ((q * n as f64).ceil() as usize).max(1);
+    sorted[rank - 1]
+}
+
+/// Per-display-group TTFT p50/p95 via nearest-rank over the in-window
+/// streaming time-to-first-byte samples. A window-wide `total` bucket is
+/// accumulated alongside the per-group buckets. Only computed for `--detail`.
+fn compute_ttft(db: &UsageDb, bounds: WindowBounds, by: GroupDim) -> Result<TtftMap, UsageError> {
+    let raw = ttfbs(db, bounds.from_ms, bounds.to_ms)?;
     let mut buckets: BTreeMap<String, Vec<i64>> = BTreeMap::new();
     for (key, ms) in raw {
         buckets.entry(group_label(&key, by)).or_default().push(ms);
+        buckets.entry("total".to_string()).or_default().push(ms);
     }
     let mut out = BTreeMap::new();
     for (label, mut values) in buckets {
@@ -501,15 +605,35 @@ fn compute_p95(
             continue;
         }
         values.sort_unstable();
-        let n = values.len();
-        // nearest-rank: rank = ceil(0.95 * n), 1-indexed.
-        let rank = ((0.95 * n as f64).ceil() as usize).max(1);
-        out.insert(label, values[rank - 1]);
+        let p50 = nearest_rank(&values, 0.50);
+        let p95 = nearest_rank(&values, 0.95);
+        out.insert(label, (Some(p50), Some(p95)));
     }
     Ok(out)
 }
 
 // --- formatting ---------------------------------------------------------
+
+const MS_PER_SECOND_F: f64 = 1_000.0;
+
+/// Render a metric sum under the not-reported rule: `-` when no fine row in
+/// the group reported the metric (`present == 0`), else the humanized sum.
+fn metric_cell(present: i64, sum: i64) -> String {
+    if present == 0 {
+        return "-".to_string();
+    }
+    human_count(sum)
+}
+
+/// Robust generation throughput as an integer tokens/second, or `None` when
+/// there is no generation window to divide by. Aggregates totals rather than
+/// averaging per-request ratios.
+fn tok_per_s(gen_output_tokens: i64, gen_window_ms: i64) -> Option<i64> {
+    if gen_window_ms == 0 {
+        return None;
+    }
+    Some((gen_output_tokens as f64 * MS_PER_SECOND_F / gen_window_ms as f64).round() as i64)
+}
 
 /// Render the cost cell for a display row given its tri-state. A display
 /// group can aggregate BOTH priced API-key rows and subscription rows; the
@@ -523,61 +647,124 @@ fn cost_cell(row: &DisplayRow) -> String {
     }
 }
 
+/// The normal (no-`--detail`) column headers, with the key dimension first.
+fn normal_headers(key_header: &str) -> Vec<String> {
+    [
+        key_header,
+        "reqs",
+        "err",
+        "input",
+        "output",
+        "reasoning",
+        "cache_read",
+        "cost",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// The extra `--detail` column headers, appended after `cost`.
+const DETAIL_HEADERS: [&str; 6] = [
+    "ttft_p50",
+    "ttft_p95",
+    "tok/s",
+    "cache_wr_5m",
+    "cache_wr_1h",
+    "srv_tools",
+];
+
+/// The normal data cells for one row, in header order.
+fn normal_cells(row: &DisplayRow) -> Vec<String> {
+    vec![
+        row.label.clone(),
+        row.requests.to_string(),
+        row.errors.to_string(),
+        human_count(row.input_tokens),
+        human_count(row.output_tokens),
+        metric_cell(row.reasoning_present, row.reasoning_tokens),
+        metric_cell(row.cache_read_present, row.cache_read),
+        cost_cell(row),
+    ]
+}
+
+/// The extra `--detail` data cells for one row, in header order.
+fn detail_cells(row: &DisplayRow) -> Vec<String> {
+    vec![
+        ttft_cell(row.ttft_p50_ms),
+        ttft_cell(row.ttft_p95_ms),
+        tok_per_s(row.gen_output_tokens, row.gen_window_ms)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        metric_cell(row.cache_write_5m_present, row.cache_write_5m),
+        metric_cell(row.cache_write_1h_present, row.cache_write_1h),
+        metric_cell(row.server_tool_present, row.server_tool_calls),
+    ]
+}
+
+fn ttft_cell(ms: Option<i64>) -> String {
+    ms.map(human_ms).unwrap_or_else(|| "-".to_string())
+}
+
 /// Render one window report as an aligned ASCII block to a string.
 pub fn render_report(report: &WindowReport) -> String {
     let mut out = String::new();
     out.push_str(&report.title);
     out.push('\n');
 
-    let key_header = report.by_header.unwrap_or("scope");
-    let mut headers: Vec<String> = vec![
-        key_header.to_string(),
-        "reqs".into(),
-        "input".into(),
-        "output".into(),
-        "cache_rd".into(),
-        "cost".into(),
-    ];
+    let mut headers = normal_headers(report.by_header);
     if report.detail {
-        headers.extend(
-            ["cw_5m", "cw_1h", "p95_ms", "max_ms", "wall_ms", "srv_tools"]
-                .iter()
-                .map(|s| s.to_string()),
-        );
+        headers.extend(DETAIL_HEADERS.iter().map(|s| s.to_string()));
     }
 
     let mut table: Vec<Vec<String>> = vec![headers];
     for row in &report.rows {
-        let mut cells = vec![
-            row.label.clone(),
-            row.requests.to_string(),
-            row.input_tokens.to_string(),
-            row.output_tokens.to_string(),
-            row.cache_read.to_string(),
-            cost_cell(row),
-        ];
+        let mut cells = normal_cells(row);
         if report.detail {
-            cells.push(row.cache_write_5m.to_string());
-            cells.push(row.cache_write_1h.to_string());
-            cells.push(
-                row.p95_latency_ms
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-            );
-            cells.push(row.max_latency_ms.to_string());
-            cells.push(row.sum_latency_ms.to_string());
-            cells.push(row.server_tool_calls.to_string());
+            cells.extend(detail_cells(row));
         }
         table.push(cells);
     }
 
     out.push_str(&render_table(&table));
 
+    if report.detail {
+        out.push_str(&render_latency_summary(report));
+    }
     if let Some(q) = &report.quota {
         out.push_str(&render_quota(q));
     }
     out.push_str(&render_footer(report));
     out
+}
+
+/// The window total row, used for the detail latency-summary line. It is
+/// always the LAST row appended by `build_window_report` (after the sorted
+/// per-group rows), so it is selected by position rather than by label -- an
+/// alias named "total" under `--by alias` must not be mistaken for it.
+fn total_row(report: &WindowReport) -> Option<&DisplayRow> {
+    report.rows.last()
+}
+
+/// One-line latency / throughput / streaming-share summary, derived from the
+/// window total row. Emitted only under `--detail`.
+fn render_latency_summary(report: &WindowReport) -> String {
+    let Some(total) = total_row(report) else {
+        return String::new();
+    };
+    let p50 = ttft_cell(total.ttft_p50_ms);
+    let p95 = ttft_cell(total.ttft_p95_ms);
+    let toks = tok_per_s(total.gen_output_tokens, total.gen_window_ms)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let pct = if total.requests > 0 {
+        (100.0 * total.stream_count as f64 / total.requests as f64).round() as i64
+    } else {
+        0
+    };
+    format!(
+        "latency: TTFT p50 {p50} / p95 {p95} (streaming)  |  throughput {toks} tok/s  |  {pct}% streaming\n"
+    )
 }
 
 /// Left-align column 0, right-align the rest, padded to the widest cell in
@@ -635,10 +822,18 @@ fn format_reset(epoch_s: i64) -> String {
 fn render_footer(report: &WindowReport) -> String {
     let hit = report
         .cache_hit_rate
-        .map(|r| format!("{:.1}%", r * 100.0))
-        .unwrap_or_else(|| "n/a".to_string());
-    format!("cache-hit-rate: {hit}   errors: {}\n", report.total_errors)
+        .map(|r| format!("cache hit {:.1}%", r * 100.0))
+        .unwrap_or_else(|| "cache hit n/a".to_string());
+    format!("{hit}\n")
 }
+
+/// One-line, end-of-report legend explaining the derived columns and
+/// markers. Appended once after the final window block (see `build_blocks`).
+const LEGEND: &str = "legend: ttft = time-to-first-token (streaming); \
+tok/s = normalized throughput (output / generation time); \
+\"-\" = metric not reported by that provider; \
+\"n/a (sub)\" = managed subscription (see quota); \
+--detail adds cache-write 5m/1h, ttft, tok/s, server-tools";
 
 // --- entry point --------------------------------------------------------
 
@@ -674,6 +869,23 @@ pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::
 /// single calendar window. Separated from `run` so it is testable without
 /// touching stdout or the clock.
 pub fn build_blocks(
+    db: &UsageDb,
+    config: &Config,
+    args: &UsageArgs,
+    now: DateTime<Local>,
+) -> Result<Vec<String>, UsageError> {
+    let mut blocks = build_window_blocks(db, config, args, now)?;
+    // Keep the legend out of the block count: append it to the last block so a
+    // multi-window summary still yields exactly one block per window.
+    if let Some(last) = blocks.last_mut() {
+        last.push_str(LEGEND);
+        last.push('\n');
+    }
+    Ok(blocks)
+}
+
+/// The per-window rendered blocks before the legend is appended.
+fn build_window_blocks(
     db: &UsageDb,
     config: &Config,
     args: &UsageArgs,

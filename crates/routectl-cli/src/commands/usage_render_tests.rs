@@ -50,13 +50,19 @@ fn render_non_detail_header_has_expected_columns() {
     let out = render_report(&report);
     let header = out.lines().nth(1).expect("header line present");
 
-    // Assert: no --by => key header is "scope"; standard columns follow.
-    assert!(header.contains("scope"));
+    // Assert: default grouping is by model; standard columns follow. Dropped
+    // and renamed columns must be absent.
+    assert!(header.contains("model"));
     assert!(header.contains("reqs"));
+    assert!(header.contains("err"));
     assert!(header.contains("input"));
     assert!(header.contains("output"));
-    assert!(header.contains("cache_rd"));
+    assert!(header.contains("reasoning"));
+    assert!(header.contains("cache_read"));
     assert!(header.contains("cost"));
+    for dropped in ["cache_rd", "scope", "p95_ms", "max_ms", "wall_ms"] {
+        assert!(!header.contains(dropped), "header should not contain {dropped}");
+    }
 }
 
 #[test]
@@ -89,16 +95,16 @@ fn render_data_row_shows_rolled_up_values_and_priced_cost() {
         .find(|l| l.trim_start().starts_with("paid"))
         .expect("data row present");
 
-    // Assert
-    assert!(data_line.contains("1000000"));
+    // Assert: tokens are humanized (1_000_000 -> "1M") and cost is priced.
+    assert!(data_line.contains("1M"));
     assert!(data_line.contains("$18.00"));
 }
 
 #[test]
 fn render_detail_adds_extra_columns_non_detail_omits_them() {
-    // Arrange
+    // Arrange: a streaming row so the detail columns have data.
     let (_dir, _path, db) = temp_db();
-    paid_row(&db, "d1", Some(10), Some(20));
+    insert_stream_row(&db, "d1", 1000, "m", 120, 620, Some(50), Some(5), Some(7));
     let config = cost_config();
     let detail = report_all(&db, &config, None, true);
     let plain = report_all(&db, &config, None, false);
@@ -109,19 +115,122 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
     let detail_header = detail_out.lines().nth(1).expect("header");
     let plain_header = plain_out.lines().nth(1).expect("header");
 
-    // Assert: detail header carries the extra columns; non-detail does not.
-    for col in ["cw_5m", "cw_1h", "p95_ms", "max_ms", "wall_ms", "srv_tools"] {
+    // Assert: detail header carries the new derived columns; non-detail omits
+    // them, and the dropped latency columns appear nowhere.
+    for col in [
+        "ttft_p50",
+        "ttft_p95",
+        "tok/s",
+        "cache_wr_5m",
+        "cache_wr_1h",
+        "srv_tools",
+    ] {
         assert!(detail_header.contains(col), "detail header missing {col}");
         assert!(
             !plain_header.contains(col),
             "non-detail header should not contain {col}"
         );
     }
+    for dropped in ["max_ms", "wall_ms", "p95_ms"] {
+        assert!(
+            !detail_header.contains(dropped),
+            "detail header should not contain {dropped}"
+        );
+    }
+    // ttft is rendered via human_ms (120ms), tok/s is present, and the
+    // detail-only latency summary line appears.
+    assert!(detail_out.contains("120ms"));
+    assert!(detail_out.contains("latency: TTFT"));
+    assert!(detail_out.contains("tok/s"));
 }
 
 #[test]
-fn render_footer_populated_rate_and_errors() {
-    // Arrange: cache_read 0, input 300 => rate 0.0%; one error row.
+fn render_humanizes_large_cache_read_and_honors_not_reported() {
+    // Arrange: a large reported cache_read (4_637_884 -> "4.6M") on a row that
+    // reports reasoning=0, plus a second model whose reasoning is NULL.
+    let (_dir, _path, db) = temp_db();
+    insert_stream_row(&db, "c1", 1000, "big", 100, 600, Some(10), Some(0), Some(4_637_884));
+    insert_stream_row(&db, "c2", 1100, "nulls", 100, 600, Some(10), None, None);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let big_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("big"))
+        .expect("big row present");
+    let null_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("nulls"))
+        .expect("nulls row present");
+
+    // Assert: humanized cache_read; reported-0 reasoning shows "0"; NULL
+    // reasoning shows "-".
+    assert!(big_line.contains("4.6M"));
+    assert!(big_line.contains(" 0 "), "reported-0 reasoning should show 0: {big_line:?}");
+    assert!(null_line.contains(" - "), "NULL reasoning should show -: {null_line:?}");
+}
+
+#[test]
+fn render_detail_latency_summary_uses_window_total_not_alias_named_total() {
+    // Arrange: under `--by alias`, an alias literally named "total" must not be
+    // mistaken for the injected window-total row. Two streaming rows under that
+    // alias (ttfb 100, 300) plus one under another alias (ttfb 500). The window
+    // total p95 (nearest-rank over all three: 100,300,500 -> rank 3 -> 500) must
+    // differ from the "total" alias group's own p95 (100,300 -> rank 2 -> 300).
+    let (_dir, _path, db) = temp_db();
+    let insert_stream_alias = |id: &str, alias: &str, ttfb: i64| {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, stream, outcome, \
+                 latency_ms, ttfb_ms, tool_count, msg_count, attempt_count, \
+                 fallback_count, output_tokens) \
+                 VALUES (1000, 1000, ?1, 'openai', 'req-model', ?2, 'm', 'paid', \
+                 'up-paid', 1, 'ok', ?3, ?4, 0, 0, 1, 0, 1)",
+                rusqlite::params![id, alias, ttfb + 1000, ttfb],
+            )
+            .expect("insert stream alias row");
+    };
+    insert_stream_alias("ta", "total", 100);
+    insert_stream_alias("tb", "total", 300);
+    insert_stream_alias("oc", "other", 500);
+
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Alias), true);
+
+    // Act
+    let out = render_report(&report);
+    let summary = out
+        .lines()
+        .find(|l| l.starts_with("latency: TTFT"))
+        .expect("latency summary line present");
+
+    // Assert: the summary's p95 reflects the window-wide value (500ms), not the
+    // "total" alias group's own p95 (300ms) -- the injected window total is
+    // selected by position, not by the label colliding with the alias name.
+    assert!(
+        summary.contains("p95 500ms"),
+        "summary p95 should be the window total, not the alias named total: {summary:?}"
+    );
+}
+
+#[test]
+fn render_includes_total_row() {
+    // Arrange
+    let (_dir, _path, db) = temp_db();
+    paid_model_row(&db, "t1", "m", "ok", 10, 20);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: a total row is always present.
+    assert!(out.lines().any(|l| l.trim_start().starts_with("total")));
+}
+
+#[test]
+fn render_footer_shows_cache_hit_rate() {
+    // Arrange: cache_read 0, input 300 => rate 0.0%.
     let (_dir, _path, db) = temp_db();
     paid_row(&db, "f1", Some(300), Some(10));
     paid_model_row(&db, "f2", "m", "upstream_error", 0, 0);
@@ -130,8 +239,9 @@ fn render_footer_populated_rate_and_errors() {
     // Act
     let out = render_report(&report);
 
-    // Assert
-    assert!(out.contains("cache-hit-rate: 0.0%   errors: 1"));
+    // Assert: errors moved to a column; the footer is the cache-hit line only.
+    assert!(out.contains("cache hit 0.0%"));
+    assert!(!out.contains("errors:"));
 }
 
 #[test]
@@ -145,7 +255,7 @@ fn render_footer_na_rate_when_no_tokens() {
     let out = render_report(&report);
 
     // Assert
-    assert!(out.contains("cache-hit-rate: n/a   errors: 0"));
+    assert!(out.contains("cache hit n/a"));
 }
 
 #[test]
@@ -331,8 +441,8 @@ fn by_model_groups_rows_sharing_a_model() {
     // Act
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
-    // Assert
-    assert_eq!(report.rows.len(), 1);
+    // Assert: one model group plus the always-appended total row.
+    assert_eq!(report.rows.len(), 2);
     let row = find(&report, "claude-x");
     assert_eq!(row.requests, 2);
     assert_eq!(row.input_tokens, 15);
@@ -340,9 +450,9 @@ fn by_model_groups_rows_sharing_a_model() {
 }
 
 #[test]
-fn by_model_null_model_falls_back_to_none_label() {
-    // Arrange: a row with a NULL model column. group_label's unwrap_or must
-    // place it under the "(none)" group.
+fn by_model_null_model_falls_back_to_unattributed_label() {
+    // Arrange: a row with a NULL model column. group_label's fallback must
+    // place it under the "(unattributed)" group.
     let (_dir, _path, db) = temp_db();
     db.conn()
         .execute(
@@ -360,7 +470,7 @@ fn by_model_null_model_falls_back_to_none_label() {
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Assert
-    let row = find(&report, "(none)");
+    let row = find(&report, "(unattributed)");
     assert_eq!(row.requests, 1);
     assert_eq!(row.input_tokens, 8);
 }

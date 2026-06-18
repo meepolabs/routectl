@@ -158,6 +158,37 @@ fn insert_row(
         .expect("insert row");
 }
 
+/// Insert a streaming, successful row with explicit `ttfb_ms`,
+/// `reasoning_tokens`, and cache columns so the detail / ttft / presence
+/// paths are testable. `reasoning` and `cache_read` are `Option` to exercise
+/// NULL-vs-reported-0.
+#[allow(clippy::too_many_arguments)]
+fn insert_stream_row(
+    db: &UsageDb,
+    request_id: &str,
+    ts_start: i64,
+    model: &str,
+    ttfb_ms: i64,
+    latency_ms: i64,
+    output: Option<i64>,
+    reasoning: Option<i64>,
+    cache_read: Option<i64>,
+) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, ttfb_ms, tool_count, msg_count, attempt_count, \
+             fallback_count, output_tokens, reasoning_tokens, cache_read) \
+             VALUES (?1, ?1, ?2, 'openai', 'req-model', 'al', ?3, 'paid', 'up-paid', \
+             1, 'ok', ?4, ?5, 0, 0, 1, 0, ?6, ?7, ?8)",
+            rusqlite::params![
+                ts_start, request_id, model, latency_ms, ttfb_ms, output, reasoning, cache_read,
+            ],
+        )
+        .expect("insert stream row");
+}
+
 fn temp_db() -> (TempDir, PathBuf, UsageDb) {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
@@ -397,7 +428,7 @@ fn by_provider_rolls_up_and_totals_match() {
     let config = cost_config();
     let bounds = window_bounds(WindowFlag::All, fixed_now());
 
-    // By provider: two groups.
+    // By provider: two groups plus the always-appended total row.
     let by_prov = build_window_report(
         &db,
         &config,
@@ -407,15 +438,15 @@ fn by_provider_rolls_up_and_totals_match() {
         false,
     )
     .unwrap();
-    assert_eq!(by_prov.rows.len(), 2);
+    assert_eq!(by_prov.rows.len(), 3);
     let paid = find(&by_prov, "paid");
     assert_eq!(paid.requests, 2);
     assert_eq!(paid.input_tokens, 15);
     assert_eq!(paid.output_tokens, 27);
 
-    // Total view: one group, sums across both providers.
+    // Default view (by=None => per-model rows): one model "m" row + total.
     let total = build_window_report(&db, &config, "t".into(), bounds, None, false).unwrap();
-    assert_eq!(total.rows.len(), 1);
+    assert_eq!(total.rows.len(), 2);
     let t = find(&total, "total");
     assert_eq!(t.requests, 3);
     assert_eq!(t.input_tokens, 18);
@@ -514,34 +545,93 @@ fn multi_window_summary_emits_four_blocks() {
     assert_eq!(blocks.len(), 4);
     assert!(blocks[0].contains("today"));
     assert!(blocks[3].contains("all time"));
+    // The legend is appended to the last block, keeping the block count at 4.
+    assert!(blocks[3].contains("legend:"));
 }
 
 #[test]
-fn detail_computes_p95_per_group() {
+fn detail_computes_ttft_percentiles_per_group() {
     let (_dir, _path, db) = temp_db();
-    // 20 latencies 1..=20 in one group; nearest-rank p95 of 1..=20 is
-    // value at ceil(0.95*20)=19th => 19.
+    // 20 streaming ttfb values 1..=20 in one model group. Nearest-rank p95 is
+    // value at ceil(0.95*20)=19th => 19; p50 at ceil(0.50*20)=10th => 10.
     for i in 1..=20 {
-        insert_row(
+        insert_stream_row(
             &db,
             &format!("d{i}"),
             1000 + i,
             "m",
-            "paid",
-            "up-paid",
-            "al",
-            "ok",
-            Some(1),
-            Some(1),
             i,
+            i + 100,
+            Some(1),
+            None,
+            None,
         );
     }
     let config = cost_config();
     let bounds = window_bounds(WindowFlag::All, fixed_now());
     let report = build_window_report(&db, &config, "t".into(), bounds, None, true).unwrap();
+    let m = find(&report, "m");
+    assert_eq!(m.ttft_p50_ms, Some(10));
+    assert_eq!(m.ttft_p95_ms, Some(19));
+    // The total row covers the same samples.
     let t = find(&report, "total");
-    assert_eq!(t.p95_latency_ms, Some(19));
-    assert_eq!(t.max_latency_ms, 20);
+    assert_eq!(t.ttft_p95_ms, Some(19));
+}
+
+// --- humanizing formatters ---
+
+#[test]
+fn human_count_renders_compact_suffixes() {
+    // Arrange + Act + Assert
+    assert_eq!(human_count(9999), "9999");
+    assert_eq!(human_count(10_000), "10K");
+    assert_eq!(human_count(38_349), "38.3K");
+    assert_eq!(human_count(4_637_884), "4.6M");
+    assert_eq!(human_count(5_000_000), "5M");
+    assert_eq!(human_count(1_500_000_000), "1.5B");
+}
+
+#[test]
+fn human_ms_renders_scaled_durations() {
+    // Arrange + Act + Assert
+    assert_eq!(human_ms(999), "999ms");
+    assert_eq!(human_ms(1000), "1.0s");
+    assert_eq!(human_ms(6512), "6.5s");
+    // The seconds path never rounds up to 60.0s: just below the round-up
+    // floor stays in seconds, at/above it promotes to the minute path.
+    assert_eq!(human_ms(59_949), "59.9s");
+    assert_eq!(human_ms(59_950), "1m00s");
+    assert_eq!(human_ms(60_000), "1m00s");
+    assert_eq!(human_ms(90_701), "1m30s");
+    assert_eq!(human_ms(273_034), "4m33s");
+    assert_eq!(human_ms(3_661_000), "1h01m");
+}
+
+#[test]
+fn tok_per_s_aggregates_and_handles_zero_window() {
+    // Arrange + Act + Assert: 40 tokens over 400ms => 100 tok/s.
+    assert_eq!(tok_per_s(40, 400), Some(100));
+    // Zero generation window => no rate.
+    assert_eq!(tok_per_s(10, 0), None);
+}
+
+#[test]
+fn nearest_rank_matches_known_samples_and_handles_empty() {
+    // Arrange: sorted 1..=20.
+    let sorted: Vec<i64> = (1..=20).collect();
+
+    // Act + Assert
+    assert_eq!(nearest_rank(&sorted, 0.50), 10);
+    assert_eq!(nearest_rank(&sorted, 0.95), 19);
+    // A single-sample group yields that sample at any quantile.
+    assert_eq!(nearest_rank(&[42], 0.95), 42);
+}
+
+#[test]
+fn ttft_cell_renders_dash_for_empty_group() {
+    // Arrange + Act + Assert
+    assert_eq!(ttft_cell(None), "-");
+    assert_eq!(ttft_cell(Some(6512)), "6.5s");
 }
 
 // The render-layer, quota-line, --since-title, and --by-model tests live in
