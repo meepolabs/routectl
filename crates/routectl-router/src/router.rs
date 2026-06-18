@@ -302,6 +302,13 @@ struct DispatchTarget {
     /// requested alias; `Some(non-empty)` overrides it. Does not
     /// affect `DispatchMeta` accounting.
     reported_model: Option<String>,
+    /// Whether the response `routectl_provider` field is exposed to the
+    /// client for the served target. Threaded from
+    /// `ResolvedModel.visible_routectl_provider`. `true` (the default)
+    /// stamps the served provider name; `false` suppresses it. Chain
+    /// semantics: the served target's value wins. Does not affect
+    /// `DispatchMeta` accounting.
+    visible_routectl_provider: bool,
 }
 
 impl Router {
@@ -915,7 +922,25 @@ impl Router {
                 match result {
                     Ok(mut resp) => {
                         self.record_success(state_key);
-                        resp.routectl_provider = Some(provider_name.to_string());
+                        // Stamp the served upstream provider name only
+                        // when the served target opts in
+                        // (`visible_routectl_provider`, default true).
+                        // When suppressed, leave the field None so
+                        // serde's skip_serializing_if drops it from the
+                        // response. Internal accounting keys off
+                        // `DispatchMeta.served_provider` / `served_upstream`,
+                        // not this client-visible field, so suppression
+                        // does not affect usage capture.
+                        // Authoritative gate: every concrete provider
+                        // pre-stamps `routectl_provider` with its own id
+                        // before returning, so suppression MUST clear the
+                        // field, not merely skip setting it -- otherwise the
+                        // provider's value leaks through.
+                        if target.visible_routectl_provider {
+                            resp.routectl_provider = Some(provider_name.to_string());
+                        } else {
+                            resp.routectl_provider = None;
+                        }
                         // Client-visible label: the serving target's
                         // `reported_model` override when set (and non-empty),
                         // else the client's requested alias. Internal
@@ -2094,6 +2119,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         max_thinking_budget: m.max_thinking_budget,
         max_output_tokens: m.max_output_tokens,
         reported_model: m.reported_model.clone(),
+        visible_routectl_provider: m.visible_routectl_provider,
         model: m,
     }
 }
@@ -2122,6 +2148,7 @@ fn dispatch_target_for_seat(
         max_thinking_budget: m.max_thinking_budget,
         max_output_tokens: m.max_output_tokens,
         reported_model: m.reported_model.clone(),
+        visible_routectl_provider: m.visible_routectl_provider,
         model: m.clone(),
     }
 }
@@ -3561,6 +3588,228 @@ mod resolved_models_tests {
         };
         let via_seat = dispatch_target_for_seat(&m, &seat);
         assert_eq!(via_seat.reported_model.as_deref(), Some("public-label"));
+    }
+
+    #[test]
+    fn visible_routectl_provider_survives_config_resolved_dispatch_relay() {
+        // Structural-relay sanity check mirroring
+        // `reported_model_survives_config_resolved_dispatch_relay`: a
+        // configured `visible_routectl_provider=false` rides the 4-hop
+        // relay (ModelEntry -> ResolvedModel -> DispatchTarget) including
+        // the seat-pinned dispatch path. The end-to-end BEHAVIOR coverage
+        // lives in `visible_routectl_provider_false_suppresses_field`.
+        let entry = crate::config::ModelEntry::new("p1", "wire-model")
+            .with_visible_routectl_provider(false);
+        assert!(!entry.visible_routectl_provider);
+
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "p1".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let resolved = ResolvedModel::new("m1", "p1", p.clone(), "wire-model")
+            .with_visible_routectl_provider(entry.visible_routectl_provider);
+        assert!(!resolved.visible_routectl_provider);
+
+        let m = Arc::new(resolved);
+        let direct = into_one_dispatch_target(m.clone());
+        assert!(!direct.visible_routectl_provider);
+
+        let seat = crate::seat_pool::SeatTarget {
+            label: Some("seat-a".into()),
+            state_key: "m1#seat-a".into(),
+            provider: p.clone(),
+            auth_secret_ref: None,
+        };
+        let via_seat = dispatch_target_for_seat(&m, &seat);
+        assert!(!via_seat.visible_routectl_provider);
+    }
+
+    #[test]
+    fn visible_routectl_provider_defaults_true_across_relay() {
+        // DEFAULT-TRUE guard: a model built without the override carries
+        // `visible_routectl_provider=true` all the way to the dispatch
+        // target, keeping existing consumers (which assert a present
+        // `routectl_provider`) green.
+        let entry = crate::config::ModelEntry::new("p1", "wire-model");
+        assert!(entry.visible_routectl_provider);
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "p1".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let m = Arc::new(ResolvedModel::new("m1", "p1", p, "wire-model"));
+        assert!(m.visible_routectl_provider);
+        assert!(into_one_dispatch_target(m).visible_routectl_provider);
+    }
+
+    #[tokio::test]
+    async fn visible_routectl_provider_false_suppresses_field() {
+        // SUPPRESS: a model with visible_routectl_provider=false yields a
+        // response with NO `routectl_provider` (left None -> serde's
+        // skip_serializing_if drops the field).
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "anthropic".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let cfg = Arc::new(Config::default());
+        let mut router = Router::new(cfg);
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "haiku".to_string(),
+            Arc::new(
+                ResolvedModel::new("haiku", "anthropic", p, "claude-haiku-4-5")
+                    .with_visible_routectl_provider(false),
+            ),
+        );
+        router.install_resolved_models(models);
+
+        let req = ChatRequest {
+            model: "haiku".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        assert!(
+            resp.routectl_provider.is_none(),
+            "suppressed model must leave routectl_provider unset"
+        );
+        // The skip_serializing_if drops the absent field from the wire.
+        let body = serde_json::to_value(&resp).expect("serialize");
+        assert!(
+            body.get("routectl_provider").is_none(),
+            "routectl_provider must be absent from the serialized body"
+        );
+    }
+
+    #[tokio::test]
+    async fn suppressed_provider_clears_prestamped_field() {
+        // LEAK GUARD: concrete providers pre-stamp `routectl_provider`
+        // with their own id before returning. CountedProvider returns
+        // None and so cannot exercise the suppression gate's clearing
+        // behavior. This provider returns Some("leaked-provider"); with
+        // visible_routectl_provider=false the gate MUST clear it to None,
+        // and the field MUST be absent from the serialized OpenAI body.
+        struct PrestampProvider {
+            id: String,
+        }
+        #[async_trait]
+        impl Provider for PrestampProvider {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+            fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+                Err(Error::normalize_response(&self.id, "unused"))
+            }
+            async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    id: format!("ok-{}", self.id),
+                    model: req.model,
+                    created: 0,
+                    choices: vec![Choice {
+                        logprobs: None,
+                        index: 0,
+                        message: Message {
+                            refusal: None,
+                            role: routectl_core::Role::Assistant,
+                            content: routectl_core::MessageContent::Text("ok".into()),
+                            reasoning: None,
+                            reasoning_details: vec![],
+                            name: None,
+                            tool_call_id: None,
+                            tool_calls: None,
+                        },
+                        finish_reason: Some("stop".into()),
+                        matched_stop_sequence: None,
+                    }],
+                    usage: Some(routectl_core::Usage::default()),
+                    // Pre-stamp, mirroring every concrete provider.
+                    routectl_provider: Some("leaked-provider".into()),
+                    extras: Default::default(),
+                    upstream_meta: None,
+                })
+            }
+            async fn stream(
+                &self,
+                _: ChatRequest,
+            ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+                unreachable!()
+            }
+        }
+
+        let p: Arc<dyn Provider> = Arc::new(PrestampProvider {
+            id: "anthropic".into(),
+        });
+        let cfg = Arc::new(Config::default());
+        let mut router = Router::new(cfg);
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "haiku".to_string(),
+            Arc::new(
+                ResolvedModel::new("haiku", "anthropic", p, "claude-haiku-4-5")
+                    .with_visible_routectl_provider(false),
+            ),
+        );
+        router.install_resolved_models(models);
+
+        let req = ChatRequest {
+            model: "haiku".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let resp = router.complete(req).await.expect("ok");
+        assert!(
+            resp.routectl_provider.is_none(),
+            "suppression must clear the provider's pre-stamped routectl_provider"
+        );
+        let body = serde_json::to_value(&resp).expect("serialize");
+        assert!(
+            body.get("routectl_provider").is_none(),
+            "pre-stamped routectl_provider must be absent from the serialized body"
+        );
+    }
+
+    #[tokio::test]
+    async fn suppressed_provider_still_records_dispatch_meta() {
+        // ACCOUNTING GUARD: suppressing the client-visible field must NOT
+        // affect internal accounting -- DispatchMeta still records
+        // served_provider / served_upstream on the suppressed model.
+        let p: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "anthropic".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let cfg = Arc::new(Config::default());
+        let mut router = Router::new(cfg);
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "haiku".to_string(),
+            Arc::new(
+                ResolvedModel::new("haiku", "anthropic", p, "claude-haiku-4-5")
+                    .with_visible_routectl_provider(false),
+            ),
+        );
+        router.install_resolved_models(models);
+
+        let req = ChatRequest {
+            model: "haiku".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+        let dispatched = router
+            .complete_with_options(req, RouterOptions::default())
+            .await;
+        dispatched.result.expect("ok");
+        assert_eq!(
+            dispatched.meta.served_provider.as_deref(),
+            Some("anthropic"),
+            "served_provider must still be recorded when the field is suppressed"
+        );
+        assert_eq!(
+            dispatched.meta.served_upstream.as_deref(),
+            Some("claude-haiku-4-5"),
+            "served_upstream must still be recorded when the field is suppressed"
+        );
     }
 
     /// Minimal streaming-capable provider for the seat-path end-to-end

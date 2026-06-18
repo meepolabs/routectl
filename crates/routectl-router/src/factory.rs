@@ -1021,6 +1021,7 @@ pub async fn build_resolved_models(
         if let Some(label) = entry.reported_model.as_ref() {
             resolved = resolved.with_reported_model(label.clone());
         }
+        resolved = resolved.with_visible_routectl_provider(entry.visible_routectl_provider);
         if let Some(uri) = primary_api_key_uri(provider_entry) {
             if let Ok(sr) = SecretRef::parse(uri) {
                 resolved = resolved.with_auth_secret_ref(sr.clone());

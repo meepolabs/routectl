@@ -97,6 +97,12 @@ pub struct ResolvedModel {
     /// stamp time. Projected from `[models.X] reported_model`. Does
     /// not affect internal accounting / observability.
     pub reported_model: Option<String>,
+    /// Whether the response `routectl_provider` field is exposed to the
+    /// client for this model. `true` (the default) stamps the served
+    /// provider name onto the response; `false` suppresses it. Projected
+    /// from `[models.X] visible_routectl_provider`. Does not affect
+    /// internal accounting / observability.
+    pub visible_routectl_provider: bool,
     /// Source `SecretRef` used to resolve this model's primary auth
     /// credential at provider-build time. Retained on the resolved
     /// model so the router can wire 401 self-heal back through the
@@ -138,6 +144,7 @@ impl ResolvedModel {
             stream_first_byte_timeout_ms: None,
             max_output_tokens: 0,
             reported_model: None,
+            visible_routectl_provider: true,
             auth_secret_ref: None,
             seats: None,
         }
@@ -207,6 +214,13 @@ impl ResolvedModel {
         self
     }
 
+    /// Set whether the response `routectl_provider` field is exposed to
+    /// the client for this model. Defaults to `true`.
+    pub fn with_visible_routectl_provider(mut self, b: bool) -> Self {
+        self.visible_routectl_provider = b;
+        self
+    }
+
     /// Attach the source `SecretRef` that resolved this model's
     /// primary auth credential. Used by the 401 self-heal path so a
     /// refresh hook can run against the originating store.
@@ -251,6 +265,7 @@ impl std::fmt::Debug for ResolvedModel {
             )
             .field("max_output_tokens", &self.max_output_tokens)
             .field("reported_model", &self.reported_model)
+            .field("visible_routectl_provider", &self.visible_routectl_provider)
             .field(
                 "auth_secret_ref",
                 &self.auth_secret_ref.as_ref().map(|sr| sr.to_string()),

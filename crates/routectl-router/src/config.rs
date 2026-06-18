@@ -439,6 +439,15 @@ pub struct ModelEntry {
     /// `DispatchMeta.served_model` / `served_upstream`, not `resp.model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_model: Option<String>,
+
+    /// Whether the response `routectl_provider` field is exposed to the
+    /// client for this model. `true` (the default) stamps the served
+    /// upstream provider name onto the response; `false` suppresses it
+    /// (serde drops the absent field). Does not affect internal
+    /// accounting / observability, which key off
+    /// `DispatchMeta.served_provider` / `served_upstream`.
+    #[serde(default = "default_true")]
+    pub visible_routectl_provider: bool,
 }
 
 impl ModelEntry {
@@ -458,6 +467,7 @@ impl ModelEntry {
             stream_first_byte_timeout_ms: None,
             max_output_tokens: None,
             reported_model: None,
+            visible_routectl_provider: true,
         }
     }
 
@@ -544,6 +554,14 @@ impl ModelEntry {
     /// at stamp time (falls through to the client's requested alias).
     pub fn with_reported_model(mut self, label: impl Into<String>) -> Self {
         self.reported_model = Some(label.into());
+        self
+    }
+
+    /// Set whether the response `routectl_provider` field is exposed to
+    /// the client for this model. Defaults to `true`; set `false` to
+    /// suppress the served-provider name on the response.
+    pub fn with_visible_routectl_provider(mut self, b: bool) -> Self {
+        self.visible_routectl_provider = b;
         self
     }
 }

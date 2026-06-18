@@ -47,6 +47,27 @@ cargo check -p routectl-providers --no-default-features \
 The live matrix is slow (~30s) and costs cents per run. Use it as a
 final gate, not a tight inner loop.
 
+## Git hooks (one-time setup)
+
+The repo ships its hooks in `tools/git-hooks/`. Install them once per
+clone:
+
+```bash
+bash tools/git-hooks/install.sh
+```
+
+This symlinks `pre-commit` and `commit-msg` into `.git/hooks/`. The
+`pre-commit` hook runs the gitleaks staged secret scan, the
+internal-ID scan (`scripts/check-internal-ids.sh --staged`), and the
+fmt / clippy / lean-check / workspace-test gate -- the same workspace
+tests CI runs EXCEPT the two replay suites (`egress_replay_all` /
+`ingress_replay_all`), which the hook skips locally pending the
+captured-corpus recapture (CI runs them unfiltered). The `commit-msg`
+hook scans the commit message for internal planning IDs. Set
+`ROUTECTL_SKIP_PRECOMMIT=1` to bypass the pre-commit gate while
+iterating; the same internal-ID rules are enforced fail-closed in CI
+regardless.
+
 ## When the Anthropic ingress breaks (a real client sending a real body)
 
 1. **Reproduce against routectl directly** with a captured request

@@ -469,6 +469,28 @@ fn redact_value(v: &mut serde_json::Value) {
             if let Some(citations) = map.get_mut("citations") {
                 *citations = redacted_object();
             }
+            // OpenAI Responses `annotations`: an array on an
+            // `output_text` block carrying url_citation entries with a
+            // `title`, a free (non-`data:`) source `url`, and quoted
+            // source `text` echoed from the cited document -- all
+            // user-derived content. None of these redact under the
+            // per-key sweep: `title` has no arm, the source `url` is a
+            // plain `https://...` (so the data-URI-only `url` arm skips
+            // it), and the quoted `text` would redact but the title/url
+            // would still leak. Collapse the whole value wholesale
+            // (precedent: citations); the sibling structural
+            // `type:"output_text"` and the block-level `text` stay
+            // visible / redact via their own arms because this is keyed
+            // off the `annotations` key, not the parent `type`.
+            //
+            // Audited-and-already-covered sibling leaves (no new code):
+            // Anthropic citations' `cited_text` + `document_title` (the
+            // `citations` arm above), OpenAI Responses
+            // `summary[*].text` (the `text` arm), and tool-result string
+            // content (the `output` / `content` arms).
+            if let Some(annotations) = map.get_mut("annotations") {
+                *annotations = redacted_object();
+            }
             // Anthropic `document` content block: the top-level `title`
             // leaf is the user-supplied document title. Redact REGARDLESS
             // of length (titles are short, so the length-only `data`/`url`
@@ -506,10 +528,12 @@ fn redact_value(v: &mut serde_json::Value) {
                     // text}`, `{type:"output_text", text}`, Anthropic
                     // thinking text, OpenAI Responses `summary[*].text`
                     // (reasoning summary), function_call `arguments`,
-                    // and the OpenAI Responses `refusal` block where
-                    // the safety reason echoes prompt-derived content.
+                    // the OpenAI Responses `refusal` block where the
+                    // safety reason echoes prompt-derived content, and an
+                    // audio block's `transcript` (the spoken-content
+                    // transcription is user content by nature).
                     "text" | "thinking" | "instructions" | "reasoning" | "arguments"
-                    | "refusal" => {
+                    | "refusal" | "transcript" => {
                         redact_string_or_recurse(entry);
                     }
                     // `system` and `content` can be string OR array of

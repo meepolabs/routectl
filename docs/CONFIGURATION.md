@@ -140,6 +140,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
 | `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> 64000 baseline); anthropic-api + bedrock-invoke only |
 | `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
+| `visible_routectl_provider`    | `[models.X]`        | bool, default true; set false to drop the `routectl_provider` field from the client response (opaque proxy) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
@@ -649,6 +650,28 @@ upstream recorded in dispatch metadata, not the response `model` field,
 and are unchanged. The `routectl_provider` field remains the intentional
 transparency channel naming the provider that answered; it is unaffected
 by `reported_model`.
+
+**`visible_routectl_provider` (bool, default true) -- response `routectl_provider` field**
+
+`routectl_provider` is a routectl response extension naming the provider
+that actually answered (e.g. `"anthropic-api"`, `"openai-compat:deepseek"`).
+It is the intentional transparency channel and is emitted by default on the
+OpenAI dialect (the Anthropic dialect omits it). For an opaque-proxy or
+white-label deployment that must not disclose its backend, set:
+
+```toml
+[models.fast]
+provider                  = "deepseek"
+upstream                  = "deepseek-v3"
+visible_routectl_provider = false   # drop routectl_provider from responses
+```
+
+When false, the router clears `routectl_provider` from the client response
+(the served model's flag decides, so a fallback chain has one stable
+contract). This affects only the client-visible field: internal usage and
+cost accounting key off the dispatch record, not this field, and are
+unaffected. There is no streaming concern -- streamed chunks never carry
+`routectl_provider`.
 
 Two other per-model overrides live on `[models.X]`:
 

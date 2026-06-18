@@ -1519,3 +1519,91 @@ fn redact_numeric_bytes_outside_source_stays_visible() {
         "long string bytes at the top level must stay visible"
     );
 }
+
+#[test]
+fn redact_openai_responses_annotations_collapsed() {
+    // POSITIVE: an OpenAI Responses `output_text` block carries
+    // `annotations[*]` url_citation entries whose `title`, source
+    // `url`, and quoted `text` echo the cited document. None redact
+    // under the per-key sweep (no `title` arm; plain https url skips
+    // the data-URI-only `url` arm), so the whole `annotations` value
+    // must collapse to the opaque marker -- taking title, url, AND
+    // quoted text with it.
+    let body = json!({
+        "type": "output_text",
+        "text": "hello",
+        "annotations": [{
+            "type": "url_citation",
+            "title": "SENTINEL_TITLE",
+            "url": "https://SENTINEL_URL",
+            "text": "SENTINEL_QUOTE",
+        }],
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    let serialized = serde_json::to_string(&got).expect("serialize redacted body");
+    // Structural assert: the whole annotations value collapses.
+    assert_eq!(got["annotations"], json!({"redacted": true}));
+    // Sensitive substrings (title, source url, quoted text) must all be
+    // gone from the serialized body.
+    assert!(
+        !serialized.contains("SENTINEL_TITLE"),
+        "annotation title survived redaction: {serialized}"
+    );
+    assert!(
+        !serialized.contains("SENTINEL_URL"),
+        "annotation source url survived redaction: {serialized}"
+    );
+    assert!(
+        !serialized.contains("SENTINEL_QUOTE"),
+        "annotation quoted text survived redaction: {serialized}"
+    );
+}
+
+#[test]
+fn redact_annotations_preserves_sibling_structure() {
+    // STRUCTURE-PRESERVATION: in the same block, the sibling
+    // structural `type:"output_text"` stays visible and the block-level
+    // `text` redacts via its own arm to `<redacted len=N>`.
+    let body = json!({
+        "type": "output_text",
+        "text": "hello",
+        "annotations": [{
+            "type": "url_citation",
+            "title": "SENTINEL_TITLE",
+            "url": "https://example.com/source",
+            "text": "SENTINEL_QUOTE",
+        }],
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    assert_eq!(got["type"], "output_text");
+    assert_eq!(got["text"], "<redacted len=5>");
+}
+
+#[test]
+fn redact_text_block_still_collapses_to_exact_marker() {
+    // REGRESSION CANARY: the annotations arm must not perturb a plain
+    // top-level `{type:"text", text}` block -- it still redacts to
+    // exactly `<redacted len=5>`.
+    let body = json!({"type": "text", "text": "hello"});
+    let got = redact_prompts_with_flag(&body, true);
+    assert_eq!(got["text"], "<redacted len=5>");
+}
+
+#[test]
+fn redact_audio_transcript_redacted() {
+    // POSITIVE: an audio block's `transcript` leaf carries the spoken
+    // content transcription -- user content by nature -- so it redacts
+    // via the always-redact text-leaf arm regardless of nesting under
+    // `input_audio`.
+    let body = json!({
+        "type": "input_audio",
+        "input_audio": {"transcript": "SENTINEL_TRANSCRIPT", "format": "wav"},
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    assert_eq!(
+        got["input_audio"]["transcript"], "<redacted len=19>",
+        "audio transcript must be redacted as content"
+    );
+    // The non-content sibling `format` stays visible.
+    assert_eq!(got["input_audio"]["format"], "wav");
+}

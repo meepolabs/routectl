@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Commit-msg gate: rejects commit messages that embed high-signal
+# internal planning / review IDs. Patterns live in
+# scripts/check-internal-ids.sh (single source of truth).
+#
+# Git passes the path to the prepared commit-message file as $1.
+#
+# Install via: bash tools/git-hooks/install.sh
+
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+bash "$ROOT/scripts/check-internal-ids.sh" --commit-msg "$1"
