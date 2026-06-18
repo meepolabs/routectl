@@ -73,7 +73,7 @@ base64 = "0.22"
 # (`tests/hot_reload.rs`) to deliver SIGHUP into the running test
 # process. Confined to `cfg(unix)` test paths.
 [target.'cfg(unix)'.dev-dependencies]
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.31", features = ["signal"] }
 
 # cargo-deb metadata. Preserved so a future PR can re-enable .deb
 # packaging in .github/workflows/release.yml without re-deriving these
