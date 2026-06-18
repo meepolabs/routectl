@@ -1116,11 +1116,9 @@ fn warn_context_management_needs_preserve(
 /// Also rejects link-local hosts (IPv4 `169.254.0.0/16`, IPv6
 /// `fe80::/10`) regardless of scheme. The IPv4 link-local range
 /// covers cloud-instance-metadata services (AWS / Azure / GCP all
-/// use `169.254.169.254`) -- an operator who accidentally pastes
-/// the metadata URL or is socially engineered into doing so would
-/// otherwise leak SigV4-signed requests + API keys to a service
-/// that exposes IAM credentials. Defense-in-depth: routectl is a
-/// gateway, not a privileged client of the metadata service.
+/// use `169.254.169.254`) -- egress there would forward signed
+/// credentials to an untrusted endpoint. Defense-in-depth: routectl
+/// is a gateway, not a privileged client of the metadata service.
 /// Extract the embedded IPv4 of an IPv4-COMPATIBLE IPv6 address
 /// (`::a.b.c.d`, the `::/96` prefix -- first six segments all zero),
 /// distinct from the IPv4-MAPPED form (`::ffff:a.b.c.d`) that
@@ -1777,9 +1775,8 @@ mod base_url_validation_tests {
     }
 
     /// Pin: AWS / Azure / GCP cloud-instance metadata IP must be
-    /// rejected even with https. Link-local egress would leak SigV4
-    /// and API keys to whatever service the operator was tricked
-    /// into pointing at.
+    /// rejected even with https. Link-local egress would forward
+    /// signed credentials to the configured endpoint.
     #[test]
     fn https_aws_imds_rejected() {
         let err =

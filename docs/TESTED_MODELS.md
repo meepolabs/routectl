@@ -55,7 +55,7 @@ headers OpenRouter expects.
 | `deepseek/deepseek-v4-flash` | complete | PASS | |
 | `deepseek/deepseek-r1` | complete + stream | PASS | Reasoning lifted, ~17+ reasoning chunks streamed |
 | `qwen/qwen3-coder:free` | complete | upstream-429 | Free tier rate-limit |
-| `x-ai/grok-3-mini` | complete | PASS | `format = xai-responses-v1` |
+| `x-ai/grok-3-mini` | complete | PASS | `format = openrouter-passthrough-v1` |
 | `nvidia/nemotron-nano-9b-v2:free` | complete | PASS | Returns `content: null`; lifted via `MessageContent::Null` |
 | `microsoft/phi-4` | complete | PASS | |
 | `cohere/command-r7b-12-2024` | complete | PASS | |
@@ -130,6 +130,11 @@ Hits `https://api.anthropic.com` with `x-api-key` (or
 blocks, signature preservation, system-message lift, tools shape,
 cache_control round-trip -- has 20+ unit tests. Live verification
 runs when `ANTHROPIC_API_KEY` is set.
+
+The OAuth-bearer auth path is exercised by a separate live test
+`crates/routectl-cli/tests/live_anthropic_oauth.rs`, run with
+`ROUTECTL_TEST_CLAUDE_OAUTH_TOKEN_FILE=<path>` pointing to a file that
+contains a raw Anthropic OAuth bearer access token (one line).
 
 ## AWS Bedrock (`kind = "bedrock"`, InvokeModel + Anthropic body)
 
@@ -231,7 +236,7 @@ Wire-shape notes for the chatgpt-oauth surface:
 
 If you find a model not in the matrix that you want covered:
 
-1. Add the `provider:model` target to the appropriate `*_MODELS` constant
+1. Add the bare model ID string to the appropriate `*_MODELS` constant
    in `crates/routectl-cli/tests/live_matrix.rs`.
 2. Run the matrix locally with the relevant key set.
 3. Update this doc with the result.

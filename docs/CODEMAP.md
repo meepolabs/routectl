@@ -17,7 +17,7 @@ listed at the bottom of each crate.
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`, `ChatChunk`, `Message`, `ReasoningDetail`, `Usage`, `RoutectlInternal`
 - `src/schema_opaque.rs` -- transport-internal `OpaqueSseEvent` carrier for unknown Anthropic SSE bytes (skip-serialized; preserves unknown content_block types verbatim through the canonical pipeline so Anthropic ingress can re-emit byte-for-byte)
 - `src/upstream_meta.rs` -- transport-internal `UpstreamMeta` carrier (skip-serialized on `ChatResponse`/`ChatChunk`) for non-canonical upstream metadata; today the provider-namespaced `AnthropicUnifiedQuota` (the `anthropic-ratelimit-unified-*` quota/overage family, raw strings + `extras` forward-compat + `is_overage()`)
-- `src/content_part.rs` -- typed `ContentPart` enum (text/image/document/tool_use/tool_result/thinking/Other) for `MessageContent::Parts`
+- `src/content_part.rs` -- typed `ContentPart` enum (text/image/image_url/file/document/tool_use/tool_result/thinking/redacted_thinking (plus the `Other` catchall)) for `MessageContent::Parts`
 - `src/system_content.rs` -- typed top-level `system` field (flat string OR array of `SystemBlock` with per-block cache_control)
 - `src/tool_def.rs` -- typed `ToolDef::Custom(CustomTool)` + `ToolDef::Other(Value)` with `from_openai_function` interop
 - `src/cache_control.rs` -- Anthropic `CacheControl` type, breakpoint validator (4-cap, 1h-before-5m TTL ordering)
@@ -47,17 +47,21 @@ listed at the bottom of each crate.
 
 ### Top-level
 
-- `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`
+- `src/lib.rs` -- feature-gated module exports for `openai_compat`, `anthropic_api`, `bedrock`, `openai_responses`; also declares crate-internal feature-gated helper modules `system_filter`, `claude_signing`, `tool_id`, `upstream_log`
 - `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
 - `src/http_client.rs` -- shared `reqwest::Client` factory with TLS-1.2 pin and User-Agent override
 - `src/effort.rs` -- shared `clamp_effort_to_supported` helper; clamps caller `reasoning.effort` against per-model `effort_levels` (rounds toward most-capable above max, least-capable below min); single source of truth across openai-compat, anthropic-api, bedrock, openai-responses
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream -> routectl) emit sites
 - `src/retry_after.rs` -- parser for the standard HTTP `Retry-After` response header (RFC 9110 delta-seconds or HTTP-date) plus `is_rate_limit_status`; every egress lifts the hint on a 429/503/529 and carries it on `Error::Upstream.retry_after` for the router to honor (the Codex `usage_limit_reached` `resets_at` / `resets_in_seconds` reset is parsed in `openai_responses/response.rs` and preferred over the header hint)
 - `src/tool_calls.rs` -- shared parse step (`normalize_tool_calls`) for OpenAI-shape `Message.tool_calls` entries (`{id, function:{name, arguments}}`, arguments a JSON-encoded string); returns `{id, name, arguments: Value}` with missing-id synthesis (`call_<index>`) and a `{"_arguments": ...}` fallback on unparseable arguments. Consumed by the bedrock-converse and openai-responses egresses to re-emit `tool_calls` as native tool-use items; gated on those two features (the anthropic-api egress keeps its own inline parse to stay byte-identical on the empty-id path)
+- `src/system_filter.rs` -- shared predicate + strip helper for the Claude Code billing/attribution system block; used by the egresses before forwarding upstream
+- `src/claude_signing.rs` -- byte-level re-signer for the billing-header checksum; re-signs an existing billing block in place after egress body mutations
+- `src/tool_id.rs` -- shared tool-call id charset sanitizer (chars outside `[a-zA-Z0-9_-]` -> `_`, deterministic) so sanitized `tool_use` ids and their `tool_result` correlators stay equal
+- `src/upstream_log.rs` -- shared WARN emitter for upstream HTTP failures (401/403-vs-other auth-warn split) across egresses
 
 ### anthropic_api
 
-- `src/anthropic_api/mod.rs` -- `AnthropicApiProvider` impl + `AnthropicApiConfig` (fields: `auth`, `base_url`, `anthropic_version`, `auth_kind`, `header_extras`, `user_agent`, `allowed_betas`, `forward_client_headers`, `context_management`, `max_thinking_entry_bytes`) + `AuthKind` (ApiKey / OauthBearer); SSE drain
+- `src/anthropic_api/mod.rs` -- `AnthropicApiProvider` impl + `AnthropicApiConfig` (fields: `auth`, `base_url`, `anthropic_version`, `auth_kind`, `header_extras`, `user_agent`, `allowed_betas`, `forward_client_headers`, `context_management`, `max_thinking_entry_bytes`, `session_id`) + `AuthKind` (ApiKey / OauthBearer); SSE drain
 - `src/anthropic_api/context_management.rs` -- LRU+TTL thinking-block store for context-management beta emulation; exports `ThinkingCache`, `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA`, `CLEAR_THINKING_EDIT_TYPE`, `THINKING_CACHE_CAP`, `THINKING_CACHE_TTL`, `snapshot_to_cache`, `lookup_thinking`, `extract_tool_thinking`, `apply_clear_thinking_edit`
 - `src/anthropic_api/types.rs` -- Anthropic Messages wire types (`AnthropicRequest`, content blocks, system, thinking config, usage)
 - `src/anthropic_api/request.rs` -- orchestrator: builds the Anthropic wire body from `ChatRequest` via the system/messages/tools/extras submodules; owns `normalize` (entry point), top-level body assembly, and cache_control breakpoint validation (`validate_breakpoints`); re-exports `build_thinking`, `filter_anthropic_betas`, `translate_tool`, `translate_system`, `lift_legacy_system` for the Bedrock egress and `mod.rs`
@@ -70,8 +74,9 @@ listed at the bottom of each crate.
 - `src/anthropic_api/sse_opaque.rs` -- bounded opaque-event capture per unknown content block (256 KB / 10000 deltas per block; degrades to sink-drain on overflow with WARN); records bytes for the matching ingress to re-emit verbatim
 - `src/anthropic_api/sse_unknown.rs` -- forward-compat handling for unknown SSE content blocks plus the per-block-index invariant; opens `OpenBlockKind::Unknown`, drops misattributed deltas
 - `src/anthropic_api/types_sse.rs` -- forward-compat catchalls (`Other(Value)` arms) on the three strict-tagged Anthropic SSE enums (`SseEvent`, `SseContentBlockStart`, `SseDelta`); extracted from `types.rs` for the 800-LOC ceiling
-- `src/anthropic_api/parts.rs` -- image-source translation (data-URI -> base64) and trailing-Text-after-tool_use stripping
+- `src/anthropic_api/parts.rs` -- image-source translation (data-URI -> base64) and trailing-Text-after-tool_use stripping; also OpenAI file-part -> Anthropic document-source translation (`parse_file_document_source`; PDF base64 data URI only) and url-source image translation
 - `src/anthropic_api/ratelimit_unified.rs` -- tolerant parser for the `anthropic-ratelimit-unified-*` quota/overage response-header family (`parse_unified_quota` -> `AnthropicUnifiedQuota`; None when absent, non-UTF8 values skipped, unknown suffixes captured in `extras`) plus the once-per-flip overage state machine (`classify_overage_transition`); wired into the egress complete/stream dir-3 sites
+- `src/anthropic_api/cloak.rs` -- Claude Code identity cloak for the OauthBearer surface; strips billing/attribution unconditionally; for non-CC clients mints stable identity + `metadata.user_id` and stamps the identity system block; no-op beyond the billing strip for genuine CC clients
 
 ### openai_compat
 
@@ -96,7 +101,7 @@ listed at the bottom of each crate.
 ### openai_compat/wire_lift
 
 - `src/openai_compat/wire_lift/mod.rs` -- ordered dispatch table rewriting Anthropic-shape body fields to OpenAI-compat wire shape
-- `src/openai_compat/wire_lift/content.rs` -- image content blocks (`{image,source:base64}` -> `image_url`), drops documents
+- `src/openai_compat/wire_lift/content.rs` -- image content blocks (Anthropic base64 source and url source shapes -> `image_url`), drops documents
 - `src/openai_compat/wire_lift/thinking.rs` -- assistant `thinking`/`redacted_thinking` blocks -> message-envelope `reasoning_details`
 - `src/openai_compat/wire_lift/tools.rs` -- canonical `ToolDef::Custom` -> `{type:"function",function:{...}}` wire shape
 - `src/openai_compat/wire_lift/tool_use.rs` -- assistant `tool_use` content blocks -> top-level `tool_calls` array
@@ -113,7 +118,7 @@ listed at the bottom of each crate.
 - `src/openai_responses/cookies.rs` -- persistent Cloudflare cookie jar (allowlist-pinned to non-secret cookie names)
 - `src/openai_responses/request.rs` -- orchestrator: builds `ResponsesRequest` from `ChatRequest` via system/messages/tools/extras submodules
 - `src/openai_responses/system.rs` -- canonical `system` -> Responses `instructions` flat string (drops per-block cache_control with DEBUG)
-- `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items)
+- `src/openai_responses/messages.rs` -- canonical `messages[]` -> Responses `input[]` (Message/Reasoning/FunctionCall/FunctionCallOutput items); also translates `File` content blocks -> `InputFile` items with `file_data` or `file_id`
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses `{type,name,description,parameters}` shape; tool_choice mapping
 - `src/openai_responses/extras.rs` -- reasoning translation + 6-key provider_extras allowlist; ChatgptOauth `store=false` lock
 - `src/openai_responses/response.rs` -- Responses response -> canonical (output walk, finish_reason from status, usage)
@@ -162,10 +167,10 @@ listed at the bottom of each crate.
 ## routectl-router
 
 - `src/lib.rs` -- crate root; re-exports `Config`, `Router`, `ResolvedModel`, factory builders
-- `src/config.rs` -- TOML schema (`Config`, `ProviderEntry`, `ModelEntry`, `AliasValue`, `RetryPolicy`, `ServerAuth`, `RegistryEntry`/`PricingConfig` pricing table, etc.); `Config::pricing_for` resolves an upstream-id glob (provider-scoped beats agnostic, then longest-prefix) to a `&PricingConfig`; `ProviderEntry::api_key_ref()` exposes the primary key ref (`None` for Bedrock) so the usage CLI can detect `oauth://` subscription providers
+- `src/config.rs` -- TOML schema (`Config`, `ProviderEntry`, `ModelEntry`, `AliasValue`, `RetryPolicy`, `ServerAuth`, `RegistryEntry`/`PricingConfig` pricing table, etc.); `Config::pricing_for` resolves an upstream-id glob (provider-scoped beats agnostic, then longest-prefix) to a `&PricingConfig`; `ProviderEntry::api_key_ref()` exposes the primary key ref (`None` for Bedrock) so the usage CLI can detect `oauth://` subscription providers; `ModelEntry` carries `reported_model: Option<String>` (response model-label echo override) and `visible_routectl_provider: bool` (default true; false suppresses the provider name in response metadata)
 - `src/factory.rs` -- secret resolution + `build_provider`/`build_resolved_models`; validation guards (incl. `validate_registry_patterns`, rejecting malformed `[registry]` glob keys at startup); OAuth credential-pool expansion (a bare-pool `oauth://<provider>` ref with >1 stored seat builds one seat-pinned provider per seat via `list_seats`)
 - `src/glob.rs` -- `[aliases]` table suffix-glob parser + longest-prefix lookup index (`AliasPattern`, `PrefixIndex`)
-- `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`; optional `seats` slice (one `SeatTarget` per OAuth pool seat, `None` for the single-seat / non-pooled case)
+- `src/resolved.rs` -- `ResolvedModel` carrying provider, upstream, reasoning defaults, header/payload extras per `[models.X]`; optional `seats` slice (one `SeatTarget` per OAuth pool seat, `None` for the single-seat / non-pooled case); `reported_model: Option<String>` (per-model response-echo override)
 - `src/router.rs` -- alias resolution + fallback-chain walk; per-model overlay merge (header/payload) and gate dispatch; `expand_chain_to_targets` expands a pooled model into one per-seat `DispatchTarget` (seat order from `seat_pool`); `rate_limit_reset_hint` (clamp an `Error::Upstream.retry_after` to the configured ceiling) + `park_provider` (open the breaker for a honored reset) thread upstream resets into the three dispatch loops
 - `src/runtime_state.rs` -- per-model (nickname-keyed) token-bucket RPM limiter + circuit breaker state machine; `force_open` parks the breaker for an explicit reset hint, bypassing the consecutive-failure threshold
 - `src/seat_pool.rs` -- OAuth credential-pool glue: `SeatTarget` (seat-pinned provider + per-seat `state_key`), `seat_state_key` (bare nickname for the default seat, `nickname#label` for labeled seats), `seat_order_for_request` + `RoundRobinCursors` (per-pool `AtomicUsize` rotating the start seat per request under `RoundRobin`; `FillFirst` walks a fixed default-first order)
@@ -207,6 +212,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 - `src/record.rs` -- `UsageRecord` (one field per capture column; epoch-ms `i64` timestamps, nullable `Option<T>` columns) and the closed `Outcome` enum (`ok`, `upstream_error`, `client_disconnect`, `timeout`, `cancelled`, `gate_blocked`) with `as_str`/`FromStr` wire tokens that mirror the DB CHECK constraint
 - `src/cost.rs` -- pure leaf-safe cost estimation: `estimate_cost(&UsageRecord, &Rates)` and the aggregate-token entry point `estimate_cost_tokens(input, output, reasoning, cache_read, cache_write_5m, cache_write_1h, &Rates) -> Option<CostBreakdown>` (the record path converts its `Option<u64>` fields to `i64` and delegates; per-dimension `tokens * rate / 1e6`, `None` when the rate table is fully unpriced, `Some(0.0)` when priced with no tokens; reasoning excluded -- billed as output upstream); `Rates` is a usage-owned mirror of the router `PricingConfig` so the crate stays a leaf
 - `src/handle.rs` -- `UsageHandle` (cheap `Clone` producer): `try_send` (never blocks/awaits/panics -- safe from `Drop`), runtime-flippable `enabled` gate, shared lock-free `UsageCounters` (enqueued / dropped_full / dropped_disabled / persisted / write_errors / prune_errors)
+- `src/query.rs` -- read-only windowed aggregation over the requests table; exports `aggregate`, `latencies`, `latest_quota`, `AggRow`, `GroupKey`, `QuotaSnapshot`
 - `src/writer.rs` -- `UsageWriter`: opens the DB once at boot (degrades to a no-op drain loop on open failure), drains the bounded channel on a dedicated thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`
 - `src/db.rs` -- `UsageDb` wrapper + `open`: connection setup (WAL, foreign keys), the `INSERT OR IGNORE` write keyed on the UNIQUE `request_id` (idempotency), schema-presence assertions
 - `src/schema.rs` -- `requests` table DDL (the capture columns + `request_id UNIQUE` idempotency key + `outcome` CHECK), `meta` table, `SCHEMA_VERSION`
@@ -269,6 +275,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 - `tests/contract_response_ingress.rs` -- canonical `ChatResponse` -> Anthropic wire body via `render_response`
 - `tests/contract_stream_ingress.rs` -- canonical chunk sequences -> Anthropic SSE events (asserts terminal-event ordering)
 - `tests/replay_egress.rs` -- replay-driven egress contract test; walks `tests/fixtures/captured/`, drives each captured ingress request through the matching egress provider's `normalize_request`, and structurally diffs the upstream-bound body against the on-disk `outgoing_request.json` (anthropic / openai-compat / openai-responses)
+- `tests/replay_ingress.rs` -- replay-driven ingress contract test; walks captured fixtures, mounts the upstream response in wiremock, drives egress `complete()`, renders the canonical `ChatResponse` via `AnthropicIngress::render_response`, and asserts it matches the captured egress response structurally (anthropic ingress, non-stream scope)
+- `tests/cross_dialect_render.rs` -- pins the per-egress-allowlist contract; asserts that a foreign upstream (openai-compat DeepSeek dialect) through canonical normalize and Anthropic ingress render does not leak vendor envelope keys or a `signature:null` thinking block into the Anthropic-shape response
 - `tests/e2e_reasoning.rs` -- end-to-end reasoning round-trip across DeepSeek / vLLM / Anthropic dialects
 - `tests/live_matrix.rs` -- live provider matrix (OpenRouter / opencode-go / NIM); requires API keys, gated by feature flag
 - `tests/live_anthropic_oauth.rs` -- live OAuth-bearer test against `api.anthropic.com`; gated by env token file

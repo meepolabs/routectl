@@ -41,8 +41,10 @@ this doc first for similar patterns. For operator-facing config recipes see
 
 - **HTML upstream error bodies leaking into the JSON envelope**.
   Misconfigured `base_url`s land on marketing 404 pages. Handled by
-  `sanitize_upstream_body` in
-  `crates/routectl-providers/src/openai_compat/mod.rs`.
+  `extract_upstream_message` in
+  `crates/routectl-core/src/log_safe.rs`, called from
+  `crates/routectl-providers/src/openai_compat/mod.rs`; for non-JSON-envelope
+  bodies `extract_upstream_message` falls back to `sanitize_upstream_body`.
 
 - **Strict openai-compat hosts 400 on top-level `system`**. NIM
   rejects with `Validation: Unsupported parameter(s): system` because
@@ -165,7 +167,7 @@ this doc first for similar patterns. For operator-facing config recipes see
   for the WARN line `skipping Thinking blocks on replay: signature
   missing or empty` to correlate (one WARN per request with
   `skipped_count=N` and `skipped_indices=[...]`, NOT one per detail).
-  Mirrored in `bedrock/converse/eventstream.rs` for the Converse
+  Mirrored in `bedrock/converse/messages.rs` (`emit_reasoning_blocks_converse`) for the Converse
   stream path.
 
 - **Forward-compat for unknown Anthropic SSE block types.**
@@ -197,6 +199,18 @@ this doc first for similar patterns. For operator-facing config recipes see
   Bedrock-Invoke inherits the v1 fix free (delegates to the same
   `parse_event`); Bedrock-Converse streaming forward-compat is a
   separate task.
+
+- **OpenAI `{type:"file"}` parts must be translated to Anthropic document blocks.**
+  Anthropic and Bedrock 400 on a raw OpenAI file block forwarded verbatim. A
+  `file.file_data` base64 `application/pdf` data URI is translated to an
+  Anthropic document block (base64 source, `title` from `file.filename`).
+  Untranslatable shapes -- `file_id` reference, non-PDF MIME type, non-base64
+  data URI, or empty `file_data` -- are re-emitted verbatim as
+  `ContentBlock::Other` on the Anthropic egress so the upstream surfaces a
+  clean error rather than a silent drop. The Converse egress drops
+  untranslatable shapes with a WARN. Handled by `parse_file_document_source`
+  in `crates/routectl-providers/src/anthropic_api/parts.rs`; Converse mirror
+  in `crates/routectl-providers/src/bedrock/converse/messages.rs`.
 
 ## Bedrock surface
 
@@ -244,11 +258,13 @@ this doc first for similar patterns. For operator-facing config recipes see
 - **OpenAI Responses chatgpt-oauth endpoint is stream-only.** Sending
   `stream:false` returns HTTP 400 `{"detail":"Stream must be set to true"}`.
   `OpenAiResponsesProvider::complete()` forces `stream:true`, drains the SSE
-  stream until a `response.completed` (or `response.failed` /
-  `response.cancelled`) event, and extracts the `response` field from that
-  event as the final body. The streaming tests in `mod.rs::e2e_tests` use
-  a wiremock that returns an SSE `response.completed` event rather than a
-  plain JSON body.
+  stream until a `response.completed` / `response.incomplete` /
+  `response.failed` / `response.cancelled` event, and extracts the `response`
+  field from that event as the final body. `response.incomplete` is
+  success-with-cutoff (maps to a `length` finish_reason); `response.failed`
+  and `response.cancelled` surface as upstream errors. The streaming tests
+  in `mod.rs::e2e_tests` use a wiremock that returns an SSE
+  `response.completed` event rather than a plain JSON body.
 
 - **OpenAI Responses tools/tool_choice must use the flat Responses shape.**
   The chatgpt-oauth backend 400s with

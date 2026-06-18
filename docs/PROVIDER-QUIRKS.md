@@ -15,7 +15,7 @@ doc. If it 4xxs or behaves weirdly, find the matching row.
 | **Any thinking model + high-effort latency** | `[providers.X] stream_first_byte_timeout_ms = 300000` (every alias hitting this provider inherits) |
 | **DeepSeek v4 / v4.1 (any host)** | `[models.X] history_reasoning = "preserve"` |
 | **DeepSeek v3 / older vLLM** | (default `history_reasoning = "auto"` strips for you) |
-| **NVIDIA NIM hosting DeepSeek** | callers must send `reasoning_effort = "high"` per request (the operator-side `default_extras` knob is deferred -- callers can still set effort via wire `reasoning.effort`) |
+| **NVIDIA NIM hosting DeepSeek** | callers must send `reasoning_effort = "high"` per request (the operator-side `payload_extras` knob is deferred -- callers can still set effort via wire `reasoning.effort`) |
 | **NIM cold-start streaming** | `[providers.X] stream_first_byte_timeout_ms = 180000` (3 min) |
 | **Anthropic + 1M-context beta** | `[providers.X] header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }` |
 | **OAuth bearer to Anthropic** | `[providers.X] auth_kind = "oauth-bearer"` + the matching beta header |
@@ -51,9 +51,11 @@ stream_first_byte_timeout_ms = 300000   # 5 min, applies to every model
 request_timeout_ms           = 600000   # 10 min, applies to every model
 ```
 
-Need different timeouts for different models on the same upstream? Split into separate `[providers.X]` entries (e.g. `bedrock-fast`, `bedrock-heavy`) with their own runtime knobs and route each `[models.X]` at the right one.
+Need different timeouts for different models on the same upstream? For `stream_first_byte_timeout_ms` you can set a per-model override directly: `[models.X] stream_first_byte_timeout_ms = 300000` (resolution is `[models.X]` > `[providers.X]` > `[retry]` > unset). For `request_timeout_ms` there is no per-model tier; split into separate `[providers.X]` entries (e.g. `bedrock-fast`, `bedrock-heavy`) with their own runtime knobs and route each `[models.X]` at the right one.
 
-Resolution priority: `[providers.X].X` > `[retry].X` > unset (no cap).
+Resolution priority:
+- `stream_first_byte_timeout_ms`: `[models.X]` > `[providers.X]` > `[retry]` > unset (no cap)
+- `request_timeout_ms`: `[providers.X]` > `[retry]` > unset (no per-model tier)
 
 **Why opt-in per model, not auto-detect by name:** Anthropic's adaptive-thinking rollout has no clean naming pattern, so a TOML opt-in is more reliable than a regex match.
 
@@ -155,10 +157,9 @@ header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }
 kind = "anthropic-api"
 api_key_ref = "file:///path/to/oauth-token"
 auth_kind = "oauth-bearer"
-header_extras = { "anthropic-beta" = "oauth-2025-04-20,context-1m-2025-08-07" }
 ```
 
-routectl does not auto-inject beta gates -- declare the ones you need.
+For `auth_kind = "api-key"` (default), routectl does not auto-inject beta gates -- declare the ones you need in `header_extras`. For `auth_kind = "oauth-bearer"` on `api.anthropic.com`, the full Claude Code beta set (incl. `oauth-2025-04-20` and `context-1m-2025-08-07`) is auto-injected from `default_claude_code_anthropic_betas()`, so no manual `header_extras` beta list is needed.
 
 ### claude-code attribution headers (`X-Claude-Code-*`)
 
@@ -499,7 +500,7 @@ is shaped for the beta-aware edit workflow.
 
 ## Troubleshooting matrix
 
-routectl logs a 256-chars-truncated `body_excerpt` (`sanitize_for_log`)
+routectl logs a 512-chars-truncated `body_excerpt` (`sanitize_for_log`)
 at WARN on every 4xx/5xx; flip `ROUTECTL_LOG=routectl=debug` for the
 full body.
 

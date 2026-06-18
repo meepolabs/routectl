@@ -6,6 +6,30 @@ per-feature change history see [CHANGELOG.md](CHANGELOG.md).
 
 ## Released
 
+- **v0.9.0** (2026-06-18) -- Per-request usage accounting
+  (`routectl-usage` SQLite crate + `routectl usage` CLI with
+  query-time cost pricing); OAuth credential seat pools with
+  `--label` per-seat login/logout/refresh and a `seat_selection`
+  dispatch knob; managed Claude Code identity on the Anthropic OAuth
+  egress (identity system block, stable `x-claude-code-session-id`,
+  beta-floor auto-injection, billing-checksum re-sign); unified
+  quota/overage observation; OpenAI file/PDF -> document-block
+  translation; graceful-shutdown in-flight drain; per-model
+  `reported_model` and `visible_routectl_provider` knobs; and a broad
+  wire-correctness + log-redaction hardening pass. BREAKING: the
+  response `model` field now echoes the client-requested alias
+  instead of the upstream's internal id (override with
+  `reported_model`).
+
+- **v0.8.0** (2026-06-07) -- Config-overridable identity-header
+  defaults and codex CLI client-header parity; `bedrock-mantle`
+  bearer auth on the `openai-responses` provider; hot-reload of
+  `credentials.json` and `config.toml` (file-watch + SIGHUP,
+  parse-validate-or-keep-old); `[server] max_body_bytes`, per-model
+  `max_output_tokens`, and raised internal caps; Bedrock Converse
+  `stop_sequence` round-trip; replay-based integration test harness
+  against the captured-fixture corpus.
+
 - **v0.7.0** (2026-05-30) -- routectl-managed OAuth (Anthropic +
   Codex) with runtime refresh and 401 recovery; claude-code as a
   first-class gateway client (`forward_client_headers`,
@@ -44,22 +68,7 @@ per-feature change history see [CHANGELOG.md](CHANGELOG.md).
 
 ## Planned
 
-### v0.8.0+ -- Replay testing + auth ergonomics
-
-- **Replay-based integration tests** against the captured-fixture
-  corpus in `crates/routectl-cli/tests/fixtures/captured/`
-  (gitignored). Deterministic wire-shape assertions without network;
-  the live matrix stays as the final gate.
-
-- **File-watch self-reexec** for `credentials.json` and
-  `config.toml`. v0.7.0 shipped lazy refresh; the next step is to
-  pick up external rotation without a daemon restart.
-
-- **Bedrock Converse `stop_sequence` round-trip** via
-  `additionalModelResponseFieldPaths`. Completes the v0.6.0
-  stop-sequence preservation fix.
-
-### v0.9.0+ -- Token reduction (themed)
+### v0.10.0+ -- Token reduction (themed)
 
 Driven by long-session cost pressure. Concrete scopes TBD before
 the milestone opens; the workstream covers tool-output truncation
@@ -73,10 +82,10 @@ aging-out on the openai-responses path, and operator-side
   RouteLLM](https://github.com/lm-sys/RouteLLM)).
 - Latency-aware routing (sliding-window p95 across healthy chain
   entries, weighted random).
-- Spend tracking / `/v1/metrics` Prometheus exposition. Data
-  already exists in `tracing` logs (token counts per response,
-  structured WARNs at every fallback hop); an in-process exporter
-  is ~250-300 LOC when prioritized.
+- Spend tracking: per-request SQLite accounting and the `routectl
+  usage` CLI shipped in v0.9.0. The remaining deferred scope is the
+  `/v1/metrics` Prometheus exposition endpoint -- an in-process
+  exporter, smaller now that the data layer exists.
 - `cargo dist` / Homebrew tap (manual `cargo build --release` for
   now).
 - Live matrix in CI (currently runs on demand against real provider

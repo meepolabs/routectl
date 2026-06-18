@@ -143,8 +143,8 @@ pub async fn save(path: &Path, file: &CredentialsFile) -> OAuthResult<()> {
 
 /// Top-level driver that delegates to the three discrete steps below.
 /// Each helper is small enough to fit in a head with the surrounding
-/// failure modes -- splitting was a reviewer ask after the original
-/// 68-line `save_blocking` grew too dense.
+/// failure modes; the original single `save_blocking` had grown too
+/// dense to read that way.
 fn save_blocking(path: &Path, file: &CredentialsFile) -> OAuthResult<()> {
     ensure_dir(path)?;
     let tmp = write_to_temp(path, file)?;

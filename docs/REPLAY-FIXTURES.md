@@ -18,8 +18,11 @@ has on hand.
 For the loader and structural comparators (`load_fixture`,
 `assert_json_equal_structural`, `assert_sse_equal`, ...) see
 `crates/routectl-cli/tests/common/replay/` -- the entry point is
-`mod.rs`, with `loader.rs`, `json_diff.rs`, and `sse_diff.rs` as
-sub-modules. For the day-to-day capture + replay flow see
+`mod.rs`, with `loader.rs`, `json_diff.rs`, `sse_diff.rs`, and
+`harness.rs` as sub-modules. `harness.rs` holds shared scaffolding
+(`captured_root`, `headers_from_pairs`, `phase1_skip_reason`,
+`PHASE1_MODEL_DENYLIST`) used by the `replay_egress.rs` and
+`replay_ingress.rs` drivers. For the day-to-day capture + replay flow see
 [DEVELOPMENT.md](DEVELOPMENT.md) "Adding a replay fixture".
 
 ## Per-fixture directory layout
@@ -72,7 +75,7 @@ is always present:
       "routectl_version": String,
       "alias": String,
       "model": String,
-      "ingress_kind": "anthropic" | "openai-chat-completions" | ...,
+      "ingress_kind": "anthropic" | "openai" | ...,
       "provider_kind": "anthropic" | "openai-compat" | "openai-responses" | ...,
       "stream": bool,
       "finish_reason": String,
@@ -152,7 +155,7 @@ Fields:
 The replay drivers exercise the bare ingress -> egress path:
 `AnthropicIngress::parse_request` produces a canonical `ChatRequest`
 with default `routectl_internal` (`supports_adaptive_thinking=false`,
-`history_reasoning=Auto`, `reasoning_dialect=None`,
+`history_reasoning=None`, `reasoning_dialect=None`,
 `max_thinking_budget=0`). In production the router overlays these
 fields from `model_profile.rs` and the dispatch-time merge BEFORE the
 egress sees the canonical. Phase 1 replay does not yet thread that

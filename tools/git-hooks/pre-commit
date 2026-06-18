@@ -42,8 +42,7 @@ echo "pre-commit: cargo test --workspace --release"
 # skipped because the local captured/ corpus has bodies cut by
 # systemd-journald LineMax (~48 KiB) leaving malformed JSON tails.
 # Loader needs a tolerance pass + capture path needs to bypass journal.
-# Tracked in issues.md "replay corpus broken by journal LineMax". Re-
-# enable by removing the --skip flags here once the loader skips
+# Re-enable by removing the --skip flags here once the loader skips
 # malformed fixtures rather than panicking.
 cargo test --workspace --release -- --skip egress_replay_all --skip ingress_replay_all
 

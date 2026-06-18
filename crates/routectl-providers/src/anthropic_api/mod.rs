@@ -745,9 +745,9 @@ impl Provider for AnthropicApiProvider {
             let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
             // Extend the auth-only WARN to all 4xx/5xx so an operator
             // never has to guess WHY a request failed. Sanitize before
-            // tracing: the upstream may return attacker-controlled bytes
+            // tracing: the upstream may return untrusted control bytes
             // (CRLF, control chars, very long lines) that would otherwise
-            // forge log lines on text-format subscribers.
+            // corrupt log output on text-format subscribers.
             let safe_excerpt = sanitize_for_log(&msg);
             crate::upstream_log::warn_upstream_failure(
                 &self.cfg.id,
@@ -1062,7 +1062,7 @@ impl Provider for AnthropicApiProvider {
             // Helper extracted at `read_anthropic_error`.
             let (msg, err) = read_anthropic_error(&self.cfg.id, status, resp).await;
             // Sanitize before tracing: the upstream may return
-            // attacker-controlled bytes (CRLF, control chars, very
+            // untrusted control bytes (CRLF, control chars, very
             // long lines) and `body_excerpt = %msg` would otherwise
             // emit them verbatim into operator logs. Same posture as
             // the `complete()` and `stream()` paths above.

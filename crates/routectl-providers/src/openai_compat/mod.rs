@@ -514,9 +514,9 @@ fn flush_pending_chunk(text: &str) -> ChatChunk {
 
 /// Upper bound on the per-choice stream accumulator index. A request's
 /// legitimate max index is n-1 where n (the `n` sampling param) is small;
-/// 128 is far above any real fan-out. A malicious or buggy upstream that
-/// echoes `choice.index = 1_000_000` would otherwise force a huge Vec
-/// allocation via `resize`. Out-of-range indices are skipped.
+/// 128 is far above any real fan-out. An out-of-range `choice.index`
+/// from upstream would otherwise force an oversized Vec allocation via
+/// `resize`. Out-of-range indices are skipped.
 const MAX_STREAM_CHOICES: usize = 128;
 
 /// Grow the per-choice accumulator and append text for the given choice
@@ -846,9 +846,9 @@ mod helper_tests {
 
     #[test]
     fn accumulate_skips_out_of_range_index_without_over_allocating() {
-        // A hostile upstream echoes a wildly out-of-range choice.index.
-        // The accumulator must neither panic nor resize the buffer to
-        // millions of entries -- it drops the write and stays bounded.
+        // An out-of-range choice.index from upstream: the accumulator
+        // must neither panic nor resize the buffer to an oversized
+        // length -- it drops the write and stays bounded.
         let mut buffers: Vec<String> = Vec::new();
 
         accumulate_choice_text(&mut buffers, 10_000, "evil");

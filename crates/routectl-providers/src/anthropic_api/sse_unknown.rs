@@ -68,9 +68,9 @@ impl SseState {
     /// block from `chunk.opaque_events`.
     pub(super) fn open_unknown_block(&mut self, index: u32, value: &Value, provider: &str) {
         // Sanitize `type_tag` at capture time: `content_block.type` is
-        // upstream-controlled and flows straight into tracing fields. A
-        // malicious or compromised upstream could embed CR, LF, or ANSI
-        // escape sequences to forge log lines on a text subscriber.
+        // upstream-controlled and flows straight into tracing fields;
+        // unsanitized CR, LF, or ANSI control sequences would corrupt
+        // log output on a text subscriber.
         // Sanitizing here once means every downstream use -- the stored
         // OpenBlockKind field, the WARN log, and OpaqueCapture -- all
         // inherit the clean value without per-site guards.
@@ -428,8 +428,8 @@ mod tests {
         use super::super::sse::OpenBlockKind;
 
         // Arrange: a content_block_start whose type tag embeds CRLF and
-        // an ANSI escape sequence -- a malicious upstream could use these
-        // to forge fake log lines on a text-format tracing subscriber.
+        // an ANSI escape sequence -- unsanitized control sequences would
+        // corrupt log output on a text-format tracing subscriber.
         let mut state = SseState::default();
 
         // Act: open the unknown block via parse_event.

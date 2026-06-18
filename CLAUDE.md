@@ -7,7 +7,7 @@ bedrock invoke + converse, openai-responses). This file is a slim
 runbook for contributors (humans and autonomous agents). Read it
 once; jump to the doc that matches your task.
 
-## The 5 crates at a glance
+## The 6 crates at a glance
 
 - `routectl-core` -- canonical wire types (`ChatRequest`,
   `ChatResponse`, `ChatChunk`, `Message`, `ReasoningDetail`) and
@@ -23,10 +23,13 @@ once; jump to the doc that matches your task.
   design; pair a non-Anthropic primary with a fallback target if
   availability matters.
 - `routectl-auth` -- `SecretStore` trait + default resolver for
-  `env://`, `file://`, and `literal:` references
+  `env://`, `file://`, `literal:`, and `oauth://` references
 - `routectl-cli` -- axum HTTP server, clap subcommands
-  (serve / login / logout / refresh / whoami / test / config),
+  (serve / login / logout / refresh / whoami / test / config / usage),
   live matrix integration tests
+- `routectl-usage` -- SQLite per-request usage accounting:
+  `UsageRecord`, `UsageHandle`, cost estimation, retention pruning,
+  and the query layer backing `routectl usage`
 
 For per-file detail see [docs/CODEMAP.md](docs/CODEMAP.md). For
 module-level architecture and the hub-and-spoke design see

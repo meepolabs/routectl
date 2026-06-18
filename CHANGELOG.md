@@ -4,6 +4,240 @@ All notable changes to routectl. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-18
+
+### Added
+
+- **Per-request usage accounting (`[usage]` block + `routectl usage` CLI).** A new
+  `routectl-usage` crate captures one row per request (identity, request shape, outcome,
+  timing, token dimensions, quota snapshot) to a local WAL-mode SQLite file (mode 0600),
+  off the hot path via a bounded-channel writer; a usage-subsystem failure never affects
+  request serving. `routectl usage` queries the DB directly (read-only, no daemon) and
+  reports aggregates over calendar windows (today / this-week / this-month / all-time) or
+  a custom date range, optionally grouped by model, provider, or alias. Cost is computed at
+  query time from a `[registry."<glob>".pricing]` table, so price corrections apply
+  retroactively; managed-OAuth (subscription) requests show `n/a (subscription)`. Config:
+  `enabled`, `db_path` (restart-only), `retention_days`. Cached tokens are billed once
+  (input is stored cache-exclusive); quota utilization is sourced from the Anthropic
+  5h-window header.
+
+- **OAuth credential pools with per-seat dispatch and `--label` targeting.** `routectl login
+  <provider> --label <name>` registers a named seat alongside the default without
+  overwriting it; `logout` / `refresh` accept `--label` to target one seat; `whoami` lists
+  every stored seat grouped by provider with per-seat expiry. A model whose `api_key_ref` is
+  a bare `oauth://<provider>` with multiple seats expands into one dispatch target per seat,
+  each with its own circuit-breaker state, slotting into the normal fallback chain.
+  `seat_selection` picks ordering: `fill-first` (default, cache-locality) or `round-robin`.
+  Adding or removing a seat takes effect on the credentials hot-reload without a daemon
+  restart. Single-seat and non-oauth refs are byte-for-byte unchanged.
+
+- **Managed Claude Code identity on the Anthropic OAuth egress.** On the `oauth-bearer` +
+  `api.anthropic.com` surface, routectl now presents a coherent Claude Code client identity
+  for requests that do not already carry one: it injects the canonical identity system
+  block, mints a stable per-credential (per-seat) session id stamped as
+  `x-claude-code-session-id` (preserved across token refresh), synthesizes `metadata.user_id`
+  when absent, and auto-injects the Claude Code `anthropic-beta` floor (incl.
+  `oauth-2025-04-20`) so operators no longer hand-declare those gates. The in-band
+  billing-attribution system block is stripped on egress, and the billing-header checksum is
+  re-signed over the final transmitted bytes after routectl's body mutations. Requests
+  already carrying a Claude Code session id are forwarded unchanged.
+  `anthropic-dangerous-direct-browser-access` is omitted on this path to match the SDK
+  fingerprint.
+
+- **Codex `session-id` header on the ChatgptOauth egress.** The stable per-seat session id
+  is now written to the outgoing `session-id` header alongside the existing codex identity
+  headers, closing a correlation gap against the ChatGPT backend. Operator `header_extras`
+  still win; the value is never logged.
+
+- **Anthropic unified-quota / overage observation on the OAuth path.** The
+  `anthropic-ratelimit-unified-*` response-header family (status, utilization, overage,
+  reset) is parsed tolerantly on both complete and stream paths; a missing or malformed
+  header never fails a request. A WARN fires on entering overage and an INFO on recovery; the
+  captured snapshot feeds the `routectl usage` quota line. The client-facing wire shape is
+  unchanged.
+
+- **Per-model `reported_model` override.** Optional `[models.X] reported_model` pins the
+  `model` label echoed to clients to a stable string regardless of the alias or fallback
+  target. (Pairs with the response-model echo change below.)
+
+- **Per-model `visible_routectl_provider` opt-out.** Set `false` on a `[models.X]` entry to
+  clear `routectl_provider` from that model's responses, so an opaque proxy does not disclose
+  its upstream. Default `true`; internal usage and cost accounting are unaffected.
+
+- **OpenAI file / PDF parts translated to native document blocks.** A base64
+  `application/pdf` carried in an OpenAI-shape `{type:"file"}` content part is now translated
+  to an Anthropic / Bedrock-Converse document block (and to an `InputFile` on
+  openai-responses) instead of being dropped. Untranslatable shapes (file_id reference,
+  non-PDF, empty) are re-emitted verbatim on the Anthropic egress so the upstream returns a
+  clean error, and dropped with a diagnostic on Converse.
+
+- **Graceful shutdown with a bounded in-flight drain.** SIGTERM / SIGINT now drains in-flight
+  streaming responses (20s deadline) before exit instead of severing them; SIGHUP remains
+  config-reload-only. Non-Unix platforms fall back to ctrl-c.
+
+### Changed
+
+- **BREAKING: the response `model` field now echoes the client-requested alias, not the
+  upstream's internal id.** Both ingress dialects previously surfaced the backend's real
+  identifier (e.g. `deepseek-chat`) in streaming and non-streaming responses, leaking routing
+  detail and diverging from the OpenAI / Anthropic convention of mirroring the requested
+  model. Responses now default to the requested alias; set `[models.X] reported_model` to pin
+  a fixed label. Internal usage and cost accounting continue to key off the real upstream
+  model. Clients that parsed the upstream model name out of responses must adjust.
+
+- **Upstream-failure WARN messages normalized to stable literal strings.** Per-provider
+  warning text is replaced by a fixed literal (`upstream auth failed` / `upstream error`)
+  with the provider family and sub-path carried in structured fields, so log-subscriber
+  filters keyed on the message string are now reliable across egresses.
+
+- **Dependency and CI maintenance.** cargo deps bumped (serde_json, http, uuid, the
+  aws-config / sigv4 / smithy group, lru 0.16 -> 0.18) and pinned GitHub Actions updated;
+  cargo-deny now allows BSL-1.0 for the xxhash-rust dependency pulled in by the
+  billing-header signer.
+
+### Fixed
+
+- **`temperature` + `top_p` together no longer 400 on Claude 4.x.** The Anthropic-shape
+  egresses (anthropic-api, bedrock-invoke, bedrock-converse) now emit `top_p` only when no
+  `temperature` is present (temperature wins the XOR), covering the thinking case where
+  temperature is forced to 1.0.
+
+- **OpenAI top-level `reasoning_effort` now triggers thinking on Claude / Bedrock targets.**
+  The field is promoted into canonical `reasoning.effort` at the OpenAI ingress before
+  deserialization (an explicit `reasoning` object still wins) instead of leaking into the
+  egress body and being ignored.
+
+- **`content_filter` mapped to `refusal`; empty tool args render as `{}`.** A `content_filter`
+  finish reason is no longer forwarded verbatim into the Anthropic vocabulary, and a tool
+  call with empty / non-JSON arguments renders `tool_use.input` as `{}` instead of `null` on
+  the non-streaming path.
+
+- **OpenAI-surface schema gaps closed.** A bare-string `stop` is lifted to a one-element
+  array; safety `refusal` and `logprobs` are preserved through the canonical schema; and
+  Anthropic / Bedrock cache-read tokens surface as
+  `usage.prompt_tokens_details.cached_tokens` on the OpenAI render.
+
+- **Upstream error `type` / `code` / stop-reason threaded through to the client.** SDKs that
+  branch on `error.type` / `error.code` now receive the original upstream value; stream and
+  non-stream error surfaces agree, and 503 / 529 map to `overloaded_error` on both dialects.
+
+- **Foreign-shaped thinking signatures dropped on the Anthropic egress.** A `Thinking` block
+  carrying a non-Claude (or malformed-base64) signature after a cross-provider replay is now
+  dropped rather than forwarded as an invalid signature that upstream 400s.
+
+- **Effort-to-thinking-budget mapping uses an exact lookup table** (none=0, minimal=512,
+  low=1024, medium=8192, high=24576, xhigh=32768, max=128000) instead of a proportional
+  estimate; the openai-responses egress converts a budget-only reasoning request to the
+  nearest effort level instead of dropping it.
+
+- **Tool-call ids sanitized to the Anthropic charset at every emit and correlation site.**
+  Ids containing `.`, `:`, or `/` are deterministically mapped to `_` (anthropic-api and
+  Bedrock tool_use / tool_result plus the shared normalizer), preserving id correlation
+  across the pair.
+
+- **Assistant `tool_calls` re-emitted as native tool-use on Converse and openai-responses.**
+  Multi-turn tool-calling routed through an OpenAI client to those egresses no longer drops
+  the assistant tool turn and orphans the following tool-result turn.
+
+- **openai-compat wire-lift shapes that strict hosts rejected are corrected** (json_schema
+  `name`, stray `cache_control` on tool_result inner blocks, thinking-only turn emitted as
+  `null`, unrepresentable inner blocks routed through a shared drop/strict helper, forcing
+  `tool_choice` after all tools dropped, and the `tool_result.is_error` flag now surfaced as
+  an `Error:` prefix).
+
+- **openai-compat egress fidelity for strict backends and o-series models.** Text-only
+  `tool_result` arrays collapse to a plain string; the Anthropic `metadata` object is blocked
+  from forwarding; and `max_completion_tokens` is restored on the wire for o-series / gpt-5.
+
+- **gpt-5 chat models keep sampling parameters; HTTP client gains a connect timeout.** The
+  gpt-5 catch-all no longer strips `temperature` / `top_p` / penalties from non-reasoning
+  chat models (gpt-5-chat-latest, gpt-5.4, gpt-5.4-mini); a connect timeout bounds hung
+  TCP / TLS handshakes.
+
+- **openai-responses egress hardened.** Multi-turn reasoning replay with `store=false`
+  requests `encrypted_content` and skips empty-content items (preventing silent replay
+  degradation and 404s); a `RedactedThinking` part no longer injects an opaque blob on
+  non-responses paths; cookie-jar persistence uses a per-call temp file + atomic rename; the
+  billing-dropped WARN fires before the early return; and the non-streaming accumulator now
+  honors the same output cap as the streaming path.
+
+- **openai-compat RawThinkTag stream recovers usage and upstream errors.** Terminal usage is
+  lifted instead of hardcoded null, mid-stream error envelopes with no choices are surfaced,
+  and a shared upstream-error mapper preserves the classifier / `retry_after` / sanitization
+  across stream and non-stream paths.
+
+- **Anthropic egress: orphan-effort invariant, billing re-sign scope, SSE resilience.** A
+  single post-assembly enforcer keeps `output_config.effort` present only when the body
+  carries adaptive thinking (a thinking-stripped request no longer retains an orphan effort
+  upstream rejects); the billing-block re-signer is scoped to the serialized system region;
+  and a streamed event with a known tag but undeserializable payload falls back to the raw
+  catchall instead of aborting the stream.
+
+- **Anthropic ingress: error mapping, empty-stream start, object-form tool args.** Stream and
+  non-stream share one error mapper (permission / auth / too-large / 429 rate-limit); an empty
+  upstream stream emits a `message_start` before `message_stop`; object-form tool arguments
+  pass through unchanged; and a mid-stream render failure is attributed to the upstream, not a
+  client disconnect, so usage accounting records it.
+
+- **Router hardening.** Unknown keys in `[server]` / `[auth]` now fail at startup (catching a
+  mistyped section that would leave a listener unauthenticated); alias glob keys are validated
+  at startup; a per-model timeout or token cap of zero is treated as unset with a WARN; the
+  base-URL SSRF guard canonicalizes IPv4-in-IPv6 forms before the loopback / link-local check;
+  the circuit breaker closes a half-open probe on the first streamed chunk rather than holding
+  the slot for the full stream; and a gate that refuses a retry forwards the original upstream
+  error instead of replacing it.
+
+- **Audit-hardening batch (egress + handlers).** Adaptive-thinking requests no longer 400 when
+  `tool_choice` forces a tool use; openai-responses `complete()` treats `response.incomplete`
+  as terminal success; per-choice text buffers prevent stop-sequence false positives on n>1
+  streaming; the think-tag accumulator flushes pending bytes at stream end; and a 300s
+  per-read idle timeout bounds tasks against hung upstreams.
+
+- **Low-severity wire-correctness batch.** The Anthropic ingress stream always emits
+  `output_tokens` on the terminal `message_delta` (defaulting to 0) and closes opaque blocks
+  still open at end-of-stream; the context-management thinking cache evicts expired entries on
+  lookup instead of promoting them; Bedrock eventstream decode-error recovery no longer reads
+  frame-length bytes from consumed prelude data; and Converse emits a single empty-text
+  `toolResult` for a null-content tool message (AWS >=1-element requirement).
+
+### Security
+
+- **Claude Code billing-attribution system block stripped on all egress paths.** The block
+  carries a client version and request fingerprint; it is now stripped for all auth kinds, all
+  hosts, and all entry points (complete, stream, count_tokens) on openai-compat, bedrock, and
+  openai-responses, so the fingerprint no longer leaks to third-party upstreams. The
+  anthropic-api egress (where it belongs) is unchanged.
+
+- **Bedrock no longer forwards client metadata or leaks IAM detail.** Client-supplied request
+  metadata is stripped on both Invoke and Converse (operator-set metadata preserved); 403
+  responses return only the IAM action name instead of echoing the body (which carries the
+  principal ARN and account id); other error bodies are capped and sanitized.
+
+- **TRACE / DEBUG log redaction widened.** Uploaded file payloads (`file_data` under `file`
+  and `input_file`), document citation spans / titles, bare content / system / output strings,
+  upstream response headers, AWS signing-token and cookie headers, and Bedrock inline
+  `source.bytes` image / document payloads are now redacted; an `x-amz-*` rule keeps non-secret
+  signing metadata visible. The redaction sweep is hardened against absent keys so malformed
+  upstream JSON cannot panic the log path. `annotations` objects and audio `transcript` fields
+  are also collapsed on the openai-responses path.
+
+- **Listener-auth and OAuth-client hardening.** An empty or whitespace-only resolved listener
+  token (from any secret source) is now rejected at startup instead of silently disabling
+  listener auth; an empty `literal:` reference is rejected at parse time. The shared OAuth HTTP
+  client is built identity-neutral so a token-endpoint request for one provider no longer
+  carries another provider's client identity. The stdin login read is bounded to its byte cap.
+
+- **Internal-reference guard.** A checked-in internal-ID scanner, pre-commit hook, and CI gate
+  now block planning identifiers from entering committed code or messages; existing internal
+  references were scrubbed from source, comments, and config.
+
+### Documentation
+
+- Reference-drift sweep across `README.md`, `ROADMAP.md`, `CLAUDE.md`, and `docs/*`: added
+  `routectl-usage` to the crate maps; documented the seat-pool / `--label` workflow, the
+  `routectl usage` CLI, `reported_model`, and `visible_routectl_provider`; and corrected
+  log-shape, config-key, fix-site, and provider-quirk references against the current code.
+
 ## [0.8.0] - 2026-06-07
 
 ### Added
@@ -530,6 +764,7 @@ Initial release.
 - **Per-provider retry** with exponential backoff.
 - **TOML config** in `~/.config/routectl/config.toml`.
 
+[0.9.0]: https://github.com/meepolabs/routectl/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/meepolabs/routectl/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/meepolabs/routectl/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/meepolabs/routectl/compare/v0.4.0...v0.6.0

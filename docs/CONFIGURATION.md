@@ -1206,8 +1206,9 @@ seat_selection = "round-robin"   # or "fill-first" (default)
   behavior with no config.
 - `round-robin` -- rotate across seats to spread load.
 
-The knob is parsed and validated per provider today; the dispatch path
-that consumes it across a live pool is a follow-up. An empty or
+Both strategies are applied at dispatch time -- `fill-first` always
+starts from seat 0 (fixed priority order), `round-robin` advances the
+start seat per request (spreading load across the pool). An empty or
 whitespace-only `--label` is rejected with a clear error, matching the
 `oauth://<provider>#<label>` ref parser's rule.
 

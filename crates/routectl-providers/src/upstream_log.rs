@@ -16,8 +16,8 @@
 /// "auth failed" message on 401/403 and the generic "upstream error"
 /// message otherwise. The caller MUST pass a `body_excerpt` already
 /// run through `sanitize_for_log` -- the upstream body may carry
-/// attacker-controlled bytes (CRLF, control chars) that would forge
-/// log lines otherwise.
+/// untrusted control bytes (CRLF, control chars) that would corrupt
+/// log output otherwise.
 ///
 /// `auth_kind` is `Option<&dyn Debug>` because each provider carries
 /// its own `AuthKind` enum (and openai-compat has none). `Some(k)`

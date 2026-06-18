@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn provider_extras_cannot_override_routectl_managed_keys() {
-        // A malicious or careless
+        // Stray routectl-managed keys in
         // `provider_extras = {"messages": [...], "model": "..."}`
         // could replace the assembled messages or model before the
         // body went upstream. The Anthropic egress had an allow-list;

@@ -35,16 +35,26 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 
 - `crates/routectl-router/` -- alias resolution, fallback chain
   walker, retry policy, capability filter (`unsupported_features`),
-  provider factory.
+  provider factory. `seat_pool.rs` expands a pooled
+  `oauth://<provider>` ref into per-seat `ResolvedModel` hops that
+  slot into the fallback chain.
 
 - `crates/routectl-auth/` -- `SecretStore` trait + resolvers for
   `env://`, `file://`, `literal:`, and `oauth://<provider>` (PKCE
-  login + atomic credentials.json + lazy refresh). No OS-keychain
+  login + atomic credentials.json + lazy refresh).
+  `oauth://<provider>#<label>` pins a named seat; a bare pool ref
+  expands via `list_seats` to all stored seats. No OS-keychain
   integration.
 
+- `crates/routectl-usage/` -- SQLite-backed per-request usage
+  accounting: `UsageWriter` (async-producer -> blocking-writer
+  bridge), `UsageHandle` (dispatch-time send handle), `cost.rs`
+  (request pricing), `query.rs` (the `routectl usage` read path).
+  Intentionally thin -- no AWS SDK or axum dependency.
+
 - `crates/routectl-cli/` -- axum HTTP server, clap CLI (`serve`,
-  `login`, `logout`, `refresh`, `whoami`, `test`, `config`), and
-  the two ingress dialects (`openai.rs` for
+  `login`, `logout`, `refresh`, `whoami`, `test`, `config`,
+  `usage`), and the two ingress dialects (`openai.rs` for
   `POST /v1/chat/completions`, `anthropic/` for `POST /v1/messages`
   + `POST /v1/messages/count_tokens`). Live matrix integration tests
   live here.

@@ -108,6 +108,11 @@ What you get at trace, additionally (full 4-direction visibility):
   body traces -- the per-chunk firehose floods the log without adding
   signal beyond the summary.
 
+The 16 KB trace body cap is the DEFAULT. Override it with
+`ROUTECTL_TRACE_BODY_BYTES=<N>` (env, read once at first trace) or
+`[log] trace_body_bytes = <N>` (config, applied at startup). The
+resolved value is announced at boot. The 4 KB debug excerpt cap is fixed.
+
 Sensitivity caveat: bodies contain user prompts AND assistant outputs
 at TRACE. Leave `ROUTECTL_LOG` at the default `info` level in
 production. Only flip to debug/trace during active triage and prefer
@@ -157,7 +162,7 @@ Operator grep cheat sheet:
 
 | Surface | Direction | Filter |
 |---|---|---|
-| `"ingress request body"`           | 1 client -> routectl     | `tag:ingress request_id=<id>` |
+| `"ingress request body"`           | 1 client -> routectl     | `ingress=<openai\|anthropic>` |
 | `"outgoing request body"`          | 2 routectl -> upstream   | `provider_kind=<kind>` |
 | `"upstream success body"`          | 3 upstream -> routectl   | `provider_kind=<kind>` |
 | `"egress response body"`           | 4 routectl -> client     | `ingress=<openai\|anthropic>` |
@@ -272,12 +277,31 @@ No secret values, ever:
 | Listener auth (wrong `x-api-key` / `Bearer`) | `WARN routectl_cli::server::auth has_x_api_key=<bool> has_bearer=<bool> route=<path> "listener auth rejected"` |
 | Bad secret ref (`env://NONEXISTENT`) | `WARN routectl_auth::memory_store scheme=env:// var=<NAME> reason="not set" "secret resolution failed"` |
 | Bad secret ref (file perm too open) | `WARN routectl_auth::memory_store scheme=file:// path=<P> mode=<oct> reason="group/other readable; chmod 600 or 400" "secret resolution failed"` |
-| Bedrock SigV4 / cred chain failed | `WARN routectl_providers::bedrock::auth variant=Profile\|DefaultChain region=<r> error=... "bedrock credential resolution failed"` |
+| Bedrock SigV4 / cred chain failed (Profile) | `WARN routectl_providers::bedrock::auth auth_kind=Profile profile=<name> region=<r> error=... "bedrock credential resolution failed"` |
+| Bedrock SigV4 / cred chain failed (DefaultChain) | `WARN routectl_providers::bedrock::auth auth_kind=DefaultChain region=<r> error=... "bedrock credential resolution failed"` |
+| Bedrock upstream 401 | `WARN routectl_providers::bedrock provider=<id> status=401 body_excerpt=... "bedrock upstream auth rejected"` |
 | Bedrock SigV4 sign failure | `ERROR routectl_providers::bedrock::signing failure_kind=<kind> ... "bedrock auth failed"` -- where `<kind>` is one of `bearer_header_invalid`, `creds_unavailable`, `body_unbuffered`, `signing_params_build`, `non_ascii_header`, `signable_request_build`, `sigv4_sign`, `signed_header_name_invalid`, `signed_header_value_invalid`, `unexpected_query_params` |
 | Bedrock 403 (IAM denied) | `WARN routectl_providers::bedrock provider=<id> status=403 action=<bedrock-runtime:InvokeModel...> principal_present=<bool> "bedrock IAM access denied"` -- `action` extracted from the AWS error body so you immediately see WHICH IAM action your role lacks |
 | Bedrock in-stream auth event | `WARN routectl_providers::bedrock::eventstream provider=<id> event_type=accessDeniedException\|unauthorizedException\|authentication_error\|permission_error message=... "bedrock in-stream auth/permission exception"` |
-| Anthropic upstream 401/403 | `WARN routectl_providers::anthropic_api provider=<id> status=<401\|403> auth_kind=<ApiKey\|OauthBearer> message=... "anthropic upstream auth failed"` |
-| OpenAI-compat upstream 401/403 | `WARN routectl_providers::openai_compat provider=<id> status=<401\|403> body_excerpt=... "openai-compat upstream auth failed"` |
+| Anthropic upstream 401/403 | `WARN routectl_providers::anthropic_api provider=<id> status=<401\|403> auth_kind=<ApiKey\|OauthBearer> context=anthropic body_excerpt=... "upstream auth failed"` |
+| OpenAI-compat upstream 401/403 | `WARN routectl_providers::openai_compat provider=<id> status=<401\|403> context=openai-compat body_excerpt=... "upstream auth failed"` |
+
+Both rows share the message string `"upstream auth failed"`; the `context` field distinguishes the call site.
+
+## Usage accounting log shapes
+
+The `routectl-usage` writer subsystem emits the following lines.
+All have `target: "routectl_usage::writer"` or `"routectl_usage::handle"`
+and inherit no `request_id` span (the writer runs on a dedicated OS thread).
+
+| Level | Module target | Key fields | Message |
+|---|---|---|---|
+| ERROR | `routectl_usage::writer` | `error=...` | `"usage writer degraded -- dropping rows it cannot persist"` (healthy->degraded edge; fired once on transition) |
+| ERROR | `routectl_usage::writer` | `write_errors=<N>` | `"usage writer still degraded"` (rate-limited: every 1024 errors after the first) |
+| INFO  | `routectl_usage::writer` | (none) | `"usage writer recovered -- persisting rows again"` (degraded->healthy recovery edge) |
+| ERROR | `routectl_usage::writer` | `error=...` | `"usage db open failed -- running degraded (records will be dropped)"` |
+| WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage channel full -- dropping record (capture lags writer)"` (rate-limited: first drop + every 1024 thereafter) |
+| WARN  | `routectl_usage::writer` | `error=...` | `"usage retention prune failed -- continuing"` |
 
 ## What's never logged
 

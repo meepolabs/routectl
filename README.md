@@ -4,7 +4,7 @@ A local LLM router. One Rust binary, listening on `127.0.0.1`, that proxies Open
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust 1.75+](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
-[![Workspace tests](https://img.shields.io/badge/tests-1000%2B%20passing-brightgreen.svg)](#testing)
+[![Workspace tests](https://img.shields.io/badge/tests-2500%2B%20passing-brightgreen.svg)](#testing)
 
 ## Features
 
@@ -20,6 +20,8 @@ A local LLM router. One Rust binary, listening on `127.0.0.1`, that proxies Open
 - **Reliability** -- per-error-class retry caps (429 / 5xx / network), per-attempt timeouts, jittered backoff, RPM token bucket per provider, passive circuit breaker with single-probe half-open. `retry_allowlist` / `retry_denylist` schema for fallback selection. `probe_max_tokens` fast-fails small availability probes on rate-limit instead of walking the chain.
 - **Secrets** -- `env://VAR`, `file:///abs/path` (chmod-600 / 400 enforced on Unix, TOCTOU-safe), `literal:value`, and `oauth://<provider>` (routectl-managed PKCE login for Anthropic and Codex with runtime refresh and 401 recovery). No OS-keychain integration, no auto-discovery.
 - **Local-first** -- binds to `127.0.0.1` by default; refuses non-loopback bind without explicit `--unsafe-public`.
+- **Usage accounting** -- per-request SQLite ledger (default `~/.config/routectl/usage.db`); inspect with `routectl usage` over calendar windows (today / this-week / this-month / all-time) or a custom date range, optionally grouped by model, provider, or alias; configured via the `[usage]` block (`db_path` overridable).
+- **Per-model response-echo knobs** -- `reported_model` (optional `[models.X]` field; pins the `model` string echoed to clients to a stable label regardless of the alias or fallback target; default = the client's requested alias) and `visible_routectl_provider` (default `true`; set `false` on a `[models.X]` entry to suppress the `routectl_provider` field in that model's responses).
 
 ## Install
 
@@ -175,7 +177,7 @@ Routectl resolves credentials through one of four URI schemes per provider. Ther
 | `env://VAR_NAME` | Process env var. |
 | `file:///abs/path` | File contents (trailing whitespace trimmed). On Unix, refused if group/other have any permissions; `chmod 600` or `400` recommended. Compatible with sops, age, doppler-cli, vault-agent, etc. Windows skips the bit-check (use NTFS ACLs there). |
 | `literal:VALUE` | Inline plaintext. For placeholders like `literal:not-needed` (llama.cpp without auth) and tests. Avoid for real secrets in version-controlled config. |
-| `oauth://<provider>` | routectl-managed OAuth credential, populated by `routectl login <provider>` (Anthropic and Codex supported). Tokens persist in `~/.config/routectl/credentials.json` (chmod 0600); resolution checks near-expiry, refreshes under a per-provider single-flight mutex, and survives upstream 401 via `Provider::on_auth_failure`. See "Managed OAuth login" below. |
+| `oauth://<provider>` or `oauth://<provider>#<label>` | routectl-managed OAuth credential, populated by `routectl login <provider>` (Anthropic and Codex supported). The bare form addresses the default seat; `#label` selects a named seat from the provider's credential pool (see `routectl login --label`). Tokens persist in `~/.config/routectl/credentials.json` (chmod 0600); resolution checks near-expiry, refreshes under a per-provider single-flight mutex, and survives upstream 401 via `Provider::on_auth_failure`. See "Managed OAuth login" below. |
 
 ### Managed OAuth login
 
@@ -190,6 +192,14 @@ routectl whoami                 # prints stored expiry per provider
 routectl refresh anthropic      # force a refresh, regardless of expiry
 routectl logout anthropic       # remove tokens for one provider
 ```
+
+`login`, `logout`, and `refresh` accept `--label <name>` for multi-seat pools:
+
+```bash
+routectl login anthropic --label seat-b  # add a named seat without overwriting the default
+```
+
+Reference a named seat via `api_key_ref = "oauth://anthropic#seat-b"`.
 
 Reference the credential in `[providers.X]` via `api_key_ref = "oauth://anthropic"` (or `"oauth://codex"`) plus `auth_kind = "oauth-bearer"`. Headless / SSH operators use `routectl login anthropic --print-url` (Anthropic only); Codex requires a browser-reachable callback and operators port-forward port 1455 instead. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) "claude-code as a gateway client" for the full operator setup including header packs and `forward_client_headers`.
 
@@ -363,10 +373,13 @@ crates/
   routectl-auth/         SecretStore: env:// / file:// (TOCTOU-safe) /
                          literal: / oauth:// (PKCE login + atomic
                          credentials.json + lazy refresh)
+  routectl-usage/        SQLite usage accounting (UsageRecord, UsageWriter,
+                         UsageHandle, cost estimation, retention) + the
+                         query layer behind the `routectl usage` CLI
   routectl-cli/          axum HTTP server (/v1/chat/completions + /v1/messages
                                           + /v1/messages/count_tokens)
                          + clap CLI (serve, login, logout, refresh,
-                         whoami, test, config)
+                         whoami, test, config, usage)
                          + IngressAdapter trait (one file per ingress dialect)
 ```
 

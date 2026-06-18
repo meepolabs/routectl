@@ -44,6 +44,12 @@ cargo check -p routectl-providers --no-default-features \
   --features openai-compat,anthropic-api
 ```
 
+The workspace has six crates: `routectl-core`, `routectl-auth`,
+`routectl-providers`, `routectl-router`, `routectl-usage` (SQLite
+per-request usage accounting + the `routectl usage` CLI subcommand),
+and `routectl-cli`. All six are covered by the `--workspace` test
+commands above.
+
 The live matrix is slow (~30s) and costs cents per run. Use it as a
 final gate, not a tight inner loop.
 
@@ -101,7 +107,7 @@ regardless.
    - Body translation issue (Anthropic Messages -> canonical):
      `routectl-cli/src/ingress/anthropic/parse.rs::translate_request`.
    - Content-block translation (canonical -> Anthropic wire):
-     `routectl-providers/src/anthropic_api/request.rs::translate_content_part`.
+     `routectl-providers/src/anthropic_api/messages.rs::translate_content_part`.
    - Missing wire field on the response side: extend
      `routectl-providers/src/anthropic_api/types.rs::AnthropicResponse`
      and `walk_content_blocks`.
