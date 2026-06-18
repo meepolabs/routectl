@@ -479,12 +479,27 @@ fn redact_value(v: &mut serde_json::Value) {
                     redact_long_string_leaf(title, 0);
                 }
             }
+            // Bedrock inline image / document source: the `source` object
+            // carries the base64 payload under a `bytes` STRING leaf
+            // (`{"source":{"bytes":"<base64>"}}`). Redact that leaf, but
+            // ONLY when it sits under a `source` object -- a numeric or
+            // short `bytes` field anywhere else (e.g. a length counter)
+            // must stay visible, so this is parent-gated rather than a
+            // blind any-key arm. Long-string-only (same 256-byte
+            // threshold as `data`) to avoid eating short metadata.
+            if let Some(source) = map.get_mut("source").and_then(|s| s.as_object_mut()) {
+                if let Some(bytes) = source.get_mut("bytes") {
+                    redact_long_string_leaf(bytes, 256);
+                }
+            }
 
             // Per-key sweep. Known user-content keys are redacted at
             // the leaf; everything else recurses.
             let keys: Vec<String> = map.keys().cloned().collect();
             for k in keys {
-                let entry = map.get_mut(&k).expect("key from map iteration");
+                let Some(entry) = map.get_mut(&k) else {
+                    continue;
+                };
                 match k.as_str() {
                     // Always-redact text leaves across all wire shapes.
                     // Covers `{type:"text", text}`, `{type:"input_text",

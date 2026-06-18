@@ -575,7 +575,14 @@ async fn parse_upstream_error_body(
     // status-specific WARN above. The WARN excerpt (cap via
     // sanitize_for_log) keeps `routectl-warn.log` scannable; DEBUG gives
     // operators field-level detail when they flip log level during triage.
-    routectl_core::debug_upstream_error_body(provider_kind, provider, status, &body_text);
+    //
+    // A 403 body carries the caller's principal ARN, account id, and the
+    // resource ARN. Those must not reach the DEBUG log, so for a 403 we
+    // substitute an action-only string derived from the existing
+    // classifier (the IAM action is the actionable bit; ARNs/account are
+    // dropped). Non-403 statuses log the sanitized raw body as before.
+    let debug_body = sanitized_debug_body(status, &body_text);
+    routectl_core::debug_upstream_error_body(provider_kind, provider, status, &debug_body);
 
     classify_client_error_message(status, &body_text)
 }
@@ -591,14 +598,62 @@ async fn parse_upstream_error_body(
 /// - **other** -> sanitized body excerpt capped at `MAX_LOG_BODY_EXCERPT`.
 fn classify_client_error_message(status: u16, body: &str) -> String {
     match classify_bedrock_error(status, body) {
-        BedrockErrorClass::AccessDenied { action, .. } => match action {
-            Some(action) => format!("bedrock access denied: missing IAM action {action}"),
-            None => "bedrock access denied".to_string(),
-        },
+        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
         BedrockErrorClass::Other => routectl_core::sanitize_upstream_body_with_cap(
             body,
             routectl_core::MAX_LOG_BODY_EXCERPT,
         ),
+    }
+}
+
+/// Build the access-denied string shared by the client-facing message
+/// (`classify_client_error_message`) and the DEBUG body
+/// (`sanitized_debug_body`) so the two cannot drift on the 403 arm.
+///
+/// The action is only surfaced if it matches an IAM `service:Action`
+/// shape (`^[A-Za-z0-9._-]+:[A-Za-z0-9*]+$`). A malformed upstream 403
+/// could leave ARN/account text as the post-`perform:` token; an ARN
+/// (`arn:aws:...` -- multiple colons, digit-only account segments,
+/// slashes) fails the shape check and falls back to the generic string
+/// so no principal/account/resource identifier leaks via the action.
+fn access_denied_message(action: Option<String>) -> String {
+    match action.filter(|a| is_iam_action_shape(a)) {
+        Some(action) => format!("bedrock access denied: missing IAM action {action}"),
+        None => "bedrock access denied".to_string(),
+    }
+}
+
+/// True if `s` matches an IAM `service:Action` shape: a service segment
+/// of `[A-Za-z0-9._-]+`, a single colon, then an action segment of
+/// `[A-Za-z0-9*]+`. Pure char scan (no regex dependency, matching
+/// `extract_iam_action`'s rationale). An ARN fails because it has more
+/// than one colon and the resource segment carries `/`.
+fn is_iam_action_shape(s: &str) -> bool {
+    let Some((service, action)) = s.split_once(':') else {
+        return false;
+    };
+    !service.is_empty()
+        && !action.is_empty()
+        && service
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && action
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '*')
+}
+
+/// Build the body string emitted to the DEBUG `upstream error body` line.
+///
+/// A 403 upstream body carries the caller's principal ARN, account id, and
+/// the resource ARN. None of that may reach the DEBUG log. For a 403 we
+/// return an action-only string built from the shared classifier (the IAM
+/// action survives as the actionable bit; ARNs and account id are dropped).
+/// Every other status returns the raw body unchanged -- the shared core
+/// helper sanitizes and caps it before it is logged.
+fn sanitized_debug_body(status: u16, body: &str) -> String {
+    match classify_bedrock_error(status, body) {
+        BedrockErrorClass::AccessDenied { action, .. } => access_denied_message(action),
+        BedrockErrorClass::Other => body.to_string(),
     }
 }
 
@@ -808,6 +863,77 @@ mod tests {
             extract_iam_action(body),
             Some("bedrock:InvokeModel".to_string())
         );
+    }
+
+    #[test]
+    fn sanitized_debug_body_403_drops_arn_and_account_keeps_action() {
+        // A real 403 body carries principal ARN + account id + resource
+        // ARN. The DEBUG body must surface only the IAM action.
+        let body = "User: arn:aws:iam::123456789012:user/foo is not authorized to \
+                    perform: bedrock-runtime:InvokeModelWithResponseStream on resource: \
+                    arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5";
+        let got = sanitized_debug_body(403, body);
+        assert!(
+            !got.contains("arn:aws:"),
+            "403 debug body must not contain any ARN, got: {got}"
+        );
+        assert!(
+            !got.contains("123456789012"),
+            "403 debug body must not contain the account id, got: {got}"
+        );
+        assert!(
+            got.contains("bedrock-runtime:InvokeModelWithResponseStream"),
+            "403 debug body must keep the IAM action, got: {got}"
+        );
+    }
+
+    #[test]
+    fn sanitized_debug_body_non_403_passes_body_through() {
+        // Non-403 statuses keep the current behavior: the raw body is
+        // returned (the shared core helper sanitizes + caps it on log).
+        let body = "validation error: malformed request";
+        assert_eq!(sanitized_debug_body(400, body), body);
+        assert_eq!(sanitized_debug_body(500, body), body);
+    }
+
+    #[test]
+    fn sanitized_debug_body_403_malformed_action_falls_back_to_generic() {
+        // A malformed 403 body whose post-`perform:` token is an ARN /
+        // account fragment (not a `service:Action` shape) must NOT leak
+        // that token into the DEBUG body via the supposedly-safe action
+        // string. The shape check rejects it and falls back to the
+        // generic message.
+        let body = "User: x is not authorized to perform: \
+                    arn:aws:iam::123456789012:role/x on resource: y";
+        let got = sanitized_debug_body(403, body);
+        assert!(
+            !got.contains("arn:aws:"),
+            "malformed-action 403 debug body must not contain any ARN, got: {got}"
+        );
+        assert!(
+            !got.contains("123456789012"),
+            "malformed-action 403 debug body must not contain the account id, got: {got}"
+        );
+        assert_eq!(
+            got, "bedrock access denied",
+            "malformed action must fall back to the generic message, got: {got}"
+        );
+    }
+
+    #[test]
+    fn is_iam_action_shape_accepts_service_action_rejects_arn() {
+        // Well-formed IAM actions pass; anything ARN-shaped (multiple
+        // colons, slashes) or empty-segmented fails.
+        assert!(is_iam_action_shape("bedrock:InvokeModel"));
+        assert!(is_iam_action_shape(
+            "bedrock-runtime:InvokeModelWithResponseStream"
+        ));
+        assert!(is_iam_action_shape("bedrock:*"));
+        assert!(!is_iam_action_shape("arn:aws:iam::123456789012:role/x"));
+        assert!(!is_iam_action_shape("noColon"));
+        assert!(!is_iam_action_shape(":InvokeModel"));
+        assert!(!is_iam_action_shape("bedrock:"));
+        assert!(!is_iam_action_shape("svc:action/with/slash"));
     }
 
     #[test]

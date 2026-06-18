@@ -1448,3 +1448,74 @@ fn sanitize_capped_strips_control_chars_at_debug_body_cap() {
         "sanitize_for_log must still cap at MAX after refactor"
     );
 }
+
+#[test]
+fn redact_bedrock_inline_source_bytes_redacted() {
+    // Bedrock inline image/document blocks carry the base64 payload
+    // under `source.bytes`. With redaction on, the long base64 string
+    // must collapse to the `<redacted len=N>` marker so it does not
+    // leak into the trace log.
+    let payload = "QUFB".repeat(100); // long base64-ish string
+    let body = json!({
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image",
+                "source": {"bytes": payload.clone()}
+            }]
+        }]
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    let redacted = got["messages"][0]["content"][0]["source"]["bytes"]
+        .as_str()
+        .expect("source.bytes stays a string");
+    assert!(
+        redacted.starts_with("<redacted len="),
+        "source.bytes should be redacted, got {redacted}"
+    );
+    assert!(
+        !redacted.contains("QUFB"),
+        "raw base64 must not survive in source.bytes"
+    );
+}
+
+#[test]
+fn redact_numeric_bytes_outside_source_stays_visible() {
+    // A `bytes` field that is NOT a string under a `source` object --
+    // e.g. a numeric byte counter -- must stay visible. Proves the
+    // redaction is parent-gated, not a blind any-key `bytes` match.
+    //
+    // The numeric and short-string leaves below are weak negatives on
+    // their own: a blind any-key `bytes` match would ALSO spare them
+    // (numbers are not redacted, and short strings fall under the
+    // 256-char long-string threshold). The LONG-string leaves are the
+    // load-bearing case -- a blind any-key match WOULD wrongly redact a
+    // 300-char `bytes` string, so their survival genuinely proves the
+    // redaction is gated on the `source` parent.
+    let long_blob = "Z".repeat(300);
+    let body = json!({
+        "stats": {"bytes": 1234},
+        "meta": {"bytes": "short"},
+        // Long string `bytes` leaf NOT under a `source` object.
+        "blob": {"bytes": long_blob.clone()},
+        // Long string `bytes` leaf at the top level (no parent object key).
+        "bytes": long_blob.clone(),
+    });
+    let got = redact_prompts_with_flag(&body, true);
+    assert_eq!(
+        got["stats"]["bytes"], 1234,
+        "numeric bytes outside source must stay visible"
+    );
+    assert_eq!(
+        got["meta"]["bytes"], "short",
+        "short string bytes outside source must stay visible"
+    );
+    assert_eq!(
+        got["blob"]["bytes"], long_blob,
+        "long string bytes under non-source parent must stay visible"
+    );
+    assert_eq!(
+        got["bytes"], long_blob,
+        "long string bytes at the top level must stay visible"
+    );
+}

@@ -132,6 +132,11 @@ fn extract_chunk_usage(provider_id: &str, val: &mut Value) -> Option<UsageDelta>
 /// top-level fields when they are not already populated by the
 /// upstream.
 fn lift_chunk_usage_subbags(val: &mut Value) {
+    // Fast path: non-terminal chunks (the vast majority) carry no `usage`
+    // sub-object. Skip the mutable borrow + sub-bag walk entirely for them.
+    if val.get("usage").is_none() {
+        return;
+    }
     let Some(usage) = val.get_mut("usage").and_then(|v| v.as_object_mut()) else {
         return;
     };
@@ -847,6 +852,21 @@ mod tests {
             "usage": usage
         })
         .to_string()
+    }
+
+    /// A non-terminal chunk carries no `usage` object. The usage-subbag
+    /// lift must leave it byte-for-byte untouched (the early-out fires
+    /// before any mutable borrow).
+    #[test]
+    fn non_terminal_chunk_without_usage_is_untouched() {
+        let mut val = json!({
+            "id": "chunk-1",
+            "model": "test",
+            "choices": [{"index": 0, "delta": {"content": "hi"}}]
+        });
+        let before = val.clone();
+        lift_chunk_usage_subbags(&mut val);
+        assert_eq!(val, before, "non-terminal chunk must be untouched");
     }
 
     /// OpenAI terminal chunk delivers `completion_tokens_details
