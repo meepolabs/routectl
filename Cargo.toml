@@ -71,7 +71,7 @@ tokio-stream = "0.1"
 # to reqwest 0.13, so 0.8.x is the right cut here. cookie_store 0.21
 # is the matching version.
 cookie_store = "0.21"
-reqwest_cookie_store = "0.8"
+reqwest_cookie_store = "0.10"
 
 # Time / ids (used in response shaping)
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

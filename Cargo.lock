@@ -2371,14 +2371,45 @@ dependencies = [
 ]
 
 [[package]]
-name = "reqwest_cookie_store"
-version = "0.8.2"
+name = "reqwest"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2314c325724fea278d44c13a525ebf60074e33c05f13b4345c076eb65b2446b3"
+checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+dependencies = [
+ "base64",
+ "bytes",
+ "cookie",
+ "cookie_store 0.22.1",
+ "futures-core",
+ "http 1.4.2",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "reqwest_cookie_store"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beb98c4d52ae6ceed18a0dff0564717623dd75fae08619ae0927332f0a81abbc"
 dependencies = [
  "bytes",
- "cookie_store 0.21.1",
- "reqwest",
+ "cookie_store 0.22.1",
+ "reqwest 0.13.4",
  "url",
 ]
 
@@ -2406,7 +2437,7 @@ dependencies = [
  "bytes",
  "http 1.4.2",
  "rand",
- "reqwest",
+ "reqwest 0.12.28",
  "routectl-core",
  "serde",
  "serde_json",
@@ -2442,7 +2473,7 @@ dependencies = [
  "nix",
  "notify",
  "notify-debouncer-full",
- "reqwest",
+ "reqwest 0.12.28",
  "routectl-auth",
  "routectl-core",
  "routectl-providers",
@@ -2504,7 +2535,7 @@ dependencies = [
  "lru",
  "pretty_assertions",
  "regex",
- "reqwest",
+ "reqwest 0.12.28",
  "reqwest_cookie_store",
  "routectl-core",
  "serde",
