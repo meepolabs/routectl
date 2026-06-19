@@ -204,6 +204,7 @@ mod tests {
             quota_extras: None,
             extra: None,
             strategy: None,
+            reduction_strategy: None,
         }
     }
 

@@ -120,6 +120,12 @@ pub struct UsageRecord {
     /// `None` when no target was dispatched (count_tokens, unknown alias,
     /// or a gate failure before any injection point ran).
     pub strategy: Option<String>,
+    /// Stable context-reduction decision token for the served target (e.g.
+    /// `applied`, `skipped:disabled`, `skipped:no-tail`,
+    /// `skipped:nothing-to-strip`). `None` when no target was dispatched
+    /// (count_tokens, unknown alias, or a gate failure before any reduction
+    /// point ran).
+    pub reduction_strategy: Option<String>,
 
     // TIMING
     pub latency_ms: i64,
@@ -250,6 +256,7 @@ mod tests {
             attempt_count: 1,
             fallback_count: 0,
             strategy: Some("auto_emitted".to_string()),
+            reduction_strategy: Some("applied".to_string()),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -304,6 +311,7 @@ mod tests {
             attempt_count: 1,
             fallback_count: 0,
             strategy: None,
+            reduction_strategy: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

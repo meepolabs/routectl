@@ -606,12 +606,13 @@ mod tests {
     }
 
     /// A v1 DB (created before the `strategy` column existed) must migrate
-    /// to v2: the column is added, `user_version` becomes 2, and any
-    /// pre-existing row survives with `strategy` NULL. Builds a genuine v1
-    /// `requests` table (the pre-strategy column set) so the ALTER path --
-    /// not the fresh-schema path -- is exercised.
+    /// forward across every ladder step: both later columns are added,
+    /// `user_version` reaches the current version, and any pre-existing row
+    /// survives with the new columns NULL. Builds a genuine v1 `requests`
+    /// table (the pre-strategy column set) so the ALTER path -- not the
+    /// fresh-schema path -- is exercised.
     #[test]
-    fn old_v1_db_migrates_to_v2_preserving_rows() {
+    fn old_v1_db_migrates_to_current_preserving_rows() {
         // Arrange: a v1-shaped DB. Minimal column subset is enough to prove
         // the ALTER + row-survival contract; the full v1 set is not needed.
         let (_dir, path) = temp_db_path();
@@ -644,12 +645,14 @@ mod tests {
         assert_eq!(user_version(&conn), 1);
 
         // Act
-        let version = migrate_to_current(&conn, 0).expect("migrate v1->v2");
+        let version = migrate_to_current(&conn, 0).expect("migrate v1->current");
 
-        // Assert: landed at v2, the column exists, the old row survived with
-        // a NULL strategy, and meta tracks the new version.
+        // Assert: the ladder runs every forward step, so a v1 DB lands at
+        // the current version with both added columns present, the old row
+        // survives with NULL strategy / reduction_strategy, and meta tracks
+        // the final version.
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(user_version(&conn), 2);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
         let strategy: Option<String> = conn
             .query_row(
                 "SELECT strategy FROM requests WHERE request_id='old-row'",
@@ -661,6 +664,17 @@ mod tests {
             strategy.is_none(),
             "migrated old row must have NULL strategy"
         );
+        let reduction_strategy: Option<String> = conn
+            .query_row(
+                "SELECT reduction_strategy FROM requests WHERE request_id='old-row'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("old row survives v2->v3");
+        assert!(
+            reduction_strategy.is_none(),
+            "migrated old row must have NULL reduction_strategy"
+        );
         let meta_version: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key='schema_version'",
@@ -668,25 +682,103 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("meta schema_version");
-        assert_eq!(meta_version, "2");
+        assert_eq!(meta_version, SCHEMA_VERSION.to_string());
     }
 
-    /// A fresh DB opens directly at v2 with the `strategy` column present.
+    /// A v2 DB (created before the `reduction_strategy` column existed) must
+    /// migrate to v3: the column is added, `user_version` becomes 3, and any
+    /// pre-existing row survives with `reduction_strategy` NULL. Builds a
+    /// genuine v2 `requests` table (the pre-reduction_strategy column set,
+    /// including `strategy`) so the ALTER path -- not the fresh-schema path
+    /// -- is exercised.
     #[test]
-    fn fresh_db_opens_at_v2_with_strategy_column() {
+    fn old_v2_db_migrates_to_v3_preserving_rows() {
+        // Arrange: a v2-shaped DB. Minimal column subset plus `strategy` is
+        // enough to prove the ALTER + row-survival contract.
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        conn.execute_batch(
+            "CREATE TABLE requests (
+                ts_start INTEGER NOT NULL,
+                ts_end INTEGER NOT NULL,
+                request_id TEXT NOT NULL UNIQUE,
+                ingress_dialect TEXT NOT NULL,
+                requested_model TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                stream INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                msg_count INTEGER NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                fallback_count INTEGER NOT NULL,
+                strategy TEXT
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                msg_count, attempt_count, fallback_count, strategy) \
+                VALUES (1, 2, 'v2-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0, 'auto_emitted');
+            PRAGMA user_version = 2;",
+        )
+        .expect("build v2 db");
+        assert_eq!(user_version(&conn), 2);
+
+        // Act
+        let version = migrate_to_current(&conn, 0).expect("migrate v2->v3");
+
+        // Assert: landed at v3, the column exists, the old row survived with
+        // a NULL reduction_strategy (and its prior strategy intact), and
+        // meta tracks the new version.
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(user_version(&conn), 3);
+        let (strategy, reduction_strategy): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT strategy, reduction_strategy FROM requests WHERE request_id='v2-row'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("old row survives");
+        assert_eq!(
+            strategy.as_deref(),
+            Some("auto_emitted"),
+            "pre-existing strategy must survive the v2->v3 migration"
+        );
+        assert!(
+            reduction_strategy.is_none(),
+            "migrated v2 row must have NULL reduction_strategy"
+        );
+        let meta_version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("meta schema_version");
+        assert_eq!(meta_version, "3");
+    }
+
+    /// A fresh DB opens directly at v3 with the `reduction_strategy` column
+    /// present.
+    #[test]
+    fn fresh_db_opens_at_v3_with_reduction_strategy_column() {
         // Arrange + Act
         let (_dir, path) = temp_db_path();
         let db = open(&path).expect("open fresh");
 
         // Assert
-        assert_eq!(user_version(db.conn()), 2);
+        assert_eq!(user_version(db.conn()), 3);
         let present: bool = db
             .conn()
-            .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name='strategy'")
+            .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name='reduction_strategy'")
             .expect("prepare")
             .exists([])
             .expect("query");
-        assert!(present, "fresh v2 DB must carry the strategy column");
+        assert!(
+            present,
+            "fresh v3 DB must carry the reduction_strategy column"
+        );
     }
 
     #[test]
@@ -755,6 +847,7 @@ mod tests {
             ("quota_extras", false),
             ("extra", false),
             ("strategy", false),
+            ("reduction_strategy", false),
         ];
 
         let (_dir, path) = temp_db_path();

@@ -42,9 +42,10 @@ fn read_user_version(conn: &Connection) -> Result<i64, rusqlite::Error> {
 /// The version literals here are the LITERAL target of this step (1), not
 /// `SCHEMA_VERSION`: a later schema bump must not make a v0 DB skip the
 /// intervening forward steps. `CREATE_REQUESTS_TABLE` already carries the
-/// current (v2) column set, so a fresh DB lands fully-shaped; the
-/// `migrate_v1_to_v2` `ADD COLUMN` is a no-op-equivalent on a fresh DB
-/// because the loop stamps user_version to 2 here only via the v1->v2 arm.
+/// current (v3) column set, so a fresh DB lands fully-shaped; the
+/// `migrate_v1_to_v2` / `migrate_v2_to_v3` `ADD COLUMN` steps are
+/// no-op-equivalents on a fresh DB because the loop only reaches them on a
+/// DB that started below their target version.
 fn migrate_v0_to_v1(conn: &Connection, now_ms: i64) -> Result<(), rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(CREATE_REQUESTS_TABLE)?;
@@ -76,6 +77,32 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
         "INSERT INTO meta (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         rusqlite::params![META_SCHEMA_VERSION, "2"],
+    )?;
+    tx.commit()
+}
+
+/// Apply the v2 -> v3 step atomically: add the nullable
+/// `reduction_strategy` column (the per-request context-reduction decision
+/// token), bump `PRAGMA user_version` to 3, and update the human-readable
+/// `meta.schema_version` row. All in one transaction so a crash mid-step
+/// rolls back rather than landing a column-without-version state. Existing
+/// rows survive with `reduction_strategy` NULL.
+///
+/// On a FRESH DB the v0 -> v1 step created `requests` from the current
+/// schema, which already carries `reduction_strategy`. The loop still
+/// enters this arm (v0->v1 stamps user_version=1, not SCHEMA_VERSION), so
+/// guard the `ADD COLUMN` against a pre-existing column to keep the fresh
+/// path safe.
+fn migrate_v2_to_v3(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    if !column_exists(&tx, "requests", "reduction_strategy")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN reduction_strategy TEXT")?;
+    }
+    tx.execute_batch("PRAGMA user_version = 3")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "3"],
     )?;
     tx.commit()
 }
@@ -126,6 +153,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
         match version {
             0 => migrate_v0_to_v1(conn, now_ms)?,
             1 => migrate_v1_to_v2(conn)?,
+            2 => migrate_v2_to_v3(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;
