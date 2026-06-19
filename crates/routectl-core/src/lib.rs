@@ -6,6 +6,7 @@
 
 pub mod cache_control;
 pub mod content_part;
+pub mod context_reduction;
 pub mod error;
 pub mod identity;
 pub mod log_safe;
@@ -31,6 +32,9 @@ pub use cache_control::{
     CacheBreakpointSource, CacheControl, FrozenFloor, OwnedBreakpoint,
 };
 pub use content_part::{ContentPart, KnownContentPart};
+pub use context_reduction::{
+    apply_json_minify, minify_json_whitespace, ReductionDelta, ReductionOutcome,
+};
 pub use error::{Error, Result};
 pub use log_safe::{
     debug_upstream_error_body, extract_upstream_message, header_trace_enabled, headers_to_json,
