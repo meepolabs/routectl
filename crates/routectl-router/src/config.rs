@@ -89,6 +89,39 @@ pub struct Config {
     /// metadata later); only pricing is wired today.
     #[serde(default)]
     pub registry: BTreeMap<String, RegistryEntry>,
+
+    /// Operator-facing `[cache]` block. Controls the dispatch-path
+    /// auto-emission of a top-level Anthropic `cache_control` breakpoint.
+    /// A missing block keeps the default: auto-emit enabled.
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
+/// Operator-facing `[cache]` config block. Global policy for the
+/// dispatch-path auto-cache feature. A missing `[cache]` table
+/// deserializes to `CacheConfig::default()` (auto-emit enabled), and the
+/// per-field `#[serde(default)]` keeps an omitted key enabled too.
+///
+/// This is the GLOBAL kill-switch; each `[providers.X]` entry carries an
+/// optional `auto_emit_top_level_breakpoint` override consulted only when
+/// the global switch is on. The effective decision is "global on AND
+/// provider not explicitly off".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CacheConfig {
+    /// Master switch for dispatch-path auto-emission of a top-level
+    /// `cache_control` ephemeral_5m breakpoint. Default on.
+    #[serde(default = "default_true")]
+    pub auto_emit_top_level_breakpoint: bool,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            auto_emit_top_level_breakpoint: true,
+        }
+    }
 }
 
 /// Operator-facing `[log]` config block. Each field mirrors a
@@ -860,6 +893,14 @@ pub enum ProviderEntry {
         /// `None` -> use the conservative per-kind default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_capability: Option<CacheCapability>,
+        /// Per-provider override for dispatch-path auto-emission of a
+        /// top-level `cache_control` breakpoint. `None` inherits the
+        /// global `[cache]` switch (treated as enabled); `Some(false)`
+        /// disables auto-emit for this provider even when global is on.
+        /// Cache policy, NOT a runtime/rate knob -- lives outside
+        /// `runtime`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_top_level_breakpoint: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -930,6 +971,12 @@ pub enum ProviderEntry {
         /// provider does not honor a top-level breakpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_capability: Option<CacheCapability>,
+        /// Per-provider override for dispatch-path auto-emission of a
+        /// top-level `cache_control` breakpoint. `None` inherits the
+        /// global `[cache]` switch; `Some(false)` disables auto-emit for
+        /// this provider. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_top_level_breakpoint: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -976,6 +1023,12 @@ pub enum ProviderEntry {
         /// `None` -> use the conservative per-kind default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_capability: Option<CacheCapability>,
+        /// Per-provider override for dispatch-path auto-emission of a
+        /// top-level `cache_control` breakpoint. `None` inherits the
+        /// global `[cache]` switch; `Some(false)` disables auto-emit for
+        /// this provider. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_top_level_breakpoint: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1004,6 +1057,12 @@ pub enum ProviderEntry {
         /// `None` -> use the conservative per-kind default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_capability: Option<CacheCapability>,
+        /// Per-provider override for dispatch-path auto-emission of a
+        /// top-level `cache_control` breakpoint. `None` inherits the
+        /// global `[cache]` switch; `Some(false)` disables auto-emit for
+        /// this provider. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_top_level_breakpoint: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1140,7 +1199,33 @@ impl ProviderEntry {
 
     /// Prompt-cache capability for this entry. Returns the operator
     /// override when set, otherwise the conservative per-kind default.
+    ///
+    /// AnthropicApi is special-cased on its `base_url`: a `kind =
+    /// "anthropic-api"` entry pointed at a NON-default base_url is an
+    /// Anthropic-COMPATIBLE third party (e.g. a vendor's `/anthropic`
+    /// surface) that may 400 on or silently drop a top-level
+    /// `cache_control` breakpoint. Since auto-emit is default-on, the
+    /// optimistic per-kind default (true/true) would risk breaking such
+    /// a host. So when there is no operator override and the base_url is
+    /// not the default Anthropic base, fail closed -> (false, false). An
+    /// operator who knows their custom-base host supports caching opts
+    /// in via an explicit `cache_capability` (which always wins below).
     pub fn cache_capability(&self) -> CacheCapability {
+        if let Self::AnthropicApi {
+            base_url,
+            cache_capability,
+            ..
+        } = self
+        {
+            return cache_capability.unwrap_or_else(|| {
+                if base_url == &default_anthropic_base() {
+                    CacheCapability::for_provider_kind(self.kind_str())
+                } else {
+                    CacheCapability::new(false, false)
+                }
+            });
+        }
+
         let override_value = match self {
             Self::OpenaiCompat {
                 cache_capability, ..
@@ -1160,6 +1245,34 @@ impl ProviderEntry {
         override_value.unwrap_or_else(|| CacheCapability::for_provider_kind(self.kind_str()))
     }
 
+    /// Per-provider override for dispatch-path auto-emission of a
+    /// top-level `cache_control` breakpoint. `None` means "inherit the
+    /// global `[cache]` switch" (the dispatch path treats that as
+    /// enabled); `Some(false)` disables auto-emit for this provider even
+    /// when the global switch is on. Mirrors `cache_capability()`.
+    pub fn auto_emit_top_level_breakpoint(&self) -> Option<bool> {
+        match self {
+            Self::OpenaiCompat {
+                auto_emit_top_level_breakpoint,
+                ..
+            } => *auto_emit_top_level_breakpoint,
+            Self::AnthropicApi {
+                auto_emit_top_level_breakpoint,
+                ..
+            } => *auto_emit_top_level_breakpoint,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock {
+                auto_emit_top_level_breakpoint,
+                ..
+            } => *auto_emit_top_level_breakpoint,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                auto_emit_top_level_breakpoint,
+                ..
+            } => *auto_emit_top_level_breakpoint,
+        }
+    }
+
     pub fn openai_compat(base_url: impl Into<String>, api_key_ref: impl Into<String>) -> Self {
         Self::OpenaiCompat {
             base_url: base_url.into(),
@@ -1168,6 +1281,7 @@ impl ProviderEntry {
             payload_extras: None,
             user_agent: None,
             cache_capability: None,
+            auto_emit_top_level_breakpoint: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1186,6 +1300,7 @@ impl ProviderEntry {
             context_management: false,
             max_thinking_entry_bytes: None,
             cache_capability: None,
+            auto_emit_top_level_breakpoint: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1205,6 +1320,7 @@ impl ProviderEntry {
             payload_extras: None,
             user_agent: None,
             cache_capability: None,
+            auto_emit_top_level_breakpoint: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1736,6 +1852,7 @@ mod tests {
                 payload_extras: None,
                 anthropic_beta: Vec::new(),
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: Default::default(),
             };
             assert_eq!(bedrock.kind_str(), "bedrock");
@@ -1928,6 +2045,70 @@ cache_capability = { supports_top_level_cache_control = true, bogus = 1 }
             toml::from_str::<Config>(bad).is_err(),
             "deny_unknown_fields must reject an unknown CacheCapability field",
         );
+    }
+
+    /// An `anthropic-api` entry on the DEFAULT Anthropic base, with no
+    /// operator override, gets the optimistic per-kind default (true/true)
+    /// -- the real Anthropic server honors a top-level breakpoint.
+    #[test]
+    fn cache_capability_anthropic_default_base_uses_optimistic_default() {
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse default base");
+        let entry = cfg.providers.get("anthropic").expect("anthropic provider");
+        let cap = entry.cache_capability();
+        assert_eq!(cap, CacheCapability::for_provider_kind("anthropic-api"));
+        assert!(cap.supports_top_level_cache_control);
+        assert!(cap.cache_hit_observable);
+    }
+
+    /// An `anthropic-api` entry on a NON-default base_url (an Anthropic-
+    /// compatible third party), with no operator override, fails closed:
+    /// auto-emit must never break a host that may not honor cache_control.
+    #[test]
+    fn cache_capability_anthropic_custom_base_fails_closed() {
+        let toml_text = r#"
+[providers.compat]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-test"
+base_url = "https://api.example.com/anthropic"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse custom base");
+        let entry = cfg.providers.get("compat").expect("compat provider");
+        let cap = entry.cache_capability();
+        assert!(
+            !cap.supports_top_level_cache_control,
+            "custom-base anthropic-api must fail closed on cache_control"
+        );
+        assert!(!cap.cache_hit_observable);
+        assert_eq!(cap, CacheCapability::new(false, false));
+        // It diverges from the optimistic per-kind default precisely
+        // because the base_url is not the default Anthropic base.
+        assert_ne!(cap, CacheCapability::for_provider_kind("anthropic-api"));
+    }
+
+    /// An explicit operator `cache_capability` override always wins, even
+    /// on a custom base_url: the operator knows their host supports it.
+    #[test]
+    fn cache_capability_anthropic_custom_base_override_wins() {
+        let toml_text = r#"
+[providers.compat]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-test"
+base_url = "https://api.example.com/anthropic"
+cache_capability = { supports_top_level_cache_control = true, cache_hit_observable = true }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse custom base override");
+        let entry = cfg.providers.get("compat").expect("compat provider");
+        let cap = entry.cache_capability();
+        assert!(
+            cap.supports_top_level_cache_control,
+            "explicit override must win over the fail-closed custom-base default"
+        );
+        assert!(cap.cache_hit_observable);
     }
 }
 

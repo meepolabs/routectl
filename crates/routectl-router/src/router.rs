@@ -11,12 +11,15 @@ use std::time::{Duration, Instant};
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
-    sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
-    RoutectlInternal, TokenCount,
+    cache_control::{compute_frozen_floor, validate_source, MAX_BREAKPOINTS},
+    sanitize_for_log, scan_volatile, CacheControl, ChatChunk, ChatRequest, ChatResponse, Error,
+    Provider, Result, RoutectlInternal, TokenCount,
 };
 use serde_json::Value;
 
-use crate::config::{AliasValue, Config, HistoryReasoning, ReasoningDialect, RetryPolicy};
+use crate::config::{
+    AliasValue, CacheCapability, Config, HistoryReasoning, ReasoningDialect, RetryPolicy,
+};
 use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::{GateDecision, ProviderState};
@@ -835,6 +838,13 @@ impl Router {
         // 429/529 these fast-fail instead of spraying retry+fallback
         // across the all-Anthropic chain. See `should_fallback`.
         let is_probe = is_probe_request(&req, &policy);
+        // Auto-cache decision inputs: computed ONCE off the ORIGINAL req
+        // (above the chain loop) so they are identical across every retry
+        // and fallback target. The per-target capability + provider switch
+        // are looked up inside the loop; the request-level facts here do
+        // not vary by target.
+        let auto_cache_plan =
+            AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
         let mut last_err: Option<Error> = None;
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
@@ -863,6 +873,20 @@ impl Router {
             // provider_name; the model's contribution lives on the
             // dispatch target.
             apply_layered_overlays(&self.config, target, &mut attempt_req);
+            // Auto-cache: maybe inject a top-level cache_control breakpoint
+            // on THIS per-attempt clone, after overlays (the last
+            // dispatch-time touch of cache_control) and before the retry
+            // loop, so every retry on this target reuses identical bytes.
+            // Never mutates the original `req`; any doubt sends un-injected.
+            let provider_cfg = self.config.providers.get(provider_name);
+            let _ = maybe_apply_auto_cache_control(
+                &mut attempt_req,
+                &auto_cache_plan,
+                provider_cfg.map(|e| e.cache_capability()),
+                provider_cfg
+                    .and_then(|e| e.auto_emit_top_level_breakpoint())
+                    .unwrap_or(true),
+            );
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
@@ -1384,6 +1408,11 @@ impl Router {
         // Availability-probe detection (see `complete_with_options`). A
         // streaming probe that 429/529s fast-fails the chain too.
         let is_probe = is_probe_request(&req, &policy);
+        // Auto-cache decision inputs: computed ONCE off the ORIGINAL req
+        // (see `complete_inner`). Reused across retries and fallback
+        // targets so the decision never drifts.
+        let auto_cache_plan =
+            AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
         let mut last_err: Option<Error> = None;
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
@@ -1406,6 +1435,18 @@ impl Router {
             let mut attempt_req = req.clone();
             attempt_req.model = model.to_string();
             apply_layered_overlays(&self.config, target, &mut attempt_req);
+            // Auto-cache: see `complete_inner`. Same once-vs-per-attempt
+            // split; injected on this clone after overlays, before the
+            // inner loop. Original `req` is never mutated.
+            let provider_cfg = self.config.providers.get(provider_name);
+            let _ = maybe_apply_auto_cache_control(
+                &mut attempt_req,
+                &auto_cache_plan,
+                provider_cfg.map(|e| e.cache_capability()),
+                provider_cfg
+                    .and_then(|e| e.auto_emit_top_level_breakpoint())
+                    .unwrap_or(true),
+            );
 
             let attempt_policy = self.compose_attempt_policy(
                 &policy,
@@ -1782,6 +1823,123 @@ impl Router {
                 provider_runtime.and_then(|p| p.stream_first_byte_timeout_ms);
         }
         out
+    }
+}
+
+/// Request-level inputs to the auto-cache decision, computed ONCE per
+/// request off the original `req` (above the `'chain` loop) and reused
+/// for every retry and fallback target. Holding these constant is what
+/// makes auto-emit idempotent: retrying the same target sends
+/// byte-identical bytes, and a fallback target re-derives nothing.
+///
+/// The gate reads `has_caller_breakpoints` / `caller_breakpoint_count`
+/// (snapshotted from the frozen floor at build time) directly so the
+/// predicate stays a cheap field compare.
+struct AutoCacheRequestPlan {
+    has_caller_breakpoints: bool,
+    caller_breakpoint_count: usize,
+    volatile_high_veto: bool,
+    global_auto_emit_enabled: bool,
+}
+
+impl AutoCacheRequestPlan {
+    /// Build the plan from the ORIGINAL request. Pure read: never mutates
+    /// `req`. Called once per dispatch fn, above the `'chain` loop.
+    fn build(req: &ChatRequest, global_auto_emit_enabled: bool) -> Self {
+        let frozen_floor = compute_frozen_floor(req);
+        let has_caller_breakpoints = frozen_floor.has_caller_breakpoints();
+        let caller_breakpoint_count = frozen_floor.caller_breakpoint_count();
+        let volatile_high_veto = scan_volatile(req).is_high_confidence_veto();
+        Self {
+            has_caller_breakpoints,
+            caller_breakpoint_count,
+            volatile_high_veto,
+            global_auto_emit_enabled,
+        }
+    }
+}
+
+/// Outcome of an auto-cache injection decision for one dispatch target.
+/// Drives control flow today (and is the stable per-target signal T6 will
+/// log). Every non-`Emitted` variant means `attempt_req` was left
+/// untouched -- the dispatched bytes equal the un-injected clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheInjection {
+    /// A top-level ephemeral_5m breakpoint was injected and validated.
+    Emitted,
+    /// Global `[cache] auto_emit_top_level_breakpoint = false`.
+    SkippedGlobalDisabled,
+    /// Per-provider `auto_emit_top_level_breakpoint = false`.
+    SkippedProviderDisabled,
+    /// Target's provider does not honor a top-level breakpoint (or its
+    /// capability is unknown -- fail closed).
+    SkippedNoCapability,
+    /// The caller already supplied at least one breakpoint; auto-emit
+    /// would risk a second marker / byte rewrite, so we defer entirely.
+    SkippedCallerSupplied,
+    /// The stable cacheable prefix carries high-confidence volatile
+    /// tokens; caching it would write-without-read every request.
+    SkippedVolatileHigh,
+    /// Injecting would push the breakpoint count past `MAX_BREAKPOINTS`.
+    SkippedBreakpointCap,
+    /// Injection was attempted but post-injection validation failed; the
+    /// original `cache_control` was restored and the clone dispatched
+    /// unchanged.
+    ValidationRolledBack,
+}
+
+/// Decide-and-maybe-inject a single top-level `cache_control` ephemeral_5m
+/// breakpoint on the PER-ATTEMPT clone. Mutates ONLY `attempt_req`, never
+/// the original request. Never returns `Err` and never panics: any doubt
+/// degrades to "dispatch the un-injected clone".
+///
+/// clone -> set -> validate -> keep-or-rollback: the only mutation is a
+/// single assignment to `attempt_req.cache_control`, and it is reverted if
+/// `validate_source` rejects the injected shape. Called once per chain
+/// entry, AFTER `apply_layered_overlays` (so injection is the last
+/// dispatch-time touch of `cache_control`) and before the inner retry
+/// loop, so all retries on a target reuse byte-identical bytes.
+///
+/// `capability` is `None` when the target's provider is absent from the
+/// table -> fail closed (no injection). Cheap field checks run before the
+/// validate call so the common skip paths never allocate.
+fn maybe_apply_auto_cache_control(
+    attempt_req: &mut ChatRequest,
+    plan: &AutoCacheRequestPlan,
+    capability: Option<CacheCapability>,
+    provider_auto_emit_enabled: bool,
+) -> CacheInjection {
+    if !plan.global_auto_emit_enabled {
+        return CacheInjection::SkippedGlobalDisabled;
+    }
+    if !provider_auto_emit_enabled {
+        return CacheInjection::SkippedProviderDisabled;
+    }
+    match capability {
+        Some(c) if c.supports_top_level_cache_control => {}
+        _ => return CacheInjection::SkippedNoCapability,
+    }
+    if plan.has_caller_breakpoints {
+        return CacheInjection::SkippedCallerSupplied;
+    }
+    if plan.volatile_high_veto {
+        return CacheInjection::SkippedVolatileHigh;
+    }
+    // Defensive drift guard: no-caller implies 0 today, so +1 is always
+    // within MAX. Kept so a future change that injects alongside caller
+    // markers cannot silently exceed the cap.
+    if plan.caller_breakpoint_count.saturating_add(1) > MAX_BREAKPOINTS {
+        return CacheInjection::SkippedBreakpointCap;
+    }
+
+    // clone -> set -> validate -> keep-or-rollback, local to this clone.
+    let original = attempt_req.cache_control.clone();
+    attempt_req.cache_control = Some(CacheControl::ephemeral_5m());
+    if validate_source(attempt_req).is_ok() {
+        CacheInjection::Emitted
+    } else {
+        attempt_req.cache_control = original;
+        CacheInjection::ValidationRolledBack
     }
 }
 
@@ -3379,6 +3537,7 @@ mod three_source_anthropic_beta_lift_tests {
                 payload_extras: None,
                 user_agent: None,
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: ProviderRuntimePolicy::default(),
             },
         );
@@ -4194,6 +4353,7 @@ mod resolved_models_tests {
                 payload_extras: None,
                 user_agent: None,
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(60_000),
@@ -4601,6 +4761,7 @@ mod gate_error_does_not_mask_real_error_tests {
                 payload_extras: None,
                 user_agent: None,
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(60_000),
@@ -5064,6 +5225,7 @@ mod count_tokens_tests {
             context_management: false,
             max_thinking_entry_bytes: None,
             cache_capability: None,
+            auto_emit_top_level_breakpoint: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -5078,6 +5240,7 @@ mod count_tokens_tests {
             payload_extras: None,
             user_agent: None,
             cache_capability: None,
+            auto_emit_top_level_breakpoint: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -5097,6 +5260,7 @@ mod count_tokens_tests {
             payload_extras: None,
             anthropic_beta: vec![],
             cache_capability: None,
+            auto_emit_top_level_breakpoint: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -5505,6 +5669,7 @@ mod feature_filter_tests {
                 payload_extras: None,
                 user_agent: None,
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: ProviderRuntimePolicy {
                     unsupported_features: unsupported_first,
                     ..Default::default()
@@ -5520,6 +5685,7 @@ mod feature_filter_tests {
                 payload_extras: None,
                 user_agent: None,
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: ProviderRuntimePolicy {
                     unsupported_features: unsupported_second,
                     ..Default::default()
@@ -5785,6 +5951,7 @@ mod auth_failure_recovery_tests {
                 payload_extras: None,
                 user_agent: None,
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: ProviderRuntimePolicy::default(),
             },
         );
@@ -6058,6 +6225,7 @@ mod circuit_breaker_slot_release_tests {
                 payload_extras: None,
                 user_agent: None,
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(circuit_failures),
                     circuit_cooldown_ms: Some(circuit_cooldown_ms),
@@ -6122,6 +6290,7 @@ mod circuit_breaker_slot_release_tests {
                 context_management: false,
                 max_thinking_entry_bytes: None,
                 cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(0),
@@ -6949,6 +7118,591 @@ mod circuit_breaker_slot_release_tests {
             elapsed >= Duration::from_millis(250),
             "the in-loop sleep must be lengthened to ~the 300ms reset (got {elapsed:?}); \
              without the bump the 1ms baseline would fire the retry almost immediately",
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_emit_cache_control_tests {
+    //! T5 dispatch-path auto-emission of a top-level `cache_control`
+    //! ephemeral_5m breakpoint. Tests assert on the captured per-attempt
+    //! request (the bytes the egress would see), and the original request
+    //! is never mutated.
+    use super::*;
+    use crate::config::{CacheConfig, ProviderEntry, ProviderRuntimePolicy};
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use parking_lot::Mutex as ParkingMutex;
+    use routectl_core::cache_control::compute_frozen_floor;
+    use routectl_core::{
+        CacheControl, ChatChunk, ChatRequest, ChatResponse, Choice, ContentPart, CustomTool,
+        KnownContentPart, Message, MessageContent, Provider, Role, SystemBlock, SystemContent,
+        ToolDef,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Captures every dispatched request; can fail the first `fail_first`
+    /// attempts with a retryable 503 to drive multi-attempt idempotence.
+    struct CapturingProvider {
+        id: String,
+        captured: Arc<ParkingMutex<Vec<ChatRequest>>>,
+        fail_first: usize,
+        seen: AtomicUsize,
+    }
+
+    fn ok_response(model: String) -> ChatResponse {
+        ChatResponse {
+            id: "ok".into(),
+            model,
+            created: 0,
+            choices: vec![Choice {
+                logprobs: None,
+                index: 0,
+                message: Message {
+                    refusal: None,
+                    role: routectl_core::Role::Assistant,
+                    content: routectl_core::MessageContent::Text("ok".into()),
+                    reasoning: None,
+                    reasoning_details: vec![],
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".into()),
+                matched_stop_sequence: None,
+            }],
+            usage: Some(routectl_core::Usage::default()),
+            routectl_provider: None,
+            extras: Default::default(),
+            upstream_meta: None,
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CapturingProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            let model = req.model.clone();
+            self.captured.lock().push(req);
+            let n = self.seen.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_first {
+                return Err(Error::upstream(&self.id, 503, "transient"));
+            }
+            Ok(ok_response(model))
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.captured.lock().push(req);
+            let s = futures::stream::once(async move {
+                Ok(ChatChunk {
+                    id: "c0".into(),
+                    model: "x".into(),
+                    choices: vec![],
+                    usage: None,
+                    opaque_events: Vec::new(),
+                    upstream_meta: None,
+                })
+            });
+            Ok(s.boxed())
+        }
+    }
+
+    /// Build a router with one provider entry (its KIND drives capability)
+    /// and one resolved model that dispatches to a CapturingProvider.
+    /// `global_enabled` / `provider_override` exercise the kill-switches;
+    /// `fail_first` drives multi-attempt idempotence.
+    fn rig(
+        entry: ProviderEntry,
+        global_enabled: bool,
+        fail_first: usize,
+    ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
+        let mut config = Config {
+            cache: CacheConfig {
+                auto_emit_top_level_breakpoint: global_enabled,
+            },
+            // Zero backoff keeps the multi-attempt test fast.
+            retry: RetryPolicy {
+                initial_backoff_ms: 0,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        config.providers.insert("p".into(), entry);
+
+        let mut router = Router::new(Arc::new(config));
+        let captured: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "cap".into(),
+            captured: captured.clone(),
+            fail_first,
+            seen: AtomicUsize::new(0),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        let resolved = ResolvedModel::new("m", "p", provider, "upstream-model");
+        models.insert("m".into(), Arc::new(resolved));
+        router.install_resolved_models(models);
+        (router, captured)
+    }
+
+    fn anthropic_entry() -> ProviderEntry {
+        ProviderEntry::anthropic_api("literal:k")
+    }
+
+    fn anthropic_entry_provider_disabled() -> ProviderEntry {
+        ProviderEntry::AnthropicApi {
+            api_key_ref: "literal:k".into(),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: Default::default(),
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
+            user_agent: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
+            context_management: false,
+            max_thinking_entry_bytes: None,
+            cache_capability: None,
+            auto_emit_top_level_breakpoint: Some(false),
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
+    fn openai_entry() -> ProviderEntry {
+        ProviderEntry::openai_compat("https://example.invalid/v1", "literal:k")
+    }
+
+    fn base_req() -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn capable_target_no_breakpoint_gets_one_ephemeral_5m() {
+        let (router, captured) = rig(anthropic_entry(), true, 0);
+        let req = base_req();
+        router.complete(req).await.expect("ok");
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(
+            up.cache_control,
+            Some(CacheControl::ephemeral_5m()),
+            "capable target with no caller breakpoint must get exactly one top-level marker",
+        );
+    }
+
+    #[tokio::test]
+    async fn caller_breakpoint_request_is_byte_identical() {
+        // Caller already set a top-level cache_control. Auto-emit must
+        // defer entirely; the dispatched request must equal the caller's
+        // (no second / rewritten marker). The dispatch path rewrites
+        // `model` to the upstream id, so normalize that field out before
+        // the byte compare -- everything else, including cache_control,
+        // must be untouched.
+        let (router, captured) = rig(anthropic_entry(), true, 0);
+        let mut req = base_req();
+        req.cache_control = Some(CacheControl::ephemeral_1h());
+        let mut before = req.clone();
+        before.model = "upstream-model".into();
+        let before_bytes = serde_json::to_vec(&before).expect("serialize before");
+        router.complete(req).await.expect("ok");
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        // Same marker (no second / rewritten one).
+        assert_eq!(up.cache_control, Some(CacheControl::ephemeral_1h()));
+        let after = serde_json::to_vec(up).expect("serialize after");
+        assert_eq!(
+            before_bytes, after,
+            "caller-supplied request must dispatch byte-identical (modulo upstream model id)",
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compat_target_gets_no_injection() {
+        let (router, captured) = rig(openai_entry(), true, 0);
+        router.complete(base_req()).await.expect("ok");
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(
+            up.cache_control, None,
+            "openai-compat (no top-level cache_control capability) must not be injected",
+        );
+    }
+
+    #[tokio::test]
+    async fn volatile_high_prefix_blocks_injection() {
+        // A UUIDv4 in the system prompt is a high-confidence volatile veto.
+        let (router, captured) = rig(anthropic_entry(), true, 0);
+        let mut req = base_req();
+        req.system = Some(SystemContent::Text(
+            "session 550e8400-e29b-41d4-a716-446655440000 active".into(),
+        ));
+        router.complete(req).await.expect("ok");
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(
+            up.cache_control, None,
+            "high-confidence volatile prefix must veto auto-emit",
+        );
+    }
+
+    #[tokio::test]
+    async fn global_kill_switch_off_blocks_injection() {
+        let (router, captured) = rig(anthropic_entry(), false, 0);
+        router.complete(base_req()).await.expect("ok");
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(
+            up.cache_control, None,
+            "global switch off must block auto-emit"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_kill_switch_off_blocks_injection() {
+        let (router, captured) = rig(anthropic_entry_provider_disabled(), true, 0);
+        router.complete(base_req()).await.expect("ok");
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(
+            up.cache_control, None,
+            "per-provider switch off must block even with global on",
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_switch_true_with_global_true_injects() {
+        // Per-provider Some(true) + global true -> injects.
+        let mut entry = anthropic_entry_provider_disabled();
+        if let ProviderEntry::AnthropicApi {
+            auto_emit_top_level_breakpoint,
+            ..
+        } = &mut entry
+        {
+            *auto_emit_top_level_breakpoint = Some(true);
+        }
+        let (router, captured) = rig(entry, true, 0);
+        router.complete(base_req()).await.expect("ok");
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(up.cache_control, Some(CacheControl::ephemeral_5m()));
+    }
+
+    #[tokio::test]
+    async fn cross_dialect_openai_ingress_to_anthropic_target_emits_marker() {
+        // OpenAI-ingress-shaped request (no cache_control vocabulary) to an
+        // anthropic-api target: the canonical marker is set and the egress
+        // would emit it. We assert the canonical marker is present.
+        let (router, captured) = rig(anthropic_entry(), true, 0);
+        let req = base_req();
+        router.complete(req).await.expect("ok");
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(up.cache_control, Some(CacheControl::ephemeral_5m()));
+    }
+
+    #[tokio::test]
+    async fn injection_is_idempotent_across_attempts() {
+        // First attempt 503 (retryable), second ok: both attempt bodies on
+        // the same target must be byte-identical -- the decision does not
+        // drift between retries.
+        let (router, captured) = rig(anthropic_entry(), true, 1);
+        router.complete(base_req()).await.expect("ok after retry");
+        let captured = captured.lock();
+        assert_eq!(captured.len(), 2, "expected one failed + one ok attempt");
+        let a = serde_json::to_vec(&captured[0]).expect("serialize attempt 0");
+        let b = serde_json::to_vec(&captured[1]).expect("serialize attempt 1");
+        assert_eq!(a, b, "retried attempt bodies must be byte-identical");
+        assert_eq!(
+            captured[0].cache_control,
+            Some(CacheControl::ephemeral_5m())
+        );
+    }
+
+    #[tokio::test]
+    async fn injection_lands_on_dispatched_clone_not_the_caller_shape() {
+        // The original request is moved into complete(), so it cannot be
+        // read back. The meaningful invariant is the SPLIT: the dispatched
+        // clone carries the injected marker, while the caller-visible
+        // request shape (a freshly built identical request) still carries
+        // no cache_control. That gap is exactly what proves the injection
+        // touched only the per-attempt clone, never the caller's shape.
+        // (The helper-level tests pin the "&mut attempt_req only" contract
+        // at the unit boundary.)
+        let (router, captured) = rig(anthropic_entry(), true, 0);
+        router.complete(base_req()).await.expect("ok");
+        // The dispatched clone WAS injected.
+        assert_eq!(
+            captured.lock().first().expect("dispatch").cache_control,
+            Some(CacheControl::ephemeral_5m()),
+            "the dispatched clone must carry the injected marker",
+        );
+        // The caller-visible request shape carries no cache_control.
+        assert_eq!(
+            base_req().cache_control,
+            None,
+            "the caller-visible request shape must stay un-injected",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_path_also_injects() {
+        let (router, captured) = rig(anthropic_entry(), true, 0);
+        let _ = router
+            .stream(base_req())
+            .await
+            .expect("ok")
+            .collect::<Vec<_>>()
+            .await;
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        assert_eq!(up.cache_control, Some(CacheControl::ephemeral_5m()));
+    }
+
+    /// Two-entry fallback chain where the two targets make OPPOSITE
+    /// injection decisions: target 1 (openai-compat, no capability) always
+    /// fails and injects nothing; target 2 (anthropic-api, capable) serves
+    /// the request and gets exactly one top-level marker. The marker on
+    /// target 2 must derive ONLY from the original request, never
+    /// accumulating from target 1's attempt -- the per-target clone is
+    /// rebuilt from `req` each hop, so target 2's bytes equal a freshly
+    /// injected original.
+    #[tokio::test]
+    async fn fallback_targets_decide_independently_without_accumulation() {
+        let cap_a: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
+        let cap_b: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
+
+        let mut config = Config {
+            retry: RetryPolicy {
+                initial_backoff_ms: 0,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        config.providers.insert(
+            "p-compat".into(),
+            ProviderEntry::openai_compat("https://example.invalid/v1", "literal:k"),
+        );
+        config.providers.insert(
+            "p-anthropic".into(),
+            ProviderEntry::anthropic_api("literal:k"),
+        );
+        config.aliases.insert(
+            "alias".into(),
+            AliasValue::Chain(vec!["m-compat".into(), "m-anthropic".into()]),
+        );
+
+        // Target 1 always fails (large fail_first) so dispatch falls back
+        // to target 2. openai-compat capability is false -> no injection.
+        let prov_a: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "p-compat".into(),
+            captured: cap_a.clone(),
+            fail_first: usize::MAX,
+            seen: AtomicUsize::new(0),
+        });
+        // Target 2 serves the request; anthropic-api is capable -> inject.
+        let prov_b: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "p-anthropic".into(),
+            captured: cap_b.clone(),
+            fail_first: 0,
+            seen: AtomicUsize::new(0),
+        });
+
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m-compat".into(),
+            Arc::new(ResolvedModel::new(
+                "m-compat",
+                "p-compat",
+                prov_a,
+                "upstream-compat",
+            )),
+        );
+        models.insert(
+            "m-anthropic".into(),
+            Arc::new(ResolvedModel::new(
+                "m-anthropic",
+                "p-anthropic",
+                prov_b,
+                "upstream-anthropic",
+            )),
+        );
+
+        let mut router = Router::new(Arc::new(config));
+        router.install_resolved_models(models);
+
+        let req = ChatRequest {
+            model: "alias".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        router.complete(req).await.expect("falls back and serves");
+
+        // Target 1: incapable -> dispatched with no injected marker.
+        let a = cap_a.lock();
+        let up_a = a.first().expect("target 1 dispatched");
+        assert_eq!(
+            up_a.cache_control, None,
+            "incapable openai-compat target must receive no auto-emitted marker",
+        );
+
+        // Target 2: capable -> exactly one top-level ephemeral_5m marker,
+        // derived only from the original request (not accumulated).
+        let b = cap_b.lock();
+        let up_b = b.first().expect("target 2 dispatched");
+        assert_eq!(
+            up_b.cache_control,
+            Some(CacheControl::ephemeral_5m()),
+            "capable target must get exactly one top-level marker",
+        );
+
+        // Non-accumulation: target 2's bytes equal an independently
+        // injected copy of the ORIGINAL request (model normalized to the
+        // upstream id), proving the clone was rebuilt from `req`, not
+        // carried over from target 1's attempt.
+        let mut expected = ChatRequest {
+            model: "upstream-anthropic".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            ..Default::default()
+        };
+        expected.cache_control = Some(CacheControl::ephemeral_5m());
+        assert_eq!(
+            serde_json::to_vec(up_b).expect("serialize target 2"),
+            serde_json::to_vec(&expected).expect("serialize expected"),
+            "target 2 bytes must derive only from the original request",
+        );
+    }
+
+    // ---- helper-level unit tests (direct gate-predicate coverage) ----
+
+    fn plan(
+        caller_breakpoints: usize,
+        volatile_high: bool,
+        global: bool,
+        req: &ChatRequest,
+    ) -> AutoCacheRequestPlan {
+        // Build off the real req for the floor, then override the snapshot
+        // fields to construct gate situations precisely.
+        let mut p = AutoCacheRequestPlan::build(req, global);
+        p.has_caller_breakpoints = caller_breakpoints > 0;
+        p.caller_breakpoint_count = caller_breakpoints;
+        p.volatile_high_veto = volatile_high;
+        p
+    }
+
+    #[test]
+    fn helper_emits_on_clean_capable_request() {
+        let mut req = base_req();
+        let p = plan(0, false, true, &req);
+        let cap = Some(CacheCapability::new(true, true));
+        let out = maybe_apply_auto_cache_control(&mut req, &p, cap, true);
+        assert_eq!(out, CacheInjection::Emitted);
+        assert_eq!(req.cache_control, Some(CacheControl::ephemeral_5m()));
+    }
+
+    #[test]
+    fn helper_fails_closed_on_unknown_capability() {
+        let mut req = base_req();
+        let p = plan(0, false, true, &req);
+        let out = maybe_apply_auto_cache_control(&mut req, &p, None, true);
+        assert_eq!(out, CacheInjection::SkippedNoCapability);
+        assert_eq!(req.cache_control, None);
+    }
+
+    #[test]
+    fn helper_rolls_back_when_validation_fails() {
+        // Craft a situation the black-box gate cannot reach: the plan says
+        // "no caller breakpoints" (so the gate proceeds past the
+        // SkippedCallerSupplied / cap checks), but the actual attempt_req
+        // already carries MAX_BREAKPOINTS caller markers. Injecting the
+        // top-level marker pushes the total to MAX+1, so post-injection
+        // validate_source fails and the helper restores the original
+        // (absent top-level marker).
+        let mut req = base_req();
+        req.tools = Some(vec![ToolDef::Custom(CustomTool {
+            name: "t".into(),
+            description: Some("d".into()),
+            input_schema: serde_json::json!({"type": "object"}),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        })]);
+        req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "s".into(),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            citations: None,
+        }]));
+        let part = |t: &str| {
+            ContentPart::Known(KnownContentPart::Text {
+                text: t.into(),
+                cache_control: Some(CacheControl::ephemeral_5m()),
+            })
+        };
+        req.messages = vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![part("a"), part("b")]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        // Sanity: the request already sits at MAX_BREAKPOINTS (1 tool + 1
+        // system + 2 message parts).
+        assert_eq!(
+            compute_frozen_floor(&req).caller_breakpoint_count(),
+            MAX_BREAKPOINTS,
+        );
+        // Force the plan to claim no caller breakpoints so the gate
+        // proceeds to the validate step -- the only path to the rollback
+        // branch given the production no-caller gate.
+        let p = plan(0, false, true, &req);
+        let cap = Some(CacheCapability::new(true, true));
+        let out = maybe_apply_auto_cache_control(&mut req, &p, cap, true);
+        assert_eq!(out, CacheInjection::ValidationRolledBack);
+        assert_eq!(
+            req.cache_control, None,
+            "rollback must restore the original (absent) top-level marker",
         );
     }
 }
