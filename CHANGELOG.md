@@ -50,7 +50,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
-- **Claude Code billing-attribution block stripped on all non-Anthropic egress** (every auth kind, host, and entry point), so its client fingerprint never leaks to third-party upstreams.
+- **Claude Code billing-attribution block stripped on every egress, including anthropic-api** (all auth kinds, hosts, and entry points -- the canonical `system`, the legacy `Role::System` lift, and the OAuth identity path), so its client fingerprint never leaks to any upstream.
 - **Bedrock** no longer forwards client metadata; 403s return only the IAM action (not the principal ARN or account id); other error bodies are capped and sanitized.
 - **TRACE / DEBUG redaction widened** to file payloads, document citations, response headers, AWS signing-token / cookie headers, and Bedrock inline `source.bytes`; the sweep is hardened against absent keys.
 - **Listener auth**: empty / whitespace tokens rejected at startup; the OAuth HTTP client is built identity-neutral; the stdin login read is bounded.
