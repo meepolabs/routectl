@@ -18,6 +18,7 @@ pub mod system_content;
 pub mod token_source;
 pub mod tool_def;
 pub mod upstream_meta;
+pub mod volatile;
 
 /// Shared canonical-request / canonical-response builders for the
 /// cross-crate contract tests. Compiled only under `cfg(test)` or the
@@ -55,6 +56,7 @@ pub use system_content::{SystemBlock, SystemContent};
 pub use token_source::{StaticToken, TokenSource};
 pub use tool_def::{CustomTool, ToolDef};
 pub use upstream_meta::{AnthropicUnifiedQuota, UpstreamMeta};
+pub use volatile::{scan_volatile, VolatileConfidence, VolatileKind, VolatileReport};
 
 /// Cross-crate cap on `body_excerpt` fields in upstream-error tracing
 /// logs. Sized to fit a typical AWS IAM error body (User ARN + action +
