@@ -1829,6 +1829,12 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // X-Claude-Code-* headers for gateway cost attribution.
     let captured_claude_code_headers =
         std::mem::take(&mut req.routectl_internal.claude_code_headers);
+    // Preserve the ingress-set provenance: like `claude_code_headers`,
+    // it is inbound-request data (which dialect produced the request),
+    // not a per-model knob, so the per-attempt rebuild from
+    // `Default::default()` must carry it across or it resets to
+    // `Library`. `RequestProvenance` is `Copy`, so a plain read suffices.
+    let captured_provenance = req.routectl_internal.provenance;
     // Preserve the header_extras map that `merge_header_extras` composed
     // onto the request above. The struct rebuild starts from
     // `Default::default()`, so without this take the merged provider +
@@ -1838,6 +1844,7 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     internal.reasoning_dialect = target.reasoning_dialect.map(|d| d.into());
     internal.history_reasoning = target.history_reasoning.map(|h| h.into());
     internal.claude_code_headers = captured_claude_code_headers;
+    internal.provenance = captured_provenance;
     internal.header_extras = composed_header_extras;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
@@ -3171,6 +3178,32 @@ mod merge_header_extras_tests {
                 "req.anthropic_beta must carry the full union; missing {expected}",
             );
         }
+    }
+
+    /// Regression guard for the per-attempt overlay rebuild hazard:
+    /// `apply_layered_overlays` reconstructs `routectl_internal` from
+    /// `Default::default()` every dispatch attempt. Ingress-set provenance
+    /// must survive that rebuild rather than reset to `Library`.
+    #[test]
+    fn apply_layered_overlays_preserves_ingress_provenance() {
+        let config = Config::default();
+        let model: Arc<ResolvedModel> = Arc::new(ResolvedModel::new(
+            "nick",
+            "test-prov",
+            Arc::new(StubProvider),
+            "claude-x",
+        ));
+        let target = into_one_dispatch_target(model);
+
+        let mut req = req_with_betas(vec![]);
+        req.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
+        apply_layered_overlays(&config, &target, &mut req);
+
+        assert_eq!(
+            req.routectl_internal.provenance,
+            routectl_core::RequestProvenance::AnthropicIngress,
+            "ingress provenance must survive the per-attempt overlay rebuild",
+        );
     }
 }
 

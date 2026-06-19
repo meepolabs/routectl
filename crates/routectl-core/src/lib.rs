@@ -47,8 +47,8 @@ pub use reasoning_dialect::{
 pub use reserved::is_canonical_request_key;
 pub use schema::{
     CacheCreation, ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Message,
-    MessageContent, Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, Role,
-    RoutectlInternal, TokenCount, Usage, UsageDelta,
+    MessageContent, Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind,
+    RequestProvenance, Role, RoutectlInternal, TokenCount, Usage, UsageDelta,
 };
 pub use schema_opaque::OpaqueSseEvent;
 pub use system_content::{SystemBlock, SystemContent};

@@ -79,6 +79,10 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // (see `capture_claude_code_headers` for the contract).
     capture_claude_code_headers(headers, &mut req);
 
+    // Stamp ingress provenance so downstream observability can attribute
+    // the request to the Anthropic Messages dialect.
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
+
     // Translate thinking config.
     if let Some(t) = thinking {
         req.reasoning = Some(translate_thinking(&t));

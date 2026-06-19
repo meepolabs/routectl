@@ -143,6 +143,10 @@ impl IngressAdapter for OpenAiIngress {
         // `AnthropicTool::Custom`. Translating here once and undoing
         // it at the openai-compat egress would be lossy and
         // double-touched -- leave canonical as the wire form.
+
+        // Stamp ingress provenance so downstream observability can
+        // attribute the request to the OpenAI Chat Completions dialect.
+        req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
         Ok(req)
     }
 
@@ -668,6 +672,21 @@ mod tests {
             .unwrap();
         assert_eq!(req.model, "gpt-4o");
         assert_eq!(req.stream, Some(true));
+    }
+
+    #[test]
+    fn parse_request_stamps_openai_provenance() {
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let req = OpenAiIngress
+            .parse_request(&HeaderMap::new(), body)
+            .unwrap();
+        assert_eq!(
+            req.routectl_internal.provenance,
+            routectl_core::RequestProvenance::OpenaiIngress,
+        );
     }
 
     #[test]

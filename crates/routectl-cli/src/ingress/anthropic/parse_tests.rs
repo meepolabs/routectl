@@ -28,6 +28,22 @@ fn parse_request_with_system_blocks_and_cache_control() {
 }
 
 #[test]
+fn parse_request_stamps_anthropic_provenance() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024
+    });
+    let req = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap();
+    assert_eq!(
+        req.routectl_internal.provenance,
+        routectl_core::RequestProvenance::AnthropicIngress,
+    );
+}
+
+#[test]
 fn parse_request_translates_thinking_to_reasoning() {
     let body = json!({
         "model": "claude-opus-4-7",

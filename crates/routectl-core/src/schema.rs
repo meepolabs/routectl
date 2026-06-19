@@ -151,6 +151,18 @@ pub struct ChatRequest {
     pub routectl_internal: RoutectlInternal,
 }
 
+/// Which ingress dialect produced this canonical request. `Library`
+/// is the default for consumers that construct a `ChatRequest`
+/// directly (no ingress in the loop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RequestProvenance {
+    #[default]
+    Library,
+    AnthropicIngress,
+    OpenaiIngress,
+}
+
 /// Transport-internal carrier for resolved-model knobs the dispatch
 /// layer hands to the egress without bouncing through the wire. In
 /// practice it carries resolved per-model CONFIG values (reasoning
@@ -260,6 +272,12 @@ pub struct RoutectlInternal {
     /// without the router; in that path the egress's own
     /// `cfg.header_extras` provider floor is the only operator source.
     pub operator_betas: Vec<String>,
+
+    /// Which ingress dialect produced this canonical request. Set by the
+    /// ingress adapter at parse time; defaults to `Library` for consumers
+    /// that build a `ChatRequest` directly (no ingress in the loop).
+    /// Pure observability metadata -- never serialized to any upstream.
+    pub provenance: RequestProvenance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -637,6 +655,23 @@ pub enum ReasoningDetailKind {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A `RoutectlInternal` built via `Default` carries `Library`
+    /// provenance, and a directly-constructed `ChatRequest` (no ingress)
+    /// inherits that default.
+    #[test]
+    fn provenance_defaults_to_library() {
+        assert_eq!(
+            RoutectlInternal::default().provenance,
+            RequestProvenance::Library
+        );
+        let req: ChatRequest = serde_json::from_value(json!({
+            "model": "gpt-4o",
+            "messages": []
+        }))
+        .unwrap();
+        assert_eq!(req.routectl_internal.provenance, RequestProvenance::Library);
+    }
 
     /// OpenAI permits `stop` as a bare string; canonical must accept it
     /// and normalize to a one-element vec instead of 400-ing the request.
