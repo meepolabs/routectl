@@ -54,6 +54,15 @@ const ALIAS_MAX_RECURSION_DEPTH: usize = 8;
 /// sibling rather than blocking on a multi-minute (or hostile) hint.
 const INLOOP_RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
 
+/// The single count_tokens-capable egress kind. `anthropic-api` is the
+/// only `Provider` impl that overrides `Provider::count_tokens` (every
+/// other kind uses the 501-ing trait default), and it is Claude-only,
+/// so all capable targets share the same Anthropic tokenizer family.
+/// `count_tokens` walks the dispatch chain to the first target whose
+/// `provider_kind` matches this token and skips the rest. Matches the
+/// `kind = "..."` discriminant from `ProviderEntry::kind_str`.
+const COUNT_TOKENS_CAPABLE_KIND: &str = "anthropic-api";
+
 pub struct Router {
     pub config: Arc<Config>,
     /// Provider implementations keyed by user-facing name. Private so
@@ -1125,20 +1134,36 @@ impl Router {
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
     }
 
-    /// Probe call: route a request to the FIRST provider in the
-    /// dispatch chain and call `Provider::count_tokens`. Used by
-    /// claude-code's context-budget display via the
+    /// Probe call: route a request to the first count_tokens-CAPABLE
+    /// provider in the dispatch chain and call `Provider::count_tokens`.
+    /// Used by claude-code's context-budget display via the
     /// `/v1/messages/count_tokens` endpoint.
     ///
-    /// Why first-only (no fallback chain walk): count_tokens reports
-    /// tokens for the upstream's tokenizer. Falling back to a
-    /// different model would return tokens computed by a different
-    /// tokenizer, which would silently miscount the caller's budget.
-    /// On `Error::NotImplemented`, the error propagates to the caller
-    /// verbatim; this function does not enter the dispatch retry
-    /// loop, so no retry/fallback semantics apply. Callers (the
-    /// count_tokens handler) translate `NotImplemented` to a 501
-    /// response per the gateway-doc contract.
+    /// Capability walk (not a try-and-fallback): the chain is scanned
+    /// for the first target whose `provider_kind == "anthropic-api"` --
+    /// the only count_tokens-capable egress kind (it is the only kind
+    /// that overrides `Provider::count_tokens`; every other kind uses
+    /// the trait default that 501s). Incapable-by-kind targets are
+    /// skipped BEFORE dispatch (DEBUG log, no upstream call, no breaker
+    /// account); a kind-skip is operator-known, not upstream health, so
+    /// it must not touch the breaker. This mirrors
+    /// `filter_chain_by_features` discipline.
+    ///
+    /// Why walking is safe for tokenizer correctness: `anthropic-api`
+    /// is Claude-only, so every capable target the walk can select uses
+    /// the SAME Anthropic tokenizer family. Walking past incapable
+    /// kinds therefore does NOT reintroduce the wrong-tokenizer hazard
+    /// that motivated the original first-only rule -- it only steps over
+    /// kinds that cannot count at all.
+    ///
+    /// Once a CAPABLE target is selected, it does NOT walk further on a
+    /// real upstream error (4xx/5xx) or on `Error::NotImplemented` --
+    /// those propagate verbatim, exactly as before. Only a 401 triggers
+    /// the single-flight auth refresh + one retry of the SAME target.
+    /// Callers (the count_tokens handler) translate `NotImplemented` to
+    /// a 501 response per the gateway-doc contract. When NO target in
+    /// the chain is capable, this returns `Error::NotImplemented` naming
+    /// the alias so the genuinely-uncapable case still maps to 501.
     ///
     /// count_tokens calls consume the same RPM bucket and honor the
     /// same circuit breaker as messages calls: the gate runs before
@@ -1148,10 +1173,42 @@ impl Router {
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
         let chain = self.dispatch_chain_for_request(&req)?;
-        let target = chain
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::UnknownAlias(req.model.clone()))?;
+        // Capability walk: select the first count_tokens-capable target
+        // (provider_kind == "anthropic-api") and skip incapable kinds
+        // before dispatch. anthropic-api is the only kind that overrides
+        // the 501-ing trait default, and it is Claude-only -- so any
+        // target the walk selects shares the same Anthropic tokenizer
+        // family. That is why stepping past incapable kinds does NOT
+        // reintroduce the wrong-tokenizer hazard the first-only rule
+        // once guarded against. A kind-skip is operator-known config,
+        // not upstream health, so it never touches the breaker.
+        let mut target: Option<DispatchTarget> = None;
+        for candidate in chain {
+            if candidate.provider_kind == Some(COUNT_TOKENS_CAPABLE_KIND) {
+                target = Some(candidate);
+                break;
+            }
+            tracing::debug!(
+                provider = %candidate.provider_name,
+                kind = candidate.provider_kind.unwrap_or("unknown"),
+                model = %candidate.nickname.as_deref().unwrap_or(""),
+                "provider skipped: kind cannot count_tokens",
+            );
+        }
+        let target = match target {
+            Some(t) => t,
+            None => {
+                tracing::warn!(
+                    alias = %req.model,
+                    "alias chain has no count_tokens-capable provider; \
+                     no target in chain overrides count_tokens",
+                );
+                return Err(Error::NotImplemented(
+                    req.model.clone(),
+                    "count_tokens: no count_tokens-capable provider in chain".into(),
+                ));
+            }
+        };
         let provider = target
             .provider
             .clone()
@@ -1185,9 +1242,11 @@ impl Router {
             // so the first attempt is debited exactly once.
             //
             // Unlike `complete_with_options`, count_tokens does NOT walk
-            // the fallback chain on a gate block (tokenizer correctness
-            // rules out walking the chain), so we propagate the gate
-            // error directly.
+            // to a sibling on a gate block of the SELECTED capable
+            // target: the capability walk above already skipped
+            // incapable kinds, and every remaining capable target shares
+            // one tokenizer family, so a gate block here just propagates
+            // (no try-and-fallback over upstream/gate state).
             if let Some((gate_kind, gate_err)) =
                 self.gate_check(&target.state_key, &target.provider_name)
             {
@@ -1255,8 +1314,11 @@ impl Router {
                     // is_probe=false: count_tokens is NOT a generation
                     // probe. Its token-count result IS consumed by the
                     // caller (claude-code's context-budget display) and
-                    // it never walks the fallback chain, so a 429 here
-                    // keeps its existing breaker-accounting behavior.
+                    // it never falls over to a sibling on an upstream
+                    // error (the capability walk runs BEFORE dispatch;
+                    // a real upstream error from the selected capable
+                    // target propagates), so a 429 here keeps its
+                    // existing breaker-accounting behavior.
                     let policy = self.policy_for(&req.model);
                     let reset_hint = rate_limit_reset_hint(&e, &policy);
                     if should_fallback(&e, &policy, false) {
@@ -4872,28 +4934,52 @@ mod seat_pool_dispatch_tests {
 
 #[cfg(test)]
 mod count_tokens_tests {
-    //! Pin: `Router::count_tokens` does NOT walk the fallback chain
-    //! and propagates `Error::NotImplemented` from the provider as-is
-    //! (no retries). Tokenizer correctness rules out walking the
-    //! chain -- a count from the wrong tokenizer would silently
-    //! miscount the caller's budget.
+    //! Pin: `Router::count_tokens` walks PAST count_tokens-incapable
+    //! targets (provider_kind != "anthropic-api") to the first capable
+    //! one, returning 501 NotImplemented only when NO target in the
+    //! chain is capable. The capability skip is keyed statically on
+    //! provider kind BEFORE dispatch -- a kind-skip is operator-known,
+    //! not upstream health -- so it never touches the breaker. A
+    //! CAPABLE target that returns a real upstream error propagates as
+    //! today (no further walk). All anthropic-api targets share the
+    //! same Anthropic tokenizer family, so walking past incapable kinds
+    //! does NOT reintroduce the wrong-tokenizer hazard.
     use super::*;
+    use crate::config::{ProviderEntry, ProviderRuntimePolicy};
     use crate::resolved::ResolvedModel;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider, TokenCount};
+    use routectl_providers::anthropic_api::AuthKind;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Tracks how many times `count_tokens` was called so the test
-    /// can assert there's no retry on `NotImplemented`.
-    struct NotImplProvider {
+    /// How a mock provider's `count_tokens` should respond once it is
+    /// actually selected and dispatched to.
+    #[derive(Clone, Copy)]
+    enum CountBehavior {
+        /// Return `Ok(TokenCount { input_tokens })`.
+        Ok(u32),
+        /// Return `Error::NotImplemented` (the trait-default shape).
+        NotImplemented,
+        /// Return `Error::Upstream { status, .. }` (a real upstream
+        /// error from a capable provider).
+        UpstreamError(u16),
+    }
+
+    /// Mock provider that records every `count_tokens` call so a test
+    /// can prove a target was (or was NOT) dispatched to. Its kind in
+    /// the capability walk is decided by the matching `ProviderEntry`
+    /// in config, NOT by this impl -- so a Bedrock-kind entry skips the
+    /// walk regardless of what this returns.
+    struct CountingProvider {
         id: String,
         calls: Arc<AtomicUsize>,
+        behavior: CountBehavior,
     }
 
     #[async_trait]
-    impl Provider for NotImplProvider {
+    impl Provider for CountingProvider {
         fn id(&self) -> &str {
             &self.id
         }
@@ -4911,53 +4997,362 @@ mod count_tokens_tests {
         }
         async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(Error::NotImplemented(
-                self.id.clone(),
-                "count_tokens".into(),
-            ))
+            match self.behavior {
+                CountBehavior::Ok(n) => Ok(TokenCount {
+                    input_tokens: n,
+                    extras: Default::default(),
+                }),
+                CountBehavior::NotImplemented => Err(Error::NotImplemented(
+                    self.id.clone(),
+                    "count_tokens".into(),
+                )),
+                CountBehavior::UpstreamError(status) => {
+                    Err(Error::upstream(self.id.clone(), status, "boom"))
+                }
+            }
         }
     }
 
-    #[tokio::test]
-    async fn not_implemented_propagates_without_retry() {
-        // Arrange
-        let calls = Arc::new(AtomicUsize::new(0));
-        let p: Arc<dyn Provider> = Arc::new(NotImplProvider {
-            id: "no-count".into(),
-            calls: calls.clone(),
-        });
-        let cfg = Arc::new(Config::default());
-        let mut router = Router::new(cfg);
-        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-        models.insert(
-            "haiku".to_string(),
-            Arc::new(ResolvedModel::new(
-                "haiku",
-                "no-count",
-                p.clone(),
-                "claude-haiku-4-5",
-            )),
-        );
-        router.install_resolved_models(models);
+    /// A count_tokens-capable provider entry (kind == "anthropic-api").
+    fn anthropic_api_entry() -> ProviderEntry {
+        ProviderEntry::AnthropicApi {
+            api_key_ref: "literal:k".into(),
+            base_url: "https://placeholder.invalid".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::default(),
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
+            user_agent: None,
+            allowed_betas: vec![],
+            forward_client_headers: vec![],
+            context_management: false,
+            max_thinking_entry_bytes: None,
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
 
-        let req = ChatRequest {
-            model: "haiku".into(),
+    /// A count_tokens-incapable provider entry (kind == "openai-compat").
+    /// Always compiled, regardless of the `bedrock` feature.
+    fn openai_compat_entry() -> ProviderEntry {
+        ProviderEntry::OpenaiCompat {
+            base_url: "https://placeholder.invalid/v1".into(),
+            api_key_ref: "literal:k".into(),
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
+            user_agent: None,
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
+    /// A count_tokens-incapable provider entry (kind == "bedrock").
+    /// Mirrors the motivating scenario from the spec. Bedrock has no
+    /// count_tokens endpoint, so its kind is skipped before dispatch.
+    #[cfg(feature = "bedrock")]
+    fn bedrock_entry() -> ProviderEntry {
+        use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
+        ProviderEntry::Bedrock {
+            region: "us-east-1".into(),
+            api_shape: BedrockApiShapeConfig::default(),
+            creds: BedrockCredsConfig::DefaultChain,
+            user_agent: None,
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
+            anthropic_beta: vec![],
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
+    /// One leg of a test chain: a provider entry + the matching mock
+    /// provider behavior.
+    struct Leg {
+        nickname: &'static str,
+        provider_name: &'static str,
+        entry: ProviderEntry,
+        behavior: CountBehavior,
+    }
+
+    /// Build a router whose alias `"alias"` resolves to the given legs
+    /// in order. Returns the router and the per-leg call counters (same
+    /// order as `legs`).
+    fn build_router(legs: Vec<Leg>) -> (Router, Vec<Arc<AtomicUsize>>) {
+        let mut config = Config::default();
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        let mut counters: Vec<Arc<AtomicUsize>> = Vec::with_capacity(legs.len());
+        let mut chain: Vec<String> = Vec::with_capacity(legs.len());
+
+        for leg in legs {
+            config
+                .providers
+                .insert(leg.provider_name.to_string(), leg.entry);
+            let calls = Arc::new(AtomicUsize::new(0));
+            counters.push(calls.clone());
+            let provider: Arc<dyn Provider> = Arc::new(CountingProvider {
+                id: leg.provider_name.to_string(),
+                calls,
+                behavior: leg.behavior,
+            });
+            models.insert(
+                leg.nickname.to_string(),
+                Arc::new(ResolvedModel::new(
+                    leg.nickname,
+                    leg.provider_name,
+                    provider,
+                    format!("upstream-{}", leg.nickname),
+                )),
+            );
+            chain.push(leg.nickname.to_string());
+        }
+
+        config
+            .aliases
+            .insert("alias".into(), AliasValue::Chain(chain));
+        let mut router = Router::new(Arc::new(config));
+        router.install_resolved_models(models);
+        (router, counters)
+    }
+
+    fn count_req() -> ChatRequest {
+        ChatRequest {
+            model: "alias".into(),
             ..Default::default()
-        };
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn walks_past_incapable_bedrock_to_capable_anthropic() {
+        // Arrange: chain [bedrock, anthropic-api]. Bedrock is not
+        // count_tokens-capable and must be skipped BEFORE dispatch
+        // (no call, no breaker account); the anthropic-api target
+        // serves the count.
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "bedrock-haiku",
+                provider_name: "bedrock-prov",
+                entry: bedrock_entry(),
+                behavior: CountBehavior::Ok(99),
+            },
+            Leg {
+                nickname: "anthropic-haiku",
+                provider_name: "anthropic-prov",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(42),
+            },
+        ]);
 
         // Act
-        let err = router.count_tokens(req).await.unwrap_err();
+        let tc = router
+            .count_tokens(count_req())
+            .await
+            .expect("capable target serves the count");
 
-        // Assert: no retry (single call), NotImplemented surfaces
-        // verbatim.
+        // Assert: anthropic-api served (42), bedrock never called.
+        assert_eq!(tc.input_tokens, 42);
         assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "count_tokens must NOT retry on NotImplemented"
+            counters[0].load(Ordering::SeqCst),
+            0,
+            "incapable bedrock target must be skipped, not dispatched",
         );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            1,
+            "capable anthropic-api target must serve the count",
+        );
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn all_incapable_chain_returns_not_implemented() {
+        // Arrange: chain [bedrock] only -- no capable target anywhere.
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "bedrock-haiku",
+            provider_name: "bedrock-prov",
+            entry: bedrock_entry(),
+            behavior: CountBehavior::Ok(7),
+        }]);
+
+        // Act
+        let err = router.count_tokens(count_req()).await.unwrap_err();
+
+        // Assert: terminal 501, provider never touched.
+        match err {
+            Error::NotImplemented(model, msg) => {
+                assert_eq!(model, "alias");
+                assert!(
+                    msg.contains("count_tokens"),
+                    "message must name the operation; got: {msg}",
+                );
+            }
+            other => panic!("expected Error::NotImplemented; got {other:?}"),
+        }
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            0,
+            "no capable target -> nothing dispatched",
+        );
+    }
+
+    #[tokio::test]
+    async fn all_incapable_openai_compat_chain_returns_not_implemented() {
+        // Feature-independent twin of the bedrock-only case: a single
+        // openai-compat leg is also count_tokens-incapable.
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "compat-model",
+            provider_name: "compat-prov",
+            entry: openai_compat_entry(),
+            behavior: CountBehavior::Ok(7),
+        }]);
+
+        let err = router.count_tokens(count_req()).await.unwrap_err();
+
+        match err {
+            Error::NotImplemented(model, msg) => {
+                assert_eq!(model, "alias");
+                assert!(msg.contains("count_tokens"), "got: {msg}");
+            }
+            other => panic!("expected Error::NotImplemented; got {other:?}"),
+        }
+        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn walks_past_incapable_openai_compat_to_capable_anthropic() {
+        // Feature-independent walk: chain [openai-compat, anthropic-api].
+        // The openai-compat leg cannot count_tokens and must be skipped
+        // BEFORE dispatch; the anthropic-api leg serves. Pins the
+        // skip-then-advance path on builds without the `bedrock` feature
+        // (the bedrock-gated twin only runs with that feature compiled in).
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "compat-model",
+                provider_name: "compat-prov",
+                entry: openai_compat_entry(),
+                behavior: CountBehavior::Ok(99),
+            },
+            Leg {
+                nickname: "anthropic-haiku",
+                provider_name: "anthropic-prov",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(42),
+            },
+        ]);
+
+        // Act
+        let tc = router
+            .count_tokens(count_req())
+            .await
+            .expect("capable target serves the count");
+
+        // Assert: anthropic-api served (42), openai-compat never called.
+        assert_eq!(tc.input_tokens, 42);
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            0,
+            "incapable openai-compat target must be skipped, not dispatched",
+        );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            1,
+            "capable anthropic-api target must serve the count",
+        );
+    }
+
+    #[tokio::test]
+    async fn capable_primary_serves_unchanged() {
+        // Arrange: chain [anthropic-api, anthropic-api]. The capable
+        // primary serves; the second leg is never reached.
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "anthropic-primary",
+                provider_name: "anthropic-prov-a",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(11),
+            },
+            Leg {
+                nickname: "anthropic-secondary",
+                provider_name: "anthropic-prov-b",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(22),
+            },
+        ]);
+
+        let tc = router
+            .count_tokens(count_req())
+            .await
+            .expect("primary serves");
+
+        assert_eq!(tc.input_tokens, 11, "first capable target serves");
+        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            0,
+            "second target must not be reached when primary is capable",
+        );
+    }
+
+    #[tokio::test]
+    async fn capable_target_upstream_error_propagates_without_walking() {
+        // Arrange: chain [anthropic-api(500), anthropic-api(ok)]. The
+        // selected capable target returns a real upstream error; it
+        // MUST propagate and MUST NOT walk to the later capable entry
+        // (try-and-fallback is reserved for the messages path -- a
+        // kind-skip is operator-known, an upstream error is not).
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "anthropic-primary",
+                provider_name: "anthropic-prov-a",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::UpstreamError(500),
+            },
+            Leg {
+                nickname: "anthropic-secondary",
+                provider_name: "anthropic-prov-b",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(22),
+            },
+        ]);
+
+        let err = router.count_tokens(count_req()).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::Upstream { status: 500, .. }),
+            "upstream error must propagate; got {err:?}",
+        );
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            1,
+            "primary attempted once"
+        );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            0,
+            "must NOT walk to a later target on a real upstream error",
+        );
+    }
+
+    #[tokio::test]
+    async fn capable_target_not_implemented_propagates_without_retry() {
+        // A capable (anthropic-api) target that itself returns
+        // NotImplemented propagates verbatim with no retry. (Real
+        // Anthropic does not do this; the test pins the no-retry
+        // contract for the selected capable target.)
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "anthropic-only",
+            provider_name: "anthropic-prov",
+            entry: anthropic_api_entry(),
+            behavior: CountBehavior::NotImplemented,
+        }]);
+
+        let err = router.count_tokens(count_req()).await.unwrap_err();
+
         assert!(
             matches!(err, Error::NotImplemented(_, _)),
-            "expected Error::NotImplemented, got {err:?}"
+            "expected Error::NotImplemented, got {err:?}",
+        );
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            1,
+            "selected capable target is dispatched once, no retry",
         );
     }
 }
@@ -5663,14 +6058,26 @@ mod circuit_breaker_slot_release_tests {
             retry,
             ..Default::default()
         };
+        // anthropic-api kind so `count_tokens` treats the "p" target as
+        // count_tokens-capable (the capability walk keys on
+        // provider_kind == "anthropic-api"). The kind is irrelevant to
+        // the complete/stream breaker tests that also use this helper;
+        // they exercise the half-open probe-slot release, not the
+        // count_tokens capability gate.
         config.providers.insert(
             "p".into(),
-            ProviderEntry::OpenaiCompat {
-                base_url: "https://placeholder.invalid/v1".into(),
+            ProviderEntry::AnthropicApi {
                 api_key_ref: "literal:k".into(),
+                base_url: "https://placeholder.invalid".into(),
+                anthropic_version: "2023-06-01".into(),
+                auth_kind: routectl_providers::anthropic_api::AuthKind::default(),
                 header_extras: BTreeMap::new(),
                 payload_extras: None,
                 user_agent: None,
+                allowed_betas: vec![],
+                forward_client_headers: vec![],
+                context_management: false,
+                max_thinking_entry_bytes: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(0),

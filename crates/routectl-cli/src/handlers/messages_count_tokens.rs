@@ -2,17 +2,22 @@
 //!
 //! claude-code calls this endpoint to size context-window budgets
 //! (and to render token counts in the UI). routectl historically
-//! 404'd here; this handler proxies the request to the FIRST
-//! provider in the configured dispatch chain.
+//! 404'd here; this handler proxies the request to the first
+//! count_tokens-capable provider in the configured dispatch chain.
 //!
 //! Why proxy and not compute locally: the count_tokens result is
 //! tokenizer-specific. Anthropic's tokenizer is not stable across
 //! model versions and is not published as a public library. The
 //! upstream's `/v1/messages/count_tokens` is the source of truth.
 //!
-//! Why first-only (no fallback chain walk): falling back to a
-//! different model would return tokens for the WRONG tokenizer and
-//! silently miscount the caller's budget. See
+//! Why walk to the first capable provider (not strictly first): only
+//! the anthropic-api egress kind implements count_tokens, and it is
+//! Claude-only, so every capable target shares the same Anthropic
+//! tokenizer family. `Router::count_tokens` skips count_tokens-incapable
+//! kinds (e.g. Bedrock, which has no count_tokens endpoint) before
+//! dispatch and 501s only when no target in the chain is capable.
+//! Walking past incapable kinds never crosses tokenizer families, so a
+//! count served by a fallback still reflects the caller's tokenizer. See
 //! `Router::count_tokens`.
 
 use std::sync::Arc;
