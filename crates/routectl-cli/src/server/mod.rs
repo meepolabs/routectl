@@ -1122,8 +1122,13 @@ mod tests {
     fn collect_restart_required_changes_flags_bind_and_log() {
         use routectl_router::{Config, ServerAuth, ServerConfig};
 
+        // `next` is cloned from `prev` (not a second `Config::default()`) so
+        // both share an identical baseline -- including `usage.db_path`, whose
+        // default reads `XDG_CONFIG_HOME`/`HOME` and so can differ between two
+        // independent `Config::default()` calls if a concurrent test mutates
+        // those env vars. Cloning keeps this test hermetic against that.
         let mut prev = Config::default();
-        let mut next = Config::default();
+        let mut next = prev.clone();
 
         // Baseline: identical configs -> empty list.
         assert!(collect_restart_required_changes(&prev, &next).is_empty());
@@ -1149,21 +1154,21 @@ mod tests {
 
         // Log knob change -> log.redact_prompts.
         prev = Config::default();
-        next = Config::default();
+        next = prev.clone();
         next.log.redact_prompts = Some(true);
         let changes = collect_restart_required_changes(&prev, &next);
         assert!(changes.contains(&"log.redact_prompts"), "got {changes:?}");
 
         // usage.db_path change -> restart-required.
         prev = Config::default();
-        next = Config::default();
+        next = prev.clone();
         next.usage.db_path = std::path::PathBuf::from("/tmp/other-usage.db");
         let changes = collect_restart_required_changes(&prev, &next);
         assert!(changes.contains(&"usage.db_path"), "got {changes:?}");
 
         // usage.enabled change -> hot-reload, NOT restart-required.
         prev = Config::default();
-        next = Config::default();
+        next = prev.clone();
         next.usage.enabled = !prev.usage.enabled;
         let changes = collect_restart_required_changes(&prev, &next);
         assert!(
@@ -1173,7 +1178,7 @@ mod tests {
 
         // usage.retention_days change -> hot-reload, NOT restart-required.
         prev = Config::default();
-        next = Config::default();
+        next = prev.clone();
         next.usage.retention_days = prev.usage.retention_days + 1;
         let changes = collect_restart_required_changes(&prev, &next);
         assert!(
