@@ -293,19 +293,33 @@ pub fn compute_frozen_floor(req: &crate::ChatRequest) -> FrozenFloor {
 /// -- no `FrozenFloor` is threaded in, so a stale floor computed from a
 /// different request can never desync the boundary from what it bounds.
 ///
+/// A top-level `req.cache_control` marker is the exception: it selects
+/// Anthropic AUTOMATIC caching, which freezes the entire prompt prefix
+/// (tools + system + ALL messages up to the last block), so it leaves NO
+/// mutable message tail. A tools- or system-level marker, by contrast,
+/// sits BEFORE the messages and leaves them mutable.
+///
 /// Return semantics:
 /// - `Some(i)`, `0 <= i < req.messages.len()`: `messages[i..]` are mutable
 ///   and `messages[..i]` are frozen, where `i` is `(index of the last
 ///   message carrying a caller marker) + 1`.
-/// - `Some(0)`: NO message carries a caller marker. This covers zero
-///   caller breakpoints anywhere AND the case where caller breakpoints
-///   exist only on tools / system / the top-level field -- minifying
-///   messages never changes those bytes, so the whole list is mutable.
-/// - `None`: there is no mutable tail -- either the last message-level
-///   marker sits on the FINAL message (nothing follows it) or
-///   `req.messages` is empty.
+/// - `Some(0)`: NO message carries a caller marker AND there is no top-level
+///   marker. This covers zero caller breakpoints anywhere AND markers only
+///   on tools / system -- minifying messages never changes those bytes, so
+///   the whole list is mutable.
+/// - `None`: there is no mutable tail -- a top-level caller marker freezes
+///   the whole prefix, OR the last message-level marker sits on the FINAL
+///   message (nothing follows it), OR `req.messages` is empty.
 pub fn mutable_suffix_start(req: &crate::ChatRequest) -> Option<usize> {
     if req.messages.is_empty() {
+        return None;
+    }
+
+    // A top-level caller `cache_control` selects Anthropic automatic caching,
+    // which freezes the ENTIRE prefix (tools + system + all messages up to the
+    // last block). Unlike a tools/system marker -- which sits before the
+    // messages, leaving them mutable -- it leaves no mutable message tail.
+    if req.cache_control.is_some() {
         return None;
     }
 
@@ -318,8 +332,9 @@ pub fn mutable_suffix_start(req: &crate::ChatRequest) -> Option<usize> {
         .next_back();
 
     match last_frozen {
-        // No message-level marker (markers only on tools/system/top-level):
-        // every message is mutable.
+        // No message-level marker (markers only on tools/system): every
+        // message is mutable; minifying them does not touch the frozen
+        // tools/system bytes.
         None => Some(0),
         // Last marker on the final message: nothing follows it.
         Some(i) if i + 1 >= req.messages.len() => None,
@@ -673,9 +688,9 @@ mod tests {
     }
 
     #[test]
-    fn mutable_suffix_start_markers_only_on_tools_system_top_level_returns_0() {
-        // Arrange: caller markers on tools + system + top-level, none on
-        // any message.
+    fn mutable_suffix_start_markers_only_on_tools_and_system_returns_0() {
+        // Arrange: caller markers on tools + system (which sit BEFORE the
+        // messages), none on any message, and NO top-level marker.
         let req = ChatRequest {
             model: "claude-sonnet-4".into(),
             tools: Some(vec![ToolDef::Custom(CustomTool {
@@ -694,6 +709,26 @@ mod tests {
                 citations: None,
             }])),
             messages: vec![user_text_msg("hi", None), user_text_msg("there", None)],
+            ..Default::default()
+        };
+        let floor = compute_frozen_floor(&req);
+
+        // Act
+        let start = mutable_suffix_start(&req);
+
+        // Assert: tools/system bytes precede the messages, so all messages
+        // remain mutable.
+        assert!(floor.has_caller_breakpoints());
+        assert_eq!(start, Some(0));
+    }
+
+    #[test]
+    fn mutable_suffix_start_top_level_marker_freezes_whole_prefix_returns_none() {
+        // Arrange: a top-level caller cache_control (Anthropic automatic
+        // caching) freezes the ENTIRE prefix, including all messages.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_text_msg("hi", None), user_text_msg("there", None)],
             cache_control: Some(cc_5m()),
             ..Default::default()
         };
@@ -702,9 +737,9 @@ mod tests {
         // Act
         let start = mutable_suffix_start(&req);
 
-        // Assert
+        // Assert: no mutable message tail under a top-level breakpoint.
         assert!(floor.has_caller_breakpoints());
-        assert_eq!(start, Some(0));
+        assert_eq!(start, None);
     }
 
     #[test]
