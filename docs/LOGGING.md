@@ -363,6 +363,45 @@ breakpoint cost against what it returned.
   CONFIGURATION.md). A caller-supplied or skipped strategy is never
   flagged as thrash -- routectl only warns on decisions it made itself.
 
+## Context-reduction log shapes
+
+The dispatch-path context reducer (see CONFIGURATION.md, "Context
+reduction") emits one line per request, and only when reduction actually
+stripped bytes. The line carries counts and stable tokens only -- never
+message bodies, tool content, prompt text, or secrets.
+
+### `context_reduction` (DEBUG, only when applied)
+
+Emitted once per dispatch when the whitespace-only minify pass changed at
+least one JSON-valued string in the mutable tail. A request where
+reduction is disabled, has no mutable tail, or finds nothing to strip
+logs nothing here -- its decision still lands in the usage DB
+`reduction_strategy` column (below).
+
+| Field             | Meaning                                                       |
+|-------------------|---------------------------------------------------------------|
+| `provider`        | The provider name the request dispatched to.                  |
+| `model`           | The resolved model id.                                        |
+| `strategy`        | The stable decision token (always `applied` for this line).   |
+| `strings_minified`| How many JSON-valued strings were minified this request.      |
+| `bytes_saved`     | Total bytes removed across those strings.                     |
+| `est_tokens_saved`| Estimated tokens saved (a byte-derived approximation).        |
+
+The `strategy` token is a stable contract, recorded in the same form in
+the usage DB `reduction_strategy` column (see `routectl usage`):
+
+| Token                       | Meaning                                                                  |
+|-----------------------------|--------------------------------------------------------------------------|
+| `applied`                   | Reduction ran and stripped whitespace from at least one JSON string.     |
+| `skipped:disabled`          | Reduction not effective (global off, or provider `reduction_enabled = false`); the minify pass never ran. |
+| `skipped:no-tail`           | No mutable tail (every message is frozen behind a caller breakpoint); nothing to safely touch. |
+| `skipped:nothing-to-strip`  | The pass ran but no JSON-valued string in the tail had insignificant whitespace to remove. |
+| `skipped:unknown`           | Reduction ran but produced an outcome this build does not map (forward-compat catch-all). |
+
+Only `applied` emits a `context_reduction` log line; the `skipped:*`
+tokens are recorded in the usage DB but produce no log line (there is
+nothing to report).
+
 ## What's never logged
 
 - Resolved secret values (env contents, file contents, OAuth tokens,

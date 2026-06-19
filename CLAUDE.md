@@ -13,8 +13,10 @@ once; jump to the doc that matches your task.
   `ChatResponse`, `ChatChunk`, `Message`, `ReasoningDetail`) and
   the `Provider` trait; prompt-cache primitives in
   `cache_control.rs` (`CacheControl`, the `CacheBreakpointSource`
-  walk, `FrozenFloor` / `compute_frozen_floor`) and the
-  stable-prefix volatile-content detector (`volatile.rs`)
+  walk, `FrozenFloor` / `compute_frozen_floor`), the
+  stable-prefix volatile-content detector (`volatile.rs`), and
+  the lossless cache-safe context-reduction primitive
+  (`context_reduction.rs`)
 - `routectl-providers` -- concrete provider impls (`openai_compat`,
   `anthropic_api`, `bedrock`, `openai_responses`) plus the per-model
   quirks table (`model_profile.rs`), the per-dialect reasoning

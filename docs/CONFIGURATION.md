@@ -155,6 +155,8 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
 | `auto_emit_top_level_breakpoint` | `[providers.X]`               | `Option<bool>`, default None (inherits global); `false` disables auto-cache for this provider     |
 | `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
+| `enabled`                      | `[reduction]` global            | bool, default false; master switch for dispatch-path context reduction (see `[reduction]`)        |
+| `reduction_enabled`            | `[providers.X]`                 | `Option<bool>`, default None (inherits global); `false` disables reduction for this provider      |
 
 **`base_url` scheme requirement.** `base_url` must use `https://` (or
 `http://` for loopback addresses only). Link-local addresses
@@ -1037,6 +1039,77 @@ closed (`false/false`) and is never auto-cached. An operator who knows
 their custom-base host supports caching must set `cache_capability`
 explicitly to opt in (an explicit override always wins, even on a custom
 base URL).
+
+## Context reduction (`[reduction]`)
+
+routectl can strip insignificant whitespace from JSON-formatted string
+tool content on the dispatch path -- `tool_result.content` and
+`tool_use.input` when they hold a JSON-valued **string** (for example, a
+tool that returns pretty-printed JSON as text). This shrinks the bytes
+sent upstream without changing what the model sees, so it can lower the
+token bill for clients whose tools emit indented JSON text. It is a
+**no-op** for raw-text tool output (nothing to strip).
+
+The transform is **lossless** and **cache-safe**:
+
+- **Lossless** -- a custom whitespace-only lexer drops insignificant
+  whitespace between JSON tokens; it never reparses through serde and
+  never reformats string/number/literal token text. Anything that is not
+  recognizable JSON is left byte-for-byte unchanged.
+- **Cache-safe** -- it mutates ONLY the region strictly after the last
+  caller `cache_control` breakpoint (the mutable message tail). The
+  cacheable prefix every caller relies on is never touched, so reduction
+  can never invalidate a caller's prompt cache. It runs on a per-attempt
+  clone, after overlays, never the original request.
+- routectl does NOT touch structured JSON `Value` tool content -- those
+  are already reserialized compactly on the wire. Only whitespace held
+  inside a JSON-valued string survives to the model, so that string is
+  the sole target.
+
+Reduction is applied to completions and streaming. It is **opt-in**
+(default off).
+
+The optional `[reduction]` block is the **global** master switch. A
+missing block keeps the default: reduction disabled.
+
+```toml
+[reduction]
+# Master switch for dispatch-path context reduction (whitespace-only
+# minify of JSON-valued string tool content in the mutable tail).
+# Default false.
+enabled = true
+```
+
+### Per-provider switch
+
+Each `[providers.X]` entry carries an optional `reduction_enabled`.
+`None` (omitted) inherits the global switch; `false` disables reduction
+for that provider even when the global switch is on. The effective
+decision is "global `enabled = true` AND provider not explicitly
+`false`".
+
+```toml
+[reduction]
+enabled = true
+
+[providers.compat-a]
+kind = "openai-compat"
+api_key_ref = "literal:PLACEHOLDER"
+base_url = "https://example.invalid/v1"
+# Inherits the global switch (reduction ON for this provider).
+
+[providers.compat-b]
+kind = "openai-compat"
+api_key_ref = "literal:PLACEHOLDER"
+base_url = "https://example.invalid/v1"
+# Opt this provider out while leaving the global default on.
+reduction_enabled = false
+```
+
+The per-request decision token is recorded in the usage DB
+`reduction_strategy` column and, when reduction actually strips bytes, a
+`context_reduction` line is logged at DEBUG (counts only -- no bodies).
+See [LOGGING.md](LOGGING.md).
 
 ## Reading usage (`routectl usage`)
 
