@@ -168,6 +168,7 @@ async fn build_provider_inner(
             user_agent,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            reduction_enabled: _,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -209,6 +210,7 @@ async fn build_provider_inner(
             max_thinking_entry_bytes,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            reduction_enabled: _,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -272,6 +274,7 @@ async fn build_provider_inner(
             user_agent,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            reduction_enabled: _,
             runtime: _,
         } => {
             let bearer_is_oauth =
@@ -351,6 +354,7 @@ async fn build_provider_inner(
             anthropic_beta,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
+            reduction_enabled: _,
             runtime: _,
         } => {
             validate_bedrock_allowlists(
@@ -1926,6 +1930,7 @@ mod bedrock_validation_tests {
             anthropic_beta: Vec::new(),
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime: Default::default(),
         }
     }
@@ -1954,6 +1959,7 @@ mod bedrock_validation_tests {
             anthropic_beta: vec!["future-flag-2026-12-31".into()],
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime,
         }
     }
@@ -2072,6 +2078,7 @@ mod bedrock_validation_tests {
                 anthropic_beta: Vec::new(),
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: Default::default(),
             },
             BedrockGlobalConfig {
@@ -2286,6 +2293,7 @@ mod build_resolved_models_tests {
             anthropic_beta: Vec::new(),
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime: Default::default(),
         };
         let cfg = config_with_models(

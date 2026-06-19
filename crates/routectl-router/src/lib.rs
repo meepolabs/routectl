@@ -15,8 +15,8 @@ pub(crate) mod seat_pool;
 
 pub use config::{
     AliasValue, CacheCapability, CacheConfig, Config, HistoryReasoning, LogConfig, ModelEntry,
-    PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, RegistryEntry,
-    RetryPolicy, ServerAuth, ServerConfig, UsageConfig,
+    PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
+    RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, UsageConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};

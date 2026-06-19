@@ -3605,6 +3605,7 @@ mod three_source_anthropic_beta_lift_tests {
                 user_agent: None,
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: ProviderRuntimePolicy::default(),
             },
         );
@@ -4421,6 +4422,7 @@ mod resolved_models_tests {
                 user_agent: None,
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(60_000),
@@ -4829,6 +4831,7 @@ mod gate_error_does_not_mask_real_error_tests {
                 user_agent: None,
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(60_000),
@@ -5293,6 +5296,7 @@ mod count_tokens_tests {
             max_thinking_entry_bytes: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -5308,6 +5312,7 @@ mod count_tokens_tests {
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -5328,6 +5333,7 @@ mod count_tokens_tests {
             anthropic_beta: vec![],
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -5737,6 +5743,7 @@ mod feature_filter_tests {
                 user_agent: None,
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: ProviderRuntimePolicy {
                     unsupported_features: unsupported_first,
                     ..Default::default()
@@ -5753,6 +5760,7 @@ mod feature_filter_tests {
                 user_agent: None,
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: ProviderRuntimePolicy {
                     unsupported_features: unsupported_second,
                     ..Default::default()
@@ -6019,6 +6027,7 @@ mod auth_failure_recovery_tests {
                 user_agent: None,
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: ProviderRuntimePolicy::default(),
             },
         );
@@ -6293,6 +6302,7 @@ mod circuit_breaker_slot_release_tests {
                 user_agent: None,
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(circuit_failures),
                     circuit_cooldown_ms: Some(circuit_cooldown_ms),
@@ -6358,6 +6368,7 @@ mod circuit_breaker_slot_release_tests {
                 max_thinking_entry_bytes: None,
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(0),
@@ -7338,6 +7349,7 @@ mod auto_emit_cache_control_tests {
             max_thinking_entry_bytes: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: Some(false),
+            reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }

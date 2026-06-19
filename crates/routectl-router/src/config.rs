@@ -95,6 +95,12 @@ pub struct Config {
     /// A missing block keeps the default: auto-emit enabled.
     #[serde(default)]
     pub cache: CacheConfig,
+
+    /// Operator-facing `[reduction]` block. Global switch for the
+    /// dispatch-path token-reduction feature. A missing block keeps the
+    /// default: reduction disabled.
+    #[serde(default)]
+    pub reduction: ReductionConfig,
 }
 
 /// Operator-facing `[cache]` config block. Global policy for the
@@ -122,6 +128,35 @@ impl Default for CacheConfig {
             auto_emit_top_level_breakpoint: true,
         }
     }
+}
+
+/// Operator-facing `[reduction]` config block. Global policy for the
+/// dispatch-path token-reduction feature. A missing `[reduction]` table
+/// deserializes to `ReductionConfig::default()` (reduction disabled), and
+/// the per-field `#[serde(default)]` keeps an omitted key disabled too.
+///
+/// This is the GLOBAL switch; each `[providers.X]` entry carries an
+/// optional `reduction_enabled` override consulted only when the global
+/// switch is on. The effective decision a later dispatch task will consume:
+/// reduction applies when the global `enabled == true` AND the provider
+/// override is not explicitly `Some(false)`. A provider `None` inherits
+/// the global setting.
+///
+/// `#[non_exhaustive]` so later tactic sub-configs are non-breaking
+/// additions to the Rust API. `#[serde(deny_unknown_fields)]` is the
+/// complementary wire-side choice (matching `CacheConfig`): unknown TOML
+/// keys are rejected so a typo surfaces at config-load time rather than
+/// being silently ignored. The two do not conflict -- a config naming a
+/// future field simply requires a binary new enough to know that field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ReductionConfig {
+    /// Master switch for the dispatch-path token-reduction feature.
+    /// Default off (reduction is opt-in): `bool::default()` is `false`,
+    /// and the derived `Default` keeps reduction disabled.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Operator-facing `[log]` config block. Each field mirrors a
@@ -901,6 +936,13 @@ pub enum ProviderEntry {
         /// `runtime`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for the dispatch-path token-reduction
+        /// feature. `None` inherits the global `[reduction]` switch;
+        /// `Some(false)` disables reduction for this provider even when
+        /// global is on. Reduction policy, NOT a runtime/rate knob --
+        /// lives outside `runtime`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reduction_enabled: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -977,6 +1019,12 @@ pub enum ProviderEntry {
         /// this provider. Cache policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for the dispatch-path token-reduction
+        /// feature. `None` inherits the global `[reduction]` switch;
+        /// `Some(false)` disables reduction for this provider. Reduction
+        /// policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reduction_enabled: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1029,6 +1077,12 @@ pub enum ProviderEntry {
         /// this provider. Cache policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for the dispatch-path token-reduction
+        /// feature. `None` inherits the global `[reduction]` switch;
+        /// `Some(false)` disables reduction for this provider. Reduction
+        /// policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reduction_enabled: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1063,6 +1117,12 @@ pub enum ProviderEntry {
         /// this provider. Cache policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for the dispatch-path token-reduction
+        /// feature. `None` inherits the global `[reduction]` switch;
+        /// `Some(false)` disables reduction for this provider. Reduction
+        /// policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reduction_enabled: Option<bool>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1273,6 +1333,34 @@ impl ProviderEntry {
         }
     }
 
+    /// Per-provider override for the dispatch-path token-reduction
+    /// feature. `None` means "inherit the global `[reduction]` switch";
+    /// `Some(false)` disables reduction for this provider even when the
+    /// global switch is on. Mirrors `auto_emit_top_level_breakpoint()`.
+    ///
+    /// The effective decision rule a later dispatch task will consume:
+    /// reduction applies when the global `[reduction] enabled == true` AND
+    /// this override is not explicitly `Some(false)`. That decision logic
+    /// is NOT implemented here -- this is the config surface only.
+    pub fn reduction_enabled(&self) -> Option<bool> {
+        match self {
+            Self::OpenaiCompat {
+                reduction_enabled, ..
+            } => *reduction_enabled,
+            Self::AnthropicApi {
+                reduction_enabled, ..
+            } => *reduction_enabled,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock {
+                reduction_enabled, ..
+            } => *reduction_enabled,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                reduction_enabled, ..
+            } => *reduction_enabled,
+        }
+    }
+
     pub fn openai_compat(base_url: impl Into<String>, api_key_ref: impl Into<String>) -> Self {
         Self::OpenaiCompat {
             base_url: base_url.into(),
@@ -1282,6 +1370,7 @@ impl ProviderEntry {
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1301,6 +1390,7 @@ impl ProviderEntry {
             max_thinking_entry_bytes: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1321,6 +1411,7 @@ impl ProviderEntry {
             user_agent: None,
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1817,7 +1908,7 @@ impl Default for RetryPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheCapability, Config, ProviderEntry};
+    use super::{CacheCapability, Config, ProviderEntry, ReductionConfig};
 
     #[test]
     #[should_panic(expected = "with_anthropic_version")]
@@ -1853,6 +1944,7 @@ mod tests {
                 anthropic_beta: Vec::new(),
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
                 runtime: Default::default(),
             };
             assert_eq!(bedrock.kind_str(), "bedrock");
@@ -2109,6 +2201,116 @@ cache_capability = { supports_top_level_cache_control = true, cache_hit_observab
             "explicit override must win over the fail-closed custom-base default"
         );
         assert!(cap.cache_hit_observable);
+    }
+
+    /// An omitted `[reduction]` block deserializes to the default:
+    /// reduction disabled.
+    #[test]
+    fn reduction_omitted_block_defaults_disabled() {
+        // Arrange: a config with no [reduction] table at all.
+        let toml_text = r#"
+[providers.openai]
+kind = "openai-compat"
+base_url = "https://example.com/v1"
+api_key_ref = "literal:k"
+"#;
+
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse without reduction block");
+
+        // Assert: omitted block == default == disabled.
+        assert!(
+            !cfg.reduction.enabled,
+            "omitted [reduction] must default to disabled"
+        );
+    }
+
+    /// A `[reduction]` block with `enabled = true` parses, and an unknown
+    /// field inside it is rejected (deny_unknown_fields, mirroring
+    /// CacheConfig).
+    #[test]
+    fn reduction_block_parses_and_rejects_unknown_fields() {
+        // Arrange + Act: explicit enable.
+        let toml_text = r#"
+[reduction]
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse enabled reduction block");
+
+        // Assert
+        assert!(cfg.reduction.enabled, "enabled = true must parse to true");
+
+        // Arrange: an unknown key inside [reduction].
+        let bad = r#"
+[reduction]
+enabled = true
+bogus = 1
+"#;
+
+        // Act + Assert: deny_unknown_fields must reject it.
+        assert!(
+            toml::from_str::<Config>(bad).is_err(),
+            "deny_unknown_fields must reject an unknown ReductionConfig field",
+        );
+    }
+
+    /// `ReductionConfig::default()` yields disabled (reduction is opt-in).
+    #[test]
+    fn reduction_config_default_is_disabled() {
+        // Arrange + Act
+        let cfg = ReductionConfig::default();
+
+        // Assert
+        assert!(!cfg.enabled, "ReductionConfig::default() must be disabled");
+    }
+
+    /// The per-provider `reduction_enabled()` accessor returns `None` when
+    /// the override is unset, and the configured `Option<bool>` when a
+    /// TOML override is present (round-tripping through serialize).
+    #[test]
+    fn reduction_enabled_per_provider_accessor() {
+        // Arrange: unset -> None.
+        let unset = ProviderEntry::openai_compat("https://example.com/v1", "literal:k");
+
+        // Act + Assert
+        assert_eq!(
+            unset.reduction_enabled(),
+            None,
+            "unset per-provider override must read as None"
+        );
+
+        // Arrange: an explicit per-provider override of false.
+        let toml_text = r#"
+[providers.openai]
+kind = "openai-compat"
+base_url = "https://example.com/v1"
+api_key_ref = "literal:k"
+reduction_enabled = false
+"#;
+
+        // Act
+        let cfg: Config = toml::from_str(toml_text).expect("parse override");
+        let entry = cfg.providers.get("openai").expect("openai provider");
+
+        // Assert: Some(false) reads back through the accessor.
+        assert_eq!(
+            entry.reduction_enabled(),
+            Some(false),
+            "explicit reduction_enabled = false must read as Some(false)"
+        );
+
+        // Round-trip: serialize, re-parse, accessor still Some(false).
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let cfg_out: Config = toml::from_str(&serialized).expect("re-parse");
+        assert_eq!(
+            cfg_out
+                .providers
+                .get("openai")
+                .expect("openai")
+                .reduction_enabled(),
+            Some(false),
+            "per-provider override must round-trip through serde"
+        );
     }
 }
 
