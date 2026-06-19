@@ -557,6 +557,7 @@ mod tests {
         rec.stream = true;
         rec.input_tokens = Some(42);
         rec.quota_extras = Some(json!({"plan": "pro"}));
+        rec.reduction_strategy = Some("applied".into());
 
         // Act
         handle.try_send(rec);
@@ -565,17 +566,18 @@ mod tests {
 
         // Assert: exact bound values for the representative row.
         let conn = Connection::open(&path).expect("read");
-        let (outcome, stream, input, extras): (String, i64, i64, String) = conn
+        let (outcome, stream, input, extras, reduction): (String, i64, i64, String, String) = conn
             .query_row(
-                "SELECT outcome, stream, input_tokens, quota_extras FROM requests WHERE request_id='rt-1'",
+                "SELECT outcome, stream, input_tokens, quota_extras, reduction_strategy FROM requests WHERE request_id='rt-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .expect("row");
         assert_eq!(outcome, "timeout");
         assert_eq!(stream, 1);
         assert_eq!(input, 42);
         assert_eq!(extras, "{\"plan\":\"pro\"}");
+        assert_eq!(reduction, "applied");
     }
 
     #[tokio::test]
