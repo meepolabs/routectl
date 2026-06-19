@@ -276,6 +276,67 @@ pub fn compute_frozen_floor(req: &crate::ChatRequest) -> FrozenFloor {
     FrozenFloor { positions }
 }
 
+/// The first MUTABLE message index: the boundary a cache-safe context
+/// reduction transform may begin byte-changing without invalidating any
+/// caller-supplied prompt-cache breakpoint.
+///
+/// A message is "frozen" when one of its content parts carries a caller
+/// `cache_control` marker -- the same condition the `cache_breakpoints`
+/// walk records as a `BreakpointPosition::Messages` breakpoint. The
+/// transform may only mutate messages STRICTLY AFTER the last frozen
+/// message.
+///
+/// `BreakpointPosition` does not carry the originating message index, so
+/// the last frozen index is recovered by re-scanning `req.messages` with
+/// the same per-part `cache_control().is_some()` check the walk uses; no
+/// new content classification is introduced. Pure function of `req` alone
+/// -- no `FrozenFloor` is threaded in, so a stale floor computed from a
+/// different request can never desync the boundary from what it bounds.
+///
+/// Return semantics:
+/// - `Some(i)`, `0 <= i < req.messages.len()`: `messages[i..]` are mutable
+///   and `messages[..i]` are frozen, where `i` is `(index of the last
+///   message carrying a caller marker) + 1`.
+/// - `Some(0)`: NO message carries a caller marker. This covers zero
+///   caller breakpoints anywhere AND the case where caller breakpoints
+///   exist only on tools / system / the top-level field -- minifying
+///   messages never changes those bytes, so the whole list is mutable.
+/// - `None`: there is no mutable tail -- either the last message-level
+///   marker sits on the FINAL message (nothing follows it) or
+///   `req.messages` is empty.
+pub fn mutable_suffix_start(req: &crate::ChatRequest) -> Option<usize> {
+    if req.messages.is_empty() {
+        return None;
+    }
+
+    let last_frozen = req
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| message_has_caller_marker(m))
+        .map(|(i, _)| i)
+        .next_back();
+
+    match last_frozen {
+        // No message-level marker (markers only on tools/system/top-level):
+        // every message is mutable.
+        None => Some(0),
+        // Last marker on the final message: nothing follows it.
+        Some(i) if i + 1 >= req.messages.len() => None,
+        Some(i) => Some(i + 1),
+    }
+}
+
+/// Whether any content part of `m` carries a caller `cache_control`
+/// marker, using the same check the `cache_breakpoints` walk applies.
+fn message_has_caller_marker(m: &crate::Message) -> bool {
+    if let crate::MessageContent::Parts(parts) = &m.content {
+        parts.iter().any(|p| p.cache_control().is_some())
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,5 +647,148 @@ mod tests {
             ..Default::default()
         };
         validate_source(&req).unwrap();
+    }
+
+    // --- mutable_suffix_start tests ---
+
+    #[test]
+    fn mutable_suffix_start_markers_on_0_and_2_of_5_returns_3() {
+        // Arrange: messages 0 and 2 carry caller markers; last frozen = 2.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![
+                user_text_msg("a", Some(cc_5m())),
+                user_text_msg("b", None),
+                user_text_msg("c", Some(cc_5m())),
+                user_text_msg("d", None),
+                user_text_msg("e", None),
+            ],
+            ..Default::default()
+        };
+        // Act
+        let start = mutable_suffix_start(&req);
+
+        // Assert
+        assert_eq!(start, Some(3));
+    }
+
+    #[test]
+    fn mutable_suffix_start_markers_only_on_tools_system_top_level_returns_0() {
+        // Arrange: caller markers on tools + system + top-level, none on
+        // any message.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            tools: Some(vec![ToolDef::Custom(CustomTool {
+                name: "calc".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+                cache_control: Some(cc_5m()),
+                defer_loading: None,
+                strict: None,
+                type_tag: None,
+            })]),
+            system: Some(SystemContent::Blocks(vec![SystemBlock {
+                kind: "text".into(),
+                text: "sys".into(),
+                cache_control: Some(cc_5m()),
+                citations: None,
+            }])),
+            messages: vec![user_text_msg("hi", None), user_text_msg("there", None)],
+            cache_control: Some(cc_5m()),
+            ..Default::default()
+        };
+        let floor = compute_frozen_floor(&req);
+
+        // Act
+        let start = mutable_suffix_start(&req);
+
+        // Assert
+        assert!(floor.has_caller_breakpoints());
+        assert_eq!(start, Some(0));
+    }
+
+    #[test]
+    fn mutable_suffix_start_marker_on_final_message_returns_none() {
+        // Arrange: the only message marker is on the final message.
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_text_msg("a", None), user_text_msg("b", Some(cc_5m()))],
+            ..Default::default()
+        };
+
+        // Act
+        let start = mutable_suffix_start(&req);
+
+        // Assert
+        assert_eq!(start, None);
+    }
+
+    #[test]
+    fn mutable_suffix_start_single_message_with_marker_returns_none() {
+        // Arrange: exactly one message, carrying a marker -- the minimum
+        // values for the `i + 1 >= len` guard (i = 0, len = 1).
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_text_msg("a", Some(cc_5m()))],
+            ..Default::default()
+        };
+
+        // Act
+        let start = mutable_suffix_start(&req);
+
+        // Assert: the marker sits on the final (only) message -- no tail.
+        assert_eq!(start, None);
+    }
+
+    #[test]
+    fn mutable_suffix_start_empty_messages_returns_none() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![],
+            ..Default::default()
+        };
+
+        // Act
+        let start = mutable_suffix_start(&req);
+
+        // Assert
+        assert_eq!(start, None);
+    }
+
+    #[test]
+    fn mutable_suffix_start_no_breakpoints_anywhere_returns_0() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_text_msg("a", None), user_text_msg("b", None)],
+            ..Default::default()
+        };
+        let floor = compute_frozen_floor(&req);
+
+        // Act
+        let start = mutable_suffix_start(&req);
+
+        // Assert
+        assert!(!floor.has_caller_breakpoints());
+        assert_eq!(start, Some(0));
+    }
+
+    #[test]
+    fn mutable_suffix_start_does_not_mutate_request() {
+        // Arrange
+        let req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![user_text_msg("a", Some(cc_5m())), user_text_msg("b", None)],
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let _ = mutable_suffix_start(&req);
+
+        // Assert: byte-identical (ChatRequest has no PartialEq).
+        let after = serde_json::to_value(&req).unwrap();
+        assert_eq!(before, after);
     }
 }

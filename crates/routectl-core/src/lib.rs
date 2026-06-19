@@ -27,8 +27,8 @@ pub mod volatile;
 pub mod test_utils;
 
 pub use cache_control::{
-    compute_frozen_floor, validate_source, Breakpoint, BreakpointPosition, CacheBreakpointSource,
-    CacheControl, FrozenFloor, OwnedBreakpoint,
+    compute_frozen_floor, mutable_suffix_start, validate_source, Breakpoint, BreakpointPosition,
+    CacheBreakpointSource, CacheControl, FrozenFloor, OwnedBreakpoint,
 };
 pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};
