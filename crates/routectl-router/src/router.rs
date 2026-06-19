@@ -187,6 +187,11 @@ pub struct DispatchMeta {
     /// The resolved alias key the request routed under (the incoming
     /// `req.model`). Always populated, even when resolution then failed.
     pub resolved_alias: String,
+    /// Stable auto-cache decision token for the served target (see
+    /// [`CacheInjection::strategy_str`]). `None` when no target was
+    /// dispatched (count_tokens, unknown alias, or all entries
+    /// gate-blocked before any injection point ran).
+    pub cache_strategy: Option<&'static str>,
 }
 
 impl DispatchMeta {
@@ -203,6 +208,7 @@ impl DispatchMeta {
             served_model: None,
             served_upstream: None,
             resolved_alias: alias.to_string(),
+            cache_strategy: None,
         }
     }
 
@@ -879,13 +885,25 @@ impl Router {
             // loop, so every retry on this target reuses identical bytes.
             // Never mutates the original `req`; any doubt sends un-injected.
             let provider_cfg = self.config.providers.get(provider_name);
-            let _ = maybe_apply_auto_cache_control(
+            let cache_injection = maybe_apply_auto_cache_control(
                 &mut attempt_req,
                 &auto_cache_plan,
                 provider_cfg.map(|e| e.cache_capability()),
                 provider_cfg
                     .and_then(|e| e.auto_emit_top_level_breakpoint())
                     .unwrap_or(true),
+            );
+            // T6 observability: stamp the per-request decision token so the
+            // usage DB and the outcome log can see what was decided, and
+            // emit the per-request decision at debug. No bodies / secrets:
+            // only provider name, model id, and the stable strategy token.
+            let strategy_token = cache_injection.strategy_str();
+            meta.cache_strategy = Some(strategy_token);
+            tracing::debug!(
+                provider = %provider_name,
+                model = %model,
+                strategy = strategy_token,
+                "cache_auto_decision",
             );
 
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
@@ -1439,13 +1457,24 @@ impl Router {
             // split; injected on this clone after overlays, before the
             // inner loop. Original `req` is never mutated.
             let provider_cfg = self.config.providers.get(provider_name);
-            let _ = maybe_apply_auto_cache_control(
+            let cache_injection = maybe_apply_auto_cache_control(
                 &mut attempt_req,
                 &auto_cache_plan,
                 provider_cfg.map(|e| e.cache_capability()),
                 provider_cfg
                     .and_then(|e| e.auto_emit_top_level_breakpoint())
                     .unwrap_or(true),
+            );
+            // T6 observability: see `complete_inner`. Stamp the decision
+            // token and emit the per-request decision at debug. No bodies /
+            // secrets: only provider name, model id, strategy token.
+            let strategy_token = cache_injection.strategy_str();
+            meta.cache_strategy = Some(strategy_token);
+            tracing::debug!(
+                provider = %provider_name,
+                model = %model,
+                strategy = strategy_token,
+                "cache_auto_decision",
             );
 
             let attempt_policy = self.compose_attempt_policy(
@@ -1886,6 +1915,37 @@ enum CacheInjection {
     /// original `cache_control` was restored and the clone dispatched
     /// unchanged.
     ValidationRolledBack,
+}
+
+impl CacheInjection {
+    /// Stable operator-facing token for this decision, recorded in the
+    /// usage DB (`requests.strategy`) and emitted in the
+    /// `cache_auto_decision` log. These tokens are a CONTRACT: do not
+    /// rename or repurpose them, only add new ones. The `auto_skipped:`
+    /// prefix groups the variants where auto-emit ran but declined.
+    ///
+    /// | variant                  | token                              |
+    /// |--------------------------|------------------------------------|
+    /// | Emitted                  | `auto_emitted`                     |
+    /// | SkippedCallerSupplied    | `caller_supplied`                  |
+    /// | SkippedVolatileHigh      | `volatile_vetoed`                  |
+    /// | SkippedGlobalDisabled    | `auto_skipped:global_disabled`     |
+    /// | SkippedProviderDisabled  | `auto_skipped:provider_disabled`   |
+    /// | SkippedNoCapability      | `auto_skipped:no_capability`       |
+    /// | SkippedBreakpointCap     | `auto_skipped:breakpoint_cap`      |
+    /// | ValidationRolledBack     | `auto_skipped:validation_rolled_back` |
+    fn strategy_str(self) -> &'static str {
+        match self {
+            CacheInjection::Emitted => "auto_emitted",
+            CacheInjection::SkippedCallerSupplied => "caller_supplied",
+            CacheInjection::SkippedVolatileHigh => "volatile_vetoed",
+            CacheInjection::SkippedGlobalDisabled => "auto_skipped:global_disabled",
+            CacheInjection::SkippedProviderDisabled => "auto_skipped:provider_disabled",
+            CacheInjection::SkippedNoCapability => "auto_skipped:no_capability",
+            CacheInjection::SkippedBreakpointCap => "auto_skipped:breakpoint_cap",
+            CacheInjection::ValidationRolledBack => "auto_skipped:validation_rolled_back",
+        }
+    }
 }
 
 /// Decide-and-maybe-inject a single top-level `cache_control` ephemeral_5m
@@ -7703,6 +7763,41 @@ mod auto_emit_cache_control_tests {
         assert_eq!(
             req.cache_control, None,
             "rollback must restore the original (absent) top-level marker",
+        );
+    }
+
+    #[test]
+    fn strategy_str_maps_every_variant_to_stable_token() {
+        // Operator-facing contract: these tokens are recorded in the usage
+        // DB and matched by the thrash predicate. Pin them exactly.
+        assert_eq!(CacheInjection::Emitted.strategy_str(), "auto_emitted");
+        assert_eq!(
+            CacheInjection::SkippedCallerSupplied.strategy_str(),
+            "caller_supplied",
+        );
+        assert_eq!(
+            CacheInjection::SkippedVolatileHigh.strategy_str(),
+            "volatile_vetoed",
+        );
+        assert_eq!(
+            CacheInjection::SkippedGlobalDisabled.strategy_str(),
+            "auto_skipped:global_disabled",
+        );
+        assert_eq!(
+            CacheInjection::SkippedProviderDisabled.strategy_str(),
+            "auto_skipped:provider_disabled",
+        );
+        assert_eq!(
+            CacheInjection::SkippedNoCapability.strategy_str(),
+            "auto_skipped:no_capability",
+        );
+        assert_eq!(
+            CacheInjection::SkippedBreakpointCap.strategy_str(),
+            "auto_skipped:breakpoint_cap",
+        );
+        assert_eq!(
+            CacheInjection::ValidationRolledBack.strategy_str(),
+            "auto_skipped:validation_rolled_back",
         );
     }
 }

@@ -278,3 +278,29 @@ async fn finalize_then_drop_still_one_row() {
         "finalize-then-drop must persist exactly one row"
     );
 }
+
+#[test]
+fn thrash_fires_only_for_auto_emitted_create_without_read() {
+    // Thrash: routectl auto-emitted, a cache entry was created, no read.
+    assert!(is_cache_thrash(Some("auto_emitted"), 300, 0));
+
+    // Healthy: created AND read -> the cache is working, not thrash.
+    assert!(!is_cache_thrash(Some("auto_emitted"), 300, 600));
+
+    // Auto-emitted but nothing created -> not thrash.
+    assert!(!is_cache_thrash(Some("auto_emitted"), 0, 0));
+
+    // Read-only hit on a pre-existing entry (no new creation this request)
+    // -> not thrash; the cache is being used.
+    assert!(!is_cache_thrash(Some("auto_emitted"), 0, 600));
+
+    // Caller-supplied breakpoint -> routectl did not decide; never thrash.
+    assert!(!is_cache_thrash(Some("caller_supplied"), 300, 0));
+
+    // Skipped strategies -> never thrash.
+    assert!(!is_cache_thrash(Some("auto_skipped:no_capability"), 300, 0));
+    assert!(!is_cache_thrash(Some("volatile_vetoed"), 300, 0));
+
+    // No strategy recorded (request never dispatched) -> never thrash.
+    assert!(!is_cache_thrash(None, 300, 0));
+}

@@ -423,12 +423,13 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.quota_reset,
             quota_extras,
             extra,
+            r.strategy,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?42` positions match the params list above.
+/// `schema.rs` exactly; `?1..?43` positions match the params list above.
 const INSERT_SQL: &str = "\
 INSERT OR IGNORE INTO requests (
     ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
@@ -441,7 +442,8 @@ INSERT OR IGNORE INTO requests (
     cache_write_1h, server_tool_use,
     quota_claim, quota_status, quota_overage_status, quota_utilization,
     quota_overage_utilization, quota_reset, quota_extras,
-    extra
+    extra,
+    strategy
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -453,7 +455,8 @@ INSERT OR IGNORE INTO requests (
     ?33, ?34,
     ?35, ?36, ?37, ?38,
     ?39, ?40, ?41,
-    ?42
+    ?42,
+    ?43
 )";
 
 #[cfg(test)]
@@ -511,6 +514,7 @@ mod tests {
             quota_reset: None,
             quota_extras: None,
             extra: None,
+            strategy: None,
         }
     }
 

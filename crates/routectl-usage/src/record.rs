@@ -115,6 +115,11 @@ pub struct UsageRecord {
     pub finish_reason: Option<String>,
     pub attempt_count: u32,
     pub fallback_count: u32,
+    /// Stable auto-cache decision token for the served target (e.g.
+    /// `auto_emitted`, `caller_supplied`, `auto_skipped:no_capability`).
+    /// `None` when no target was dispatched (count_tokens, unknown alias,
+    /// or a gate failure before any injection point ran).
+    pub strategy: Option<String>,
 
     // TIMING
     pub latency_ms: i64,
@@ -244,6 +249,7 @@ mod tests {
             finish_reason: Some("stop".to_string()),
             attempt_count: 1,
             fallback_count: 0,
+            strategy: Some("auto_emitted".to_string()),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -297,6 +303,7 @@ mod tests {
             finish_reason: None,
             attempt_count: 1,
             fallback_count: 0,
+            strategy: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

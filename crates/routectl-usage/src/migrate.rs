@@ -38,19 +38,62 @@ fn read_user_version(conn: &Connection) -> Result<i64, rusqlite::Error> {
 /// crash mid-step rolls back, so the DB never lands in a
 /// tables-without-version state. Each statement is still idempotent
 /// (`IF NOT EXISTS` / `INSERT OR IGNORE`) so a re-run is safe.
+///
+/// The version literals here are the LITERAL target of this step (1), not
+/// `SCHEMA_VERSION`: a later schema bump must not make a v0 DB skip the
+/// intervening forward steps. `CREATE_REQUESTS_TABLE` already carries the
+/// current (v2) column set, so a fresh DB lands fully-shaped; the
+/// `migrate_v1_to_v2` `ADD COLUMN` is a no-op-equivalent on a fresh DB
+/// because the loop stamps user_version to 2 here only via the v1->v2 arm.
 fn migrate_v0_to_v1(conn: &Connection, now_ms: i64) -> Result<(), rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(CREATE_REQUESTS_TABLE)?;
     tx.execute_batch(CREATE_TS_START_INDEX)?;
     tx.execute_batch(CREATE_META_TABLE)?;
     seed_meta(&tx, now_ms)?;
-    tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+    tx.execute_batch("PRAGMA user_version = 1")?;
     tx.commit()
+}
+
+/// Apply the v1 -> v2 step atomically: add the nullable `strategy` column
+/// (the per-request auto-cache decision token), bump `PRAGMA
+/// user_version` to 2, and update the human-readable `meta.schema_version`
+/// row. All in one transaction so a crash mid-step rolls back rather than
+/// landing a column-without-version state. Existing rows survive with
+/// `strategy` NULL.
+///
+/// On a FRESH DB the v0 -> v1 step created `requests` from the current
+/// schema, which already carries `strategy`. The loop still enters this
+/// arm (v0->v1 stamps user_version=1, not SCHEMA_VERSION), so guard the
+/// `ADD COLUMN` against a pre-existing column to keep the fresh path safe.
+fn migrate_v1_to_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    if !column_exists(&tx, "requests", "strategy")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN strategy TEXT")?;
+    }
+    tx.execute_batch("PRAGMA user_version = 2")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "2"],
+    )?;
+    tx.commit()
+}
+
+/// True if `table` already has a column named `column`. Used so the
+/// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
+/// created from the current schema and already carries the column).
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?;
+    let present = stmt.exists(rusqlite::params![table, column])?;
+    Ok(present)
 }
 
 /// Insert the creation timestamp and schema version into `meta`. Uses
 /// `INSERT OR IGNORE` so a re-run never overwrites the original
-/// creation time.
+/// creation time. Seeds `schema_version` to the v1 literal (the version
+/// this step lands); later migration steps update it in lockstep with
+/// their own `PRAGMA user_version` bump.
 fn seed_meta(conn: &Connection, now_ms: i64) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
@@ -58,7 +101,7 @@ fn seed_meta(conn: &Connection, now_ms: i64) -> Result<(), rusqlite::Error> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
-        rusqlite::params![META_SCHEMA_VERSION, SCHEMA_VERSION.to_string()],
+        rusqlite::params![META_SCHEMA_VERSION, "1"],
     )?;
     Ok(())
 }
@@ -82,6 +125,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
     while version < SCHEMA_VERSION {
         match version {
             0 => migrate_v0_to_v1(conn, now_ms)?,
+            1 => migrate_v1_to_v2(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;

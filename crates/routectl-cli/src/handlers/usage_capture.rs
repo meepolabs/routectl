@@ -64,6 +64,7 @@ pub(crate) fn build_usage_draft(
         finish_reason: None,
         attempt_count: 0,
         fallback_count: 0,
+        strategy: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -122,6 +123,22 @@ pub(crate) fn outcome_for_dispatch_err(meta: &DispatchMeta) -> Outcome {
     } else {
         Outcome::UpstreamError
     }
+}
+
+/// True when an auto-emitted breakpoint created a cache entry that got no
+/// read this request -- the thrash signature. The router auto-emitted
+/// (`strategy == "auto_emitted"`), the upstream reported cache CREATION
+/// (`cache_creation > 0`), and NO cache READ (`cache_read == 0`). A
+/// caller-supplied or skipped strategy is never thrash here (routectl did
+/// not make the decision); a created-and-read entry is the healthy case.
+///
+/// Pure + total so it can be unit-tested without a live capture.
+pub(crate) fn is_cache_thrash(
+    strategy: Option<&str>,
+    cache_creation: u64,
+    cache_read: u64,
+) -> bool {
+    strategy == Some("auto_emitted") && cache_creation > 0 && cache_read == 0
 }
 
 /// Cache-EXCLUSIVE new input for the DB `input_tokens` column. This is
@@ -236,6 +253,7 @@ impl UsageCapture {
         self.record.provider_kind = meta.served_provider_kind.clone();
         self.record.model = meta.served_model.clone();
         self.record.upstream = meta.served_upstream.clone();
+        self.record.strategy = meta.cache_strategy.map(|s| s.to_string());
     }
 
     /// Stamp the token / quota / finish columns from a non-streaming
@@ -388,11 +406,55 @@ impl UsageCapture {
             .first_byte
             .map(|fb| i64::try_from(fb.duration_since(self.start).as_millis()).unwrap_or(0));
         self.emit_egress_summary();
+        self.emit_cache_outcome();
         // Move the owned record into the channel rather than cloning a
         // wide ~40-column struct (some columns carry JSON Value trees).
         // `finalized` is already set above, so the only later access --
         // Drop -- short-circuits and never touches the taken record.
         self.usage.try_send(std::mem::take(&mut self.record));
+    }
+
+    /// Emit the auto-cache outcome signal for an auto-emitted breakpoint:
+    /// WARN on thrash (created an entry, got no read this request), debug
+    /// on the healthy created-and-read case. No-op for caller-supplied /
+    /// skipped strategies and when nothing was created. Counts only --
+    /// never message content / secrets. `cache_creation` is the aggregate
+    /// 5m + 1h write the upstream reported (the per-TTL columns already on
+    /// the record); `cache_read` is the read count.
+    fn emit_cache_outcome(&self) {
+        let strategy = self.record.strategy.as_deref();
+        if strategy != Some("auto_emitted") {
+            return;
+        }
+        let cache_creation =
+            self.record.cache_write_5m.unwrap_or(0) + self.record.cache_write_1h.unwrap_or(0);
+        let cache_read = self.record.cache_read.unwrap_or(0);
+        if cache_creation == 0 {
+            // Auto-emitted but the upstream reported no creation: not a
+            // thrash, not a confirmed-working cache. Nothing actionable.
+            return;
+        }
+        let provider = self.record.provider.as_deref().unwrap_or("");
+        let model = self.record.upstream.as_deref().unwrap_or("");
+        if is_cache_thrash(strategy, cache_creation, cache_read) {
+            tracing::warn!(
+                provider = %provider,
+                model = %model,
+                strategy = "auto_emitted",
+                cache_creation = cache_creation,
+                cache_read = cache_read,
+                "cache_auto_outcome",
+            );
+        } else {
+            tracing::debug!(
+                provider = %provider,
+                model = %model,
+                strategy = "auto_emitted",
+                cache_creation = cache_creation,
+                cache_read = cache_read,
+                "cache_auto_outcome",
+            );
+        }
     }
 
     /// Emit the single `direction=egress` stream trace-summary line that

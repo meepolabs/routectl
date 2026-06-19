@@ -1974,6 +1974,7 @@ default = "claude"
             quota_reset: None,
             quota_extras: None,
             extra: None,
+            strategy: None,
         }
     }
 }
