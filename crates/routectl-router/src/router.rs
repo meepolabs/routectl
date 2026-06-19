@@ -1923,6 +1923,8 @@ impl CacheInjection {
     /// `cache_auto_decision` log. These tokens are a CONTRACT: do not
     /// rename or repurpose them, only add new ones. The `auto_skipped:`
     /// prefix groups the variants where auto-emit ran but declined.
+    /// `caller_supplied` is a request-level fact evaluated FIRST and takes
+    /// precedence over every `auto_skipped:*` reason.
     ///
     /// | variant                  | token                              |
     /// |--------------------------|------------------------------------|
@@ -1963,12 +1965,20 @@ impl CacheInjection {
 /// `capability` is `None` when the target's provider is absent from the
 /// table -> fail closed (no injection). Cheap field checks run before the
 /// validate call so the common skip paths never allocate.
+///
+/// `caller_supplied` is evaluated FIRST as a request-level fact: a request
+/// that already carries caller breakpoints is independent of which target /
+/// provider is selected, so it takes precedence over every per-target /
+/// config `auto_skipped:*` reason (global / provider kill-switch, capability).
 fn maybe_apply_auto_cache_control(
     attempt_req: &mut ChatRequest,
     plan: &AutoCacheRequestPlan,
     capability: Option<CacheCapability>,
     provider_auto_emit_enabled: bool,
 ) -> CacheInjection {
+    if plan.has_caller_breakpoints {
+        return CacheInjection::SkippedCallerSupplied;
+    }
     if !plan.global_auto_emit_enabled {
         return CacheInjection::SkippedGlobalDisabled;
     }
@@ -1978,9 +1988,6 @@ fn maybe_apply_auto_cache_control(
     match capability {
         Some(c) if c.supports_top_level_cache_control => {}
         _ => return CacheInjection::SkippedNoCapability,
-    }
-    if plan.has_caller_breakpoints {
-        return CacheInjection::SkippedCallerSupplied;
     }
     if plan.volatile_high_veto {
         return CacheInjection::SkippedVolatileHigh;
@@ -7764,6 +7771,42 @@ mod auto_emit_cache_control_tests {
             req.cache_control, None,
             "rollback must restore the original (absent) top-level marker",
         );
+    }
+
+    #[test]
+    fn helper_caller_supplied_dominates_all_per_target_skip_reasons() {
+        // Arrange: a request that already carries caller breakpoints. This is
+        // a request-level fact, so it must dominate every per-target / config
+        // skip reason regardless of capability or kill-switch state.
+        let mut req = base_req();
+        let p = plan(1, false, true, &req);
+
+        // Act + Assert: capability unknown (None) -> caller_supplied, NOT
+        // no_capability (the key precedence change).
+        let out = maybe_apply_auto_cache_control(&mut req, &p, None, true);
+        assert_eq!(out, CacheInjection::SkippedCallerSupplied);
+        assert_eq!(
+            req.cache_control, None,
+            "caller_supplied path must leave attempt_req.cache_control untouched",
+        );
+
+        // Global kill-switch off -> caller still dominates.
+        let p_global_off = plan(1, false, false, &req);
+        let cap = Some(CacheCapability::new(true, true));
+        let out = maybe_apply_auto_cache_control(&mut req, &p_global_off, cap, true);
+        assert_eq!(out, CacheInjection::SkippedCallerSupplied);
+        assert_eq!(req.cache_control, None);
+
+        // Per-provider kill-switch off -> caller still dominates.
+        let out = maybe_apply_auto_cache_control(&mut req, &p, cap, false);
+        assert_eq!(out, CacheInjection::SkippedCallerSupplied);
+        assert_eq!(req.cache_control, None);
+
+        // Volatile-high veto must not override caller_supplied either.
+        let p_volatile = plan(1, true, true, &req);
+        let out = maybe_apply_auto_cache_control(&mut req, &p_volatile, cap, true);
+        assert_eq!(out, CacheInjection::SkippedCallerSupplied);
+        assert_eq!(req.cache_control, None);
     }
 
     #[test]
