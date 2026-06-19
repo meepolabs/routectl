@@ -303,6 +303,66 @@ and inherit no `request_id` span (the writer runs on a dedicated OS thread).
 | WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage channel full -- dropping record (capture lags writer)"` (rate-limited: first drop + every 1024 thereafter) |
 | WARN  | `routectl_usage::writer` | `error=...` | `"usage retention prune failed -- continuing"` |
 
+## Prompt-cache auto-emission log shapes
+
+The dispatch-path prompt-cache auto-emitter (see CONFIGURATION.md,
+"Prompt-cache auto-emission") emits two lines per request: a per-dispatch
+`cache_auto_decision` at DEBUG, and a `cache_auto_outcome` at DEBUG on the
+healthy path or WARN when a cache thrash is detected (see each section
+below for the exact level). Both carry counts and stable tokens only --
+never bodies, prompt content, or secrets.
+
+### `cache_auto_decision` (DEBUG, per dispatch)
+
+Emitted once per dispatch target with the decision the auto-emitter
+made for that target.
+
+| Field      | Meaning                                                        |
+|------------|----------------------------------------------------------------|
+| `provider` | The provider name the request dispatched to.                   |
+| `model`    | The resolved model id.                                         |
+| `strategy` | The stable decision token (vocabulary below).                  |
+
+The `strategy` token is a stable contract (recorded in the same form in
+the usage DB `strategy` column; see `routectl usage`):
+
+| Token                                  | Meaning                                                                 |
+|----------------------------------------|-------------------------------------------------------------------------|
+| `auto_emitted`                         | routectl injected a top-level ephemeral_5m breakpoint.                  |
+| `caller_supplied`                      | The caller already supplied a breakpoint; routectl deferred entirely.   |
+| `volatile_vetoed`                      | The stable prefix carried high-confidence volatile tokens; vetoed.      |
+| `auto_skipped:global_disabled`         | `[cache] auto_emit_top_level_breakpoint = false`.                       |
+| `auto_skipped:provider_disabled`       | The provider's `auto_emit_top_level_breakpoint = false`.                |
+| `auto_skipped:no_capability`           | The provider does not honor a top-level breakpoint (or capability unknown -- fail closed). |
+| `auto_skipped:breakpoint_cap`          | Injecting would exceed the 4-breakpoint maximum.                        |
+| `auto_skipped:validation_rolled_back`  | Injection was attempted but failed post-injection validation; rolled back. |
+
+### `cache_auto_outcome` (DEBUG healthy / WARN on thrash)
+
+Emitted only when routectl auto-emitted a breakpoint AND the upstream
+reported cache creation this request. Compares what the auto-emitted
+breakpoint cost against what it returned.
+
+| Field            | Meaning                                                  |
+|------------------|----------------------------------------------------------|
+| `provider`       | The provider name.                                       |
+| `model`          | The served upstream model id.                            |
+| `strategy`       | Always `auto_emitted` for this line.                     |
+| `cache_creation` | Aggregate cache-write tokens (5m + 1h) the upstream reported. |
+| `cache_read`     | Cache-read tokens the upstream reported.                 |
+
+- **DEBUG** (healthy): the auto-emitted breakpoint created a cache entry
+  AND got a read -- the cache is paying off.
+- **WARN** (thrash): the auto-emitted breakpoint created a cache entry
+  but got NO read this request (`cache_creation > 0` and `cache_read ==
+  0`). The stable prefix is being cached on every request without ever
+  being re-read, so the premium cache-write tokens are spent for no
+  payoff. **Remedy:** disable auto-emit for that provider with the
+  per-provider `auto_emit_top_level_breakpoint = false`, or set its
+  `cache_capability` `supports_top_level_cache_control = false` (see
+  CONFIGURATION.md). A caller-supplied or skipped strategy is never
+  flagged as thrash -- routectl only warns on decisions it made itself.
+
 ## What's never logged
 
 - Resolved secret values (env contents, file contents, OAuth tokens,

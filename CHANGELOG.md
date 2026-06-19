@@ -4,6 +4,17 @@ All notable changes to routectl. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Automatic prompt-cache breakpoint emission on the dispatch path** (default on). When a caller supplies no `cache_control` of its own, routectl adds a single top-level ephemeral 5-minute breakpoint over the stable cacheable prefix (system prompt + tool name/description strings) for capable providers, turning an otherwise-uncached prefix into a cache hit with no client change. The injection is lossless: applied to a per-attempt clone, re-validated before dispatch and rolled back on any doubt, and skipped entirely whenever the caller already supplied a breakpoint. Not applied to `count_tokens`.
+  - **Kill-switches.** A global `[cache] auto_emit_top_level_breakpoint` (default true) plus a per-provider `auto_emit_top_level_breakpoint` override; the effective decision is "global on AND provider not explicitly off".
+  - **Conservative per-provider capability.** A per-kind `cache_capability` default decides whether a provider honors a top-level breakpoint at all (anthropic-api / bedrock yes; openai-compat / unknown kinds no), overridable per entry. A `kind = "anthropic-api"` entry pointed at a non-default base URL fails closed until the operator opts in with an explicit `cache_capability`.
+  - **Structural volatile-prefix veto.** A pure, non-mutating detector vetoes auto-caching a prefix that carries high-confidence per-request-volatile tokens (UUIDs, RFC3339 timestamps, JWTs, long hex blobs), so a churning prefix is never cached without payoff.
+- **Ingress provenance** -- the canonical request now records which ingress dialect produced it (`Library` / `AnthropicIngress` / `OpenaiIngress`).
+- **Per-request cache strategy in `routectl usage`** -- each row records the auto-cache decision token (`auto_emitted`, `caller_supplied`, `volatile_vetoed`, `auto_skipped:<reason>`) in a new `strategy` column (usage DB schema v2; migrate-on-open). A `cache_auto_outcome` log warns on cache thrash (an auto-emitted breakpoint that created a cache entry but got no read).
+
 ## [0.9.0] - 2026-06-18
 
 ### Added

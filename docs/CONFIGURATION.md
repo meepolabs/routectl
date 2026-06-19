@@ -152,6 +152,9 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor always sent, bypasses `[bedrock] allowed_betas`            |
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
 | `allow_disable_fallbacks`      | `[server]`                      | bool, default true; when false the `x-routectl-disable-fallbacks` per-request header is ignored   |
+| `auto_emit_top_level_breakpoint` | `[cache]` global              | bool, default true; master switch for dispatch-path auto-cache (see `[cache]`)                    |
+| `auto_emit_top_level_breakpoint` | `[providers.X]`               | `Option<bool>`, default None (inherits global); `false` disables auto-cache for this provider     |
+| `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
 
 **`base_url` scheme requirement.** `base_url` must use `https://` (or
 `http://` for loopback addresses only). Link-local addresses
@@ -950,6 +953,90 @@ The optional `provider` scope lets the same upstream id served by two
 different providers be priced differently -- give each a distinct key
 (the table is keyed by pattern string) and set `provider` on the scoped
 one.
+
+## Prompt-cache auto-emission (`[cache]`)
+
+When a caller sends no `cache_control` breakpoint of its own, routectl
+can add a single top-level ephemeral 5-minute breakpoint over the
+stable cacheable prefix (system prompt + tool name/description strings)
+on the dispatch path. For a capable upstream this turns an
+otherwise-uncached prefix into a prompt-cache hit on the next request
+that reuses it, with no client change. The injection is **lossless**:
+it is applied to a per-attempt clone, never the original request; it is
+skipped entirely whenever the caller already supplied any breakpoint
+(so it can never break a caller's own caching); and the injected shape
+is re-validated before dispatch and rolled back on any doubt.
+
+The optional `[cache]` block is the **global** master switch. A missing
+block keeps the default: auto-emit enabled.
+
+```toml
+[cache]
+# Master switch for dispatch-path auto-emission of a top-level
+# cache_control breakpoint. Default true.
+auto_emit_top_level_breakpoint = true
+```
+
+Auto-emit applies to completions and streaming. It is **not** applied to
+`count_tokens` (`/v1/messages/count_tokens`), which is a probe and never
+writes a cache entry.
+
+### Per-provider switch
+
+Each `[providers.X]` entry carries an optional
+`auto_emit_top_level_breakpoint`. `None` (omitted) inherits the global
+switch (treated as enabled); `false` disables auto-emit for that
+provider even when the global switch is on. The effective decision is
+"global on AND provider not explicitly off". Use this to turn auto-cache
+off for one upstream without touching the global default -- it is the
+first-line remedy for a cache-thrash warning (see LOGGING.md).
+
+```toml
+[providers.some-anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:PLACEHOLDER"
+# Opt this provider out of auto-cache while leaving the global default on.
+auto_emit_top_level_breakpoint = false
+```
+
+### Per-provider capability (`cache_capability`)
+
+routectl only auto-emits a breakpoint to a provider it knows honors one.
+Each provider kind has a **conservative** default capability:
+
+| `kind`              | `supports_top_level_cache_control` | `cache_hit_observable` |
+|---------------------|------------------------------------|------------------------|
+| `anthropic-api`     | true (default base URL only -- see below) | true            |
+| `bedrock`           | true                               | true                   |
+| `openai-responses`  | false (server-side auto-cache; no explicit breakpoint) | true |
+| `openai-compat`     | false                              | false                  |
+| any unknown kind    | false                              | false                  |
+
+When `supports_top_level_cache_control` is false, auto-emit is skipped
+for that provider regardless of the switches above. An operator can
+override the default per entry with an explicit `cache_capability`:
+
+```toml
+# An anthropic-compatible third-party host that DOES honor a top-level
+# breakpoint and DOES report cache hits. Use PLACEHOLDER values.
+[providers.compat-anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:PLACEHOLDER"
+base_url = "https://example.invalid/v1"
+cache_capability = { supports_top_level_cache_control = true, cache_hit_observable = true }
+```
+
+**anthropic-api custom base URL fails closed.** A `kind =
+"anthropic-api"` entry pointed at the default `https://api.anthropic.com`
+base URL gets the optimistic `true/true` default -- the real Anthropic
+server honors a top-level breakpoint. But a `kind = "anthropic-api"`
+entry pointed at any **other** base URL is treated as an
+Anthropic-compatible third party that may 400 on or silently drop a
+top-level breakpoint. With no operator override, such an entry fails
+closed (`false/false`) and is never auto-cached. An operator who knows
+their custom-base host supports caching must set `cache_capability`
+explicitly to opt in (an explicit override always wins, even on a custom
+base URL).
 
 ## Reading usage (`routectl usage`)
 
