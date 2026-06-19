@@ -1,8 +1,14 @@
 use axum::http::HeaderMap;
 use serde_json::{Map, Value};
 
-use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
-use routectl_core::{ChatRequest, ContentPart, Error, MessageContent, ReasoningConfig, Result};
+use routectl_core::cache_control;
+use routectl_core::{ChatRequest, Error, ReasoningConfig, Result};
+
+// Referenced only by the inline test module (`parse_tests.rs`) via
+// `use super::*`; test-gated so they do not flag as unused in the
+// non-test build now that the breakpoint walk moved to routectl-core.
+#[cfg(test)]
+use routectl_core::{ContentPart, MessageContent};
 
 use crate::ingress::read_alias_header;
 
@@ -370,60 +376,13 @@ fn translate_thinking(t: &Value) -> ReasoningConfig {
 }
 
 fn validate_request_cache_control(req: &ChatRequest) -> Result<()> {
-    // Collect owned cache_control values first so refs into them live
-    // long enough for the Breakpoint borrows. This is required for
-    // `ToolDef::Other` whose `cache_control()` returns owned because
-    // it's parsed on demand from the inner Value.
-    let mut owned: Vec<(BreakpointPosition, routectl_core::CacheControl)> = Vec::new();
-
-    if let Some(tools) = &req.tools {
-        for t in tools {
-            // Covers both ToolDef::Custom (typed) and ToolDef::Other
-            // (Anthropic builtins like bash_*, web_search_*) -- the
-            // latter would otherwise silently bypass the 4-cap.
-            if let Some(cc) = t.cache_control() {
-                owned.push((BreakpointPosition::Tools, cc));
-            }
-        }
-    }
-
-    if let Some(routectl_core::SystemContent::Blocks(blocks)) = &req.system {
-        for b in blocks {
-            if let Some(cc) = b.cache_control.as_ref() {
-                owned.push((BreakpointPosition::System, cc.clone()));
-            }
-        }
-    }
-
-    for m in &req.messages {
-        if let MessageContent::Parts(parts) = &m.content {
-            for p in parts {
-                if let Some(cc) = part_cache_control(p) {
-                    owned.push((BreakpointPosition::Messages, cc.clone()));
-                }
-            }
-        }
-    }
-
-    if let Some(cc) = req.cache_control.as_ref() {
-        owned.push((BreakpointPosition::TopLevel, cc.clone()));
-    }
-
-    let bps: Vec<Breakpoint<'_>> = owned
-        .iter()
-        .map(|(pos, cc)| Breakpoint {
-            position: *pos,
-            control: cc,
-        })
-        .collect();
-    cache_control::validate(&bps)
-}
-
-fn part_cache_control(p: &ContentPart) -> Option<&routectl_core::CacheControl> {
-    match p {
-        ContentPart::Known(k) => k.cache_control(),
-        ContentPart::Other { cache_control, .. } => cache_control.as_ref(),
-    }
+    // The canonical breakpoint walk lives in routectl-core
+    // (`CacheBreakpointSource for ChatRequest`); reuse it so the ingress,
+    // the Anthropic egress, and the Bedrock egress all validate through
+    // one traversal. Owned-control collection (needed for
+    // `ToolDef::Other`'s on-demand parse) is handled inside
+    // `validate_source`.
+    cache_control::validate_source(req)
 }
 
 #[cfg(test)]

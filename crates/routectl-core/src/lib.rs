@@ -25,7 +25,10 @@ pub mod upstream_meta;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
-pub use cache_control::{Breakpoint, BreakpointPosition, CacheControl};
+pub use cache_control::{
+    compute_frozen_floor, validate_source, Breakpoint, BreakpointPosition, CacheBreakpointSource,
+    CacheControl, FrozenFloor, OwnedBreakpoint,
+};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use error::{Error, Result};
 pub use log_safe::{

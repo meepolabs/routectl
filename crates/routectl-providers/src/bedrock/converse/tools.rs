@@ -271,27 +271,3 @@ fn translate_typed_tool_choice(
         }
     }
 }
-
-/// Expose tool-level cache_control so the orchestrator's breakpoint
-/// validator can include them in the prefix order. Iterates
-/// `req.tools` and yields `(position-relative-index, control)` for any
-/// tool that carries a marker.
-pub(super) fn collect_tool_cache_controls(req: &ChatRequest) -> Vec<CacheControl> {
-    let Some(tools) = req.tools.as_ref() else {
-        return Vec::new();
-    };
-    let mut out: Vec<CacheControl> = Vec::new();
-    for td in tools {
-        let cc = match td {
-            ToolDef::Custom(c) => c.cache_control.clone(),
-            ToolDef::Other(_) => match translate_tool(td) {
-                AnthropicTool::Custom { cache_control, .. } => cache_control,
-                AnthropicTool::Builtin(_) => None,
-            },
-        };
-        if let Some(c) = cc {
-            out.push(c);
-        }
-    }
-    out
-}

@@ -33,14 +33,14 @@
 //! mis-shaped cache prefix surfaces as a clean 400 locally rather than
 //! a vague AWS error.
 
-use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
-use routectl_core::{ChatRequest, MessageContent, Result};
+use routectl_core::cache_control;
+use routectl_core::{ChatRequest, Result};
 
 use super::super::BedrockConfig;
 use super::extras::build_additional_fields;
 use super::messages::build_messages;
 use super::system::build_system;
-use super::tools::{build_tool_config, collect_tool_cache_controls};
+use super::tools::build_tool_config;
 use super::types::{ConverseRequest, InferenceConfig};
 
 /// JSON Pointer paths lifted out of the model-specific response bag
@@ -114,59 +114,12 @@ fn build_inference_config(req: &ChatRequest) -> Option<InferenceConfig> {
 
 /// Walk every position of the canonical request and run
 /// `cache_control::validate` over the collected breakpoint sequence.
-/// Mirrors `anthropic_api::request::validate_breakpoints` so the
-/// 4-breakpoint cap and 1h-after-5m TTL ordering are caught locally
-/// before the body reaches AWS. The message-side iteration is
-/// canonical-shape (ContentPart.cache_control) -- the cachePoint
-/// translation in `messages.rs` happens after this validation.
+/// Delegates to the shared `CacheBreakpointSource` walk on
+/// `ChatRequest` so the 4-breakpoint cap and 1h-after-5m TTL ordering
+/// are caught locally before the body reaches AWS. The cachePoint
+/// translation in `messages.rs` / `tools.rs` happens after this.
 fn validate_breakpoints(req: &ChatRequest) -> Result<()> {
-    let tool_ccs = collect_tool_cache_controls(req);
-    let mut bps: Vec<Breakpoint<'_>> = Vec::new();
-
-    // Tools come first in the cache prefix.
-    for cc in &tool_ccs {
-        bps.push(Breakpoint {
-            position: BreakpointPosition::Tools,
-            control: cc,
-        });
-    }
-
-    // Then system blocks (per-block cache_control on
-    // `SystemContent::Blocks`).
-    if let Some(routectl_core::SystemContent::Blocks(blocks)) = req.system.as_ref() {
-        for b in blocks {
-            if let Some(cc) = b.cache_control.as_ref() {
-                bps.push(Breakpoint {
-                    position: BreakpointPosition::System,
-                    control: cc,
-                });
-            }
-        }
-    }
-
-    // Then messages: each typed ContentPart may carry cache_control.
-    for m in &req.messages {
-        if let MessageContent::Parts(parts) = &m.content {
-            for p in parts {
-                if let Some(cc) = p.cache_control() {
-                    bps.push(Breakpoint {
-                        position: BreakpointPosition::Messages,
-                        control: cc,
-                    });
-                }
-            }
-        }
-    }
-
-    // Top-level auto-cache marker.
-    if let Some(cc) = req.cache_control.as_ref() {
-        bps.push(Breakpoint {
-            position: BreakpointPosition::TopLevel,
-            control: cc,
-        });
-    }
-
-    cache_control::validate(&bps)
+    cache_control::validate_source(req)
 }
 
 // ---------------------------------------------------------------------------

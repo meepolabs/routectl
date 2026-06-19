@@ -36,7 +36,7 @@
 
 use serde_json::Value;
 
-use routectl_core::cache_control::{self, Breakpoint, BreakpointPosition};
+use routectl_core::cache_control::{self, BreakpointPosition};
 use routectl_core::{ChatRequest, CoreHistoryReasoning, Error, Result};
 
 // `MessageContent`, `ReasoningDetail`, and `ReasoningDetailKind` are
@@ -91,82 +91,75 @@ use super::extras::{effort_ratio, is_routectl_managed_key};
 /// Catches 1h-after-5m ordering violations and 5+ breakpoint counts
 /// before they reach upstream.
 fn validate_breakpoints(ar: &AnthropicRequest) -> Result<()> {
-    let mut bps: Vec<Breakpoint<'_>> = Vec::new();
+    cache_control::validate_source(ar)
+}
 
-    // Owned cache_control values pulled out of `AnthropicTool::Builtin`'s
-    // raw JSON. Lives here so the Breakpoint slice below can reference
-    // them without lifetime issues. Indexed by position in `ar.tools`.
-    let builtin_tool_ccs: Vec<Option<routectl_core::CacheControl>> = ar
-        .tools
-        .as_ref()
-        .map(|tools| {
-            tools
-                .iter()
-                .map(|t| match t {
-                    AnthropicTool::Builtin(v) => v
-                        .as_object()
-                        .and_then(|o| o.get("cache_control"))
-                        .and_then(|cc| {
-                            serde_json::from_value::<routectl_core::CacheControl>(cc.clone()).ok()
-                        }),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+impl cache_control::CacheBreakpointSource for AnthropicRequest {
+    fn cache_breakpoints(&self) -> Vec<cache_control::OwnedBreakpoint> {
+        use cache_control::OwnedBreakpoint;
+        let mut bps: Vec<OwnedBreakpoint> = Vec::new();
 
-    // Tools come first in the cache prefix.
-    if let Some(tools) = &ar.tools {
-        for (i, t) in tools.iter().enumerate() {
-            if let Some(cc) = anthropic_tool_cache_control(t) {
-                bps.push(Breakpoint {
-                    position: BreakpointPosition::Tools,
-                    control: cc,
-                });
-            } else if let Some(cc) = builtin_tool_ccs.get(i).and_then(|o| o.as_ref()) {
-                bps.push(Breakpoint {
-                    position: BreakpointPosition::Tools,
-                    control: cc,
-                });
-            }
-        }
-    }
-
-    // Then system blocks.
-    if let Some(AnthropicSystem::Blocks(blocks)) = &ar.system {
-        for b in blocks {
-            if let Some(cc) = b.cache_control.as_ref() {
-                bps.push(Breakpoint {
-                    position: BreakpointPosition::System,
-                    control: cc,
-                });
-            }
-        }
-    }
-
-    // Then messages.
-    for m in &ar.messages {
-        if let AnthropicContent::Blocks(blocks) = &m.content {
-            for b in blocks {
-                if let Some(cc) = content_block_cache_control(b) {
-                    bps.push(Breakpoint {
-                        position: BreakpointPosition::Messages,
-                        control: cc,
-                    });
+        // Tools come first in the cache prefix. `Custom` carries a typed
+        // marker; `Builtin` carries it inside raw JSON, parsed on demand.
+        if let Some(tools) = &self.tools {
+            for t in tools {
+                if let Some(cc) = anthropic_tool_cache_control(t) {
+                    // borrowed ref -> clone to own (asymmetry: the
+                    // builtin helper below already returns owned).
+                    bps.push(OwnedBreakpoint::new(BreakpointPosition::Tools, cc.clone()));
+                } else if let Some(cc) = builtin_tool_cache_control(t) {
+                    bps.push(OwnedBreakpoint::new(BreakpointPosition::Tools, cc));
                 }
             }
         }
-    }
 
-    // Top-level auto-cache marker.
-    if let Some(cc) = ar.cache_control.as_ref() {
-        bps.push(Breakpoint {
-            position: BreakpointPosition::TopLevel,
-            control: cc,
-        });
-    }
+        // Then system blocks.
+        if let Some(AnthropicSystem::Blocks(blocks)) = &self.system {
+            for b in blocks {
+                if let Some(cc) = b.cache_control.as_ref() {
+                    bps.push(OwnedBreakpoint::new(BreakpointPosition::System, cc.clone()));
+                }
+            }
+        }
 
-    cache_control::validate(&bps)
+        // Then messages.
+        for m in &self.messages {
+            if let AnthropicContent::Blocks(blocks) = &m.content {
+                for b in blocks {
+                    if let Some(cc) = content_block_cache_control(b) {
+                        bps.push(OwnedBreakpoint::new(
+                            BreakpointPosition::Messages,
+                            cc.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Top-level auto-cache marker.
+        if let Some(cc) = self.cache_control.as_ref() {
+            bps.push(OwnedBreakpoint::new(
+                BreakpointPosition::TopLevel,
+                cc.clone(),
+            ));
+        }
+
+        bps
+    }
+}
+
+/// Pull an owned `cache_control` out of an `AnthropicTool::Builtin`'s
+/// raw JSON. Returns `None` for the typed `Custom` variant (handled by
+/// `anthropic_tool_cache_control`) and for any builtin without a
+/// parseable marker.
+fn builtin_tool_cache_control(t: &AnthropicTool) -> Option<routectl_core::CacheControl> {
+    match t {
+        AnthropicTool::Builtin(v) => v
+            .as_object()
+            .and_then(|o| o.get("cache_control"))
+            .and_then(|cc| serde_json::from_value::<routectl_core::CacheControl>(cc.clone()).ok()),
+        _ => None,
+    }
 }
 
 fn content_block_cache_control(b: &ContentBlock) -> Option<&routectl_core::CacheControl> {
