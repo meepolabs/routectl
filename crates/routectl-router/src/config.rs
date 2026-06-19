@@ -777,6 +777,59 @@ fn default_port() -> u16 {
     8787
 }
 
+/// Describes what a provider supports re: Anthropic-style prompt-cache
+/// breakpoints. The dispatch path consults this to decide whether to
+/// auto-emit a top-level `cache_control` breakpoint -- it does so only
+/// for providers that actually honor one (anthropic-api, bedrock) and
+/// never for OpenAI-shape providers that silently drop it.
+///
+/// Per-kind defaults are deliberately conservative; an unknown provider
+/// kind is treated as supporting nothing so routectl never emits a
+/// breakpoint to an upstream whose behavior it cannot vouch for.
+/// Operators override per-entry via the `cache_capability` TOML key
+/// when a non-Anthropic upstream behind an anthropic-api-shaped provider
+/// differs from the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CacheCapability {
+    /// Whether the upstream honors an explicit top-level Anthropic
+    /// `cache_control` breakpoint. When false the dispatch path must not
+    /// auto-emit one.
+    pub supports_top_level_cache_control: bool,
+    /// Whether the upstream reports cache-hit usage (e.g.
+    /// `cache_read_input_tokens` / `cached_tokens`) back in its response.
+    pub cache_hit_observable: bool,
+}
+
+impl CacheCapability {
+    /// Build a capability from its two flags. Use this for explicit
+    /// construction from outside the crate (the struct is
+    /// `#[non_exhaustive]`, so struct-literal syntax is unavailable there).
+    pub fn new(supports_top_level_cache_control: bool, cache_hit_observable: bool) -> Self {
+        Self {
+            supports_top_level_cache_control,
+            cache_hit_observable,
+        }
+    }
+
+    /// Conservative per-kind default for a provider kind token (the
+    /// stable `kind = "..."` discriminant). An unrecognized kind maps to
+    /// "supports nothing" so the dispatch path never auto-emits a
+    /// breakpoint to an upstream routectl does not understand.
+    pub fn for_provider_kind(kind: &str) -> Self {
+        match kind {
+            "anthropic-api" => Self::new(true, true),
+            "bedrock" => Self::new(true, true),
+            // OpenAI auto-caches server-side; there is no explicit
+            // breakpoint to emit, but `cached_tokens` IS reported back.
+            "openai-responses" => Self::new(false, true),
+            // openai-compat and every unknown kind: emit nothing.
+            _ => Self::new(false, false),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 #[non_exhaustive]
@@ -803,6 +856,10 @@ pub enum ProviderEntry {
         /// Override the outbound User-Agent.
         #[serde(default)]
         user_agent: Option<String>,
+        /// Operator override for this entry's prompt-cache capability.
+        /// `None` -> use the conservative per-kind default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_capability: Option<CacheCapability>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -867,6 +924,12 @@ pub enum ProviderEntry {
         /// the default applies.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_thinking_entry_bytes: Option<u32>,
+        /// Operator override for this entry's prompt-cache capability.
+        /// `None` -> use the conservative per-kind default. Useful when a
+        /// non-Anthropic upstream behind this anthropic-api-shaped
+        /// provider does not honor a top-level breakpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_capability: Option<CacheCapability>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -909,6 +972,10 @@ pub enum ProviderEntry {
         /// `routectl/<version> codex-cli`.
         #[serde(default)]
         user_agent: Option<String>,
+        /// Operator override for this entry's prompt-cache capability.
+        /// `None` -> use the conservative per-kind default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_capability: Option<CacheCapability>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -933,6 +1000,10 @@ pub enum ProviderEntry {
         payload_extras: Option<Value>,
         #[serde(default)]
         anthropic_beta: Vec<String>,
+        /// Operator override for this entry's prompt-cache capability.
+        /// `None` -> use the conservative per-kind default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_capability: Option<CacheCapability>,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1067,6 +1138,28 @@ impl ProviderEntry {
         }
     }
 
+    /// Prompt-cache capability for this entry. Returns the operator
+    /// override when set, otherwise the conservative per-kind default.
+    pub fn cache_capability(&self) -> CacheCapability {
+        let override_value = match self {
+            Self::OpenaiCompat {
+                cache_capability, ..
+            } => cache_capability,
+            Self::AnthropicApi {
+                cache_capability, ..
+            } => cache_capability,
+            #[cfg(feature = "bedrock")]
+            Self::Bedrock {
+                cache_capability, ..
+            } => cache_capability,
+            #[cfg(feature = "openai-responses")]
+            Self::OpenaiResponses {
+                cache_capability, ..
+            } => cache_capability,
+        };
+        override_value.unwrap_or_else(|| CacheCapability::for_provider_kind(self.kind_str()))
+    }
+
     pub fn openai_compat(base_url: impl Into<String>, api_key_ref: impl Into<String>) -> Self {
         Self::OpenaiCompat {
             base_url: base_url.into(),
@@ -1074,6 +1167,7 @@ impl ProviderEntry {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
+            cache_capability: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1091,6 +1185,7 @@ impl ProviderEntry {
             forward_client_headers: Vec::new(),
             context_management: false,
             max_thinking_entry_bytes: None,
+            cache_capability: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1109,6 +1204,7 @@ impl ProviderEntry {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
+            cache_capability: None,
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -1605,7 +1701,7 @@ impl Default for RetryPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ProviderEntry};
+    use super::{CacheCapability, Config, ProviderEntry};
 
     #[test]
     #[should_panic(expected = "with_anthropic_version")]
@@ -1639,6 +1735,7 @@ mod tests {
                 header_extras: std::collections::BTreeMap::new(),
                 payload_extras: None,
                 anthropic_beta: Vec::new(),
+                cache_capability: None,
                 runtime: Default::default(),
             };
             assert_eq!(bedrock.kind_str(), "bedrock");
@@ -1732,6 +1829,104 @@ forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
             RetryPolicy::default().jitter_ms,
             50,
             "default jitter_ms must be 50 for out-of-the-box retry spread"
+        );
+    }
+
+    #[test]
+    fn cache_capability_per_kind_defaults_are_conservative() {
+        let anthropic = CacheCapability::for_provider_kind("anthropic-api");
+        assert!(anthropic.supports_top_level_cache_control);
+        assert!(anthropic.cache_hit_observable);
+
+        let bedrock = CacheCapability::for_provider_kind("bedrock");
+        assert!(bedrock.supports_top_level_cache_control);
+        assert!(bedrock.cache_hit_observable);
+
+        // OpenAI-shape: no explicit breakpoint, but cached_tokens reported.
+        let responses = CacheCapability::for_provider_kind("openai-responses");
+        assert!(!responses.supports_top_level_cache_control);
+        assert!(responses.cache_hit_observable);
+
+        let compat = CacheCapability::for_provider_kind("openai-compat");
+        assert!(!compat.supports_top_level_cache_control);
+        assert!(!compat.cache_hit_observable);
+
+        // Unknown kind: never auto-emit.
+        let unknown = CacheCapability::for_provider_kind("some-future-kind");
+        assert!(!unknown.supports_top_level_cache_control);
+        assert!(!unknown.cache_hit_observable);
+    }
+
+    #[test]
+    fn cache_capability_falls_back_to_per_kind_default_when_unset() {
+        let anthropic = ProviderEntry::anthropic_api("literal:sk-ant-test");
+        assert_eq!(
+            anthropic.cache_capability(),
+            CacheCapability::for_provider_kind("anthropic-api"),
+        );
+
+        let compat = ProviderEntry::openai_compat("https://example.com/v1", "literal:k");
+        assert_eq!(
+            compat.cache_capability(),
+            CacheCapability::for_provider_kind("openai-compat"),
+        );
+    }
+
+    #[test]
+    fn cache_capability_operator_override_beats_per_kind_default() {
+        // An anthropic-api entry whose upstream does NOT honor a
+        // top-level breakpoint but DOES report cache hits.
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+cache_capability = { supports_top_level_cache_control = false, cache_hit_observable = true }
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse override");
+        let entry = cfg.providers.get("anthropic").expect("anthropic provider");
+        let cap = entry.cache_capability();
+        assert!(!cap.supports_top_level_cache_control);
+        assert!(cap.cache_hit_observable);
+        // The override beats the per-kind default (which is true/true).
+        assert_ne!(cap, CacheCapability::for_provider_kind("anthropic-api"));
+
+        // Round-trips through serialize/deserialize.
+        let serialized = toml::to_string(&cfg).expect("serialize");
+        let cfg_out: Config = toml::from_str(&serialized).expect("re-parse");
+        let cap_out = cfg_out
+            .providers
+            .get("anthropic")
+            .expect("anthropic")
+            .cache_capability();
+        assert_eq!(cap_out, cap);
+    }
+
+    #[test]
+    fn cache_capability_omitted_uses_default_and_deny_unknown_fields_holds() {
+        let toml_text = r#"
+[providers.openai]
+kind = "openai-compat"
+base_url = "https://example.com/v1"
+api_key_ref = "literal:k"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse default");
+        let entry = cfg.providers.get("openai").expect("openai provider");
+        assert_eq!(
+            entry.cache_capability(),
+            CacheCapability::for_provider_kind("openai-compat"),
+        );
+
+        // An unknown sub-field inside cache_capability must be rejected.
+        let bad = r#"
+[providers.openai]
+kind = "openai-compat"
+base_url = "https://example.com/v1"
+api_key_ref = "literal:k"
+cache_capability = { supports_top_level_cache_control = true, bogus = 1 }
+"#;
+        assert!(
+            toml::from_str::<Config>(bad).is_err(),
+            "deny_unknown_fields must reject an unknown CacheCapability field",
         );
     }
 }

@@ -166,6 +166,7 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             user_agent,
+            cache_capability: _,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -205,6 +206,7 @@ async fn build_provider_inner(
             forward_client_headers,
             context_management,
             max_thinking_entry_bytes,
+            cache_capability: _,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -266,6 +268,7 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             user_agent,
+            cache_capability: _,
             runtime: _,
         } => {
             let bearer_is_oauth =
@@ -343,6 +346,7 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             anthropic_beta,
+            cache_capability: _,
             runtime: _,
         } => {
             validate_bedrock_allowlists(
@@ -1916,6 +1920,7 @@ mod bedrock_validation_tests {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             anthropic_beta: Vec::new(),
+            cache_capability: None,
             runtime: Default::default(),
         }
     }
@@ -1942,6 +1947,7 @@ mod bedrock_validation_tests {
             header_extras,
             payload_extras,
             anthropic_beta: vec!["future-flag-2026-12-31".into()],
+            cache_capability: None,
             runtime,
         }
     }
@@ -2058,6 +2064,7 @@ mod bedrock_validation_tests {
                 header_extras: BTreeMap::new(),
                 payload_extras: None,
                 anthropic_beta: Vec::new(),
+                cache_capability: None,
                 runtime: Default::default(),
             },
             BedrockGlobalConfig {
@@ -2270,6 +2277,7 @@ mod build_resolved_models_tests {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             anthropic_beta: Vec::new(),
+            cache_capability: None,
             runtime: Default::default(),
         };
         let cfg = config_with_models(
