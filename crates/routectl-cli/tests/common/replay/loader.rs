@@ -127,16 +127,29 @@ pub fn load_fixture(dir: &Path) -> Result<Fixture, ReplayError> {
     })
 }
 
+/// Result of walking a fixture corpus: the fixtures that loaded cleanly
+/// plus the count that were skipped (parse error, missing required file,
+/// stray optional file). A degraded corpus -- e.g. one truncated by a
+/// log line-length limit at capture time -- thins `fixtures` while
+/// `skipped` rises, so the run's coverage is visible rather than silent.
+#[derive(Debug, Default)]
+pub struct LoadedCorpus {
+    pub fixtures: Vec<Fixture>,
+    pub skipped: usize,
+}
+
 /// Walk `canon_root` for fixture subdirectories, sorting by directory
 /// name for deterministic test ordering. Skips dotfiles and any
 /// non-directory entry (e.g. `README.md`, `.gitkeep`). A subdirectory
-/// that fails to load (malformed `meta.json`, missing required file,
-/// stray optional file) is logged to stderr (naming the directory and
-/// the error) and skipped rather than aborting the whole corpus, so one
-/// bad fixture cannot blind the run to every other fixture's regression
-/// signal. Filesystem-level errors reading `canon_root` itself still
+/// that fails to load (malformed `meta.json` or body JSON, missing
+/// required file, stray optional file) is logged to stderr (naming the
+/// directory and the error), counted in `LoadedCorpus.skipped`, and
+/// skipped rather than aborting the whole corpus, so one bad fixture
+/// cannot blind the run to every other fixture's regression signal. A
+/// final summary line reports loaded vs skipped so a thin corpus is
+/// visible. Filesystem-level errors reading `canon_root` itself still
 /// propagate as `Err`.
-pub fn discover_fixtures(canon_root: &Path) -> Result<Vec<Fixture>, ReplayError> {
+pub fn discover_fixtures(canon_root: &Path) -> Result<LoadedCorpus, ReplayError> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let read = fs::read_dir(canon_root).map_err(|e| ReplayError::Io {
         path: canon_root.display().to_string(),
@@ -162,10 +175,12 @@ pub fn discover_fixtures(canon_root: &Path) -> Result<Vec<Fixture>, ReplayError>
     }
     dirs.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
     let mut fixtures = Vec::with_capacity(dirs.len());
+    let mut skipped = 0usize;
     for dir in dirs {
         match load_fixture(&dir) {
             Ok(f) => fixtures.push(f),
             Err(e) => {
+                skipped += 1;
                 eprintln!(
                     "[replay] skipping unloadable fixture `{}`: {e}",
                     dir.display(),
@@ -173,7 +188,12 @@ pub fn discover_fixtures(canon_root: &Path) -> Result<Vec<Fixture>, ReplayError>
             }
         }
     }
-    Ok(fixtures)
+    eprintln!(
+        "[replay] corpus: loaded {}, skipped {} (parse errors / malformed fixtures)",
+        fixtures.len(),
+        skipped,
+    );
+    Ok(LoadedCorpus { fixtures, skipped })
 }
 
 fn read_meta(dir: &Path) -> Result<FixtureMeta, ReplayError> {
@@ -467,12 +487,13 @@ mod tests {
         fs::write(tmp.path().join(".gitkeep"), b"").unwrap();
         fs::write(tmp.path().join("README.md"), b"# notes").unwrap();
 
-        let fixtures = discover_fixtures(tmp.path()).unwrap();
-        let names: Vec<_> = fixtures.iter().map(|f| f.name.as_str()).collect();
+        let loaded = discover_fixtures(tmp.path()).unwrap();
+        let names: Vec<_> = loaded.fixtures.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
             vec!["alpha_scenario", "mu_scenario", "zeta_scenario"]
         );
+        assert_eq!(loaded.skipped, 0);
     }
 
     #[test]
@@ -490,8 +511,39 @@ mod tests {
         write_minimal_fixture(&bad, false, false);
         fs::remove_file(bad.join(OUTGOING_BODY)).unwrap();
 
-        let fixtures = discover_fixtures(tmp.path()).unwrap();
-        let names: Vec<_> = fixtures.iter().map(|f| f.name.as_str()).collect();
+        let loaded = discover_fixtures(tmp.path()).unwrap();
+        let names: Vec<_> = loaded.fixtures.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["good_a", "good_b"]);
+        assert_eq!(loaded.skipped, 1);
+    }
+
+    #[test]
+    fn discover_fixtures_skips_fixture_with_malformed_body_json() {
+        // Arrange: one well-formed fixture and one whose required body
+        // JSON is truncated mid-string with a bare trailing backslash --
+        // mirrors the journald LineMax truncation that left most of the
+        // real corpus unparseable (serde reports `invalid escape` /
+        // unexpected EOF).
+        let tmp = tempdir().unwrap();
+        let good = tmp.path().join("good_scenario");
+        fs::create_dir(&good).unwrap();
+        write_minimal_fixture(&good, false, false);
+
+        let bad = tmp.path().join("truncated_scenario");
+        fs::create_dir(&bad).unwrap();
+        write_minimal_fixture(&bad, false, false);
+        // Overwrite the outgoing body with a truncated JSON string.
+        fs::write(bad.join(OUTGOING_BODY), b"{\"model\": \"y\\").unwrap();
+
+        // Act
+        let loaded = discover_fixtures(tmp.path()).unwrap();
+
+        // Assert: the good fixture loads, the malformed one is skipped
+        // (not panicked / not erroring the whole load) and the skip is
+        // reflected in the count.
+        let names: Vec<_> = loaded.fixtures.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["good_scenario"]);
+        assert_eq!(loaded.fixtures.len(), 1);
+        assert_eq!(loaded.skipped, 1);
     }
 }

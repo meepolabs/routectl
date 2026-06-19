@@ -32,7 +32,9 @@ pub(crate) use harness::{
 pub use json_diff::{
     assert_headers_equal, assert_json_equal_structural, DEFAULT_HEADER_ALLOW_SKIP,
 };
-pub use loader::{discover_fixtures, load_fixture, Fixture, FixtureMeta, ReplayError};
+pub use loader::{
+    discover_fixtures, load_fixture, Fixture, FixtureMeta, LoadedCorpus, ReplayError,
+};
 pub use sse_diff::{assert_sse_equal, parse_sse_events, ParseError, SseEventCmp};
 
 /// Wrapped error message returned by every structural comparator.

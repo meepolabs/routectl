@@ -181,7 +181,7 @@ fn egress_replay_all() {
         return;
     }
     let fixtures = match discover_fixtures(&root) {
-        Ok(f) => f,
+        Ok(corpus) => corpus.fixtures,
         Err(e) => panic!("failed to discover fixtures under {}: {e}", root.display()),
     };
     if fixtures.is_empty() {
