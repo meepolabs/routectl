@@ -13,7 +13,7 @@ overlays merge, what's reserved.
 
 ## Top-level shape
 
-A routectl config is a single TOML file with up to eight top-level
+A routectl config is a single TOML file with the following top-level
 sections:
 
 ```toml
@@ -31,6 +31,13 @@ sections:
                       # one flat table, single value or list per key
 
 [retry]               # workspace-wide retry + fallback policy
+
+[cache]               # prompt-cache auto-emission policy
+                      # (auto_emit_top_level_breakpoint). Optional;
+                      # default on.
+
+[reduction]           # dispatch-time context-reduction policy
+                      # (enabled). Optional; default off.
 
 [bedrock]             # global Bedrock allowlists (allowed_betas,
                       # allowed_body_fields). Optional.
