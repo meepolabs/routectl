@@ -18,12 +18,28 @@ fi
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-echo "pre-commit: gitleaks (staged secret scan)"
-if command -v gitleaks >/dev/null 2>&1; then
-    gitleaks protect --staged --redact --no-banner
-else
-    echo "pre-commit: WARNING gitleaks not installed; skipping staged secret scan"
+# gitleaks: REQUIRED, with a version FLOOR. A stale or unversioned local
+# gitleaks silently lacks rules the CI gitleaks-action has (this bit us once:
+# an old /usr/bin/gitleaks missed a `jwt` finding the action caught), so the
+# hook fails closed unless a recognized gitleaks >= MIN_GITLEAKS is present.
+# Keep MIN_GITLEAKS in lockstep with GITLEAKS_VERSION in
+# .github/workflows/gitleaks.yml so local and CI scan with the same ruleset.
+MIN_GITLEAKS="8.30.1"
+echo "pre-commit: gitleaks (staged secret scan, require >= $MIN_GITLEAKS)"
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: ERROR gitleaks not installed; need >= $MIN_GITLEAKS" >&2
+    exit 1
 fi
+GLV="$(gitleaks version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+if [[ -z "$GLV" ]]; then
+    echo "pre-commit: ERROR could not read gitleaks version; need >= $MIN_GITLEAKS" >&2
+    exit 1
+fi
+if [[ "$(printf '%s\n%s\n' "$MIN_GITLEAKS" "$GLV" | sort -V | head -1)" != "$MIN_GITLEAKS" ]]; then
+    echo "pre-commit: ERROR gitleaks $GLV is older than required $MIN_GITLEAKS; update it" >&2
+    exit 1
+fi
+gitleaks protect --staged --redact --no-banner
 
 echo "pre-commit: internal-ID scan (staged added lines)"
 bash scripts/check-internal-ids.sh --staged
