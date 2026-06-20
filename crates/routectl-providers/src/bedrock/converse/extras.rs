@@ -226,6 +226,16 @@ fn insert_anthropic_beta(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<S
 
 fn insert_top_level_cache_control(req: &ChatRequest, bag: &mut Map<String, Value>) {
     if let Some(cc) = req.cache_control.as_ref() {
+        // AWS Converse only caches via per-block `cachePoint` blocks;
+        // a top-level marker in additionalModelRequestFields is ignored
+        // by the service. Forward it inert (so the bag mirrors the
+        // Anthropic shape) but warn so a caller who set it knows the
+        // caching they asked for will not happen on this path.
+        tracing::warn!(
+            "top-level cache_control on Converse path does not produce \
+             caching (only per-block cachePoint does); forwarding inert \
+             in additionalModelRequestFields"
+        );
         if let Ok(v) = serde_json::to_value(cc) {
             bag.insert("cache_control".to_string(), v);
         }
@@ -352,6 +362,7 @@ mod tests {
     };
     use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
     use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
+    use tracing_test::traced_test;
 
     #[test]
     fn output_config_is_managed_key() {
@@ -419,6 +430,55 @@ mod tests {
         assert!(
             !serialized.contains("a-2"),
             "account_uuid fingerprint leaked into Converse bag: {serialized}"
+        );
+    }
+
+    /// A top-level cache_control on the Converse path is forwarded inert
+    /// into the bag (no wire change) but must emit a WARN so a caller who
+    /// asked for caching knows it will not happen via this path.
+    #[traced_test]
+    #[test]
+    fn top_level_cache_control_warns_and_forwards_inert() {
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = req_with_thinking();
+        req.cache_control = Some(routectl_core::cache_control::CacheControl::ephemeral_1h());
+
+        // Act
+        let bag = build_additional_fields(&cfg, &req, None).expect("bag should be present");
+
+        // Assert: WARN fired, and the marker is still forwarded inert
+        // (wire shape unchanged from the prior drop-silently behavior
+        // except for the log).
+        assert!(
+            logs_contain("top-level cache_control on Converse path does not produce caching"),
+            "expected a WARN when top-level cache_control reaches Converse"
+        );
+        assert!(
+            bag.get("cache_control")
+                .and_then(|v| v.as_object())
+                .is_some_and(|o| !o.is_empty()),
+            "top-level cache_control must still be forwarded inert as a \
+             non-empty object: {bag:?}"
+        );
+    }
+
+    /// No top-level cache_control means no WARN -- the common path stays
+    /// quiet.
+    #[traced_test]
+    #[test]
+    fn no_top_level_cache_control_does_not_warn() {
+        // Arrange: req_with_thinking carries no cache_control.
+        let cfg = fake_cfg();
+        let req = req_with_thinking();
+
+        // Act
+        let _ = build_additional_fields(&cfg, &req, None);
+
+        // Assert
+        assert!(
+            !logs_contain("top-level cache_control on Converse path does not produce caching"),
+            "WARN must not fire when no top-level cache_control is present"
         );
     }
 

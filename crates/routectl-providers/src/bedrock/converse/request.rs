@@ -9,13 +9,16 @@
 //!
 //! The big "bag" for model-specific extras:
 //! `additional_model_request_fields`. AWS forwards this verbatim to the
-//! underlying model, so for Claude on Converse we drop `thinking`,
-//! `anthropic_beta`, top-level `cache_control`, `output_config`, and any
-//! operator-supplied `additional_model_request_fields` here. The
-//! request normalizer is intentionally lossy for non-Claude vendors:
-//! Mistral / Cohere / Llama on Converse won't honor `thinking` or
-//! `anthropic_beta` in the bag, but they also won't 400 on it, so a
-//! single code path serves both.
+//! underlying model, so for Claude on Converse we route `thinking`,
+//! `anthropic_beta`, `output_config`, and any operator-supplied
+//! `additional_model_request_fields` through it here. A top-level
+//! `cache_control` marker is also forwarded inert into this bag (with a
+//! WARN), since Converse does not honor a top-level marker for caching
+//! -- only per-block `cachePoint` blocks cache. The request normalizer
+//! is intentionally lossy for non-Claude vendors: Mistral / Cohere /
+//! Llama on Converse won't honor `thinking` or `anthropic_beta` in the
+//! bag, but they also won't 400 on it, so a single code path serves
+//! both.
 //!
 //! cache_control breakpoints don't translate to per-block markers on
 //! the Converse wire -- AWS uses inline `cachePoint` blocks instead.
