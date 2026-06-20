@@ -4,10 +4,6 @@ expression: body
 ---
 {
   "anthropic_version": "bedrock-2023-05-31",
-  "cache_control": {
-    "ttl": "5m",
-    "type": "ephemeral"
-  },
   "max_tokens": 1024,
   "messages": [
     {

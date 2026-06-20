@@ -148,6 +148,16 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // `super::CLIENT_FINGERPRINT_METADATA_KEY`.
     strip_client_metadata(obj, cfg.additional_model_request_fields.as_ref());
 
+    // AWS Bedrock InvokeModel REJECTS a top-level `cache_control` body
+    // field with HTTP 400 ("Extra inputs are not permitted") -- proven by
+    // a live probe. The shared anthropic_api normalizer emits the
+    // canonical `req.cache_control` as a top-level marker (correct for
+    // Anthropic-direct, which honors it). Bedrock InvokeModel for
+    // Anthropic instead honors a PER-BLOCK marker inside a content block,
+    // where a single marker caches all prefixes up to ~20 blocks before
+    // it. Lower the top-level marker to the last eligible block.
+    lower_top_level_cache_control_to_per_block(&cfg.id, obj);
+
     // Bedrock's InvokeModel takes the model identifier in the URL path
     // (`/model/{model_id}/invoke`), not the body. The Anthropic API
     // path requires it in the body, which `anthropic_api::request::
@@ -271,6 +281,238 @@ fn strip_client_metadata(
     if let Some(v) = operator_metadata {
         obj.insert(key.to_string(), v);
     }
+}
+
+/// Lower a TOP-LEVEL `cache_control` body field to a PER-BLOCK marker on
+/// the last cache_control-eligible content block. ALWAYS removes the
+/// top-level field first -- that removal alone is what stops the Bedrock
+/// 400; the per-block re-placement preserves the caller's caching intent.
+///
+/// The re-placement is computed on a CLONE of the messages array, the
+/// resulting full breakpoint sequence is re-validated against the
+/// canonical invariants, and only a valid arrangement is committed. The
+/// pre-lowering validation in `anthropic_api::request::normalize` checked
+/// a DIFFERENT arrangement (with the top-level marker, no per-block
+/// insertion), so the lowered shape -- which can interact with an
+/// already-marked forward-compat `Other` block the insertion scan skips
+/// -- must be re-checked here before it ships.
+///
+/// Drop-only fallback (top-level removed, no per-block added) is the safe
+/// path under any uncertainty: the original top-level body is broken, so
+/// re-emitting it is never correct.
+fn lower_top_level_cache_control_to_per_block(
+    provider_id: &str,
+    obj: &mut serde_json::Map<String, Value>,
+) {
+    // Always remove the top-level marker first; that alone stops the 400.
+    let Some(cc) = obj.remove("cache_control") else {
+        return;
+    };
+    // `cc` stays in scope for the whole function, so borrow the ttl for
+    // logging rather than allocating a String.
+    let ttl = cc.get("ttl").and_then(Value::as_str).unwrap_or("");
+
+    let Some(messages) = obj.get("messages").and_then(Value::as_array) else {
+        tracing::warn!(
+            provider = provider_id,
+            "bedrock-invoke egress: top-level cache_control dropped (no messages array to host a per-block marker)"
+        );
+        return;
+    };
+
+    // Compute the insertion on a CANDIDATE clone; do NOT mutate the live
+    // `obj["messages"]` until the result is validated.
+    let mut candidate = messages.clone();
+    let Some(kind) = insert_marker_on_candidate(&mut candidate, &cc) else {
+        tracing::warn!(
+            provider = provider_id,
+            "bedrock-invoke egress: top-level cache_control dropped (no eligible content block to host a per-block marker)"
+        );
+        return;
+    };
+
+    // Re-validate the FULL breakpoint sequence across tools -> system ->
+    // (candidate) messages before committing. This catches arrangements
+    // the pre-lowering validator never saw -- e.g. inserting a 5m marker
+    // ahead of an already-marked 1h forward-compat `Other` block.
+    if let Err(e) = validate_lowered_breakpoints(obj, &candidate) {
+        tracing::warn!(
+            provider = provider_id,
+            error = %e,
+            "bedrock-invoke egress: top-level cache_control dropped (lowering would violate the breakpoint invariants)"
+        );
+        return;
+    }
+
+    // Valid -> commit the candidate.
+    obj.insert("messages".into(), Value::Array(candidate));
+    match kind {
+        InsertKind::NewTextBlock => tracing::debug!(
+            provider = provider_id,
+            ttl = %ttl,
+            "bedrock-invoke egress: lowered top-level cache_control to a new trailing text block"
+        ),
+        InsertKind::ExistingBlock => tracing::debug!(
+            provider = provider_id,
+            ttl = %ttl,
+            "bedrock-invoke egress: lowered top-level cache_control to the last eligible content block"
+        ),
+        InsertKind::AlreadyMarked => tracing::debug!(
+            provider = provider_id,
+            ttl = %ttl,
+            "bedrock-invoke egress: top-level cache_control removed; last eligible block already marked"
+        ),
+    }
+}
+
+/// How the candidate placed the marker; drives the commit-time debug log.
+enum InsertKind {
+    /// A trailing string-content message was converted to a one-element
+    /// text block carrying the marker.
+    NewTextBlock,
+    /// The marker was inserted onto an existing eligible block.
+    ExistingBlock,
+    /// The last eligible block already carried a marker; nothing was added.
+    AlreadyMarked,
+}
+
+/// Apply the per-block lowering to a CANDIDATE messages array in place.
+/// Scans messages last -> first; within each, blocks last -> first. The
+/// first eligible block found is the target. A trailing string-content
+/// message converts to a single text block carrying the marker.
+///
+/// Returns `Some(kind)` describing the placement, or `None` if there was
+/// no eligible target (caller drops the marker).
+fn insert_marker_on_candidate(messages: &mut [Value], cc: &Value) -> Option<InsertKind> {
+    for msg in messages.iter_mut().rev() {
+        let Some(content) = msg.get_mut("content") else {
+            continue;
+        };
+
+        if let Some(s) = content.as_str() {
+            // Convert the trailing string turn to a one-element text block
+            // carrying the marker. Realistic traffic (and the live probe)
+            // sends a flat-string system + a string user message, so this
+            // is the ONLY way to place a marker that caches the stable
+            // system prefix; drop-only would cache nothing. The cacheable
+            // prefix (tools / system / earlier messages) stays
+            // byte-identical -- only this trailing turn is rewritten, and
+            // deterministically so within a request.
+            let text = s.to_owned();
+            *content = Value::Array(vec![serde_json::json!({
+                "type": "text",
+                "text": text,
+                "cache_control": cc.clone(),
+            })]);
+            return Some(InsertKind::NewTextBlock);
+        }
+
+        let Some(blocks) = content.as_array_mut() else {
+            continue;
+        };
+        for block in blocks.iter_mut().rev() {
+            let Some(map) = block.as_object_mut() else {
+                continue;
+            };
+            let is_eligible = map
+                .get("type")
+                .and_then(Value::as_str)
+                .map(is_cache_control_eligible_block_type)
+                .unwrap_or(false);
+            if !is_eligible {
+                continue;
+            }
+            if map.contains_key("cache_control") {
+                // Already caches at/after this point; adding would
+                // duplicate and risk the breakpoint cap. Top-level
+                // removal alone is the fix here.
+                return Some(InsertKind::AlreadyMarked);
+            }
+            map.insert("cache_control".into(), cc.clone());
+            return Some(InsertKind::ExistingBlock);
+        }
+    }
+    None
+}
+
+/// Re-validate the post-lowering breakpoint sequence against the canonical
+/// invariants. Walks the `cache_control` markers in cache-prefix order
+/// across tools -> system -> (candidate) messages, builds
+/// `routectl_core::cache_control::Breakpoint` values, and delegates to
+/// `routectl_core::cache_control::validate` -- the single source of truth
+/// for the count cap (<= MAX_BREAKPOINTS) and the TTL-ordering rule (1h
+/// before 5m). Markers are pulled from the assembled JSON body directly
+/// because the lowering operates on JSON, not the typed request.
+fn validate_lowered_breakpoints(
+    obj: &serde_json::Map<String, Value>,
+    candidate_messages: &[Value],
+) -> Result<()> {
+    use routectl_core::cache_control::{validate, Breakpoint, BreakpointPosition, CacheControl};
+
+    fn parse_marker(v: &Value) -> Option<CacheControl> {
+        serde_json::from_value::<CacheControl>(v.clone()).ok()
+    }
+
+    let mut owned: Vec<(BreakpointPosition, CacheControl)> = Vec::new();
+
+    // Tools first in the cache prefix.
+    if let Some(tools) = obj.get("tools").and_then(Value::as_array) {
+        for t in tools {
+            if let Some(cc) = t.get("cache_control").and_then(parse_marker) {
+                owned.push((BreakpointPosition::Tools, cc));
+            }
+        }
+    }
+
+    // Then system blocks (array shape only carries per-block markers).
+    if let Some(blocks) = obj.get("system").and_then(Value::as_array) {
+        for b in blocks {
+            if let Some(cc) = b.get("cache_control").and_then(parse_marker) {
+                owned.push((BreakpointPosition::System, cc));
+            }
+        }
+    }
+
+    // Then the candidate messages, in order.
+    for msg in candidate_messages {
+        if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
+            for b in blocks {
+                if let Some(cc) = b.get("cache_control").and_then(parse_marker) {
+                    owned.push((BreakpointPosition::Messages, cc));
+                }
+            }
+        }
+    }
+
+    let bps: Vec<Breakpoint<'_>> = owned
+        .iter()
+        .map(|(position, control)| Breakpoint {
+            position: *position,
+            control,
+        })
+        .collect();
+    validate(&bps)
+}
+
+/// The INSERTION-TARGET allow-list: the content block `type`s the
+/// Bedrock-Invoke lowering will place a `cache_control` marker onto.
+/// Forward-compat `Other` (unknown `type`) blocks and
+/// `thinking` / `redacted_thinking` blocks are intentionally NEVER
+/// insertion targets -- `Other` because its shape is opaque and
+/// `thinking` / `redacted_thinking` because they are not valid cache
+/// breakpoint targets. This predicate is deliberately NOT a mirror of the
+/// sibling `anthropic_api::request::content_block_cache_control` walk
+/// (which counts `Other` via a catch-all and does not list
+/// `search_result` separately); that walk enumerates existing markers,
+/// this list selects where to ADD one. Ordering safety against an
+/// already-marked `Other` block is provided by the
+/// clone -> validate -> rollback gate in
+/// `lower_top_level_cache_control_to_per_block`, not by this predicate.
+fn is_cache_control_eligible_block_type(block_type: &str) -> bool {
+    matches!(
+        block_type,
+        "text" | "image" | "document" | "tool_use" | "tool_result" | "search_result"
+    )
 }
 
 /// Parse the Bedrock InvokeModel response body into a `ChatResponse`.
@@ -413,10 +655,12 @@ mod tests {
 
     #[test]
     fn cache_control_on_user_text_round_trips_to_bedrock_invoke_body() {
-        // v0.4.0 mandate: Anthropic-in -> Bedrock-Invoke-out path
-        // preserves cache_control byte-for-byte. Bedrock-Invoke
-        // delegates body construction to anthropic_api::request::
-        // normalize, so this test pins the inheritance.
+        // Bedrock InvokeModel REJECTS a top-level cache_control body field
+        // (HTTP 400), so the Bedrock-Invoke egress LOWERS the canonical
+        // top-level marker to a per-block marker. Per-block markers the
+        // caller already placed (here: the 1h system block and the 5m user
+        // text block) are preserved byte-for-byte; the body must carry NO
+        // top-level cache_control key after normalize.
         use routectl_core::{
             cache_control::CacheControl, content_part::ContentPart, system_content::SystemContent,
             KnownContentPart, SystemBlock,
@@ -439,19 +683,333 @@ mod tests {
 
         let body = normalize_request(&cfg, &req).unwrap();
 
-        // Top-level cache_control on body.
-        assert_eq!(body["cache_control"]["ttl"], "5m");
-        // System block preserved with cache_control.
+        // Top-level cache_control is lowered away (Bedrock 400s on it).
+        assert!(
+            body.get("cache_control").is_none(),
+            "top-level cache_control must be removed for Bedrock-Invoke: {body}"
+        );
+        // System block preserved with its original cache_control.
         let sys = body["system"].as_array().unwrap();
         assert_eq!(sys[0]["cache_control"]["ttl"], "1h");
-        // User text block preserved with cache_control.
+        // User text block already carried its own 5m marker; it is the
+        // last eligible block and already marked, so it stays 5m.
         let blk = &body["messages"][0]["content"][0];
         assert_eq!(blk["cache_control"]["ttl"], "5m");
         // Bedrock-required version still set.
         assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
     }
 
-    /// `BedrockConfig::adaptive_thinking = Some(true)` propagates
+    /// Top-level 5m marker + a trailing Blocks-array user message whose
+    /// last block carries no cache_control: the marker lowers onto that
+    /// last block, and the top-level key is gone.
+    #[test]
+    fn top_level_cache_control_lowers_to_last_unmarked_block() {
+        use routectl_core::{
+            cache_control::CacheControl, content_part::ContentPart, KnownContentPart,
+        };
+
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.cache_control = Some(CacheControl::ephemeral_5m());
+        req.messages[0].content =
+            MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "look".into(),
+                cache_control: None,
+            })]);
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        assert!(
+            body.get("cache_control").is_none(),
+            "top-level cache_control must be removed: {body}"
+        );
+        let blk = &body["messages"][0]["content"][0];
+        assert_eq!(blk["cache_control"]["type"], "ephemeral");
+        assert_eq!(blk["cache_control"]["ttl"], "5m");
+    }
+
+    /// Top-level 5m marker + last user message content is a STRING: the
+    /// string converts to a one-element text-block array carrying the 5m
+    /// marker; the top-level key is gone.
+    #[test]
+    fn top_level_cache_control_lowers_onto_stringified_content() {
+        use routectl_core::cache_control::CacheControl;
+
+        // Arrange: user_req() builds MessageContent::Text("hello"), which
+        // the shared normalizer emits as a JSON string `content`.
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.cache_control = Some(CacheControl::ephemeral_5m());
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        assert!(
+            body.get("cache_control").is_none(),
+            "top-level cache_control must be removed: {body}"
+        );
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("string content converted to a block array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "hello");
+        assert_eq!(content[0]["cache_control"]["ttl"], "5m");
+    }
+
+    /// Top-level marker + the last eligible block already carries its own
+    /// marker: the top-level key is removed, and the existing block marker
+    /// is left UNCHANGED (no duplicate, no overwrite). The block's TTL is
+    /// 1h and the top-level is 5m so the shared normalizer's prefix-order
+    /// validation (longer TTLs before shorter) is satisfied before lowering
+    /// runs.
+    #[test]
+    fn top_level_cache_control_does_not_override_existing_block_marker() {
+        use routectl_core::{
+            cache_control::CacheControl, content_part::ContentPart, KnownContentPart,
+        };
+
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.cache_control = Some(CacheControl::ephemeral_5m());
+        req.messages[0].content =
+            MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "look".into(),
+                cache_control: Some(CacheControl::ephemeral_1h()),
+            })]);
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        assert!(
+            body.get("cache_control").is_none(),
+            "top-level cache_control must be removed: {body}"
+        );
+        let blk = &body["messages"][0]["content"][0];
+        assert_eq!(
+            blk["cache_control"]["ttl"], "1h",
+            "existing block marker must be left unchanged, not overwritten: {body}"
+        );
+    }
+
+    /// No top-level cache_control, but a per-block marker on a system
+    /// block: the body is unchanged -- the per-block marker survives and
+    /// no top-level key is introduced.
+    #[test]
+    fn no_top_level_cache_control_leaves_per_block_marker_untouched() {
+        use routectl_core::{
+            cache_control::CacheControl, system_content::SystemContent, SystemBlock,
+        };
+
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.cache_control = None;
+        req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "be helpful".into(),
+            cache_control: Some(CacheControl::ephemeral_1h()),
+            citations: None,
+        }]));
+
+        // Act
+        let body = normalize_request(&cfg, &req).unwrap();
+
+        // Assert
+        assert!(
+            body.get("cache_control").is_none(),
+            "no top-level cache_control must be introduced: {body}"
+        );
+        let sys = body["system"].as_array().unwrap();
+        assert_eq!(sys[0]["cache_control"]["ttl"], "1h");
+    }
+
+    /// Determinism: lowering is a pure function of the input body, so two
+    /// identical requests must serialize to byte-identical bodies.
+    #[test]
+    fn lowering_is_deterministic_across_identical_requests() {
+        use routectl_core::{
+            cache_control::CacheControl, content_part::ContentPart, system_content::SystemContent,
+            KnownContentPart, SystemBlock,
+        };
+
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = user_req();
+        req.cache_control = Some(CacheControl::ephemeral_5m());
+        req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+            kind: "text".into(),
+            text: "be helpful".into(),
+            cache_control: Some(CacheControl::ephemeral_1h()),
+            citations: None,
+        }]));
+        req.messages[0].content =
+            MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "look".into(),
+                cache_control: None,
+            })]);
+
+        // Act
+        let first = normalize_request(&cfg, &req).unwrap().to_string();
+        let second = normalize_request(&cfg, &req).unwrap().to_string();
+
+        // Assert
+        assert_eq!(first, second, "lowering must be byte-identical");
+    }
+
+    /// Review concern 8 (load-bearing rollback): a top-level 5m marker plus
+    /// a trailing user message whose blocks are [eligible text (unmarked),
+    /// trailing unknown `Other` block carrying a 1h marker]. Inserting the
+    /// 5m onto the text block would place a 5m breakpoint BEFORE the 1h
+    /// `Other` breakpoint -- a TTL-ordering violation. The clone -> validate
+    /// gate must ROLL BACK to drop-only: top-level removed, no 5m inserted,
+    /// the trailing 1h `Other` marker untouched.
+    #[test]
+    fn lowering_rolls_back_to_drop_only_on_ttl_order_violation() {
+        // Arrange
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "cache_control".into(),
+            json!({"type": "ephemeral", "ttl": "5m"}),
+        );
+        obj.insert(
+            "messages".into(),
+            json!([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hi"},
+                    {
+                        "type": "some_future_block",
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                    }
+                ]
+            }]),
+        );
+
+        // Act
+        lower_top_level_cache_control_to_per_block("bedrock:test", &mut obj);
+
+        // Assert
+        assert!(
+            obj.get("cache_control").is_none(),
+            "top-level cache_control must always be removed: {obj:?}"
+        );
+        let blocks = obj["messages"][0]["content"].as_array().unwrap();
+        assert!(
+            blocks[0].get("cache_control").is_none(),
+            "5m marker must NOT be inserted on the text block (rolled back): {obj:?}"
+        );
+        assert_eq!(
+            blocks[1]["cache_control"]["ttl"], "1h",
+            "trailing Other block's 1h marker must be left untouched: {obj:?}"
+        );
+    }
+
+    /// No `messages` array to host a per-block marker: the top-level marker
+    /// is dropped (drop-only via the no-messages warn path).
+    #[test]
+    fn top_level_cache_control_dropped_when_no_messages_array() {
+        // Arrange
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "cache_control".into(),
+            json!({"type": "ephemeral", "ttl": "5m"}),
+        );
+
+        // Act
+        lower_top_level_cache_control_to_per_block("bedrock:test", &mut obj);
+
+        // Assert
+        assert!(
+            obj.get("cache_control").is_none(),
+            "top-level cache_control must be removed even with no messages: {obj:?}"
+        );
+    }
+
+    /// The only block is a `thinking` block (not an insertion target): the
+    /// top-level marker is dropped and the thinking block is untouched.
+    #[test]
+    fn top_level_cache_control_dropped_when_no_eligible_block() {
+        // Arrange
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "cache_control".into(),
+            json!({"type": "ephemeral", "ttl": "5m"}),
+        );
+        obj.insert(
+            "messages".into(),
+            json!([{
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "hmm"}]
+            }]),
+        );
+
+        // Act
+        lower_top_level_cache_control_to_per_block("bedrock:test", &mut obj);
+
+        // Assert
+        assert!(
+            obj.get("cache_control").is_none(),
+            "top-level cache_control must be removed: {obj:?}"
+        );
+        let block = &obj["messages"][0]["content"][0];
+        assert!(
+            block.get("cache_control").is_none(),
+            "ineligible thinking block must not receive a marker: {obj:?}"
+        );
+    }
+
+    /// Direct unit test of the post-lowering validator: a 1h-before-5m
+    /// sequence is VALID, a 5m-before-1h sequence is INVALID, and a
+    /// 5-marker sequence is INVALID (exceeds MAX_BREAKPOINTS).
+    #[test]
+    fn validate_lowered_breakpoints_enforces_count_and_ttl_order() {
+        let mk = |ttl: &str| json!({"type": "ephemeral", "ttl": ttl});
+
+        // VALID: 1h (system) then 5m (messages).
+        let mut valid = serde_json::Map::new();
+        valid.insert(
+            "system".into(),
+            json!([{"type": "text", "text": "s", "cache_control": mk("1h")}]),
+        );
+        let valid_msgs = vec![json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "u", "cache_control": mk("5m")}]
+        })];
+        assert!(validate_lowered_breakpoints(&valid, &valid_msgs).is_ok());
+
+        // INVALID: 5m (system) then 1h (messages).
+        let mut bad_order = serde_json::Map::new();
+        bad_order.insert(
+            "system".into(),
+            json!([{"type": "text", "text": "s", "cache_control": mk("5m")}]),
+        );
+        let bad_order_msgs = vec![json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "u", "cache_control": mk("1h")}]
+        })];
+        assert!(validate_lowered_breakpoints(&bad_order, &bad_order_msgs).is_err());
+
+        // INVALID: 5 markers exceeds MAX_BREAKPOINTS (4).
+        let five = serde_json::Map::new();
+        let five_msgs = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "a", "cache_control": mk("5m")},
+                {"type": "text", "text": "b", "cache_control": mk("5m")},
+                {"type": "text", "text": "c", "cache_control": mk("5m")},
+                {"type": "text", "text": "d", "cache_control": mk("5m")},
+                {"type": "text", "text": "e", "cache_control": mk("5m")}
+            ]
+        })];
+        assert!(validate_lowered_breakpoints(&five, &five_msgs).is_err());
+    }
     /// through `normalize_request` -> `anthropic_api::request::normalize`
     /// and produces the Opus 4.7+ wire shape (no `budget_tokens`,
     /// top-level `output_config.effort`). This is the integration

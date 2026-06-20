@@ -170,10 +170,12 @@ mod scenario_3_multi_turn_with_tool_result {
 // Scenario 5: cache_control_positions
 // =====================================================================
 //
-// Bedrock-Invoke uses the Anthropic-shape body, so `cache_control`
-// should survive on all four supported positions (top level, system
-// block, tool, message content block) -- same as the anthropic_api
-// egress baseline.
+// Bedrock-Invoke uses the Anthropic-shape body, but AWS InvokeModel
+// REJECTS a top-level `cache_control` body field (HTTP 400). The egress
+// lowers the top-level marker onto the last eligible content block, so the
+// body carries the system / tool / message-block markers but NO top-level
+// `cache_control`. The trailing message block already carries its own 5m
+// marker here, so it is left unchanged by the lowering.
 
 mod scenario_5_cache_control_positions {
     use super::*;
