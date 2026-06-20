@@ -13,7 +13,6 @@ use routectl_core::{
 
 use super::translate;
 use crate::openai_responses::{AuthKind, OpenAiResponsesConfig};
-
 // ---------------------------------------------------------------------------
 // Test scaffolding
 // ---------------------------------------------------------------------------
@@ -1147,5 +1146,157 @@ fn openai_responses_does_not_inject_max_tokens_when_caller_omitted() {
     assert!(
         v.get("max_output_tokens").is_none(),
         "openai-responses egress must not inject max_output_tokens either; got: {v}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// dropped cache_control observability
+//
+// The Responses API has no prompt-cache breakpoint surface, so dropping
+// caller `cache_control` markers is CORRECT; these tests pin that the
+// drop is OBSERVABLE (a single WARN naming the surfaces) and that the
+// wire body is UNCHANGED by the diagnostic. `system`-level markers are
+// excluded here -- system.rs already logs that drop at DEBUG.
+// ---------------------------------------------------------------------------
+
+use super::dropped_cache_surfaces;
+use tracing_test::traced_test;
+
+fn user_text_part_with_cc(text: &str) -> Message {
+    Message {
+        refusal: None,
+        role: Role::User,
+        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+            text: text.into(),
+            cache_control: Some(CacheControl::ephemeral_5m()),
+        })]),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+fn custom_tool_with_cc(name: &str) -> ToolDef {
+    ToolDef::Custom(CustomTool {
+        name: name.into(),
+        description: None,
+        input_schema: json!({"type": "object"}),
+        cache_control: Some(CacheControl::ephemeral_5m()),
+        defer_loading: None,
+        strict: None,
+        type_tag: None,
+    })
+}
+
+#[test]
+fn dropped_surfaces_detects_top_level_marker() {
+    // Arrange
+    let mut req = req_with(vec![user_text("hi")]);
+    req.cache_control = Some(CacheControl::ephemeral_5m());
+
+    // Act
+    let surfaces = dropped_cache_surfaces(&req);
+
+    // Assert
+    assert_eq!(surfaces, vec!["top-level"]);
+}
+
+#[test]
+fn dropped_surfaces_detects_per_part_marker() {
+    // Arrange
+    let req = req_with(vec![user_text_part_with_cc("hi")]);
+
+    // Act
+    let surfaces = dropped_cache_surfaces(&req);
+
+    // Assert
+    assert_eq!(surfaces, vec!["messages"]);
+}
+
+#[test]
+fn dropped_surfaces_detects_per_tool_marker() {
+    // Arrange
+    let mut req = req_with(vec![user_text("hi")]);
+    req.tools = Some(vec![custom_tool_with_cc("calc")]);
+
+    // Act
+    let surfaces = dropped_cache_surfaces(&req);
+
+    // Assert
+    assert_eq!(surfaces, vec!["tools"]);
+}
+
+#[test]
+fn dropped_surfaces_excludes_system_already_logged_at_debug() {
+    // Arrange: only a system-block marker. system.rs owns that DEBUG log,
+    // so this helper must NOT re-report it (avoids a double-log).
+    let mut req = req_with(vec![user_text("hi")]);
+    req.system = Some(SystemContent::Blocks(vec![SystemBlock {
+        kind: "text".into(),
+        text: "sys".into(),
+        cache_control: Some(CacheControl::ephemeral_5m()),
+        citations: None,
+    }]));
+
+    // Act
+    let surfaces = dropped_cache_surfaces(&req);
+
+    // Assert
+    assert!(
+        surfaces.is_empty(),
+        "system marker must not be re-reported: {surfaces:?}"
+    );
+}
+
+#[test]
+fn dropped_surfaces_empty_for_clean_request() {
+    // Arrange: no markers anywhere.
+    let req = req_with(vec![user_text("hi")]);
+
+    // Act
+    let surfaces = dropped_cache_surfaces(&req);
+
+    // Assert
+    assert!(surfaces.is_empty());
+}
+
+#[traced_test]
+#[test]
+fn warn_fires_for_top_level_marker_and_wire_is_unchanged() {
+    // Arrange: identical requests, one with a top-level marker.
+    let clean = req_with(vec![user_text("hi")]);
+    let mut hinted = req_with(vec![user_text("hi")]);
+    hinted.cache_control = Some(CacheControl::ephemeral_5m());
+
+    // Act
+    let clean_wire = translate_to_json(&cfg(), &clean);
+    let hinted_wire = translate_to_json(&cfg(), &hinted);
+
+    // Assert: the diagnostic fired, names the surface, and the wire body
+    // is byte-identical to the unhinted request (cache_control never rode
+    // the Responses wire to begin with).
+    assert!(
+        logs_contain("cache_control dropped"),
+        "drop diagnostic must fire for a top-level marker"
+    );
+    assert_eq!(clean_wire, hinted_wire);
+    assert!(hinted_wire.get("cache_control").is_none());
+}
+
+#[traced_test]
+#[test]
+fn no_warn_for_clean_request() {
+    // Arrange
+    let req = req_with(vec![user_text("hi")]);
+
+    // Act
+    let _ = translate(&cfg(), &req).expect("translate");
+
+    // Assert: a request with no caller markers emits no drop diagnostic.
+    assert!(
+        !logs_contain("cache_control dropped"),
+        "no drop diagnostic should fire when no caller marker is present"
     );
 }

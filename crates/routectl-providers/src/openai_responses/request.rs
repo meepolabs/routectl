@@ -12,6 +12,7 @@
 //! `provider_extras["store"]`. `parallel_tool_calls` defaults to
 //! `true`, matching codex's `ResponsesApiRequest` default.
 
+use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::{ChatRequest, Result};
 
 use super::messages::build_input;
@@ -28,6 +29,8 @@ pub(crate) fn translate(
     cfg: &OpenAiResponsesConfig,
     req: &ChatRequest,
 ) -> Result<ResponsesRequest> {
+    warn_dropped_cache_control(req);
+
     let instructions = translate_system(req).unwrap_or_default();
     let input = build_input(&cfg.id, &req.messages)?;
     let tools = translate_tools(req);
@@ -60,6 +63,52 @@ pub(crate) fn translate(
     extras::finalize_reasoning_include(&mut request, req);
 
     Ok(request)
+}
+
+/// Cache-prefix surfaces (other than `system`) that carry a caller
+/// `cache_control` marker the Responses egress will drop. The Responses
+/// API has no prompt-caching breakpoint surface, so dropping the markers
+/// is correct -- this only names which surfaces carried one.
+///
+/// `system` is excluded on purpose: `system.rs` already logs that drop at
+/// DEBUG, so re-reporting it here would double-log the same surface.
+/// Pure function of `req` -- no logging, no mutation -- so the detection
+/// can be unit-tested directly.
+fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
+    let mut surfaces: Vec<&'static str> = Vec::new();
+    for bp in req.cache_breakpoints() {
+        let name = match bp.position {
+            BreakpointPosition::Tools => "tools",
+            BreakpointPosition::Messages => "messages",
+            BreakpointPosition::TopLevel => "top-level",
+            // Already logged at DEBUG in system.rs; skip to avoid a double-log.
+            BreakpointPosition::System => continue,
+        };
+        if !surfaces.contains(&name) {
+            surfaces.push(name);
+        }
+    }
+    surfaces
+}
+
+/// Emit one WARN naming every cache-prefix surface carrying a caller
+/// `cache_control` marker that the Responses egress drops. Matches the
+/// openai-compat egress convention (`check_dropped_anthropic_fields`),
+/// which WARNs on every dropped cache_control carrier so an operator
+/// routing cache-hinted traffic to a Responses target sees the same
+/// breadcrumb. Logs only the surface name(s) + a count: no message
+/// content, no bodies, no secrets.
+fn warn_dropped_cache_control(req: &ChatRequest) {
+    let surfaces = dropped_cache_surfaces(req);
+    if surfaces.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        dropped_surfaces = ?surfaces,
+        dropped_count = surfaces.len(),
+        "openai-responses egress: cache_control dropped (Responses API has no \
+         prompt-cache breakpoint surface)"
+    );
 }
 
 #[cfg(test)]
