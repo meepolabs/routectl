@@ -889,21 +889,20 @@ impl CacheCapability {
     pub fn for_provider_kind(kind: &str) -> Self {
         match kind {
             "anthropic-api" => Self::new(true, true),
-            // Bedrock supports prompt caching only via per-block markers
-            // (a `cachePoint` block on Converse, per-block `cache_control`
-            // on Invoke), NOT a routectl-injected top-level marker: on
-            // Converse a top-level marker lands in
-            // `additionalModelRequestFields` and never becomes a
-            // `cachePoint` (silent no-op -- AWS caches only off
-            // `cachePoint`); on Invoke it is sent as an undocumented
-            // top-level body field AWS does not honor. So auto-emit must
-            // fail-closed for Bedrock (SkippedNoCapability) rather than
-            // silently no-op. Caller-supplied per-block markers are
-            // unaffected and still cache normally; operators may override
-            // per-entry. Extension point: if a future change lowers a
-            // top-level marker to a per-block `cachePoint` on the Bedrock
-            // egress, this default can be revisited. Hit usage IS reported
-            // back, so cache_hit_observable stays true.
+            // Conservative kind-level default used only when no
+            // `api_shape` is known (the kind token carries no shape).
+            // `ProviderEntry::cache_capability()` special-cases the
+            // Bedrock variant and derives the live value from `api_shape`
+            // instead: Invoke -> supports_top_level = true, because the
+            // egress lowers a routectl-injected top-level marker to the
+            // per-block form Invoke caches on (commit 3e12f88); Converse
+            // -> false, because a top-level marker is inert there (no
+            // `cachePoint` translation). Hit usage is reported back on
+            // both shapes, so cache_hit_observable stays true. This
+            // kind-level value stays fail-closed as the no-shape fallback
+            // so the dispatch path never auto-emits to a shape it cannot
+            // reason about. Caller-supplied per-block markers cache
+            // normally regardless; operators may override per-entry.
             "bedrock" => Self::new(false, true),
             // OpenAI auto-caches server-side; there is no explicit
             // breakpoint to emit, but `cached_tokens` IS reported back.
@@ -1299,6 +1298,28 @@ impl ProviderEntry {
                 } else {
                     CacheCapability::new(false, false)
                 }
+            });
+        }
+
+        // Bedrock is special-cased on its `api_shape`: the two shapes
+        // cache a top-level `cache_control` marker differently. On
+        // Invoke the egress lowers a routectl-injected top-level marker
+        // to the per-block form Invoke caches on (commit 3e12f88), so
+        // auto-emit is safe -> supports_top_level = true. On Converse a
+        // top-level marker is inert (no `cachePoint` translation), so it
+        // stays fail-closed. Hit usage is reported back on both shapes.
+        // An explicit operator override always wins (mirrors the
+        // AnthropicApi case above).
+        #[cfg(feature = "bedrock")]
+        if let Self::Bedrock {
+            api_shape,
+            cache_capability,
+            ..
+        } = self
+        {
+            return cache_capability.unwrap_or_else(|| match api_shape {
+                BedrockApiShapeConfig::Invoke => CacheCapability::new(true, true),
+                BedrockApiShapeConfig::Converse => CacheCapability::new(false, true),
             });
         }
 
@@ -2097,6 +2118,64 @@ forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
             compat.cache_capability(),
             CacheCapability::for_provider_kind("openai-compat"),
         );
+    }
+
+    #[cfg(feature = "bedrock")]
+    fn bedrock_entry(
+        api_shape: super::BedrockApiShapeConfig,
+        cache_capability: Option<CacheCapability>,
+    ) -> ProviderEntry {
+        ProviderEntry::Bedrock {
+            region: "us-east-1".into(),
+            api_shape,
+            creds: super::BedrockCredsConfig::DefaultChain,
+            user_agent: None,
+            header_extras: std::collections::BTreeMap::new(),
+            payload_extras: None,
+            anthropic_beta: Vec::new(),
+            cache_capability,
+            auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
+            runtime: Default::default(),
+        }
+    }
+
+    /// The Bedrock Invoke egress lowers a top-level `cache_control`
+    /// marker to the per-block form Invoke caches on, so auto-emit is
+    /// safe there: `cache_capability()` derives supports_top_level = true
+    /// from `api_shape = Invoke`.
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn cache_capability_bedrock_invoke_supports_top_level() {
+        let cap = bedrock_entry(super::BedrockApiShapeConfig::Invoke, None).cache_capability();
+        assert!(cap.supports_top_level_cache_control);
+        assert!(cap.cache_hit_observable);
+    }
+
+    /// A top-level marker is inert on Bedrock Converse (no `cachePoint`
+    /// translation), so it stays fail-closed: supports_top_level = false,
+    /// hit usage still observable.
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn cache_capability_bedrock_converse_fails_closed() {
+        let cap = bedrock_entry(super::BedrockApiShapeConfig::Converse, None).cache_capability();
+        assert!(!cap.supports_top_level_cache_control);
+        assert!(cap.cache_hit_observable);
+    }
+
+    /// An explicit operator override always wins over the api_shape-
+    /// derived default, even when the shape would otherwise enable
+    /// auto-emit.
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn cache_capability_bedrock_override_beats_api_shape() {
+        let cap = bedrock_entry(
+            super::BedrockApiShapeConfig::Invoke,
+            Some(CacheCapability::new(false, false)),
+        )
+        .cache_capability();
+        assert!(!cap.supports_top_level_cache_control);
+        assert!(!cap.cache_hit_observable);
     }
 
     #[test]
