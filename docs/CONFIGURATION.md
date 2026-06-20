@@ -1063,7 +1063,7 @@ Each provider kind has a **conservative** default capability:
 | `kind`              | `supports_top_level_cache_control` | `cache_hit_observable` |
 |---------------------|------------------------------------|------------------------|
 | `anthropic-api`     | true (default base URL only -- see below) | true            |
-| `bedrock`           | true                               | true                   |
+| `bedrock`           | false (per-block markers only -- see below) | true                 |
 | `openai-responses`  | false (server-side auto-cache; no explicit breakpoint) | true |
 | `openai-compat`     | false                              | false                  |
 | any unknown kind    | false                              | false                  |
@@ -1093,6 +1093,18 @@ closed (`false/false`) and is never auto-cached. An operator who knows
 their custom-base host supports caching must set `cache_capability`
 explicitly to opt in (an explicit override always wins, even on a custom
 base URL).
+
+**bedrock fails closed for auto-emit.** Bedrock honors prompt caching
+only via per-block markers -- a `cachePoint` block on Converse, a
+per-block `cache_control` on Invoke -- never a routectl-injected
+top-level marker (on Converse it lands in
+`additionalModelRequestFields` and never becomes a `cachePoint`; on
+Invoke it is an undocumented top-level field AWS does not honor). So the
+`bedrock` default is `false/true`: auto-emit is skipped
+(`auto_skipped:no_capability`) rather than silently no-op'd, while hit
+usage is still reported back (`cache_hit_observable = true`).
+Caller-supplied per-block markers are unaffected and still cache
+normally; an operator may override per entry.
 
 ## Context reduction (`[reduction]`)
 

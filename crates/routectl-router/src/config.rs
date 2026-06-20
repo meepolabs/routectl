@@ -848,8 +848,9 @@ fn default_port() -> u16 {
 /// Describes what a provider supports re: Anthropic-style prompt-cache
 /// breakpoints. The dispatch path consults this to decide whether to
 /// auto-emit a top-level `cache_control` breakpoint -- it does so only
-/// for providers that actually honor one (anthropic-api, bedrock) and
-/// never for OpenAI-shape providers that silently drop it.
+/// for providers that actually honor one (anthropic-api) and never for
+/// providers that ignore or silently drop it (OpenAI-shape; Bedrock,
+/// which caches only off per-block markers, not a top-level one).
 ///
 /// Per-kind defaults are deliberately conservative; an unknown provider
 /// kind is treated as supporting nothing so routectl never emits a
@@ -888,7 +889,22 @@ impl CacheCapability {
     pub fn for_provider_kind(kind: &str) -> Self {
         match kind {
             "anthropic-api" => Self::new(true, true),
-            "bedrock" => Self::new(true, true),
+            // Bedrock supports prompt caching only via per-block markers
+            // (a `cachePoint` block on Converse, per-block `cache_control`
+            // on Invoke), NOT a routectl-injected top-level marker: on
+            // Converse a top-level marker lands in
+            // `additionalModelRequestFields` and never becomes a
+            // `cachePoint` (silent no-op -- AWS caches only off
+            // `cachePoint`); on Invoke it is sent as an undocumented
+            // top-level body field AWS does not honor. So auto-emit must
+            // fail-closed for Bedrock (SkippedNoCapability) rather than
+            // silently no-op. Caller-supplied per-block markers are
+            // unaffected and still cache normally; operators may override
+            // per-entry. Extension point: if a future change lowers a
+            // top-level marker to a per-block `cachePoint` on the Bedrock
+            // egress, this default can be revisited. Hit usage IS reported
+            // back, so cache_hit_observable stays true.
+            "bedrock" => Self::new(false, true),
             // OpenAI auto-caches server-side; there is no explicit
             // breakpoint to emit, but `cached_tokens` IS reported back.
             "openai-responses" => Self::new(false, true),
@@ -2047,8 +2063,10 @@ forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
         assert!(anthropic.supports_top_level_cache_control);
         assert!(anthropic.cache_hit_observable);
 
+        // Bedrock caches only off per-block markers, never a top-level one,
+        // so auto-emit must fail-closed -- but hit usage is still reported.
         let bedrock = CacheCapability::for_provider_kind("bedrock");
-        assert!(bedrock.supports_top_level_cache_control);
+        assert!(!bedrock.supports_top_level_cache_control);
         assert!(bedrock.cache_hit_observable);
 
         // OpenAI-shape: no explicit breakpoint, but cached_tokens reported.
