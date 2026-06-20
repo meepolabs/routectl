@@ -86,10 +86,20 @@ use super::extras::{effort_ratio, is_routectl_managed_key};
 // cache_control validation
 // ---------------------------------------------------------------------------
 
-/// Walk all positions of an AnthropicRequest and call
-/// `cache_control::validate` against the collected breakpoint sequence.
-/// Catches 1h-after-5m ordering violations and 5+ breakpoint counts
-/// before they reach upstream.
+/// Walk all positions of the ASSEMBLED `AnthropicRequest` and validate the
+/// collected breakpoint sequence (1h-after-5m ordering, 5+ count) before it
+/// ships upstream.
+///
+/// This deliberately validates the POST-assembly wire body, NOT the canonical
+/// `ChatRequest`. Assembly is lossy -- `tool_choice="none"` suppresses tools,
+/// the billing-attribution strip drops a block, a legacy `Role::System` lift
+/// flattens its cache_control away, and `Role::Tool` Parts collapse into one
+/// unmarked `ToolResult` -- so this walk counts what ACTUALLY ships. It is
+/// load-bearing and is NOT replaceable with `validate_source(req)` on the
+/// canonical request: that would change the cap/ordering outcome for every
+/// suppressed / stripped / lifted / collapsed request. The canonical
+/// pre-assembly walk lives in routectl-core cache_control.rs
+/// (`CacheBreakpointSource for ChatRequest`).
 fn validate_breakpoints(ar: &AnthropicRequest) -> Result<()> {
     cache_control::validate_source(ar)
 }
