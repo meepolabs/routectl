@@ -485,7 +485,11 @@ mod tests {
     #[test]
     fn high_confidence_veto_on_three_segment_jwt_in_system_prompt() {
         // Arrange
-        // Header is {"alg":"HS256","typ":"JWT"} base64url-encoded.
+        // Fabricated, non-functional JWT: a real {"alg":"HS256","typ":"JWT"}
+        // base64url header (which is all is_jwt sniffs) followed by a
+        // deliberately non-eyJ payload/signature, so it exercises the detector
+        // without being a scannable token. Do not "restore" a realistic
+        // payload -- secret scanners flag eyJ.eyJ. JWT shapes.
         let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.cGF5bG9hZA.c2ln";
         let req = req_with_system(&format!("Bearer {jwt} must be present"));
 
