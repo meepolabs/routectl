@@ -38,7 +38,7 @@ use routectl_core::{
 };
 
 use super::super::frame::{self, FrameHandler, FrameLabel};
-use super::response::lift_stop_sequence;
+use super::response::{lift_stop_sequence, translate_cache_details};
 use super::response_types::{
     ConverseUsage, StreamContentBlockDelta, StreamContentBlockStart,
     StreamContentBlockStartPayload, StreamContentBlockStop, StreamDelta, StreamMessageStart,
@@ -466,6 +466,7 @@ fn build_closing_chunk(
             total_tokens: Some(total_tokens),
             cache_creation_input_tokens: u.cache_write_input_tokens,
             cache_read_input_tokens: u.cache_read_input_tokens,
+            cache_creation: u.cache_details.as_deref().map(translate_cache_details),
             ..Default::default()
         }
     });

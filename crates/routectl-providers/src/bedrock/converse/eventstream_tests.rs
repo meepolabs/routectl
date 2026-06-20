@@ -278,6 +278,64 @@ fn message_stop_capture_then_metadata_emits_closing_chunk_with_finish_and_usage(
 }
 
 #[test]
+fn metadata_cache_details_translate_to_per_ttl_breakdown_on_closing_chunk() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act: messageStop holds the stop_reason; the metadata frame
+    // carries a ConverseUsage with a per-TTL cacheDetails breakdown.
+    let _ = run("messageStop", r#"{"stopReason":"end_turn"}"#, &mut state);
+    let closing = run(
+        "metadata",
+        r#"{"usage":{"inputTokens":0,"outputTokens":5,
+            "cacheWriteInputTokens":175,
+            "cacheDetails":[
+                {"inputTokens":75,"ttl":"5m"},
+                {"inputTokens":100,"ttl":"1h"}
+            ]}}"#,
+        &mut state,
+    );
+
+    // Assert: the streaming closing chunk must carry the same per-TTL
+    // split the non-streaming path produces, not a flattened None.
+    assert_eq!(closing.len(), 1);
+    let u = closing[0].usage.as_ref().unwrap();
+    assert_eq!(u.cache_creation_input_tokens, Some(175));
+    let cc = u.cache_creation.as_ref().unwrap();
+    assert_eq!(cc.ephemeral_5m_input_tokens, Some(75));
+    assert_eq!(cc.ephemeral_1h_input_tokens, Some(100));
+}
+
+#[test]
+fn metadata_unknown_ttl_bucket_dropped_from_per_ttl_split_on_closing_chunk() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+
+    // Act: a future TTL bucket (e.g. "24h") AWS hasn't shipped yet.
+    let _ = run("messageStop", r#"{"stopReason":"end_turn"}"#, &mut state);
+    let closing = run(
+        "metadata",
+        r#"{"usage":{"inputTokens":0,"outputTokens":5,
+            "cacheWriteInputTokens":125,
+            "cacheDetails":[
+                {"inputTokens":50,"ttl":"24h"},
+                {"inputTokens":75,"ttl":"5m"}
+            ]}}"#,
+        &mut state,
+    );
+
+    // Assert: the unknown bucket is dropped from the per-TTL object
+    // (not coerced into the wrong bucket) but still counts toward the
+    // aggregate, matching the shared translate_cache_details contract.
+    assert_eq!(closing.len(), 1);
+    let u = closing[0].usage.as_ref().unwrap();
+    assert_eq!(u.cache_creation_input_tokens, Some(125));
+    let cc = u.cache_creation.as_ref().unwrap();
+    assert_eq!(cc.ephemeral_5m_input_tokens, Some(75));
+    assert_eq!(cc.ephemeral_1h_input_tokens, None);
+}
+
+#[test]
 fn unknown_stop_reason_passes_through_on_closing_chunk() {
     // Arrange: Converse-only stop_reason.
     let mut state = ConverseStreamState::default();

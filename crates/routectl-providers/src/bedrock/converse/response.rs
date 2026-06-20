@@ -301,7 +301,7 @@ fn translate_usage(u: &ConverseUsage) -> Usage {
 /// the canonical per-TTL object. Multiple entries with the same `ttl`
 /// (shouldn't happen on the wire today but is theoretically possible)
 /// sum together so no token counts get silently lost.
-fn translate_cache_details(details: &[ConverseCacheDetail]) -> CacheCreation {
+pub(crate) fn translate_cache_details(details: &[ConverseCacheDetail]) -> CacheCreation {
     let mut five_min: Option<u32> = None;
     let mut one_hour: Option<u32> = None;
     for d in details {
