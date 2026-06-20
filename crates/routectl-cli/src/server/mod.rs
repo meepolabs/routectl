@@ -120,6 +120,20 @@ pub async fn serve(
     serve_on_listener(config, listener, config_path).await
 }
 
+/// Format the one-line startup cache-policy banner from the two policy
+/// switches. Pure so it can be unit-tested without booting a server.
+fn cache_policy_banner(auto_emit_top_level: bool, reduction: bool) -> String {
+    format!(
+        "cache policy: auto-emit top-level breakpoint {}, context reduction {}",
+        if auto_emit_top_level {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if reduction { "enabled" } else { "disabled" },
+    )
+}
+
 /// Serve on an already-bound listener. Used by tests so the OS-assigned port
 /// can be read back with `listener.local_addr()` before handing it over.
 ///
@@ -154,6 +168,15 @@ pub async fn serve_on_listener(
         addr = %bound,
         aliases = ?alias_list,
         "routectl listening on http://{bound}"
+    );
+
+    let auto_emit = config.cache.auto_emit_top_level_breakpoint;
+    let reduction = config.reduction.enabled;
+    tracing::info!(
+        auto_emit_top_level = auto_emit,
+        reduction = reduction,
+        "{}",
+        cache_policy_banner(auto_emit, reduction)
     );
 
     // Resolve the three runtime log knobs (redact_prompts,
@@ -1083,6 +1106,23 @@ fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_policy_banner_reflects_both_switches() {
+        // Arrange / Act / Assert: each switch maps to enabled / disabled.
+        assert_eq!(
+            cache_policy_banner(true, true),
+            "cache policy: auto-emit top-level breakpoint enabled, context reduction enabled"
+        );
+        assert_eq!(
+            cache_policy_banner(false, false),
+            "cache policy: auto-emit top-level breakpoint disabled, context reduction disabled"
+        );
+        assert_eq!(
+            cache_policy_banner(true, false),
+            "cache policy: auto-emit top-level breakpoint enabled, context reduction disabled"
+        );
+    }
 
     /// Point a config's usage DB at a per-test tempdir so server tests
     /// never touch the real `~/.config/routectl/usage.db` (the

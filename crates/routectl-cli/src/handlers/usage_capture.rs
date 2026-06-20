@@ -157,6 +157,17 @@ pub(crate) fn cache_exclusive_input(prompt: u32, cache_read: u32, cache_creation
         .saturating_sub(cache_creation)
 }
 
+/// Integer cache-hit percentage: `read * 100 / prompt`, where `prompt` is
+/// the cache-INCLUSIVE prompt total. Guards `prompt == 0` -> 0 (no
+/// divide-by-zero) and saturates the multiply so a malformed tally cannot
+/// wrap. Pure + total so it can be unit-tested without a live capture.
+pub(crate) fn cache_hit_pct(read: u64, prompt: u64) -> u64 {
+    if prompt == 0 {
+        return 0;
+    }
+    read.saturating_mul(100) / prompt
+}
+
 /// Short, stable error-class token for the `error_class` column. Never
 /// the Display string (which can embed provider names / upstream bodies);
 /// just the routectl error variant family.
@@ -409,6 +420,7 @@ impl UsageCapture {
             .map(|fb| i64::try_from(fb.duration_since(self.start).as_millis()).unwrap_or(0));
         self.emit_egress_summary();
         self.emit_cache_outcome();
+        self.emit_cache_summary();
         // Move the owned record into the channel rather than cloning a
         // wide ~40-column struct (some columns carry JSON Value trees).
         // `finalized` is already set above, so the only later access --
@@ -455,6 +467,59 @@ impl UsageCapture {
                 cache_creation = cache_creation,
                 cache_read = cache_read,
                 "cache_auto_outcome",
+            );
+        }
+    }
+
+    /// Emit the per-request cache breadcrumb: `cache=READ/PROMPT (PCT%)`.
+    /// READ is the cache-read token count; PROMPT is the cache-INCLUSIVE
+    /// prompt total, reconstructed from the cache-EXCLUSIVE `input_tokens`
+    /// the record stores plus the disjoint cache columns
+    /// (`input_tokens + cache_read + cache_write_5m + cache_write_1h`).
+    ///
+    /// Surfaced at INFO only when there was cache activity (a read, a
+    /// write, or an auto-emitted decision), so cached / auto-emitted
+    /// requests get an INFO breadcrumb while uncached requests stay at
+    /// DEBUG (no `cache=0/0` flood). Counts / ids / strategy only -- never
+    /// message content / secrets / bodies.
+    fn emit_cache_summary(&self) {
+        let cache_read = self.record.cache_read.unwrap_or(0);
+        let cache_write_5m = self.record.cache_write_5m.unwrap_or(0);
+        let cache_write_1h = self.record.cache_write_1h.unwrap_or(0);
+        let cache_creation = cache_write_5m + cache_write_1h;
+        let prompt = self
+            .record
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(cache_read)
+            .saturating_add(cache_creation);
+        let pct = cache_hit_pct(cache_read, prompt);
+        let strategy = self.record.strategy.as_deref().unwrap_or("");
+        let provider = self.record.provider.as_deref().unwrap_or("");
+        let model = self.record.model.as_deref().unwrap_or("");
+        let request_id = self.record.request_id.as_str();
+        let cache_active = cache_read > 0 || cache_creation > 0 || strategy == "auto_emitted";
+        if cache_active {
+            tracing::info!(
+                request_id = %request_id,
+                provider = %provider,
+                model = %model,
+                strategy = %strategy,
+                cache_read = cache_read,
+                prompt = prompt,
+                cache_hit_pct = pct,
+                "cache={cache_read}/{prompt} ({pct}%)",
+            );
+        } else {
+            tracing::debug!(
+                request_id = %request_id,
+                provider = %provider,
+                model = %model,
+                strategy = %strategy,
+                cache_read = cache_read,
+                prompt = prompt,
+                cache_hit_pct = pct,
+                "cache={cache_read}/{prompt} ({pct}%)",
             );
         }
     }

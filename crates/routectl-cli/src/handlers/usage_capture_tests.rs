@@ -304,3 +304,30 @@ fn thrash_fires_only_for_auto_emitted_create_without_read() {
     // No strategy recorded (request never dispatched) -> never thrash.
     assert!(!is_cache_thrash(None, 300, 0));
 }
+
+#[test]
+fn cache_hit_pct_zero_read_is_zero() {
+    // Arrange / Act / Assert: no read against a real prompt is 0%.
+    assert_eq!(cache_hit_pct(0, 1000), 0);
+}
+
+#[test]
+fn cache_hit_pct_full_read_is_hundred() {
+    // Arrange / Act / Assert: read == prompt is exactly 100%.
+    assert_eq!(cache_hit_pct(1000, 1000), 100);
+}
+
+#[test]
+fn cache_hit_pct_partial_read_is_integer_percent() {
+    // Arrange / Act / Assert: 600 of 1000 -> 60% (integer truncation).
+    assert_eq!(cache_hit_pct(600, 1000), 60);
+    // 1 of 3 -> 33% (floor, not round).
+    assert_eq!(cache_hit_pct(1, 3), 33);
+}
+
+#[test]
+fn cache_hit_pct_zero_prompt_guards_divide() {
+    // Arrange / Act / Assert: prompt == 0 yields 0%, never a panic.
+    assert_eq!(cache_hit_pct(0, 0), 0);
+    assert_eq!(cache_hit_pct(500, 0), 0);
+}

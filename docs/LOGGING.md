@@ -363,6 +363,58 @@ breakpoint cost against what it returned.
   CONFIGURATION.md). A caller-supplied or skipped strategy is never
   flagged as thrash -- routectl only warns on decisions it made itself.
 
+### per-request cache summary (`cache=READ/PROMPT (PCT%)`)
+
+Emitted once per request from the usage-capture finalize path, alongside
+the thrash signal above. The message reads `cache=READ/PROMPT (PCT%)`:
+
+- **READ** -- the cache-read token count the upstream reported
+  (`cache_read`).
+- **PROMPT** -- the cache-INCLUSIVE prompt total. The usage DB stores a
+  cache-EXCLUSIVE `input_tokens`, so this line reconstructs the inclusive
+  prompt as `input_tokens + cache_read + cache_write_5m + cache_write_1h`.
+- **PCT%** -- integer cache-hit percentage, `READ * 100 / PROMPT` (guards
+  `PROMPT == 0` -> `0%`).
+
+| Field          | Meaning                                                   |
+|----------------|-----------------------------------------------------------|
+| `request_id`   | The request correlation id.                               |
+| `provider`     | The served provider name.                                 |
+| `model`        | The served upstream model id.                             |
+| `strategy`     | The stable cache-decision token (vocabulary above).       |
+| `cache_read`   | Cache-read tokens the upstream reported.                  |
+| `prompt`       | Cache-inclusive prompt total (reconstructed, see above).  |
+| `cache_hit_pct`| Integer cache-hit percentage.                             |
+
+Level gating, to avoid flooding INFO with `cache=0/0` on every uncached
+request:
+
+- **INFO** when there was cache activity -- a read (`cache_read > 0`), a
+  write (`cache_write_5m + cache_write_1h > 0`), or an auto-emitted
+  decision (`strategy == auto_emitted`). Cached / auto-emitted requests
+  get an INFO breadcrumb.
+- **DEBUG** otherwise (no cache activity).
+
+Counts, ids, and stable tokens only -- never bodies, prompt content, or
+secrets.
+
+## Startup cache-policy banner
+
+## Startup cache-policy banner
+
+At server startup, immediately after the `routectl listening on ...` line,
+routectl emits one INFO banner summarizing the two cache-policy switches:
+
+| Field                 | Meaning                                                  |
+|-----------------------|----------------------------------------------------------|
+| `auto_emit_top_level` | `[cache] auto_emit_top_level_breakpoint` (bool).         |
+| `reduction`           | `[reduction] enabled` (bool).                            |
+
+The human message reads `cache policy: auto-emit top-level breakpoint
+<enabled|disabled>, context reduction <enabled|disabled>`. It lets an
+operator confirm at a glance which cache behaviors are live for this
+process without grepping the config.
+
 ## Context-reduction log shapes
 
 The dispatch-path context reducer (see CONFIGURATION.md, "Context
