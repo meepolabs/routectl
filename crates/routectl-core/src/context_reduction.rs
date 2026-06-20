@@ -9,8 +9,9 @@
 //! verbatim). A tool that returns pretty-printed JSON as TEXT (e.g.
 //! `json.dumps(x, indent=2)`) ships that whitespace to the model. This
 //! transform therefore targets JSON-valued `Value::String` payloads --
-//! `ToolResult.content` and `ToolUse.input` when they are strings -- not
-//! structured Values.
+//! Anthropic-shape `ToolResult.content` and `ToolUse.input` when they are
+//! strings, plus the OpenAI-shape `function.arguments` string on each
+//! `Message.tool_calls` entry -- not structured Values.
 //!
 //! CACHE SAFETY: the transform only touches messages at or after
 //! `mutable_suffix_start` (the boundary after the last caller
@@ -151,14 +152,54 @@ fn strip_insignificant_whitespace(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Minify a single JSON-valued `Value::String` target in place, bumping the
+/// running counters on success. Non-string targets and minify failures are
+/// left untouched (fail-closed).
+fn minify_string_target(target: &mut Value, strings_minified: &mut usize, bytes_saved: &mut usize) {
+    if let Value::String(s) = target {
+        if let Some(minified) = minify_json_whitespace(s) {
+            *bytes_saved += s.len() - minified.len();
+            *strings_minified += 1;
+            *target = Value::String(minified);
+        }
+    }
+}
+
+/// Minify the stringified `function.arguments` of each OpenAI-shape tool_call.
+///
+/// The OpenAI Chat Completions shape carries assistant tool calls on the
+/// separate `Message.tool_calls` field as untyped Values shaped
+/// `{"id":..,"type":"function","function":{"name":..,"arguments":"<json>"}}`.
+/// The `arguments` value is a STRING that may carry pretty-printed JSON
+/// whitespace shipped every turn -- the same minify target as the Anthropic
+/// content-part path. A tool_call may be malformed or a non-function type, so
+/// every navigation step is fallible: a missing `function`/`arguments` key or
+/// a non-string `arguments` is skipped, never unwrapped.
+fn minify_tool_call_arguments(
+    tool_calls: &mut [Value],
+    strings_minified: &mut usize,
+    bytes_saved: &mut usize,
+) {
+    for call in tool_calls {
+        let Some(arguments) = call
+            .get_mut("function")
+            .and_then(|f| f.get_mut("arguments"))
+        else {
+            continue;
+        };
+        minify_string_target(arguments, strings_minified, bytes_saved);
+    }
+}
+
 /// Minify JSON-valued STRING content in the request's mutable message tail.
 ///
 /// Computes `mutable_suffix_start(req)`; if `None`, returns
 /// `NoMutableTail` and leaves `req` untouched. Otherwise, for each message
-/// in `req.messages[start..]` whose content is `MessageContent::Parts`, it
-/// minifies every `ToolResult.content` and `ToolUse.input` that is a
-/// `Value::String`. Structured (non-string) Values, `ContentPart::Other`,
-/// thinking blocks, and anything before `start` are never touched.
+/// in `req.messages[start..]` it minifies every JSON-valued `Value::String`:
+/// `ToolResult.content` and `ToolUse.input` on Anthropic-shape content parts,
+/// and `function.arguments` on each OpenAI-shape `Message.tool_calls` entry.
+/// Structured (non-string) Values, `ContentPart::Other`, thinking blocks, and
+/// anything before `start` are never touched.
 ///
 /// Fail-closed: a per-string minify failure simply skips that string (the
 /// original is kept); the function never panics. Returns `NothingToStrip`
@@ -175,25 +216,22 @@ pub fn apply_json_minify(req: &mut ChatRequest) -> ReductionOutcome {
     let mut bytes_saved = 0usize;
 
     for message in req.messages.iter_mut().skip(start) {
-        let MessageContent::Parts(parts) = &mut message.content else {
-            continue;
-        };
-        for part in parts.iter_mut() {
-            let ContentPart::Known(known) = part else {
-                continue;
-            };
-            let target = match known {
-                KnownContentPart::ToolResult { content, .. } => content,
-                KnownContentPart::ToolUse { input, .. } => input,
-                _ => continue,
-            };
-            if let Value::String(s) = target {
-                if let Some(minified) = minify_json_whitespace(s) {
-                    bytes_saved += s.len() - minified.len();
-                    strings_minified += 1;
-                    *target = Value::String(minified);
-                }
+        if let MessageContent::Parts(parts) = &mut message.content {
+            for part in parts.iter_mut() {
+                let ContentPart::Known(known) = part else {
+                    continue;
+                };
+                let target = match known {
+                    KnownContentPart::ToolResult { content, .. } => content,
+                    KnownContentPart::ToolUse { input, .. } => input,
+                    _ => continue,
+                };
+                minify_string_target(target, &mut strings_minified, &mut bytes_saved);
             }
+        }
+
+        if let Some(tool_calls) = message.tool_calls.as_mut() {
+            minify_tool_call_arguments(tool_calls, &mut strings_minified, &mut bytes_saved);
         }
     }
 
@@ -409,6 +447,37 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+        }
+    }
+
+    /// Build an OpenAI-shape assistant message carrying `tool_calls`. With
+    /// `cc == None` the content is `Null` -- the real wire shape for a
+    /// tool-call-only assistant turn. With `cc == Some` a Text part carries
+    /// the caller cache_control marker so the message freezes (freeze tests).
+    fn tool_calls_msg(arguments: Value, cc: Option<CacheControl>) -> Message {
+        let content = match cc {
+            Some(cc) => MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "calling".into(),
+                cache_control: Some(cc),
+            })]),
+            None => MessageContent::Null,
+        };
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content,
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![json!({
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "arguments": arguments,
+                },
+            })]),
         }
     }
 
@@ -680,5 +749,294 @@ mod tests {
             }
             other => panic!("expected Applied, got {other:?}"),
         }
+    }
+
+    // --- apply_json_minify: OpenAI-shape tool_calls arguments ---
+
+    /// Read back `function.arguments` of the first tool_call on message 0.
+    fn first_tool_call_arguments(req: &ChatRequest) -> &Value {
+        req.messages[0]
+            .tool_calls
+            .as_ref()
+            .expect("expected tool_calls")[0]
+            .get("function")
+            .expect("expected function")
+            .get("arguments")
+            .expect("expected arguments")
+    }
+
+    #[test]
+    fn apply_compacts_pretty_tool_call_arguments_in_mutable_tail() {
+        // Arrange: an assistant tool_call whose function.arguments is a pretty
+        // JSON STRING in the mutable tail.
+        let pretty = "{\n  \"query\": \"rust\",\n  \"limit\": 10\n}";
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![tool_calls_msg(json!(pretty), None)],
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        match outcome {
+            ReductionOutcome::Applied(delta) => {
+                assert_eq!(delta.strings_minified, 1);
+                assert_eq!(
+                    delta.bytes_saved,
+                    pretty.len() - "{\"query\":\"rust\",\"limit\":10}".len()
+                );
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        assert_eq!(
+            first_tool_call_arguments(&req),
+            &json!("{\"query\":\"rust\",\"limit\":10}")
+        );
+    }
+
+    #[test]
+    fn apply_leaves_frozen_tool_call_arguments_byte_identical() {
+        // Arrange: message 0 carries a caller marker (frozen) and a pretty
+        // tool_call arguments; message 1 is mutable plain text. The frozen
+        // arguments must NOT be compacted.
+        let pretty = "{\n  \"frozen\": true\n}";
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![
+                tool_calls_msg(json!(pretty), Some(CacheControl::ephemeral_5m())),
+                text_msg("hi", None),
+            ],
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: nothing in the tail to strip, frozen prefix byte-identical.
+        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert_eq!(first_tool_call_arguments(&req), &json!(pretty));
+        assert_eq!(serde_json::to_value(&req).unwrap(), before);
+    }
+
+    #[test]
+    fn apply_frozen_tool_call_arguments_unchanged_when_tail_is_compacted() {
+        // Arrange: frozen message 0 holds pretty tool_call arguments; mutable
+        // message 1 ALSO holds pretty tool_call arguments. Only the tail must
+        // change; the serialized frozen prefix bytes must match exactly. This
+        // exercises the path the byte-identical guard alone cannot -- where the
+        // loop DOES run and must still skip the frozen prefix.
+        let frozen_pretty = "{\n  \"frozen\": [1, 2]\n}";
+        let tail_pretty = "{\n  \"tail\": [3, 4]\n}";
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![
+                tool_calls_msg(json!(frozen_pretty), Some(CacheControl::ephemeral_5m())),
+                tool_calls_msg(json!(tail_pretty), None),
+            ],
+            ..Default::default()
+        };
+        let frozen_before = serde_json::to_value(&req.messages[0]).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: exactly the tail compacted, frozen prefix byte-identical.
+        match outcome {
+            ReductionOutcome::Applied(delta) => assert_eq!(delta.strings_minified, 1),
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        assert_eq!(
+            serde_json::to_value(&req.messages[0]).unwrap(),
+            frozen_before
+        );
+        assert_eq!(first_tool_call_arguments(&req), &json!(frozen_pretty));
+        let tail_args = req.messages[1].tool_calls.as_ref().unwrap()[0]
+            .get("function")
+            .unwrap()
+            .get("arguments")
+            .unwrap();
+        assert_eq!(tail_args, &json!("{\"tail\":[3,4]}"));
+    }
+
+    #[test]
+    fn apply_top_level_cache_control_freezes_tool_call_arguments() {
+        // Arrange: a top-level caller cache_control freezes the entire
+        // prefix, so even a pretty tool_call arguments in the last message
+        // must NOT be touched.
+        let pretty = "{\n  \"a\": 1\n}";
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![tool_calls_msg(json!(pretty), None)],
+            cache_control: Some(CacheControl::ephemeral_5m()),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: untouched under a top-level breakpoint.
+        assert_eq!(outcome, ReductionOutcome::NoMutableTail);
+        assert_eq!(serde_json::to_value(&req).unwrap(), before);
+    }
+
+    #[test]
+    fn apply_already_compact_tool_call_arguments_is_nothing_to_strip() {
+        // Arrange: arguments is already whitespace-free JSON.
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![tool_calls_msg(json!("{\"q\":\"x\"}"), None)],
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert_eq!(serde_json::to_value(&req).unwrap(), before);
+    }
+
+    #[test]
+    fn apply_non_json_tool_call_arguments_is_nothing_to_strip() {
+        // Arrange: arguments carries prose, not JSON -- whitespace is
+        // semantic and must be preserved.
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![tool_calls_msg(json!("just some text"), None)],
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert_eq!(serde_json::to_value(&req).unwrap(), before);
+    }
+
+    #[test]
+    fn apply_tool_call_missing_function_key_is_skipped_safely() {
+        // Arrange: a malformed tool_call with no `function` key, plus one
+        // with `function` but no `arguments`. Neither must panic; nothing is
+        // minified.
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    json!({"id": "call_1", "type": "function"}),
+                    json!({"id": "call_2", "function": {"name": "noargs"}}),
+                ]),
+            }],
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert_eq!(serde_json::to_value(&req).unwrap(), before);
+    }
+
+    #[test]
+    fn apply_non_string_tool_call_arguments_is_skipped_safely() {
+        // Arrange: `arguments` is an object (not a string) and a number on a
+        // second call -- only Value::String targets are minified.
+        let mut req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![
+                    json!({"function": {"name": "f", "arguments": {"q": "x"}}}),
+                    json!({"function": {"name": "g", "arguments": 42}}),
+                ]),
+            }],
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&req).unwrap();
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert
+        assert_eq!(outcome, ReductionOutcome::NothingToStrip);
+        assert_eq!(serde_json::to_value(&req).unwrap(), before);
+    }
+
+    #[test]
+    fn apply_compacts_both_tool_use_part_and_tool_calls() {
+        // Arrange: one mutable message carries BOTH an Anthropic ToolUse
+        // content part AND an OpenAI tool_calls entry, both pretty.
+        let tool_use_pretty = "{\n  \"input\": 1\n}";
+        let tool_call_pretty = "{\n  \"args\": 2\n}";
+        let mut req = ChatRequest {
+            model: "claude-sonnet-4".into(),
+            messages: vec![Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "search".into(),
+                        input: json!(tool_use_pretty),
+                        cache_control: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(vec![json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": tool_call_pretty},
+                })]),
+            }],
+            ..Default::default()
+        };
+
+        // Act
+        let outcome = apply_json_minify(&mut req);
+
+        // Assert: both compacted; counts reflect both.
+        match outcome {
+            ReductionOutcome::Applied(delta) => {
+                assert_eq!(delta.strings_minified, 2);
+                assert_eq!(
+                    delta.bytes_saved,
+                    (tool_use_pretty.len() - "{\"input\":1}".len())
+                        + (tool_call_pretty.len() - "{\"args\":2}".len())
+                );
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        let MessageContent::Parts(parts) = &req.messages[0].content else {
+            panic!("expected parts");
+        };
+        let ContentPart::Known(KnownContentPart::ToolUse { input, .. }) = &parts[0] else {
+            panic!("expected tool_use");
+        };
+        assert_eq!(input, &json!("{\"input\":1}"));
+        assert_eq!(first_tool_call_arguments(&req), &json!("{\"args\":2}"));
     }
 }
