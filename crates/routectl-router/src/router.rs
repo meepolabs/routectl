@@ -49,7 +49,7 @@ const LIST_VALUED_HEADERS: &[&str] = &["anthropic-beta"];
 /// case the static walk missed could still introduce one at runtime.
 /// Depth > 8 hops fails the request with a clear `Error::Config`
 /// rather than recurse indefinitely.
-const ALIAS_MAX_RECURSION_DEPTH: usize = 8;
+pub const ALIAS_MAX_RECURSION_DEPTH: usize = 8;
 
 /// The largest upstream reset hint we honor as an in-loop, same-provider
 /// retry sleep (blocking the request thread). A reset at or below this

@@ -912,6 +912,53 @@ retention_days = 90                     # prune rows older than this; default 90
   are pruned from the database. Hot-reloads; the new value applies at
   the next startup-time prune.
 
+## Inspecting a request offline (`routectl prompt-size`)
+
+`routectl prompt-size` prints an OFFLINE report of a request fixture's
+token footprint and what routectl's cache / reduction machinery WOULD do
+to it. It never dispatches to any upstream and never resolves secrets or
+touches the network, so it is safe to run against any saved request body
+without valid credentials.
+
+```sh
+routectl prompt-size --alias heavy --request ./fixture.json
+```
+
+- `--alias` -- an `[aliases]` key or a `[models.X]` nickname. Its target
+  provider's prompt-cache capability is resolved CONFIG-only (alias ->
+  first model nickname -> provider entry), with no provider build.
+- `--request` -- a JSON request body parsed as a canonical `ChatRequest`.
+  Both OpenAI Chat Completions and Anthropic Messages shapes work: a
+  `system` prompt may sit at the top level OR as `role: "system"`
+  messages -- both are attributed to the SYSTEM tier.
+
+The report has three sections:
+
+1. **Size breakdown** -- bytes and approx tokens per tier (SYSTEM, TOOLS,
+   MESSAGES, TOTAL). Approx tokens are `bytes / 4`, a rough estimate for
+   sizing only, NOT a billing figure.
+2. **Auto-emit** -- whether the dispatch path would inject a top-level
+   `cache_control` breakpoint, reflecting the operator's current
+   `[cache] auto_emit_top_level_breakpoint` switch: `caller-supplied`
+   (the request already carries breakpoints; checked first), `skipped:
+   globally_disabled ([cache] auto_emit_top_level_breakpoint = false)`
+   (auto-emit is turned off in config), `would inject 1 top-level
+   ephemeral_5m breakpoint`, `skipped: no_capability` (target does not
+   honor a top-level breakpoint), `skipped: volatile_vetoed` (the stable
+   prefix carries high-confidence volatile tokens), or `indeterminate`
+   (the alias's capability could not be resolved offline).
+3. **Reduction** -- what `[reduction]` json-minify would strip from the
+   mutable message tail, reflecting the operator's current `[reduction]
+   enabled` switch. When reduction is ENABLED: the strings minified,
+   bytes saved, and approx tokens saved (or a no-op reason). When
+   reduction is DISABLED in config, the line still reports the available
+   headroom but prefixes it with `reduction disabled in config
+   ([reduction] enabled = false)` so an operator sees both the savings on
+   offer AND the truth about their current config.
+
+A misconfigured alias surfaces the same clean config-validation error
+`routectl test` produces.
+
 ## Pricing registry (`[registry."<pattern>".pricing]`)
 
 The optional `[registry]` table supplies per-upstream prices so usage

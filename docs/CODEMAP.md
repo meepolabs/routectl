@@ -256,9 +256,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 
 ### commands
 
-- `src/commands/mod.rs` -- groups CLI subcommand entry points (test, config, login, logout, refresh, whoami, usage; `serve` lives in `crate::server`)
+- `src/commands/mod.rs` -- groups CLI subcommand entry points (test, prompt_size, config, login, logout, refresh, whoami, usage; `serve` lives in `crate::server`)
 - `src/commands/config.rs` -- `routectl config check/show/example` (secret resolution, alias chain validation)
 - `src/commands/test.rs` -- `routectl test <target>` one-shot completion against an alias or model nickname
+- `src/commands/prompt_size.rs` -- `routectl prompt-size --alias <X> --request <fixture.json>` offline report of a request fixture's per-tier (SYSTEM / TOOLS / MESSAGES / TOTAL) byte + approx-token footprint and the projected auto-emit decision (caller-supplied / would-inject / no_capability / volatile_vetoed / indeterminate) + reduction outcome. Pure `build_report(&ChatRequest, Option<bool>) -> Report`; config-only alias->provider cache-capability resolution (no secret resolution, no provider build, no network). Runs the same cheap config guards as `test`
 - `src/commands/login.rs` -- `routectl login <provider> [--label <name>]` runs the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via `OAuthStore`; `--label` registers an additional seat without overwriting the default; `--print-url` headless flow guarded against providers without a paste-back landing page
 - `src/commands/logout.rs` -- `routectl logout <provider> [--label <name>]` -- removes one seat (`--label` removes only the named seat; no label removes the default) from the credentials store; first-time logout reported but not an error
 - `src/commands/refresh.rs` -- `routectl refresh <provider> [--label <name>]` -- forces a refresh of one seat through the per-seat single-flight gate, regardless of expiry

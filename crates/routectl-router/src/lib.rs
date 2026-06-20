@@ -29,4 +29,6 @@ pub use factory::{
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use resolved::ResolvedModel;
-pub use router::{DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions};
+pub use router::{
+    DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions, ALIAS_MAX_RECURSION_DEPTH,
+};

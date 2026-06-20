@@ -123,6 +123,19 @@ enum Cmd {
         #[command(subcommand)]
         action: ConfigCmd,
     },
+    /// Offline report of a request fixture's token footprint and what
+    /// routectl's cache / reduction machinery would do to it. Never
+    /// dispatches upstream and never resolves secrets or touches the network.
+    PromptSize {
+        /// Alias key (`[aliases]` entry) or model nickname (`[models.X]`
+        /// table key) whose target provider's cache capability is consulted.
+        #[arg(long)]
+        alias: String,
+        /// Path to a request body fixture (JSON) parsed as a canonical
+        /// ChatRequest (OpenAI Chat Completions or Anthropic Messages shape).
+        #[arg(long)]
+        request: PathBuf,
+    },
     /// Summarize recorded usage from the local usage DB (read-only).
     ///
     /// With no window flag and no `--since`, prints a multi-window
@@ -274,6 +287,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Cmd::PromptSize { alias, request } => {
+            let config = load_config(cli.config.as_deref())?;
+            if let Err(e) = commands::prompt_size::run(config, &alias, &request) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         Cmd::Usage {
             today,
             this_week,
