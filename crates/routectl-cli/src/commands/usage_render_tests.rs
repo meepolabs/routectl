@@ -58,9 +58,11 @@ fn render_non_detail_header_has_expected_columns() {
     assert!(header.contains("input"));
     assert!(header.contains("output"));
     assert!(header.contains("reasoning"));
-    assert!(header.contains("cache_read"));
+    assert!(header.contains("ctx_peak"));
     assert!(header.contains("cost"));
-    for dropped in ["cache_rd", "scope", "p95_ms", "max_ms", "wall_ms"] {
+    // cache_read was a misleading SUM of a per-turn snapshot; the column is
+    // now the honest peak context size. The old name must be gone.
+    for dropped in ["cache_rd", "cache_read", "scope", "p95_ms", "max_ms", "wall_ms"] {
         assert!(!header.contains(dropped), "header should not contain {dropped}");
     }
 }
@@ -214,6 +216,76 @@ fn render_detail_latency_summary_uses_window_total_not_alias_named_total() {
     );
 }
 
+/// Config priced with a non-zero cache_read rate, used by the cost
+/// regression test. The `paid` provider is API-key (not subscription) and
+/// `up-paid` carries a cache_read price so cache reads contribute dollars.
+fn cache_read_priced_config(cache_read_per_mtok: f64) -> Config {
+    let mut config = Config::default();
+    config.providers.insert(
+        "paid".to_string(),
+        ProviderEntry::anthropic_api("env://PAID_KEY"),
+    );
+    config.registry.insert(
+        "up-paid".to_string(),
+        RegistryEntry {
+            pricing: Some(PricingConfig {
+                cache_read_per_mtok: Some(cache_read_per_mtok),
+                ..Default::default()
+            }),
+            provider: None,
+        },
+    );
+    config
+}
+
+#[test]
+fn cost_prices_summed_cache_read_not_peak() {
+    // Arrange: one model group with a CLIMBING cache_read snapshot
+    // (88000, 89000, 91000). Cache reads are billed PER TURN, so the cost
+    // basis is the SUM (268000), not the peak (91000). Price only cache_read
+    // at a known rate so the dollar figure is attributable to it alone.
+    let (_dir, _path, db) = temp_db();
+    insert_stream_row(&db, "cr1", 1000, "m", 100, 600, Some(1), None, Some(88_000));
+    insert_stream_row(&db, "cr2", 1100, "m", 100, 600, Some(1), None, Some(89_000));
+    insert_stream_row(&db, "cr3", 1200, "m", 100, 600, Some(1), None, Some(91_000));
+    let rate = 6.0; // USD per million tokens
+    let config = cache_read_priced_config(rate);
+    let report = report_all(&db, &config, Some(GroupDim::Model), false);
+
+    // Act
+    let total = find(&report, "total");
+    let cost = total.priced_total_usd.expect("priced cost present");
+
+    // Assert: cost is the SUM-based figure (268000 * rate / 1e6), strictly
+    // greater than the peak-based figure (91000 * rate / 1e6). This MUST fail
+    // if cost is ever reverted to pricing the peak.
+    let sum_cost = 268_000.0 * rate / 1_000_000.0;
+    let peak_cost = 91_000.0 * rate / 1_000_000.0;
+    assert!((cost - sum_cost).abs() < 1e-9, "expected sum-based cost {sum_cost}, got {cost}");
+    assert!(cost > peak_cost, "sum-based cost {cost} must exceed peak-based cost {peak_cost}");
+}
+
+#[test]
+fn render_total_ctx_peak_is_max_not_sum_and_flows_stay_summed() {
+    // Arrange: two streaming rows in the same model group with a climbing
+    // cache_read snapshot (88000, 91000). The display total must report the
+    // PEAK context (91000 -> "91K"), never the sum (179000 -> "179K"), while
+    // input/output remain real summed flows.
+    let (_dir, _path, db) = temp_db();
+    insert_stream_row(&db, "ft1", 1000, "m", 100, 600, Some(10), None, Some(88_000));
+    insert_stream_row(&db, "ft2", 1100, "m", 100, 600, Some(20), None, Some(91_000));
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let total = find(&report, "total");
+
+    // Assert: ctx_peak is the MAX snapshot; the sum never appears as a field.
+    assert_eq!(total.cache_read_peak, 91_000);
+    assert_ne!(total.cache_read_peak, 179_000);
+    // Output is a real summed flow (10 + 20).
+    assert_eq!(total.output_tokens, 30);
+}
+
 #[test]
 fn render_includes_total_row() {
     // Arrange
@@ -256,6 +328,34 @@ fn render_footer_na_rate_when_no_tokens() {
 
     // Assert
     assert!(out.contains("cache hit n/a"));
+}
+
+#[test]
+fn render_footer_cache_hit_rate_is_per_group_mean_of_rates() {
+    // Arrange: two DIFFERENT model groups. Group A: peak=900, input=100 ->
+    // rate 0.9. Group B: peak=0, input=100 -> rate 0.0. The footer must report
+    // the MEAN of the per-group rates (0.45 -> "cache hit 45.0%"), weighting
+    // each group equally -- NOT the old MAX-numerator-over-summed-input figure
+    // (900/(900+200) = 0.818 -> "81.8%"), which padded the denominator with the
+    // other group's input.
+    let (_dir, _path, db) = temp_db();
+    // Group A "ga": a stream row carries the cache_read peak (900); a paid row
+    // carries the input (100). Both share (model, provider, upstream, alias)
+    // so they roll into one aggregate group.
+    insert_stream_row(&db, "ga_s", 1000, "ga", 100, 600, Some(5), None, Some(900));
+    paid_model_row(&db, "ga_i", "ga", "ok", 100, 0);
+    // Group B "gb": cache_read reported as 0 (peak 0), input 100.
+    insert_stream_row(&db, "gb_s", 1100, "gb", 100, 600, Some(5), None, Some(0));
+    paid_model_row(&db, "gb_i", "gb", "ok", 100, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: mean of 0.9 and 0.0 is 0.45 -> 45.0%; the old MAX/SUM figure
+    // (81.8%) must not appear.
+    assert!(out.contains("cache hit 45.0%"), "footer should be the per-group mean: {out:?}");
+    assert!(!out.contains("81.8%"), "footer must not be the old MAX/SUM figure: {out:?}");
 }
 
 #[test]
@@ -450,9 +550,10 @@ fn by_model_groups_rows_sharing_a_model() {
 }
 
 #[test]
-fn by_model_null_model_falls_back_to_unattributed_label() {
-    // Arrange: a row with a NULL model column. group_label's fallback must
-    // place it under the "(unattributed)" group.
+fn by_model_null_model_attributes_to_requested_model() {
+    // Arrange: a pre-dispatch abort has model=NULL but always carries a
+    // requested_model. The aggregate must attribute it to requested_model so
+    // it groups under the route the caller asked for, not a NULL bucket.
     let (_dir, _path, db) = temp_db();
     db.conn()
         .execute(
@@ -460,8 +561,8 @@ fn by_model_null_model_falls_back_to_unattributed_label() {
              requested_model, alias, model, provider, upstream, stream, outcome, \
              latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
              input_tokens, output_tokens) \
-             VALUES (1000, 1000, 'nm1', 'openai', 'req-model', 'al', NULL, 'paid', \
-             'up-paid', 0, 'ok', 5, 0, 0, 1, 0, 8, 9)",
+             VALUES (1000, 1000, 'nm1', 'openai', 'gpt-asked', 'al', NULL, NULL, \
+             NULL, 0, 'client_disconnect', 5, 0, 0, 0, 0, 8, 9)",
             [],
         )
         .expect("insert null-model row");
@@ -469,8 +570,12 @@ fn by_model_null_model_falls_back_to_unattributed_label() {
     // Act
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
-    // Assert
-    let row = find(&report, "(unattributed)");
+    // Assert: attributed to requested_model, never an "(unattributed)" bucket.
+    assert!(
+        report.rows.iter().all(|r| r.label != "(unattributed)"),
+        "pre-dispatch abort must not land in the unattributed bucket"
+    );
+    let row = find(&report, "gpt-asked");
     assert_eq!(row.requests, 1);
     assert_eq!(row.input_tokens, 8);
 }

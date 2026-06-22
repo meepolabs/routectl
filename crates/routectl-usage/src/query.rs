@@ -31,11 +31,16 @@ pub struct GroupKey {
 }
 
 /// One aggregate row at the finest cost-relevant granularity:
-/// `(model, provider, upstream, alias)`. Token dims are summed with
-/// COALESCE so NULL counters contribute 0. `server_tool_calls` is the sum
-/// of the integer values inside each row's `server_tool_use` JSON map (via
-/// JSON1 `json_each`), i.e. the total number of server-tool invocations --
-/// not a count of rows that used a server tool.
+/// `(model, provider, upstream, alias)`, where `model` coalesces to
+/// `requested_model` so pre-dispatch aborts (NULL `model`) attribute to the
+/// route the caller asked for rather than a NULL bucket. Token FLOW dims
+/// (`input_tokens`, `output_tokens`, `cache_write_*`) are summed with
+/// COALESCE so NULL counters contribute 0. `cache_read` is NOT summed: it is
+/// a per-turn SNAPSHOT of cached-context size, so the group reports its peak
+/// and mean instead (see `cache_read_peak` / `cache_read_avg`).
+/// `server_tool_calls` is the sum of the integer values inside each row's
+/// `server_tool_use` JSON map (via JSON1 `json_each`), i.e. the total number
+/// of server-tool invocations -- not a count of rows that used a server tool.
 ///
 /// The `*_present` fields are `COUNT(col)` (SQLite COUNT ignores NULLs), so
 /// the caller can distinguish "metric reported as 0" from "metric not
@@ -52,7 +57,23 @@ pub struct AggRow {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_tokens: i64,
-    pub cache_read: i64,
+    /// Peak cached-context SIZE seen in the group (`MAX(cache_read)`). NOT a
+    /// flow: each row's `cache_read` is a per-turn SNAPSHOT of the cached
+    /// prefix re-read that turn, so summing it across a long session would
+    /// repeat-count the same growing prefix. The peak is the true high-water
+    /// mark of context served from cache.
+    pub cache_read_peak: i64,
+    /// Mean cached-context size across the group's rows (`AVG(cache_read)`,
+    /// truncated to an integer). Same snapshot semantics as `cache_read_peak`.
+    pub cache_read_avg: i64,
+    /// Summed cache-read volume across the group (`SUM(cache_read)`), kept
+    /// SOLELY as the cost basis: cache reads are billed PER TURN, so the
+    /// cumulative dollar cost is the sum, not the peak. This is deliberately
+    /// distinct from `cache_read_peak` / `cache_read_avg`, which are
+    /// display-only context-SIZE figures -- do NOT "clean up" this SUM
+    /// thinking it is the repeat-counting bug that was removed; pricing the
+    /// peak instead understates cost by roughly the turn count.
+    pub cache_read_billed: i64,
     pub cache_write_5m: i64,
     pub cache_write_1h: i64,
     pub server_tool_calls: i64,
@@ -83,14 +104,16 @@ pub struct QuotaSnapshot {
 
 const AGG_SQL: &str = "\
 SELECT
-    model, provider, upstream, alias,
+    COALESCE(model, requested_model) AS model, provider, upstream, alias,
     COUNT(*)                                            AS requests,
     SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
     SUM(CASE WHEN outcome != 'ok' THEN 1 ELSE 0 END)    AS errors,
     COALESCE(SUM(input_tokens), 0)                      AS input_tokens,
     COALESCE(SUM(output_tokens), 0)                     AS output_tokens,
     COALESCE(SUM(reasoning_tokens), 0)                  AS reasoning_tokens,
-    COALESCE(SUM(cache_read), 0)                        AS cache_read,
+    COALESCE(MAX(cache_read), 0)                        AS cache_read_peak,
+    CAST(COALESCE(AVG(cache_read), 0) AS INTEGER)       AS cache_read_avg,
+    COALESCE(SUM(cache_read), 0)                        AS cache_read_billed,
     COALESCE(SUM(cache_write_5m), 0)                    AS cache_write_5m,
     COALESCE(SUM(cache_write_1h), 0)                    AS cache_write_1h,
     COALESCE(SUM(
@@ -116,7 +139,7 @@ SELECT
     COALESCE(SUM(stream), 0)                            AS stream_count
 FROM requests AS r
 WHERE ts_start >= ?1 AND ts_start < ?2
-GROUP BY model, provider, upstream, alias";
+GROUP BY COALESCE(model, requested_model), provider, upstream, alias";
 
 /// Windowed aggregate grouped by `(model, provider, upstream, alias)`.
 /// Rows outside `[from_ms, to_ms)` are excluded. The caller rolls these up
@@ -144,20 +167,22 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
         input_tokens: row.get(7)?,
         output_tokens: row.get(8)?,
         reasoning_tokens: row.get(9)?,
-        cache_read: row.get(10)?,
-        cache_write_5m: row.get(11)?,
-        cache_write_1h: row.get(12)?,
-        server_tool_calls: row.get(13)?,
-        sum_ttfb_ms: row.get(14)?,
-        ttfb_count: row.get(15)?,
-        gen_window_ms: row.get(16)?,
-        gen_output_tokens: row.get(17)?,
-        reasoning_present: row.get(18)?,
-        cache_read_present: row.get(19)?,
-        cache_write_5m_present: row.get(20)?,
-        cache_write_1h_present: row.get(21)?,
-        server_tool_present: row.get(22)?,
-        stream_count: row.get(23)?,
+        cache_read_peak: row.get(10)?,
+        cache_read_avg: row.get(11)?,
+        cache_read_billed: row.get(12)?,
+        cache_write_5m: row.get(13)?,
+        cache_write_1h: row.get(14)?,
+        server_tool_calls: row.get(15)?,
+        sum_ttfb_ms: row.get(16)?,
+        ttfb_count: row.get(17)?,
+        gen_window_ms: row.get(18)?,
+        gen_output_tokens: row.get(19)?,
+        reasoning_present: row.get(20)?,
+        cache_read_present: row.get(21)?,
+        cache_write_5m_present: row.get(22)?,
+        cache_write_1h_present: row.get(23)?,
+        server_tool_present: row.get(24)?,
+        stream_count: row.get(25)?,
     })
 }
 
@@ -525,6 +550,102 @@ mod tests {
         // Assert: 2 + 1 + 3 = 6 invocations across the group.
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].server_tool_calls, 6);
+    }
+
+    #[test]
+    fn aggregate_cache_read_reports_peak_avg_and_billed_with_distinct_semantics() {
+        // Arrange: several rows in the SAME group with a CLIMBING cache_read.
+        // cache_read is a per-turn SNAPSHOT of the cached prefix re-read that
+        // turn. For DISPLAY (context SIZE) the group reports the peak (MAX) and
+        // mean (AVG) -- summing those would repeat-count the same growing
+        // prefix. For COST, cache reads are billed PER TURN, so the cumulative
+        // cost basis IS the sum (`cache_read_billed`). All three must coexist
+        // with the right semantics.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_full_row(
+            &db,
+            "k1",
+            100,
+            1,
+            "ok",
+            Some(10),
+            50,
+            Some(1),
+            None,
+            Some(88_000),
+        );
+        insert_full_row(
+            &db,
+            "k2",
+            110,
+            1,
+            "ok",
+            Some(10),
+            50,
+            Some(1),
+            None,
+            Some(89_000),
+        );
+        insert_full_row(
+            &db,
+            "k3",
+            120,
+            1,
+            "ok",
+            Some(10),
+            50,
+            Some(1),
+            None,
+            Some(91_000),
+        );
+
+        // Act
+        let rows = aggregate(&db, 0, 1000).expect("aggregate");
+
+        // Assert: one group; peak is the MAX, avg is the integer mean, and the
+        // billed figure is the SUM (the cost basis), distinct from peak/avg.
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.cache_read_peak, 91_000);
+        assert_eq!(r.cache_read_avg, 89_333); // (88000+89000+91000)/3 truncated
+        assert_eq!(r.cache_read_billed, 268_000); // SUM, the per-turn cost basis
+                                                  // The display figures must NOT equal the billed sum.
+        assert_ne!(r.cache_read_peak, r.cache_read_billed);
+        assert_ne!(r.cache_read_avg, r.cache_read_billed);
+        // cache_read_present still counts the reporting rows (all three).
+        assert_eq!(r.cache_read_present, 3);
+    }
+
+    #[test]
+    fn aggregate_null_model_attributes_to_requested_model() {
+        // Arrange: a pre-dispatch abort has model=NULL but always carries a
+        // requested_model. The aggregate must attribute it to requested_model
+        // (the route asked for), not drop it into a NULL group key.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, stream, outcome, \
+                 latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+                 input_tokens, output_tokens) \
+                 VALUES (100, 100, 'abort', 'openai', 'asked-model', 'al', NULL, NULL, \
+                 NULL, 0, 'client_disconnect', 5, 0, 0, 0, 0, 7, 0)",
+                [],
+            )
+            .expect("insert null-model row");
+
+        // Act
+        let rows = aggregate(&db, 0, 1000).expect("aggregate");
+
+        // Assert: the group key's model is the requested_model, never NULL.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key.model.as_deref(), Some("asked-model"));
+        assert!(
+            rows[0].key.model.is_some(),
+            "must not be a NULL model bucket"
+        );
     }
 
     #[test]

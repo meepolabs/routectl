@@ -296,7 +296,13 @@ pub struct DisplayRow {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_tokens: i64,
-    pub cache_read: i64,
+    /// Peak cached-context SIZE in the group (MAX of the fine rows' per-turn
+    /// snapshots). NOT a flow -- never folded into a token total.
+    pub cache_read_peak: i64,
+    /// Mean cached-context size in the group: presence-weighted mean of the
+    /// fine rows' per-turn snapshots (`sum(avg_i * present_i) / total_present`).
+    /// Display-only.
+    pub cache_read_avg: i64,
     pub cache_write_5m: i64,
     pub cache_write_1h: i64,
     pub server_tool_calls: i64,
@@ -383,11 +389,15 @@ fn cost_for_row(config: &Config, row: &AggRow) -> RowCost {
         return RowCost::Unpriced;
     };
     let rates = rates_from_pricing(pricing);
+    // cache_read is billed PER TURN, so the cost basis is the summed cache-read
+    // volume (`cache_read_billed`), not the peak. The peak / avg are
+    // display-only context SIZE and must NOT drive cost; input / output /
+    // cache_write_* are real summed flows.
     match estimate_cost_tokens(
         row.input_tokens,
         row.output_tokens,
         row.reasoning_tokens,
-        row.cache_read,
+        row.cache_read_billed,
         row.cache_write_5m,
         row.cache_write_1h,
         &rates,
@@ -427,7 +437,11 @@ struct Acc {
     input_tokens: i64,
     output_tokens: i64,
     reasoning_tokens: i64,
-    cache_read: i64,
+    /// Running MAX of the fine rows' per-turn cache-read peaks.
+    cache_read_peak: i64,
+    /// Presence-weighted accumulator for the group's mean cache-read size:
+    /// `sum(avg_i * present_i)`; divided by `cache_read_present` at finalize.
+    cache_read_avg_weighted: i64,
     cache_write_5m: i64,
     cache_write_1h: i64,
     server_tool_calls: i64,
@@ -453,7 +467,9 @@ impl Acc {
         self.input_tokens += row.input_tokens;
         self.output_tokens += row.output_tokens;
         self.reasoning_tokens += row.reasoning_tokens;
-        self.cache_read += row.cache_read;
+        self.cache_read_peak = self.cache_read_peak.max(row.cache_read_peak);
+        // safe in i64: ~200k-token ceiling * realistic per-window turn counts << i64::MAX
+        self.cache_read_avg_weighted += row.cache_read_avg * row.cache_read_present;
         self.cache_write_5m += row.cache_write_5m;
         self.cache_write_1h += row.cache_write_1h;
         self.server_tool_calls += row.server_tool_calls;
@@ -528,6 +544,11 @@ pub fn build_window_report(
 /// attaching the group's pre-computed TTFT percentiles (if any).
 fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
     let (ttft_p50_ms, ttft_p95_ms) = ttft.get(&label).copied().unwrap_or((None, None));
+    let cache_read_avg = if acc.cache_read_present > 0 {
+        acc.cache_read_avg_weighted / acc.cache_read_present
+    } else {
+        0
+    };
     DisplayRow {
         ttft_p50_ms,
         ttft_p95_ms,
@@ -545,7 +566,8 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
         input_tokens: acc.input_tokens,
         output_tokens: acc.output_tokens,
         reasoning_tokens: acc.reasoning_tokens,
-        cache_read: acc.cache_read,
+        cache_read_peak: acc.cache_read_peak,
+        cache_read_avg,
         cache_write_5m: acc.cache_write_5m,
         cache_write_1h: acc.cache_write_1h,
         server_tool_calls: acc.server_tool_calls,
@@ -560,21 +582,31 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
     }
 }
 
-/// Window-wide footer: cache-hit-rate = cache_read / (cache_read + input)
-/// over every fine row (None when the denominator is zero), and the total
-/// error count.
+/// Window-wide footer: cache-hit-rate and the total error count.
+///
+/// cache_read is a per-turn SNAPSHOT of cached-context size, not a flow, so the
+/// rate cannot use a cross-row SUM (that repeat-counts the same growing prefix).
+/// It is instead a per-group mean-of-rates: each fine row contributes
+/// `cache_read_peak / (cache_read_peak + input_tokens)` -- that group's fraction
+/// of its largest prompt served from cache -- and the window rate is the
+/// arithmetic mean of those per-group fractions, weighting every group equally.
+/// This is coherent for both single- and multi-group windows and never sums
+/// cache_read across rows. `None` when no group has a positive denominator.
+/// Errors ARE a flow, so the error count stays a cross-row sum.
 fn footer(rows: &[AggRow]) -> (Option<f64>, i64) {
-    let mut cache_read = 0i64;
-    let mut input = 0i64;
+    let mut rate_sum = 0f64;
+    let mut rate_count = 0i64;
     let mut errors = 0i64;
     for r in rows {
-        cache_read += r.cache_read;
-        input += r.input_tokens;
         errors += r.errors;
+        let denom = r.cache_read_peak + r.input_tokens;
+        if denom > 0 {
+            rate_sum += r.cache_read_peak as f64 / denom as f64;
+            rate_count += 1;
+        }
     }
-    let denom = cache_read + input;
-    let rate = if denom > 0 {
-        Some(cache_read as f64 / denom as f64)
+    let rate = if rate_count > 0 {
+        Some(rate_sum / rate_count as f64)
     } else {
         None
     };
@@ -656,7 +688,7 @@ fn normal_headers(key_header: &str) -> Vec<String> {
         "input",
         "output",
         "reasoning",
-        "cache_read",
+        "ctx_peak",
         "cost",
     ]
     .iter()
@@ -665,7 +697,8 @@ fn normal_headers(key_header: &str) -> Vec<String> {
 }
 
 /// The extra `--detail` column headers, appended after `cost`.
-const DETAIL_HEADERS: [&str; 6] = [
+const DETAIL_HEADERS: [&str; 7] = [
+    "ctx_avg",
     "ttft_p50",
     "ttft_p95",
     "tok/s",
@@ -683,7 +716,7 @@ fn normal_cells(row: &DisplayRow) -> Vec<String> {
         human_count(row.input_tokens),
         human_count(row.output_tokens),
         metric_cell(row.reasoning_present, row.reasoning_tokens),
-        metric_cell(row.cache_read_present, row.cache_read),
+        metric_cell(row.cache_read_present, row.cache_read_peak),
         cost_cell(row),
     ]
 }
@@ -691,6 +724,7 @@ fn normal_cells(row: &DisplayRow) -> Vec<String> {
 /// The extra `--detail` data cells for one row, in header order.
 fn detail_cells(row: &DisplayRow) -> Vec<String> {
     vec![
+        metric_cell(row.cache_read_present, row.cache_read_avg),
         ttft_cell(row.ttft_p50_ms),
         ttft_cell(row.ttft_p95_ms),
         tok_per_s(row.gen_output_tokens, row.gen_window_ms)
@@ -831,9 +865,10 @@ fn render_footer(report: &WindowReport) -> String {
 /// markers. Appended once after the final window block (see `build_blocks`).
 const LEGEND: &str = "legend: ttft = time-to-first-token (streaming); \
 tok/s = normalized throughput (output / generation time); \
+ctx_peak/ctx_avg = cached-context size (peak / mean per-turn snapshot, not a flow); \
 \"-\" = metric not reported by that provider; \
 \"n/a (sub)\" = managed subscription (see quota); \
---detail adds cache-write 5m/1h, ttft, tok/s, server-tools";
+--detail adds ctx_avg, cache-write 5m/1h, ttft, tok/s, server-tools";
 
 // --- entry point --------------------------------------------------------
 
