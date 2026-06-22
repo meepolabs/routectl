@@ -303,6 +303,12 @@ pub struct DisplayRow {
     /// fine rows' per-turn snapshots (`sum(avg_i * present_i) / total_present`).
     /// Display-only.
     pub cache_read_avg: i64,
+    /// Token-weighted cache-hit rate for this row, precomputed at finalize so
+    /// the rendered cell never recomputes from summed fields. `None` when the
+    /// provider does not report cache reads or the denominator is degenerate.
+    /// The `total` row's value is overridden after the footer is computed so it
+    /// mirrors the authoritative footer rate (see `build_window_report`).
+    pub cache_hit_rate: Option<f64>,
     pub cache_write_5m: i64,
     pub cache_write_1h: i64,
     pub server_tool_calls: i64,
@@ -442,6 +448,8 @@ struct Acc {
     /// Presence-weighted accumulator for the group's mean cache-read size:
     /// `sum(avg_i * present_i)`; divided by `cache_read_present` at finalize.
     cache_read_avg_weighted: i64,
+    /// Running SUM of the fine rows' billed cache-read volume (a flow).
+    cache_read_billed: i64,
     cache_write_5m: i64,
     cache_write_1h: i64,
     server_tool_calls: i64,
@@ -470,6 +478,7 @@ impl Acc {
         self.cache_read_peak = self.cache_read_peak.max(row.cache_read_peak);
         // safe in i64: ~200k-token ceiling * realistic per-window turn counts << i64::MAX
         self.cache_read_avg_weighted += row.cache_read_avg * row.cache_read_present;
+        self.cache_read_billed += row.cache_read_billed;
         self.cache_write_5m += row.cache_write_5m;
         self.cache_write_1h += row.cache_write_1h;
         self.server_tool_calls += row.server_tool_calls;
@@ -528,6 +537,11 @@ pub fn build_window_report(
     display_rows.push(finalize_row("total".to_string(), total, &ttft));
 
     let (cache_hit_rate, total_errors) = footer(&rows);
+    // The total row mirrors the authoritative footer (token-weighted over
+    // cache-reporting rows) so the two never disagree in mixed-provider windows.
+    if let Some(t) = display_rows.last_mut() {
+        t.cache_hit_rate = cache_hit_rate;
+    }
 
     Ok(WindowReport {
         title,
@@ -549,6 +563,13 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
     } else {
         0
     };
+    let cache_hit_rate = cache_hit_pct(
+        acc.cache_read_present,
+        acc.input_tokens,
+        acc.cache_read_billed,
+        acc.cache_write_5m,
+        acc.cache_write_1h,
+    );
     DisplayRow {
         ttft_p50_ms,
         ttft_p95_ms,
@@ -568,6 +589,7 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
         reasoning_tokens: acc.reasoning_tokens,
         cache_read_peak: acc.cache_read_peak,
         cache_read_avg,
+        cache_hit_rate,
         cache_write_5m: acc.cache_write_5m,
         cache_write_1h: acc.cache_write_1h,
         server_tool_calls: acc.server_tool_calls,
@@ -582,31 +604,56 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
     }
 }
 
+/// Token-weighted cache-hit rate: the fraction of prompt tokens served from
+/// cache, `cache_read_billed / (input + cache_read_billed + cache_write_5m +
+/// cache_write_1h)`. The DB stores input / cache_read / cache_write as DISJOINT
+/// prompt dimensions, so that denominator is the cache-INCLUSIVE prompt total.
+/// This is a FLOW ratio: `cache_read_billed` is already the SUM of the per-turn
+/// cache-read volume, so summing here is correct (unlike the display SIZE figure
+/// `cache_read_peak`, where summing was the bug). Returns `None` when the
+/// provider does not report cache reads (`present == 0`) or the denominator is
+/// degenerate (0) -- the caller renders `-`, never `0%`.
+fn cache_hit_pct(
+    cache_read_present: i64,
+    input_tokens: i64,
+    cache_read_billed: i64,
+    cache_write_5m: i64,
+    cache_write_1h: i64,
+) -> Option<f64> {
+    if cache_read_present == 0 {
+        return None;
+    }
+    let den = input_tokens + cache_read_billed + cache_write_5m + cache_write_1h;
+    if den <= 0 {
+        return None;
+    }
+    Some(cache_read_billed as f64 / den as f64)
+}
+
 /// Window-wide footer: cache-hit-rate and the total error count.
 ///
-/// cache_read is a per-turn SNAPSHOT of cached-context size, not a flow, so the
-/// rate cannot use a cross-row SUM (that repeat-counts the same growing prefix).
-/// It is instead a per-group mean-of-rates: each fine row contributes
-/// `cache_read_peak / (cache_read_peak + input_tokens)` -- that group's fraction
-/// of its largest prompt served from cache -- and the window rate is the
-/// arithmetic mean of those per-group fractions, weighting every group equally.
-/// This is coherent for both single- and multi-group windows and never sums
-/// cache_read across rows. `None` when no group has a positive denominator.
-/// Errors ARE a flow, so the error count stays a cross-row sum.
+/// The rate is the token-weighted fraction of prompt tokens served from cache,
+/// computed over the rows that report cache reads (`cache_read_present > 0`):
+/// `sum(cache_read_billed) / sum(input + cache_read_billed + cache_write_5m +
+/// cache_write_1h)`. cache_read here is a billed FLOW, so summing it across rows
+/// is correct (the per-turn snapshot used for the display SIZE column is NOT --
+/// that one must never be summed). Rows whose provider does not report cache are
+/// excluded from both numerator and denominator. `None` when no qualifying row
+/// has a positive denominator. Errors ARE a flow, so the error count stays a
+/// cross-row sum.
 fn footer(rows: &[AggRow]) -> (Option<f64>, i64) {
-    let mut rate_sum = 0f64;
-    let mut rate_count = 0i64;
+    let mut num = 0i64;
+    let mut den = 0i64;
     let mut errors = 0i64;
     for r in rows {
         errors += r.errors;
-        let denom = r.cache_read_peak + r.input_tokens;
-        if denom > 0 {
-            rate_sum += r.cache_read_peak as f64 / denom as f64;
-            rate_count += 1;
+        if r.cache_read_present > 0 {
+            num += r.cache_read_billed;
+            den += r.input_tokens + r.cache_read_billed + r.cache_write_5m + r.cache_write_1h;
         }
     }
-    let rate = if rate_count > 0 {
-        Some(rate_sum / rate_count as f64)
+    let rate = if den > 0 {
+        Some(num as f64 / den as f64)
     } else {
         None
     };
@@ -689,6 +736,7 @@ fn normal_headers(key_header: &str) -> Vec<String> {
         "output",
         "reasoning",
         "ctx_peak",
+        "hit%",
         "cost",
     ]
     .iter()
@@ -707,6 +755,16 @@ const DETAIL_HEADERS: [&str; 7] = [
     "srv_tools",
 ];
 
+/// Render the token-weighted cache-hit-rate cell for a display row under the
+/// not-reported rule: `-` when the provider reports no cache reads or the
+/// denominator is degenerate, else the one-decimal percentage (e.g. `45.0%`),
+/// matching the footer's formatting so column and footer read identically.
+fn hit_pct_cell(row: &DisplayRow) -> String {
+    row.cache_hit_rate
+        .map(|r| format!("{:.1}%", r * 100.0))
+        .unwrap_or_else(|| "-".to_string())
+}
+
 /// The normal data cells for one row, in header order.
 fn normal_cells(row: &DisplayRow) -> Vec<String> {
     vec![
@@ -717,6 +775,7 @@ fn normal_cells(row: &DisplayRow) -> Vec<String> {
         human_count(row.output_tokens),
         metric_cell(row.reasoning_present, row.reasoning_tokens),
         metric_cell(row.cache_read_present, row.cache_read_peak),
+        hit_pct_cell(row),
         cost_cell(row),
     ]
 }
@@ -866,6 +925,7 @@ fn render_footer(report: &WindowReport) -> String {
 const LEGEND: &str = "legend: ttft = time-to-first-token (streaming); \
 tok/s = normalized throughput (output / generation time); \
 ctx_peak/ctx_avg = cached-context size (peak / mean per-turn snapshot, not a flow); \
+hit% = token-weighted cache-hit rate (cache-read volume / cache-inclusive prompt tokens); \
 \"-\" = metric not reported by that provider; \
 \"n/a (sub)\" = managed subscription (see quota); \
 --detail adds ctx_avg, cache-write 5m/1h, ttft, tok/s, server-tools";

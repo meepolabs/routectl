@@ -456,8 +456,10 @@ fn by_provider_rolls_up_and_totals_match() {
 #[test]
 fn footer_cache_hit_rate_and_errors() {
     let (_dir, _path, db) = temp_db();
-    // input=300, one error row. No cache_read columns => rate uses
-    // cache_read(0)/(0+300)=0.0 (denominator nonzero).
+    // input=300, one error row, neither reporting cache_read (NULL). The footer
+    // rate is presence-gated: with cache_read_present == 0 on every row, no row
+    // qualifies, so the rate is None ("not reported"), NOT 0.0. The error count
+    // stays a cross-row sum (1).
     insert_row(
         &db,
         "ok1",
@@ -488,7 +490,7 @@ fn footer_cache_hit_rate_and_errors() {
     let bounds = window_bounds(WindowFlag::All, fixed_now());
     let report = build_window_report(&db, &config, "t".into(), bounds, None, false).unwrap();
     assert_eq!(report.total_errors, 1);
-    assert_eq!(report.cache_hit_rate, Some(0.0));
+    assert_eq!(report.cache_hit_rate, None);
 }
 
 #[test]

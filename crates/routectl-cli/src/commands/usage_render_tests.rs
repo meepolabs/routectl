@@ -59,6 +59,7 @@ fn render_non_detail_header_has_expected_columns() {
     assert!(header.contains("output"));
     assert!(header.contains("reasoning"));
     assert!(header.contains("ctx_peak"));
+    assert!(header.contains("hit%"));
     assert!(header.contains("cost"));
     // cache_read was a misleading SUM of a per-turn snapshot; the column is
     // now the honest peak context size. The old name must be gone.
@@ -302,9 +303,12 @@ fn render_includes_total_row() {
 
 #[test]
 fn render_footer_shows_cache_hit_rate() {
-    // Arrange: cache_read 0, input 300 => rate 0.0%.
+    // Arrange: one cache-reporting stream row (cache_read=100, input=0) and a
+    // fresh-input stream row (cache_read=0, input via reasoning unused). With the
+    // token-weighted formula, a row reporting cache_read=100 and no fresh input /
+    // cache-write has hit rate 100/100 = 100.0%.
     let (_dir, _path, db) = temp_db();
-    paid_row(&db, "f1", Some(300), Some(10));
+    insert_stream_row(&db, "f1", 1000, "m", 100, 600, Some(10), None, Some(100));
     paid_model_row(&db, "f2", "m", "upstream_error", 0, 0);
     let report = report_all(&db, &cost_config(), None, false);
 
@@ -312,7 +316,7 @@ fn render_footer_shows_cache_hit_rate() {
     let out = render_report(&report);
 
     // Assert: errors moved to a column; the footer is the cache-hit line only.
-    assert!(out.contains("cache hit 0.0%"));
+    assert!(out.contains("cache hit 100.0%"));
     assert!(!out.contains("errors:"));
 }
 
@@ -331,20 +335,23 @@ fn render_footer_na_rate_when_no_tokens() {
 }
 
 #[test]
-fn render_footer_cache_hit_rate_is_per_group_mean_of_rates() {
-    // Arrange: two DIFFERENT model groups. Group A: peak=900, input=100 ->
-    // rate 0.9. Group B: peak=0, input=100 -> rate 0.0. The footer must report
-    // the MEAN of the per-group rates (0.45 -> "cache hit 45.0%"), weighting
-    // each group equally -- NOT the old MAX-numerator-over-summed-input figure
-    // (900/(900+200) = 0.818 -> "81.8%"), which padded the denominator with the
-    // other group's input.
+fn render_footer_cache_hit_rate_is_token_weighted_over_reporting_rows() {
+    // Arrange: two model groups that both report cache reads. The footer is the
+    // token-weighted fraction of prompt tokens served from cache:
+    //   num = sum(cache_read_billed) over reporting rows
+    //   den = sum(input + cache_read_billed + cache_write_5m + cache_write_1h)
+    // Recomputed from the old "per-group mean of peak/(peak+input)" figure, which
+    // was wrong (it mixed a per-turn SNAPSHOT with summed input and dropped
+    // cache-write). Group A: cache_read 900, input 100. Group B: cache_read 0,
+    // input 100. num = 900 + 0 = 900; den = (100+900) + (100+0) = 1100;
+    // 900/1100 = 0.81818 -> "81.8%".
     let (_dir, _path, db) = temp_db();
-    // Group A "ga": a stream row carries the cache_read peak (900); a paid row
-    // carries the input (100). Both share (model, provider, upstream, alias)
-    // so they roll into one aggregate group.
+    // Group A "ga": a stream row carries the cache_read billed volume (900); a
+    // paid row carries the fresh input (100). Both share (model, provider,
+    // upstream, alias) so they roll into one aggregate group.
     insert_stream_row(&db, "ga_s", 1000, "ga", 100, 600, Some(5), None, Some(900));
     paid_model_row(&db, "ga_i", "ga", "ok", 100, 0);
-    // Group B "gb": cache_read reported as 0 (peak 0), input 100.
+    // Group B "gb": cache_read reported as 0 (present), input 100.
     insert_stream_row(&db, "gb_s", 1100, "gb", 100, 600, Some(5), None, Some(0));
     paid_model_row(&db, "gb_i", "gb", "ok", 100, 0);
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
@@ -352,10 +359,133 @@ fn render_footer_cache_hit_rate_is_per_group_mean_of_rates() {
     // Act
     let out = render_report(&report);
 
-    // Assert: mean of 0.9 and 0.0 is 0.45 -> 45.0%; the old MAX/SUM figure
-    // (81.8%) must not appear.
-    assert!(out.contains("cache hit 45.0%"), "footer should be the per-group mean: {out:?}");
-    assert!(!out.contains("81.8%"), "footer must not be the old MAX/SUM figure: {out:?}");
+    // Assert: token-weighted 900/1100 = 81.8%.
+    assert!(
+        out.contains("cache hit 81.8%"),
+        "footer should be the token-weighted rate: {out:?}"
+    );
+}
+
+#[test]
+fn render_footer_excludes_non_cache_reporting_rows() {
+    // Arrange: one cache-reporting group and one group that does NOT report cache
+    // (NULL cache_read => cache_read_present == 0). The FOOTER's token-weighted
+    // rate must exclude the non-reporting group's input from BOTH numerator and
+    // denominator. Reporting group "rep": cache_read 600, input 0. Non-reporting
+    // "norep": input 1000, NULL cache_read. Footer over reporting rows only =
+    // 600/600 = 100.0%; if the non-reporting input leaked in it would be
+    // 600/1600 = 37.5%.
+    let (_dir, _path, db) = temp_db();
+    insert_stream_row(&db, "rep_s", 1000, "rep", 100, 600, Some(5), None, Some(600));
+    paid_model_row(&db, "norep_i", "norep", "ok", 1000, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let footer_line = out
+        .lines()
+        .find(|l| l.starts_with("cache hit"))
+        .expect("footer line present");
+
+    // Assert: the footer counts only the cache-reporting row -> 100.0%, never the
+    // 37.5% it would show if the non-reporting input padded the denominator.
+    assert!(
+        footer_line.contains("cache hit 100.0%"),
+        "non-reporting row must be excluded from footer num and den: {footer_line:?}"
+    );
+    assert!(
+        !footer_line.contains("37.5%"),
+        "non-reporting input must not pad the footer denominator: {footer_line:?}"
+    );
+}
+
+#[test]
+fn render_footer_not_equal_to_old_peak_based_value() {
+    // Arrange: a regression guard for the footer-formula rewrite. The OLD footer
+    // was a per-group mean of peak/(peak+input). For ONE group with two stream
+    // rows (cache_read snapshots 100 then 900) plus input 100, the old value used
+    // the PEAK (900): 900/(900+100) = 0.90 -> "90.0%". The NEW token-weighted
+    // value sums the billed cache-read flow (100+900=1000): 1000/(100+1000) =
+    // 0.90909 -> "90.9%". These differ, proving the footer no longer uses peak.
+    let (_dir, _path, db) = temp_db();
+    insert_stream_row(&db, "pk1", 1000, "pk", 100, 600, Some(5), None, Some(100));
+    insert_stream_row(&db, "pk2", 1100, "pk", 100, 600, Some(5), None, Some(900));
+    paid_model_row(&db, "pk_i", "pk", "ok", 100, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: the token-weighted billed figure (90.9%), NOT the old peak (90.0%).
+    assert!(
+        out.contains("cache hit 90.9%"),
+        "footer should use summed billed cache-read, not peak: {out:?}"
+    );
+    assert!(
+        !out.contains("90.0%"),
+        "footer must not equal the old peak-based value: {out:?}"
+    );
+}
+
+#[test]
+fn render_hit_pct_column_is_token_weighted_over_billed_not_peak() {
+    // Arrange: one model group with two stream rows carrying a CLIMBING cache_read
+    // snapshot (100 then 900) plus a paid row with fresh input 100. The hit%
+    // column is token-weighted over the BILLED (summed) cache-read volume:
+    //   billed = 100 + 900 = 1000; input = 100; cache_write = 0
+    //   hit% = 1000 / (100 + 1000) = 0.90909 -> "90.9%"
+    // If it ever used the PEAK (900) the cell would read "90.0%"
+    // (900 / (100 + 900)). The group's own per-row cell must show the billed
+    // figure, proving SUM not peak.
+    let (_dir, _path, db) = temp_db();
+    insert_stream_row(&db, "hp1", 1000, "hp", 100, 600, Some(5), None, Some(100));
+    insert_stream_row(&db, "hp2", 1100, "hp", 100, 600, Some(5), None, Some(900));
+    paid_model_row(&db, "hp_i", "hp", "ok", 100, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let row_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("hp"))
+        .expect("hp row present");
+
+    // Assert: the cell is the token-weighted billed figure (90.9%), not peak.
+    assert!(
+        row_line.contains("90.9%"),
+        "hit% cell should use summed billed cache-read: {row_line:?}"
+    );
+    assert!(
+        !row_line.contains("90.0%"),
+        "hit% cell must not use the peak figure: {row_line:?}"
+    );
+}
+
+#[test]
+fn render_hit_pct_column_dash_when_provider_does_not_report_cache() {
+    // Arrange: a paid row with input but NULL cache_read => cache_read_present
+    // == 0. The hit% cell must render "-" (not "0.0%"): the provider does not
+    // report cache reads, so the rate is "not reported", not "zero hits".
+    let (_dir, _path, db) = temp_db();
+    paid_model_row(&db, "nc1", "nocache", "ok", 500, 200);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let row_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("nocache"))
+        .expect("nocache row present");
+
+    // Assert: dash, never a 0.0% rate, for a non-cache-reporting provider.
+    assert!(
+        row_line.contains(" - "),
+        "hit% cell should be '-' when cache is not reported: {row_line:?}"
+    );
+    assert!(
+        !row_line.contains("0.0%"),
+        "hit% must not render 0.0% for a non-reporting provider: {row_line:?}"
+    );
 }
 
 #[test]
@@ -385,6 +515,51 @@ fn render_table_left_aligns_key_and_right_aligns_numeric() {
     assert!(
         data_line.contains("   1 "),
         "reqs cell should be right-justified: {data_line:?}"
+    );
+}
+
+#[test]
+fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
+    // Arrange: a mixed-provider window with one cache-reporting group and one
+    // that does NOT report cache. The TOTAL row's hit% must mirror the footer
+    // (token-weighted over cache-reporting rows only), NOT a value diluted by
+    // the non-reporting group's input.
+    //   Reporting "rep": cache_read billed 900, input 100.
+    //   Non-reporting "norep": input 1000, NULL cache_read (present == 0).
+    // Footer / total = 900 / (100 + 900) = 90.0%.
+    // The OLD total recomputed from its OWN summed fields, which fold in the
+    // non-reporting input: 900 / (100 + 900 + 1000) = 900/2000 = 45.0%. The
+    // total must read 90.0%, never 45.0%.
+    let (_dir, _path, db) = temp_db();
+    insert_stream_row(&db, "rep_s", 1000, "rep", 100, 600, Some(5), None, Some(900));
+    paid_model_row(&db, "rep_i", "rep", "ok", 100, 0);
+    paid_model_row(&db, "norep_i", "norep", "ok", 1000, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let total_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("total"))
+        .expect("total row present");
+    let footer_line = out
+        .lines()
+        .find(|l| l.starts_with("cache hit"))
+        .expect("footer line present");
+
+    // Assert: the total row's hit% equals the footer's reporting-only rate, and
+    // is not the diluted all-input value.
+    assert!(
+        total_line.contains("90.0%"),
+        "total hit% should mirror the footer rate: {total_line:?}"
+    );
+    assert!(
+        !total_line.contains("45.0%"),
+        "total hit% must not be diluted by non-reporting input: {total_line:?}"
+    );
+    assert!(
+        footer_line.contains("cache hit 90.0%"),
+        "footer should be the reporting-only token-weighted rate: {footer_line:?}"
     );
 }
 
