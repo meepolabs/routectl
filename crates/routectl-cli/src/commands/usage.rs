@@ -303,6 +303,11 @@ pub struct DisplayRow {
     /// fine rows' per-turn snapshots (`sum(avg_i * present_i) / total_present`).
     /// Display-only.
     pub cache_read_avg: i64,
+    /// Summed billed cache-read VOLUME for the group (a flow). The rendered
+    /// `cache_read` column shows this directly; it is also the numerator of the
+    /// token-weighted `hit%`. Distinct from `cache_read_peak`/`cache_read_avg`,
+    /// which are per-turn context SIZE snapshots (never summed).
+    pub cache_read_billed: i64,
     /// Token-weighted cache-hit rate for this row, precomputed at finalize so
     /// the rendered cell never recomputes from summed fields. `None` when the
     /// provider does not report cache reads or the denominator is degenerate.
@@ -589,6 +594,7 @@ fn finalize_row(label: String, acc: Acc, ttft: &TtftMap) -> DisplayRow {
         reasoning_tokens: acc.reasoning_tokens,
         cache_read_peak: acc.cache_read_peak,
         cache_read_avg,
+        cache_read_billed: acc.cache_read_billed,
         cache_hit_rate,
         cache_write_5m: acc.cache_write_5m,
         cache_write_1h: acc.cache_write_1h,
@@ -734,24 +740,24 @@ fn normal_headers(key_header: &str) -> Vec<String> {
         "err",
         "input",
         "output",
-        "reasoning",
-        "ctx_peak",
+        "cache_read",
         "hit%",
-        "cost",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect()
 }
 
-/// The extra `--detail` column headers, appended after `cost`.
-const DETAIL_HEADERS: [&str; 7] = [
+/// The `--detail` column headers, appended after the normal columns.
+const DETAIL_HEADERS: [&str; 9] = [
+    "cost",
+    "ctx_peak",
     "ctx_avg",
+    "cache_wr_5m",
+    "cache_wr_1h",
     "ttft_p50",
     "ttft_p95",
     "tok/s",
-    "cache_wr_5m",
-    "cache_wr_1h",
     "srv_tools",
 ];
 
@@ -773,24 +779,24 @@ fn normal_cells(row: &DisplayRow) -> Vec<String> {
         row.errors.to_string(),
         human_count(row.input_tokens),
         human_count(row.output_tokens),
-        metric_cell(row.reasoning_present, row.reasoning_tokens),
-        metric_cell(row.cache_read_present, row.cache_read_peak),
+        metric_cell(row.cache_read_present, row.cache_read_billed),
         hit_pct_cell(row),
-        cost_cell(row),
     ]
 }
 
 /// The extra `--detail` data cells for one row, in header order.
 fn detail_cells(row: &DisplayRow) -> Vec<String> {
     vec![
+        cost_cell(row),
+        metric_cell(row.cache_read_present, row.cache_read_peak),
         metric_cell(row.cache_read_present, row.cache_read_avg),
+        metric_cell(row.cache_write_5m_present, row.cache_write_5m),
+        metric_cell(row.cache_write_1h_present, row.cache_write_1h),
         ttft_cell(row.ttft_p50_ms),
         ttft_cell(row.ttft_p95_ms),
         tok_per_s(row.gen_output_tokens, row.gen_window_ms)
             .map(|v| v.to_string())
             .unwrap_or_else(|| "-".to_string()),
-        metric_cell(row.cache_write_5m_present, row.cache_write_5m),
-        metric_cell(row.cache_write_1h_present, row.cache_write_1h),
         metric_cell(row.server_tool_present, row.server_tool_calls),
     ]
 }
@@ -920,15 +926,19 @@ fn render_footer(report: &WindowReport) -> String {
     format!("{hit}\n")
 }
 
-/// One-line, end-of-report legend explaining the derived columns and
-/// markers. Appended once after the final window block (see `build_blocks`).
-const LEGEND: &str = "legend: ttft = time-to-first-token (streaming); \
-tok/s = normalized throughput (output / generation time); \
-ctx_peak/ctx_avg = cached-context size (peak / mean per-turn snapshot, not a flow); \
-hit% = token-weighted cache-hit rate (cache-read volume / cache-inclusive prompt tokens); \
-\"-\" = metric not reported by that provider; \
-\"n/a (sub)\" = managed subscription (see quota); \
---detail adds ctx_avg, cache-write 5m/1h, ttft, tok/s, server-tools";
+/// End-of-report legend explaining the derived columns and markers, one entry
+/// per line with the descriptions aligned at a fixed column. Appended once
+/// after the final window block (see `build_blocks`).
+const LEGEND: &str = concat!(
+    "legend:\n",
+    "  input       = fresh prompt tokens (excludes cached + cache-write)\n",
+    "  cache_read  = prompt tokens served from cache (billed volume)\n",
+    "  hit%        = token-weighted cache-hit rate: cache_read / cache-inclusive prompt tokens\n",
+    "  \"-\"         = metric not reported by that provider\n",
+    "  \"n/a (sub)\" = managed subscription (see quota)\n",
+    "  --detail    = adds cost, ctx_peak/ctx_avg (cached-context size, not a flow),\n",
+    "                cache-write 5m/1h, ttft, tok/s, server-tools",
+);
 
 // --- entry point --------------------------------------------------------
 

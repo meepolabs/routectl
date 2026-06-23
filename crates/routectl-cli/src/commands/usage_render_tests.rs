@@ -57,13 +57,13 @@ fn render_non_detail_header_has_expected_columns() {
     assert!(header.contains("err"));
     assert!(header.contains("input"));
     assert!(header.contains("output"));
-    assert!(header.contains("reasoning"));
-    assert!(header.contains("ctx_peak"));
+    assert!(header.contains("cache_read"));
     assert!(header.contains("hit%"));
-    assert!(header.contains("cost"));
-    // cache_read was a misleading SUM of a per-turn snapshot; the column is
-    // now the honest peak context size. The old name must be gone.
-    for dropped in ["cache_rd", "cache_read", "scope", "p95_ms", "max_ms", "wall_ms"] {
+    // The normal view no longer carries reasoning, the context-size peak, or
+    // cost -- ctx_peak and cost moved under --detail; reasoning is unrendered.
+    for dropped in [
+        "reasoning", "ctx_peak", "cost", "scope", "p95_ms", "max_ms", "wall_ms",
+    ] {
         assert!(!header.contains(dropped), "header should not contain {dropped}");
     }
 }
@@ -86,10 +86,11 @@ fn render_by_provider_uses_provider_key_header() {
 
 #[test]
 fn render_data_row_shows_rolled_up_values_and_priced_cost() {
-    // Arrange: 1_000_000 in @ $3 + 1_000_000 out @ $15 = $18.00.
+    // Arrange: 1_000_000 in @ $3 + 1_000_000 out @ $15 = $18.00. Cost renders
+    // only under --detail, so request the detail view.
     let (_dir, _path, db) = temp_db();
     paid_row(&db, "r1", Some(1_000_000), Some(1_000_000));
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Provider), false);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Provider), true);
 
     // Act
     let out = render_report(&report);
@@ -121,11 +122,14 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
     // Assert: detail header carries the new derived columns; non-detail omits
     // them, and the dropped latency columns appear nowhere.
     for col in [
+        "cost",
+        "ctx_peak",
+        "ctx_avg",
+        "cache_wr_5m",
+        "cache_wr_1h",
         "ttft_p50",
         "ttft_p95",
         "tok/s",
-        "cache_wr_5m",
-        "cache_wr_1h",
         "srv_tools",
     ] {
         assert!(detail_header.contains(col), "detail header missing {col}");
@@ -134,6 +138,9 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
             "non-detail header should not contain {col}"
         );
     }
+    // reasoning is no longer rendered in EITHER view.
+    assert!(!detail_header.contains("reasoning"));
+    assert!(!plain_header.contains("reasoning"));
     for dropped in ["max_ms", "wall_ms", "p95_ms"] {
         assert!(
             !detail_header.contains(dropped),
@@ -149,11 +156,13 @@ fn render_detail_adds_extra_columns_non_detail_omits_them() {
 
 #[test]
 fn render_humanizes_large_cache_read_and_honors_not_reported() {
-    // Arrange: a large reported cache_read (4_637_884 -> "4.6M") on a row that
-    // reports reasoning=0, plus a second model whose reasoning is NULL.
+    // Arrange: the cache_read column across all three presence/value cases --
+    // a large reported volume (4_637_884 -> "4.6M"), a NULL (not reported), and a
+    // reported-but-zero (present, sum 0) that must render "0", not "-".
     let (_dir, _path, db) = temp_db();
     insert_stream_row(&db, "c1", 1000, "big", 100, 600, Some(10), Some(0), Some(4_637_884));
     insert_stream_row(&db, "c2", 1100, "nulls", 100, 600, Some(10), None, None);
+    insert_stream_row(&db, "c3", 1200, "zero", 100, 600, Some(10), None, Some(0));
     let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
 
     // Act
@@ -166,12 +175,28 @@ fn render_humanizes_large_cache_read_and_honors_not_reported() {
         .lines()
         .find(|l| l.trim_start().starts_with("nulls"))
         .expect("nulls row present");
+    let zero_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("zero"))
+        .expect("zero row present");
 
-    // Assert: humanized cache_read; reported-0 reasoning shows "0"; NULL
-    // reasoning shows "-".
+    // Assert: the cache_read column humanizes the billed sum; a provider that
+    // does not report cache reads (NULL) shows "-", never "0"; and a provider
+    // that reports a cache read of 0 (present, sum 0) shows "0", never "-".
     assert!(big_line.contains("4.6M"));
-    assert!(big_line.contains(" 0 "), "reported-0 reasoning should show 0: {big_line:?}");
-    assert!(null_line.contains(" - "), "NULL reasoning should show -: {null_line:?}");
+    assert!(
+        null_line.contains(" - "),
+        "NULL cache_read should show -: {null_line:?}"
+    );
+    // Header order is key|reqs|err|input|output|cache_read|hit%, so the cache_read
+    // cell is field index 5 -- pin it by position so a stray "0" elsewhere on the
+    // row cannot satisfy the assertion.
+    let zero_cells: Vec<&str> = zero_line.split_whitespace().collect();
+    assert_eq!(
+        zero_cells.get(5).copied(),
+        Some("0"),
+        "reported-0 cache_read should render '0', not '-': {zero_line:?}"
+    );
 }
 
 #[test]
