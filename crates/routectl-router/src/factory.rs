@@ -211,6 +211,7 @@ async fn build_provider_inner(
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
             reduction_enabled: _,
+            cloak,
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
@@ -260,6 +261,7 @@ async fn build_provider_inner(
                     *max_thinking_entry_bytes,
                 ),
                 session_id,
+                cloak: cloak.clone(),
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }

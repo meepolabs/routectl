@@ -16,9 +16,96 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use routectl_core::ChatRequest;
+
+/// Zero-width space (U+200B) inserted after the first character of each
+/// `sensitive_words` match. Represented as a Rust escape (never a literal
+/// non-ASCII byte in source) per the repo's ASCII-only rule. Invisible to
+/// the model, so no reverse mapping is needed on the response.
+const ZERO_WIDTH_SPACE: char = '\u{200B}';
+
+/// Minimum length (in chars) a configured sensitive word must have to be
+/// obfuscated. Mirrors CLIProxyAPI's matcher: words shorter than this are
+/// dropped to avoid pathological single-letter rewrites.
+const MIN_SENSITIVE_WORD_LEN: usize = 2;
+
+/// Operator-facing cloak mode. Selects how aggressively the OAuth-egress
+/// cloak rewrites the outgoing body. `Auto` (default) preserves the
+/// Increment-1 behavior exactly: the non-CC heuristic keys off the
+/// presence of an `x-claude-code-session-id` capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloakMode {
+    /// Heuristic mode (default): cloak as a non-CC client only when the
+    /// inbound request did NOT carry an `x-claude-code-session-id`
+    /// capture. Identical to Increment-1 behavior.
+    #[default]
+    Auto,
+    /// Always cloak as a non-CC client: stamp the identity block and a
+    /// minted metadata `user_id` regardless of the session-id header.
+    Always,
+    /// Skip the cloak entirely: no billing strip, no identity, no
+    /// metadata, no `mcp_` normalization, no tool rename, no
+    /// sensitive-word obfuscation. The body goes upstream untouched.
+    Never,
+}
+
+/// A single operator-configured tool-name rename. Applied AFTER the
+/// always-on `mcp_` -> `mcp__` normalization, over the same tool-name JSON
+/// paths, recording reverse entries so renamed names restore on the
+/// response.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolRename {
+    /// The tool name as the client sends it (the rename source).
+    pub from: String,
+    /// The tool name routectl rewrites it to on the wire (the rename
+    /// target).
+    pub to: String,
+}
+
+/// Opt-in, empty-default configuration surface for the OAuth-egress cloak.
+/// `CloakConfig::default()` leaves behavior identical to Increment 1: mode
+/// `Auto`, no strict mode, no operator tool renames, no sensitive words.
+///
+/// `Debug` is hand-rolled (NOT derived) to print mode + strict_mode +
+/// COUNTS only. The configured `tool_rename` pairs and `sensitive_words`
+/// are operator content and must never enter Debug output or logs -- a
+/// derived `Debug` would leak them through a future `dbg!(&cfg.cloak)` or
+/// `tracing::debug!(?cloak)`. `ProviderEntry::AnthropicApi` and
+/// `AnthropicApiConfig` both Debug-format this, so the impl is mandatory.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloakConfig {
+    /// Cloak mode. Default `Auto` (Increment-1 heuristic).
+    pub mode: CloakMode,
+    /// Reserved strict-mode flag. Default false. Carried through the
+    /// config surface for forward compatibility; no behavior is gated on
+    /// it in this increment.
+    pub strict_mode: bool,
+    /// Operator tool renames, applied after the `mcp_` normalization.
+    /// Default empty (no renames).
+    pub tool_rename: Vec<ToolRename>,
+    /// Words to obfuscate (zero-width-space insertion) in system blocks
+    /// and message text. Default empty (no obfuscation).
+    pub sensitive_words: Vec<String>,
+}
+
+impl std::fmt::Debug for CloakConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Counts/mode ONLY: the tool_rename from/to pairs and the
+        // sensitive_words strings are operator content and must never reach
+        // Debug output or logs (log-hygiene rule).
+        f.debug_struct("CloakConfig")
+            .field("mode", &self.mode)
+            .field("strict_mode", &self.strict_mode)
+            .field("tool_rename_count", &self.tool_rename.len())
+            .field("sensitive_words_count", &self.sensitive_words.len())
+            .finish()
+    }
+}
 
 /// The single-underscore `mcp_` prefix that trips the Anthropic
 /// subscription billing classifier when sent by a non-Claude-Code client.
@@ -107,18 +194,28 @@ impl ClaudeCodeIdentity {
 /// surface. The billing block is stripped unconditionally (even for a
 /// genuine CC client); the identity system block and metadata `user_id`
 /// are minted only for a non-CC client.
+///
+/// Order is load-bearing and cache-safe: identity/billing transforms
+/// first, then the always-on `mcp_` normalization, then operator
+/// `tool_rename` over the SAME tool-name paths (recording reverse entries
+/// into the SAME map), then `sensitive_words` obfuscation over system and
+/// message text. With a default (empty) `config`, the output is
+/// byte-identical to the Increment-1 cloak.
 pub(crate) fn cloak_oauth_egress(
     body: &mut Value,
     _req: &ChatRequest,
     identity: &ClaudeCodeIdentity,
     is_non_cc: bool,
+    config: &CloakConfig,
 ) -> CloakResult {
     strip_billing_block(body);
     if is_non_cc {
         ensure_identity_block(body);
         mint_metadata_user_id(body, identity);
     }
-    let tool_reverse = normalize_mcp_tool_names(body);
+    let mut tool_reverse = normalize_mcp_tool_names(body);
+    apply_tool_rename(body, &config.tool_rename, &mut tool_reverse);
+    obfuscate_sensitive_words(body, &config.sensitive_words);
     CloakResult { tool_reverse }
 }
 
@@ -142,14 +239,71 @@ pub(crate) fn cloak_oauth_egress(
 /// - nested `tool_result.content[]` entries of type `tool_reference`
 ///   (`.tool_name`)
 fn normalize_mcp_tool_names(body: &mut Value) -> HashMap<String, String> {
-    let existing = collect_existing_tool_names(body);
     let mut reverse: HashMap<String, String> = HashMap::new();
-
-    rename_tools_array(body, &existing, &mut reverse);
-    rename_tool_choice(body, &existing, &mut reverse);
-    rename_message_tool_refs(body, &existing, &mut reverse);
-
+    rename_tool_names_with(body, &mut reverse, &renamed_mcp_name);
     reverse
+}
+
+/// Apply an operator-configured `tool_rename` map over the SAME tool-name
+/// JSON paths the `mcp_` normalization walks, recording reverse entries
+/// into the SAME `reverse` map so renamed names also restore on the
+/// response. Runs AFTER `normalize_mcp_tool_names`, so a `from` targeting a
+/// post-normalization name (e.g. `mcp__x`) matches the already-normalized
+/// wire name. An empty map is a no-op. Each rename honors the same
+/// collision guard and builtin-skip as the `mcp_` pass.
+///
+/// First-from-wins on duplicate `from` keys; an entry with an empty `from`
+/// is skipped. The reverse map records first-seen per renamed name,
+/// consistent with `rename_name_field`.
+fn apply_tool_rename(
+    body: &mut Value,
+    renames: &[ToolRename],
+    reverse: &mut HashMap<String, String>,
+) {
+    if renames.is_empty() {
+        return;
+    }
+    let mut map: HashMap<String, String> = HashMap::new();
+    for r in renames {
+        if r.from.is_empty() {
+            continue;
+        }
+        map.entry(r.from.clone()).or_insert_with(|| r.to.clone());
+    }
+    if map.is_empty() {
+        return;
+    }
+    let renamer = move |name: &str| -> Option<String> {
+        match map.get(name) {
+            Some(to) if to != name => Some(to.clone()),
+            _ => None,
+        }
+    };
+    rename_tool_names_with(body, reverse, &renamer);
+}
+
+/// Walk every tool-name JSON path and apply `renamer` (returning the new
+/// name or `None` to leave the field untouched), recording reverse entries.
+/// Shared by the `mcp_` normalization and the operator `tool_rename` pass so
+/// both touch exactly the same surfaces and obey the same collision guard.
+///
+/// Paths walked (serde_json `Value`, by path not typed enum, so unknown
+/// forward-compat block types are still handled correctly):
+/// - `tools[].name`
+/// - `tool_choice.name` (when `tool_choice.type == "tool"`)
+/// - `messages[].content[]` entries of type `tool_use` (`.name`)
+/// - `messages[].content[]` entries of type `tool_reference` (`.tool_name`)
+/// - nested `tool_result.content[]` entries of type `tool_reference`
+///   (`.tool_name`)
+fn rename_tool_names_with(
+    body: &mut Value,
+    reverse: &mut HashMap<String, String>,
+    renamer: &dyn Fn(&str) -> Option<String>,
+) {
+    let existing = collect_existing_tool_names(body);
+    rename_tools_array(body, &existing, reverse, renamer);
+    rename_tool_choice(body, &existing, reverse, renamer);
+    rename_message_tool_refs(body, &existing, reverse, renamer);
 }
 
 /// Compute the renamed form of a tool name, or `None` if it does not need
@@ -195,16 +349,17 @@ fn rename_name_field(
     field: &str,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
+    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     let Some(original) = obj.get(field).and_then(Value::as_str).map(str::to_string) else {
         return;
     };
-    let Some(renamed) = renamed_mcp_name(&original) else {
+    let Some(renamed) = renamer(&original) else {
         return;
     };
     if existing.contains(&renamed) {
         tracing::warn!(
-            "cloak mcp tool-name normalization skipped: renamed form collides with an \
+            "cloak tool-name rename skipped: renamed form collides with an \
              existing tool name in the request"
         );
         return;
@@ -212,9 +367,9 @@ fn rename_name_field(
     if let Some(map) = obj.as_object_mut() {
         map.insert(field.to_string(), Value::String(renamed.clone()));
     }
-    // First-seen is sufficient: the prefix-only rename guarantees any given
-    // renamed form has exactly one possible original, so repeated entries
-    // for the same renamed name all carry an identical original.
+    // First-seen is sufficient: the prefix-only mcp rename guarantees any
+    // given renamed form has exactly one possible original; for the operator
+    // tool_rename pass first-seen is the documented contract.
     reverse.entry(renamed).or_insert(original);
 }
 
@@ -224,6 +379,7 @@ fn rename_tools_array(
     body: &mut Value,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
+    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
@@ -232,7 +388,7 @@ fn rename_tools_array(
         if tool_is_builtin(tool) {
             continue;
         }
-        rename_name_field(tool, "name", existing, reverse);
+        rename_name_field(tool, "name", existing, reverse, renamer);
     }
 }
 
@@ -251,6 +407,7 @@ fn rename_tool_choice(
     body: &mut Value,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
+    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     let is_tool_choice = body
         .get("tool_choice")
@@ -262,7 +419,7 @@ fn rename_tool_choice(
         return;
     }
     if let Some(tc) = body.get_mut("tool_choice") {
-        rename_name_field(tc, "name", existing, reverse);
+        rename_name_field(tc, "name", existing, reverse, renamer);
     }
 }
 
@@ -273,6 +430,7 @@ fn rename_message_tool_refs(
     body: &mut Value,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
+    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
@@ -282,7 +440,7 @@ fn rename_message_tool_refs(
             continue;
         };
         for part in content.iter_mut() {
-            rename_content_part(part, existing, reverse);
+            rename_content_part(part, existing, reverse, renamer);
         }
     }
 }
@@ -294,17 +452,18 @@ fn rename_content_part(
     part: &mut Value,
     existing: &HashSet<String>,
     reverse: &mut HashMap<String, String>,
+    renamer: &dyn Fn(&str) -> Option<String>,
 ) {
     match part.get("type").and_then(Value::as_str) {
-        Some("tool_use") => rename_name_field(part, "name", existing, reverse),
-        Some("tool_reference") => rename_name_field(part, "tool_name", existing, reverse),
+        Some("tool_use") => rename_name_field(part, "name", existing, reverse, renamer),
+        Some("tool_reference") => rename_name_field(part, "tool_name", existing, reverse, renamer),
         Some("tool_result") => {
             let Some(nested) = part.get_mut("content").and_then(Value::as_array_mut) else {
                 return;
             };
             for nested_part in nested.iter_mut() {
                 if nested_part.get("type").and_then(Value::as_str) == Some("tool_reference") {
-                    rename_name_field(nested_part, "tool_name", existing, reverse);
+                    rename_name_field(nested_part, "tool_name", existing, reverse, renamer);
                 }
             }
         }
@@ -428,6 +587,253 @@ fn encode_user_id(identity: &ClaudeCodeIdentity) -> String {
         r#"{{"device_id":"{}","account_uuid":"{}","session_id":"{}"}}"#,
         identity.device_id, identity.account_uuid, identity.session_id
     )
+}
+
+/// Obfuscate each configured sensitive word in the outgoing body by
+/// inserting a zero-width space (U+200B) after the first character of each
+/// match. Mirrors CLIProxyAPI's `ObfuscateSensitiveWords`: matches are
+/// case-insensitive and longest-match-first; obfuscation is applied to
+/// `system` (string and array-of-text-blocks forms) and `messages[]`
+/// content text (string and array-of-text-blocks forms). The inserted
+/// zero-width space is invisible to the model, so no reverse mapping is
+/// needed on the response. An empty word list is a byte-identical no-op.
+fn obfuscate_sensitive_words(body: &mut Value, words: &[String]) {
+    let matcher = match SensitiveWordMatcher::build(words) {
+        Some(m) => m,
+        None => return,
+    };
+    obfuscate_system(body, &matcher);
+    obfuscate_messages(body, &matcher);
+}
+
+/// A normalized, deduplicated, longest-first set of sensitive words for a
+/// case-insensitive scan. Words shorter than `MIN_SENSITIVE_WORD_LEN` chars
+/// or already containing a zero-width space are dropped at build time;
+/// `None` is returned when no valid word remains (the obfuscation no-ops).
+struct SensitiveWordMatcher {
+    /// (original-cased word, lowercased word), sorted longest-first by
+    /// char count so an overlap prefers the longest match.
+    words: Vec<(String, String)>,
+}
+
+impl SensitiveWordMatcher {
+    fn build(words: &[String]) -> Option<Self> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut valid: Vec<(String, String)> = Vec::new();
+        for w in words {
+            let trimmed = w.trim();
+            if trimmed.chars().count() < MIN_SENSITIVE_WORD_LEN
+                || trimmed.contains(ZERO_WIDTH_SPACE)
+            {
+                continue;
+            }
+            let lower = trimmed.to_lowercase();
+            if seen.insert(lower.clone()) {
+                valid.push((trimmed.to_string(), lower));
+            }
+        }
+        if valid.is_empty() {
+            return None;
+        }
+        // Longest-first (by char count) so the scan prefers the longest
+        // overlapping match, matching CLIProxyAPI's sort-by-length.
+        valid.sort_by_key(|w| std::cmp::Reverse(w.0.chars().count()));
+        Some(Self { words: valid })
+    }
+
+    /// Return the obfuscated form of `text`, or `None` when no match was
+    /// found (so callers can skip the write and keep bytes identical).
+    /// Scans left-to-right; at each position the longest configured word
+    /// that matches case-insensitively (anchored at that byte offset) is
+    /// obfuscated, then the scan resumes past the match.
+    fn obfuscate(&self, text: &str) -> Option<String> {
+        let lower = text.to_lowercase();
+        // `to_lowercase` can change byte length for some scripts; guard by
+        // only using the lowercased copy for ASCII-safe matching. The
+        // configured words and the haystack are compared on their
+        // lowercased forms but we splice from the ORIGINAL `text` by byte
+        // offset, so a length divergence between `text` and `lower` would
+        // corrupt offsets. Fall back to no-op when the lengths diverge.
+        if lower.len() != text.len() {
+            return self.obfuscate_charwise(text);
+        }
+        let bytes = text.as_bytes();
+        let lower_bytes = lower.as_bytes();
+        let mut out = String::with_capacity(text.len() + 8);
+        let mut i = 0usize;
+        let mut hit = false;
+        while i < bytes.len() {
+            if let Some(w) = self.match_at(lower_bytes, i) {
+                let matched = &text[i..i + w];
+                push_obfuscated(&mut out, matched);
+                i += w;
+                hit = true;
+            } else {
+                // Advance one full char so we never split a UTF-8 boundary.
+                let ch_len = utf8_char_len(bytes[i]);
+                out.push_str(&text[i..i + ch_len]);
+                i += ch_len;
+            }
+        }
+        if hit {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    /// Slow path for haystacks whose lowercased byte length diverges from
+    /// the original (rare; non-ASCII case folding). Matches on a fully
+    /// lowercased char view and rebuilds from the original chars.
+    ///
+    /// Graceful degradation (intentional, documented): when per-char
+    /// lowercasing also changes the CHAR count (a configured sensitive word
+    /// whose lowercase form is a different length, e.g. certain non-ASCII
+    /// scripts), this returns `None` -- that word is silently NOT obfuscated
+    /// rather than risk corrupting the body by splicing at a mismatched
+    /// offset. Sensitive-word obfuscation is best-effort hardening, not a
+    /// correctness-critical transform, so skipping such a word is preferred
+    /// over a malformed payload.
+    fn obfuscate_charwise(&self, text: &str) -> Option<String> {
+        let orig: Vec<char> = text.chars().collect();
+        let lower: Vec<char> = text.chars().flat_map(|c| c.to_lowercase()).collect();
+        // When per-char lowering changed the char count, give up rather
+        // than risk corrupting the body. Sensitive-word obfuscation is a
+        // best-effort hardening, not a correctness-critical transform.
+        if lower.len() != orig.len() {
+            return None;
+        }
+        let mut out = String::with_capacity(text.len() + 8);
+        let mut i = 0usize;
+        let mut hit = false;
+        while i < orig.len() {
+            if let Some(n) = self.match_at_chars(&lower, i) {
+                let matched: String = orig[i..i + n].iter().collect();
+                push_obfuscated(&mut out, &matched);
+                i += n;
+                hit = true;
+            } else {
+                out.push(orig[i]);
+                i += 1;
+            }
+        }
+        if hit {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    /// Return the byte length of the longest configured word that matches
+    /// `lower_bytes` anchored at byte offset `i`, or `None`.
+    fn match_at(&self, lower_bytes: &[u8], i: usize) -> Option<usize> {
+        for (_, lw) in &self.words {
+            let lwb = lw.as_bytes();
+            if i + lwb.len() <= lower_bytes.len() && &lower_bytes[i..i + lwb.len()] == lwb {
+                return Some(lwb.len());
+            }
+        }
+        None
+    }
+
+    /// Char-view variant of `match_at`: return the char count of the
+    /// longest configured word matching `lower` anchored at char index `i`.
+    fn match_at_chars(&self, lower: &[char], i: usize) -> Option<usize> {
+        for (_, lw) in &self.words {
+            let lwc: Vec<char> = lw.chars().collect();
+            if i + lwc.len() <= lower.len() && lower[i..i + lwc.len()] == lwc[..] {
+                return Some(lwc.len());
+            }
+        }
+        None
+    }
+}
+
+/// Append `matched` to `out` with a zero-width space inserted after its
+/// first character. A single-char match is left unchanged (no interior
+/// position to mark), matching CLIProxyAPI's `size >= len` guard.
+fn push_obfuscated(out: &mut String, matched: &str) {
+    let mut chars = matched.chars();
+    if let Some(first) = chars.next() {
+        let rest = chars.as_str();
+        if rest.is_empty() {
+            out.push(first);
+        } else {
+            out.push(first);
+            out.push(ZERO_WIDTH_SPACE);
+            out.push_str(rest);
+        }
+    }
+}
+
+/// Length in bytes of the UTF-8 char beginning with `b`.
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
+}
+
+/// Obfuscate sensitive words in `body["system"]` (string form, or an array
+/// of `{type:"text", text:...}` blocks).
+fn obfuscate_system(body: &mut Value, matcher: &SensitiveWordMatcher) {
+    match body.get_mut("system") {
+        Some(Value::String(s)) => {
+            if let Some(ob) = matcher.obfuscate(s) {
+                *s = ob;
+            }
+        }
+        Some(Value::Array(blocks)) => {
+            for block in blocks.iter_mut() {
+                obfuscate_text_block(block, matcher);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Obfuscate sensitive words in `body["messages"][].content` (string form,
+/// or an array of content blocks; only `{type:"text"}` blocks are touched).
+fn obfuscate_messages(body: &mut Value, matcher: &SensitiveWordMatcher) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for msg in messages.iter_mut() {
+        match msg.get_mut("content") {
+            Some(Value::String(s)) => {
+                if let Some(ob) = matcher.obfuscate(s) {
+                    *s = ob;
+                }
+            }
+            Some(Value::Array(blocks)) => {
+                for block in blocks.iter_mut() {
+                    obfuscate_text_block(block, matcher);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Obfuscate the `text` field of a `{type:"text"}` content block in place.
+/// Blocks of any other type are left untouched.
+fn obfuscate_text_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
+    if block.get("type").and_then(Value::as_str) != Some("text") {
+        return;
+    }
+    let Some(text) = block.get("text").and_then(Value::as_str) else {
+        return;
+    };
+    if let Some(ob) = matcher.obfuscate(text) {
+        if let Some(obj) = block.as_object_mut() {
+            obj.insert("text".into(), Value::String(ob));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -711,7 +1117,7 @@ mod tests {
         });
 
         // Act
-        cloak_oauth_egress(&mut body, &req, &id, true);
+        cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
 
         // Assert: billing gone, identity prepended, metadata minted.
         let arr = body["system"].as_array().unwrap();
@@ -738,7 +1144,7 @@ mod tests {
         });
 
         // Act
-        cloak_oauth_egress(&mut body, &req, &id, false);
+        cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default());
 
         // Assert: billing stripped, but identity NOT stamped, metadata absent.
         let arr = body["system"].as_array().unwrap();
@@ -994,7 +1400,7 @@ mod tests {
         let mut body = json!({"tools": [{"name": "mcp_foo"}]});
 
         // Act
-        let result = cloak_oauth_egress(&mut body, &req, &id, true);
+        let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
 
         // Assert
         assert_eq!(body["tools"][0]["name"], "mcp__foo");
@@ -1031,6 +1437,301 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&a).unwrap(),
             serde_json::to_string(&b).unwrap()
+        );
+    }
+
+    // -- CloakConfig defaults ----------------------------------------------
+
+    #[test]
+    fn cloak_config_default_is_auto_false_empty_empty() {
+        // Arrange / Act
+        let cfg = CloakConfig::default();
+
+        // Assert
+        assert_eq!(cfg.mode, CloakMode::Auto);
+        assert!(!cfg.strict_mode);
+        assert!(cfg.tool_rename.is_empty());
+        assert!(cfg.sensitive_words.is_empty());
+    }
+
+    #[test]
+    fn cloak_mode_default_is_auto() {
+        assert_eq!(CloakMode::default(), CloakMode::Auto);
+    }
+
+    // -- regression guard: default config == Increment-1 behavior ----------
+
+    /// With a DEFAULT (empty) CloakConfig, the post-cloak body must be
+    /// byte-identical to the Increment-1 output for a representative request:
+    /// the `mcp_` fix still applies, nothing else changes. This is the hard
+    /// regression guard for the opt-in surface.
+    #[test]
+    fn default_config_byte_identical_to_increment1() {
+        // Arrange: a body exercising billing strip + identity stamp + mcp_.
+        let id = identity();
+        let req = ChatRequest::default();
+        let template = json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: v=1"},
+                {"type": "text", "text": "custom system prompt"},
+            ],
+            "tools": [{"name": "mcp_linear_get_issue"}, {"name": "Bash"}],
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "mcp_foo", "input": {}}]
+            }]
+        });
+
+        // Act: one body through the new signature with a default config; a
+        // second body through the SAME transforms but applied directly (the
+        // Increment-1 sequence: strip + identity + metadata + mcp_).
+        let mut via_config = template.clone();
+        cloak_oauth_egress(&mut via_config, &req, &id, true, &CloakConfig::default());
+
+        let mut via_inc1 = template.clone();
+        strip_billing_block(&mut via_inc1);
+        ensure_identity_block(&mut via_inc1);
+        mint_metadata_user_id(&mut via_inc1, &id);
+        let _ = normalize_mcp_tool_names(&mut via_inc1);
+
+        // Assert: byte-identical serialized output.
+        assert_eq!(
+            serde_json::to_string(&via_config).unwrap(),
+            serde_json::to_string(&via_inc1).unwrap()
+        );
+        // And the mcp_ fix definitely applied.
+        assert_eq!(via_config["tools"][0]["name"], "mcp__linear_get_issue");
+    }
+
+    /// Companion guard for the GENUINE-CC path (is_non_cc=false): with a
+    /// DEFAULT config, the post-cloak body must be byte-identical to the
+    /// Increment-1 CC sequence -- strip_billing_block + normalize_mcp_tool_names
+    /// ONLY, with NO identity block prepended and NO metadata user_id minted.
+    #[test]
+    fn default_config_byte_identical_to_increment1_genuine_cc() {
+        // Arrange: same representative body as the non-CC guard.
+        let id = identity();
+        let req = ChatRequest::default();
+        let template = json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: v=1"},
+                {"type": "text", "text": "custom system prompt"},
+            ],
+            "tools": [{"name": "mcp_linear_get_issue"}, {"name": "Bash"}],
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "mcp_foo", "input": {}}]
+            }]
+        });
+
+        // Act: default config with is_non_cc=false vs. the Increment-1 CC
+        // sequence (billing strip + mcp_ normalize only -- no identity, no
+        // user_id mint).
+        let mut via_config = template.clone();
+        cloak_oauth_egress(&mut via_config, &req, &id, false, &CloakConfig::default());
+
+        let mut via_inc1 = template.clone();
+        strip_billing_block(&mut via_inc1);
+        let _ = normalize_mcp_tool_names(&mut via_inc1);
+
+        // Assert: byte-identical serialized output.
+        assert_eq!(
+            serde_json::to_string(&via_config).unwrap(),
+            serde_json::to_string(&via_inc1).unwrap()
+        );
+        // The mcp_ fix still applies on the CC path...
+        assert_eq!(via_config["tools"][0]["name"], "mcp__linear_get_issue");
+        // ...but NO identity block was prepended (system[0] is still the
+        // client's billing-stripped first block, not the interactive line)
+        // and NO metadata was minted.
+        assert_ne!(via_config["system"][0]["text"], INTERACTIVE_IDENTITY_LINE);
+        assert!(via_config.get("metadata").is_none());
+    }
+
+    // -- tool_rename --------------------------------------------------------
+
+    #[test]
+    fn tool_rename_applies_to_tools_and_tool_use_and_records_reverse() {
+        // Arrange: a foo->bar rename across tools + tool_use.
+        let id = identity();
+        let req = ChatRequest::default();
+        let mut body = json!({
+            "tools": [{"name": "foo"}],
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "foo", "input": {}}]
+            }]
+        });
+        let cfg = CloakConfig {
+            tool_rename: vec![ToolRename {
+                from: "foo".into(),
+                to: "bar".into(),
+            }],
+            ..CloakConfig::default()
+        };
+
+        // Act
+        let result = cloak_oauth_egress(&mut body, &req, &id, false, &cfg);
+
+        // Assert: forward rename applied on both surfaces.
+        assert_eq!(body["tools"][0]["name"], "bar");
+        assert_eq!(body["messages"][0]["content"][0]["name"], "bar");
+        // Reverse map records bar -> foo.
+        assert_eq!(
+            result.tool_reverse.get("bar").map(String::as_str),
+            Some("foo")
+        );
+    }
+
+    /// Ordering: `mcp_` normalization runs FIRST, then operator tool_rename.
+    /// A rename targeting the post-normalization name `mcp__x` must match
+    /// (because the wire name is already `mcp__x` by the time the operator
+    /// pass runs). A rename keyed on the pre-normalization `mcp_x` must NOT
+    /// match (the `mcp_` pass already changed it).
+    #[test]
+    fn tool_rename_runs_after_mcp_normalization() {
+        let id = identity();
+        let req = ChatRequest::default();
+
+        // (a) rename keyed on the normalized name mcp__x -> renamed.
+        let mut body_a = json!({"tools": [{"name": "mcp_x"}]});
+        let cfg_a = CloakConfig {
+            tool_rename: vec![ToolRename {
+                from: "mcp__x".into(),
+                to: "renamed".into(),
+            }],
+            ..CloakConfig::default()
+        };
+        let res_a = cloak_oauth_egress(&mut body_a, &req, &id, false, &cfg_a);
+        assert_eq!(
+            body_a["tools"][0]["name"], "renamed",
+            "rename keyed on the post-mcp_ name must match"
+        );
+        // Both reverse hops are recorded: mcp__x->mcp_x (from the mcp_ pass)
+        // and renamed->mcp__x (from the operator pass).
+        assert_eq!(
+            res_a.tool_reverse.get("mcp__x").map(String::as_str),
+            Some("mcp_x")
+        );
+        assert_eq!(
+            res_a.tool_reverse.get("renamed").map(String::as_str),
+            Some("mcp__x")
+        );
+
+        // (b) rename keyed on the PRE-normalization name mcp_x must NOT match
+        // (the mcp_ pass already rewrote it to mcp__x first).
+        let mut body_b = json!({"tools": [{"name": "mcp_x"}]});
+        let cfg_b = CloakConfig {
+            tool_rename: vec![ToolRename {
+                from: "mcp_x".into(),
+                to: "should_not_apply".into(),
+            }],
+            ..CloakConfig::default()
+        };
+        cloak_oauth_egress(&mut body_b, &req, &id, false, &cfg_b);
+        assert_eq!(
+            body_b["tools"][0]["name"], "mcp__x",
+            "rename keyed on the pre-mcp_ name must NOT match after normalization"
+        );
+    }
+
+    #[test]
+    fn tool_rename_empty_is_noop() {
+        let mut body = json!({"tools": [{"name": "foo"}]});
+        let mut reverse: HashMap<String, String> = HashMap::new();
+        apply_tool_rename(&mut body, &[], &mut reverse);
+        assert_eq!(body["tools"][0]["name"], "foo");
+        assert!(reverse.is_empty());
+    }
+
+    // -- sensitive_words ----------------------------------------------------
+
+    #[test]
+    fn sensitive_words_obfuscates_system_and_message_text() {
+        // Arrange
+        let mut body = json!({
+            "system": "the secret password is here",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "another secret"}]
+            }]
+        });
+
+        // Act
+        obfuscate_sensitive_words(&mut body, &["secret".to_string()]);
+
+        // Assert: a zero-width space lands after the first char of "secret".
+        let zws = ZERO_WIDTH_SPACE;
+        let expect = format!("s{zws}ecret");
+        assert!(
+            body["system"].as_str().unwrap().contains(&expect),
+            "system text must be obfuscated: {:?}",
+            body["system"]
+        );
+        assert!(
+            body["messages"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&expect),
+            "message text must be obfuscated"
+        );
+    }
+
+    #[test]
+    fn sensitive_words_empty_list_is_byte_identical() {
+        // Arrange
+        let mut with_words = json!({
+            "system": "the secret password",
+            "messages": [{"role": "user", "content": "secret stuff"}]
+        });
+        let without = with_words.clone();
+
+        // Act: empty list must be a byte-identical no-op.
+        obfuscate_sensitive_words(&mut with_words, &[]);
+
+        // Assert
+        assert_eq!(
+            serde_json::to_string(&with_words).unwrap(),
+            serde_json::to_string(&without).unwrap()
+        );
+    }
+
+    #[test]
+    fn sensitive_words_case_insensitive_longest_first() {
+        // Arrange: "secretkey" (longer) must win over "secret" at the same
+        // anchor, and matching is case-insensitive.
+        let mut body = json!({"system": "my SECRETKEY value"});
+        let cfg_words = vec!["secret".to_string(), "secretkey".to_string()];
+
+        // Act
+        obfuscate_sensitive_words(&mut body, &cfg_words);
+
+        // Assert: the obfuscation marks after the first char of the WHOLE
+        // longest match, preserving the original casing of the remaining
+        // chars ("SECRETKEY" -> "S<zws>ECRETKEY").
+        let zws = ZERO_WIDTH_SPACE;
+        let out = body["system"].as_str().unwrap();
+        assert!(
+            out.contains(&format!("S{zws}ECRETKEY")),
+            "longest case-insensitive match must be obfuscated whole: {out:?}"
+        );
+    }
+
+    #[test]
+    fn sensitive_words_obfuscation_carries_no_reverse() {
+        // The full egress with sensitive_words set records NO extra reverse
+        // entries for the obfuscation (zero-width space is invisible).
+        let id = identity();
+        let req = ChatRequest::default();
+        let mut body = json!({"system": "secret", "tools": [{"name": "Bash"}]});
+        let cfg = CloakConfig {
+            sensitive_words: vec!["secret".to_string()],
+            ..CloakConfig::default()
+        };
+        let result = cloak_oauth_egress(&mut body, &req, &id, false, &cfg);
+        assert!(
+            result.tool_reverse.is_empty(),
+            "sensitive-word obfuscation must not add reverse entries"
         );
     }
 }

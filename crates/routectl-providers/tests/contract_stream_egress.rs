@@ -30,7 +30,9 @@
 
 use futures::StreamExt;
 use routectl_core::{ChatChunk, ChatRequest, Message, MessageContent, Provider, Role};
-use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
+use routectl_providers::anthropic_api::{
+    AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
+};
 use routectl_providers::openai_compat::{
     HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
 };
@@ -61,6 +63,7 @@ fn anthropic_api_provider(base_url: &str) -> AnthropicApiProvider {
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         session_id: None,
+        cloak: CloakConfig::default(),
     })
 }
 

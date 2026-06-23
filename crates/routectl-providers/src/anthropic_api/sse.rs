@@ -670,7 +670,8 @@ impl SseState {
         name
     }
 
-    fn make_tool_delta_chunk(&self, partial_json: String) -> ChatChunk {        let (tool_id, tool_name, call_index) = match &self.open_block {
+    fn make_tool_delta_chunk(&self, partial_json: String) -> ChatChunk {
+        let (tool_id, tool_name, call_index) = match &self.open_block {
             Some(OpenBlockKind::ToolUse {
                 id,
                 name,

@@ -316,7 +316,8 @@ fn lookup_reverse(name: &str, map: &HashMap<String, String>) -> Option<String> {
     None
 }
 
-pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {    let resp: AnthropicResponse =
+pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
+    let resp: AnthropicResponse =
         serde_json::from_value(raw).map_err(|e| Error::normalize_response(id, e.to_string()))?;
 
     let (text, reasoning_details, tool_calls, parts) = walk_content_blocks(id, &resp.content)?;
@@ -368,7 +369,10 @@ mod tests {
 
     fn reverse_map() -> HashMap<String, String> {
         let mut m = HashMap::new();
-        m.insert("mcp__linear_get_issue".to_string(), "mcp_linear_get_issue".to_string());
+        m.insert(
+            "mcp__linear_get_issue".to_string(),
+            "mcp_linear_get_issue".to_string(),
+        );
         m
     }
 
@@ -430,7 +434,10 @@ mod tests {
                     if name == "mcp_linear_get_issue"
             )
         });
-        assert!(found, "ToolUse part name must be reversed to client original");
+        assert!(
+            found,
+            "ToolUse part name must be reversed to client original"
+        );
     }
 
     #[test]
@@ -491,7 +498,7 @@ mod tests {
 
     #[test]
     fn round_trip_forward_cloak_then_reverse_response() {
-        use super::super::cloak::{cloak_oauth_egress, ClaudeCodeIdentity};
+        use super::super::cloak::{cloak_oauth_egress, ClaudeCodeIdentity, CloakConfig};
         use routectl_core::ChatRequest;
 
         // Arrange: an outgoing request with a single-underscore mcp_ tool
@@ -510,7 +517,7 @@ mod tests {
         });
 
         // Act 1: forward cloak.
-        let result = cloak_oauth_egress(&mut body, &req, &id, true);
+        let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
 
         // Assert: outgoing body carries the doubled prefix on both surfaces.
         assert_eq!(body["tools"][0]["name"], "mcp__linear_get_issue");
@@ -552,7 +559,8 @@ mod tests {
     }
 
     #[test]
-    fn cache_usage_fields_propagate_to_canonical() {        let raw = json!({
+    fn cache_usage_fields_propagate_to_canonical() {
+        let raw = json!({
             "id": "msg_01",
             "model": "claude-opus-4-7",
             "content": [{"type": "text", "text": "hi"}],

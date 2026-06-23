@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex};
 
 use routectl_core::Provider;
 use routectl_core::{ChatRequest, Message, MessageContent, Role};
-use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
+use routectl_providers::anthropic_api::{
+    AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
+};
 use serde_json::json;
 use tracing::field::{Field, Visit};
 use wiremock::matchers::{method, path};
@@ -140,6 +142,7 @@ fn make_provider(base_url: &str) -> AnthropicApiProvider {
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         session_id: None,
+        cloak: CloakConfig::default(),
     };
     AnthropicApiProvider::new(cfg)
 }

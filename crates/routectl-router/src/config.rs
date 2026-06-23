@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use routectl_providers::anthropic_api::AuthKind;
+use routectl_providers::anthropic_api::{AuthKind, CloakConfig};
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use serde::{Deserialize, Serialize};
@@ -1040,6 +1040,15 @@ pub enum ProviderEntry {
         /// policy, not a runtime/rate knob.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reduction_enabled: Option<bool>,
+        /// Opt-in OAuth-cloak configuration. Omitting the `[cloak]`
+        /// sub-table yields `CloakConfig::default()` (mode `auto`, no
+        /// strict mode, no tool renames, no sensitive words) -- identical
+        /// to the always-on `mcp_` normalization. TOML surface:
+        /// `[providers.X.cloak]` with `mode` / `strict_mode` /
+        /// `sensitive_words`, and tool renames as an array of tables
+        /// `[[providers.X.cloak.tool_rename]] from=.. to=..`.
+        #[serde(default)]
+        cloak: CloakConfig,
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
@@ -1428,6 +1437,7 @@ impl ProviderEntry {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            cloak: CloakConfig::default(),
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -2972,6 +2982,77 @@ max_thinking_entry_bytes = 2097152
             routectl_providers::anthropic_api::AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             "Some(0) must fall back to the default cap, not zero"
         );
+    }
+
+    /// A `[providers.X.cloak]` block with mode + strict_mode + tool_rename
+    /// (array of tables) + sensitive_words parses into the entry's
+    /// `CloakConfig`, and round-trips through serialize + re-parse.
+    #[test]
+    fn anthropic_api_cloak_block_parses_and_round_trips() {
+        use crate::config::ProviderEntry;
+        use routectl_providers::anthropic_api::CloakMode;
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+
+[providers.anthropic.cloak]
+mode = "always"
+strict_mode = true
+sensitive_words = ["secret", "token"]
+
+[[providers.anthropic.cloak.tool_rename]]
+from = "foo"
+to = "bar"
+
+[[providers.anthropic.cloak.tool_rename]]
+from = "baz"
+to = "qux"
+"#;
+        let cfg_in: Config = toml::from_str(toml_text).expect("parse cloak block");
+        let assert_cloak = |entry: &ProviderEntry| match entry {
+            ProviderEntry::AnthropicApi { cloak, .. } => {
+                assert_eq!(cloak.mode, CloakMode::Always);
+                assert!(cloak.strict_mode);
+                assert_eq!(cloak.sensitive_words, vec!["secret", "token"]);
+                assert_eq!(cloak.tool_rename.len(), 2);
+                assert_eq!(cloak.tool_rename[0].from, "foo");
+                assert_eq!(cloak.tool_rename[0].to, "bar");
+                assert_eq!(cloak.tool_rename[1].from, "baz");
+                assert_eq!(cloak.tool_rename[1].to, "qux");
+            }
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        };
+        assert_cloak(cfg_in.providers.get("anthropic").expect("anthropic"));
+
+        // Serialize + re-parse: the cloak surface must survive the round-trip.
+        let serialized = toml::to_string(&cfg_in).expect("serialize");
+        let cfg_out: Config = toml::from_str(&serialized).expect("re-parse");
+        assert_cloak(cfg_out.providers.get("anthropic").expect("anthropic"));
+    }
+
+    /// Omitting the `[cloak]` block yields `CloakConfig::default()` (mode
+    /// auto, no strict mode, empty tool_rename + sensitive_words).
+    #[test]
+    fn anthropic_api_cloak_omitted_yields_default() {
+        use crate::config::ProviderEntry;
+        use routectl_providers::anthropic_api::CloakMode;
+
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+"#;
+        let cfg_in: Config = toml::from_str(toml_text).expect("parse without cloak");
+        match cfg_in.providers.get("anthropic").expect("anthropic") {
+            ProviderEntry::AnthropicApi { cloak, .. } => {
+                assert_eq!(cloak.mode, CloakMode::Auto);
+                assert!(!cloak.strict_mode);
+                assert!(cloak.tool_rename.is_empty());
+                assert!(cloak.sensitive_words.is_empty());
+            }
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
     }
 }
 

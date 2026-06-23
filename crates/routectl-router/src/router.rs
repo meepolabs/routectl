@@ -6000,6 +6000,7 @@ mod count_tokens_tests {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
+            cloak: routectl_providers::anthropic_api::CloakConfig::default(),
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -7137,6 +7138,7 @@ mod circuit_breaker_slot_release_tests {
                 cache_capability: None,
                 auto_emit_top_level_breakpoint: None,
                 reduction_enabled: None,
+                cloak: routectl_providers::anthropic_api::CloakConfig::default(),
                 runtime: ProviderRuntimePolicy {
                     circuit_failures: Some(1),
                     circuit_cooldown_ms: Some(0),
@@ -8118,6 +8120,7 @@ mod auto_emit_cache_control_tests {
             cache_capability: None,
             auto_emit_top_level_breakpoint: Some(false),
             reduction_enabled: None,
+            cloak: routectl_providers::anthropic_api::CloakConfig::default(),
             runtime: ProviderRuntimePolicy::default(),
         }
     }
@@ -8766,6 +8769,7 @@ mod context_reduction_dispatch_tests {
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: Some(false),
+            cloak: routectl_providers::anthropic_api::CloakConfig::default(),
             runtime: ProviderRuntimePolicy::default(),
         }
     }

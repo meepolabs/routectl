@@ -52,6 +52,8 @@ pub(crate) const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 use sse::SseState;
 
+pub use cloak::{CloakConfig, CloakMode, ToolRename};
+
 /// How the provider authenticates to the Anthropic Messages API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -133,6 +135,13 @@ pub struct AnthropicApiConfig {
     /// non-Anthropic base, or a credential that has none -- in every
     /// such case `build_headers` stamps no session-id header.
     pub session_id: Option<String>,
+    /// Opt-in OAuth-cloak configuration. `CloakConfig::default()` (mode
+    /// `auto`, no strict mode, no tool renames, no sensitive words) leaves
+    /// the egress behavior identical to the always-on `mcp_` normalization
+    /// -- zero config change for existing operators. Threaded into
+    /// `cloak_body` to gate the mode and feed the tool-rename /
+    /// sensitive-word passes.
+    pub cloak: CloakConfig,
 }
 
 impl std::fmt::Debug for AnthropicApiConfig {
@@ -158,6 +167,16 @@ impl std::fmt::Debug for AnthropicApiConfig {
             // Presence only: the session_id ties requests to one logical
             // session; treat as sensitive so its value never enters logs.
             .field("session_id", &self.session_id.is_some())
+            // Cloak surface: counts/mode ONLY -- the configured tool-rename
+            // pairs and sensitive words are operator content and must never
+            // enter Debug output or logs.
+            .field("cloak_mode", &self.cloak.mode)
+            .field("cloak_strict_mode", &self.cloak.strict_mode)
+            .field("cloak_tool_rename_count", &self.cloak.tool_rename.len())
+            .field(
+                "cloak_sensitive_words_count",
+                &self.cloak.sensitive_words.len(),
+            )
             .finish()
     }
 }
@@ -200,6 +219,7 @@ impl AnthropicApiConfig {
             context_management: false,
             max_thinking_entry_bytes: Self::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         }
     }
 }
@@ -518,13 +538,24 @@ impl AnthropicApiProvider {
         {
             return None;
         }
+        // Mode gate. `Never` skips ALL cloak transforms: the body goes
+        // upstream untouched by the cloak. `Always` cloaks as a non-CC
+        // client regardless of the session-id header. `Auto` keeps the
+        // Increment-1 heuristic (non-CC iff no captured session-id header).
+        if self.cfg.cloak.mode == cloak::CloakMode::Never {
+            return None;
+        }
         let identity = self.identity.as_ref()?;
-        let is_non_cc = !req
-            .routectl_internal
-            .claude_code_headers
-            .iter()
-            .any(|(n, _)| n.eq_ignore_ascii_case("x-claude-code-session-id"));
-        let result = cloak::cloak_oauth_egress(body, req, identity, is_non_cc);
+        let is_non_cc = match self.cfg.cloak.mode {
+            cloak::CloakMode::Always => true,
+            // `Never` handled above; `Auto` falls through to the heuristic.
+            _ => !req
+                .routectl_internal
+                .claude_code_headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("x-claude-code-session-id")),
+        };
+        let result = cloak::cloak_oauth_egress(body, req, identity, is_non_cc, &self.cfg.cloak);
         // Decision log: provider + non-CC gate + how many tool names were
         // normalized. NEVER logs tool names or message content.
         tracing::info!(
@@ -933,9 +964,7 @@ impl Provider for AnthropicApiProvider {
         // Per-request tool-name reverse map (renamed upstream name ->
         // original client name) from the cloak forward pass. Empty / None
         // when the cloak did not run or renamed nothing.
-        let tool_reverse = cloak_result
-            .map(|r| r.tool_reverse)
-            .unwrap_or_default();
+        let tool_reverse = cloak_result.map(|r| r.tool_reverse).unwrap_or_default();
 
         let stream = async_stream::stream! {
             let mut state = SseState::new(&provider_id);
@@ -1370,6 +1399,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         }
     }
 
@@ -1486,6 +1516,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "from-client")]);
@@ -1516,6 +1547,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         // ChatRequest is #[non_exhaustive]; mutate after default().
@@ -1553,6 +1585,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = ChatRequest::default();
@@ -1592,6 +1625,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         // ChatRequest is #[non_exhaustive]; mutate after default().
@@ -1631,6 +1665,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = ChatRequest::default();
@@ -1679,6 +1714,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         }
     }
 
@@ -1802,6 +1838,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id,
+            cloak: CloakConfig::default(),
         }
     }
 
@@ -2020,6 +2057,7 @@ mod tests {
             context_management: true,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = ChatRequest::default();
@@ -2054,6 +2092,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = ChatRequest::default();
@@ -2081,6 +2120,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = ChatRequest::default();
@@ -2222,6 +2262,110 @@ mod tests {
             body, before,
             "non-anthropic host must leave the body untouched (gate skips)"
         );
+    }
+
+    // -- cloak mode (T6) ---------------------------------------------------
+
+    /// Build an OauthBearer + api.anthropic.com provider with an explicit
+    /// `CloakConfig` and a stable session id, for the mode tests.
+    fn oauth_provider_with_cloak(cloak: CloakConfig) -> AnthropicApiProvider {
+        let cfg = AnthropicApiConfig {
+            id: "test".into(),
+            auth: Arc::new(StaticToken::new("oat-token")),
+            base_url: "https://api.anthropic.com".into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::OauthBearer,
+            header_extras: Vec::new(),
+            user_agent: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
+            context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: Some("session-stable-123".into()),
+            cloak,
+        };
+        AnthropicApiProvider::new(cfg)
+    }
+
+    /// `mode = never` skips ALL cloak transforms: billing block NOT stripped,
+    /// identity NOT injected, `mcp_` NOT normalized, and `cloak_body` returns
+    /// None.
+    #[test]
+    fn cloak_mode_never_skips_all_transforms() {
+        let provider = oauth_provider_with_cloak(CloakConfig {
+            mode: CloakMode::Never,
+            ..CloakConfig::default()
+        });
+        // Non-CC request, with a tool that would normally be normalized.
+        let req = req_with_claude_code_headers(Vec::new());
+        let mut body = serde_json::json!({
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: v=1"},
+                {"type": "text", "text": "client system prompt"},
+            ],
+            "tools": [{"name": "mcp_foo"}]
+        });
+        let before = body.clone();
+
+        let result = provider.cloak_body(&mut body, &req);
+
+        assert!(
+            result.is_none(),
+            "mode=never must return None from cloak_body"
+        );
+        assert_eq!(body, before, "mode=never must leave the body untouched");
+        // Explicitly: billing block survives and mcp_ is NOT normalized.
+        assert!(
+            body_has_billing(&body),
+            "billing block must survive mode=never"
+        );
+        assert_eq!(body["tools"][0]["name"], "mcp_foo");
+    }
+
+    /// `mode = always` cloaks as a non-CC client even when the request DID
+    /// carry an `x-claude-code-session-id` capture (which `Auto` would treat
+    /// as genuine CC): identity stamped + metadata minted.
+    #[test]
+    fn cloak_mode_always_stamps_identity_even_with_session_header() {
+        let provider = oauth_provider_with_cloak(CloakConfig {
+            mode: CloakMode::Always,
+            ..CloakConfig::default()
+        });
+        // Genuine-CC-looking request: session-id header present.
+        let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+        let mut body = cloak_test_body();
+
+        provider.cloak_body(&mut body, &req);
+
+        // Despite the session header, identity is stamped and metadata minted.
+        assert_eq!(
+            body["system"][0]["text"],
+            "You are Claude Code, Anthropic's official CLI for Claude."
+        );
+        assert!(
+            body["metadata"]["user_id"].is_string(),
+            "mode=always must mint metadata.user_id even with a session header"
+        );
+        assert!(!body_has_billing(&body), "billing block must be stripped");
+    }
+
+    /// `mode = auto` (the default) keeps the Increment-1 heuristic: a request
+    /// WITH a session-id capture is treated as genuine CC (no identity stamp,
+    /// no metadata), billing still stripped.
+    #[test]
+    fn cloak_mode_auto_matches_increment1_for_genuine_cc() {
+        let provider = oauth_provider_with_cloak(CloakConfig::default());
+        let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+        let mut body = cloak_test_body();
+
+        provider.cloak_body(&mut body, &req);
+
+        // Genuine CC under Auto: only the client block remains, no metadata.
+        let arr = body["system"].as_array().expect("system is array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["text"], "client system prompt");
+        assert!(body.get("metadata").is_none());
+        assert!(!body_has_billing(&body));
     }
 
     /// Build a `reqwest::Response` from a status + body for driving

@@ -38,7 +38,9 @@ use std::sync::Arc;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::IngressAdapter;
 use routectl_core::{ChatRequest, Provider, StaticToken};
-use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
+use routectl_providers::anthropic_api::{
+    AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
+};
 use routectl_providers::openai_compat::{
     HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
 };
@@ -112,6 +114,7 @@ fn build_provider_for_kind(
                 context_management: false,
                 max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
                 session_id: None,
+                cloak: CloakConfig::default(),
             },
         )))),
         "openai-compat" => Ok(Some(Box::new(OpenAiCompatProvider::new(

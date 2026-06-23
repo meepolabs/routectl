@@ -19,7 +19,9 @@ const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
 const CLEAR_THINKING_EDIT_TYPE: &str = "clear_thinking_20251015";
 
 use routectl_core::{Message, MessageContent, Provider, Role};
-use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
+use routectl_providers::anthropic_api::{
+    AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
+};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -54,6 +56,7 @@ fn make_provider(base_url: &str, context_management: bool) -> AnthropicApiProvid
         context_management,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         session_id: None,
+        cloak: CloakConfig::default(),
     })
 }
 
