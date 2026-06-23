@@ -503,20 +503,37 @@ impl AnthropicApiProvider {
     /// (a genuine Claude Code client always does), so a non-CC client
     /// gets the identity block + minted metadata while a genuine CC client
     /// only has its billing block stripped.
-    fn cloak_body(&self, body: &mut Value, req: &ChatRequest) {
+    ///
+    /// Returns `Some(CloakResult)` on the cloak path (carrying the
+    /// per-request tool-name reverse map) and `None` on every non-cloak
+    /// path (non-OAuth / non-anthropic-host / identity absent).
+    ///
+    /// Cache-safety invariant: the tool-name normalization here runs
+    /// AFTER `normalize_request` and BEFORE serialization and
+    /// `resign_cch_in_place`, and auto-cache breakpoints are planned
+    /// upstream in the router. The rename touches only tool-NAME strings
+    /// -- never `cache_control` keys -- so cached bytes stay byte-stable.
+    fn cloak_body(&self, body: &mut Value, req: &ChatRequest) -> Option<cloak::CloakResult> {
         if self.cfg.auth_kind != AuthKind::OauthBearer || !is_anthropic_api_host(&self.cfg.base_url)
         {
-            return;
+            return None;
         }
-        let Some(identity) = self.identity.as_ref() else {
-            return;
-        };
+        let identity = self.identity.as_ref()?;
         let is_non_cc = !req
             .routectl_internal
             .claude_code_headers
             .iter()
             .any(|(n, _)| n.eq_ignore_ascii_case("x-claude-code-session-id"));
-        cloak::cloak_oauth_egress(body, req, identity, is_non_cc);
+        let result = cloak::cloak_oauth_egress(body, req, identity, is_non_cc);
+        // Decision log: provider + non-CC gate + how many tool names were
+        // normalized. NEVER logs tool names or message content.
+        tracing::info!(
+            provider = %self.cfg.id,
+            is_non_cc = is_non_cc,
+            rename_count = result.tool_reverse.len(),
+            "anthropic-api cloak applied to outgoing body",
+        );
+        Some(result)
     }
 
     /// Parse the `anthropic-ratelimit-unified-*` quota family from an
@@ -681,9 +698,12 @@ impl Provider for AnthropicApiProvider {
 
         // Cloak the outgoing body on the OAuth anthropic-api surface:
         // always strip the billing block; for a non-CC client also stamp
-        // the identity system block and metadata user_id. Runs after
-        // normalize_request and before serialize/resign.
-        self.cloak_body(&mut body, &req);
+        // the identity system block and metadata user_id. Also normalize
+        // single-underscore `mcp_` tool names to `mcp__`. Runs after
+        // normalize_request and before serialize/resign. The returned
+        // reverse map restores the client's original tool names on the
+        // response below.
+        let cloak_result = self.cloak_body(&mut body, &req);
 
         // Emit the outgoing body at trace level so a grep by
         // request_id correlates ingress -> egress -> upstream
@@ -782,6 +802,14 @@ impl Provider for AnthropicApiProvider {
             None
         };
         let mut chat_resp = self.normalize_response(raw_body)?;
+        // Restore the client's original tool names on the response. The
+        // forward pass renamed single-underscore `mcp_` names to `mcp__`
+        // on the wire; reverse only the names this request actually
+        // renamed so a client that legitimately used `mcp__` names is
+        // unaffected.
+        if let Some(result) = cloak_result.as_ref() {
+            response::reverse_tool_names(&mut chat_resp, &result.tool_reverse);
+        }
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         chat_resp.upstream_meta = upstream_meta;
         // Context-management cache write. Extracts (tool_use_id, thinking)
@@ -823,8 +851,10 @@ impl Provider for AnthropicApiProvider {
 
         // See complete(): cloak the OAuth anthropic-api body before
         // serialize/resign (billing strip always; identity + metadata for
-        // a non-CC client).
-        self.cloak_body(&mut body, &req);
+        // a non-CC client; mcp_ tool-name normalization). The reverse map
+        // is threaded into SseState so streamed tool_use names are
+        // restored to the client's originals.
+        let cloak_result = self.cloak_body(&mut body, &req);
 
         // NOTE: this trace reflects the pre-resign body; the cch token
         // in the transmitted bytes differs after resign_cch_in_place.
@@ -900,9 +930,16 @@ impl Provider for AnthropicApiProvider {
         let context_management_enabled = self.cfg.context_management;
         let max_thinking_entry_bytes = self.cfg.max_thinking_entry_bytes;
         let thinking_cache_for_stream = Arc::clone(&self.thinking_cache);
+        // Per-request tool-name reverse map (renamed upstream name ->
+        // original client name) from the cloak forward pass. Empty / None
+        // when the cloak did not run or renamed nothing.
+        let tool_reverse = cloak_result
+            .map(|r| r.tool_reverse)
+            .unwrap_or_default();
 
         let stream = async_stream::stream! {
             let mut state = SseState::new(&provider_id);
+            state.tool_reverse = tool_reverse;
 
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {
@@ -1028,8 +1065,10 @@ impl Provider for AnthropicApiProvider {
         let mut normalized = self.normalize_request(&req)?;
         // Cloak before build_count_tokens_body reads `normalized`. The
         // metadata user_id is dropped by the count_tokens allowlist (it is
-        // not in that schema), but the system-identity stamp and the
-        // billing strip still apply to the forwarded `system`.
+        // not in that schema), but the system-identity stamp, the billing
+        // strip, and the mcp_ tool-name normalization still apply to the
+        // forwarded body. count_tokens has no response tool_use surface to
+        // reverse, so the returned reverse map is discarded.
         self.cloak_body(&mut normalized, &req);
         let body = build_count_tokens_body(&normalized);
 

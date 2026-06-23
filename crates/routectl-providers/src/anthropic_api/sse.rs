@@ -127,6 +127,14 @@ pub struct SseState {
     /// tool_use). Drained by `stream()` in `mod.rs` after the SSE
     /// pipeline finishes -- NOT cleared here.
     pub(super) pending_cache_writes: Vec<(String, Vec<ReasoningDetail>)>,
+    /// Per-request tool-name reverse map (upstream renamed name ->
+    /// original client name) from the cloak forward pass. Used to restore
+    /// the client's original tool names on streamed `tool_use` blocks.
+    /// The name is reversed ONCE when the block opens
+    /// (`ContentBlockStart::ToolUse`); every `input_json_delta` chunk
+    /// re-emits the stored name and so inherits the reversal. Empty map =
+    /// no-op.
+    pub tool_reverse: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -226,6 +234,13 @@ impl SseState {
                     SseContentBlockStart::ToolUse { id, name } => {
                         let ci = self.next_call_index;
                         self.next_call_index += 1;
+                        // Reverse the tool name to the client's original
+                        // once, here at block open. make_tool_delta_chunk
+                        // re-emits this stored name on every
+                        // input_json_delta chunk, so all deltas inherit
+                        // the reversal. Names absent from the map (or a
+                        // bare name with no mcp__ shape) pass through.
+                        let name = self.reverse_tool_name(name, provider_id);
                         // Snapshot thinking preceding this tool_use for
                         // context_management emulation. Non-cumulative:
                         // each tool_use is paired only with the thinking
@@ -632,8 +647,30 @@ impl SseState {
         }
     }
 
-    fn make_tool_delta_chunk(&self, partial_json: String) -> ChatChunk {
-        let (tool_id, tool_name, call_index) = match &self.open_block {
+    /// Reverse a streamed `tool_use` name to the client's original via
+    /// the per-request reverse map. A name present in the map is restored.
+    /// A name with the `mcp__` shape but absent from the map is left as-is
+    /// and bumps a debug-level unmatched-reverse counter (the cloak
+    /// renamed nothing matching, so the client sent this name verbatim).
+    /// Empty map = no-op.
+    fn reverse_tool_name(&self, name: String, provider_id: &str) -> String {
+        if self.tool_reverse.is_empty() {
+            return name;
+        }
+        if let Some(original) = self.tool_reverse.get(&name) {
+            return original.clone();
+        }
+        if name.starts_with("mcp__") {
+            tracing::debug!(
+                provider = %provider_id,
+                "anthropic SSE tool_use name has mcp__ shape but is absent from the \
+                 cloak reverse map; leaving unchanged",
+            );
+        }
+        name
+    }
+
+    fn make_tool_delta_chunk(&self, partial_json: String) -> ChatChunk {        let (tool_id, tool_name, call_index) = match &self.open_block {
             Some(OpenBlockKind::ToolUse {
                 id,
                 name,
