@@ -1749,8 +1749,13 @@ pub struct ProviderRuntimePolicy {
     /// Operator-supplied list of feature keys this provider does not
     /// support. Router pre-filters the alias chain before dispatch -- a
     /// provider listed here is skipped entirely (not tried-and-fallback)
-    /// when the request needs any of these features. Examples:
-    /// `web_search`, `computer_use`. See feature-key derivation in
+    /// when the request needs any of these features. Tool-type keys are
+    /// derived from built-in tool `type` strings (e.g. `web_search`,
+    /// `computer_use`). The `structured_output` key is request-derived
+    /// (NOT a tool type): it fires when the request carries
+    /// `output_config.format` or any strict tool, both of which need
+    /// constrained decoding some upstreams (e.g. a Bedrock Invoke leg)
+    /// cannot enforce. See feature-key derivation in
     /// `crates/routectl-router/src/feature_keys.rs`.
     #[serde(default)]
     pub unsupported_features: Vec<String>,

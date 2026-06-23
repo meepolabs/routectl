@@ -85,3 +85,19 @@ allowed_body_fields = [
   "metadata",
   "context_management",
 ]
+
+# ---- Per-provider capability gate ----
+# A Bedrock Invoke leg whose Claude model does NOT natively enforce
+# structured outputs (output_config.format) or strict tool use will emit
+# unconstrained, malformed tool_use JSON the client cannot parse. Declare
+# the request-derived `structured_output` feature unsupported so those
+# requests skip this provider and fall back to a leg that enforces it
+# (e.g. api.anthropic.com). The router drops the leg BEFORE dispatch --
+# no per-target 400, no breaker churn.
+#
+# [providers.bedrock-invoke]
+# kind      = "bedrock"
+# region    = "us-west-2"
+# creds     = { kind = "default-chain" }
+# api_shape = "invoke"
+# unsupported_features = ["structured_output"]

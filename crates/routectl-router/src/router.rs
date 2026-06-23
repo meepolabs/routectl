@@ -747,7 +747,8 @@ impl Router {
     fn dispatch_chain_for_request(&self, req: &ChatRequest) -> Result<Vec<DispatchTarget>> {
         let chain = self.dispatch_chain(&req.model)?;
         let tools = req.tools.as_deref().unwrap_or(&[]);
-        let features = crate::feature_keys::derive_feature_keys(tools);
+        let features =
+            crate::feature_keys::derive_feature_keys(tools, req.provider_extras.as_ref());
         self.filter_chain_by_features(chain, &features, &req.model)
     }
 
@@ -5815,6 +5816,26 @@ mod feature_filter_tests {
         }
     }
 
+    /// Request carrying an Anthropic structured-output `output_config.
+    /// format` on `provider_extras` -- the non-tool-derived source of
+    /// the `structured_output` feature key.
+    fn structured_output_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            model: model.into(),
+            messages: vec![],
+            tools: None,
+            provider_extras: Some(json!({
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {"type": "object"}
+                    }
+                }
+            })),
+            ..Default::default()
+        }
+    }
+
     /// Per-provider captured-request log for test introspection.
     type CapturedRequests = Arc<ParkingMutex<Vec<ChatRequest>>>;
 
@@ -6017,6 +6038,51 @@ mod feature_filter_tests {
             1,
             "Custom tools must not be treated as feature keys",
         );
+    }
+
+    #[tokio::test]
+    async fn structured_output_skips_first_provider_when_listed_unsupported() {
+        // Chain [bedrock, anthropic]. Bedrock declares structured_output
+        // unsupported. Request carries output_config.format. Dispatch
+        // must go DIRECTLY to anthropic (Bedrock Invoke can't enforce
+        // constrained decoding -> malformed tool_use the client can't
+        // parse).
+        let (router, captured_bedrock, captured_anthropic) =
+            build_router_with_chain(vec!["structured_output".into()], vec![]);
+        let req = structured_output_request("alias");
+        let resp = router.complete(req).await.expect("dispatch must succeed");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic-prov"));
+        assert_eq!(
+            captured_bedrock.lock().len(),
+            0,
+            "bedrock must be skipped, not tried-and-fallback",
+        );
+        assert_eq!(captured_anthropic.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn structured_output_empty_chain_returns_not_implemented() {
+        // Both chain entries declare structured_output unsupported. The
+        // filter eliminates everyone -> 501 NotImplemented naming the
+        // feature key, no upstream attempt.
+        let (router, captured_bedrock, captured_anthropic) = build_router_with_chain(
+            vec!["structured_output".into()],
+            vec!["structured_output".into()],
+        );
+        let req = structured_output_request("alias");
+        let err = router.complete(req).await.unwrap_err();
+        match err {
+            Error::NotImplemented(alias, msg) => {
+                assert_eq!(alias, "alias");
+                assert!(
+                    msg.contains("structured_output"),
+                    "error message must name the feature; got: {msg}",
+                );
+            }
+            other => panic!("expected Error::NotImplemented; got {other:?}"),
+        }
+        assert_eq!(captured_bedrock.lock().len(), 0);
+        assert_eq!(captured_anthropic.lock().len(), 0);
     }
 }
 
