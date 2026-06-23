@@ -15,7 +15,9 @@ mod tests {
         tool_def::CustomTool, ChatRequest, KnownContentPart, Message, MessageContent,
         ReasoningConfig, ReasoningDetail, ReasoningDetailKind, Role, SystemBlock, ToolDef,
     };
-    use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
+    use routectl_providers::anthropic_api::{
+        AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
+    };
     use serde_json::{json, Value};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -38,6 +40,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         AnthropicApiProvider::new(cfg)
     }
@@ -1407,6 +1410,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1444,6 +1448,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1474,6 +1479,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1513,6 +1519,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = base_req("claude-3-opus", vec![user_msg("hello")]);
@@ -1920,6 +1927,7 @@ mod tests {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);

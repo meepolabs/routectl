@@ -16,7 +16,9 @@
 mod common;
 
 use routectl_core::Provider;
-use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, AuthKind};
+use routectl_providers::anthropic_api::{
+    AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
+};
 use routectl_providers::openai_compat::{
     HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
 };
@@ -41,6 +43,7 @@ fn anthropic_api_provider() -> AnthropicApiProvider {
         context_management: false,
         max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
         session_id: None,
+        cloak: CloakConfig::default(),
     })
 }
 
@@ -415,6 +418,7 @@ mod forward_compat_pins {
             context_management: false,
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
+            cloak: CloakConfig::default(),
         })
     }
 
