@@ -44,9 +44,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
-    trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
-    StaticToken, TokenSource,
+    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
+    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
+    Provider, Result, StaticToken, TokenSource,
 };
 
 pub(crate) mod auth;
@@ -803,7 +803,17 @@ fn map_responses_upstream_error(
         .ok()
         .and_then(|v| crate::openai_responses::response::codex_reset_hint(&v));
     let retry_after = codex_hint.or(header_hint);
-    Error::upstream_with_retry_after(provider_id, status, msg, retry_after)
+    // When the upstream returned a structured `{error:...}` JSON envelope,
+    // carry the RAW body so the ingress sanitizer can re-extract the
+    // upstream's own top-level `error.message` and surface it to the
+    // client. Otherwise carry the sanitized excerpt so a non-`{error}`
+    // body falls back to a status-only client message -- never a raw dump.
+    let err_body = if is_json_error_envelope(body_text) {
+        body_text.to_string()
+    } else {
+        msg
+    };
+    Error::upstream_with_retry_after(provider_id, status, err_body, retry_after)
 }
 
 // ---------------------------------------------------------------------------

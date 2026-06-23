@@ -486,6 +486,76 @@ fn sanitize_upstream_for_client_status_only_for_json_without_error_object() {
     );
 }
 
+#[tokio::test]
+async fn map_error_surfaces_anthropic_thinking_block_message_to_client() {
+    // Arrange: the exact production 400 shape Anthropic returns when a
+    // stale thinking-block signature is replayed. After the provider-side
+    // fix, `read_anthropic_error` carries the RAW `{error:...}` envelope in
+    // `.body` (not a pre-extracted bare string), so the ingress sanitizer
+    // can re-extract the upstream's own `error.message`. A client (Claude
+    // Code) needs to SEE this message to self-heal -- strip stale thinking
+    // signatures and retry -- instead of hitting a status-only wall.
+    let raw = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\
+                \"message\":\"messages.23.content.5: `thinking` or `redacted_thinking` \
+                blocks in the latest assistant message cannot be modified. These blocks \
+                must remain as they were in the original response.\"}}";
+    let err = Error::Upstream {
+        provider: "anthropic_oauth_prod".into(),
+        status: 400,
+        retry_after: None,
+        upstream_type: Some("invalid_request_error".into()),
+        upstream_code: None,
+        body: raw.into(),
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+    let body = body_to_value(resp).await;
+
+    // Assert: the actionable upstream message reaches the client, the
+    // status is preserved, and the upstream error.type is lifted -- but the
+    // internal provider config name never leaks.
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("cannot be modified"),
+        "upstream self-heal message must reach the client: {msg:?}"
+    );
+    assert!(msg.contains("400"), "HTTP status preserved: {msg:?}");
+    assert!(
+        !msg.contains("anthropic_oauth_prod"),
+        "internal provider config name must not leak: {msg:?}"
+    );
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test]
+async fn map_error_non_json_upstream_body_stays_status_only() {
+    // Arrange: a non-JSON upstream error body. The provider reader carries
+    // a sanitized excerpt (not raw JSON) in `.body` for this case, so the
+    // ingress sanitizer must fall back to a status-only client message and
+    // never echo the raw body.
+    let err = Error::Upstream {
+        provider: "anthropic_oauth_prod".into(),
+        status: 502,
+        retry_after: None,
+        upstream_type: None,
+        upstream_code: None,
+        body: "<html>upstream-host gateway timeout</html>".into(),
+    };
+
+    // Act
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+    let body = body_to_value(resp).await;
+
+    // Assert
+    let msg = body["error"]["message"].as_str().unwrap_or("");
+    assert!(msg.contains("502"), "HTTP status preserved: {msg:?}");
+    assert!(
+        !msg.contains("upstream-host"),
+        "raw non-JSON body must not leak: {msg:?}"
+    );
+}
+
 // -------- Layer B: OpenAI ingress preserves upstream type/code -------
 
 #[tokio::test]

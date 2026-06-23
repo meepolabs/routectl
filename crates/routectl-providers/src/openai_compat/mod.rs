@@ -38,8 +38,9 @@ use serde_json::Value;
 use tracing::debug;
 
 use routectl_core::{
-    debug_upstream_error_body, extract_upstream_message, sanitize_for_log, trace_outgoing_body,
-    trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    debug_upstream_error_body, extract_upstream_message, is_json_error_envelope, sanitize_for_log,
+    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
+    Provider, Result,
 };
 
 use sse::ThinkTagAccumulator;
@@ -646,10 +647,20 @@ fn map_openai_compat_upstream_error(
         &safe_excerpt,
         "openai-compat",
     );
+    // When the upstream returned a structured `{error:...}` JSON envelope,
+    // carry the RAW body so the ingress sanitizer can re-extract the
+    // upstream's own top-level `error.message` and surface it to the
+    // client. Otherwise carry the sanitized excerpt so a non-`{error}`
+    // body falls back to a status-only client message -- never a raw dump.
+    let err_body = if is_json_error_envelope(body_text) {
+        body_text.to_string()
+    } else {
+        sanitized
+    };
     Error::upstream_full(
         provider_id,
         status,
-        sanitized,
+        err_body,
         retry_after,
         upstream_type,
         upstream_code,
@@ -821,6 +832,60 @@ mod helper_tests {
                     retry_after,
                     Some(std::time::Duration::from_secs(30)),
                     "retry_after must be preserved for both callers"
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A structured `{error:...}` body must be carried RAW in
+    /// `Error::Upstream.body` so the ingress sanitizer can re-extract the
+    /// upstream's own `error.message` and surface it to the client.
+    #[test]
+    fn map_upstream_error_carries_raw_envelope_for_structured_body() {
+        // Arrange: a JSON error envelope with sibling keys around `error`.
+        let body = r#"{"error":{"type":"invalid_request_error","message":"bad model id"},"x_trace":"t-7"}"#;
+        let headers = HeaderMap::new();
+
+        // Act
+        let err = map_openai_compat_upstream_error("p", 400, &headers, body);
+
+        // Assert: the RAW JSON reaches `.body` so ingress can re-parse
+        // `/error/message`.
+        match err {
+            Error::Upstream { body, .. } => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&body).expect("body must be the raw JSON envelope");
+                assert_eq!(
+                    parsed.pointer("/error/message").and_then(|v| v.as_str()),
+                    Some("bad model id")
+                );
+            }
+            other => panic!("expected Error::Upstream, got: {other:?}"),
+        }
+    }
+
+    /// A non-JSON upstream body must NOT be carried raw; the sanitized
+    /// excerpt is stored so the ingress sanitizer yields status-only.
+    #[test]
+    fn map_upstream_error_sanitizes_non_json_body() {
+        // Arrange
+        let headers = HeaderMap::new();
+
+        // Act
+        let err = map_openai_compat_upstream_error(
+            "p",
+            502,
+            &headers,
+            "<html>upstream-host gateway timeout</html>",
+        );
+
+        // Assert
+        match err {
+            Error::Upstream { body, .. } => {
+                assert!(
+                    !body.contains("upstream-host"),
+                    "raw non-JSON body must not be carried in .body: {body}"
                 );
             }
             other => panic!("expected Error::Upstream, got: {other:?}"),

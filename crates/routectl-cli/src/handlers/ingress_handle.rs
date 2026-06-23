@@ -369,12 +369,19 @@ async fn render_stream_task<A: IngressAdapter>(
                 // is a definite upstream fault, so finalize the row as
                 // `upstream_error` regardless of whether the terminal
                 // event reaches the client.
-                tracing::error!(
-                    error = ?e,
-                    "upstream stream error -- emitting terminal error event"
-                );
                 let safe_msg = sanitize_stream_error_for_client(&e);
                 let class = crate::ingress::StreamErrorClass::from_error(&e);
+                // Log the sanitized client-facing detail and the error
+                // class -- NOT `?e`, whose `Error::Upstream` Debug embeds
+                // the raw upstream body (now the full `{error:...}`
+                // envelope for structured errors). The full raw body
+                // remains available at DEBUG via `debug_upstream_error_body`
+                // on the egress side.
+                tracing::error!(
+                    detail = %safe_msg,
+                    class = ?class,
+                    "upstream stream error -- emitting terminal error event"
+                );
                 capture.observe_error(&e);
                 capture.finalize(Outcome::UpstreamError);
                 for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
@@ -411,9 +418,10 @@ async fn render_stream_task<A: IngressAdapter>(
 /// dropped: it can carry attacker-controlled bytes that, even after
 /// `sanitize_for_log`, can leak per-tenant existence info or
 /// upstream-side rate limit hints we don't want to forward.
-/// Operators reading routectl logs still see the full error via the
-/// `tracing::error!(error = ?e, ...)` line that fires on the same
-/// path -- the wire bytes are the only place this short summary
+/// Operators reading routectl logs still see the sanitized detail and
+/// error class on the same path's ERROR line; the full raw upstream
+/// body is available at DEBUG via `debug_upstream_error_body` on the
+/// egress side -- the wire bytes are the only place this short summary
 /// shows up.
 ///
 /// Used only on the streaming-error path (`render_error_eos`). The
@@ -507,13 +515,28 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         }
         // The `Error::Upstream` Display string embeds the internal
         // provider config section name (routing topology) and the raw
-        // upstream body (which can carry per-tenant rate-limit detail
-        // and upstream-side metadata). Log the full error server-side
-        // and return only the HTTP status plus the upstream's own
-        // top-level `error.message` / `error.type` when the body parsed
-        // as JSON -- mirroring the streaming path's discipline.
-        Error::Upstream { status, body, .. } => {
-            tracing::error!(error = %e, "upstream error sanitized in HTTP response");
+        // upstream body (now the full `{error:...}` envelope for
+        // structured errors, which can also carry per-tenant rate-limit
+        // detail and upstream-side metadata). Log only safe structured
+        // fields server-side -- never the raw body via Display/Debug; the
+        // full body remains available at DEBUG via
+        // `debug_upstream_error_body` on the egress side. Return only the
+        // HTTP status plus the upstream's own top-level `error.message` /
+        // `error.type` when the body parsed as JSON -- mirroring the
+        // streaming path's discipline.
+        Error::Upstream {
+            status,
+            body,
+            provider,
+            upstream_type,
+            ..
+        } => {
+            tracing::error!(
+                provider = %provider,
+                status = *status,
+                upstream_type = ?upstream_type,
+                "upstream error sanitized in HTTP response"
+            );
             sanitize_upstream_for_client(*status, body)
         }
         _ => e.to_string(),

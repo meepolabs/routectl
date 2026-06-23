@@ -132,6 +132,26 @@ pub fn extract_upstream_message(body_text: &str) -> String {
         .unwrap_or_else(|| sanitize_upstream_body(body_text))
 }
 
+/// True when `body_text` parses as JSON carrying a top-level `error`
+/// object -- the shape OpenAI Chat Completions, OpenAI Responses, and
+/// Anthropic Messages all use for 4xx/5xx error bodies.
+///
+/// Provider error readers use this to decide whether to carry the RAW
+/// upstream body in `Error::Upstream.body` (so the ingress sanitizer can
+/// re-extract the upstream's own top-level `error.message` for the
+/// client) versus a pre-sanitized excerpt. A non-`{error}` body (HTML
+/// page, plain-text gateway error, or JSON with no top-level `error`)
+/// returns `false`, so the reader carries the sanitized excerpt and the
+/// client sees a status-only message -- never a raw body dump or a
+/// sibling key.
+pub fn is_json_error_envelope(body_text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body_text)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .is_some()
+}
+
 /// Variant of [`sanitize_upstream_body`] that takes an explicit
 /// character cap. Used by [`debug_upstream_error_body`] for the 4 KB
 /// debug-level full-body log so a JSON validation error with field

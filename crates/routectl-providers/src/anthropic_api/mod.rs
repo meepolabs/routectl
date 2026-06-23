@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    debug_upstream_error_body, sanitize_for_log, sanitize_upstream_body, trace_outgoing_body,
-    trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
-    StaticToken, TokenCount, TokenSource,
+    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
+    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
+    Provider, Result, StaticToken, TokenCount, TokenSource,
 };
 
 mod cloak;
@@ -1146,10 +1146,24 @@ async fn read_anthropic_error(
         .and_then(|v| v.pointer("/error/type"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    // When the upstream returned a structured `{error:...}` JSON envelope,
+    // carry the RAW body so the ingress sanitizer can re-extract the
+    // upstream's own top-level `error.message` and surface it to the
+    // client. A client (e.g. Claude Code) can then recognize and
+    // self-heal an actionable upstream 400 instead of hitting a
+    // status-only wall. When the body was NOT a `{error:...}` envelope
+    // (HTML page, plain-text gateway error), carry the sanitized excerpt
+    // so the sanitizer falls back to a status-only message -- never a raw
+    // body dump.
+    let err_body = if is_json_error_envelope(&body_text) {
+        body_text.clone()
+    } else {
+        msg.clone()
+    };
     let err = Error::upstream_full(
         provider_id,
         status,
-        msg.clone(),
+        err_body,
         retry_after,
         upstream_type,
         None,
@@ -2169,5 +2183,92 @@ mod tests {
             body, before,
             "non-anthropic host must leave the body untouched (gate skips)"
         );
+    }
+
+    /// Build a `reqwest::Response` from a status + body for driving
+    /// `read_anthropic_error` directly, without a live HTTP round-trip or
+    /// the `complete()` path's global-tracing side effects (which race the
+    /// `#[traced_test]` upstream_log tests in this crate's test binary).
+    ///
+    /// `http::Response` is only in scope under the `bedrock` feature
+    /// (`dep:http`), which the default and `--all-features` builds both
+    /// enable -- so these tests run under the standard gate.
+    #[cfg(feature = "bedrock")]
+    fn reqwest_response(status: u16, body: &str) -> reqwest::Response {
+        let http_resp = http::Response::builder()
+            .status(status)
+            .body(body.to_string())
+            .expect("build http::Response");
+        reqwest::Response::from(http_resp)
+    }
+
+    /// A structured Anthropic `{error:...}` 400 must carry the RAW JSON
+    /// envelope in `Error::Upstream.body` so the ingress sanitizer can
+    /// re-extract the upstream's own `error.message` for the client. This
+    /// is the recovery lever: Claude Code self-heals a stale thinking-block
+    /// 400 only if it can SEE the message.
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn read_anthropic_error_carries_raw_envelope_for_structured_400() {
+        let raw = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\
+                    \"message\":\"messages.23.content.5: `thinking` or `redacted_thinking` \
+                    blocks in the latest assistant message cannot be modified.\"}}";
+        let resp = reqwest_response(400, raw);
+
+        let (msg, err) = read_anthropic_error("anthropic_oauth_prod", 400, resp).await;
+
+        // The returned `msg` stays the clean extracted message for logging.
+        assert!(
+            msg.contains("cannot be modified"),
+            "returned msg is the extracted message: {msg:?}"
+        );
+        match err {
+            Error::Upstream {
+                status,
+                body,
+                upstream_type,
+                ..
+            } => {
+                assert_eq!(status, 400);
+                assert_eq!(upstream_type.as_deref(), Some("invalid_request_error"));
+                // `.body` must be the RAW envelope so the ingress sanitizer
+                // re-parses `/error/message`.
+                let parsed: Value =
+                    serde_json::from_str(&body).expect("body must still be the raw JSON envelope");
+                assert_eq!(
+                    parsed.pointer("/error/message").and_then(Value::as_str),
+                    Some(
+                        "messages.23.content.5: `thinking` or `redacted_thinking` \
+                         blocks in the latest assistant message cannot be modified."
+                    )
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
+    }
+
+    /// A non-JSON upstream body (HTML gateway page) must NOT be carried raw
+    /// in `.body`; the sanitized excerpt is stored so the ingress sanitizer
+    /// falls back to a status-only client message and nothing leaks.
+    #[cfg(feature = "bedrock")]
+    #[tokio::test]
+    async fn read_anthropic_error_sanitizes_non_json_body() {
+        let resp = reqwest_response(
+            502,
+            "<html><body>upstream-host gateway timeout</body></html>",
+        );
+
+        let (_msg, err) = read_anthropic_error("anthropic_oauth_prod", 502, resp).await;
+
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 502);
+                assert!(
+                    !body.contains("upstream-host"),
+                    "raw HTML body must not be carried in .body: {body:?}"
+                );
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
     }
 }

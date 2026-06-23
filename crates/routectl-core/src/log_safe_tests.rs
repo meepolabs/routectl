@@ -5,10 +5,28 @@
 //! this file is the body of `mod tests` declared inside `log_safe`.
 
 use super::{
-    redact_prompts_with_flag, sanitize_capped, sanitize_for_log, sanitize_upstream_body, MAX,
-    MAX_DEBUG_BODY_BYTES,
+    is_json_error_envelope, redact_prompts_with_flag, sanitize_capped, sanitize_for_log,
+    sanitize_upstream_body, MAX, MAX_DEBUG_BODY_BYTES,
 };
 use serde_json::json;
+
+#[test]
+fn is_json_error_envelope_true_for_top_level_error_object() {
+    assert!(is_json_error_envelope(
+        r#"{"error":{"type":"invalid_request_error","message":"x"}}"#
+    ));
+}
+
+#[test]
+fn is_json_error_envelope_false_for_non_json() {
+    assert!(!is_json_error_envelope("<html>gateway timeout</html>"));
+    assert!(!is_json_error_envelope("plain text error"));
+}
+
+#[test]
+fn is_json_error_envelope_false_for_json_without_error_key() {
+    assert!(!is_json_error_envelope(r#"{"detail":"tenant-7 trace"}"#));
+}
 
 #[test]
 fn ascii_printable_passes_through_unchanged() {
