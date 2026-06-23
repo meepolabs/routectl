@@ -14,9 +14,32 @@
 //! Shapes here are fixed from empirical capture against the live endpoint;
 //! do not redesign them.
 
+use std::collections::{HashMap, HashSet};
+
 use serde_json::{json, Value};
 
 use routectl_core::ChatRequest;
+
+/// The single-underscore `mcp_` prefix that trips the Anthropic
+/// subscription billing classifier when sent by a non-Claude-Code client.
+const MCP_SINGLE_PREFIX: &str = "mcp_";
+
+/// The canonical double-underscore prefix the classifier accepts.
+const MCP_DOUBLE_PREFIX: &str = "mcp__";
+
+/// Result of the OAuth-egress cloak. Carries the per-request reverse map
+/// (upstream renamed name -> original client name) so the caller can
+/// restore the client's original tool names on the response. The map is
+/// per-request, NOT global: a global reverse map would corrupt a client
+/// that legitimately sent a mix of `mcp_` and `mcp__` names by rewriting
+/// names the client never asked us to touch.
+#[derive(Debug, Default)]
+pub(crate) struct CloakResult {
+    /// Maps an upstream (renamed) tool name back to the original
+    /// client-supplied name. Contains ONLY names actually renamed on this
+    /// request.
+    pub(crate) tool_reverse: HashMap<String, String>,
+}
 
 /// Marker prefix (after trimming leading whitespace) for the Claude Code
 /// billing/attribution system block. Same concept as
@@ -89,11 +112,203 @@ pub(crate) fn cloak_oauth_egress(
     _req: &ChatRequest,
     identity: &ClaudeCodeIdentity,
     is_non_cc: bool,
-) {
+) -> CloakResult {
     strip_billing_block(body);
     if is_non_cc {
         ensure_identity_block(body);
         mint_metadata_user_id(body, identity);
+    }
+    let tool_reverse = normalize_mcp_tool_names(body);
+    CloakResult { tool_reverse }
+}
+
+/// Normalize every tool NAME on the outgoing body from the single-
+/// underscore `mcp_` prefix to the double-underscore `mcp__` prefix. The
+/// single-underscore shape is the one tool-name pattern that diverts a
+/// non-Claude-Code request to the extra-usage billing lane; the
+/// double-underscore shape passes. The rename is prefix-only (internal
+/// separators untouched), idempotent (an already-`mcp__` name is left
+/// alone and records no reverse entry), and pure.
+///
+/// Returns the per-request reverse map (renamed upstream name -> original
+/// client name) containing ONLY names actually renamed.
+///
+/// Paths walked (serde_json `Value`, by path not typed enum, so unknown
+/// forward-compat block types are still handled correctly):
+/// - `tools[].name`
+/// - `tool_choice.name` (when `tool_choice.type == "tool"`)
+/// - `messages[].content[]` entries of type `tool_use` (`.name`)
+/// - `messages[].content[]` entries of type `tool_reference` (`.tool_name`)
+/// - nested `tool_result.content[]` entries of type `tool_reference`
+///   (`.tool_name`)
+fn normalize_mcp_tool_names(body: &mut Value) -> HashMap<String, String> {
+    let existing = collect_existing_tool_names(body);
+    let mut reverse: HashMap<String, String> = HashMap::new();
+
+    rename_tools_array(body, &existing, &mut reverse);
+    rename_tool_choice(body, &existing, &mut reverse);
+    rename_message_tool_refs(body, &existing, &mut reverse);
+
+    reverse
+}
+
+/// Compute the renamed form of a tool name, or `None` if it does not need
+/// renaming. A name is renamed when it starts with `mcp_` but NOT `mcp__`;
+/// a single underscore is inserted right after `mcp` (prefix only).
+fn renamed_mcp_name(name: &str) -> Option<String> {
+    if name.starts_with(MCP_DOUBLE_PREFIX) {
+        return None;
+    }
+    let suffix = name.strip_prefix(MCP_SINGLE_PREFIX)?;
+    Some(format!("{MCP_DOUBLE_PREFIX}{suffix}"))
+}
+
+/// Gather every tool name in the request's `tools[]` array. This is a
+/// PRE-RENAME snapshot of `tools[]` names only: it is computed once before
+/// the forward pass, does NOT track in-progress renames, and does NOT
+/// detect collisions against names that appear only in message history
+/// (`tool_use` / `tool_reference`). It backs the collision guard in
+/// `rename_name_field`.
+fn collect_existing_tool_names(body: &Value) -> HashSet<String> {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Apply the rename at a single JSON object's string field, honoring the
+/// collision guard and recording the reverse mapping. `existing` is the
+/// pre-rename snapshot of `tools[]` names; a renamed form already present
+/// there is skipped with a warning. The same name appearing across
+/// multiple surfaces (e.g. in `tools[]` AND a prior `tool_use`) is renamed
+/// on every surface by design -- safe because the rename is idempotent and
+/// the reverse map records first-seen, so identical originals map to
+/// identical renamed forms.
+fn rename_name_field(
+    obj: &mut Value,
+    field: &str,
+    existing: &HashSet<String>,
+    reverse: &mut HashMap<String, String>,
+) {
+    let Some(original) = obj.get(field).and_then(Value::as_str).map(str::to_string) else {
+        return;
+    };
+    let Some(renamed) = renamed_mcp_name(&original) else {
+        return;
+    };
+    if existing.contains(&renamed) {
+        tracing::warn!(
+            "cloak mcp tool-name normalization skipped: renamed form collides with an \
+             existing tool name in the request"
+        );
+        return;
+    }
+    if let Some(map) = obj.as_object_mut() {
+        map.insert(field.to_string(), Value::String(renamed.clone()));
+    }
+    // First-seen is sufficient: the prefix-only rename guarantees any given
+    // renamed form has exactly one possible original, so repeated entries
+    // for the same renamed name all carry an identical original.
+    reverse.entry(renamed).or_insert(original);
+}
+
+/// Rename `tools[].name` in place. Anthropic native builtins (objects
+/// carrying a non-empty `"type"`) are skipped.
+fn rename_tools_array(
+    body: &mut Value,
+    existing: &HashSet<String>,
+    reverse: &mut HashMap<String, String>,
+) {
+    let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool in tools.iter_mut() {
+        if tool_is_builtin(tool) {
+            continue;
+        }
+        rename_name_field(tool, "name", existing, reverse);
+    }
+}
+
+/// True for an Anthropic native builtin tool (web_search, code_execution,
+/// ...): an object with a non-empty `"type"` field. Such tools are left
+/// unchanged.
+fn tool_is_builtin(tool: &Value) -> bool {
+    tool.get("type")
+        .and_then(Value::as_str)
+        .map(|t| !t.is_empty())
+        .unwrap_or(false)
+}
+
+/// Rename `tool_choice.name` when `tool_choice.type == "tool"`.
+fn rename_tool_choice(
+    body: &mut Value,
+    existing: &HashSet<String>,
+    reverse: &mut HashMap<String, String>,
+) {
+    let is_tool_choice = body
+        .get("tool_choice")
+        .and_then(|tc| tc.get("type"))
+        .and_then(Value::as_str)
+        .map(|t| t == "tool")
+        .unwrap_or(false);
+    if !is_tool_choice {
+        return;
+    }
+    if let Some(tc) = body.get_mut("tool_choice") {
+        rename_name_field(tc, "name", existing, reverse);
+    }
+}
+
+/// Rename tool references in message history: `tool_use.name`,
+/// `tool_reference.tool_name`, and nested
+/// `tool_result.content[].tool_reference.tool_name`.
+fn rename_message_tool_refs(
+    body: &mut Value,
+    existing: &HashSet<String>,
+    reverse: &mut HashMap<String, String>,
+) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for msg in messages.iter_mut() {
+        let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in content.iter_mut() {
+            rename_content_part(part, existing, reverse);
+        }
+    }
+}
+
+/// Rename a single `messages[].content[]` entry by its `type`:
+/// `tool_use` -> `.name`; `tool_reference` -> `.tool_name`;
+/// `tool_result` -> recurse into nested `content[]` `tool_reference`s.
+fn rename_content_part(
+    part: &mut Value,
+    existing: &HashSet<String>,
+    reverse: &mut HashMap<String, String>,
+) {
+    match part.get("type").and_then(Value::as_str) {
+        Some("tool_use") => rename_name_field(part, "name", existing, reverse),
+        Some("tool_reference") => rename_name_field(part, "tool_name", existing, reverse),
+        Some("tool_result") => {
+            let Some(nested) = part.get_mut("content").and_then(Value::as_array_mut) else {
+                return;
+            };
+            for nested_part in nested.iter_mut() {
+                if nested_part.get("type").and_then(Value::as_str) == Some("tool_reference") {
+                    rename_name_field(nested_part, "tool_name", existing, reverse);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -567,5 +782,255 @@ mod tests {
             id.account_uuid
         );
         assert!(id.account_uuid.contains('-'));
+    }
+
+    // -- mcp_ tool-name normalization (forward) ----------------------------
+
+    #[test]
+    fn renames_single_underscore_mcp_prefix_only() {
+        // Arrange: internal separators must be untouched.
+        let mut body = json!({
+            "tools": [{"name": "mcp_linear_get_issue"}]
+        });
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert: prefix doubled, internal underscores preserved.
+        assert_eq!(body["tools"][0]["name"], "mcp__linear_get_issue");
+        assert_eq!(
+            reverse.get("mcp__linear_get_issue").map(String::as_str),
+            Some("mcp_linear_get_issue")
+        );
+    }
+
+    #[test]
+    fn renames_across_tool_choice() {
+        // Arrange
+        let mut body = json!({
+            "tool_choice": {"type": "tool", "name": "mcp_foo"}
+        });
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(body["tool_choice"]["name"], "mcp__foo");
+        assert_eq!(reverse.get("mcp__foo").map(String::as_str), Some("mcp_foo"));
+    }
+
+    #[test]
+    fn tool_choice_auto_is_untouched() {
+        // Arrange: tool_choice without type=="tool" has no name to rename.
+        let mut body = json!({"tool_choice": {"type": "auto"}});
+        let before = body.clone();
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(body, before);
+        assert!(reverse.is_empty());
+    }
+
+    #[test]
+    fn renames_tool_use_in_message_history() {
+        // Arrange
+        let mut body = json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "mcp_foo", "input": {}}]
+            }]
+        });
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(body["messages"][0]["content"][0]["name"], "mcp__foo");
+        assert_eq!(reverse.get("mcp__foo").map(String::as_str), Some("mcp_foo"));
+    }
+
+    #[test]
+    fn renames_tool_reference_in_message_history() {
+        // Arrange
+        let mut body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "tool_reference", "tool_name": "mcp_foo"}]
+            }]
+        });
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(body["messages"][0]["content"][0]["tool_name"], "mcp__foo");
+        assert_eq!(reverse.get("mcp__foo").map(String::as_str), Some("mcp_foo"));
+    }
+
+    #[test]
+    fn renames_nested_tool_reference_inside_tool_result() {
+        // Arrange
+        let mut body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": [{"type": "tool_reference", "tool_name": "mcp_foo"}]
+                }]
+            }]
+        });
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(
+            body["messages"][0]["content"][0]["content"][0]["tool_name"],
+            "mcp__foo"
+        );
+        assert_eq!(reverse.get("mcp__foo").map(String::as_str), Some("mcp_foo"));
+    }
+
+    #[test]
+    fn idempotent_double_underscore_untouched_no_reverse_entry() {
+        // Arrange: an already-mcp__ name records nothing and is unchanged.
+        let mut body = json!({"tools": [{"name": "mcp__foo"}]});
+        let before = body.clone();
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(body, before);
+        assert!(
+            reverse.is_empty(),
+            "an already-normalized name must record no reverse entry"
+        );
+    }
+
+    #[test]
+    fn idempotent_applying_twice_is_byte_identical() {
+        // Arrange
+        let mut body = json!({"tools": [{"name": "mcp_foo"}]});
+
+        // Act: first pass renames, second is a no-op.
+        normalize_mcp_tool_names(&mut body);
+        let once = body.clone();
+        let reverse2 = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(body, once);
+        assert!(reverse2.is_empty());
+    }
+
+    #[test]
+    fn builtin_tool_with_type_is_skipped() {
+        // Arrange: a native builtin (non-empty "type") is left unchanged
+        // even if its name happens to carry the mcp_ prefix.
+        let mut body = json!({
+            "tools": [{"type": "web_search_20250305", "name": "mcp_should_not_rename"}]
+        });
+        let before = body.clone();
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(body, before);
+        assert!(reverse.is_empty());
+    }
+
+    #[test]
+    fn collision_guard_skips_when_renamed_form_already_exists() {
+        // Arrange: renaming mcp_foo would collide with an existing mcp__foo.
+        let mut body = json!({
+            "tools": [
+                {"name": "mcp_foo"},
+                {"name": "mcp__foo"}
+            ]
+        });
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert: the colliding rename is skipped; both names preserved.
+        assert_eq!(body["tools"][0]["name"], "mcp_foo");
+        assert_eq!(body["tools"][1]["name"], "mcp__foo");
+        assert!(
+            reverse.is_empty(),
+            "collision must skip the rename and record no reverse entry"
+        );
+    }
+
+    #[test]
+    fn no_mcp_names_yields_byte_identical_output_and_empty_map() {
+        // Arrange: bare, lowercase, TitleCase names all pass untouched.
+        let mut body = json!({
+            "tools": [{"name": "Bash"}, {"name": "glob"}, {"name": "read_file"}],
+            "tool_choice": {"type": "tool", "name": "Bash"},
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]
+            }]
+        });
+        let before = body.clone();
+
+        // Act
+        let reverse = normalize_mcp_tool_names(&mut body);
+
+        // Assert
+        assert_eq!(body, before);
+        assert!(reverse.is_empty());
+    }
+
+    #[test]
+    fn cloak_oauth_egress_returns_reverse_map() {
+        // Arrange
+        let id = identity();
+        let req = ChatRequest::default();
+        let mut body = json!({"tools": [{"name": "mcp_foo"}]});
+
+        // Act
+        let result = cloak_oauth_egress(&mut body, &req, &id, true);
+
+        // Assert
+        assert_eq!(body["tools"][0]["name"], "mcp__foo");
+        assert_eq!(
+            result.tool_reverse.get("mcp__foo").map(String::as_str),
+            Some("mcp_foo")
+        );
+    }
+
+    #[test]
+    fn normalize_is_deterministic_same_input_byte_identical() {
+        // Arrange: a body exercising every renamed surface.
+        let template = json!({
+            "tools": [{"name": "mcp_foo"}, {"name": "Bash"}],
+            "tool_choice": {"type": "tool", "name": "mcp_bar"},
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "mcp_baz", "input": {}},
+                    {"type": "tool_result", "tool_use_id": "t1", "content": [
+                        {"type": "tool_reference", "tool_name": "mcp_qux"}
+                    ]}
+                ]
+            }]
+        });
+
+        // Act: normalize two independent clones.
+        let mut a = template.clone();
+        let mut b = template.clone();
+        normalize_mcp_tool_names(&mut a);
+        normalize_mcp_tool_names(&mut b);
+
+        // Assert: byte-identical serialized output.
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap()
+        );
     }
 }

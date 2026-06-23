@@ -12,6 +12,7 @@
 
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -241,8 +242,81 @@ fn translate_usage(u: &AnthropicUsage) -> Usage {
     }
 }
 
-pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
-    let resp: AnthropicResponse =
+/// Restore the client's original tool names on a normalized response.
+///
+/// The cloak forward pass renamed single-underscore `mcp_` tool names to
+/// `mcp__` on the wire; `map` carries the per-request reverse (renamed
+/// upstream name -> original client name). This reverses tool_use names on
+/// BOTH canonical surfaces produced by `walk_content_blocks`:
+/// - the OpenAI-shape `choices[].message.tool_calls[].function.name`
+/// - the Anthropic-shape `KnownContentPart::ToolUse` name in
+///   `message.content` Parts
+///
+/// Only names present in `map` are reversed. A tool_use name with the
+/// `mcp__` shape that is absent from `map` is left unchanged and bumps a
+/// debug-level unmatched-reverse counter. Empty map = no-op.
+pub(crate) fn reverse_tool_names(resp: &mut ChatResponse, map: &HashMap<String, String>) {
+    if map.is_empty() {
+        return;
+    }
+    for choice in resp.choices.iter_mut() {
+        reverse_tool_calls(&mut choice.message.tool_calls, map);
+        reverse_content_parts(&mut choice.message.content, map);
+    }
+}
+
+/// Reverse names on the OpenAI-shape `tool_calls[].function.name`.
+fn reverse_tool_calls(tool_calls: &mut Option<Vec<Value>>, map: &HashMap<String, String>) {
+    let Some(calls) = tool_calls.as_mut() else {
+        return;
+    };
+    for call in calls.iter_mut() {
+        let Some(name) = call
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if let Some(original) = lookup_reverse(&name, map) {
+            if let Some(func_name) = call.pointer_mut("/function/name") {
+                *func_name = Value::String(original);
+            }
+        }
+    }
+}
+
+/// Reverse names on the Anthropic-shape `ToolUse` parts in message content.
+fn reverse_content_parts(content: &mut MessageContent, map: &HashMap<String, String>) {
+    let MessageContent::Parts(parts) = content else {
+        return;
+    };
+    for part in parts.iter_mut() {
+        if let ContentPart::Known(KnownContentPart::ToolUse { name, .. }) = part {
+            if let Some(original) = lookup_reverse(name, map) {
+                *name = original;
+            }
+        }
+    }
+}
+
+/// Look up the original client name for an upstream tool name. Returns
+/// `Some(original)` when present in the map; `None` (with a debug count
+/// for the unmatched `mcp__` case) otherwise.
+fn lookup_reverse(name: &str, map: &HashMap<String, String>) -> Option<String> {
+    if let Some(original) = map.get(name) {
+        return Some(original.clone());
+    }
+    if name.starts_with("mcp__") {
+        tracing::debug!(
+            "anthropic response tool_use name has mcp__ shape but is absent from the \
+             cloak reverse map; leaving unchanged",
+        );
+    }
+    None
+}
+
+pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {    let resp: AnthropicResponse =
         serde_json::from_value(raw).map_err(|e| Error::normalize_response(id, e.to_string()))?;
 
     let (text, reasoning_details, tool_calls, parts) = walk_content_blocks(id, &resp.content)?;
@@ -292,9 +366,193 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn reverse_map() -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert("mcp__linear_get_issue".to_string(), "mcp_linear_get_issue".to_string());
+        m
+    }
+
     #[test]
-    fn cache_usage_fields_propagate_to_canonical() {
+    fn reverse_tool_names_restores_openai_shape_function_name() {
+        // Arrange
         let raw = json!({
+            "id": "msg_01",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "tool_use",
+                "id": "t1",
+                "name": "mcp__linear_get_issue",
+                "input": {"k": "v"}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let mut resp = normalize("test", raw).expect("normalize");
+
+        // Act
+        reverse_tool_names(&mut resp, &reverse_map());
+
+        // Assert: OpenAI-shape tool_calls function.name reversed.
+        let name = resp.choices[0].message.tool_calls.as_ref().unwrap()[0]["function"]["name"]
+            .as_str()
+            .unwrap();
+        assert_eq!(name, "mcp_linear_get_issue");
+    }
+
+    #[test]
+    fn reverse_tool_names_restores_anthropic_part_name() {
+        // Arrange
+        let raw = json!({
+            "id": "msg_01",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "tool_use",
+                "id": "t1",
+                "name": "mcp__linear_get_issue",
+                "input": {"k": "v"}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let mut resp = normalize("test", raw).expect("normalize");
+
+        // Act
+        reverse_tool_names(&mut resp, &reverse_map());
+
+        // Assert: Anthropic-shape ToolUse Part name reversed.
+        let MessageContent::Parts(parts) = &resp.choices[0].message.content else {
+            panic!("expected Parts content for a tool_use-only response");
+        };
+        let found = parts.iter().any(|p| {
+            matches!(
+                p,
+                ContentPart::Known(KnownContentPart::ToolUse { name, .. })
+                    if name == "mcp_linear_get_issue"
+            )
+        });
+        assert!(found, "ToolUse part name must be reversed to client original");
+    }
+
+    #[test]
+    fn reverse_tool_names_empty_map_is_noop() {
+        // Arrange
+        let raw = json!({
+            "id": "msg_01",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "tool_use",
+                "id": "t1",
+                "name": "mcp__linear_get_issue",
+                "input": {}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let mut resp = normalize("test", raw).expect("normalize");
+
+        // Act
+        reverse_tool_names(&mut resp, &HashMap::new());
+
+        // Assert: name unchanged.
+        let name = resp.choices[0].message.tool_calls.as_ref().unwrap()[0]["function"]["name"]
+            .as_str()
+            .unwrap();
+        assert_eq!(name, "mcp__linear_get_issue");
+    }
+
+    #[test]
+    fn reverse_tool_names_unmatched_mcp_name_left_unchanged() {
+        // Arrange: a mcp__ name absent from the map is left as-is.
+        let raw = json!({
+            "id": "msg_01",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "tool_use",
+                "id": "t1",
+                "name": "mcp__other",
+                "input": {}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let mut resp = normalize("test", raw).expect("normalize");
+
+        // Act
+        reverse_tool_names(&mut resp, &reverse_map());
+
+        // Assert
+        let name = resp.choices[0].message.tool_calls.as_ref().unwrap()[0]["function"]["name"]
+            .as_str()
+            .unwrap();
+        assert_eq!(name, "mcp__other");
+    }
+
+    // -- forward+reverse round trip ----------------------------------------
+
+    #[test]
+    fn round_trip_forward_cloak_then_reverse_response() {
+        use super::super::cloak::{cloak_oauth_egress, ClaudeCodeIdentity};
+        use routectl_core::ChatRequest;
+
+        // Arrange: an outgoing request with a single-underscore mcp_ tool
+        // on both tools[] and a prior tool_use in history.
+        let id = ClaudeCodeIdentity::mint(Some("sess"));
+        let req = ChatRequest::default();
+        let mut body = json!({
+            "tools": [{"name": "mcp_linear_get_issue"}],
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use", "id": "t1",
+                    "name": "mcp_linear_get_issue", "input": {}
+                }]
+            }]
+        });
+
+        // Act 1: forward cloak.
+        let result = cloak_oauth_egress(&mut body, &req, &id, true);
+
+        // Assert: outgoing body carries the doubled prefix on both surfaces.
+        assert_eq!(body["tools"][0]["name"], "mcp__linear_get_issue");
+        assert_eq!(
+            body["messages"][0]["content"][0]["name"],
+            "mcp__linear_get_issue"
+        );
+
+        // Act 2: a synthetic upstream response uses the upstream
+        // (renamed) name; reverse it through normalize + reverse_tool_names.
+        let raw = json!({
+            "id": "msg_rt",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "tool_use",
+                "id": "t1",
+                "name": "mcp__linear_get_issue",
+                "input": {"q": 1}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let mut resp = normalize("test", raw).expect("normalize");
+        reverse_tool_names(&mut resp, &result.tool_reverse);
+
+        // Assert: BOTH surfaces reversed to the client's original name.
+        let fn_name = resp.choices[0].message.tool_calls.as_ref().unwrap()[0]["function"]["name"]
+            .as_str()
+            .unwrap();
+        assert_eq!(fn_name, "mcp_linear_get_issue");
+        let MessageContent::Parts(parts) = &resp.choices[0].message.content else {
+            panic!("expected Parts content");
+        };
+        assert!(parts.iter().any(|p| matches!(
+            p,
+            ContentPart::Known(KnownContentPart::ToolUse { name, .. })
+                if name == "mcp_linear_get_issue"
+        )));
+    }
+
+    #[test]
+    fn cache_usage_fields_propagate_to_canonical() {        let raw = json!({
             "id": "msg_01",
             "model": "claude-opus-4-7",
             "content": [{"type": "text", "text": "hi"}],
