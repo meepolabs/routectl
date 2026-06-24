@@ -202,355 +202,101 @@ impl ProviderState {
     }
 
     fn refill_tokens(&mut self, now: Instant, capacity: f64) {
-        let elapsed_ms = now.duration_since(self.rpm_last_refill).as_millis() as f64;
-        if elapsed_ms <= 0.0 {
+        if now.duration_since(self.rpm_last_refill).as_millis() == 0 {
+            // No measurable time elapsed; leave the anchor untouched
+            // (matches the pre-refactor early return).
             return;
         }
-        let refill_rate_per_ms = capacity / RPM_WINDOW_MS as f64;
-        self.rpm_tokens = (self.rpm_tokens + refill_rate_per_ms * elapsed_ms).min(capacity);
+        self.rpm_tokens = self.projected_tokens(now, capacity);
         self.rpm_last_refill = now;
+    }
+
+    /// Pure, non-mutating projection of the bucket level at `now`. Shared
+    /// by `refill_tokens` (which stores the result) and `capacity_snapshot`
+    /// (which does not), so the leak arithmetic never diverges. `elapsed`
+    /// at or below zero yields the current level unchanged.
+    fn projected_tokens(&self, now: Instant, capacity: f64) -> f64 {
+        let elapsed_ms = now.duration_since(self.rpm_last_refill).as_millis() as f64;
+        if elapsed_ms <= 0.0 {
+            return self.rpm_tokens;
+        }
+        let refill_rate_per_ms = capacity / RPM_WINDOW_MS as f64;
+        (self.rpm_tokens + refill_rate_per_ms * elapsed_ms).min(capacity)
+    }
+
+    /// Read the gate's capacity WITHOUT mutating it. Takes `&self`, so the
+    /// borrow checker forbids touching the token bucket or the half-open
+    /// probe slot; it must never call `try_dispatch` or `refill_tokens`.
+    /// Projects the lazily-refilled bucket level at `now` and classifies
+    /// the breaker phase, mirroring what `try_dispatch` would observe.
+    pub fn capacity_snapshot(&self, now: Instant) -> CapacitySnapshot {
+        let rpm_available = self
+            .rpm_capacity
+            .map(|capacity| self.projected_tokens(now, capacity));
+
+        let circuit = match self.circuit_opened_at {
+            None => CircuitPhase::Closed,
+            Some(opened_at) => {
+                let cooldown_elapsed = now.duration_since(opened_at) >= self.active_cooldown;
+                if !cooldown_elapsed || self.half_open_in_flight {
+                    CircuitPhase::Open
+                } else {
+                    CircuitPhase::HalfOpenReady
+                }
+            }
+        };
+
+        CapacitySnapshot {
+            rpm_available,
+            circuit,
+        }
+    }
+}
+
+/// Read-only classification of the circuit breaker, mirroring the decision
+/// `try_dispatch` would make from the same state -- without mutating it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitPhase {
+    /// `circuit_opened_at == None`. `try_dispatch` would fall through the
+    /// breaker and (RPM permitting) return `Allow`.
+    Closed,
+    /// Breaker is currently blocking: still within cooldown
+    /// (`now - opened_at < active_cooldown`), OR cooldown elapsed but a
+    /// half-open probe is already in flight. `try_dispatch` would return
+    /// `CircuitOpen`.
+    Open,
+    /// Cooldown elapsed AND no probe is in flight: the next `try_dispatch`
+    /// would claim the half-open probe slot and (RPM permitting) return
+    /// `Allow`.
+    HalfOpenReady,
+}
+
+/// Non-mutating view of a `ProviderState`'s capacity at a given instant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CapacitySnapshot {
+    /// Projected available RPM tokens right now. `None` when the policy is
+    /// unlimited; otherwise the lazily-refilled bucket level computed
+    /// without storing it back.
+    pub rpm_available: Option<f64>,
+    /// Read-only circuit-breaker phase.
+    pub circuit: CircuitPhase,
+}
+
+impl CapacitySnapshot {
+    /// Predict whether `try_dispatch` would return `Allow` from this state,
+    /// without mutating anything: the circuit is not `Open` (i.e. `Closed`
+    /// or `HalfOpenReady`) AND there is RPM headroom (unlimited, or at least
+    /// one whole token available).
+    pub fn is_dispatchable(&self) -> bool {
+        let circuit_ok = self.circuit != CircuitPhase::Open;
+        let rpm_ok = match self.rpm_available {
+            None => true,
+            Some(tokens) => tokens >= 1.0,
+        };
+        circuit_ok && rpm_ok
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unlimited_state_always_allows() {
-        let policy = ProviderRuntimePolicy::default();
-        let mut s = ProviderState::new(&policy);
-        for _ in 0..100 {
-            assert_eq!(s.try_dispatch(Instant::now()), GateDecision::Allow);
-            s.record_success();
-        }
-    }
-
-    #[test]
-    fn rpm_bucket_drains_and_refills() {
-        let policy = ProviderRuntimePolicy {
-            rpm_limit: Some(2),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_success();
-        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_success();
-        assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
-        let t1 = t0 + Duration::from_secs(60);
-        assert_eq!(s.try_dispatch(t1), GateDecision::Allow);
-    }
-
-    #[test]
-    fn circuit_opens_after_threshold_and_skips_until_cooldown() {
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(2),
-            circuit_cooldown_ms: Some(1_000),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_failure(t0);
-        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_failure(t0);
-        assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
-        let t_mid = t0 + Duration::from_millis(500);
-        assert_eq!(s.try_dispatch(t_mid), GateDecision::CircuitOpen);
-        // After cooldown a single probe is allowed.
-        let t_after = t0 + Duration::from_millis(1_500);
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-    }
-
-    #[test]
-    fn release_probe_slot_frees_slot_without_recording_outcome() {
-        // A probe fast-fail releases the claimed half-open slot WITHOUT
-        // counting a failure. The slot must clear, the failure counter
-        // and trip timestamp must stay put, and the next dispatch in the
-        // still-open window must be granted a fresh probe (proving the
-        // breaker is not locked).
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(1),
-            circuit_cooldown_ms: Some(500),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        // Trip the breaker (threshold = 1).
-        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_failure(t0);
-        assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
-        // After cooldown, the first dispatch claims the half-open slot.
-        let t_after = t0 + Duration::from_millis(600);
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-        assert!(s.half_open_probe_in_flight(), "probe slot must be claimed");
-        let failures_before = s.consecutive_failures;
-        let opened_before = s.circuit_opened_at;
-
-        // Release WITHOUT recording success/failure.
-        s.release_probe_slot();
-        assert!(
-            !s.half_open_probe_in_flight(),
-            "release_probe_slot must clear the half-open slot",
-        );
-        assert_eq!(
-            s.consecutive_failures, failures_before,
-            "release_probe_slot must NOT change the failure counter",
-        );
-        assert_eq!(
-            s.circuit_opened_at, opened_before,
-            "release_probe_slot must NOT change the trip timestamp",
-        );
-
-        // The breaker is NOT locked: the next dispatch in the still-open
-        // window is granted a fresh probe because the slot is free again.
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-        assert!(s.half_open_probe_in_flight());
-    }
-
-    #[test]
-    fn half_open_is_single_probe_under_concurrent_dispatches() {
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(2),
-            circuit_cooldown_ms: Some(1_000),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        // Trip the breaker.
-        s.try_dispatch(t0);
-        s.record_failure(t0);
-        s.try_dispatch(t0);
-        s.record_failure(t0);
-        assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
-        // Cooldown elapsed: first dispatch claims the half-open slot.
-        let t_after = t0 + Duration::from_millis(1_500);
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-        // Second concurrent dispatch (probe NOT yet recorded) sees
-        // CircuitOpen because someone already has the probe slot.
-        assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
-        // Probe fails -> breaker re-trips.
-        s.record_failure(t_after);
-        // Subsequent calls in the new cooldown window also see CircuitOpen.
-        assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
-    }
-
-    #[test]
-    fn half_open_probe_success_closes_the_breaker() {
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(2),
-            circuit_cooldown_ms: Some(500),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        s.try_dispatch(t0);
-        s.record_failure(t0);
-        s.try_dispatch(t0);
-        s.record_failure(t0);
-        let t_after = t0 + Duration::from_millis(600);
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-        s.record_success();
-        // Closed -- subsequent dispatch is Allow without needing another cooldown.
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-    }
-
-    #[test]
-    fn half_open_slot_released_when_rpm_refuses_the_probe() {
-        // If the breaker is half-open AND the RPM bucket is empty,
-        // we should NOT consume the half-open slot -- the next caller
-        // (after RPM refills) should still get a probe.
-        let policy = ProviderRuntimePolicy {
-            rpm_limit: Some(1),
-            circuit_failures: Some(1),
-            circuit_cooldown_ms: Some(500),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        // Trip the breaker.
-        s.try_dispatch(t0);
-        s.record_failure(t0);
-        // Consume the RPM token in the next cycle so the next
-        // try_dispatch hits RPM-limited.
-        let t_after = t0 + Duration::from_millis(700);
-        // RPM is at 0/1 after the failed probe. Refill is gradual.
-        // We ensure the bucket is empty by exhausting it explicitly:
-        // (record_failure already returned the slot in failure path, but
-        //  the bucket itself was decremented -- let's just check the
-        //  half_open_slot is reclaimable when RPM refuses.)
-        // Force RPM empty: drain whatever is left.
-        while matches!(s.try_dispatch(t_after), GateDecision::Allow) {
-            s.record_success();
-        }
-        // Now circuit is Closed (we just succeeded). Re-trip it.
-        s.record_failure(t_after);
-        // Wait cooldown; RPM still depleted in this instant.
-        let t_probe = t_after + Duration::from_millis(700);
-        // RPM may have refilled by t_probe; if so this test's pre-condition
-        // is moot. The invariant we care about: any path that returns
-        // RateLimited must NOT leave half_open_in_flight=true.
-        // Force the scenario directly:
-        s.rpm_tokens = 0.0;
-        s.rpm_last_refill = t_probe;
-        let decision = s.try_dispatch(t_probe);
-        assert_eq!(decision, GateDecision::RateLimited);
-        // The half-open slot is still free; bumping the clock past
-        // a refill window lets the next dispatch claim it.
-        let t_refill = t_probe + Duration::from_secs(60);
-        assert_eq!(s.try_dispatch(t_refill), GateDecision::Allow);
-    }
-
-    #[test]
-    fn success_resets_failure_counter() {
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(3),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t = Instant::now();
-        s.try_dispatch(t);
-        s.record_failure(t);
-        s.try_dispatch(t);
-        s.record_failure(t);
-        s.try_dispatch(t);
-        s.record_success();
-        s.try_dispatch(t);
-        s.record_failure(t);
-        s.try_dispatch(t);
-        s.record_failure(t);
-        assert_eq!(s.try_dispatch(t), GateDecision::Allow);
-    }
-
-    #[test]
-    fn force_open_parks_immediately_bypassing_threshold() {
-        // Arrange: a high failure threshold so the counter-driven trip
-        // would never fire on a single failure.
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(5),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-
-        // Act: park immediately after ZERO failures.
-        s.force_open(t0, Duration::from_secs(10));
-
-        // Assert: open right away, single probe only after the custom cooldown.
-        assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
-        let t_after = t0 + Duration::from_secs(11);
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-    }
-
-    #[test]
-    fn force_open_cooldown_outlasts_default() {
-        // Arrange: a tiny 1s default cooldown.
-        let policy = ProviderRuntimePolicy {
-            circuit_cooldown_ms: Some(1_000),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-
-        // Act: park for 60s, far longer than the 1s default.
-        s.force_open(t0, Duration::from_secs(60));
-
-        // Assert: still open at t0+5s (default would already be elapsed),
-        // probe only after the custom 60s window.
-        assert_eq!(
-            s.try_dispatch(t0 + Duration::from_secs(5)),
-            GateDecision::CircuitOpen,
-        );
-        assert_eq!(
-            s.try_dispatch(t0 + Duration::from_secs(61)),
-            GateDecision::Allow,
-        );
-    }
-
-    #[test]
-    fn force_open_releases_inflight_probe_slot() {
-        // Arrange: trip the breaker normally, then advance past cooldown
-        // and claim the half-open slot.
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(1),
-            circuit_cooldown_ms: Some(500),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        s.try_dispatch(t0);
-        s.record_failure(t0);
-        let t_after = t0 + Duration::from_millis(600);
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-        assert!(s.half_open_probe_in_flight(), "probe slot must be claimed");
-
-        // Act: force_open while a probe is in flight.
-        s.force_open(t_after, Duration::from_secs(30));
-
-        // Assert: the in-flight slot is released and the breaker is open
-        // again for the new window.
-        assert!(
-            !s.half_open_probe_in_flight(),
-            "force_open must release the in-flight probe slot",
-        );
-        assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
-    }
-
-    #[test]
-    fn force_open_then_probe_success_resets_to_default() {
-        // Arrange: a 1s default cooldown, then a 60s custom park.
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(1),
-            circuit_cooldown_ms: Some(1_000),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        s.force_open(t0, Duration::from_secs(60));
-
-        // Act: the custom park elapses, the single probe succeeds.
-        let t_probe = t0 + Duration::from_secs(61);
-        assert_eq!(s.try_dispatch(t_probe), GateDecision::Allow);
-        s.record_success();
-
-        // Assert: a NORMAL threshold trip now uses the DEFAULT cooldown
-        // (1s), not the stale 60s custom park.
-        s.try_dispatch(t_probe);
-        s.record_failure(t_probe);
-        assert_eq!(s.try_dispatch(t_probe), GateDecision::CircuitOpen);
-        // Still open just before the 1s default elapses.
-        assert_eq!(
-            s.try_dispatch(t_probe + Duration::from_millis(500)),
-            GateDecision::CircuitOpen,
-        );
-        // Allowed once the 1s default cooldown elapses -- proving the
-        // window is the default, not 60s.
-        assert_eq!(
-            s.try_dispatch(t_probe + Duration::from_millis(1_500)),
-            GateDecision::Allow,
-        );
-    }
-
-    #[test]
-    fn force_open_recovery_is_single_probe() {
-        // Arrange: park immediately for a custom window.
-        let policy = ProviderRuntimePolicy {
-            circuit_failures: Some(5),
-            ..Default::default()
-        };
-        let mut s = ProviderState::new(&policy);
-        let t0 = Instant::now();
-        s.force_open(t0, Duration::from_secs(10));
-
-        // Act: the custom cooldown elapses; the first dispatch claims the
-        // single probe, a concurrent second dispatch (probe not yet
-        // recorded) is refused.
-        let t_after = t0 + Duration::from_secs(11);
-
-        // Assert: single-probe invariant holds under force_open.
-        assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-        assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
-    }
-}
+#[path = "runtime_state_tests.rs"]
+mod tests;
