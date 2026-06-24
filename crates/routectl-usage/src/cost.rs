@@ -205,6 +205,7 @@ mod tests {
             extra: None,
             strategy: None,
             reduction_strategy: None,
+            selection_decision: None,
         }
     }
 

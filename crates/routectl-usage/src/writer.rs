@@ -425,12 +425,13 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             extra,
             r.strategy,
             r.reduction_strategy,
+            r.selection_decision,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?44` positions match the params list above.
+/// `schema.rs` exactly; `?1..?45` positions match the params list above.
 const INSERT_SQL: &str = "\
 INSERT OR IGNORE INTO requests (
     ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
@@ -445,7 +446,8 @@ INSERT OR IGNORE INTO requests (
     quota_overage_utilization, quota_reset, quota_extras,
     extra,
     strategy,
-    reduction_strategy
+    reduction_strategy,
+    selection_decision
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -459,7 +461,8 @@ INSERT OR IGNORE INTO requests (
     ?39, ?40, ?41,
     ?42,
     ?43,
-    ?44
+    ?44,
+    ?45
 )";
 
 #[cfg(test)]
@@ -519,6 +522,7 @@ mod tests {
             extra: None,
             strategy: None,
             reduction_strategy: None,
+            selection_decision: None,
         }
     }
 
@@ -558,6 +562,7 @@ mod tests {
         rec.input_tokens = Some(42);
         rec.quota_extras = Some(json!({"plan": "pro"}));
         rec.reduction_strategy = Some("applied".into());
+        rec.selection_decision = Some("sticky_stay".into());
 
         // Act
         handle.try_send(rec);
@@ -566,11 +571,18 @@ mod tests {
 
         // Assert: exact bound values for the representative row.
         let conn = Connection::open(&path).expect("read");
-        let (outcome, stream, input, extras, reduction): (String, i64, i64, String, String) = conn
+        let (outcome, stream, input, extras, reduction, selection): (
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+        ) = conn
             .query_row(
-                "SELECT outcome, stream, input_tokens, quota_extras, reduction_strategy FROM requests WHERE request_id='rt-1'",
+                "SELECT outcome, stream, input_tokens, quota_extras, reduction_strategy, selection_decision FROM requests WHERE request_id='rt-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .expect("row");
         assert_eq!(outcome, "timeout");
@@ -578,6 +590,7 @@ mod tests {
         assert_eq!(input, 42);
         assert_eq!(extras, "{\"plan\":\"pro\"}");
         assert_eq!(reduction, "applied");
+        assert_eq!(selection, "sticky_stay");
     }
 
     #[tokio::test]

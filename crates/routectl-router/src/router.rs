@@ -205,6 +205,16 @@ pub struct DispatchMeta {
     /// dispatched (count_tokens, unknown alias, or all entries
     /// gate-blocked before any reduction point ran).
     pub reduction_strategy: Option<&'static str>,
+    /// Stable seat-selection decision token for the served target's home
+    /// seat (see `push_seat_targets` for the fixed vocabulary). `None` for
+    /// non-sticky / single-seat pools, non-pooled aliases, and when no
+    /// target was dispatched.
+    ///
+    /// LIMITATION: this token is propagated only when the sticky HOME seat
+    /// serves. A request that falls back PAST its home (home failed) records
+    /// `None`, because the decision is stamped on the home target only and
+    /// `mark_target` copies whichever target actually served.
+    pub selection_decision: Option<&'static str>,
 }
 
 impl DispatchMeta {
@@ -223,6 +233,7 @@ impl DispatchMeta {
             resolved_alias: alias.to_string(),
             cache_strategy: None,
             reduction_strategy: None,
+            selection_decision: None,
         }
     }
 
@@ -235,6 +246,7 @@ impl DispatchMeta {
         self.served_provider_kind = target.provider_kind.map(|k| k.to_string());
         self.served_model = target.nickname.clone();
         self.served_upstream = Some(target.upstream.clone());
+        self.selection_decision = target.selection_decision;
     }
 }
 
@@ -341,6 +353,13 @@ struct DispatchTarget {
     /// semantics: the served target's value wins. Does not affect
     /// `DispatchMeta` accounting.
     visible_routectl_provider: bool,
+    /// Stable seat-selection decision token for THIS target, set only on
+    /// the home (first) seat target of a sticky / keyless-collapse pool by
+    /// `push_seat_targets`. `None` on every other target. Propagated to
+    /// `DispatchMeta::selection_decision` via `mark_target` so usage
+    /// accounting can record how the seat was chosen. Observability only --
+    /// never affects seat order, the target set, or dispatch.
+    selection_decision: Option<&'static str>,
 }
 
 impl Router {
@@ -776,20 +795,52 @@ impl Router {
         // keyless / single-seat StickyLeastLoaded) routes through the
         // existing `seat_order_for_request` path UNCHANGED, so keyless
         // StickyLeastLoaded stays byte-for-byte fill-first.
-        let order = match (selection, session_key) {
+        //
+        // `token` is computed ALONGSIDE the order purely for observability:
+        // the order and target set below are byte-for-byte what they were
+        // before the token existed. It is `None` for genuinely non-sticky
+        // modes (FillFirst, RoundRobin) and single-seat pools, which have no
+        // sticky decision to record.
+        let (order, token): (Vec<usize>, Option<&'static str>) = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
-                self.sticky_seat_order(seats, key)
+                let (order, tok) = self.sticky_seat_order(seats, key);
+                (order, Some(tok))
             }
-            _ => crate::seat_pool::seat_order_for_request(
-                &m.nickname,
-                seats.len(),
-                selection,
-                &self.round_robin,
+            // Keyless (or single-seat) StickyLeastLoaded collapses to
+            // fill-first; surface that collapse so an operator can spot the
+            // silent fill-first regime on a pool configured sticky.
+            (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => (
+                crate::seat_pool::seat_order_for_request(
+                    &m.nickname,
+                    seats.len(),
+                    selection,
+                    &self.round_robin,
+                ),
+                Some("keyless_fill_first"),
+            ),
+            _ => (
+                crate::seat_pool::seat_order_for_request(
+                    &m.nickname,
+                    seats.len(),
+                    selection,
+                    &self.round_robin,
+                ),
+                None,
             ),
         };
+        let first = out.len();
         for idx in order {
             let seat = &seats[idx];
             out.push(dispatch_target_for_seat(m, seat));
+        }
+        // Stamp the decision on the home (first) target pushed for THIS
+        // model only -- never the fallback seats. The LIMITATION on
+        // `DispatchMeta::selection_decision` applies: a serve past the home
+        // records `None`.
+        if let Some(tok) = token {
+            if let Some(t) = out.get_mut(first) {
+                t.selection_decision = Some(tok);
+            }
         }
     }
 
@@ -802,7 +853,16 @@ impl Router {
     /// home (`repinned: true`). A healthy home, an already-repinned home, or a
     /// no-healthy-sibling case stays put with no pin write -- the one-time cap
     /// + hysteresis. Never logs the raw session key.
-    fn sticky_seat_order(&self, seats: &[crate::seat_pool::SeatTarget], key: &str) -> Vec<usize> {
+    ///
+    /// Returns the walk order paired with a fixed-vocabulary
+    /// `selection_decision` token mapped from the `SelectionOutcome`
+    /// (observability only -- the pin writes, logs, and returned order are
+    /// byte-for-byte unchanged from before the token was added).
+    fn sticky_seat_order(
+        &self,
+        seats: &[crate::seat_pool::SeatTarget],
+        key: &str,
+    ) -> (Vec<usize>, &'static str) {
         // A pinned state_key no longer present in this pool resolves to None
         // -> treated as a miss (re-pick), and `repinned` resets to false on
         // the fresh birth -- correct.
@@ -813,26 +873,8 @@ impl Router {
                 .map(|i| (i, p.repinned))
         });
 
-        // Gather ALL seat snapshots (both hit and miss): the overflow check
-        // needs the pinned home's snapshot to decide whether to migrate.
         let now = Instant::now();
-        let snapshots: Vec<crate::runtime_state::CapacitySnapshot> = seats
-            .iter()
-            .map(|s| {
-                self.capacity_snapshot_for(&s.state_key, now).unwrap_or(
-                    // Defensive: a seat with no state slot should never
-                    // happen (install creates one per seat). If it does,
-                    // fail safe -- treat it as non-dispatchable so it is
-                    // excluded from a pick rather than chosen as the most-
-                    // attractive home. It still appears in the fallback
-                    // order, and the existing gate stays authoritative.
-                    crate::runtime_state::CapacitySnapshot {
-                        rpm_available: Some(0.0),
-                        circuit: crate::runtime_state::CircuitPhase::Open,
-                    },
-                )
-            })
-            .collect();
+        let snapshots = self.gather_capacity_snapshots(seats, now);
 
         // Advance the anti-herd counter only when a pick is actually
         // attempted: a miss, or a hit whose home is non-dispatchable and not
@@ -854,6 +896,49 @@ impl Router {
             &snapshots,
             tiebreak,
         );
+        let token = self.apply_sticky_outcome(key, seats, outcome);
+        (order, token)
+    }
+
+    /// Gather the per-seat capacity snapshots for sticky least-loaded
+    /// selection (one lock each; N is small and locks are uncontended). The
+    /// overflow check needs every seat's snapshot, including the pinned
+    /// home's, so this reads ALL seats (both hit and miss).
+    fn gather_capacity_snapshots(
+        &self,
+        seats: &[crate::seat_pool::SeatTarget],
+        now: Instant,
+    ) -> Vec<crate::runtime_state::CapacitySnapshot> {
+        seats
+            .iter()
+            .map(|s| {
+                self.capacity_snapshot_for(&s.state_key, now).unwrap_or(
+                    // Defensive: a seat with no state slot should never
+                    // happen (install creates one per seat). If it does,
+                    // fail safe -- treat it as non-dispatchable so it is
+                    // excluded from a pick rather than chosen as the most-
+                    // attractive home. It still appears in the fallback
+                    // order, and the existing gate stays authoritative.
+                    crate::runtime_state::CapacitySnapshot {
+                        rpm_available: Some(0.0),
+                        circuit: crate::runtime_state::CircuitPhase::Open,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Apply the pin write implied by `outcome` and return the fixed-vocabulary
+    /// `selection_decision` token. A birth pins the chosen home
+    /// (`repinned: false`); a one-time overflow-repin pins the new home
+    /// (`repinned: true`); a stay or no-healthy case writes nothing. Never
+    /// logs the raw session key.
+    fn apply_sticky_outcome(
+        &self,
+        key: &str,
+        seats: &[crate::seat_pool::SeatTarget],
+        outcome: crate::seat_pool::SelectionOutcome,
+    ) -> &'static str {
         match outcome {
             crate::seat_pool::SelectionOutcome::Birth { home } => {
                 self.sticky_pins.put(
@@ -868,6 +953,7 @@ impl Router {
                     seat_label = ?seats[home].label,
                     "sticky least-loaded birth pick: pinned session to seat"
                 );
+                "birth_pick"
             }
             crate::seat_pool::SelectionOutcome::OverflowRepin { home } => {
                 self.sticky_pins.put(
@@ -882,11 +968,11 @@ impl Router {
                     seat_label = ?seats[home].label,
                     "sticky least-loaded overflow-repin: migrated session to healthy sibling"
                 );
+                "overflow_repin"
             }
-            crate::seat_pool::SelectionOutcome::Stay { .. }
-            | crate::seat_pool::SelectionOutcome::DeferNoHealthy => {}
+            crate::seat_pool::SelectionOutcome::Stay { .. } => "sticky_stay",
+            crate::seat_pool::SelectionOutcome::DeferNoHealthy => "defer_no_healthy",
         }
-        order
     }
 
     /// Resolve the dispatch chain for a request and pre-filter against
@@ -2681,6 +2767,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         reported_model: m.reported_model.clone(),
         visible_routectl_provider: m.visible_routectl_provider,
         model: m,
+        selection_decision: None,
     }
 }
 
@@ -2710,6 +2797,7 @@ fn dispatch_target_for_seat(
         reported_model: m.reported_model.clone(),
         visible_routectl_provider: m.visible_routectl_provider,
         model: m.clone(),
+        selection_decision: None,
     }
 }
 
@@ -5390,6 +5478,156 @@ mod seat_pool_dispatch_tests {
             .collect()
     }
 
+    /// The `selection_decision` token on each target of the resolved chain
+    /// for `opus`. Same-module access to the private field; lets the
+    /// observability tests assert which token (if any) landed on the home
+    /// seat without changing any routing.
+    fn chain_decisions_for(
+        router: &Router,
+        session_key: Option<&str>,
+    ) -> Vec<Option<&'static str>> {
+        router
+            .dispatch_chain("opus", session_key)
+            .expect("chain resolves")
+            .into_iter()
+            .map(|t| t.selection_decision)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn fill_first_records_no_selection_decision() {
+        // A genuinely non-sticky pool has no sticky decision: every target's
+        // selection_decision is None.
+        let (router, _counters) = pooled_router(SeatSelection::FillFirst);
+        let decisions = chain_decisions_for(&router, None);
+        assert_eq!(decisions, vec![None, None, None]);
+    }
+
+    #[tokio::test]
+    async fn sticky_keyed_records_decision_on_home_only() {
+        // A keyed StickyLeastLoaded pool stamps the sticky token on the home
+        // (first) target ONLY -- birth_pick on the first request, sticky_stay
+        // on a follow-up for the same session. The fallback seats stay None.
+        let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+
+        let birth = chain_decisions_for(&router, Some("S"));
+        assert_eq!(
+            birth,
+            vec![Some("birth_pick"), None, None],
+            "first request for a session is a birth pick on the home seat"
+        );
+
+        let stay = chain_decisions_for(&router, Some("S"));
+        assert_eq!(
+            stay,
+            vec![Some("sticky_stay"), None, None],
+            "a follow-up for the same session stays on the pinned home seat"
+        );
+    }
+
+    #[tokio::test]
+    async fn keyless_sticky_records_keyless_fill_first() {
+        // StickyLeastLoaded on a multi-seat pool WITHOUT a session key
+        // collapses to fill-first; the token must surface that collapse so an
+        // operator can spot it. Order is unchanged (byte-for-byte fill-first).
+        let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+        let decisions = chain_decisions_for(&router, None);
+        assert_eq!(decisions, vec![Some("keyless_fill_first"), None, None]);
+        // The collapse must not alter the seat order.
+        assert_eq!(
+            chain_state_keys_for(&router, None),
+            vec!["opus", "opus#seat-b", "opus#seat-c"]
+        );
+    }
+
+    #[test]
+    fn mark_target_copies_selection_decision_into_meta() {
+        // mark_target propagates the home target's selection_decision into
+        // the per-request DispatchMeta exactly like the served_* fields.
+        let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+        let chain = router
+            .dispatch_chain("opus", Some("S"))
+            .expect("chain resolves");
+        let home = &chain[0];
+        assert_eq!(home.selection_decision, Some("birth_pick"));
+
+        let mut meta = DispatchMeta::for_alias("opus");
+        meta.mark_target(home);
+        assert_eq!(meta.selection_decision, Some("birth_pick"));
+    }
+
+    #[tokio::test]
+    async fn sticky_overflow_repin_stamps_overflow_repin_token() {
+        // The thrash signal: a session pinned (birth_pick) whose home seat
+        // then trips must, on re-request, migrate to a healthy sibling AND
+        // stamp `overflow_repin` on the NEW home target. Reuses the
+        // park-and-re-request seam from
+        // `sticky_overflow_repin_migrates_once_and_does_not_flap`.
+        let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+
+        // Birth: first request pins session S and stamps birth_pick.
+        let birth = chain_decisions_for(&router, Some("S"));
+        assert_eq!(birth[0], Some("birth_pick"));
+        let home = chain_state_keys_for(&router, Some("S"))[0].clone();
+
+        // Force the pinned home seat's breaker open.
+        assert!(
+            router.force_open_breaker(&home, Duration::from_secs(3600)),
+            "home seat must own a state slot to trip"
+        );
+
+        // Re-request ONCE: the migration stamps overflow_repin on the new
+        // home (first) target only; fallback seats stay None. A single
+        // resolution is read so the one-time-cap (repinned=true) does not
+        // turn a follow-up into a sticky_stay before we observe the token.
+        let migrated = router
+            .dispatch_chain("opus", Some("S"))
+            .expect("chain resolves");
+        let migrated_decisions: Vec<Option<&'static str>> =
+            migrated.iter().map(|t| t.selection_decision).collect();
+        assert_ne!(
+            migrated[0].state_key, home,
+            "overflow-repin must migrate off the parked home seat"
+        );
+        assert_eq!(
+            migrated_decisions,
+            vec![Some("overflow_repin"), None, None],
+            "the thrash signal must land on the migrated home target only"
+        );
+    }
+
+    #[tokio::test]
+    async fn sticky_defer_no_healthy_stamps_defer_token() {
+        // A fresh keyed session (pin miss) over a pool whose every seat's
+        // breaker is forced open has no dispatchable home: the outcome is
+        // DeferNoHealthy -> `defer_no_healthy` token, fill-first order, and
+        // NO pin written.
+        let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+        for key in ["opus", "opus#seat-b", "opus#seat-c"] {
+            assert!(
+                router.force_open_breaker(key, Duration::from_secs(3600)),
+                "seat {key} must own a state slot to trip"
+            );
+        }
+
+        let decisions = chain_decisions_for(&router, Some("S"));
+        assert_eq!(
+            decisions,
+            vec![Some("defer_no_healthy"), None, None],
+            "a no-healthy-seat miss must stamp defer_no_healthy on the home target"
+        );
+        // Order is the fill-first walk (a hint, not a filter), and no pin
+        // was written for the deferred session.
+        assert_eq!(
+            chain_state_keys_for(&router, Some("S")),
+            vec!["opus", "opus#seat-b", "opus#seat-c"]
+        );
+        assert!(
+            router.sticky_pins.get("S").is_none(),
+            "DeferNoHealthy must not write a pin"
+        );
+    }
+
     #[tokio::test]
     async fn each_seat_has_independent_breaker() {
         // Parking seat-a (force_open) must leave seat-b/seat-c
@@ -5597,7 +5835,7 @@ mod seat_pool_dispatch_tests {
 
     #[tokio::test]
     async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
-        // F2c end-to-end: pin a session, force its home seat's breaker open,
+        // End-to-end overflow-repin: pin a session, force its home seat's breaker open,
         // and assert a subsequent call leads with a healthy sibling AND the
         // pin records repinned=true. Then heal the original and assert the
         // session STAYS on the sibling (hysteresis -- no A->B->A flap). Then

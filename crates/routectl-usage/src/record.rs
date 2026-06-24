@@ -126,6 +126,12 @@ pub struct UsageRecord {
     /// (count_tokens, unknown alias, or a gate failure before any reduction
     /// point ran).
     pub reduction_strategy: Option<String>,
+    /// Stable seat-selection decision token for the served target's home
+    /// seat (e.g. `birth_pick`, `sticky_stay`, `overflow_repin`,
+    /// `defer_no_healthy`, `keyless_fill_first`). `None` for non-sticky /
+    /// single-seat pools, non-pooled aliases, and when the served target was
+    /// not the sticky home (a fallback past the home records NULL).
+    pub selection_decision: Option<String>,
 
     // TIMING
     pub latency_ms: i64,
@@ -257,6 +263,7 @@ mod tests {
             fallback_count: 0,
             strategy: Some("auto_emitted".to_string()),
             reduction_strategy: Some("applied".to_string()),
+            selection_decision: Some("sticky_stay".to_string()),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -312,6 +319,7 @@ mod tests {
             fallback_count: 0,
             strategy: None,
             reduction_strategy: None,
+            selection_decision: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,
