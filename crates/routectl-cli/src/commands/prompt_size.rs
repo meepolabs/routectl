@@ -18,9 +18,10 @@ use routectl_core::context_reduction::{apply_json_minify, ReductionOutcome};
 use routectl_core::schema::Role;
 use routectl_core::{scan_volatile, ChatRequest, Error, Result};
 use routectl_router::{
-    validate_alias_chain_targets, validate_alias_patterns, validate_bedrock_global_config,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy, AliasPattern,
-    AliasValue, Config, ALIAS_MAX_RECURSION_DEPTH,
+    break_even_k, evaluate, lookup, validate_alias_chain_targets, validate_alias_patterns,
+    validate_bedrock_global_config, validate_reasoning_defaults, validate_registry_patterns,
+    validate_retry_policy, AliasPattern, AliasValue, CachePricingRow, Config, GateDecision,
+    KeepReason, PrefixReductionCandidate, ALIAS_MAX_RECURSION_DEPTH,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -90,8 +91,9 @@ impl TierSize {
 }
 
 /// The full offline report. Pure data: built by `build_report`, rendered by
-/// `print_report`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `print_report`. `Eq` is intentionally not derived: the optional
+/// `economics` projection carries `f64` break-even / verdict values.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Report {
     pub system: TierSize,
     pub tools: TierSize,
@@ -104,6 +106,49 @@ pub struct Report {
     /// drives whether the description promises an applied reduction or reports
     /// the savings as conditional on enabling the feature.
     pub reduction_enabled: bool,
+    /// OPTIONAL cache-break economics projection. `Some` only when the operator
+    /// supplied `--hypothetical-d`; `None` keeps the report's legacy output
+    /// byte-for-byte unchanged (backward compatibility).
+    pub economics: Option<EconomicsProjection>,
+}
+
+/// Optional CLI arguments that turn on the cache-break economics projection.
+/// Borrowed for the lifetime of one `run` call; `ttl_tier` is validated by the
+/// CLI parser to be `"5m"` or `"1h"`.
+#[derive(Debug, Clone, Copy)]
+pub struct ProjectionArgs<'a> {
+    pub hypothetical_d: Option<u64>,
+    pub hypothetical_k: Option<f64>,
+    pub c_after: Option<u64>,
+    pub ttl_tier: &'a str,
+}
+
+/// The advisory cache-break economics projection: the resolved pricing cell,
+/// its trust label, the break-even reuse threshold K*, and (when a `--hypothetical-k`
+/// was supplied) a keep/break verdict. Pure data: built by
+/// `build_economics`, rendered by `print_economics`. Never mutates a request,
+/// resolves a secret, or touches the network.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EconomicsProjection {
+    /// Resolved provider-kind discriminant (e.g. `anthropic-api`), or `None`
+    /// when the alias could not be resolved to a target offline.
+    pub provider_kind: Option<String>,
+    /// Resolved upstream model id, or `None` when unresolved offline.
+    pub model: Option<String>,
+    /// The priced TTL tier (`5m` / `1h`).
+    pub tier: String,
+    /// Whether the resolved pricing cell is verified against a primary vendor
+    /// doc. An unverified cell falls to the conservative sentinel treatment.
+    pub verified: bool,
+    /// Break-even reuse count K*: the minimum future prefix reuses at which
+    /// breaking the cache turns net-positive. `None` when `d == 0` or the row
+    /// is a sentinel (no live decision is meaningful).
+    pub break_even_k: Option<f64>,
+    /// The candidate cut handed to the gate.
+    pub candidate: PrefixReductionCandidate,
+    /// The keep/break verdict at `--hypothetical-k`, present only when that
+    /// flag was supplied.
+    pub verdict: Option<GateDecision>,
 }
 
 /// Compute the offline report from a parsed request and the resolved target's
@@ -145,6 +190,59 @@ pub fn build_report(
         auto_emit,
         reduction,
         reduction_enabled,
+        economics: None,
+    }
+}
+
+/// Build the advisory cache-break economics projection for a resolved target.
+///
+/// `C` (total cacheable prefix tokens) is taken from the report's TOTAL
+/// approx-token count: the command does not distinguish a separate stable /
+/// cacheable-prefix token count (its tiers are SYSTEM / TOOLS / MESSAGES, not a
+/// frozen-prefix slice), so the whole prompt-token footprint is the
+/// conservative `C`. `C_after` defaults to `C` (the oldest-first conservative
+/// case) unless the operator overrides it. `D` is the proposed cut.
+///
+/// `target` is `Some((provider_kind, model))` when the alias resolved offline,
+/// or `None` (the cell then prices as the sentinel and the verdict reads
+/// "insufficient data"). `lookup` is given the requested `tier`.
+fn build_economics(
+    report_total_tokens: usize,
+    target: Option<(&'static str, String)>,
+    args: &ProjectionArgs,
+) -> EconomicsProjection {
+    let d = args.hypothetical_d.unwrap_or(0);
+    let c = report_total_tokens as u64;
+    let c_after = args.c_after.unwrap_or(c);
+    let candidate = PrefixReductionCandidate::new(d, c_after, c);
+
+    let (provider_kind, model, row) = match &target {
+        Some((kind, model)) => (
+            Some((*kind).to_string()),
+            Some(model.clone()),
+            lookup(kind, model, Some(args.ttl_tier)),
+        ),
+        None => (None, None, CachePricingRow::sentinel()),
+    };
+
+    // A sentinel / unverified cell carries no trusted multipliers, so a live
+    // break-even number is meaningless; suppress it and let the verdict carry
+    // the "insufficient data" message instead.
+    let break_even = if row.verified {
+        break_even_k(&row, &candidate)
+    } else {
+        None
+    };
+    let verdict = args.hypothetical_k.map(|k| evaluate(&row, &candidate, k));
+
+    EconomicsProjection {
+        provider_kind,
+        model,
+        tier: args.ttl_tier.to_string(),
+        verified: row.verified,
+        break_even_k: break_even,
+        candidate,
+        verdict,
     }
 }
 
@@ -236,6 +334,20 @@ fn resolve_supports_top_level(config: &Config, alias: &str) -> Option<bool> {
     Some(provider.cache_capability().supports_top_level_cache_control)
 }
 
+/// Resolve `--alias` to its target `(provider_kind, upstream_model)` using the
+/// SAME config-only precedence as `resolve_supports_top_level` -- no live
+/// secret resolution, no provider build, no network. `provider_kind` is the
+/// stable `kind_str()` discriminant; `model` is the resolved upstream id. The
+/// cache-economics projection feeds these to `lookup`. Returns `None` when any
+/// hop cannot be resolved offline.
+fn resolve_target(config: &Config, alias: &str) -> Option<(&'static str, String)> {
+    let value = resolve_alias_value(config, alias)?;
+    let nickname = first_nickname(config, value, 0)?;
+    let model = config.models.get(&nickname)?;
+    let provider = config.providers.get(&model.provider)?;
+    Some((provider.kind_str(), model.upstream.clone()))
+}
+
 /// Resolve an alias key to its `AliasValue` via the router's precedence:
 /// exact key, then longest-prefix glob, then direct-nickname (synthesized as a
 /// single), then the `default` catch-all.
@@ -289,7 +401,12 @@ fn first_nickname(config: &Config, value: AliasValue, depth: usize) -> Option<St
     None
 }
 
-pub fn run(config: Config, alias: &str, request_path: &Path) -> Result<()> {
+pub fn run(
+    config: Config,
+    alias: &str,
+    request_path: &Path,
+    projection: ProjectionArgs,
+) -> Result<()> {
     // Same cheap config-validation guards `routectl test` runs, so a
     // misconfigured alias surfaces a clean error rather than a confusing
     // resolution miss. None of these resolve secrets or touch the network.
@@ -314,36 +431,150 @@ pub fn run(config: Config, alias: &str, request_path: &Path) -> Result<()> {
     })?;
 
     let supports_top_level = resolve_supports_top_level(&config, alias);
-    let report = build_report(
+    let mut report = build_report(
         &req,
         supports_top_level,
         config.cache.auto_emit_top_level_breakpoint,
         config.reduction.enabled,
     );
+
+    // The economics projection is opt-in: present ONLY when --hypothetical-d
+    // was supplied. Without it the report renders exactly as before.
+    if projection.hypothetical_d.is_some() {
+        let target = resolve_target(&config, alias);
+        report.economics = Some(build_economics(
+            report.total.approx_tokens,
+            target,
+            &projection,
+        ));
+    } else if projection.c_after.is_some() || projection.hypothetical_k.is_some() {
+        eprintln!("warning: --c-after / --hypothetical-k have no effect without --hypothetical-d");
+    }
+
     print_report(alias, &report);
     Ok(())
 }
 
 fn print_report(alias: &str, report: &Report) {
-    println!("[prompt-size: alias `{alias}`]");
-    println!("--- size breakdown (approx tokens = bytes / 4, rough estimate, not billing) ---");
-    print_tier("SYSTEM  ", report.system);
-    print_tier("TOOLS   ", report.tools);
-    print_tier("MESSAGES", report.messages);
-    print_tier("TOTAL   ", report.total);
+    print!("{}", render_report(alias, report));
+}
 
-    println!("--- auto-emit ---");
-    println!("{}", report.auto_emit.describe());
+/// Render the full offline report to a String (byte-identical to what
+/// `print_report` emits). Split out so tests can assert on the rendered text
+/// without capturing process stdout.
+fn render_report(alias: &str, report: &Report) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "[prompt-size: alias `{alias}`]");
+    let _ = writeln!(
+        out,
+        "--- size breakdown (approx tokens = bytes / 4, rough estimate, not billing) ---"
+    );
+    write_tier(&mut out, "SYSTEM  ", report.system);
+    write_tier(&mut out, "TOOLS   ", report.tools);
+    write_tier(&mut out, "MESSAGES", report.messages);
+    write_tier(&mut out, "TOTAL   ", report.total);
 
-    println!("--- reduction ---");
-    println!(
+    let _ = writeln!(out, "--- auto-emit ---");
+    let _ = writeln!(out, "{}", report.auto_emit.describe());
+
+    let _ = writeln!(out, "--- reduction ---");
+    let _ = writeln!(
+        out,
         "{}",
         describe_reduction(&report.reduction, report.reduction_enabled)
     );
+
+    if let Some(economics) = &report.economics {
+        out.push_str(&render_economics(economics));
+    }
+    out
 }
 
-fn print_tier(label: &str, size: TierSize) {
-    println!(
+/// Render the advisory cache-break economics projection to a String. Only
+/// appended when the operator supplied `--hypothetical-d`, so the legacy
+/// output stays unchanged for the no-flag invocation.
+fn render_economics(economics: &EconomicsProjection) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "--- cache-break economics (advisory) ---");
+    let provider_kind = economics.provider_kind.as_deref().unwrap_or("(unresolved)");
+    let model = economics.model.as_deref().unwrap_or("(unresolved)");
+    let _ = writeln!(
+        out,
+        "target: {provider_kind} / {model}  tier={}",
+        economics.tier
+    );
+    let _ = writeln!(out, "pricing cell: {}", trust_label(economics.verified));
+    let _ = writeln!(
+        out,
+        "candidate: D={} tokens  C_after={} tokens  C={} tokens",
+        economics.candidate.d, economics.candidate.c_after, economics.candidate.c
+    );
+
+    match economics.break_even_k {
+        Some(k_star) => {
+            let _ = writeln!(out, "break-even K* = {k_star:.2} future reuses");
+        }
+        None if !economics.verified => {
+            let _ = writeln!(out, "break-even K*: n/a (insufficient data)");
+        }
+        None => {
+            let _ = writeln!(out, "break-even K*: n/a (nothing to remove)");
+        }
+    }
+
+    if let Some(verdict) = &economics.verdict {
+        let _ = writeln!(out, "verdict: {}", describe_verdict(verdict));
+    }
+    out
+}
+
+/// Operator-facing trust label for a pricing cell.
+fn trust_label(verified: bool) -> &'static str {
+    if verified {
+        "verified"
+    } else {
+        "unverified (NEEDS-LIVE-PROBE)"
+    }
+}
+
+/// Map a `GateDecision` to a readable verdict line that includes the stable
+/// ledger strategy token.
+fn describe_verdict(decision: &GateDecision) -> String {
+    let strategy = decision.strategy_str();
+    match decision {
+        GateDecision::Keep { reason } => {
+            format!("KEEP ({}) [{strategy}]", describe_keep_reason(reason))
+        }
+        GateDecision::Break { delta_tokens } => {
+            format!("BREAK (cut {delta_tokens} tokens) [{strategy}]")
+        }
+        GateDecision::FreeBreak {
+            delta_tokens,
+            reason,
+        } => format!("FREE-BREAK (cut {delta_tokens} tokens; {reason}) [{strategy}]"),
+        // `GateDecision` is `#[non_exhaustive]`; keep self-describing.
+        _ => format!("{decision:?} [{strategy}]"),
+    }
+}
+
+/// Human-readable text for a `KeepReason`.
+fn describe_keep_reason(reason: &KeepReason) -> &'static str {
+    match reason {
+        KeepReason::NetNegative => "net-negative at this reuse count",
+        KeepReason::BelowMinPrefix => "remaining prefix below cacheable floor",
+        KeepReason::InsufficientData => "insufficient data",
+        KeepReason::NoCandidate => "nothing to remove",
+        // `KeepReason` is `#[non_exhaustive]`; keep self-describing.
+        _ => "keep",
+    }
+}
+
+fn write_tier(out: &mut String, label: &str, size: TierSize) {
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
         "{label}  {} bytes  (~{} tokens)",
         size.bytes, size.approx_tokens
     );
@@ -721,6 +952,336 @@ fast = "sonnet"
         assert!(
             described.contains(&format!("{bytes_saved} bytes")),
             "description should still report headroom: {described}"
+        );
+    }
+
+    // -- cache-break economics projection -----------------------------
+
+    /// A config resolving alias `heavy` -> model `opus` -> anthropic-api
+    /// provider with the verified `claude-opus-4-8` upstream, and alias
+    /// `mystery` -> model `mystery_model` -> an openai-compat provider with an
+    /// unknown upstream that prices to the unverified catch-all (sentinel
+    /// treatment).
+    fn economics_config() -> Config {
+        let toml = r#"
+[providers.anthro]
+kind = "anthropic-api"
+api_key_ref = "literal:placeholder"
+
+[providers.compat]
+kind = "openai-compat"
+base_url = "https://api.example.invalid/v1"
+api_key_ref = "literal:placeholder"
+
+[models.opus]
+provider = "anthro"
+upstream = "claude-opus-4-8"
+
+[models.mystery_model]
+provider = "compat"
+upstream = "totally-unknown-model-xyz"
+
+[aliases]
+heavy = "opus"
+mystery = "mystery_model"
+"#;
+        toml::from_str(toml).expect("test config should deserialize")
+    }
+
+    #[test]
+    fn build_economics_break_even_matches_cost_gate_math_for_verified_target() {
+        // Arrange: `heavy` resolves to anthropic-api / claude-opus-4-8, a
+        // verified 5m cell. Use the cost-gate doc's scenario (D=50k, C=C_after=200k)
+        // so the wiring must reproduce the gate's own K* oracle.
+        let config = economics_config();
+        let target = resolve_target(&config, "heavy");
+        assert_eq!(
+            target,
+            Some(("anthropic-api", "claude-opus-4-8".to_string()))
+        );
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: None,
+            c_after: Some(200_000),
+            ttl_tier: "5m",
+        };
+
+        // Act: C is the report's total approx tokens; pass 200_000 directly.
+        let economics = build_economics(200_000, target, &args);
+
+        // Assert: the projected K* equals the cost gate's own computation for
+        // the looked-up row + candidate (wiring matches the math).
+        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        let candidate = PrefixReductionCandidate::new(50_000, 200_000, 200_000);
+        let expected = break_even_k(&row, &candidate).expect("d > 0");
+        assert_eq!(economics.break_even_k, Some(expected));
+        // Sanity-anchor on the doc's worked result (K* == 50 at 5m).
+        assert!((economics.break_even_k.unwrap() - 50.0).abs() < 1e-4);
+        assert!(economics.verified);
+        assert_eq!(economics.provider_kind.as_deref(), Some("anthropic-api"));
+    }
+
+    #[test]
+    fn build_economics_verdict_breaks_above_break_even_k() {
+        // Arrange: same verified target, K* == 50; assume k just above it.
+        let config = economics_config();
+        let target = resolve_target(&config, "heavy");
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: Some(50.0001),
+            c_after: Some(200_000),
+            ttl_tier: "5m",
+        };
+
+        // Act
+        let economics = build_economics(200_000, target, &args);
+
+        // Assert: a BREAK verdict carrying the cut token count + ledger token.
+        let verdict = economics.verdict.expect("k was supplied");
+        assert_eq!(
+            verdict,
+            GateDecision::Break {
+                delta_tokens: 50_000
+            }
+        );
+        let rendered = describe_verdict(&verdict);
+        assert!(rendered.contains("BREAK"), "rendered: {rendered}");
+        assert!(rendered.contains("cost_gate:break"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn build_economics_unverified_target_reads_keep_insufficient_data() {
+        // Arrange: `mystery` resolves to openai-compat / unknown model, which
+        // prices to the unverified catch-all (sentinel treatment).
+        let config = economics_config();
+        let target = resolve_target(&config, "mystery");
+        assert_eq!(
+            target,
+            Some(("openai-compat", "totally-unknown-model-xyz".to_string()))
+        );
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: Some(1_000_000.0),
+            c_after: Some(200_000),
+            ttl_tier: "5m",
+        };
+
+        // Act
+        let economics = build_economics(200_000, target, &args);
+
+        // Assert: the cell is labeled unverified, no live break-even is shown,
+        // and the verdict reads KEEP (insufficient data) even at a huge k.
+        assert!(!economics.verified);
+        assert_eq!(
+            trust_label(economics.verified),
+            "unverified (NEEDS-LIVE-PROBE)"
+        );
+        assert_eq!(economics.break_even_k, None);
+        let verdict = economics.verdict.expect("k was supplied");
+        assert_eq!(
+            verdict,
+            GateDecision::Keep {
+                reason: KeepReason::InsufficientData
+            }
+        );
+        assert!(describe_verdict(&verdict).contains("insufficient data"));
+    }
+
+    #[test]
+    fn build_economics_no_target_prices_as_sentinel_keep_insufficient_data() {
+        // Arrange: an alias that resolves to no target offline (None).
+        let config = economics_config();
+        let target = resolve_target(&config, "no-such-alias-and-no-default");
+        assert_eq!(target, None);
+        let args = ProjectionArgs {
+            hypothetical_d: Some(10_000),
+            hypothetical_k: Some(999.0),
+            c_after: None,
+            ttl_tier: "5m",
+        };
+
+        // Act: C defaults from the report total; C_after defaults to C.
+        let economics = build_economics(80_000, target, &args);
+
+        // Assert: sentinel treatment -- unverified, no K*, KEEP/insufficient.
+        assert!(!economics.verified);
+        assert_eq!(economics.provider_kind, None);
+        assert_eq!(economics.break_even_k, None);
+        assert_eq!(economics.candidate.c, 80_000);
+        assert_eq!(economics.candidate.c_after, 80_000, "c_after defaults to C");
+        assert_eq!(
+            economics.verdict,
+            Some(GateDecision::Keep {
+                reason: KeepReason::InsufficientData
+            })
+        );
+    }
+
+    #[test]
+    fn build_report_leaves_economics_none_for_backward_compatible_output() {
+        // The no-flag invocation path: build_report never populates economics,
+        // so the rendered report is identical to before this feature.
+        let req = ChatRequest {
+            model: "claude-opus-4-8".into(),
+            system: Some(SystemContent::Text("You are helpful.".into())),
+            messages: vec![user_text("hi")],
+            ..Default::default()
+        };
+
+        let report = build_report(&req, Some(true), true, true);
+
+        assert_eq!(report.economics, None);
+    }
+
+    #[test]
+    fn run_level_guard_renders_no_economics_section_without_hypothetical_d() {
+        // Arrange: mirror the run-level path for a verified target but with NO
+        // --hypothetical-d. This exercises the same guard `run` applies before
+        // rendering (the build_report-level test only covers build_report).
+        let req = ChatRequest {
+            model: "claude-opus-4-8".into(),
+            system: Some(SystemContent::Text("You are helpful.".into())),
+            messages: vec![user_text("hi")],
+            ..Default::default()
+        };
+        let projection = ProjectionArgs {
+            hypothetical_d: None,
+            hypothetical_k: None,
+            c_after: None,
+            ttl_tier: "5m",
+        };
+        let mut report = build_report(&req, Some(true), true, true);
+
+        // Act: the same run-level guard -- economics stays None without -d.
+        if projection.hypothetical_d.is_some() {
+            report.economics = Some(build_economics(
+                report.total.approx_tokens,
+                Some(("anthropic-api", "claude-opus-4-8".to_string())),
+                &projection,
+            ));
+        }
+        let out = render_report("heavy", &report);
+
+        // Assert: the legacy sections render, but nothing from the economics
+        // projection leaks into the output.
+        assert!(
+            out.contains("size breakdown"),
+            "expected legacy report: {out}"
+        );
+        assert!(
+            !out.contains("cache-break economics"),
+            "economics header must be absent: {out}"
+        );
+        assert!(!out.contains("break-even"), "no break-even line: {out}");
+        assert!(!out.contains("verdict"), "no verdict line: {out}");
+    }
+
+    #[test]
+    fn build_economics_finite_k_but_below_min_prefix_keeps_below_floor() {
+        // Arrange: a VERIFIED anthropic-api / claude-opus-4-8 cell (min_prefix
+        // 1024). A small candidate (d=900, c=1500) leaves remaining 600 < 1024
+        // -- a finite K* still exists, but the cut is permanently unreachable.
+        let config = economics_config();
+        let target = resolve_target(&config, "heavy");
+        assert_eq!(
+            target,
+            Some(("anthropic-api", "claude-opus-4-8".to_string()))
+        );
+        let args = ProjectionArgs {
+            hypothetical_d: Some(900),
+            hypothetical_k: Some(1_000_000.0),
+            c_after: Some(1_500),
+            ttl_tier: "5m",
+        };
+
+        // Act
+        let economics = build_economics(1_500, target, &args);
+
+        // Assert: finite K* (the math is well-defined) AND a hard KEEP below
+        // the cacheable floor even at a wildly favorable k.
+        assert!(
+            economics.break_even_k.is_some(),
+            "a finite K* should still be computed: {:?}",
+            economics.break_even_k
+        );
+        let verdict = economics.verdict.expect("k was supplied");
+        assert_eq!(
+            verdict,
+            GateDecision::Keep {
+                reason: KeepReason::BelowMinPrefix
+            }
+        );
+        // The rendered output shows the K* number AND the floor reason.
+        let k_star = economics.break_even_k.expect("finite K*");
+        let rendered_k = format!("{k_star:.2}");
+        assert!(
+            !rendered_k.is_empty(),
+            "K* should render to a number: {rendered_k}"
+        );
+        let rendered_verdict = describe_verdict(&verdict);
+        assert!(
+            rendered_verdict.contains("below cacheable floor"),
+            "verdict should cite the floor: {rendered_verdict}"
+        );
+    }
+
+    #[test]
+    fn build_economics_forwards_1h_tier_to_lookup() {
+        // Arrange: same verified target, but the 1h tier (wm=2.0 row). The
+        // projected K* must match the gate's own lookup for the 1h row,
+        // proving the tier is forwarded through build_economics.
+        let config = economics_config();
+        let target = resolve_target(&config, "heavy");
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: None,
+            c_after: Some(200_000),
+            ttl_tier: "1h",
+        };
+
+        // Act
+        let economics = build_economics(200_000, target, &args);
+
+        // Assert: K* equals the gate's computation for the 1h (wm=2.0) row.
+        let row = lookup("anthropic-api", "claude-opus-4-8", Some("1h"));
+        assert_eq!(row.wm, 2.0, "1h tier should resolve the wm=2.0 row");
+        let candidate = PrefixReductionCandidate::new(50_000, 200_000, 200_000);
+        let expected = break_even_k(&row, &candidate).expect("d > 0");
+        assert_eq!(economics.break_even_k, Some(expected));
+        // Sanity-anchor: (200000 * 2.0) / (50000 * 0.10) == 80 at the 1h tier.
+        assert!((economics.break_even_k.unwrap() - 80.0).abs() < 1e-4);
+        assert_eq!(economics.tier, "1h");
+    }
+
+    #[test]
+    fn build_economics_keep_net_negative_renders_net_negative_verdict() {
+        // Arrange: verified target, K* == 50 (5m tier, D=50k, C_after=200k).
+        // A hypothetical k just BELOW the threshold is net-negative to break.
+        let config = economics_config();
+        let target = resolve_target(&config, "heavy");
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: Some(49.9999),
+            c_after: Some(200_000),
+            ttl_tier: "5m",
+        };
+
+        // Act
+        let economics = build_economics(200_000, target, &args);
+
+        // Assert: a KEEP/NetNegative verdict whose rendered text conveys the
+        // net-negative reason.
+        let verdict = economics.verdict.expect("k was supplied");
+        assert_eq!(
+            verdict,
+            GateDecision::Keep {
+                reason: KeepReason::NetNegative
+            }
+        );
+        let rendered = describe_verdict(&verdict);
+        assert!(
+            rendered.contains("net-negative"),
+            "verdict should convey net-negative: {rendered}"
         );
     }
 }

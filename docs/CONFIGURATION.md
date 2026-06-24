@@ -53,6 +53,10 @@ sections:
 
 [registry."<glob>"]   # per-upstream pricing for cost estimation.
                       # Optional; no defaults shipped.
+
+[cache_pricing."<sel>"] # field-level overrides for the baked
+                      # prompt-cache economics table. Optional; a
+                      # verified table ships baked-in.
 ```
 
 [`examples/config.toml`](../examples/config.toml) is a working
@@ -959,6 +963,47 @@ The report has three sections:
 A misconfigured alias surfaces the same clean config-validation error
 `routectl test` produces.
 
+### Cache-break economics projection (advisory)
+
+When you pass `--hypothetical-d`, the report gains a fourth section: an
+ADVISORY projection of whether breaking a warm prompt-cache to apply a
+proposed prefix cut would be net-positive. It is offline-only and never
+mutates a request, resolves a secret, or touches the network -- it is
+advice, computed from the baked per-`(provider_kind, model, tier)` cache
+pricing table.
+
+```sh
+# Just the break-even threshold K* for a 50k-token cut, 5m tier:
+routectl prompt-size --alias heavy --request ./fixture.json \
+  --hypothetical-d 50000
+
+# Plus a keep/break verdict at an assumed reuse count, 1h tier:
+routectl prompt-size --alias heavy --request ./fixture.json \
+  --hypothetical-d 50000 --hypothetical-k 60 --ttl-tier 1h
+```
+
+- `--hypothetical-d <TOKENS>` -- the size of the proposed cache-prefix
+  cut. Supplying this flag is what turns ON the projection; omit it and
+  the report is byte-for-byte the three-section output above.
+- `--hypothetical-k <COUNT>` -- an assumed future-reuse count. When
+  given, the report also prints a KEEP / BREAK verdict (with the stable
+  ledger strategy token). When omitted, only the break-even K* threshold
+  is printed.
+- `--c-after <TOKENS>` -- cached tokens at/after the edit point that must
+  re-write. Defaults to C (the oldest-first conservative case).
+- `--ttl-tier <5m|1h>` -- the cache TTL tier to price (Anthropic /
+  Bedrock differ; other providers ignore it). Defaults to `5m`.
+
+C (the total cacheable prefix tokens) is taken from the report's TOTAL
+approx-token count; the command does not distinguish a separate
+cacheable-prefix slice, so the whole prompt-token footprint is the
+conservative C. The projection prints the resolved provider kind /
+model / tier, the pricing cell's trust label (`verified` or
+`unverified (NEEDS-LIVE-PROBE)`), the break-even K*, and -- when
+`--hypothetical-k` is supplied -- the verdict. An unverified / sentinel
+cell shows no live K* and a `KEEP (insufficient data)` verdict, because
+its multipliers are not trusted for a live decision.
+
 ## Pricing registry (`[registry."<pattern>".pricing]`)
 
 The optional `[registry]` table supplies per-upstream prices so usage
@@ -1009,6 +1054,61 @@ The optional `provider` scope lets the same upstream id served by two
 different providers be priced differently -- give each a distinct key
 (the table is keyed by pattern string) and set `provider` on the scoped
 one.
+
+## Cache-economics pricing overrides (`[cache_pricing."<selector>"]`)
+
+routectl ships a verified, baked-in table of prompt-cache *economics*
+multipliers -- the write multiplier (`wm`), read multiplier (`rm`), TTL,
+and minimum cacheable prefix -- per `(provider_kind, model)`. These feed
+the (later) cache-break break-even reasoning; they are distinct from the
+`[registry]` dollar prices above, which feed usage-cost estimation.
+
+You do not normally need to touch this. The table is re-verified against
+vendor docs on each routectl release, and unverified cells already fall
+back to a conservative sentinel. The `[cache_pricing]` block exists only
+to patch a cell that drifted between releases.
+
+```toml
+# Selector key is "<provider_kind>:<model_glob>". provider_kind is the
+# stable `kind = "..."` token (anthropic-api, bedrock, openai-responses,
+# openai-compat); model_glob is an exact id or a trailing-`*` prefix.
+[cache_pricing."openai-compat:grok-4-3*"]
+rm = 0.05            # correct just the read multiplier; everything else
+                     # (wm, ttl_seconds, min_prefix_tokens, ...) inherits
+                     # the baked-in value -- an omitted field is NOT reset.
+```
+
+**Field-level merge.** Every field is optional. A field you set wins; a
+field you omit inherits the baked-in cell value. You never have to
+restate the whole row. Overridable fields:
+
+| Field                  | Meaning                                              |
+|------------------------|------------------------------------------------------|
+| `wm`                   | write multiplier (cost to re-write a cached block)   |
+| `rm`                   | read multiplier (cost to read a warm cached block)   |
+| `ttl_seconds`          | cache time-to-live in seconds                        |
+| `min_prefix_tokens`    | minimum prefix tokens below which caching stops      |
+| `has_storage_rent`     | whether the provider charges per-hour cache rent     |
+| `storage_rent`         | per-hour storage-rent multiplier                     |
+| `auto_cacher`          | whether the upstream caches automatically            |
+
+**Cost-risk acknowledgement.** An override that sets `wm` *below* the
+conservative sentinel value (`2.0`) is **rejected** unless it also carries
+`override_acknowledges_cost_risk = true`. A too-cheap write multiplier
+makes a cache break look falsely profitable, so dropping below the
+sentinel requires an explicit operator acknowledgement:
+
+```toml
+[cache_pricing."openai-compat:my-cheap-host-*"]
+wm = 1.0
+override_acknowledges_cost_risk = true   # required: wm < 2.0 sentinel
+```
+
+The selector keys are not validated against the baked table -- a
+selector that matches no baked cell is simply inert (it overrides
+nothing). A baked cell whose `verified_at` is more than 90 days old logs
+a startup `WARN` advising re-verification; this is advisory only and
+never blocks startup.
 
 ## Prompt-cache auto-emission (`[cache]`)
 
