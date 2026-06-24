@@ -730,7 +730,7 @@ impl Provider for AnthropicApiProvider {
         // Cloak the outgoing body on the OAuth anthropic-api surface:
         // always strip the billing block; for a non-CC client also stamp
         // the identity system block and metadata user_id. Also normalize
-        // single-underscore `mcp_` tool names to `mcp__`. Runs after
+        // every non-`mcp__` tool name to the `mcp__` prefix. Runs after
         // normalize_request and before serialize/resign. The returned
         // reverse map restores the client's original tool names on the
         // response below.
@@ -834,7 +834,7 @@ impl Provider for AnthropicApiProvider {
         };
         let mut chat_resp = self.normalize_response(raw_body)?;
         // Restore the client's original tool names on the response. The
-        // forward pass renamed single-underscore `mcp_` names to `mcp__`
+        // forward pass normalized non-`mcp__` names to the `mcp__` prefix
         // on the wire; reverse only the names this request actually
         // renamed so a client that legitimately used `mcp__` names is
         // unaffected.
