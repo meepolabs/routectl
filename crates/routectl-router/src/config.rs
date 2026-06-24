@@ -101,6 +101,22 @@ pub struct Config {
     /// default: reduction disabled.
     #[serde(default)]
     pub reduction: ReductionConfig,
+
+    /// Operator-facing `[cache_pricing]` field-level override table for the
+    /// baked prompt-cache economics rows (`crate::cache_pricing`). Each key
+    /// is a `"provider_kind:model_glob"` selector (e.g.
+    /// `"openai-compat:grok-*"`); each value is a sparse
+    /// [`crate::cache_pricing::CachePricingOverride`] -- only the fields the
+    /// operator wants to correct, the rest inheriting the baked-in value.
+    /// routectl ships a verified baked table, so an empty / omitted block is
+    /// the norm; this exists to patch a cell that drifted before a routectl
+    /// release can re-bake it. An override that sets `wm` below the
+    /// conservative sentinel must carry `override_acknowledges_cost_risk =
+    /// true` or the merge is rejected by the consuming cost gate. The
+    /// selector keys are NOT validated against the baked table here (an
+    /// unmatched selector is simply inert).
+    #[serde(default)]
+    pub cache_pricing: BTreeMap<String, crate::cache_pricing::CachePricingOverride>,
 }
 
 /// Operator-facing `[cache]` config block. Global policy for the

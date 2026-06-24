@@ -4,7 +4,9 @@
 //! resolves an incoming request's `model` against the configured aliases, and
 //! walks the fallback chain on `5xx`/`429`/timeout errors.
 
+pub mod cache_pricing;
 pub mod config;
+pub mod cost_gate;
 pub mod factory;
 pub(crate) mod feature_keys;
 pub mod glob;
@@ -13,6 +15,7 @@ pub mod router;
 pub mod runtime_state;
 pub(crate) mod seat_pool;
 
+pub use cache_pricing::{lookup, CachePricingOverride, CachePricingRow, CachePricingSelector};
 pub use config::{
     AliasValue, CacheCapability, CacheConfig, Config, HistoryReasoning, LogConfig, ModelEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
@@ -20,6 +23,7 @@ pub use config::{
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
+pub use cost_gate::{break_even_k, evaluate, GateDecision, KeepReason, PrefixReductionCandidate};
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
