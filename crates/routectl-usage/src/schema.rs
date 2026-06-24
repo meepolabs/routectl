@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -108,7 +108,18 @@ CREATE TABLE IF NOT EXISTS requests (
     -- Appended last so this column lands in the same ordinal position
     -- whether the DB was created fresh at v4 or migrated from v3 via
     -- `ALTER TABLE ... ADD COLUMN selection_decision` (which always appends).
-    selection_decision TEXT
+    selection_decision TEXT,
+
+    -- STEADY-STATE WOULD-TRIM ADVISORY (v5): the non-mutating record of the
+    -- steady-state trimmer's would-cut candidate for this request. NULL when
+    -- the trimmer proposed no cut. `would_trim_tokens` is the candidate's
+    -- freed-token count `d`; `would_trim_break_even_k` is the break-even reuse
+    -- count K* the cost gate priced for it. Appended last so these columns
+    -- land in the same ordinal position whether the DB was created fresh at v5
+    -- or migrated from v4 via `ALTER TABLE ... ADD COLUMN` (which always
+    -- appends). The live request is NEVER mutated -- this is recording only.
+    would_trim_tokens INTEGER,
+    would_trim_break_even_k REAL
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

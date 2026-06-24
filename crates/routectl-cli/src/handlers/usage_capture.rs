@@ -67,6 +67,8 @@ pub(crate) fn build_usage_draft(
         strategy: None,
         reduction_strategy: None,
         selection_decision: None,
+        would_trim_tokens: None,
+        would_trim_break_even_k: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -269,6 +271,8 @@ impl UsageCapture {
         self.record.strategy = meta.cache_strategy.map(|s| s.to_string());
         self.record.reduction_strategy = meta.reduction_strategy.map(|s| s.to_string());
         self.record.selection_decision = meta.selection_decision.map(|s| s.to_string());
+        self.record.would_trim_tokens = meta.would_trim_tokens;
+        self.record.would_trim_break_even_k = meta.would_trim_break_even_k;
     }
 
     /// Stamp the token / quota / finish columns from a non-streaming

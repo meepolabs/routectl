@@ -132,6 +132,18 @@ pub struct UsageRecord {
     /// single-seat pools, non-pooled aliases, and when the served target was
     /// not the sticky home (a fallback past the home records NULL).
     pub selection_decision: Option<String>,
+    /// Non-mutating steady-state would-trim advisory: the freed-token count
+    /// `d` of the trimmer's would-cut candidate for this request. `None` when
+    /// the steady-state trimmer proposed no cut. The live request is NEVER
+    /// mutated -- this is recording only.
+    pub would_trim_tokens: Option<u64>,
+    /// Non-mutating steady-state would-trim advisory: the break-even reuse
+    /// count K* the cost gate priced for the would-cut candidate. `None` when
+    /// the trimmer proposed no cut, when the pricing cell is unverified /
+    /// sentinel (an unknown / unverified provider records the freed-token
+    /// count but no K* -- no trusted pricing), or when a verified row carried
+    /// no finite break-even. Recording only.
+    pub would_trim_break_even_k: Option<f64>,
 
     // TIMING
     pub latency_ms: i64,
@@ -264,6 +276,8 @@ mod tests {
             strategy: Some("auto_emitted".to_string()),
             reduction_strategy: Some("applied".to_string()),
             selection_decision: Some("sticky_stay".to_string()),
+            would_trim_tokens: Some(40_000),
+            would_trim_break_even_k: Some(50.0),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -320,6 +334,8 @@ mod tests {
             strategy: None,
             reduction_strategy: None,
             selection_decision: None,
+            would_trim_tokens: None,
+            would_trim_break_even_k: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

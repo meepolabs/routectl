@@ -19,8 +19,8 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 
 use routectl_router::Config;
 use routectl_usage::{
-    aggregate, estimate_cost_tokens, latest_quota, open_readonly, ttfbs, AggRow, GroupKey,
-    OpenError, QueryError, QuotaSnapshot, Rates, UsageDb,
+    aggregate, estimate_cost_tokens, latest_quota, open_readonly, ttfbs, would_trim_summary,
+    AggRow, GroupKey, OpenError, QueryError, QuotaSnapshot, Rates, UsageDb, WouldTrimSummary,
 };
 
 /// Parsed `routectl usage` arguments, already validated by clap.
@@ -343,6 +343,9 @@ pub struct WindowReport {
     pub quota: Option<QuotaSnapshot>,
     pub cache_hit_rate: Option<f64>,
     pub total_errors: i64,
+    /// Steady-state would-trim opportunity over the window (advisory; only
+    /// populated and surfaced under `--detail`).
+    pub would_trim: WouldTrimSummary,
 }
 
 /// True iff `provider` is a managed-OAuth subscription provider: its
@@ -535,6 +538,14 @@ pub fn build_window_report(
         BTreeMap::new()
     };
 
+    // Steady-state would-trim opportunity: only queried (and surfaced) under
+    // --detail. The default table stays unchanged.
+    let would_trim = if detail {
+        would_trim_summary(db, bounds.from_ms, bounds.to_ms)?
+    } else {
+        WouldTrimSummary::default()
+    };
+
     let mut display_rows: Vec<DisplayRow> = groups
         .into_iter()
         .map(|(label, acc)| finalize_row(label, acc, &ttft))
@@ -556,6 +567,7 @@ pub fn build_window_report(
         quota: latest_quota(db)?,
         cache_hit_rate,
         total_errors,
+        would_trim,
     })
 }
 
@@ -838,6 +850,7 @@ pub fn render_report(report: &WindowReport) -> String {
 
     if report.detail {
         out.push_str(&render_latency_summary(report));
+        out.push_str(&render_would_trim(report));
     }
     if let Some(q) = &report.quota {
         out.push_str(&render_quota(q));
@@ -872,6 +885,23 @@ fn render_latency_summary(report: &WindowReport) -> String {
     };
     format!(
         "latency: TTFT p50 {p50} / p95 {p95} (streaming)  |  throughput {toks} tok/s  |  {pct}% streaming\n"
+    )
+}
+
+/// One-line steady-state would-trim opportunity summary: the count of
+/// requests the trimmer flagged with a would-cut candidate and the summed
+/// candidate tokens over the window. Advisory (non-mutating recording);
+/// emitted only under `--detail`, and only when there is an opportunity, so a
+/// window with no candidates stays uncluttered.
+fn render_would_trim(report: &WindowReport) -> String {
+    let wt = &report.would_trim;
+    if wt.candidate_requests == 0 {
+        return String::new();
+    }
+    format!(
+        "would-trim: {} reqs with a would-cut candidate, {} tokens (advisory; not applied)\n",
+        wt.candidate_requests,
+        human_count(wt.would_trim_tokens),
     )
 }
 
@@ -946,7 +976,8 @@ const LEGEND: &str = concat!(
     "  \"-\"         = metric not reported by that provider\n",
     "  \"n/a (sub)\" = managed subscription (see quota)\n",
     "  --detail    = adds cost, ctx_peak/ctx_avg (cached-context size, not a flow),\n",
-    "                cache-write 5m/1h (breakdown of the share already in input), ttft, tok/s, server-tools",
+    "                cache-write 5m/1h (breakdown of the share already in input), ttft, tok/s, server-tools,\n",
+    "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied)",
 );
 
 // --- entry point --------------------------------------------------------

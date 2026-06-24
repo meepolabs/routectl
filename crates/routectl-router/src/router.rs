@@ -18,9 +18,12 @@ use routectl_core::{
 };
 use serde_json::Value;
 
+use crate::cache_pricing::lookup_with_overrides;
 use crate::config::{
     AliasValue, CacheCapability, Config, HistoryReasoning, ReasoningDialect, RetryPolicy,
 };
+use crate::context_trim::{propose_steady_state_trim, SteadyStateTrimParams};
+use crate::cost_gate::break_even_k;
 use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::{GateDecision, ProviderState};
@@ -215,6 +218,19 @@ pub struct DispatchMeta {
     /// `None`, because the decision is stamped on the home target only and
     /// `mark_target` copies whichever target actually served.
     pub selection_decision: Option<&'static str>,
+    /// Non-mutating steady-state would-trim advisory: the freed-token count
+    /// `d` of the trimmer's would-cut candidate for the dispatched request.
+    /// `None` when the steady-state trimmer proposed no cut (or no target was
+    /// dispatched). The live request is NEVER mutated -- this is recording
+    /// only (see [`Router::record_would_trim`]).
+    pub would_trim_tokens: Option<u64>,
+    /// Non-mutating steady-state would-trim advisory: the break-even reuse
+    /// count K* the cost gate priced for the would-cut candidate. `None` when
+    /// the trimmer proposed no cut, OR the resolved pricing cell is
+    /// unverified / sentinel (an unknown / unverified provider records the
+    /// freed-token count but no K* -- no trusted pricing), OR the verified
+    /// row carried no finite break-even. Recording only.
+    pub would_trim_break_even_k: Option<f64>,
 }
 
 impl DispatchMeta {
@@ -234,6 +250,8 @@ impl DispatchMeta {
             cache_strategy: None,
             reduction_strategy: None,
             selection_decision: None,
+            would_trim_tokens: None,
+            would_trim_break_even_k: None,
         }
     }
 
@@ -1194,6 +1212,12 @@ impl Router {
                 "cache_auto_decision",
             );
 
+            // Steady-state would-trim advisory: NON-MUTATING. Reads the
+            // dispatched clone, prices the would-cut candidate, and records it
+            // onto `meta`. Never touches `attempt_req` (no `apply_trim_plan`),
+            // so what is sent upstream is byte-identical with or without this.
+            self.record_would_trim(&attempt_req, target.provider_kind, model, meta);
+
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
             // Per-chain-entry one-shot auth-recovery flag. Set after a
@@ -1790,6 +1814,11 @@ impl Router {
                 "cache_auto_decision",
             );
 
+            // Steady-state would-trim advisory: see `complete_inner`. The same
+            // NON-MUTATING shared helper runs on the streaming path so the two
+            // dispatch sites never diverge. Never touches `attempt_req`.
+            self.record_would_trim(&attempt_req, target.provider_kind, model, meta);
+
             let attempt_policy = self.compose_attempt_policy(
                 &policy,
                 provider_name,
@@ -2165,6 +2194,52 @@ impl Router {
                 provider_runtime.and_then(|p| p.stream_first_byte_timeout_ms);
         }
         out
+    }
+
+    /// NON-MUTATING steady-state would-trim advisory recording. Computes the
+    /// deterministic trimmer's would-cut candidate for the dispatched clone,
+    /// prices it against the already-resolved `(provider_kind, model)` cell,
+    /// and stamps the freed-token count `d` plus the break-even reuse count K*
+    /// onto `meta`. When the trimmer proposes no cut, records nothing (both
+    /// columns stay `None` / NULL).
+    ///
+    /// CRITICAL: this NEVER mutates `attempt_req`. It only reads the request
+    /// (`propose_steady_state_trim` is pure) and never calls `apply_trim_plan`,
+    /// so the bytes sent upstream are identical with or without this call. It
+    /// is extracted into ONE helper -- invoked from both `complete_inner` and
+    /// `stream_inner` -- so the two byte-identical dispatch blocks cannot drift.
+    ///
+    /// An unknown / unverified-provider target (e.g. `provider_kind` is `None`
+    /// for a legacy / direct-construction target, or the cell is a sentinel /
+    /// unverified row) records the freed-token count but `K* = None`: an
+    /// unverified row carries no trusted multipliers, so a break-even number
+    /// would be misleading. This matches the offline prompt-size advisory
+    /// convention (compute `break_even_k` only when `row.verified`).
+    fn record_would_trim(
+        &self,
+        attempt_req: &ChatRequest,
+        provider_kind: Option<&'static str>,
+        model: &str,
+        meta: &mut DispatchMeta,
+    ) {
+        let Some(plan) = propose_steady_state_trim(attempt_req, &SteadyStateTrimParams::default())
+        else {
+            return;
+        };
+        // Tier defaults to the trimmer's auto-emit default (5m) via the lookup.
+        // K* is recorded only for a VERIFIED row (no reuse count K is assumed
+        // here); an unverified / sentinel row records None.
+        let row = lookup_with_overrides(
+            provider_kind.unwrap_or(""),
+            model,
+            None,
+            &self.config.cache_pricing,
+        );
+        meta.would_trim_tokens = Some(plan.candidate.d);
+        meta.would_trim_break_even_k = row
+            .verified
+            .then(|| break_even_k(&row, &plan.candidate))
+            .flatten();
     }
 }
 
@@ -8326,6 +8401,179 @@ mod auto_emit_cache_control_tests {
         let captured = captured.lock();
         let up = captured.first().expect("one dispatch");
         assert_eq!(up.cache_control, Some(CacheControl::ephemeral_5m()));
+    }
+
+    // -- steady-state would-trim advisory (NON-MUTATING recording) ---------
+
+    /// A bulky tool_result message (`tokens` tokens at ~4 bytes/token).
+    fn tool_result_msg(tokens: usize) -> Message {
+        let payload = "x".repeat(tokens * 4);
+        Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(
+                KnownContentPart::ToolResult {
+                    tool_use_id: "toolu_1".into(),
+                    content: serde_json::json!(payload),
+                    is_error: None,
+                    cache_control: None,
+                },
+            )]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    fn text_msg(role: Role, text: &str) -> Message {
+        Message {
+            refusal: None,
+            role,
+            content: MessageContent::Text(text.into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// A long tool-heavy request well above the steady-state trigger, with a
+    /// head, several bulky old tool turns, and a small recent tail -- so the
+    /// trimmer proposes a would-cut candidate.
+    fn long_tool_request() -> ChatRequest {
+        let mut messages = vec![
+            text_msg(Role::User, "system framing turn one"),
+            text_msg(Role::Assistant, "acknowledged"),
+        ];
+        for _ in 0..12 {
+            messages.push(text_msg(Role::Assistant, "calling a tool"));
+            messages.push(tool_result_msg(12_000));
+        }
+        for i in 0..6 {
+            messages.push(text_msg(Role::User, &format!("recent turn {i}")));
+        }
+        ChatRequest {
+            model: "m".into(),
+            messages,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn would_trim_recorded_for_long_request() {
+        // A long request with a would-cut candidate records the freed-token
+        // count `d` and a finite break-even K* (anthropic catch-all is a
+        // verified write-premium row).
+        let (router, _captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+
+        let plan =
+            propose_steady_state_trim(&long_tool_request(), &SteadyStateTrimParams::default())
+                .expect("trimmer proposes a cut for this request");
+        assert_eq!(
+            dispatched.meta.would_trim_tokens,
+            Some(plan.candidate.d),
+            "would_trim_tokens must equal the candidate's freed-token count",
+        );
+        assert!(
+            dispatched.meta.would_trim_break_even_k.is_some(),
+            "a verified write-premium row must yield a finite break-even K*",
+        );
+    }
+
+    #[tokio::test]
+    async fn would_trim_records_nothing_for_short_request() {
+        // A short request has no would-cut candidate, so both advisory columns
+        // stay None (recorded as NULL).
+        let (router, _captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(base_req(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+        assert_eq!(dispatched.meta.would_trim_tokens, None);
+        assert_eq!(dispatched.meta.would_trim_break_even_k, None);
+    }
+
+    #[tokio::test]
+    async fn would_trim_unverified_row_records_tokens_but_no_break_even_k() {
+        // An openai-compat target with no specific cell resolves to the
+        // unverified `"*"` catch-all (a sentinel-treated row). The long request
+        // still records the freed-token count, but K* is None -- an unverified
+        // row carries no trusted multipliers, matching the offline prompt-size
+        // advisory convention.
+        let (router, _captured) = rig(openai_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+
+        let plan =
+            propose_steady_state_trim(&long_tool_request(), &SteadyStateTrimParams::default())
+                .expect("trimmer proposes a cut for this request");
+        assert_eq!(
+            dispatched.meta.would_trim_tokens,
+            Some(plan.candidate.d),
+            "an unverified row must still record the freed-token count",
+        );
+        assert_eq!(
+            dispatched.meta.would_trim_break_even_k, None,
+            "an unverified / sentinel row must record K* = None (no trusted pricing)",
+        );
+    }
+
+    #[tokio::test]
+    async fn would_trim_recording_does_not_mutate_outbound_request() {
+        // CRITICAL non-mutation invariant: the outbound bytes are identical
+        // whether or not the recording helper fired. A long request (helper
+        // DOES fire) must dispatch byte-identical to the same request built
+        // without the recording path -- the helper never calls
+        // apply_trim_plan. Compare the captured outbound clone against a fresh
+        // copy with only the dispatch-time field changes the helper does NOT
+        // own (model id rewrite + the auto-cache marker), proving the message
+        // payloads were untouched.
+        let (router, captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+        // The helper recorded a candidate (so it definitely ran).
+        assert!(
+            dispatched.meta.would_trim_tokens.is_some(),
+            "the recording helper must have run for this long request",
+        );
+
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        // The outbound messages are byte-identical to the un-trimmed input:
+        // the recording NEVER substituted a placeholder (no apply_trim_plan).
+        let sent_messages = serde_json::to_value(&up.messages).expect("serialize sent");
+        let original_messages =
+            serde_json::to_value(&long_tool_request().messages).expect("serialize original");
+        assert_eq!(
+            sent_messages, original_messages,
+            "would-trim recording must not change the outbound message payloads",
+        );
+    }
+
+    #[tokio::test]
+    async fn would_trim_recorded_on_stream_path_too() {
+        // The shared helper is exercised from the streaming path as well as
+        // the non-streaming path (mirrors `stream_path_also_injects`).
+        let (router, _captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .stream_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        let _ = dispatched.result.expect("ok").collect::<Vec<_>>().await;
+        assert!(
+            dispatched.meta.would_trim_tokens.is_some(),
+            "the streaming dispatch path must also record the would-trim advisory",
+        );
     }
 
     /// Two-entry fallback chain where the two targets make OPPOSITE
