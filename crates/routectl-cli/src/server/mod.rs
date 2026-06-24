@@ -543,6 +543,13 @@ pub(crate) async fn build_router_from_config(
     // cost resolution never silently skips a key it cannot parse.
     routectl_router::validate_registry_patterns(&config)?;
 
+    // Reject a degenerate `[cache_pricing]` override (unparseable selector
+    // key or a multiplier that makes the break-even math degenerate) at
+    // startup. Without this, a bad override silently goes inert at lookup
+    // time and the operator never learns their correction did nothing;
+    // failing here names the offending selector upfront.
+    routectl_router::validate_overrides(&config.cache_pricing).map_err(Error::Config)?;
+
     // Advisory: warn (never fail) if the baked prompt-cache pricing table
     // has gone stale (> 90 days since a cell's verified_at). The numbers
     // drift; a stale stamp is the operator's cue to re-verify.

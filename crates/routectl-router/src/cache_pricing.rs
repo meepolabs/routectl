@@ -125,30 +125,13 @@ impl CachePricingRow {
     /// override field is `Option`; `None` inherits the baked value (the
     /// operator restates only the cells they know are wrong).
     ///
-    /// RELIABILITY GUARD: an override that sets `wm` BELOW the sentinel's
-    /// `wm` (2.0) is rejected unless it also carries
-    /// `override_acknowledges_cost_risk = true`. A too-cheap write
-    /// multiplier makes a cache break look falsely profitable; the explicit
-    /// ack flag is the operator asserting they understand the risk.
+    /// RELIABILITY GUARD: a degenerate override is rejected up front via
+    /// [`CachePricingOverride::validate`] (a below-sentinel `wm` without the
+    /// cost-risk ack, or a non-positive `rm`). On success the override fields
+    /// merge over the baked values and the row is stamped `verified = true`
+    /// with an `"operator-override"` provenance.
     pub fn with_overrides(&self, ov: &CachePricingOverride) -> Result<Self, String> {
-        if let Some(wm) = ov.wm {
-            if wm < CachePricingRow::sentinel().wm && !ov.override_acknowledges_cost_risk {
-                return Err(format!(
-                    "cache-pricing override sets wm = {wm} below the conservative sentinel wm = \
-                     {}, which can make a cache break look falsely profitable; set \
-                     override_acknowledges_cost_risk = true to accept this risk",
-                    CachePricingRow::sentinel().wm
-                ));
-            }
-        }
-        if let Some(rm) = ov.rm {
-            if rm <= 0.0 {
-                return Err(format!(
-                    "cache_pricing override: rm must be > 0.0 (got {rm}); a zero or negative read \
-                     multiplier makes the break-even math degenerate"
-                ));
-            }
-        }
+        ov.validate()?;
         Ok(Self {
             wm: ov.wm.unwrap_or(self.wm),
             rm: ov.rm.unwrap_or(self.rm),
@@ -199,11 +182,44 @@ pub struct CachePricingOverride {
     pub override_acknowledges_cost_risk: bool,
 }
 
+impl CachePricingOverride {
+    /// Reject a degenerate override before it is merged onto a baked row.
+    ///
+    /// RELIABILITY GUARD: a `wm` BELOW the sentinel's `wm` (2.0) is rejected
+    /// unless `override_acknowledges_cost_risk = true` -- a too-cheap write
+    /// multiplier makes a cache break look falsely profitable. A non-positive
+    /// `rm` is rejected unconditionally (the ack flag does not exempt it): a
+    /// zero or negative read multiplier makes the break-even math degenerate.
+    /// Shared by the merge path ([`CachePricingRow::with_overrides`]) and the
+    /// startup validate-only pass ([`validate_overrides`]).
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(wm) = self.wm {
+            if wm < CachePricingRow::sentinel().wm && !self.override_acknowledges_cost_risk {
+                return Err(format!(
+                    "cache-pricing override sets wm = {wm} below the conservative sentinel wm = \
+                     {}, which can make a cache break look falsely profitable; set \
+                     override_acknowledges_cost_risk = true to accept this risk",
+                    CachePricingRow::sentinel().wm
+                ));
+            }
+        }
+        if let Some(rm) = self.rm {
+            if rm <= 0.0 {
+                return Err(format!(
+                    "cache_pricing override: rm must be > 0.0 (got {rm}); a zero or negative read \
+                     multiplier makes the break-even math degenerate"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A parsed `"provider_kind:model_glob"` config-key selector for the
 /// `[cache_pricing]` override table. The raw key is split on the FIRST
 /// colon so a model glob may itself contain colons (real Bedrock ids do).
-/// The override path uses this to apply `Config.cache_pricing` overrides onto baked rows;
-/// it is intentionally not wired into a consumer here.
+/// [`best_override`] uses this to apply `Config.cache_pricing` overrides
+/// onto baked rows during [`lookup_with_overrides`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachePricingSelector {
     pub provider_kind: String,
@@ -937,6 +953,144 @@ pub fn lookup(provider_kind: &str, model: &str, tier: Option<&str>) -> CachePric
     CachePricingRow::sentinel()
 }
 
+/// The distinct provider-kind tokens present in the baked table. Used by
+/// [`validate_overrides`] to surface a likely-typo provider_kind as a
+/// non-fatal warning. A `"*"` provider selector is a legitimate catch-all
+/// and is intentionally absent here (it is handled before the typo check).
+const BAKED_PROVIDER_KINDS: &[&str] = &[
+    "anthropic-api",
+    "bedrock",
+    "openai-responses",
+    "openai-compat",
+];
+
+/// True when a selector's model glob matches `model`. A `"*"` glob is the
+/// catch-all (treated as a match WITHOUT calling [`AliasPattern`], which
+/// rejects a bare `*`); any other glob defers to the alias-glob matcher.
+fn selector_glob_matches(model_glob: &str, model: &str) -> bool {
+    if model_glob == "*" {
+        return true;
+    }
+    AliasPattern::parse(model_glob)
+        .map(|pat| pat.matches(model))
+        .unwrap_or(false)
+}
+
+/// The glob specificity used to rank competing overrides: a `"*"` glob is
+/// the least specific (length 0); any other glob ranks by its parsed
+/// prefix length. A glob that fails to parse ranks 0 (it cannot have
+/// matched a real model anyway).
+fn selector_glob_specificity(model_glob: &str) -> usize {
+    if model_glob == "*" {
+        return 0;
+    }
+    AliasPattern::parse(model_glob)
+        .map(|pat| pat.prefix_len())
+        .unwrap_or(0)
+}
+
+/// Pick the most-specific matching override for `(provider_kind, model)`,
+/// mirroring [`lookup`]'s tier ordering: an exact-provider match beats any
+/// provider `"*"` match; within a tier the longest model-glob prefix wins.
+/// Keys that fail to parse are skipped (startup validation is the gate for
+/// bad keys). Returns `None` when nothing matches.
+///
+/// Tie-break: equal-specificity matches within the same provider tier
+/// resolve in ascending BTreeMap (lexicographic) key order -- the iteration
+/// keeps the FIRST equal-length match seen, and `BTreeMap` iterates keys in
+/// sorted order (so, e.g., a shorter exact key sorts before an equal-prefix
+/// glob and wins).
+fn best_override<'a>(
+    provider_kind: &str,
+    model: &str,
+    overrides: &'a std::collections::BTreeMap<String, CachePricingOverride>,
+) -> Option<&'a CachePricingOverride> {
+    let mut exact: Option<(usize, &'a CachePricingOverride)> = None;
+    let mut star: Option<(usize, &'a CachePricingOverride)> = None;
+    for (key, ov) in overrides {
+        let Ok(selector) = CachePricingSelector::parse(key) else {
+            continue;
+        };
+        if !selector_glob_matches(&selector.model_glob, model) {
+            continue;
+        }
+        let len = selector_glob_specificity(&selector.model_glob);
+        if selector.provider_kind == provider_kind {
+            if exact.map_or(true, |(best, _)| len > best) {
+                exact = Some((len, ov));
+            }
+        } else if selector.provider_kind == "*" && star.map_or(true, |(best, _)| len > best) {
+            star = Some((len, ov));
+        }
+    }
+    exact.or(star).map(|(_, ov)| ov)
+}
+
+/// Look up the pricing row for a `(provider_kind, model, tier)` triple,
+/// then apply the most-specific matching operator override from
+/// `overrides` (the `[cache_pricing]` table).
+///
+/// Resolves the baked row via [`lookup`], then merges the best-matching
+/// override (see [`best_override`]). When NO override matches, returns the
+/// baked row unchanged (byte-identical to `lookup`). When a matched
+/// override is degenerate (it slipped past [`validate_overrides`] and
+/// `with_overrides` rejects it), this falls back to the baked row and warns
+/// -- it never panics, keeping the lookup path fail-closed.
+pub fn lookup_with_overrides(
+    provider_kind: &str,
+    model: &str,
+    tier: Option<&str>,
+    overrides: &std::collections::BTreeMap<String, CachePricingOverride>,
+) -> CachePricingRow {
+    let baked = lookup(provider_kind, model, tier);
+    let Some(ov) = best_override(provider_kind, model, overrides) else {
+        return baked;
+    };
+    match baked.with_overrides(ov) {
+        Ok(row) => row,
+        Err(reason) => {
+            tracing::warn!(
+                provider_kind,
+                model,
+                %reason,
+                "cache-pricing override is degenerate; falling back to the baked row",
+            );
+            baked
+        }
+    }
+}
+
+/// Validate every `[cache_pricing]` override at startup, failing fast on a
+/// bad selector key or a degenerate override so a misconfiguration surfaces
+/// at boot rather than silently going inert at lookup time. A likely-typo
+/// provider_kind (one not present in the baked table, and not `"*"`) is a
+/// non-fatal WARN -- a custom upstream kind is legitimate.
+///
+/// Returns `Ok(())` on an empty map and on an all-valid table. Each error
+/// is prefixed with the offending selector key so the operator knows which
+/// entry to fix.
+pub fn validate_overrides(
+    overrides: &std::collections::BTreeMap<String, CachePricingOverride>,
+) -> Result<(), String> {
+    for (key, ov) in overrides {
+        let selector =
+            CachePricingSelector::parse(key).map_err(|e| format!("[cache_pricing.{key}]: {e}"))?;
+        ov.validate()
+            .map_err(|e| format!("[cache_pricing.{key}]: {e}"))?;
+        if selector.provider_kind != "*"
+            && !BAKED_PROVIDER_KINDS.contains(&selector.provider_kind.as_str())
+        {
+            tracing::warn!(
+                selector = key.as_str(),
+                provider_kind = selector.provider_kind.as_str(),
+                "cache-pricing override provider_kind is not a known baked kind; \
+                 likely a typo (the override will be inert unless the kind is real)",
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Today's date as a proleptic-Gregorian epoch-day count (days since
 /// 1970-01-01), derived from the system clock. Pure arithmetic, no date
 /// library. Returns `0` if the clock is somehow before the epoch.
@@ -1323,6 +1477,268 @@ mod tests {
         assert_eq!(parse_epoch_day("1970-01-02"), Some(1));
         // A full year later.
         assert_eq!(parse_epoch_day("1971-01-01"), Some(365));
+    }
+
+    use std::collections::BTreeMap;
+
+    /// Build a one-entry override map tersely.
+    fn ov_map(key: &str, ov: CachePricingOverride) -> BTreeMap<String, CachePricingOverride> {
+        let mut m = BTreeMap::new();
+        m.insert(key.to_string(), ov);
+        m
+    }
+
+    #[test]
+    fn lookup_with_overrides_applies_a_matching_override() {
+        // Arrange: an override on the Opus 4.8 cell that sets min_prefix_tokens
+        // (a field that does not trip the wm / rm degeneracy guards) and leaves
+        // everything else unset.
+        let baked = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        let overrides = ov_map(
+            "anthropic-api:claude-opus-4-8*",
+            CachePricingOverride {
+                min_prefix_tokens: Some(512),
+                ..Default::default()
+            },
+        );
+
+        // Act
+        let merged =
+            lookup_with_overrides("anthropic-api", "claude-opus-4-8", Some("5m"), &overrides);
+
+        // Assert: the overridden field changed; verified + source flipped to the
+        // operator-assertion shape; unset fields inherited from the baked row.
+        assert_eq!(merged.min_prefix_tokens, 512);
+        assert!(merged.verified);
+        assert_eq!(merged.source, "operator-override");
+        assert_eq!(merged.wm, baked.wm);
+        assert_eq!(merged.rm, baked.rm);
+        assert_eq!(merged.ttl_seconds, baked.ttl_seconds);
+        assert_eq!(merged.tier, baked.tier);
+    }
+
+    #[test]
+    fn lookup_with_overrides_returns_baked_row_when_no_selector_matches() {
+        // Arrange: an override keyed on a DIFFERENT provider / model.
+        let overrides = ov_map(
+            "openai-compat:grok-*",
+            CachePricingOverride {
+                rm: Some(0.5),
+                ..Default::default()
+            },
+        );
+
+        // Act
+        let merged =
+            lookup_with_overrides("anthropic-api", "claude-opus-4-8", Some("5m"), &overrides);
+        let baked = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+
+        // Assert: byte-identical to the un-overridden lookup.
+        assert_eq!(merged, baked);
+    }
+
+    #[test]
+    fn lookup_with_overrides_prefers_longer_model_glob_within_a_tier() {
+        // Arrange: two overlapping exact-provider overrides for a v4-pro id.
+        // The longer glob (deepseek-v4-pro*) must win over the broad one.
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "openai-compat:deepseek-*".to_string(),
+            CachePricingOverride {
+                min_prefix_tokens: Some(100),
+                ..Default::default()
+            },
+        );
+        overrides.insert(
+            "openai-compat:deepseek-v4-pro*".to_string(),
+            CachePricingOverride {
+                min_prefix_tokens: Some(200),
+                ..Default::default()
+            },
+        );
+
+        // Act
+        let merged =
+            lookup_with_overrides("openai-compat", "deepseek-v4-pro-0610", None, &overrides);
+
+        // Assert: the longer, more specific glob's value applied.
+        assert_eq!(merged.min_prefix_tokens, 200);
+    }
+
+    #[test]
+    fn lookup_with_overrides_prefers_exact_provider_over_star_provider() {
+        // Arrange: a provider "*" catch-all override AND an exact-provider
+        // override both match. The exact-provider one must win, mirroring
+        // lookup's own tier ordering.
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "*:*".to_string(),
+            CachePricingOverride {
+                min_prefix_tokens: Some(1),
+                ..Default::default()
+            },
+        );
+        overrides.insert(
+            "anthropic-api:*".to_string(),
+            CachePricingOverride {
+                min_prefix_tokens: Some(7),
+                ..Default::default()
+            },
+        );
+
+        // Act
+        let merged =
+            lookup_with_overrides("anthropic-api", "claude-opus-4-8", Some("5m"), &overrides);
+
+        // Assert: the exact-provider override wins even though both match and
+        // the "*" provider key sorts first in the BTreeMap.
+        assert_eq!(merged.min_prefix_tokens, 7);
+    }
+
+    #[test]
+    fn lookup_with_overrides_falls_back_to_baked_row_on_degenerate_override() {
+        // Arrange: an override that fails with_overrides (rm <= 0.0). This
+        // models a degenerate override that slipped past startup validation;
+        // lookup must fail-closed to the baked row, never panic.
+        let baked = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        let overrides = ov_map(
+            "anthropic-api:claude-opus-4-8*",
+            CachePricingOverride {
+                rm: Some(0.0),
+                ..Default::default()
+            },
+        );
+
+        // Act
+        let merged =
+            lookup_with_overrides("anthropic-api", "claude-opus-4-8", Some("5m"), &overrides);
+
+        // Assert: the baked row is returned unchanged.
+        assert_eq!(merged, baked);
+    }
+
+    #[test]
+    fn lookup_with_overrides_skips_unparseable_selector_keys() {
+        // Arrange: a key with no colon never parses; lookup must ignore it (the
+        // startup validator is the gate for bad keys) and return the baked row.
+        let baked = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        let overrides = ov_map(
+            "no-colon-here",
+            CachePricingOverride {
+                min_prefix_tokens: Some(1),
+                ..Default::default()
+            },
+        );
+
+        // Act
+        let merged =
+            lookup_with_overrides("anthropic-api", "claude-opus-4-8", Some("5m"), &overrides);
+
+        // Assert
+        assert_eq!(merged, baked);
+    }
+
+    #[test]
+    fn validate_overrides_accepts_empty_map() {
+        let empty: BTreeMap<String, CachePricingOverride> = BTreeMap::new();
+        assert!(validate_overrides(&empty).is_ok());
+    }
+
+    #[test]
+    fn validate_overrides_accepts_a_valid_override() {
+        let overrides = ov_map(
+            "openai-compat:grok-*",
+            CachePricingOverride {
+                rm: Some(0.12),
+                ..Default::default()
+            },
+        );
+        assert!(validate_overrides(&overrides).is_ok());
+    }
+
+    #[test]
+    fn validate_overrides_rejects_unparseable_key_naming_the_selector() {
+        let overrides = ov_map(
+            "no-colon-key",
+            CachePricingOverride {
+                rm: Some(0.1),
+                ..Default::default()
+            },
+        );
+        let err = validate_overrides(&overrides).expect_err("unparseable key must fail");
+        assert!(err.contains("no-colon-key"), "msg: {err}");
+        assert!(err.contains("missing a `:`"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_overrides_rejects_non_positive_rm_naming_the_selector() {
+        let overrides = ov_map(
+            "openai-compat:grok-*",
+            CachePricingOverride {
+                rm: Some(0.0),
+                ..Default::default()
+            },
+        );
+        let err = validate_overrides(&overrides).expect_err("rm <= 0 must fail");
+        assert!(err.contains("openai-compat:grok-*"), "msg: {err}");
+        assert!(err.contains("rm must be > 0.0"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_overrides_rejects_below_sentinel_wm_without_ack_naming_selector() {
+        let overrides = ov_map(
+            "anthropic-api:claude-opus-4-8*",
+            CachePricingOverride {
+                wm: Some(1.0),
+                ..Default::default()
+            },
+        );
+        let err = validate_overrides(&overrides).expect_err("below-sentinel wm must fail");
+        assert!(err.contains("anthropic-api:claude-opus-4-8*"), "msg: {err}");
+        assert!(
+            err.contains("override_acknowledges_cost_risk"),
+            "msg: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_overrides_accepts_below_sentinel_wm_with_ack() {
+        let overrides = ov_map(
+            "anthropic-api:claude-opus-4-8*",
+            CachePricingOverride {
+                wm: Some(1.0),
+                override_acknowledges_cost_risk: true,
+                ..Default::default()
+            },
+        );
+        assert!(validate_overrides(&overrides).is_ok());
+    }
+
+    #[test]
+    fn validate_overrides_accepts_unknown_provider_kind_as_non_fatal_warn() {
+        // A likely-typo provider_kind that still parses is accepted (the typo
+        // hint is a non-fatal warn, never a hard failure).
+        let overrides = ov_map(
+            "openai-compatt:grok-*",
+            CachePricingOverride {
+                rm: Some(0.1),
+                ..Default::default()
+            },
+        );
+        assert!(validate_overrides(&overrides).is_ok());
+    }
+
+    #[test]
+    fn validate_overrides_accepts_star_provider_selector_without_warn() {
+        // A "*" provider_kind is a legitimate catch-all selector, not a typo.
+        let overrides = ov_map(
+            "*:claude-opus-4-8*",
+            CachePricingOverride {
+                rm: Some(0.1),
+                ..Default::default()
+            },
+        );
+        assert!(validate_overrides(&overrides).is_ok());
     }
 
     #[test]
