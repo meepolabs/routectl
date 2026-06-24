@@ -135,6 +135,24 @@ enum Cmd {
         /// ChatRequest (OpenAI Chat Completions or Anthropic Messages shape).
         #[arg(long)]
         request: PathBuf,
+        /// OPTIONAL cache-break economics projection: the size (in tokens)
+        /// of a proposed cache-prefix cut. Supplying this flag turns ON the
+        /// projection section; omitting it leaves the report unchanged.
+        #[arg(long = "hypothetical-d")]
+        hypothetical_d: Option<u64>,
+        /// OPTIONAL assumed future-reuse count. When given, also print a
+        /// keep/break VERDICT for the cut. When omitted, only the break-even
+        /// K* threshold is printed.
+        #[arg(long = "hypothetical-k")]
+        hypothetical_k: Option<f64>,
+        /// OPTIONAL tokens at/after the edit point that must re-write.
+        /// Defaults to C (the oldest-first conservative case).
+        #[arg(long = "c-after")]
+        c_after: Option<u64>,
+        /// OPTIONAL cache TTL tier to price (Anthropic / Bedrock differ;
+        /// other providers ignore it). One of `5m` or `1h`.
+        #[arg(long = "ttl-tier", value_parser = ["5m", "1h"], default_value = "5m")]
+        ttl_tier: String,
     },
     /// Summarize recorded usage from the local usage DB (read-only).
     ///
@@ -287,9 +305,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
-        Cmd::PromptSize { alias, request } => {
+        Cmd::PromptSize {
+            alias,
+            request,
+            hypothetical_d,
+            hypothetical_k,
+            c_after,
+            ttl_tier,
+        } => {
             let config = load_config(cli.config.as_deref())?;
-            if let Err(e) = commands::prompt_size::run(config, &alias, &request) {
+            let projection = commands::prompt_size::ProjectionArgs {
+                hypothetical_d,
+                hypothetical_k,
+                c_after,
+                ttl_tier: &ttl_tier,
+            };
+            if let Err(e) = commands::prompt_size::run(config, &alias, &request, projection) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
