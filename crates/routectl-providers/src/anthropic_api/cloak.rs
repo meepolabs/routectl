@@ -48,13 +48,13 @@ pub enum CloakMode {
     /// minted metadata `user_id` regardless of the session-id header.
     Always,
     /// Skip the cloak entirely: no billing strip, no identity, no
-    /// metadata, no `mcp_` normalization, no tool rename, no
+    /// metadata, no tool-name normalization, no tool rename, no
     /// sensitive-word obfuscation. The body goes upstream untouched.
     Never,
 }
 
 /// A single operator-configured tool-name rename. Applied AFTER the
-/// always-on `mcp_` -> `mcp__` normalization, over the same tool-name JSON
+/// always-on tool-name `mcp__` normalization, over the same tool-name JSON
 /// paths, recording reverse entries so renamed names restore on the
 /// response.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -85,8 +85,11 @@ pub struct CloakConfig {
     /// config surface for forward compatibility; no behavior is gated on
     /// it in this increment.
     pub strict_mode: bool,
-    /// Operator tool renames, applied after the `mcp_` normalization.
-    /// Default empty (no renames).
+    /// Operator tool renames, applied after the tool-name normalization.
+    /// Default empty (no renames). IMPORTANT: because normalization runs
+    /// first and prefixes every non-`mcp__` tool with `mcp__`, the `from`
+    /// key must be the POST-normalization wire name (e.g. `mcp__read_file`,
+    /// not the client's original `read_file`) or it will silently no-match.
     pub tool_rename: Vec<ToolRename>,
     /// Words to obfuscate (zero-width-space insertion) in system blocks
     /// and message text. Default empty (no obfuscation).
@@ -107,19 +110,22 @@ impl std::fmt::Debug for CloakConfig {
     }
 }
 
-/// The single-underscore `mcp_` prefix that trips the Anthropic
-/// subscription billing classifier when sent by a non-Claude-Code client.
+/// The single-underscore `mcp_` prefix: a non-Claude-Code tool name shape
+/// that, alongside any other non-`mcp__` name, trips the Anthropic
+/// subscription billing classifier. Used to detect the prefix-doubling
+/// subcase so the result is `mcp__<rest>` rather than `mcp__mcp_<rest>`.
 const MCP_SINGLE_PREFIX: &str = "mcp_";
 
-/// The canonical double-underscore prefix the classifier accepts.
+/// The canonical double-underscore prefix the classifier accepts. Every
+/// tool name that does not already start with this is normalized to it.
 const MCP_DOUBLE_PREFIX: &str = "mcp__";
 
 /// Result of the OAuth-egress cloak. Carries the per-request reverse map
 /// (upstream renamed name -> original client name) so the caller can
 /// restore the client's original tool names on the response. The map is
 /// per-request, NOT global: a global reverse map would corrupt a client
-/// that legitimately sent a mix of `mcp_` and `mcp__` names by rewriting
-/// names the client never asked us to touch.
+/// that legitimately sent a mix of names by rewriting names the client
+/// never asked us to touch.
 #[derive(Debug, Default)]
 pub(crate) struct CloakResult {
     /// Maps an upstream (renamed) tool name back to the original
@@ -196,11 +202,12 @@ impl ClaudeCodeIdentity {
 /// are minted only for a non-CC client.
 ///
 /// Order is load-bearing and cache-safe: identity/billing transforms
-/// first, then the always-on `mcp_` normalization, then operator
-/// `tool_rename` over the SAME tool-name paths (recording reverse entries
-/// into the SAME map), then `sensitive_words` obfuscation over system and
-/// message text. With a default (empty) `config`, the output is
-/// byte-identical to the Increment-1 cloak.
+/// first, then the always-on tool-name normalization (every non-`mcp__`
+/// name to `mcp__`), then operator `tool_rename` over the SAME tool-name
+/// paths (recording reverse entries into the SAME map), then
+/// `sensitive_words` obfuscation over system and message text. With a
+/// default (empty) `config`, the output adds nothing beyond the base
+/// cloak transforms.
 pub(crate) fn cloak_oauth_egress(
     body: &mut Value,
     _req: &ChatRequest,
@@ -213,19 +220,26 @@ pub(crate) fn cloak_oauth_egress(
         ensure_identity_block(body);
         mint_metadata_user_id(body, identity);
     }
-    let mut tool_reverse = normalize_mcp_tool_names(body);
+    let mut tool_reverse = normalize_tool_names_to_mcp(body);
     apply_tool_rename(body, &config.tool_rename, &mut tool_reverse);
     obfuscate_sensitive_words(body, &config.sensitive_words);
     CloakResult { tool_reverse }
 }
 
-/// Normalize every tool NAME on the outgoing body from the single-
-/// underscore `mcp_` prefix to the double-underscore `mcp__` prefix. The
-/// single-underscore shape is the one tool-name pattern that diverts a
-/// non-Claude-Code request to the extra-usage billing lane; the
-/// double-underscore shape passes. The rename is prefix-only (internal
-/// separators untouched), idempotent (an already-`mcp__` name is left
-/// alone and records no reverse entry), and pure.
+/// Normalize every tool NAME on the outgoing body to the canonical
+/// double-underscore `mcp__` prefix. A non-Claude-Code request whose tool
+/// SET contains enough non-`mcp__` names is diverted to the extra-usage
+/// billing lane; prefixing every such name with `mcp__` keeps the request
+/// in the subscription lane. The rename is prefix-only (the original name
+/// is preserved as the suffix, internal separators untouched), idempotent
+/// (an already-`mcp__` name is left alone and records no reverse entry),
+/// and pure.
+///
+/// Per name:
+/// - already starts with `mcp__` -> unchanged (no reverse entry).
+/// - starts with `mcp_` (single underscore) -> the prefix is doubled:
+///   `mcp_x` -> `mcp__x` (NOT `mcp__mcp_x`).
+/// - any other (bare) name -> prefixed: `read_file` -> `mcp__read_file`.
 ///
 /// Returns the per-request reverse map (renamed upstream name -> original
 /// client name) containing ONLY names actually renamed.
@@ -238,19 +252,19 @@ pub(crate) fn cloak_oauth_egress(
 /// - `messages[].content[]` entries of type `tool_reference` (`.tool_name`)
 /// - nested `tool_result.content[]` entries of type `tool_reference`
 ///   (`.tool_name`)
-fn normalize_mcp_tool_names(body: &mut Value) -> HashMap<String, String> {
+fn normalize_tool_names_to_mcp(body: &mut Value) -> HashMap<String, String> {
     let mut reverse: HashMap<String, String> = HashMap::new();
-    rename_tool_names_with(body, &mut reverse, &renamed_mcp_name);
+    rename_tool_names_with(body, &mut reverse, &renamed_to_mcp);
     reverse
 }
 
 /// Apply an operator-configured `tool_rename` map over the SAME tool-name
-/// JSON paths the `mcp_` normalization walks, recording reverse entries
+/// JSON paths the tool-name normalization walks, recording reverse entries
 /// into the SAME `reverse` map so renamed names also restore on the
-/// response. Runs AFTER `normalize_mcp_tool_names`, so a `from` targeting a
-/// post-normalization name (e.g. `mcp__x`) matches the already-normalized
+/// response. Runs AFTER `normalize_tool_names_to_mcp`, so a `from` targeting
+/// a post-normalization name (e.g. `mcp__x`) matches the already-normalized
 /// wire name. An empty map is a no-op. Each rename honors the same
-/// collision guard and builtin-skip as the `mcp_` pass.
+/// collision guard and builtin-skip as the normalization pass.
 ///
 /// First-from-wins on duplicate `from` keys; an entry with an empty `from`
 /// is skipped. The reverse map records first-seen per renamed name,
@@ -284,8 +298,8 @@ fn apply_tool_rename(
 
 /// Walk every tool-name JSON path and apply `renamer` (returning the new
 /// name or `None` to leave the field untouched), recording reverse entries.
-/// Shared by the `mcp_` normalization and the operator `tool_rename` pass so
-/// both touch exactly the same surfaces and obey the same collision guard.
+/// Shared by the tool-name normalization and the operator `tool_rename` pass
+/// so both touch exactly the same surfaces and obey the same collision guard.
 ///
 /// Paths walked (serde_json `Value`, by path not typed enum, so unknown
 /// forward-compat block types are still handled correctly):
@@ -306,15 +320,18 @@ fn rename_tool_names_with(
     rename_message_tool_refs(body, &existing, reverse, renamer);
 }
 
-/// Compute the renamed form of a tool name, or `None` if it does not need
-/// renaming. A name is renamed when it starts with `mcp_` but NOT `mcp__`;
-/// a single underscore is inserted right after `mcp` (prefix only).
-fn renamed_mcp_name(name: &str) -> Option<String> {
+/// Compute the canonical `mcp__` form of a tool name, or `None` if it
+/// already starts with `mcp__` (idempotent: no rename, no reverse entry).
+/// A single-underscore `mcp_` prefix is doubled (`mcp_x` -> `mcp__x`); any
+/// other (bare) name is prefixed (`read_file` -> `mcp__read_file`).
+fn renamed_to_mcp(name: &str) -> Option<String> {
     if name.starts_with(MCP_DOUBLE_PREFIX) {
         return None;
     }
-    let suffix = name.strip_prefix(MCP_SINGLE_PREFIX)?;
-    Some(format!("{MCP_DOUBLE_PREFIX}{suffix}"))
+    if let Some(suffix) = name.strip_prefix(MCP_SINGLE_PREFIX) {
+        return Some(format!("{MCP_DOUBLE_PREFIX}{suffix}"));
+    }
+    Some(format!("{MCP_DOUBLE_PREFIX}{name}"))
 }
 
 /// Gather every tool name in the request's `tools[]` array. This is a
@@ -367,9 +384,11 @@ fn rename_name_field(
     if let Some(map) = obj.as_object_mut() {
         map.insert(field.to_string(), Value::String(renamed.clone()));
     }
-    // First-seen is sufficient: the prefix-only mcp rename guarantees any
-    // given renamed form has exactly one possible original; for the operator
-    // tool_rename pass first-seen is the documented contract.
+    // First-seen is sufficient: the prefix-only mcp normalization maps a
+    // given original to exactly one renamed form, and the collision guard
+    // above skips a rename whose target already exists among tool names, so
+    // distinct originals do not silently share one renamed form; for the
+    // operator tool_rename pass first-seen is the documented contract.
     reverse.entry(renamed).or_insert(original);
 }
 
@@ -1190,17 +1209,17 @@ mod tests {
         assert!(id.account_uuid.contains('-'));
     }
 
-    // -- mcp_ tool-name normalization (forward) ----------------------------
+    // -- tool-name normalization to mcp__ (forward) ------------------------
 
     #[test]
-    fn renames_single_underscore_mcp_prefix_only() {
+    fn doubles_single_underscore_mcp_prefix_only() {
         // Arrange: internal separators must be untouched.
         let mut body = json!({
             "tools": [{"name": "mcp_linear_get_issue"}]
         });
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert: prefix doubled, internal underscores preserved.
         assert_eq!(body["tools"][0]["name"], "mcp__linear_get_issue");
@@ -1218,7 +1237,7 @@ mod tests {
         });
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert
         assert_eq!(body["tool_choice"]["name"], "mcp__foo");
@@ -1232,7 +1251,7 @@ mod tests {
         let before = body.clone();
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert
         assert_eq!(body, before);
@@ -1250,7 +1269,7 @@ mod tests {
         });
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert
         assert_eq!(body["messages"][0]["content"][0]["name"], "mcp__foo");
@@ -1268,7 +1287,7 @@ mod tests {
         });
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert
         assert_eq!(body["messages"][0]["content"][0]["tool_name"], "mcp__foo");
@@ -1290,7 +1309,7 @@ mod tests {
         });
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert
         assert_eq!(
@@ -1307,7 +1326,7 @@ mod tests {
         let before = body.clone();
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert
         assert_eq!(body, before);
@@ -1323,9 +1342,9 @@ mod tests {
         let mut body = json!({"tools": [{"name": "mcp_foo"}]});
 
         // Act: first pass renames, second is a no-op.
-        normalize_mcp_tool_names(&mut body);
+        normalize_tool_names_to_mcp(&mut body);
         let once = body.clone();
-        let reverse2 = normalize_mcp_tool_names(&mut body);
+        let reverse2 = normalize_tool_names_to_mcp(&mut body);
 
         // Assert
         assert_eq!(body, once);
@@ -1342,7 +1361,7 @@ mod tests {
         let before = body.clone();
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert
         assert_eq!(body, before);
@@ -1360,7 +1379,7 @@ mod tests {
         });
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
         // Assert: the colliding rename is skipped; both names preserved.
         assert_eq!(body["tools"][0]["name"], "mcp_foo");
@@ -1372,24 +1391,98 @@ mod tests {
     }
 
     #[test]
-    fn no_mcp_names_yields_byte_identical_output_and_empty_map() {
-        // Arrange: bare, lowercase, TitleCase names all pass untouched.
+    fn bare_name_is_prefixed_with_mcp_double() {
+        // Arrange: a bare snake_case tool name (the hermes-style set).
+        let mut body = json!({"tools": [{"name": "read_file"}]});
+
+        // Act
+        let reverse = normalize_tool_names_to_mcp(&mut body);
+
+        // Assert: prefixed, reverse restores the bare original.
+        assert_eq!(body["tools"][0]["name"], "mcp__read_file");
+        assert_eq!(
+            reverse.get("mcp__read_file").map(String::as_str),
+            Some("read_file")
+        );
+    }
+
+    #[test]
+    fn titlecase_bare_name_is_prefixed_with_mcp_double() {
+        // Arrange: the bare path applies to anything non-mcp__, including
+        // TitleCase names like Bash.
+        let mut body = json!({"tools": [{"name": "Bash"}]});
+
+        // Act
+        let reverse = normalize_tool_names_to_mcp(&mut body);
+
+        // Assert
+        assert_eq!(body["tools"][0]["name"], "mcp__Bash");
+        assert_eq!(reverse.get("mcp__Bash").map(String::as_str), Some("Bash"));
+    }
+
+    #[test]
+    fn every_non_mcp_double_name_is_cloaked_across_all_surfaces() {
+        // Arrange: a mixed set of bare, TitleCase, single-mcp_, and
+        // already-mcp__ names spread across every renamed surface.
         let mut body = json!({
             "tools": [{"name": "Bash"}, {"name": "glob"}, {"name": "read_file"}],
             "tool_choice": {"type": "tool", "name": "Bash"},
             "messages": [{
                 "role": "assistant",
-                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]
+                "content": [{"type": "tool_use", "id": "t1", "name": "terminal", "input": {}}]
             }]
         });
-        let before = body.clone();
 
         // Act
-        let reverse = normalize_mcp_tool_names(&mut body);
+        let reverse = normalize_tool_names_to_mcp(&mut body);
 
-        // Assert
-        assert_eq!(body, before);
-        assert!(reverse.is_empty());
+        // Assert: every bare name became mcp__-prefixed on every surface.
+        assert_eq!(body["tools"][0]["name"], "mcp__Bash");
+        assert_eq!(body["tools"][1]["name"], "mcp__glob");
+        assert_eq!(body["tools"][2]["name"], "mcp__read_file");
+        assert_eq!(body["tool_choice"]["name"], "mcp__Bash");
+        assert_eq!(body["messages"][0]["content"][0]["name"], "mcp__terminal");
+        // Reverse map has one entry per distinct renamed name.
+        assert_eq!(reverse.get("mcp__Bash").map(String::as_str), Some("Bash"));
+        assert_eq!(reverse.get("mcp__glob").map(String::as_str), Some("glob"));
+        assert_eq!(
+            reverse.get("mcp__read_file").map(String::as_str),
+            Some("read_file")
+        );
+        assert_eq!(
+            reverse.get("mcp__terminal").map(String::as_str),
+            Some("terminal")
+        );
+    }
+
+    #[test]
+    fn full_hermes_tool_set_round_trips() {
+        // Arrange: a representative subset of the real hermes tool set (all
+        // bare snake_case), the empirical trigger for the billing 400.
+        let names = [
+            "browser_back",
+            "read_file",
+            "terminal",
+            "write_file",
+            "list_dir",
+            "search",
+        ];
+        let tools: Vec<Value> = names.iter().map(|n| json!({"name": n})).collect();
+        let mut body = json!({"tools": tools});
+
+        // Act
+        let reverse = normalize_tool_names_to_mcp(&mut body);
+
+        // Assert: every tool is now mcp__-prefixed, one reverse entry each,
+        // and the reverse fully restores the originals.
+        let out = body["tools"].as_array().unwrap();
+        assert_eq!(out.len(), names.len());
+        for (i, n) in names.iter().enumerate() {
+            let renamed = format!("mcp__{n}");
+            assert_eq!(out[i]["name"], renamed);
+            assert_eq!(reverse.get(&renamed).map(String::as_str), Some(*n));
+        }
+        assert_eq!(reverse.len(), names.len());
     }
 
     #[test]
@@ -1430,8 +1523,8 @@ mod tests {
         // Act: normalize two independent clones.
         let mut a = template.clone();
         let mut b = template.clone();
-        normalize_mcp_tool_names(&mut a);
-        normalize_mcp_tool_names(&mut b);
+        normalize_tool_names_to_mcp(&mut a);
+        normalize_tool_names_to_mcp(&mut b);
 
         // Assert: byte-identical serialized output.
         assert_eq!(
@@ -1459,15 +1552,17 @@ mod tests {
         assert_eq!(CloakMode::default(), CloakMode::Auto);
     }
 
-    // -- regression guard: default config == Increment-1 behavior ----------
+    // -- regression guard: default config == base cloak transforms ---------
 
     /// With a DEFAULT (empty) CloakConfig, the post-cloak body must be
-    /// byte-identical to the Increment-1 output for a representative request:
-    /// the `mcp_` fix still applies, nothing else changes. This is the hard
-    /// regression guard for the opt-in surface.
+    /// byte-identical to the base cloak transforms for a representative
+    /// request: the broadened tool-name normalization still applies, and the
+    /// config defaults add nothing on top. This is the hard regression guard
+    /// for the opt-in surface.
     #[test]
-    fn default_config_byte_identical_to_increment1() {
-        // Arrange: a body exercising billing strip + identity stamp + mcp_.
+    fn default_config_byte_identical_to_base_transforms() {
+        // Arrange: a body exercising billing strip + identity stamp +
+        // tool-name normalization (mcp_ subcase AND a bare name).
         let id = identity();
         let req = ChatRequest::default();
         let template = json!({
@@ -1482,33 +1577,35 @@ mod tests {
             }]
         });
 
-        // Act: one body through the new signature with a default config; a
-        // second body through the SAME transforms but applied directly (the
-        // Increment-1 sequence: strip + identity + metadata + mcp_).
+        // Act: one body through the cloak with a default config; a second
+        // body through the SAME base transforms applied directly (strip +
+        // identity + metadata + tool-name normalization).
         let mut via_config = template.clone();
         cloak_oauth_egress(&mut via_config, &req, &id, true, &CloakConfig::default());
 
-        let mut via_inc1 = template.clone();
-        strip_billing_block(&mut via_inc1);
-        ensure_identity_block(&mut via_inc1);
-        mint_metadata_user_id(&mut via_inc1, &id);
-        let _ = normalize_mcp_tool_names(&mut via_inc1);
+        let mut via_base = template.clone();
+        strip_billing_block(&mut via_base);
+        ensure_identity_block(&mut via_base);
+        mint_metadata_user_id(&mut via_base, &id);
+        let _ = normalize_tool_names_to_mcp(&mut via_base);
 
         // Assert: byte-identical serialized output.
         assert_eq!(
             serde_json::to_string(&via_config).unwrap(),
-            serde_json::to_string(&via_inc1).unwrap()
+            serde_json::to_string(&via_base).unwrap()
         );
-        // And the mcp_ fix definitely applied.
+        // And the BROADENED normalization applied: the mcp_ subcase doubled
+        // its prefix AND the bare name gained the mcp__ prefix.
         assert_eq!(via_config["tools"][0]["name"], "mcp__linear_get_issue");
+        assert_eq!(via_config["tools"][1]["name"], "mcp__Bash");
     }
 
     /// Companion guard for the GENUINE-CC path (is_non_cc=false): with a
-    /// DEFAULT config, the post-cloak body must be byte-identical to the
-    /// Increment-1 CC sequence -- strip_billing_block + normalize_mcp_tool_names
-    /// ONLY, with NO identity block prepended and NO metadata user_id minted.
+    /// DEFAULT config, the post-cloak body must be byte-identical to the base
+    /// CC sequence -- strip_billing_block + normalize_tool_names_to_mcp ONLY,
+    /// with NO identity block prepended and NO metadata user_id minted.
     #[test]
-    fn default_config_byte_identical_to_increment1_genuine_cc() {
+    fn default_config_byte_identical_to_base_transforms_genuine_cc() {
         // Arrange: same representative body as the non-CC guard.
         let id = identity();
         let req = ChatRequest::default();
@@ -1524,23 +1621,24 @@ mod tests {
             }]
         });
 
-        // Act: default config with is_non_cc=false vs. the Increment-1 CC
-        // sequence (billing strip + mcp_ normalize only -- no identity, no
+        // Act: default config with is_non_cc=false vs. the base CC sequence
+        // (billing strip + tool-name normalize only -- no identity, no
         // user_id mint).
         let mut via_config = template.clone();
         cloak_oauth_egress(&mut via_config, &req, &id, false, &CloakConfig::default());
 
-        let mut via_inc1 = template.clone();
-        strip_billing_block(&mut via_inc1);
-        let _ = normalize_mcp_tool_names(&mut via_inc1);
+        let mut via_base = template.clone();
+        strip_billing_block(&mut via_base);
+        let _ = normalize_tool_names_to_mcp(&mut via_base);
 
         // Assert: byte-identical serialized output.
         assert_eq!(
             serde_json::to_string(&via_config).unwrap(),
-            serde_json::to_string(&via_inc1).unwrap()
+            serde_json::to_string(&via_base).unwrap()
         );
-        // The mcp_ fix still applies on the CC path...
+        // The broadened normalization still applies on the CC path...
         assert_eq!(via_config["tools"][0]["name"], "mcp__linear_get_issue");
+        assert_eq!(via_config["tools"][1]["name"], "mcp__Bash");
         // ...but NO identity block was prepended (system[0] is still the
         // client's billing-stripped first block, not the interactive line)
         // and NO metadata was minted.
@@ -1552,7 +1650,10 @@ mod tests {
 
     #[test]
     fn tool_rename_applies_to_tools_and_tool_use_and_records_reverse() {
-        // Arrange: a foo->bar rename across tools + tool_use.
+        // Arrange: an operator rename across tools + tool_use. Because the
+        // tool-name normalization runs FIRST, a bare `foo` is already
+        // `mcp__foo` on the wire by the time the operator pass runs, so the
+        // rename keys on the normalized name `mcp__foo`.
         let id = identity();
         let req = ChatRequest::default();
         let mut body = json!({
@@ -1564,7 +1665,7 @@ mod tests {
         });
         let cfg = CloakConfig {
             tool_rename: vec![ToolRename {
-                from: "foo".into(),
+                from: "mcp__foo".into(),
                 to: "bar".into(),
             }],
             ..CloakConfig::default()
@@ -1576,20 +1677,25 @@ mod tests {
         // Assert: forward rename applied on both surfaces.
         assert_eq!(body["tools"][0]["name"], "bar");
         assert_eq!(body["messages"][0]["content"][0]["name"], "bar");
-        // Reverse map records bar -> foo.
+        // Both reverse hops recorded: the normalization mcp__foo->foo and the
+        // operator rename bar->mcp__foo.
+        assert_eq!(
+            result.tool_reverse.get("mcp__foo").map(String::as_str),
+            Some("foo")
+        );
         assert_eq!(
             result.tool_reverse.get("bar").map(String::as_str),
-            Some("foo")
+            Some("mcp__foo")
         );
     }
 
-    /// Ordering: `mcp_` normalization runs FIRST, then operator tool_rename.
-    /// A rename targeting the post-normalization name `mcp__x` must match
-    /// (because the wire name is already `mcp__x` by the time the operator
-    /// pass runs). A rename keyed on the pre-normalization `mcp_x` must NOT
-    /// match (the `mcp_` pass already changed it).
+    /// Ordering: tool-name normalization runs FIRST, then operator
+    /// tool_rename. A rename targeting the post-normalization name `mcp__x`
+    /// must match (because the wire name is already `mcp__x` by the time the
+    /// operator pass runs). A rename keyed on the pre-normalization `mcp_x`
+    /// must NOT match (the normalization pass already changed it).
     #[test]
-    fn tool_rename_runs_after_mcp_normalization() {
+    fn tool_rename_runs_after_tool_name_normalization() {
         let id = identity();
         let req = ChatRequest::default();
 
@@ -1605,10 +1711,10 @@ mod tests {
         let res_a = cloak_oauth_egress(&mut body_a, &req, &id, false, &cfg_a);
         assert_eq!(
             body_a["tools"][0]["name"], "renamed",
-            "rename keyed on the post-mcp_ name must match"
+            "rename keyed on the normalized name must match"
         );
-        // Both reverse hops are recorded: mcp__x->mcp_x (from the mcp_ pass)
-        // and renamed->mcp__x (from the operator pass).
+        // Both reverse hops are recorded: mcp__x->mcp_x (from the
+        // normalization pass) and renamed->mcp__x (from the operator pass).
         assert_eq!(
             res_a.tool_reverse.get("mcp__x").map(String::as_str),
             Some("mcp_x")
@@ -1619,7 +1725,7 @@ mod tests {
         );
 
         // (b) rename keyed on the PRE-normalization name mcp_x must NOT match
-        // (the mcp_ pass already rewrote it to mcp__x first).
+        // (the normalization pass already rewrote it to mcp__x first).
         let mut body_b = json!({"tools": [{"name": "mcp_x"}]});
         let cfg_b = CloakConfig {
             tool_rename: vec![ToolRename {
@@ -1631,7 +1737,7 @@ mod tests {
         cloak_oauth_egress(&mut body_b, &req, &id, false, &cfg_b);
         assert_eq!(
             body_b["tools"][0]["name"], "mcp__x",
-            "rename keyed on the pre-mcp_ name must NOT match after normalization"
+            "rename keyed on the pre-normalization name must NOT match"
         );
     }
 
@@ -1720,10 +1826,12 @@ mod tests {
     #[test]
     fn sensitive_words_obfuscation_carries_no_reverse() {
         // The full egress with sensitive_words set records NO extra reverse
-        // entries for the obfuscation (zero-width space is invisible).
+        // entries for the obfuscation (zero-width space is invisible). The
+        // tool name is already mcp__-shaped, so the tool-name normalization
+        // adds no reverse entry either -- isolating the obfuscation pass.
         let id = identity();
         let req = ChatRequest::default();
-        let mut body = json!({"system": "secret", "tools": [{"name": "Bash"}]});
+        let mut body = json!({"system": "secret", "tools": [{"name": "mcp__bash"}]});
         let cfg = CloakConfig {
             sensitive_words: vec!["secret".to_string()],
             ..CloakConfig::default()

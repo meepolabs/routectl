@@ -244,8 +244,8 @@ fn translate_usage(u: &AnthropicUsage) -> Usage {
 
 /// Restore the client's original tool names on a normalized response.
 ///
-/// The cloak forward pass renamed single-underscore `mcp_` tool names to
-/// `mcp__` on the wire; `map` carries the per-request reverse (renamed
+/// The cloak forward pass normalized non-`mcp__` tool names to the `mcp__`
+/// prefix on the wire; `map` carries the per-request reverse (renamed
 /// upstream name -> original client name). This reverses tool_use names on
 /// BOTH canonical surfaces produced by `walk_content_blocks`:
 /// - the OpenAI-shape `choices[].message.tool_calls[].function.name`
@@ -555,6 +555,70 @@ mod tests {
             p,
             ContentPart::Known(KnownContentPart::ToolUse { name, .. })
                 if name == "mcp_linear_get_issue"
+        )));
+    }
+
+    #[test]
+    fn round_trip_bare_tool_name_forward_cloak_then_reverse_response() {
+        use super::super::cloak::{cloak_oauth_egress, ClaudeCodeIdentity, CloakConfig};
+        use routectl_core::ChatRequest;
+
+        // Arrange: an outgoing request with a BARE snake_case tool name (the
+        // hermes-style set) on both tools[] and a prior tool_use in history.
+        let id = ClaudeCodeIdentity::mint(Some("sess"));
+        let req = ChatRequest::default();
+        let mut body = json!({
+            "tools": [{"name": "read_file"}],
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use", "id": "t1",
+                    "name": "read_file", "input": {}
+                }]
+            }]
+        });
+
+        // Act 1: forward cloak. The bare name is prefixed with mcp__.
+        let result = cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
+        assert_eq!(body["tools"][0]["name"], "mcp__read_file");
+        assert_eq!(body["messages"][0]["content"][0]["name"], "mcp__read_file");
+        assert_eq!(
+            result
+                .tool_reverse
+                .get("mcp__read_file")
+                .map(String::as_str),
+            Some("read_file")
+        );
+
+        // Act 2: a synthetic upstream response uses the upstream (prefixed)
+        // name; reverse it through normalize + reverse_tool_names.
+        let raw = json!({
+            "id": "msg_rt",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "tool_use",
+                "id": "t1",
+                "name": "mcp__read_file",
+                "input": {"path": "/x"}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let mut resp = normalize("test", raw).expect("normalize");
+        reverse_tool_names(&mut resp, &result.tool_reverse);
+
+        // Assert: BOTH surfaces reversed to the client's bare original name.
+        let fn_name = resp.choices[0].message.tool_calls.as_ref().unwrap()[0]["function"]["name"]
+            .as_str()
+            .unwrap();
+        assert_eq!(fn_name, "read_file");
+        let MessageContent::Parts(parts) = &resp.choices[0].message.content else {
+            panic!("expected Parts content");
+        };
+        assert!(parts.iter().any(|p| matches!(
+            p,
+            ContentPart::Known(KnownContentPart::ToolUse { name, .. })
+                if name == "read_file"
         )));
     }
 

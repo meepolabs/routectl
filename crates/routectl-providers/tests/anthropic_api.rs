@@ -1057,6 +1057,53 @@ mod tests {
         }
     }
 
+    /// Stream reversal for a BARE tool name: a tool_use block whose upstream
+    /// name is the prefixed `mcp__read_file` (the cloak's forward form for a
+    /// bare `read_file`) is reversed ONCE at content_block_start via the
+    /// per-request reverse map; every input_json_delta chunk inherits the
+    /// client's original bare name.
+    #[test]
+    fn sse_bare_tool_use_name_reversed_via_reverse_map() {
+        use routectl_providers::anthropic_api::sse::SseState;
+
+        let mut state = SseState::default();
+        state
+            .tool_reverse
+            .insert("mcp__read_file".to_string(), "read_file".to_string());
+        let pid = "test";
+        let mut chunks = Vec::new();
+
+        let events = vec![
+            r#"{"type":"message_start","message":{"id":"msg_bare","model":"claude-opus-4-8","usage":{"input_tokens":20,"output_tokens":0}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"mcp__read_file"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"/x\"}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+        ];
+
+        for event_data in &events {
+            if let Some(chunk) = state.parse_event(pid, event_data).unwrap() {
+                chunks.push(chunk);
+            }
+        }
+
+        let tool_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.choices[0].delta.tool_calls.is_some())
+            .collect();
+        assert!(
+            tool_chunks.len() >= 2,
+            "expected a tool-call chunk per input_json_delta"
+        );
+        for c in &tool_chunks {
+            let tc = c.choices[0].delta.tool_calls.as_ref().unwrap();
+            assert_eq!(
+                tc[0]["function"]["name"], "read_file",
+                "reversed bare name must ride on the start AND every delta chunk"
+            );
+        }
+    }
+
     /// Stream contract: `server_tool_use` on the closing
     /// `message_delta.usage` lands on the canonical chunk usage.
     #[test]
