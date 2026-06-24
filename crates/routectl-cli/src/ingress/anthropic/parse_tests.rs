@@ -73,6 +73,114 @@ fn parse_request_translates_metadata_user_id_to_user() {
     assert_eq!(req.user.as_deref(), Some("abc-123"));
 }
 
+fn headers_with_session(value: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-claude-code-session-id",
+        axum::http::HeaderValue::from_str(value).unwrap(),
+    );
+    headers
+}
+
+#[test]
+fn parse_request_captures_inbound_session_key_from_header() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024
+    });
+    let req = AnthropicIngress
+        .parse_request(&headers_with_session("sid-from-header"), body)
+        .unwrap();
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-from-header"),
+    );
+}
+
+#[test]
+fn parse_request_falls_back_to_metadata_session_id() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "metadata": {"session_id": "sid-from-metadata"}
+    });
+    let req = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap();
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-from-metadata"),
+    );
+}
+
+#[test]
+fn parse_request_header_session_key_wins_over_metadata() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "metadata": {"session_id": "sid-from-metadata"}
+    });
+    let req = AnthropicIngress
+        .parse_request(&headers_with_session("sid-from-header"), body)
+        .unwrap();
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-from-header"),
+    );
+}
+
+#[test]
+fn parse_request_keyless_yields_none_session_key() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024
+    });
+    let req = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap();
+    assert_eq!(req.routectl_internal.inbound_session_key, None);
+}
+
+#[test]
+fn parse_request_empty_header_session_key_falls_through_to_metadata() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "metadata": {"session_id": "sid-from-metadata"}
+    });
+    let req = AnthropicIngress
+        .parse_request(&headers_with_session("   "), body)
+        .unwrap();
+    assert_eq!(
+        req.routectl_internal.inbound_session_key.as_deref(),
+        Some("sid-from-metadata"),
+    );
+}
+
+#[test]
+fn parse_request_preserves_metadata_session_id_in_provider_extras() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "metadata": {"session_id": "sid-from-metadata", "user_id": "abc-123"}
+    });
+    let req = AnthropicIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap();
+    // Capturing the session key must be a non-destructive read: the full
+    // `metadata` object (including `session_id`) still round-trips into
+    // provider_extras for Anthropic-shape egresses.
+    let extras = req.provider_extras.unwrap();
+    assert_eq!(extras["metadata"]["session_id"], "sid-from-metadata");
+    assert_eq!(extras["metadata"]["user_id"], "abc-123");
+}
+
 #[test]
 fn parse_request_anthropic_only_fields_land_in_provider_extras() {
     let body = json!({

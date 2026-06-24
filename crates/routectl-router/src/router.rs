@@ -2159,12 +2159,18 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // `Default::default()`, so without this take the merged provider +
     // model header_extras would be dropped before the egress reads them.
     let composed_header_extras = req.routectl_internal.header_extras.take();
+    // Preserve the ingress-captured inbound per-conversation session key:
+    // like `claude_code_headers`, it is inbound-request data, not a
+    // per-model knob, so the per-attempt rebuild from `Default::default()`
+    // must carry it across or it resets to `None` on the 2nd chain attempt.
+    let captured_inbound_session_key = req.routectl_internal.inbound_session_key.take();
     let mut internal = RoutectlInternal::default();
     internal.reasoning_dialect = target.reasoning_dialect.map(|d| d.into());
     internal.history_reasoning = target.history_reasoning.map(|h| h.into());
     internal.claude_code_headers = captured_claude_code_headers;
     internal.provenance = captured_provenance;
     internal.header_extras = composed_header_extras;
+    internal.inbound_session_key = captured_inbound_session_key;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
@@ -3522,6 +3528,31 @@ mod merge_header_extras_tests {
             req.routectl_internal.provenance,
             routectl_core::RequestProvenance::AnthropicIngress,
             "ingress provenance must survive the per-attempt overlay rebuild",
+        );
+    }
+
+    /// Regression guard for the same per-attempt overlay rebuild hazard:
+    /// the ingress-captured inbound per-conversation session key must
+    /// survive the rebuild rather than reset to `None` on a later attempt.
+    #[test]
+    fn apply_layered_overlays_preserves_inbound_session_key() {
+        let config = Config::default();
+        let model: Arc<ResolvedModel> = Arc::new(ResolvedModel::new(
+            "nick",
+            "test-prov",
+            Arc::new(StubProvider),
+            "claude-x",
+        ));
+        let target = into_one_dispatch_target(model);
+
+        let mut req = req_with_betas(vec![]);
+        req.routectl_internal.inbound_session_key = Some("sid-abc".into());
+        apply_layered_overlays(&config, &target, &mut req);
+
+        assert_eq!(
+            req.routectl_internal.inbound_session_key.as_deref(),
+            Some("sid-abc"),
+            "inbound session key must survive the per-attempt overlay rebuild",
         );
     }
 }

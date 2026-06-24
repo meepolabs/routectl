@@ -83,6 +83,12 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     // the request to the Anthropic Messages dialect.
     req.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
 
+    // Capture the INBOUND per-conversation key (header wins, then
+    // body `metadata.session_id`). Borrows `metadata` so it stays intact
+    // for the round-trip re-insertion into extras below. Never logged raw.
+    req.routectl_internal.inbound_session_key =
+        resolve_inbound_session_key(headers, metadata.as_ref());
+
     // Translate thinking config.
     if let Some(t) = thinking {
         req.reasoning = Some(translate_thinking(&t));
@@ -134,6 +140,31 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     validate_request_cache_control(&req)?;
 
     Ok(req)
+}
+
+/// Resolve the INBOUND per-conversation session key. Priority: the
+/// inbound `x-claude-code-session-id` HTTP header (axum lowercases
+/// inbound names), then the body `metadata.session_id`. Each candidate
+/// is trimmed; an empty-after-trim value is treated as absent and falls
+/// through. Returns `None` when neither is present. The `metadata`
+/// argument is borrowed, not consumed, so the object still round-trips.
+fn resolve_inbound_session_key(headers: &HeaderMap, metadata: Option<&Value>) -> Option<String> {
+    if let Some(h) = headers.get("x-claude-code-session-id") {
+        if let Ok(s) = h.to_str() {
+            let t = s.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+
+    metadata
+        .and_then(|m| m.as_object())
+        .and_then(|o| o.get("session_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 /// Field names the canonical `ChatRequest` deserializes directly from
