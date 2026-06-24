@@ -19,11 +19,12 @@ use routectl_core::context_reduction::{apply_json_minify, ReductionOutcome};
 use routectl_core::schema::Role;
 use routectl_core::{scan_volatile, ChatRequest, Error, Result};
 use routectl_router::{
-    break_even_k, evaluate, lookup_with_overrides, validate_alias_chain_targets,
-    validate_alias_patterns, validate_bedrock_global_config, validate_overrides,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy, AliasPattern,
-    AliasValue, CachePricingOverride, CachePricingRow, Config, GateDecision, KeepReason,
-    PrefixReductionCandidate, ALIAS_MAX_RECURSION_DEPTH,
+    break_even_k, evaluate, lookup_with_overrides, propose_steady_state_trim,
+    validate_alias_chain_targets, validate_alias_patterns, validate_bedrock_global_config,
+    validate_overrides, validate_reasoning_defaults, validate_registry_patterns,
+    validate_retry_policy, AliasPattern, AliasValue, CachePricingOverride, CachePricingRow, Config,
+    GateDecision, KeepReason, PrefixReductionCandidate, SteadyStateTrimParams,
+    ALIAS_MAX_RECURSION_DEPTH,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -123,6 +124,11 @@ pub struct ProjectionArgs<'a> {
     pub hypothetical_k: Option<f64>,
     pub c_after: Option<u64>,
     pub ttl_tier: &'a str,
+    /// When set, compute the REAL steady-state-trim candidate for the request
+    /// (via `propose_steady_state_trim`) and price IT, instead of pricing an
+    /// operator-supplied `--hypothetical-d`. Mutually exclusive with
+    /// `--hypothetical-d` (the parser rejects supplying both).
+    pub steady_state: bool,
 }
 
 /// The advisory cache-break economics projection: the resolved pricing cell,
@@ -151,6 +157,12 @@ pub struct EconomicsProjection {
     /// The keep/break verdict at `--hypothetical-k`, present only when that
     /// flag was supplied.
     pub verdict: Option<GateDecision>,
+    /// For the `--steady-state` projection: whether the deterministic trimmer
+    /// produced a real cut for this request (`Some(true)`), declined because no
+    /// safe trigger-clearing cut exists (`Some(false)`), or this is the
+    /// `--hypothetical-d` path where the steady-state trimmer was not run
+    /// (`None`).
+    pub steady_state_would_trim: Option<bool>,
 }
 
 /// Compute the offline report from a parsed request and the resolved target's
@@ -219,7 +231,45 @@ fn build_economics(
     let c = report_total_tokens as u64;
     let c_after = args.c_after.unwrap_or(c);
     let candidate = PrefixReductionCandidate::new(d, c_after, c);
+    price_candidate(candidate, target, overrides, args, None)
+}
 
+/// Build the advisory economics projection for the REAL steady-state-trim
+/// candidate of `req`, instead of an operator-supplied `--hypothetical-d`.
+///
+/// Runs the deterministic trimmer; when it produces a cut, the cut's own
+/// `(d, c_after, c)` candidate is priced and `steady_state_would_trim` is
+/// `Some(true)`. When the trimmer declines (request too short / below trigger /
+/// no safe elidable span), the projection reports `Some(false)` and a zero
+/// candidate that the gate reads as "nothing to remove" -- a KEEP. The
+/// operator's `--hypothetical-k` and `[cache_pricing]` overrides still apply.
+fn build_steady_state_economics(
+    req: &ChatRequest,
+    target: Option<(&'static str, String)>,
+    overrides: &BTreeMap<String, CachePricingOverride>,
+    args: &ProjectionArgs,
+) -> EconomicsProjection {
+    let params = SteadyStateTrimParams::default();
+    match propose_steady_state_trim(req, &params) {
+        Some(plan) => price_candidate(plan.candidate, target, overrides, args, Some(true)),
+        None => {
+            let zero = PrefixReductionCandidate::new(0, 0, 0);
+            price_candidate(zero, target, overrides, args, Some(false))
+        }
+    }
+}
+
+/// Shared pricing core: resolve the pricing cell for `target`, compute the
+/// break-even K* and (when `--hypothetical-k` was given) the keep/break
+/// verdict, and assemble the projection. `would_trim` flags whether this came
+/// from the steady-state trimmer (`Some`) or the hypothetical-d path (`None`).
+fn price_candidate(
+    candidate: PrefixReductionCandidate,
+    target: Option<(&'static str, String)>,
+    overrides: &BTreeMap<String, CachePricingOverride>,
+    args: &ProjectionArgs,
+    would_trim: Option<bool>,
+) -> EconomicsProjection {
     let (provider_kind, model, row) = match &target {
         Some((kind, model)) => (
             Some((*kind).to_string()),
@@ -247,6 +297,7 @@ fn build_economics(
         break_even_k: break_even,
         candidate,
         verdict,
+        steady_state_would_trim: would_trim,
     }
 }
 
@@ -446,9 +497,19 @@ pub fn run(
         config.reduction.enabled,
     );
 
-    // The economics projection is opt-in: present ONLY when --hypothetical-d
-    // was supplied. Without it the report renders exactly as before.
-    if projection.hypothetical_d.is_some() {
+    // The economics projection is opt-in. Two mutually-exclusive entry points:
+    //   --steady-state   -> price the REAL deterministic trim candidate.
+    //   --hypothetical-d -> price an operator-supplied hypothetical cut.
+    // Without either, the report renders exactly as before.
+    if projection.steady_state {
+        let target = resolve_target(&config, alias);
+        report.economics = Some(build_steady_state_economics(
+            &req,
+            target,
+            &config.cache_pricing,
+            &projection,
+        ));
+    } else if projection.hypothetical_d.is_some() {
         let target = resolve_target(&config, alias);
         report.economics = Some(build_economics(
             report.total.approx_tokens,
@@ -457,7 +518,10 @@ pub fn run(
             &projection,
         ));
     } else if projection.c_after.is_some() || projection.hypothetical_k.is_some() {
-        eprintln!("warning: --c-after / --hypothetical-k have no effect without --hypothetical-d");
+        eprintln!(
+            "warning: --c-after / --hypothetical-k have no effect without \
+             --hypothetical-d or --steady-state"
+        );
     }
 
     print_report(alias, &report);
@@ -514,6 +578,15 @@ fn render_economics(economics: &EconomicsProjection) -> String {
         "target: {provider_kind} / {model}  tier={}",
         economics.tier
     );
+    // For the steady-state path, lead with the deterministic trimmer's
+    // would-trim decision before the candidate it priced.
+    if let Some(would_trim) = economics.steady_state_would_trim {
+        let _ = writeln!(
+            out,
+            "steady-state trim: would-trim {}",
+            if would_trim { "yes" } else { "no" }
+        );
+    }
     let _ = writeln!(out, "pricing cell: {}", trust_label(economics.verified));
     let _ = writeln!(
         out,
@@ -1015,6 +1088,7 @@ mystery = "mystery_model"
             hypothetical_k: None,
             c_after: Some(200_000),
             ttl_tier: "5m",
+            steady_state: false,
         };
 
         // Act: C is the report's total approx tokens; pass 200_000 directly.
@@ -1042,6 +1116,7 @@ mystery = "mystery_model"
             hypothetical_k: Some(50.0001),
             c_after: Some(200_000),
             ttl_tier: "5m",
+            steady_state: false,
         };
 
         // Act
@@ -1075,6 +1150,7 @@ mystery = "mystery_model"
             hypothetical_k: Some(1_000_000.0),
             c_after: Some(200_000),
             ttl_tier: "5m",
+            steady_state: false,
         };
 
         // Act
@@ -1109,6 +1185,7 @@ mystery = "mystery_model"
             hypothetical_k: Some(999.0),
             c_after: None,
             ttl_tier: "5m",
+            steady_state: false,
         };
 
         // Act: C defaults from the report total; C_after defaults to C.
@@ -1160,6 +1237,7 @@ mystery = "mystery_model"
             hypothetical_k: None,
             c_after: None,
             ttl_tier: "5m",
+            steady_state: false,
         };
         let mut report = build_report(&req, Some(true), true, true);
 
@@ -1204,6 +1282,7 @@ mystery = "mystery_model"
             hypothetical_k: Some(1_000_000.0),
             c_after: Some(1_500),
             ttl_tier: "5m",
+            steady_state: false,
         };
 
         // Act
@@ -1249,6 +1328,7 @@ mystery = "mystery_model"
             hypothetical_k: None,
             c_after: Some(200_000),
             ttl_tier: "1h",
+            steady_state: false,
         };
 
         // Act
@@ -1282,6 +1362,7 @@ mystery = "mystery_model"
             hypothetical_k: Some(1_000_000.0),
             c_after: Some(200_000),
             ttl_tier: "5m",
+            steady_state: false,
         };
 
         // Baseline: no override -> unverified -> KEEP/insufficient-data.
@@ -1339,6 +1420,7 @@ mystery = "mystery_model"
             hypothetical_k: Some(49.9999),
             c_after: Some(200_000),
             ttl_tier: "5m",
+            steady_state: false,
         };
 
         // Act
@@ -1357,6 +1439,153 @@ mystery = "mystery_model"
         assert!(
             rendered.contains("net-negative"),
             "verdict should convey net-negative: {rendered}"
+        );
+    }
+
+    // -- steady-state trim projection ---------------------------------
+
+    /// A bulky tool_result message carrying a large JSON-string payload, using
+    /// the same canonical `KnownContentPart::ToolResult` shape the shared
+    /// `test_utils` builders use.
+    fn bulky_tool_result(payload: &str) -> Message {
+        tool_result_msg(json!(payload), None)
+    }
+
+    /// An assistant tool_use turn carrying a large JSON-string input, the
+    /// canonical `KnownContentPart::ToolUse` shape.
+    fn bulky_tool_use(payload: &str) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::ToolUse {
+                id: "toolu_1".into(),
+                name: "search".into(),
+                input: json!(payload),
+                cache_control: None,
+            })]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Build a long tool-heavy request that clears the steady-state trigger:
+    /// head + many bulky tool turns + a small recent tail.
+    fn long_tool_heavy_request() -> ChatRequest {
+        let payload = "z".repeat(48_000); // ~12k tokens each at 4 bytes/token
+        let mut messages = vec![user_text("head one"), user_text("head two")];
+        for _ in 0..6 {
+            messages.push(bulky_tool_use(&payload));
+            messages.push(bulky_tool_result(&payload));
+        }
+        for i in 0..6 {
+            messages.push(user_text(&format!("recent {i}")));
+        }
+        ChatRequest {
+            model: "claude-opus-4-8".into(),
+            messages,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_steady_state_economics_renders_real_candidate_for_long_request() {
+        // Arrange: a verified anthropic-api / claude-opus-4-8 target and a long
+        // tool-heavy request the deterministic trimmer can cut.
+        let config = economics_config();
+        let target = resolve_target(&config, "heavy");
+        let req = long_tool_heavy_request();
+        let args = ProjectionArgs {
+            hypothetical_d: None,
+            hypothetical_k: Some(1_000.0),
+            c_after: None,
+            ttl_tier: "5m",
+            steady_state: true,
+        };
+
+        // Act
+        let economics = build_steady_state_economics(&req, target, &config.cache_pricing, &args);
+
+        // Assert: a real cut was proposed, a live K* exists, and the rendered
+        // projection surfaces the would-trim line + the candidate.
+        assert_eq!(economics.steady_state_would_trim, Some(true));
+        assert!(
+            economics.candidate.d > 0,
+            "real candidate should free tokens"
+        );
+        assert!(economics.verified);
+        assert!(economics.break_even_k.is_some());
+        let rendered = render_economics(&economics);
+        assert!(
+            rendered.contains("steady-state trim: would-trim yes"),
+            "rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("D={}", economics.candidate.d)),
+            "rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn build_steady_state_economics_reports_no_trim_for_short_request() {
+        // Arrange: a tiny request well below the trigger -- the trimmer declines.
+        let config = economics_config();
+        let target = resolve_target(&config, "heavy");
+        let req = ChatRequest {
+            model: "claude-opus-4-8".into(),
+            messages: vec![user_text("hi"), user_text("there")],
+            ..Default::default()
+        };
+        let args = ProjectionArgs {
+            hypothetical_d: None,
+            hypothetical_k: Some(1_000.0),
+            c_after: None,
+            ttl_tier: "5m",
+            steady_state: true,
+        };
+
+        // Act
+        let economics = build_steady_state_economics(&req, target, &config.cache_pricing, &args);
+
+        // Assert: would-trim no, a zero candidate, and a KEEP verdict.
+        assert_eq!(economics.steady_state_would_trim, Some(false));
+        assert_eq!(economics.candidate.d, 0);
+        assert_eq!(
+            economics.verdict,
+            Some(GateDecision::Keep {
+                reason: KeepReason::NoCandidate
+            })
+        );
+        let rendered = render_economics(&economics);
+        assert!(
+            rendered.contains("steady-state trim: would-trim no"),
+            "rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn hypothetical_d_path_leaves_steady_state_field_none() {
+        // The --hypothetical-d path must not set the steady-state would-trim
+        // field, so its rendered output is unchanged (no would-trim line).
+        let config = economics_config();
+        let target = resolve_target(&config, "heavy");
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: None,
+            c_after: Some(200_000),
+            ttl_tier: "5m",
+            steady_state: false,
+        };
+
+        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
+
+        assert_eq!(economics.steady_state_would_trim, None);
+        let rendered = render_economics(&economics);
+        assert!(
+            !rendered.contains("steady-state trim:"),
+            "hypothetical-d output must not show a steady-state line: {rendered}"
         );
     }
 }

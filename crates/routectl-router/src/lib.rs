@@ -6,6 +6,7 @@
 
 pub mod cache_pricing;
 pub mod config;
+pub mod context_trim;
 pub mod cost_gate;
 pub mod factory;
 pub(crate) mod feature_keys;
@@ -26,6 +27,10 @@ pub use config::{
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
+pub use context_trim::{
+    apply_trim_plan, propose_steady_state_trim, ElisionMark, SteadyStateTrimParams,
+    SteadyStateTrimPlan,
+};
 pub use cost_gate::{break_even_k, evaluate, GateDecision, KeepReason, PrefixReductionCandidate};
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;

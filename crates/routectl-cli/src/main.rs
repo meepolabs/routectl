@@ -138,8 +138,15 @@ enum Cmd {
         /// OPTIONAL cache-break economics projection: the size (in tokens)
         /// of a proposed cache-prefix cut. Supplying this flag turns ON the
         /// projection section; omitting it leaves the report unchanged.
-        #[arg(long = "hypothetical-d")]
+        /// Mutually exclusive with `--steady-state`.
+        #[arg(long = "hypothetical-d", conflicts_with = "steady_state")]
         hypothetical_d: Option<u64>,
+        /// OPTIONAL: compute and price the REAL deterministic steady-state
+        /// trim candidate for the request (front-anchored old-tool-content
+        /// elision) instead of a hypothetical cut. Turns ON the projection
+        /// section. Mutually exclusive with `--hypothetical-d`.
+        #[arg(long = "steady-state")]
+        steady_state: bool,
         /// OPTIONAL assumed future-reuse count. When given, also print a
         /// keep/break VERDICT for the cut. When omitted, only the break-even
         /// K* threshold is printed.
@@ -309,6 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             alias,
             request,
             hypothetical_d,
+            steady_state,
             hypothetical_k,
             c_after,
             ttl_tier,
@@ -319,6 +327,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hypothetical_k,
                 c_after,
                 ttl_tier: &ttl_tier,
+                steady_state,
             };
             if let Err(e) = commands::prompt_size::run(config, &alias, &request, projection) {
                 eprintln!("error: {e}");
