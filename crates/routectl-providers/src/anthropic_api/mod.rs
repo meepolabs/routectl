@@ -546,6 +546,11 @@ impl AnthropicApiProvider {
             return None;
         }
         let identity = self.identity.as_ref()?;
+        // Trust boundary: the session-id header is client-supplied, so this
+        // non-CC signal is advisory, not authoritative. The fail-safe is that
+        // a misclassification cannot cause a silent billing leak -- a wrong
+        // call yields an upstream rejection, not a paid overage applied
+        // quietly.
         let is_non_cc = match self.cfg.cloak.mode {
             cloak::CloakMode::Always => true,
             // `Never` handled above; `Auto` falls through to the heuristic.
@@ -728,10 +733,11 @@ impl Provider for AnthropicApiProvider {
         }
 
         // Cloak the outgoing body on the OAuth anthropic-api surface:
-        // always strip the billing block; for a non-CC client also stamp
-        // the identity system block and metadata user_id. Also normalize
-        // every non-`mcp__` tool name to the `mcp__` prefix. Runs after
-        // normalize_request and before serialize/resign. The returned
+        // always strip the billing block; for a non-CC client also reduce
+        // `system` to the identity line only (relocating the client system
+        // into the first user message) and mint the metadata user_id. Also
+        // normalize every non-`mcp__` tool name to the `mcp__` prefix. Runs
+        // after normalize_request and before serialize/resign. The returned
         // reverse map restores the client's original tool names on the
         // response below.
         let cloak_result = self.cloak_body(&mut body, &req);
@@ -2141,7 +2147,8 @@ mod tests {
             "system": [
                 {"type": "text", "text": "x-anthropic-billing-header: v=1; cch=abcde;"},
                 {"type": "text", "text": "client system prompt"},
-            ]
+            ],
+            "messages": [{"role": "user", "content": "hello"}]
         })
     }
 
@@ -2161,8 +2168,10 @@ mod tests {
     }
 
     /// (a) OauthBearer + api.anthropic.com + NON-CC req (no captured
-    /// `x-claude-code-session-id`): the body gains the interactive identity
-    /// as `system[0]`, mints `metadata.user_id`, AND strips the billing block.
+    /// `x-claude-code-session-id`): the body's `system` is reduced to the
+    /// interactive identity line only, the client system is relocated into
+    /// the first user message as a `<system-reminder>`, `metadata.user_id` is
+    /// minted, AND the billing block is stripped.
     #[test]
     fn cloak_body_non_cc_stamps_identity_and_metadata_and_strips_billing() {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
@@ -2176,13 +2185,18 @@ mod tests {
 
         provider.cloak_body(&mut body, &req);
 
-        // Identity stamped as the first system block.
+        // System is identity-only.
+        let arr = body["system"].as_array().expect("system is array");
+        assert_eq!(arr.len(), 1, "system must be reduced to identity only");
         assert_eq!(
-            body["system"][0]["text"],
+            arr[0]["text"],
             "You are Claude Code, Anthropic's official CLI for Claude."
         );
-        // Client system block preserved after the prepended identity.
-        assert_eq!(body["system"][1]["text"], "client system prompt");
+        // Client system relocated into the first user message as a reminder.
+        assert_eq!(
+            body["messages"][0]["content"][0]["text"],
+            "<system-reminder>\nclient system prompt\n</system-reminder>"
+        );
         // Metadata user_id minted.
         assert!(
             body["metadata"]["user_id"].is_string(),
@@ -2223,6 +2237,14 @@ mod tests {
         assert!(
             body.get("metadata").is_none(),
             "genuine-CC path must not mint metadata"
+        );
+        // The genuine-CC path must not relocate the client system: no
+        // system-reminder block appears anywhere.
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("<system-reminder>"),
+            "genuine-CC path must not add a system-reminder block"
         );
     }
 

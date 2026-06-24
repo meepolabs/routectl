@@ -6,10 +6,14 @@
 //! system block, and a metadata `user_id`; a non-CC client (a bare
 //! OpenAI/Anthropic SDK, a custom script) supplies none of these. This
 //! module mints a stable per-provider identity once and rewrites the
-//! outgoing body so a non-CC client inherits the same shape: the
-//! interactive identity system block and a corpus-shaped metadata
-//! `user_id`. The billing/attribution block is always stripped (CC or
-//! not) so the client fingerprint never reaches the upstream.
+//! outgoing body so a non-CC client inherits the same shape: the `system`
+//! field is reduced to the interactive identity line only, the client's
+//! real system content is relocated verbatim into the first user message as
+//! a `<system-reminder>` block (so client behavior is preserved without the
+//! client fingerprint reaching the subscription classifier), and a
+//! corpus-shaped metadata `user_id` is minted. The billing/attribution
+//! block is always stripped (CC or not) so the client fingerprint never
+//! reaches the upstream.
 //!
 //! Shapes here are fixed from empirical capture against the live endpoint;
 //! do not redesign them.
@@ -67,8 +71,10 @@ pub struct ToolRename {
 }
 
 /// Opt-in, empty-default configuration surface for the OAuth-egress cloak.
-/// `CloakConfig::default()` leaves behavior identical to Increment 1: mode
-/// `Auto`, no strict mode, no operator tool renames, no sensitive words.
+/// `CloakConfig::default()` selects the standard cloak: mode `Auto`,
+/// `strict_mode` false (relocate the client system into the first user
+/// message rather than dropping it), no operator tool renames, no sensitive
+/// words.
 ///
 /// `Debug` is hand-rolled (NOT derived) to print mode + strict_mode +
 /// COUNTS only. The configured `tool_rename` pairs and `sensitive_words`
@@ -81,9 +87,13 @@ pub struct ToolRename {
 pub struct CloakConfig {
     /// Cloak mode. Default `Auto` (Increment-1 heuristic).
     pub mode: CloakMode,
-    /// Reserved strict-mode flag. Default false. Carried through the
-    /// config surface for forward compatibility; no behavior is gated on
-    /// it in this increment.
+    /// How the non-CC client's real `system` content is handled after the
+    /// `system` field is reduced to the identity line only. Default false:
+    /// relocate the client system verbatim into the first user message as a
+    /// `<system-reminder>` block (client behavior preserved). When true:
+    /// drop the client system entirely (identity-only `system`, no
+    /// reminder). Egress-only: the response never echoes `system`, so there
+    /// is no reverse map for this transform.
     pub strict_mode: bool,
     /// Operator tool renames, applied after the tool-name normalization.
     /// Default empty (no renames). IMPORTANT: because normalization runs
@@ -154,6 +164,15 @@ const RECOGNIZED_IDENTITY_LINES: &[&str] = &[
 /// (first) recognized line.
 const INTERACTIVE_IDENTITY_LINE: &str = RECOGNIZED_IDENTITY_LINES[0];
 
+/// Opening tag wrapping the relocated client system content in the first
+/// user message. The client's real system prompt is moved here verbatim so
+/// the subscription classifier sees only the Claude Code identity in
+/// `system` while the client's behavior is preserved.
+const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
+
+/// Closing tag for the relocated client system content.
+const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
+
 /// Stable Claude Code identity minted once per provider instance for the
 /// OAuth anthropic-api egress. The values are reused across every request
 /// the provider handles so a non-CC client presents one consistent
@@ -198,8 +217,10 @@ impl ClaudeCodeIdentity {
 
 /// Apply the full cloak to the outgoing body on the OAuth anthropic-api
 /// surface. The billing block is stripped unconditionally (even for a
-/// genuine CC client); the identity system block and metadata `user_id`
-/// are minted only for a non-CC client.
+/// genuine CC client). For a non-CC client the `system` field is reduced to
+/// the interactive identity line only, the client's real system content is
+/// relocated into the first user message as a `<system-reminder>` block
+/// (unless `strict_mode` drops it), and a metadata `user_id` is minted.
 ///
 /// Order is load-bearing and cache-safe: identity/billing transforms
 /// first, then the always-on tool-name normalization (every non-`mcp__`
@@ -217,7 +238,7 @@ pub(crate) fn cloak_oauth_egress(
 ) -> CloakResult {
     strip_billing_block(body);
     if is_non_cc {
-        ensure_identity_block(body);
+        relocate_client_system(body, config.strict_mode);
         mint_metadata_user_id(body, identity);
     }
     let mut tool_reverse = normalize_tool_names_to_mcp(body);
@@ -520,48 +541,164 @@ fn block_is_billing(block: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Ensure the body's `system` opens with the interactive Claude Code
-/// identity line. A no-op when the first block already is a recognized
-/// identity line; otherwise the interactive line is prepended (array) or
-/// the whole string is wrapped behind it. Injected WITHOUT
-/// `cache_control` -- no cache breakpoint is added.
-fn ensure_identity_block(body: &mut Value) {
-    if first_block_is_recognized(body.get("system")) {
+/// Reduce a non-CC client's `system` to the interactive identity line only,
+/// relocating the client's real system content into the first user message.
+///
+/// The subscription classifier runs a substance check on `system`; a
+/// third-party agent's system prompt fails it wholesale. So the client's
+/// real system content (already billing-stripped) is captured, the `system`
+/// field is replaced with the identity line only, and -- unless
+/// `strict_mode` is set -- the captured content is reattached as a
+/// `<system-reminder>` block at the front of the first user message so the
+/// client's intended behavior is preserved.
+///
+/// Recognized identity lines in the captured content are excluded (we
+/// re-add our own identity, so an existing identity line is never
+/// duplicated into the reminder). The transform is egress-only: the
+/// response never echoes `system`, so there is no reverse map.
+fn relocate_client_system(body: &mut Value, strict_mode: bool) {
+    // Run the transform as an all-or-nothing unit: if the body root is not a
+    // JSON object there is no `system` / `messages` to rewrite, so bail before
+    // any partial mutation leaves the body in an inconsistent state.
+    if body.as_object().is_none() {
         return;
     }
-    let identity = identity_block();
-    let new_system = match body.get_mut("system") {
-        Some(Value::Array(blocks)) => {
-            blocks.insert(0, identity);
-            return;
-        }
-        Some(Value::String(s)) => {
-            let existing = json!({"type": "text", "text": std::mem::take(s)});
-            Value::Array(vec![identity, existing])
-        }
-        _ => Value::Array(vec![identity]),
+    let captured = capture_client_system(body.get("system"));
+    set_identity_only_system(body);
+
+    if strict_mode {
+        return;
+    }
+    let Some(reminder) = build_reminder_block(&captured) else {
+        return;
     };
-    if let Some(obj) = body.as_object_mut() {
-        obj.insert("system".into(), new_system);
+    insert_reminder_into_first_user(body, reminder);
+}
+
+/// A captured client system text block: its text plus any `cache_control`
+/// it carried (so a cache breakpoint can be preserved on relocation).
+struct CapturedSystemBlock {
+    text: String,
+    cache_control: Option<Value>,
+}
+
+/// Capture the client's real system content, excluding any block whose
+/// trimmed text is a recognized identity line (we re-add our own identity).
+/// Handles the string form, the array-of-text-blocks form, and absence.
+fn capture_client_system(system: Option<&Value>) -> Vec<CapturedSystemBlock> {
+    match system {
+        Some(Value::String(s)) => {
+            if RECOGNIZED_IDENTITY_LINES.contains(&s.trim()) {
+                return Vec::new();
+            }
+            vec![CapturedSystemBlock {
+                text: s.clone(),
+                cache_control: None,
+            }]
+        }
+        Some(Value::Array(blocks)) => blocks.iter().filter_map(capture_one_system_block).collect(),
+        _ => Vec::new(),
     }
 }
 
-/// True when `system` already presents a recognized identity line as its
-/// first block (array `[0].text`) or as the whole string.
-fn first_block_is_recognized(system: Option<&Value>) -> bool {
-    let text = match system {
-        Some(Value::Array(blocks)) => blocks
-            .first()
-            .and_then(|b| b.get("text"))
-            .and_then(Value::as_str),
-        Some(Value::String(s)) => Some(s.as_str()),
-        _ => None,
-    };
-    text.map(|t| RECOGNIZED_IDENTITY_LINES.contains(&t.trim()))
-        .unwrap_or(false)
+/// Capture a single system array element when it is a text block that is not
+/// a recognized identity line. A block whose `text` field is absent or
+/// non-string is intentionally dropped: only text blocks are valid system
+/// content for the Anthropic `system` field, so a non-text block has nothing
+/// to relocate into the reminder.
+fn capture_one_system_block(block: &Value) -> Option<CapturedSystemBlock> {
+    let text = block.get("text").and_then(Value::as_str)?;
+    if RECOGNIZED_IDENTITY_LINES.contains(&text.trim()) {
+        return None;
+    }
+    Some(CapturedSystemBlock {
+        text: text.to_string(),
+        cache_control: block.get("cache_control").cloned(),
+    })
 }
 
-/// The interactive identity system block, without `cache_control`.
+/// Replace `body["system"]` with the identity-only array (no
+/// `cache_control`; matches `identity_block()`).
+fn set_identity_only_system(body: &mut Value) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("system".into(), Value::Array(vec![identity_block()]));
+    }
+}
+
+/// Build the `<system-reminder>` text block from the captured client system
+/// content, or `None` when there is nothing to relocate. Multiple captured
+/// blocks' text is joined with a blank line. KNOWN LIMITATION: multiple
+/// client system cache breakpoints collapse to one -- the last captured
+/// `cache_control` (closest to the cache boundary) is carried, the rest are
+/// dropped.
+fn build_reminder_block(captured: &[CapturedSystemBlock]) -> Option<Value> {
+    if captured.is_empty() {
+        return None;
+    }
+    // Single-pass build with a blank-line separator between blocks; a literal
+    // closing tag inside client content is neutralized so it cannot
+    // prematurely close our wrapper framing.
+    let mut joined = String::new();
+    for (i, b) in captured.iter().enumerate() {
+        if i > 0 {
+            joined.push_str("\n\n");
+        }
+        joined.push_str(&neutralize_close_tag(&b.text));
+    }
+    let text = format!("{SYSTEM_REMINDER_OPEN}\n{joined}\n{SYSTEM_REMINDER_CLOSE}");
+    let mut block = json!({"type": "text", "text": text});
+    if let Some(cache_control) = captured.iter().rev().find_map(|b| b.cache_control.clone()) {
+        if let Some(obj) = block.as_object_mut() {
+            obj.insert("cache_control".into(), cache_control);
+        }
+    }
+    Some(block)
+}
+
+/// Strip any literal `</system-reminder>` from captured client content so the
+/// relocated text cannot prematurely close the wrapper framing. The tag is
+/// removed entirely (the least-surprising minimal transform); unrelated
+/// content is untouched.
+fn neutralize_close_tag(text: &str) -> String {
+    if text.contains(SYSTEM_REMINDER_CLOSE) {
+        text.replace(SYSTEM_REMINDER_CLOSE, "")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Insert the reminder block at index 0 of the content of the first
+/// `role == "user"` message. A no-op when there is no usable user message
+/// (missing/empty messages array, or no user role) -- the identity-only
+/// system still stands and the client body is dropped. Never panics.
+fn insert_reminder_into_first_user(body: &mut Value, reminder: Value) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(user) = messages
+        .iter_mut()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+    else {
+        return;
+    };
+    match user.get_mut("content") {
+        Some(Value::Array(blocks)) => {
+            blocks.insert(0, reminder);
+        }
+        Some(content @ Value::String(_)) => {
+            let original = std::mem::replace(content, Value::Null);
+            let Value::String(text) = original else {
+                unreachable!()
+            };
+            *content = Value::Array(vec![reminder, json!({"type": "text", "text": text})]);
+        }
+        _ => {
+            if let Some(obj) = user.as_object_mut() {
+                obj.insert("content".into(), Value::Array(vec![reminder]));
+            }
+        }
+    }
+}
 fn identity_block() -> Value {
     json!({"type": "text", "text": INTERACTIVE_IDENTITY_LINE})
 }
@@ -938,100 +1075,380 @@ mod tests {
         assert_eq!(arr[0]["text"], INTERACTIVE_IDENTITY_LINE);
     }
 
-    // -- identity stamp (non-CC) -------------------------------------------
+    // -- system relocation (non-CC) ----------------------------------------
 
-    #[test]
-    fn identity_noop_when_first_block_is_interactive_line() {
-        // Arrange
-        let mut body = json!({
-            "system": [{"type": "text", "text": INTERACTIVE_IDENTITY_LINE}]
-        });
-        let before = body.clone();
-
-        // Act
-        ensure_identity_block(&mut body);
-
-        // Assert
-        assert_eq!(body, before);
+    fn reminder_text(inner: &str) -> String {
+        format!("{SYSTEM_REMINDER_OPEN}\n{inner}\n{SYSTEM_REMINDER_CLOSE}")
     }
 
     #[test]
-    fn identity_noop_when_first_block_is_agent_sdk_line() {
-        // Arrange
-        let agent_line = RECOGNIZED_IDENTITY_LINES[1];
+    fn relocate_string_system_sets_identity_only_and_moves_to_first_user() {
+        // Arrange: non-CC body, client system as a String, one user message.
         let mut body = json!({
-            "system": [{"type": "text", "text": agent_line}]
-        });
-        let before = body.clone();
-
-        // Act
-        ensure_identity_block(&mut body);
-
-        // Assert
-        assert_eq!(body, before);
-    }
-
-    #[test]
-    fn identity_prepended_to_generic_array() {
-        // Arrange
-        let mut body = json!({
-            "system": [{"type": "text", "text": "custom system prompt"}]
+            "system": "client system prompt",
+            "messages": [{"role": "user", "content": "hello"}]
         });
 
         // Act
-        ensure_identity_block(&mut body);
+        relocate_client_system(&mut body, false);
 
-        // Assert
-        let arr = body["system"].as_array().expect("system is array");
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["text"], INTERACTIVE_IDENTITY_LINE);
-        assert_eq!(arr[1]["text"], "custom system prompt");
+        // Assert: system is identity-only; first user content[0] is the
+        // reminder wrapping the original string, content[1] the original text.
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("content promoted to array");
+        assert_eq!(content[0]["text"], reminder_text("client system prompt"));
+        assert_eq!(content[1]["text"], "hello");
     }
 
     #[test]
-    fn identity_wraps_string_system() {
-        // Arrange
-        let mut body = json!({"system": "custom system prompt"});
+    fn relocate_array_system_joins_blocks_into_one_reminder() {
+        // Arrange: client system as an array of two text blocks.
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "first block"},
+                {"type": "text", "text": "second block"},
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
 
         // Act
-        ensure_identity_block(&mut body);
+        relocate_client_system(&mut body, false);
 
-        // Assert
-        let arr = body["system"].as_array().expect("system is array");
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["text"], INTERACTIVE_IDENTITY_LINE);
-        assert_eq!(arr[1]["type"], "text");
-        assert_eq!(arr[1]["text"], "custom system prompt");
+        // Assert: identity-only system; reminder joins both blocks' text.
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("content promoted to array");
+        assert_eq!(
+            content[0]["text"],
+            reminder_text("first block\n\nsecond block")
+        );
+        assert_eq!(content[1]["text"], "hi");
     }
 
     #[test]
-    fn identity_injected_when_system_absent() {
-        // Arrange
-        let mut body = json!({"model": "claude"});
+    fn strict_mode_drops_client_system_and_leaves_user_message_unchanged() {
+        // Arrange: strict mode set, client system present, a user message.
+        let mut body = json!({
+            "system": "client system prompt",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
 
         // Act
-        ensure_identity_block(&mut body);
+        relocate_client_system(&mut body, true);
 
-        // Assert
-        let arr = body["system"].as_array().expect("system is array");
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        // Assert: identity-only system; user message untouched, no reminder.
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        assert_eq!(body["messages"][0]["content"], "hello");
     }
 
     #[test]
-    fn injected_identity_carries_no_cache_control() {
-        // Arrange
-        let mut body = json!({"system": [{"type": "text", "text": "custom"}]});
+    fn relocate_preserves_cache_control_on_reminder_block() {
+        // Arrange: a client system block carrying a cache_control breakpoint.
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "cached prompt", "cache_control": {"type": "ephemeral"}},
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
 
         // Act
-        ensure_identity_block(&mut body);
+        relocate_client_system(&mut body, false);
 
-        // Assert
+        // Assert: the relocated reminder carries the cache_control.
+        let reminder = &body["messages"][0]["content"][0];
+        assert_eq!(reminder["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn relocate_no_panic_when_no_user_message_present() {
+        // Arrange: only an assistant message -- nowhere to relocate into.
+        let mut body = json!({
+            "system": "client system prompt",
+            "messages": [{"role": "assistant", "content": "prior"}]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: identity-only system; client body dropped; messages intact.
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        assert_eq!(body["messages"][0]["content"], "prior");
+    }
+
+    #[test]
+    fn relocate_no_panic_when_messages_empty() {
+        // Arrange: empty messages array.
+        let mut body = json!({
+            "system": "client system prompt",
+            "messages": []
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: identity-only system; no reminder anywhere.
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        assert!(body["messages"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn relocate_identity_only_system_leaves_messages_untouched() {
+        // Arrange: client system is already exactly the identity line.
+        let mut body = json!({
+            "system": INTERACTIVE_IDENTITY_LINE,
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: identity-only system; no reminder added; message intact.
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        assert_eq!(body["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn relocate_excludes_identity_line_from_reminder() {
+        // Arrange: client system = [identity line, real body].
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": INTERACTIVE_IDENTITY_LINE},
+                {"type": "text", "text": "real body"},
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: identity-only system; only the real body relocated (the
+        // identity line is not duplicated into the reminder).
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        let reminder = &body["messages"][0]["content"][0];
+        assert_eq!(reminder["text"], reminder_text("real body"));
+    }
+
+    #[test]
+    fn relocated_identity_carries_no_cache_control() {
+        // Arrange: a plain client system, no cache_control.
+        let mut body = json!({
+            "system": [{"type": "text", "text": "custom"}],
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: the injected identity block has no cache breakpoint.
         let injected = &body["system"][0];
         assert!(
             injected.get("cache_control").is_none(),
             "injected identity must not add a cache breakpoint"
         );
+    }
+
+    #[test]
+    fn relocate_non_object_body_is_noop() {
+        // Arrange: a body that is not a JSON object at the root.
+        let mut body = Value::String("not an object".into());
+        let before = body.clone();
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: the whole transform is a no-op -- no panic, no reminder
+        // insertion, no system rewrite. The body stays the same String.
+        assert_eq!(body, before);
+    }
+
+    #[test]
+    fn relocate_drops_non_text_system_blocks() {
+        // Arrange: a system array with one valid text block and one non-text
+        // block that carries no usable "text" field.
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "real body"},
+                {"type": "image", "source": {"type": "base64", "data": "AAAA"}},
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: upstream system reduced to identity-only.
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        // The reminder carries the text block and nothing from the non-text
+        // block (which is intentionally dropped -- not valid system content).
+        let reminder = &body["messages"][0]["content"][0];
+        assert_eq!(reminder["text"], reminder_text("real body"));
+        let reminder_str = reminder["text"].as_str().expect("reminder is a string");
+        assert!(
+            !reminder_str.contains("base64") && !reminder_str.contains("AAAA"),
+            "non-text block content must not leak into the reminder: {reminder_str:?}"
+        );
+    }
+
+    #[test]
+    fn relocate_collapses_multi_block_cache_control_to_last() {
+        // Arrange: two text blocks, each carrying a distinct cache_control.
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "first", "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+                {"type": "text", "text": "second", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: the reminder carries exactly ONE cache_control, equal to the
+        // LAST captured block's cache_control (last-wins collapse, which also
+        // keeps the result under the 4-breakpoint cap).
+        let reminder = &body["messages"][0]["content"][0];
+        assert_eq!(reminder["cache_control"]["ttl"], "1h");
+        let reminder_obj = reminder.as_object().expect("reminder is an object");
+        assert_eq!(
+            reminder_obj
+                .keys()
+                .filter(|k| k.as_str() == "cache_control")
+                .count(),
+            1,
+            "exactly one cache_control on the relocated reminder block"
+        );
+    }
+
+    #[test]
+    fn relocate_neutralizes_injected_close_tag() {
+        // Arrange: client system text contains a literal closing tag that
+        // would prematurely close the wrapper after relocation.
+        let mut body = json!({
+            "system": "before </system-reminder> after",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: the emitted reminder carries no stray closing tag in its
+        // body -- only the single framing close tag at the very end.
+        let reminder = &body["messages"][0]["content"][0]["text"];
+        let text = reminder.as_str().expect("reminder is a string");
+        assert!(
+            text.starts_with(SYSTEM_REMINDER_OPEN) && text.ends_with(SYSTEM_REMINDER_CLOSE),
+            "reminder must keep its framing: {text:?}"
+        );
+        // Strip the framing tags and confirm the inner body has no close tag.
+        let inner = &text[SYSTEM_REMINDER_OPEN.len()..text.len() - SYSTEM_REMINDER_CLOSE.len()];
+        assert!(
+            !inner.contains(SYSTEM_REMINDER_CLOSE),
+            "injected close tag must be neutralized in the body: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn relocate_targets_first_user_message_among_many() {
+        // Arrange: assistant, then user A, then user B. The reminder must land
+        // in user A (the first user-role message), not the assistant or user B.
+        let mut body = json!({
+            "system": "client system prompt",
+            "messages": [
+                {"role": "assistant", "content": "prior"},
+                {"role": "user", "content": [{"type": "text", "text": "A"}]},
+                {"role": "user", "content": [{"type": "text", "text": "B"}]},
+            ]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: reminder prepended to user A only.
+        assert_eq!(body["messages"][0]["content"], "prior");
+        assert_eq!(
+            body["messages"][1]["content"][0]["text"],
+            reminder_text("client system prompt")
+        );
+        assert_eq!(body["messages"][1]["content"][1]["text"], "A");
+        assert_eq!(body["messages"][2]["content"][0]["text"], "B");
+    }
+
+    #[test]
+    fn relocate_handles_absent_or_null_user_content() {
+        // Arrange (a): a user message whose content key is absent.
+        let mut absent = json!({
+            "system": "client system prompt",
+            "messages": [{"role": "user"}]
+        });
+
+        // Act
+        relocate_client_system(&mut absent, false);
+
+        // Assert: content becomes an array holding only the reminder.
+        let content = absent["messages"][0]["content"]
+            .as_array()
+            .expect("content set to array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"], reminder_text("client system prompt"));
+
+        // Arrange (b): a user message whose content is explicitly null.
+        let mut null_content = json!({
+            "system": "client system prompt",
+            "messages": [{"role": "user", "content": Value::Null}]
+        });
+
+        // Act
+        relocate_client_system(&mut null_content, false);
+
+        // Assert: same -- content becomes an array holding only the reminder.
+        let content = null_content["messages"][0]["content"]
+            .as_array()
+            .expect("content set to array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"], reminder_text("client system prompt"));
+    }
+
+    #[test]
+    fn relocate_handles_whitespace_only_system() {
+        // Arrange: system is a whitespace-only string.
+        let mut body = json!({
+            "system": "   ",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+
+        // Act
+        relocate_client_system(&mut body, false);
+
+        // Assert: system is reduced to identity-only (sensible, no panic).
+        let sys = body["system"].as_array().expect("system is array");
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], INTERACTIVE_IDENTITY_LINE);
+        // Current behavior pinned: whitespace is not a recognized identity
+        // line, so it IS relocated -- the reminder wraps the whitespace.
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("content promoted to array");
+        assert_eq!(content[0]["text"], reminder_text("   "));
+        assert_eq!(content[1]["text"], "hello");
     }
 
     // -- metadata mint -----------------------------------------------------
@@ -1125,51 +1542,67 @@ mod tests {
 
     #[test]
     fn cloak_non_cc_strips_billing_stamps_identity_and_metadata() {
-        // Arrange
+        // Arrange: non-CC body with billing + custom system and a user
+        // message to relocate the client system into.
         let id = identity();
         let req = ChatRequest::default();
         let mut body = json!({
             "system": [
                 {"type": "text", "text": "x-anthropic-billing-header: v=1"},
                 {"type": "text", "text": "custom"},
-            ]
+            ],
+            "messages": [{"role": "user", "content": "hello"}]
         });
 
         // Act
         cloak_oauth_egress(&mut body, &req, &id, true, &CloakConfig::default());
 
-        // Assert: billing gone, identity prepended, metadata minted.
+        // Assert: billing gone, system is identity-only, the client system is
+        // relocated into the first user message, metadata minted.
         let arr = body["system"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["text"], INTERACTIVE_IDENTITY_LINE);
-        assert_eq!(arr[1]["text"], "custom");
         assert!(!arr.iter().any(|b| b["text"]
             .as_str()
             .map(|t| t.starts_with(BILLING_PREFIX))
             .unwrap_or(false)));
+        let reminder = &body["messages"][0]["content"][0];
+        assert_eq!(
+            reminder["text"],
+            format!("{SYSTEM_REMINDER_OPEN}\ncustom\n{SYSTEM_REMINDER_CLOSE}")
+        );
         assert!(body["metadata"]["user_id"].is_string());
     }
 
     #[test]
     fn cloak_genuine_cc_strips_billing_but_does_not_stamp() {
         // Arrange: genuine CC (is_non_cc = false). Billing must still be
-        // stripped, but no identity block and no metadata are added.
+        // stripped, but no identity block, no metadata, no reminder added.
         let id = identity();
         let req = ChatRequest::default();
         let mut body = json!({
             "system": [
                 {"type": "text", "text": "x-anthropic-billing-header: v=1"},
                 {"type": "text", "text": "custom"},
-            ]
+            ],
+            "messages": [{"role": "user", "content": "hello"}]
         });
 
         // Act
         cloak_oauth_egress(&mut body, &req, &id, false, &CloakConfig::default());
 
-        // Assert: billing stripped, but identity NOT stamped, metadata absent.
+        // Assert: billing stripped, but identity NOT stamped, metadata absent,
+        // client system retained in `system`, and NO reminder anywhere.
         let arr = body["system"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["text"], "custom");
         assert!(body.get("metadata").is_none());
+        assert_eq!(body["messages"][0]["content"], "hello");
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(
+            !serialized.contains(SYSTEM_REMINDER_OPEN),
+            "genuine CC must not gain a system-reminder block"
+        );
     }
 
     #[test]
@@ -1554,15 +1987,17 @@ mod tests {
 
     // -- regression guard: default config == base cloak transforms ---------
 
-    /// With a DEFAULT (empty) CloakConfig, the post-cloak body must be
-    /// byte-identical to the base cloak transforms for a representative
-    /// request: the broadened tool-name normalization still applies, and the
-    /// config defaults add nothing on top. This is the hard regression guard
-    /// for the opt-in surface.
+    /// With a DEFAULT (empty) CloakConfig, the non-CC post-cloak body must be
+    /// byte-identical to the base cloak transforms: billing strip, system
+    /// relocation (identity-only system + client body moved to the first user
+    /// message), metadata mint, and the broadened tool-name normalization.
+    /// This is the hard regression guard for the opt-in surface; the base is
+    /// the NEW relocate behavior, not the old keep-behind-identity.
     #[test]
     fn default_config_byte_identical_to_base_transforms() {
-        // Arrange: a body exercising billing strip + identity stamp +
-        // tool-name normalization (mcp_ subcase AND a bare name).
+        // Arrange: a body exercising billing strip + system relocation +
+        // tool-name normalization (mcp_ subcase AND a bare name). A user
+        // message is present so the client system has somewhere to relocate.
         let id = identity();
         let req = ChatRequest::default();
         let template = json!({
@@ -1572,20 +2007,20 @@ mod tests {
             ],
             "tools": [{"name": "mcp_linear_get_issue"}, {"name": "Bash"}],
             "messages": [{
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": "t1", "name": "mcp_foo", "input": {}}]
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}]
             }]
         });
 
         // Act: one body through the cloak with a default config; a second
         // body through the SAME base transforms applied directly (strip +
-        // identity + metadata + tool-name normalization).
+        // relocate + metadata + tool-name normalization).
         let mut via_config = template.clone();
         cloak_oauth_egress(&mut via_config, &req, &id, true, &CloakConfig::default());
 
         let mut via_base = template.clone();
         strip_billing_block(&mut via_base);
-        ensure_identity_block(&mut via_base);
+        relocate_client_system(&mut via_base, false);
         mint_metadata_user_id(&mut via_base, &id);
         let _ = normalize_tool_names_to_mcp(&mut via_base);
 
@@ -1593,6 +2028,12 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&via_config).unwrap(),
             serde_json::to_string(&via_base).unwrap()
+        );
+        // The NEW base behavior: identity-only system, client body relocated.
+        assert_eq!(via_config["system"][0]["text"], INTERACTIVE_IDENTITY_LINE);
+        assert_eq!(
+            via_config["messages"][0]["content"][0]["text"],
+            format!("{SYSTEM_REMINDER_OPEN}\ncustom system prompt\n{SYSTEM_REMINDER_CLOSE}")
         );
         // And the BROADENED normalization applied: the mcp_ subcase doubled
         // its prefix AND the bare name gained the mcp__ prefix.
