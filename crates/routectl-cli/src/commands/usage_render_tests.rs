@@ -779,3 +779,79 @@ fn by_model_null_model_attributes_to_requested_model() {
     assert_eq!(row.requests, 1);
     assert_eq!(row.input_tokens, 8);
 }
+
+/// Insert a successful row carrying explicit fresh input plus cache-write
+/// buckets, so the displayed-input fold-in (input + cache_write_5m +
+/// cache_write_1h) is testable. Model "m", provider "paid", upstream
+/// "up-paid", alias "al".
+fn insert_cache_write_row(
+    db: &UsageDb,
+    request_id: &str,
+    input: i64,
+    cache_write_5m: i64,
+    cache_write_1h: i64,
+) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             input_tokens, output_tokens, cache_write_5m, cache_write_1h) \
+             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', 'm', 'paid', \
+             'up-paid', 0, 'ok', 5, 0, 0, 1, 0, ?2, 10, ?3, ?4)",
+            rusqlite::params![request_id, input, cache_write_5m, cache_write_1h],
+        )
+        .expect("insert cache-write row");
+}
+
+#[test]
+fn displayed_input_folds_in_cache_write_buckets() {
+    // Arrange: a row with fresh input 100 and a 5m cache-write of 40 (1h zero).
+    // The displayed input column means "prompt tokens not served from cache",
+    // so it must render the sum 100 + 40 + 0 = 140, not the fresh-only 100.
+    let (_dir, _path, db) = temp_db();
+    insert_cache_write_row(&db, "cw1", 100, 40, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let row_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("m "))
+        .expect("model row present");
+
+    // Assert: header order is key|reqs|err|input|output|cache_read|hit%, so the
+    // input cell is field index 3. Pin by position so a stray "140" elsewhere
+    // cannot satisfy the assertion. 140 < COMPACT_COUNT_FLOOR renders plain.
+    let cells: Vec<&str> = row_line.split_whitespace().collect();
+    assert_eq!(
+        cells.get(3).copied(),
+        Some("140"),
+        "displayed input must fold in cache-write (100 + 40): {row_line:?}"
+    );
+}
+
+#[test]
+fn displayed_input_unchanged_for_write_less_provider() {
+    // Arrange: an OpenAI-style row reports zero cache-write and no cache_read.
+    // With both write buckets zero the displayed input must equal the fresh
+    // input (100) -- no regression for write-less providers.
+    let (_dir, _path, db) = temp_db();
+    insert_cache_write_row(&db, "ow1", 100, 0, 0);
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let row_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("m "))
+        .expect("model row present");
+
+    // Assert: input cell (field index 3) equals the fresh input unchanged.
+    let cells: Vec<&str> = row_line.split_whitespace().collect();
+    assert_eq!(
+        cells.get(3).copied(),
+        Some("100"),
+        "write-less provider input must equal fresh input: {row_line:?}"
+    );
+}

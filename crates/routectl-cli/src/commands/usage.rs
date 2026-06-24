@@ -771,13 +771,22 @@ fn hit_pct_cell(row: &DisplayRow) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+/// Displayed `input`: all prompt tokens NOT served from cache, i.e. fresh
+/// input plus both cache-write buckets. Applied uniformly to every provider
+/// (write buckets are 0 for OpenAI-style rows, so they render unchanged). With
+/// `cache_read_billed`, this reconciles with the `cache_hit_pct` denominator.
+/// NOT the cost basis -- cost prices the disjoint stored buckets separately.
+fn display_input(row: &DisplayRow) -> i64 {
+    row.input_tokens + row.cache_write_5m + row.cache_write_1h
+}
+
 /// The normal data cells for one row, in header order.
 fn normal_cells(row: &DisplayRow) -> Vec<String> {
     vec![
         row.label.clone(),
         row.requests.to_string(),
         row.errors.to_string(),
-        human_count(row.input_tokens),
+        human_count(display_input(row)),
         human_count(row.output_tokens),
         metric_cell(row.cache_read_present, row.cache_read_billed),
         hit_pct_cell(row),
@@ -931,13 +940,13 @@ fn render_footer(report: &WindowReport) -> String {
 /// after the final window block (see `build_blocks`).
 const LEGEND: &str = concat!(
     "legend:\n",
-    "  input       = fresh prompt tokens (excludes cached + cache-write)\n",
+    "  input       = prompt tokens not served from cache (fresh + cache-write); excludes cache_read\n",
     "  cache_read  = prompt tokens served from cache (billed volume)\n",
     "  hit%        = token-weighted cache-hit rate: cache_read / cache-inclusive prompt tokens\n",
     "  \"-\"         = metric not reported by that provider\n",
     "  \"n/a (sub)\" = managed subscription (see quota)\n",
     "  --detail    = adds cost, ctx_peak/ctx_avg (cached-context size, not a flow),\n",
-    "                cache-write 5m/1h, ttft, tok/s, server-tools",
+    "                cache-write 5m/1h (breakdown of the share already in input), ttft, tok/s, server-tools",
 );
 
 // --- entry point --------------------------------------------------------
