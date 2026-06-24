@@ -278,6 +278,23 @@ pub struct RoutectlInternal {
     /// that build a `ChatRequest` directly (no ingress in the loop).
     /// Pure observability metadata -- never serialized to any upstream.
     pub provenance: RequestProvenance,
+
+    /// INBOUND per-conversation key captured by the Anthropic ingress
+    /// from the `x-claude-code-session-id` request header, falling back
+    /// to the body `metadata.session_id`. This is the REAL per-conversation
+    /// key -- it differs per conversation.
+    ///
+    /// Do NOT confuse this with the OUTBOUND per-credential
+    /// `ClaudeCodeIdentity::session_id` value minted in
+    /// `crates/routectl-providers/src/anthropic_api/cloak.rs` and stamped
+    /// on the egress request: that one is stable for the provider's life
+    /// (identical across every conversation on a seat) and is NOT a usable
+    /// per-conversation key.
+    ///
+    /// `None` for non-Anthropic ingresses and library consumers. Never
+    /// serialized to any upstream (it rides on `routectl_internal`, which
+    /// is `#[serde(skip)]`). Must not be logged raw.
+    pub inbound_session_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
