@@ -1763,7 +1763,9 @@ pub struct ProviderRuntimePolicy {
     /// How dispatch picks among multiple OAuth seats configured for this
     /// provider's credential pool. `fill-first` (the default) drains one
     /// seat before moving to the next; `round-robin` spreads load across
-    /// seats. Applied per request at dispatch time whenever the
+    /// seats; `sticky-least-loaded` pins each conversation to one seat for
+    /// prompt-cache affinity while balancing new conversations across seats
+    /// by load. Applied per request at dispatch time whenever the
     /// provider's credential pool resolves to more than one seat.
     #[serde(default)]
     pub seat_selection: SeatSelection,
@@ -1780,6 +1782,17 @@ pub enum SeatSelection {
     FillFirst,
     /// Rotate across seats to spread load.
     RoundRobin,
+    /// Pin each conversation to one seat for prompt-cache affinity, and
+    /// balance NEW conversations across seats by load. The contract: a
+    /// conversation's first request picks the least-loaded healthy seat at
+    /// birth; every subsequent request for that conversation routes back to
+    /// the same seat so its warm prompt cache is preserved (avoiding a cold
+    /// miss on every turn). If a pinned home goes unhealthy the conversation
+    /// migrates once to a healthy sibling and stays there (no flapping back).
+    /// The selection is a best-effort reorder of the walk: the per-seat
+    /// dispatch gate and the fill-first fallback walk stay authoritative, so
+    /// a stale or wrong pin only costs locality, never correctness.
+    StickyLeastLoaded,
 }
 
 fn default_anthropic_base() -> String {

@@ -2527,6 +2527,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "lru",
  "parking_lot",
  "routectl-auth",
  "routectl-core",

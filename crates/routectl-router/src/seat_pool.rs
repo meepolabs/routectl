@@ -15,9 +15,12 @@
 //! `router.rs`.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use lru::LruCache;
+use parking_lot::Mutex;
 use routectl_auth::SecretRef;
 use routectl_core::Provider;
 
@@ -117,6 +120,65 @@ impl RoundRobinCursors {
     }
 }
 
+/// Maximum number of session->seat pins held at once. A bounded LRU keeps
+/// the map at a few-thousand entries so memory stays flat under churn; the
+/// least-recently-used pin is evicted when a new conversation arrives at
+/// capacity. An evicted conversation simply re-pins (one cold miss) on its
+/// next turn, so the bound is safe.
+const STICKY_PIN_CAPACITY: usize = 4096;
+
+/// Bounded LRU map of inbound conversation session key -> pinned seat's
+/// STABLE `state_key` (see [`SeatTarget::state_key`] / [`seat_state_key`]).
+/// A positional seat index is deliberately NOT stored: indices can shift on
+/// a Router rebuild, whereas `state_key` is stable across reloads.
+///
+/// Wraps a `parking_lot::Mutex<LruCache<..>>` for interior mutability so the
+/// map is read/written on the `&self` dispatch path.
+///
+/// UNLIKE [`RoundRobinCursors`], this map is CARRIED OVER on a Router
+/// rebuild (see `Router::carry_over_sticky_from`). Dropping pins mid-incident
+/// would scatter every live conversation off its warm-cache seat -- a mass
+/// cold-miss across all in-flight conversations -- so the carry-over is
+/// mandatory, not benign.
+pub(crate) struct StickyPins {
+    pins: Mutex<LruCache<String, String>>,
+}
+
+impl Default for StickyPins {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StickyPins {
+    /// Construct an empty pin map bounded at [`STICKY_PIN_CAPACITY`].
+    pub(crate) fn new() -> Self {
+        let cap = NonZeroUsize::new(STICKY_PIN_CAPACITY).expect("STICKY_PIN_CAPACITY > 0");
+        Self {
+            pins: Mutex::new(LruCache::new(cap)),
+        }
+    }
+
+    /// Insert or update the pin for `session_key`, marking it most-recently
+    /// used. `state_key` is the pinned seat's stable runtime-state key.
+    pub(crate) fn put(&self, session_key: &str, state_key: String) {
+        self.pins.lock().put(session_key.to_string(), state_key);
+    }
+
+    /// Snapshot all entries in LRU order: least-recently-used FIRST,
+    /// most-recently-used LAST. Used for carry-over on a Router rebuild so
+    /// the destination map can re-`put` in the same recency order. (`iter`
+    /// yields MRU->LRU, so the collected order is reversed.)
+    pub(crate) fn export_entries(&self) -> Vec<(String, String)> {
+        let guard = self.pins.lock();
+        guard
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .rev()
+            .collect()
+    }
+}
+
 /// Resolve the per-request seat walk order for a pooled model.
 ///
 /// `FillFirst` (or any non-pooled model, where `cursors` has no entry):
@@ -144,6 +206,11 @@ pub(crate) fn seat_order_for_request(
     let start = match selection {
         SeatSelection::RoundRobin => cursors.next_start(nickname).unwrap_or(0) % seat_count,
         SeatSelection::FillFirst => 0,
+        // The real sticky-least-loaded ordering (session-key pin lookup +
+        // least-loaded-at-birth) lands in the follow-up task. Until then
+        // this intentionally mirrors FillFirst (start seat 0, fixed order)
+        // so routing is byte-for-byte unchanged.
+        SeatSelection::StickyLeastLoaded => 0,
     };
     (0..seat_count).map(|i| (start + i) % seat_count).collect()
 }
@@ -218,5 +285,55 @@ mod tests {
             seat_order_for_request("opus", 0, SeatSelection::FillFirst, &cursors),
             Vec::<usize>::new()
         );
+    }
+
+    #[test]
+    fn stickyleastloaded_order_matches_fillfirst_for_now() {
+        // Placeholder contract: until the follow-up adds real sticky
+        // ordering, StickyLeastLoaded walks the fixed fill-first order.
+        let cursors = RoundRobinCursors::default();
+        let order = seat_order_for_request("m", 3, SeatSelection::StickyLeastLoaded, &cursors);
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sticky_pins_put_then_export_round_trips() {
+        // Arrange
+        let pins = StickyPins::new();
+
+        // Act
+        pins.put("sess-1", "opus#seat-b".to_string());
+
+        // Assert
+        let entries = pins.export_entries();
+        assert!(entries.contains(&("sess-1".to_string(), "opus#seat-b".to_string())));
+    }
+
+    #[test]
+    fn sticky_pins_evicts_beyond_capacity() {
+        // Arrange
+        let pins = StickyPins::new();
+        let overflow = 8;
+
+        // Act: fill past capacity with distinct, never-re-touched keys.
+        for i in 0..(STICKY_PIN_CAPACITY + overflow) {
+            pins.put(&format!("sess-{i}"), format!("seat-{i}"));
+        }
+
+        // Assert: bounded at capacity.
+        let entries = pins.export_entries();
+        assert_eq!(entries.len(), STICKY_PIN_CAPACITY);
+
+        // Assert: the earliest-inserted keys were evicted (LRU).
+        let keys: std::collections::HashSet<&str> =
+            entries.iter().map(|(k, _)| k.as_str()).collect();
+        for i in 0..overflow {
+            assert!(
+                !keys.contains(format!("sess-{i}").as_str()),
+                "earliest-inserted key sess-{i} should have been evicted",
+            );
+        }
+        // And the most-recently-inserted survives.
+        assert!(keys.contains(format!("sess-{}", STICKY_PIN_CAPACITY + overflow - 1).as_str()));
     }
 }
