@@ -25,6 +25,7 @@ use routectl_auth::SecretRef;
 use routectl_core::Provider;
 
 use crate::config::SeatSelection;
+use crate::runtime_state::{CapacitySnapshot, CircuitPhase};
 
 /// One credential seat of a pooled model: a seat-pinned provider instance
 /// plus the runtime-state key that gives this seat its OWN circuit breaker
@@ -142,6 +143,13 @@ const STICKY_PIN_CAPACITY: usize = 4096;
 /// mandatory, not benign.
 pub(crate) struct StickyPins {
     pins: Mutex<LruCache<String, String>>,
+    /// Deterministic anti-herd tiebreak counter. When a birth pick finds
+    /// several equally-least-loaded seats, the chooser rotates across them
+    /// by `tiebreak % tied.len()` so concurrent fan-out misses reading the
+    /// same capacity snapshot spread over distinct seats instead of herding
+    /// onto one. Deliberately NOT carried over on a Router rebuild: a reset
+    /// to 0 is benign -- it only re-seeds tie rotation, never a pin.
+    tiebreak: AtomicUsize,
 }
 
 impl Default for StickyPins {
@@ -156,7 +164,22 @@ impl StickyPins {
         let cap = NonZeroUsize::new(STICKY_PIN_CAPACITY).expect("STICKY_PIN_CAPACITY > 0");
         Self {
             pins: Mutex::new(LruCache::new(cap)),
+            tiebreak: AtomicUsize::new(0),
         }
+    }
+
+    /// Read the pinned seat `state_key` for `session_key`, marking it
+    /// most-recently used under the lock. Marking MRU on read keeps an
+    /// active conversation's pin hot so it survives LRU eviction while it
+    /// is still being served. `None` when the session has no pin.
+    pub(crate) fn get(&self, session_key: &str) -> Option<String> {
+        self.pins.lock().get(session_key).cloned()
+    }
+
+    /// Return the next deterministic tiebreak value and advance the counter.
+    /// Seeds the anti-herd rotation in [`sticky_least_loaded_order`].
+    pub(crate) fn next_tiebreak(&self) -> usize {
+        self.tiebreak.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Insert or update the pin for `session_key`, marking it most-recently
@@ -213,6 +236,84 @@ pub(crate) fn seat_order_for_request(
         SeatSelection::StickyLeastLoaded => 0,
     };
     (0..seat_count).map(|i| (start + i) % seat_count).collect()
+}
+
+/// Build a walk order with `home` first, then every other seat in ascending
+/// index order. The home seat is a best-effort cache-locality hint; the
+/// ascending tail preserves the fill-first fallback so the existing
+/// sequential gate + chain fallback walk stays authoritative.
+fn order_home_first(home: usize, seat_count: usize) -> Vec<usize> {
+    let mut order = Vec::with_capacity(seat_count);
+    order.push(home);
+    order.extend((0..seat_count).filter(|&i| i != home));
+    order
+}
+
+/// Pure seat-selection math for `StickyLeastLoaded`. Decides the per-request
+/// walk order and whether this request should pin a freshly-chosen home seat.
+///
+/// `snapshots` is index-aligned with the seat slice (`len == seat_count`).
+/// `pinned_index` is the seat this session is already pinned to (`Some`), or
+/// `None` for a birth pick / pin miss. `tiebreak` seeds the anti-herd
+/// rotation among equally-least-loaded candidates.
+///
+/// Returns `(walk_order, to_pin)`: `to_pin == Some(home)` ONLY on a successful
+/// birth pick (the caller must pin it); `None` on a sticky-stay, the trivial
+/// single-seat case, or an all-parked birth (no seat worth pinning yet).
+pub(crate) fn sticky_least_loaded_order(
+    seat_count: usize,
+    pinned_index: Option<usize>,
+    snapshots: &[CapacitySnapshot],
+    tiebreak: usize,
+) -> (Vec<usize>, Option<usize>) {
+    if seat_count <= 1 {
+        return ((0..seat_count).collect(), None);
+    }
+    // Sticky-stay: keep serving the pinned seat as the home hint; no new pin.
+    if let Some(home) = pinned_index {
+        return (order_home_first(home, seat_count), None);
+    }
+
+    // Birth pick: candidate set = dispatchable seats.
+    let dispatchable: Vec<usize> = (0..seat_count)
+        .filter(|&i| snapshots[i].is_dispatchable())
+        .collect();
+    if dispatchable.is_empty() {
+        // All parked/exhausted: home 0, fill-first order, no pin. The gate +
+        // fallback walk handles the all-parked case; a later turn re-picks
+        // once a seat is healthy.
+        return (order_home_first(0, seat_count), None);
+    }
+
+    // Health preference: if any candidate is fully Closed, do NOT birth a new
+    // session onto a HalfOpenReady seat -- restrict to the Closed ones.
+    let has_closed = dispatchable
+        .iter()
+        .any(|&i| snapshots[i].circuit == CircuitPhase::Closed);
+    let candidates: Vec<usize> = if has_closed {
+        dispatchable
+            .into_iter()
+            .filter(|&i| snapshots[i].circuit == CircuitPhase::Closed)
+            .collect()
+    } else {
+        dispatchable
+    };
+
+    // Least loaded = most available RPM headroom. Treat unlimited (`None`) as
+    // +infinity so an unlimited seat always wins the headroom comparison.
+    let headroom = |idx: usize| -> f64 { snapshots[idx].rpm_available.unwrap_or(f64::INFINITY) };
+    let max_headroom = candidates
+        .iter()
+        .map(|&i| headroom(i))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let tied: Vec<usize> = candidates
+        .into_iter()
+        .filter(|&i| headroom(i) == max_headroom)
+        .collect();
+
+    // Anti-herd tiebreak: rotate deterministically across the tied seats.
+    let home = tied[tiebreak % tied.len()];
+    (order_home_first(home, seat_count), Some(home))
 }
 
 #[cfg(test)]
@@ -335,5 +436,128 @@ mod tests {
         }
         // And the most-recently-inserted survives.
         assert!(keys.contains(format!("sess-{}", STICKY_PIN_CAPACITY + overflow - 1).as_str()));
+    }
+
+    // ---- sticky_least_loaded_order pure-fn tests ----
+
+    /// A Closed, unlimited (max headroom) snapshot -- the most-dispatchable
+    /// possible seat. Used to build all-equal candidate sets.
+    fn closed_unlimited() -> CapacitySnapshot {
+        CapacitySnapshot {
+            rpm_available: None,
+            circuit: CircuitPhase::Closed,
+        }
+    }
+
+    fn closed_with(rpm: f64) -> CapacitySnapshot {
+        CapacitySnapshot {
+            rpm_available: Some(rpm),
+            circuit: CircuitPhase::Closed,
+        }
+    }
+
+    #[test]
+    fn sticky_birth_keyless_equal_snapshots_picks_index_zero() {
+        // A birth pick (pinned_index=None) over all-equal candidates with
+        // tiebreak=0 chooses seat 0 and yields the fill-first order, pinning 0.
+        let snaps = vec![closed_unlimited(), closed_unlimited(), closed_unlimited()];
+        let (order, to_pin) = sticky_least_loaded_order(3, None, &snaps, 0);
+        assert_eq!(order, vec![0, 1, 2]);
+        assert_eq!(to_pin, Some(0));
+    }
+
+    #[test]
+    fn sticky_stay_orders_home_first_no_pin() {
+        // An existing pin (Some(2)) stays: order leads with 2, the rest
+        // ascending, and NO new pin is minted.
+        let snaps: Vec<CapacitySnapshot> = Vec::new();
+        let (order, to_pin) = sticky_least_loaded_order(3, Some(2), &snaps, 7);
+        assert_eq!(order, vec![2, 0, 1]);
+        assert_eq!(to_pin, None);
+    }
+
+    #[test]
+    fn sticky_birth_picks_least_loaded_seat() {
+        // Seat 1 has the most RPM headroom -> chosen as home and pinned.
+        let snaps = vec![closed_with(2.0), closed_with(9.0), closed_with(5.0)];
+        let (order, to_pin) = sticky_least_loaded_order(3, None, &snaps, 0);
+        assert_eq!(order, vec![1, 0, 2]);
+        assert_eq!(to_pin, Some(1));
+    }
+
+    #[test]
+    fn sticky_birth_prefers_closed_over_half_open_ready() {
+        // Seat 0 is HalfOpenReady with high headroom; seat 1 is Closed with
+        // lower headroom. Health preference picks the Closed seat 1.
+        let snaps = vec![
+            CapacitySnapshot {
+                rpm_available: Some(100.0),
+                circuit: CircuitPhase::HalfOpenReady,
+            },
+            closed_with(3.0),
+        ];
+        let (order, to_pin) = sticky_least_loaded_order(2, None, &snaps, 0);
+        assert_eq!(to_pin, Some(1));
+        assert_eq!(order, vec![1, 0]);
+    }
+
+    #[test]
+    fn sticky_birth_tiebreak_rotates_across_tied_seats() {
+        // All three seats tied (equal snapshots): tiebreak rotates the home
+        // deterministically and wraps -- the anti-herd spread.
+        let snaps = vec![closed_with(5.0), closed_with(5.0), closed_with(5.0)];
+        assert_eq!(sticky_least_loaded_order(3, None, &snaps, 0).1, Some(0));
+        assert_eq!(sticky_least_loaded_order(3, None, &snaps, 1).1, Some(1));
+        assert_eq!(sticky_least_loaded_order(3, None, &snaps, 2).1, Some(2));
+        assert_eq!(sticky_least_loaded_order(3, None, &snaps, 3).1, Some(0));
+    }
+
+    #[test]
+    fn sticky_birth_all_parked_yields_fill_first_no_pin() {
+        // Every seat Open / not dispatchable: home 0, fill-first order, no
+        // pin (a later turn re-picks once a seat is healthy).
+        let open = CapacitySnapshot {
+            rpm_available: None,
+            circuit: CircuitPhase::Open,
+        };
+        let snaps = vec![open, open, open];
+        let (order, to_pin) = sticky_least_loaded_order(3, None, &snaps, 0);
+        assert_eq!(order, vec![0, 1, 2]);
+        assert_eq!(to_pin, None);
+    }
+
+    #[test]
+    fn sticky_order_home_first_in_the_middle() {
+        // Home in the middle -> [home, then 0..n excluding home ascending].
+        assert_eq!(order_home_first(2, 5), vec![2, 0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn sticky_single_seat_is_trivial() {
+        let snaps = vec![closed_unlimited()];
+        assert_eq!(
+            sticky_least_loaded_order(1, None, &snaps, 0),
+            (vec![0], None)
+        );
+        assert_eq!(
+            sticky_least_loaded_order(0, None, &[], 0),
+            (Vec::<usize>::new(), None)
+        );
+    }
+
+    #[test]
+    fn sticky_next_tiebreak_advances_monotonically() {
+        let pins = StickyPins::new();
+        assert_eq!(pins.next_tiebreak(), 0);
+        assert_eq!(pins.next_tiebreak(), 1);
+        assert_eq!(pins.next_tiebreak(), 2);
+    }
+
+    #[test]
+    fn sticky_pins_get_returns_pinned_state_key() {
+        let pins = StickyPins::new();
+        assert_eq!(pins.get("sess-x"), None);
+        pins.put("sess-x", "opus#seat-b".to_string());
+        assert_eq!(pins.get("sess-x"), Some("opus#seat-b".to_string()));
     }
 }

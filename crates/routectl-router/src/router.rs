@@ -545,6 +545,21 @@ impl Router {
         self.resolved_models.get(nickname).cloned()
     }
 
+    /// Non-mutating read of the capacity gate for the seat / model keyed by
+    /// `state_key`. Returns `None` when no state slot exists. This is the
+    /// `&self`-borrow read surface used by sticky least-loaded selection; it
+    /// must never go through the `try_dispatch`-based `breaker_open_for`
+    /// anti-pattern, which would claim a half-open probe slot just to read.
+    fn capacity_snapshot_for(
+        &self,
+        state_key: &str,
+        now: Instant,
+    ) -> Option<crate::runtime_state::CapacitySnapshot> {
+        self.state
+            .get(state_key)
+            .map(|s| s.lock().capacity_snapshot(now))
+    }
+
     /// v0.6.0 alias-table lookup. Precedence: exact match -> longest
     /// prefix glob (no default fallback). Returns the resolved chain
     /// of `Arc<ResolvedModel>` entries on hit, `None` when neither
@@ -685,19 +700,23 @@ impl Router {
     /// a backup behind an existing direct nickname). Glob keys also win
     /// over direct nicknames -- e.g. `"claude-*" = "fallback"` shadows
     /// any nickname starting with `claude-`.
-    fn dispatch_chain(&self, model: &str) -> Result<Vec<DispatchTarget>> {
+    fn dispatch_chain(
+        &self,
+        model: &str,
+        session_key: Option<&str>,
+    ) -> Result<Vec<DispatchTarget>> {
         if let Some(chain) = self.resolve_v6_alias(model)? {
-            return Ok(self.expand_chain_to_targets(chain));
+            return Ok(self.expand_chain_to_targets(chain, session_key));
         }
         // Wire model could ALSO be a direct nickname.
         if let Some(m) = self.resolve_nickname(model) {
-            return Ok(self.expand_chain_to_targets(vec![m]));
+            return Ok(self.expand_chain_to_targets(vec![m], session_key));
         }
         // Catch-all: only consulted after exact alias / glob / direct
         // nickname all miss. This ordering means a wire model that's
         // a known nickname always wins over a configured default.
         if let Some(chain) = self.resolve_default_alias()? {
-            return Ok(self.expand_chain_to_targets(chain));
+            return Ok(self.expand_chain_to_targets(chain, session_key));
         }
         Err(Error::UnknownAlias(model.to_string()))
     }
@@ -711,12 +730,16 @@ impl Router {
     /// per-request rotated start). The expanded seat targets slot inline
     /// where the model sat, preserving the operator's fallback order so a
     /// chain `[opus, sonnet]` becomes `[opus-seatA, opus-seatB, sonnet]`.
-    fn expand_chain_to_targets(&self, chain: Vec<Arc<ResolvedModel>>) -> Vec<DispatchTarget> {
+    fn expand_chain_to_targets(
+        &self,
+        chain: Vec<Arc<ResolvedModel>>,
+        session_key: Option<&str>,
+    ) -> Vec<DispatchTarget> {
         let mut out: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
         for m in chain {
             match m.seats.as_ref() {
                 None => out.push(into_one_dispatch_target(m)),
-                Some(seats) => self.push_seat_targets(&m, seats, &mut out),
+                Some(seats) => self.push_seat_targets(&m, seats, session_key, &mut out),
             }
         }
         for target in &mut out {
@@ -738,6 +761,7 @@ impl Router {
         &self,
         m: &Arc<ResolvedModel>,
         seats: &[crate::seat_pool::SeatTarget],
+        session_key: Option<&str>,
         out: &mut Vec<DispatchTarget>,
     ) {
         let selection = self
@@ -746,16 +770,89 @@ impl Router {
             .get(&m.provider_name)
             .map(|e| e.runtime().seat_selection)
             .unwrap_or_default();
-        let order = crate::seat_pool::seat_order_for_request(
-            &m.nickname,
-            seats.len(),
-            selection,
-            &self.round_robin,
-        );
+
+        // Sticky least-loaded only engages with a real session key on a
+        // multi-seat pool. Every OTHER case (FillFirst, RoundRobin, or
+        // keyless / single-seat StickyLeastLoaded) routes through the
+        // existing `seat_order_for_request` path UNCHANGED, so keyless
+        // StickyLeastLoaded stays byte-for-byte fill-first.
+        let order = match (selection, session_key) {
+            (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
+                self.sticky_seat_order(seats, key)
+            }
+            _ => crate::seat_pool::seat_order_for_request(
+                &m.nickname,
+                seats.len(),
+                selection,
+                &self.round_robin,
+            ),
+        };
         for idx in order {
             let seat = &seats[idx];
             out.push(dispatch_target_for_seat(m, seat));
         }
+    }
+
+    /// Resolve the sticky least-loaded seat walk order for `key` over a
+    /// multi-seat pool. Resolves the pin FIRST (cheap, common path); only on
+    /// a miss gathers the per-seat capacity snapshots (one lock each) to pick
+    /// the least-loaded home, then pins it. Never logs the raw session key.
+    fn sticky_seat_order(&self, seats: &[crate::seat_pool::SeatTarget], key: &str) -> Vec<usize> {
+        // A pinned state_key no longer present in this pool resolves to None
+        // -> treated as a miss (re-pick).
+        let pinned_index = self
+            .sticky_pins
+            .get(key)
+            .and_then(|sk| seats.iter().position(|s| s.state_key == sk));
+
+        // Avoid the N-lock snapshot gather on the hit path: only gather when
+        // we actually need to choose a new home.
+        let now = Instant::now();
+        let snapshots: Vec<crate::runtime_state::CapacitySnapshot> = if pinned_index.is_some() {
+            Vec::new()
+        } else {
+            seats
+                .iter()
+                .map(|s| {
+                    self.capacity_snapshot_for(&s.state_key, now).unwrap_or(
+                        // Defensive: a seat with no state slot should never
+                        // happen (install creates one per seat). If it does,
+                        // fail safe -- treat it as non-dispatchable so it is
+                        // excluded from the birth pick rather than chosen as
+                        // the most-attractive home. It still appears in the
+                        // fallback order, and the existing gate stays
+                        // authoritative.
+                        crate::runtime_state::CapacitySnapshot {
+                            rpm_available: Some(0.0),
+                            circuit: crate::runtime_state::CircuitPhase::Open,
+                        },
+                    )
+                })
+                .collect()
+        };
+
+        let tiebreak = if pinned_index.is_none() {
+            self.sticky_pins.next_tiebreak()
+        } else {
+            // Sticky-stay ignores tiebreak; do not advance the anti-herd
+            // counter on a hit.
+            0
+        };
+        let (order, to_pin) = crate::seat_pool::sticky_least_loaded_order(
+            seats.len(),
+            pinned_index,
+            &snapshots,
+            tiebreak,
+        );
+        if let Some(idx) = to_pin {
+            self.sticky_pins.put(key, seats[idx].state_key.clone());
+            tracing::debug!(
+                state_key = %seats[idx].state_key,
+                seat_label = ?seats[idx].label,
+                "sticky least-loaded birth pick: pinned session to seat"
+            );
+        }
+        order
     }
 
     /// Resolve the dispatch chain for a request and pre-filter against
@@ -777,7 +874,10 @@ impl Router {
     /// offending feature key(s) so the operator's triage starts from
     /// the right place.
     fn dispatch_chain_for_request(&self, req: &ChatRequest) -> Result<Vec<DispatchTarget>> {
-        let chain = self.dispatch_chain(&req.model)?;
+        let chain = self.dispatch_chain(
+            &req.model,
+            req.routectl_internal.inbound_session_key.as_deref(),
+        )?;
         let tools = req.tools.as_deref().unwrap_or(&[]);
         let features =
             crate::feature_keys::derive_feature_keys(tools, req.provider_extras.as_ref());
@@ -4660,7 +4760,7 @@ mod resolved_models_tests {
             calls: AtomicUsize::new(0),
         });
         let router = router_with_resolved(vec![("haiku", "anthropic", "u", p)]);
-        let res = router.dispatch_chain("does-not-exist");
+        let res = router.dispatch_chain("does-not-exist", None);
         assert!(matches!(res, Err(Error::UnknownAlias(_))));
     }
 
@@ -4842,7 +4942,7 @@ mod resolved_models_tests {
                 ("model-e", "p-e", "u-e"),
             ],
         );
-        let chain = router.dispatch_chain("a").expect("dispatch_chain ok");
+        let chain = router.dispatch_chain("a", None).expect("dispatch_chain ok");
         let upstreams: Vec<&str> = chain.iter().map(|t| t.upstream.as_str()).collect();
         assert_eq!(
             upstreams,
@@ -4866,12 +4966,12 @@ mod resolved_models_tests {
             &[("model-x", "p-x", "u-x")],
         );
 
-        let chain_a = router.dispatch_chain("a").expect("a resolves");
+        let chain_a = router.dispatch_chain("a", None).expect("a resolves");
         assert_eq!(chain_a.len(), 1);
         assert_eq!(chain_a[0].upstream, "u-x");
 
         let chain_claude = router
-            .dispatch_chain("claude-a")
+            .dispatch_chain("claude-a", None)
             .expect("claude-a resolves");
         assert_eq!(chain_claude.len(), 1);
         assert_eq!(chain_claude[0].upstream, "u-x");
@@ -4891,7 +4991,7 @@ mod resolved_models_tests {
             &[("model-x", "p-x", "u-x")],
         );
         let chain = router
-            .dispatch_chain("claude-haiku-3")
+            .dispatch_chain("claude-haiku-3", None)
             .expect("glob match resolves");
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].upstream, "u-x");
@@ -4906,7 +5006,7 @@ mod resolved_models_tests {
         // We force the case here by building a router with a
         // self-cycle directly (skipping `validate_alias_chain_targets`).
         let router = router_with_recursive_aliases(&[("a", AliasValue::Single("a".into()))], &[]);
-        let res = router.dispatch_chain("a");
+        let res = router.dispatch_chain("a", None);
         match res {
             Err(Error::Config(msg)) => {
                 assert!(
@@ -5226,8 +5326,14 @@ mod seat_pool_dispatch_tests {
     /// The seat order produced by `dispatch_chain` for `opus`, as a list
     /// of `state_key`s. Same-module access to the private method.
     fn chain_state_keys(router: &Router) -> Vec<String> {
+        chain_state_keys_for(router, None)
+    }
+
+    /// Like [`chain_state_keys`] but threads an explicit inbound session key
+    /// (the sticky-pin lookup key) into resolution.
+    fn chain_state_keys_for(router: &Router, session_key: Option<&str>) -> Vec<String> {
         router
-            .dispatch_chain("opus")
+            .dispatch_chain("opus", session_key)
             .expect("chain resolves")
             .into_iter()
             .map(|t| t.state_key)
@@ -5377,6 +5483,53 @@ mod seat_pool_dispatch_tests {
         );
         // And the pool re-expanded to three seats.
         assert_eq!(after.seat_count_for("opus"), Some(3));
+    }
+
+    #[tokio::test]
+    async fn sticky_pins_on_miss_then_stays_on_session() {
+        // A multi-seat StickyLeastLoaded pool: the first request for session
+        // "S" picks (and pins) a home seat; a second request for "S" returns
+        // the SAME home seat first (it reads the pin rather than re-picking).
+        let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+        let first = chain_state_keys_for(&router, Some("S"));
+        let home = first[0].clone();
+        let second = chain_state_keys_for(&router, Some("S"));
+        assert_eq!(
+            second[0], home,
+            "second request for the same session must lead with the pinned home seat"
+        );
+        // Every seat still appears (the order is a hint, not a filter).
+        assert_eq!(first.len(), 3);
+        assert_eq!(second.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn sticky_keyless_matches_fill_first() {
+        // Keyless StickyLeastLoaded routes through seat_order_for_request, so
+        // its order is identical to a FillFirst pool's.
+        let (sticky, _c1) = pooled_router(SeatSelection::StickyLeastLoaded);
+        let (fill, _c2) = pooled_router(SeatSelection::FillFirst);
+        let sticky_order = chain_state_keys_for(&sticky, None);
+        let fill_order = chain_state_keys(&fill);
+        assert_eq!(sticky_order, fill_order);
+        assert_eq!(sticky_order, vec!["opus", "opus#seat-b", "opus#seat-c"]);
+    }
+
+    #[tokio::test]
+    async fn sticky_stale_pin_not_in_pool_is_re_picked() {
+        // A pin whose state_key no longer exists in the pool resolves to a
+        // miss: the request re-picks a valid in-pool seat (and re-pins it).
+        let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+        router.sticky_pins.put("S", "opus#seat-gone".to_string());
+        let order = chain_state_keys_for(&router, Some("S"));
+        let valid = ["opus", "opus#seat-b", "opus#seat-c"];
+        assert!(
+            valid.contains(&order[0].as_str()),
+            "stale pin must re-pick a valid in-pool seat, got {}",
+            order[0]
+        );
+        // The re-pick repaired the pin to an in-pool seat.
+        assert!(valid.contains(&router.sticky_pins.get("S").expect("re-pinned").as_str()));
     }
 }
 
