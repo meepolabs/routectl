@@ -1424,18 +1424,38 @@ dispatch chooses among the pool's seats:
 kind          = "anthropic-api"
 api_key_ref   = "oauth://anthropic"
 auth_kind     = "oauth-bearer"
-seat_selection = "round-robin"   # or "fill-first" (default)
+seat_selection = "round-robin"   # "fill-first" (default) / "round-robin" / "sticky-least-loaded"
 ```
 
 - `fill-first` (default) -- drain one seat before advancing to the
   next. A single-seat provider (the common case) keeps today's
   behavior with no config.
 - `round-robin` -- rotate across seats to spread load.
+- `sticky-least-loaded` -- pin each conversation to one seat so its
+  warm prompt cache is preserved, while balancing NEW conversations
+  across seats by available capacity. A conversation's first request
+  picks the least-loaded healthy seat (preferring seats with a closed
+  breaker, then the most RPM headroom, with a deterministic tiebreak so
+  a burst of new conversations does not herd onto one seat); every
+  later request for that conversation routes back to the same seat. If
+  that seat later goes unhealthy (rate-limited or breaker-open), the
+  conversation migrates ONCE to a healthy sibling and does not flap back
+  when the original recovers. Requires an inbound per-conversation key
+  (the `x-claude-code-session-id` header Claude Code sends, or body
+  `metadata.session_id`); a request without one falls back to
+  `fill-first`. The per-request decision is recorded in the usage
+  ledger's `selection_decision` column (birth_pick / sticky_stay /
+  overflow_repin / defer_no_healthy / keyless_fill_first) for
+  diagnostics.
 
-Both strategies are applied at dispatch time -- `fill-first` always
+These strategies are applied at dispatch time -- `fill-first` always
 starts from seat 0 (fixed priority order), `round-robin` advances the
-start seat per request (spreading load across the pool). An empty or
-whitespace-only `--label` is rejected with a clear error, matching the
+start seat per request (spreading load across the pool), and
+`sticky-least-loaded` leads with the conversation's home seat (the rest
+of the pool follows in fill-first order as fallback). Seat selection is
+a best-effort ordering hint: the per-seat rate-limit gate and the
+fallback chain remain authoritative. An empty or whitespace-only
+`--label` is rejected with a clear error, matching the
 `oauth://<provider>#<label>` ref parser's rule.
 
 ### Header pack ("look like claude-code")
