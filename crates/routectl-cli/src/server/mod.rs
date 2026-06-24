@@ -543,6 +543,11 @@ pub(crate) async fn build_router_from_config(
     // cost resolution never silently skips a key it cannot parse.
     routectl_router::validate_registry_patterns(&config)?;
 
+    // Advisory: warn (never fail) if the baked prompt-cache pricing table
+    // has gone stale (> 90 days since a cell's verified_at). The numbers
+    // drift; a stale stamp is the operator's cue to re-verify.
+    routectl_router::cache_pricing::warn_if_stale();
+
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
         .with_bedrock_allowed_betas(config.bedrock.allowed_betas.clone())
