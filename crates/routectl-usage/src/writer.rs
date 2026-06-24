@@ -426,12 +426,14 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.strategy,
             r.reduction_strategy,
             r.selection_decision,
+            r.would_trim_tokens,
+            r.would_trim_break_even_k,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?45` positions match the params list above.
+/// `schema.rs` exactly; `?1..?47` positions match the params list above.
 const INSERT_SQL: &str = "\
 INSERT OR IGNORE INTO requests (
     ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
@@ -447,7 +449,9 @@ INSERT OR IGNORE INTO requests (
     extra,
     strategy,
     reduction_strategy,
-    selection_decision
+    selection_decision,
+    would_trim_tokens,
+    would_trim_break_even_k
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -462,7 +466,9 @@ INSERT OR IGNORE INTO requests (
     ?42,
     ?43,
     ?44,
-    ?45
+    ?45,
+    ?46,
+    ?47
 )";
 
 #[cfg(test)]
@@ -523,6 +529,8 @@ mod tests {
             strategy: None,
             reduction_strategy: None,
             selection_decision: None,
+            would_trim_tokens: None,
+            would_trim_break_even_k: None,
         }
     }
 

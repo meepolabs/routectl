@@ -219,6 +219,45 @@ pub fn latest_quota(db: &UsageDb) -> Result<Option<QuotaSnapshot>, QueryError> {
     Ok(snapshot)
 }
 
+/// Windowed steady-state would-trim opportunity: how many requests in the
+/// window carried a non-mutating would-cut candidate, and the summed
+/// `would_trim_tokens` (the candidate freed-token count `d`) over them. Plain
+/// data; the caller decides how to display it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WouldTrimSummary {
+    /// Count of requests in the window with a would-cut candidate
+    /// (`would_trim_tokens IS NOT NULL`).
+    pub candidate_requests: i64,
+    /// Summed `would_trim_tokens` over those requests.
+    pub would_trim_tokens: i64,
+}
+
+const WOULD_TRIM_SQL: &str = "\
+SELECT
+    COUNT(would_trim_tokens)               AS candidate_requests,
+    COALESCE(SUM(would_trim_tokens), 0)    AS would_trim_tokens
+FROM requests
+WHERE ts_start >= ?1 AND ts_start < ?2";
+
+/// The window's steady-state would-trim opportunity. `COUNT(col)` ignores
+/// NULLs, so `candidate_requests` is the number of requests the trimmer
+/// flagged; `would_trim_tokens` is the summed candidate freed-token count.
+/// Both are 0 when no row in the window carried a candidate.
+pub fn would_trim_summary(
+    db: &UsageDb,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<WouldTrimSummary, QueryError> {
+    let mut stmt = db.conn().prepare(WOULD_TRIM_SQL)?;
+    let summary = stmt.query_row([from_ms, to_ms], |row| {
+        Ok(WouldTrimSummary {
+            candidate_requests: row.get(0)?,
+            would_trim_tokens: row.get(1)?,
+        })
+    })?;
+    Ok(summary)
+}
+
 const TTFBS_SQL: &str = "\
 SELECT model, provider, upstream, alias, ttfb_ms
 FROM requests
@@ -646,6 +685,57 @@ mod tests {
             rows[0].key.model.is_some(),
             "must not be a NULL model bucket"
         );
+    }
+
+    /// Insert a row with an optional `would_trim_tokens` value so the
+    /// would-trim summary's NULL-vs-present accounting is testable.
+    fn insert_would_trim_row(
+        db: &UsageDb,
+        request_id: &str,
+        ts_start: i64,
+        would_trim_tokens: Option<i64>,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, would_trim_tokens) \
+                 VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 0, 'ok', 0, 0, 0, 1, 0, ?3)",
+                rusqlite::params![ts_start, request_id, would_trim_tokens],
+            )
+            .expect("insert would-trim row");
+    }
+
+    #[test]
+    fn would_trim_summary_counts_candidates_and_sums_tokens() {
+        // Arrange: two rows with candidates, one without (NULL), plus an
+        // out-of-window candidate row.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_would_trim_row(&db, "w1", 100, Some(40_000));
+        insert_would_trim_row(&db, "w2", 110, Some(20_000));
+        insert_would_trim_row(&db, "w3", 120, None);
+        insert_would_trim_row(&db, "out", 5, Some(99_000));
+
+        // Act
+        let s = would_trim_summary(&db, 100, 1000).expect("summary");
+
+        // Assert: COUNT ignores the NULL row and the out-of-window row.
+        assert_eq!(s.candidate_requests, 2);
+        assert_eq!(s.would_trim_tokens, 60_000);
+    }
+
+    #[test]
+    fn would_trim_summary_is_zero_when_no_candidates() {
+        // Arrange: only a plain row with no would-trim candidate.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_would_trim_row(&db, "plain", 100, None);
+
+        // Act + Assert
+        let s = would_trim_summary(&db, 0, 1000).expect("summary");
+        assert_eq!(s.candidate_requests, 0);
+        assert_eq!(s.would_trim_tokens, 0);
     }
 
     #[test]

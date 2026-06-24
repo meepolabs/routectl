@@ -68,6 +68,74 @@ fn render_non_detail_header_has_expected_columns() {
     }
 }
 
+/// Insert a row carrying a steady-state would-trim candidate, so the
+/// --detail would-trim opportunity line is testable.
+fn would_trim_row(db: &UsageDb, request_id: &str, would_trim_tokens: i64) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             would_trim_tokens) \
+             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', 'm', 'paid', \
+             'up-paid', 0, 'ok', 5, 0, 0, 1, 0, ?2)",
+            rusqlite::params![request_id, would_trim_tokens],
+        )
+        .expect("insert would-trim row");
+}
+
+#[test]
+fn render_detail_shows_would_trim_opportunity_line() {
+    // Arrange: two rows with would-cut candidates.
+    let (_dir, _path, db) = temp_db();
+    would_trim_row(&db, "wt1", 40_000);
+    would_trim_row(&db, "wt2", 20_000);
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: the compact advisory line names the candidate count, the summed
+    // tokens (humanized 60_000 -> "60K"), and flags that it is not applied.
+    assert!(
+        out.contains("would-trim: 2 reqs with a would-cut candidate"),
+        "detail output must surface the would-trim opportunity: {out}"
+    );
+    assert!(out.contains("60K"), "summed candidate tokens: {out}");
+    assert!(out.contains("not applied"), "advisory framing: {out}");
+}
+
+#[test]
+fn render_non_detail_omits_would_trim_line() {
+    // Arrange: a would-cut candidate exists, but the default table must not
+    // surface it (only --detail does).
+    let (_dir, _path, db) = temp_db();
+    would_trim_row(&db, "wt1", 40_000);
+    let report = report_all(&db, &cost_config(), None, false);
+
+    // Act + Assert
+    let out = render_report(&report);
+    assert!(
+        !out.contains("would-trim"),
+        "the default (non-detail) table must omit the would-trim line: {out}"
+    );
+}
+
+#[test]
+fn render_detail_omits_would_trim_line_when_no_candidates() {
+    // Arrange: a plain row, no would-cut candidate.
+    let (_dir, _path, db) = temp_db();
+    paid_row(&db, "plain", Some(10), Some(20));
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act + Assert: a window with no candidates stays uncluttered.
+    let out = render_report(&report);
+    assert!(
+        !out.contains("would-trim"),
+        "no candidates -> no would-trim line: {out}"
+    );
+}
+
 #[test]
 fn render_by_provider_uses_provider_key_header() {
     // Arrange

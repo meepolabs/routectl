@@ -133,6 +133,9 @@ pub fn propose_steady_state_trim(
         return None;
     }
 
+    // `collect_elision_marks` is the SINGLE source of truth for the
+    // `clear_at_least` floor: a `Some` here already freed at least that many
+    // tokens, so no separate re-check is needed.
     let marks = collect_elision_marks(
         req,
         params.head_keep_messages,
@@ -141,9 +144,6 @@ pub fn propose_steady_state_trim(
     )?;
 
     let elided_tokens: u64 = marks.iter().map(|m| m.original_tokens).sum();
-    if elided_tokens < params.clear_at_least_tokens {
-        return None;
-    }
 
     let placeholder_tokens = estimate_str_tokens(ELISION_PLACEHOLDER);
     // `d` = original elided payload tokens minus the placeholder tokens that
@@ -171,8 +171,10 @@ pub fn propose_steady_state_trim(
 }
 
 /// Scan FORWARD over `[start, scan_end)`, marking the oldest elidable tool
-/// content until `clear_at_least` tokens are freed. Returns `None` when no
-/// elidable old-tool content exists in the scan window.
+/// content until `clear_at_least` tokens are freed. SINGLE SOURCE OF TRUTH
+/// for the `clear_at_least` floor: returns `None` whenever the scan window
+/// cannot reach it (no elidable old-tool content at all, or not enough of
+/// it), so the caller never sees a partial mark set it has to re-reject.
 fn collect_elision_marks(
     req: &ChatRequest,
     start: usize,
@@ -202,11 +204,9 @@ fn collect_elision_marks(
         }
     }
 
-    if marks.is_empty() {
-        None
-    } else {
-        Some(marks)
-    }
+    // The whole scan window was exhausted without freeing `clear_at_least`
+    // tokens: there is no trigger-clearing cut, so report no plan.
+    None
 }
 
 /// Token count of an elidable tool payload, or `None` when the part is not
@@ -536,6 +536,10 @@ mod tests {
 
     #[test]
     fn growth_does_not_shift_span_or_placeholders() {
+        // SCOPE: this covers the safe early-stop case (one N -> N+1 step where
+        // the forward scan reaches `clear_at_least` at a fixed front index);
+        // `growth_holds_span_and_marks_across_many_turns` covers the general
+        // multi-turn invariant.
         // Arrange: turn N, and turn N+1 = turn N + one appended user/assistant.
         let turn_n = long_conversation(6, 12_000);
         let mut turn_n_plus_1 = turn_n.clone();
@@ -555,6 +559,52 @@ mod tests {
         // growth (front-anchored, byte-stable as the conversation grows).
         assert_eq!(plan_n.span, plan_n1.span, "span shifted under growth");
         assert_eq!(plan_n.marks, plan_n1.marks, "marks shifted under growth");
+    }
+
+    #[test]
+    fn growth_holds_span_and_marks_across_many_turns() {
+        // The general front-determined invariant: grow a long tool-heavy
+        // conversation ONE turn at a time across many appended turns and prove
+        // (i) once `propose_steady_state_trim` returns `Some` it NEVER reverts
+        // to `None`, and (ii) across ALL `Some` turns the elided `span` AND the
+        // per-part `marks` are byte-identical. Together these show the elided
+        // span is fixed by FRONT content: the `None -> Some` activation is
+        // one-time and there is no harmful turn-to-turn flicker.
+        // Arrange: a conversation already past the trigger, then >= 10 growth
+        // steps appending one user + one assistant turn each.
+        const GROWTH_STEPS: usize = 12;
+        let mut req = long_conversation(6, 12_000);
+        let params = SteadyStateTrimParams::default();
+
+        // Act + Assert, step by step.
+        let mut activated: Option<(Range<usize>, Vec<ElisionMark>)> = None;
+        for step in 0..GROWTH_STEPS {
+            match propose_steady_state_trim(&req, &params) {
+                Some(plan) => match &activated {
+                    None => activated = Some((plan.span.clone(), plan.marks.clone())),
+                    Some((span, marks)) => {
+                        assert_eq!(&plan.span, span, "span shifted at growth step {step}");
+                        assert_eq!(&plan.marks, marks, "marks shifted at growth step {step}");
+                    }
+                },
+                None => assert!(
+                    activated.is_none(),
+                    "plan reverted to None at growth step {step} after activating",
+                ),
+            }
+            // Grow by one full turn (front indices stay immutable; only the
+            // tail lengthens).
+            req.messages
+                .push(user_msg(&format!("follow-up turn {step}")));
+            req.messages.push(assistant_msg(&format!("reply {step}")));
+        }
+
+        // Sanity: the trimmer DID activate at some point (otherwise the
+        // invariant above is vacuously true and proves nothing).
+        assert!(
+            activated.is_some(),
+            "trimmer never activated across the growth sweep",
+        );
     }
 
     #[test]

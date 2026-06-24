@@ -206,6 +206,8 @@ mod tests {
             strategy: None,
             reduction_strategy: None,
             selection_decision: None,
+            would_trim_tokens: None,
+            would_trim_break_even_k: None,
         }
     }
 
