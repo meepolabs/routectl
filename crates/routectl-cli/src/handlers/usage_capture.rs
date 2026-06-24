@@ -66,6 +66,7 @@ pub(crate) fn build_usage_draft(
         fallback_count: 0,
         strategy: None,
         reduction_strategy: None,
+        selection_decision: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -267,6 +268,7 @@ impl UsageCapture {
         self.record.upstream = meta.served_upstream.clone();
         self.record.strategy = meta.cache_strategy.map(|s| s.to_string());
         self.record.reduction_strategy = meta.reduction_strategy.map(|s| s.to_string());
+        self.record.selection_decision = meta.selection_decision.map(|s| s.to_string());
     }
 
     /// Stamp the token / quota / finish columns from a non-streaming

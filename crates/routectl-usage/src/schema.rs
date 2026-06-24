@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -101,7 +101,14 @@ CREATE TABLE IF NOT EXISTS requests (
     -- the same ordinal position whether the DB was created fresh at v3 or
     -- migrated from v2 via `ALTER TABLE ... ADD COLUMN reduction_strategy`
     -- (which always appends).
-    reduction_strategy TEXT
+    reduction_strategy TEXT,
+
+    -- SEAT-SELECTION DECISION (v4): the per-request seat-selection decision
+    -- token recorded by the router for the served target's home seat.
+    -- Appended last so this column lands in the same ordinal position
+    -- whether the DB was created fresh at v4 or migrated from v3 via
+    -- `ALTER TABLE ... ADD COLUMN selection_decision` (which always appends).
+    selection_decision TEXT
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query
