@@ -10,6 +10,7 @@
 //! either as the top-level `system` field OR as `Role::System` messages; both
 //! are attributed to the SYSTEM tier in the breakdown below.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -18,10 +19,11 @@ use routectl_core::context_reduction::{apply_json_minify, ReductionOutcome};
 use routectl_core::schema::Role;
 use routectl_core::{scan_volatile, ChatRequest, Error, Result};
 use routectl_router::{
-    break_even_k, evaluate, lookup, validate_alias_chain_targets, validate_alias_patterns,
-    validate_bedrock_global_config, validate_reasoning_defaults, validate_registry_patterns,
-    validate_retry_policy, AliasPattern, AliasValue, CachePricingRow, Config, GateDecision,
-    KeepReason, PrefixReductionCandidate, ALIAS_MAX_RECURSION_DEPTH,
+    break_even_k, evaluate, lookup_with_overrides, validate_alias_chain_targets,
+    validate_alias_patterns, validate_bedrock_global_config, validate_overrides,
+    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy, AliasPattern,
+    AliasValue, CachePricingOverride, CachePricingRow, Config, GateDecision, KeepReason,
+    PrefixReductionCandidate, ALIAS_MAX_RECURSION_DEPTH,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -205,10 +207,12 @@ pub fn build_report(
 ///
 /// `target` is `Some((provider_kind, model))` when the alias resolved offline,
 /// or `None` (the cell then prices as the sentinel and the verdict reads
-/// "insufficient data"). `lookup` is given the requested `tier`.
+/// "insufficient data"). The resolved row honors the operator's
+/// `[cache_pricing]` `overrides` for the requested `tier`.
 fn build_economics(
     report_total_tokens: usize,
     target: Option<(&'static str, String)>,
+    overrides: &BTreeMap<String, CachePricingOverride>,
     args: &ProjectionArgs,
 ) -> EconomicsProjection {
     let d = args.hypothetical_d.unwrap_or(0);
@@ -220,7 +224,7 @@ fn build_economics(
         Some((kind, model)) => (
             Some((*kind).to_string()),
             Some(model.clone()),
-            lookup(kind, model, Some(args.ttl_tier)),
+            lookup_with_overrides(kind, model, Some(args.ttl_tier), overrides),
         ),
         None => (None, None, CachePricingRow::sentinel()),
     };
@@ -416,6 +420,10 @@ pub fn run(
     validate_alias_patterns(&config)?;
     validate_retry_policy(&config)?;
     validate_registry_patterns(&config)?;
+    // Reject a degenerate `[cache_pricing]` override (unparseable selector or
+    // a multiplier that breaks the break-even math) here too, so the advisory
+    // projection never silently prices off a bad override.
+    validate_overrides(&config.cache_pricing).map_err(Error::Config)?;
 
     let text = fs::read_to_string(request_path).map_err(|e| {
         Error::Config(format!(
@@ -445,6 +453,7 @@ pub fn run(
         report.economics = Some(build_economics(
             report.total.approx_tokens,
             target,
+            &config.cache_pricing,
             &projection,
         ));
     } else if projection.c_after.is_some() || projection.hypothetical_k.is_some() {
@@ -612,6 +621,8 @@ fn describe_reduction(outcome: &ReductionOutcome, enabled: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_router::lookup;
+
     use routectl_core::cache_control::CacheControl;
     use routectl_core::content_part::{ContentPart, KnownContentPart};
     use routectl_core::schema::{Message, MessageContent};
@@ -1007,7 +1018,7 @@ mystery = "mystery_model"
         };
 
         // Act: C is the report's total approx tokens; pass 200_000 directly.
-        let economics = build_economics(200_000, target, &args);
+        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
 
         // Assert: the projected K* equals the cost gate's own computation for
         // the looked-up row + candidate (wiring matches the math).
@@ -1034,7 +1045,7 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(200_000, target, &args);
+        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
 
         // Assert: a BREAK verdict carrying the cut token count + ledger token.
         let verdict = economics.verdict.expect("k was supplied");
@@ -1067,7 +1078,7 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(200_000, target, &args);
+        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
 
         // Assert: the cell is labeled unverified, no live break-even is shown,
         // and the verdict reads KEEP (insufficient data) even at a huge k.
@@ -1101,7 +1112,7 @@ mystery = "mystery_model"
         };
 
         // Act: C defaults from the report total; C_after defaults to C.
-        let economics = build_economics(80_000, target, &args);
+        let economics = build_economics(80_000, target, &config.cache_pricing, &args);
 
         // Assert: sentinel treatment -- unverified, no K*, KEEP/insufficient.
         assert!(!economics.verified);
@@ -1157,6 +1168,7 @@ mystery = "mystery_model"
             report.economics = Some(build_economics(
                 report.total.approx_tokens,
                 Some(("anthropic-api", "claude-opus-4-8".to_string())),
+                &BTreeMap::new(),
                 &projection,
             ));
         }
@@ -1195,7 +1207,7 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(1_500, target, &args);
+        let economics = build_economics(1_500, target, &config.cache_pricing, &args);
 
         // Assert: finite K* (the math is well-defined) AND a hard KEEP below
         // the cacheable floor even at a wildly favorable k.
@@ -1240,7 +1252,7 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(200_000, target, &args);
+        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
 
         // Assert: K* equals the gate's computation for the 1h (wm=2.0) row.
         let row = lookup("anthropic-api", "claude-opus-4-8", Some("1h"));
@@ -1251,6 +1263,69 @@ mystery = "mystery_model"
         // Sanity-anchor: (200000 * 2.0) / (50000 * 0.10) == 80 at the 1h tier.
         assert!((economics.break_even_k.unwrap() - 80.0).abs() < 1e-4);
         assert_eq!(economics.tier, "1h");
+    }
+
+    #[test]
+    fn build_economics_honors_operator_override_flipping_the_verdict() {
+        // Arrange: the unverified `mystery` target (openai-compat catch-all)
+        // reads KEEP/insufficient-data with no override. An operator override on
+        // that selector supplies verified-trust multipliers, so the SAME inputs
+        // now yield a live break-even and a real BREAK verdict.
+        let config = economics_config();
+        let target = resolve_target(&config, "mystery");
+        assert_eq!(
+            target,
+            Some(("openai-compat", "totally-unknown-model-xyz".to_string()))
+        );
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: Some(1_000_000.0),
+            c_after: Some(200_000),
+            ttl_tier: "5m",
+        };
+
+        // Baseline: no override -> unverified -> KEEP/insufficient-data.
+        let baseline = build_economics(200_000, target.clone(), &config.cache_pricing, &args);
+        assert!(!baseline.verified);
+        assert_eq!(baseline.break_even_k, None);
+        assert_eq!(
+            baseline.verdict,
+            Some(GateDecision::Keep {
+                reason: KeepReason::InsufficientData
+            })
+        );
+
+        // Arrange the override: a small min-prefix and a sane wm/rm under the
+        // exact catch-all selector for this provider/model.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(
+            "openai-compat:*".to_string(),
+            routectl_router::CachePricingOverride {
+                wm: Some(1.0),
+                rm: Some(0.10),
+                min_prefix_tokens: Some(1),
+                override_acknowledges_cost_risk: true,
+                ..Default::default()
+            },
+        );
+
+        // Act
+        let overridden = build_economics(200_000, target, &overrides, &args);
+
+        // Assert: the override flipped the cell to verified -> a live break-even
+        // now exists and the verdict differs from the unverified baseline.
+        assert!(
+            overridden.verified,
+            "override should mark the cell verified"
+        );
+        assert!(
+            overridden.break_even_k.is_some(),
+            "a verified cell yields a live K*"
+        );
+        assert_ne!(
+            overridden.verdict, baseline.verdict,
+            "override should change the verdict vs the no-override baseline"
+        );
     }
 
     #[test]
@@ -1267,7 +1342,7 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(200_000, target, &args);
+        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
 
         // Assert: a KEEP/NetNegative verdict whose rendered text conveys the
         // net-negative reason.

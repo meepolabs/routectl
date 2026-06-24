@@ -1403,3 +1403,41 @@ async fn build_test_router(
         .await
         .expect("build router")
 }
+
+/// A degenerate `[cache_pricing]` override (rm <= 0.0) must fail the
+/// server bootstrap, surfaced as a config error rather than silently going
+/// inert. Drives the real `build_router_from_config` startup path.
+#[tokio::test]
+async fn bootstrap_rejects_degenerate_cache_pricing_override() {
+    use routectl_auth::{MemoryStore, SecretStore};
+    use routectl_router::{CachePricingOverride, Config};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    // Arrange: a minimal config carrying one degenerate override.
+    let mut cache_pricing = BTreeMap::new();
+    cache_pricing.insert(
+        "openai-compat:grok-*".to_string(),
+        CachePricingOverride {
+            rm: Some(0.0),
+            ..Default::default()
+        },
+    );
+    let config = Arc::new(Config {
+        cache_pricing,
+        ..Default::default()
+    });
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+
+    // Act
+    let result = crate::server::build_router_from_config(config, secrets).await;
+
+    // Assert: startup fails, naming the offending selector. `Router` is not
+    // `Debug`, so match the Result rather than calling `expect_err`.
+    let msg = match result {
+        Ok(_) => panic!("degenerate override must fail bootstrap"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("openai-compat:grok-*"), "msg: {msg}");
+    assert!(msg.contains("rm must be > 0.0"), "msg: {msg}");
+}

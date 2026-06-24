@@ -15,7 +15,10 @@ pub mod router;
 pub mod runtime_state;
 pub(crate) mod seat_pool;
 
-pub use cache_pricing::{lookup, CachePricingOverride, CachePricingRow, CachePricingSelector};
+pub use cache_pricing::{
+    lookup, lookup_with_overrides, validate_overrides, CachePricingOverride, CachePricingRow,
+    CachePricingSelector,
+};
 pub use config::{
     AliasValue, CacheCapability, CacheConfig, Config, HistoryReasoning, LogConfig, ModelEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
