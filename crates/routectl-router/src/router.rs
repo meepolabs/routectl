@@ -492,8 +492,8 @@ impl Router {
     /// after building a replacement Router and before swapping it in,
     /// alongside `carry_over_runtime_state_from`.
     pub fn carry_over_sticky_from(&mut self, previous: &Router) {
-        for (session_key, state_key) in previous.sticky_pins.export_entries() {
-            self.sticky_pins.put(&session_key, state_key);
+        for (session_key, pin) in previous.sticky_pins.export_entries() {
+            self.sticky_pins.put(&session_key, pin);
         }
     }
 
@@ -794,63 +794,97 @@ impl Router {
     }
 
     /// Resolve the sticky least-loaded seat walk order for `key` over a
-    /// multi-seat pool. Resolves the pin FIRST (cheap, common path); only on
-    /// a miss gathers the per-seat capacity snapshots (one lock each) to pick
-    /// the least-loaded home, then pins it. Never logs the raw session key.
+    /// multi-seat pool. Resolves the pin (with its one-time overflow marker)
+    /// FIRST, gathers the per-seat capacity snapshots (one lock each; N is
+    /// small and locks are uncontended), then asks the pure selector for the
+    /// walk order and a [`SelectionOutcome`]. On a birth it pins the chosen
+    /// home (`repinned: false`); on a one-time overflow-repin it pins the new
+    /// home (`repinned: true`). A healthy home, an already-repinned home, or a
+    /// no-healthy-sibling case stays put with no pin write -- the one-time cap
+    /// + hysteresis. Never logs the raw session key.
     fn sticky_seat_order(&self, seats: &[crate::seat_pool::SeatTarget], key: &str) -> Vec<usize> {
         // A pinned state_key no longer present in this pool resolves to None
-        // -> treated as a miss (re-pick).
-        let pinned_index = self
-            .sticky_pins
-            .get(key)
-            .and_then(|sk| seats.iter().position(|s| s.state_key == sk));
-
-        // Avoid the N-lock snapshot gather on the hit path: only gather when
-        // we actually need to choose a new home.
-        let now = Instant::now();
-        let snapshots: Vec<crate::runtime_state::CapacitySnapshot> = if pinned_index.is_some() {
-            Vec::new()
-        } else {
+        // -> treated as a miss (re-pick), and `repinned` resets to false on
+        // the fresh birth -- correct.
+        let pin: Option<(usize, bool)> = self.sticky_pins.get(key).and_then(|p| {
             seats
                 .iter()
-                .map(|s| {
-                    self.capacity_snapshot_for(&s.state_key, now).unwrap_or(
-                        // Defensive: a seat with no state slot should never
-                        // happen (install creates one per seat). If it does,
-                        // fail safe -- treat it as non-dispatchable so it is
-                        // excluded from the birth pick rather than chosen as
-                        // the most-attractive home. It still appears in the
-                        // fallback order, and the existing gate stays
-                        // authoritative.
-                        crate::runtime_state::CapacitySnapshot {
-                            rpm_available: Some(0.0),
-                            circuit: crate::runtime_state::CircuitPhase::Open,
-                        },
-                    )
-                })
-                .collect()
-        };
+                .position(|s| s.state_key == p.state_key)
+                .map(|i| (i, p.repinned))
+        });
 
-        let tiebreak = if pinned_index.is_none() {
+        // Gather ALL seat snapshots (both hit and miss): the overflow check
+        // needs the pinned home's snapshot to decide whether to migrate.
+        let now = Instant::now();
+        let snapshots: Vec<crate::runtime_state::CapacitySnapshot> = seats
+            .iter()
+            .map(|s| {
+                self.capacity_snapshot_for(&s.state_key, now).unwrap_or(
+                    // Defensive: a seat with no state slot should never
+                    // happen (install creates one per seat). If it does,
+                    // fail safe -- treat it as non-dispatchable so it is
+                    // excluded from a pick rather than chosen as the most-
+                    // attractive home. It still appears in the fallback
+                    // order, and the existing gate stays authoritative.
+                    crate::runtime_state::CapacitySnapshot {
+                        rpm_available: Some(0.0),
+                        circuit: crate::runtime_state::CircuitPhase::Open,
+                    },
+                )
+            })
+            .collect();
+
+        // Advance the anti-herd counter only when a pick is actually
+        // attempted: a miss, or a hit whose home is non-dispatchable and not
+        // yet repinned. A sticky-stay does not consume tiebreak.
+        let will_attempt_pick = match pin {
+            None => true,
+            Some((home, repinned)) => !snapshots[home].is_dispatchable() && !repinned,
+        };
+        let tiebreak = if will_attempt_pick {
             self.sticky_pins.next_tiebreak()
         } else {
-            // Sticky-stay ignores tiebreak; do not advance the anti-herd
-            // counter on a hit.
             0
         };
-        let (order, to_pin) = crate::seat_pool::sticky_least_loaded_order(
+
+        let (order, outcome) = crate::seat_pool::sticky_least_loaded_order(
             seats.len(),
-            pinned_index,
+            pin.map(|(i, _)| i),
+            pin.map(|(_, r)| r).unwrap_or(false),
             &snapshots,
             tiebreak,
         );
-        if let Some(idx) = to_pin {
-            self.sticky_pins.put(key, seats[idx].state_key.clone());
-            tracing::debug!(
-                state_key = %seats[idx].state_key,
-                seat_label = ?seats[idx].label,
-                "sticky least-loaded birth pick: pinned session to seat"
-            );
+        match outcome {
+            crate::seat_pool::SelectionOutcome::Birth { home } => {
+                self.sticky_pins.put(
+                    key,
+                    crate::seat_pool::SeatPin {
+                        state_key: seats[home].state_key.clone(),
+                        repinned: false,
+                    },
+                );
+                tracing::debug!(
+                    state_key = %seats[home].state_key,
+                    seat_label = ?seats[home].label,
+                    "sticky least-loaded birth pick: pinned session to seat"
+                );
+            }
+            crate::seat_pool::SelectionOutcome::OverflowRepin { home } => {
+                self.sticky_pins.put(
+                    key,
+                    crate::seat_pool::SeatPin {
+                        state_key: seats[home].state_key.clone(),
+                        repinned: true,
+                    },
+                );
+                tracing::debug!(
+                    state_key = %seats[home].state_key,
+                    seat_label = ?seats[home].label,
+                    "sticky least-loaded overflow-repin: migrated session to healthy sibling"
+                );
+            }
+            crate::seat_pool::SelectionOutcome::Stay { .. }
+            | crate::seat_pool::SelectionOutcome::DeferNoHealthy => {}
         }
         order
     }
@@ -3198,21 +3232,37 @@ mod tests {
         // NOT drop StickyLeastLoaded pins, or every live conversation cold-
         // misses its warm-cache seat.
 
-        // Arrange: pin a session in the outgoing Router.
+        // Arrange: pin a session in the outgoing Router, with the one-time
+        // overflow marker set so we can prove it survives the rebuild.
         let config = Arc::new(Config::default());
         let before = Router::new(config.clone());
-        before.sticky_pins.put("sess-1", "opus#seat-b".into());
+        before.sticky_pins.put(
+            "sess-1",
+            crate::seat_pool::SeatPin {
+                state_key: "opus#seat-b".into(),
+                repinned: true,
+            },
+        );
 
         let mut after = Router::new(config.clone());
 
         // Act
         after.carry_over_sticky_from(&before);
 
-        // Assert: the pin survived the rebuild.
+        // Assert: the pin survived the rebuild, INCLUDING the repinned flag --
+        // otherwise a reload would reset the one-time cap and re-open the flap
+        // window.
         let entries = after.sticky_pins.export_entries();
         assert!(
-            entries.contains(&("sess-1".to_string(), "opus#seat-b".to_string())),
-            "carry_over_sticky_from must preserve session->seat pins across a rebuild",
+            entries.contains(&(
+                "sess-1".to_string(),
+                crate::seat_pool::SeatPin {
+                    state_key: "opus#seat-b".to_string(),
+                    repinned: true,
+                }
+            )),
+            "carry_over_sticky_from must preserve session->seat pins (with the \
+             repinned flag) across a rebuild",
         );
     }
 }
@@ -5520,7 +5570,13 @@ mod seat_pool_dispatch_tests {
         // A pin whose state_key no longer exists in the pool resolves to a
         // miss: the request re-picks a valid in-pool seat (and re-pins it).
         let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
-        router.sticky_pins.put("S", "opus#seat-gone".to_string());
+        router.sticky_pins.put(
+            "S",
+            crate::seat_pool::SeatPin {
+                state_key: "opus#seat-gone".to_string(),
+                repinned: false,
+            },
+        );
         let order = chain_state_keys_for(&router, Some("S"));
         let valid = ["opus", "opus#seat-b", "opus#seat-c"];
         assert!(
@@ -5529,7 +5585,82 @@ mod seat_pool_dispatch_tests {
             order[0]
         );
         // The re-pick repaired the pin to an in-pool seat.
-        assert!(valid.contains(&router.sticky_pins.get("S").expect("re-pinned").as_str()));
+        assert!(valid.contains(
+            &router
+                .sticky_pins
+                .get("S")
+                .expect("re-pinned")
+                .state_key
+                .as_str()
+        ));
+    }
+
+    #[tokio::test]
+    async fn sticky_overflow_repin_migrates_once_and_does_not_flap() {
+        // F2c end-to-end: pin a session, force its home seat's breaker open,
+        // and assert a subsequent call leads with a healthy sibling AND the
+        // pin records repinned=true. Then heal the original and assert the
+        // session STAYS on the sibling (hysteresis -- no A->B->A flap). Then
+        // park the sibling (new home) and assert the already-repinned session
+        // STAYS (does not chase a third seat -- one-time cap).
+        let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
+
+        // Birth: pin session S to its home seat.
+        let first = chain_state_keys_for(&router, Some("S"));
+        let home = first[0].clone();
+        assert!(
+            !router.sticky_pins.get("S").expect("pinned").repinned,
+            "birth pin must start un-repinned"
+        );
+
+        // Force the home seat's breaker open for a long cooldown.
+        assert!(
+            router.force_open_breaker(&home, Duration::from_secs(3600)),
+            "home seat must own a state slot to trip"
+        );
+
+        // The session migrates ONCE to a healthy sibling.
+        let migrated = chain_state_keys_for(&router, Some("S"));
+        assert_ne!(
+            migrated[0], home,
+            "overflow-repin must migrate off the parked home seat"
+        );
+        let sibling = migrated[0].clone();
+        let pin_after = router.sticky_pins.get("S").expect("re-pinned");
+        assert_eq!(
+            pin_after.state_key, sibling,
+            "pin must point at the sibling"
+        );
+        assert!(
+            pin_after.repinned,
+            "overflow-repin must set repinned=true (the one-time cap marker)"
+        );
+
+        // Heal the original home seat. The session must NOT flap back: the pin
+        // now points at the healthy sibling, so it STAYS there.
+        router.record_success(&home);
+        let healed = chain_state_keys_for(&router, Some("S"));
+        assert_eq!(
+            healed[0], sibling,
+            "a recovered original must NOT pull the session back (no A->B->A flap)"
+        );
+
+        // Park the NEW home (the sibling). An already-repinned session must
+        // STAY rather than chase a third seat (one-time cap).
+        assert!(
+            router.force_open_breaker(&sibling, Duration::from_secs(3600)),
+            "sibling seat must own a state slot to trip"
+        );
+        let capped = chain_state_keys_for(&router, Some("S"));
+        assert_eq!(
+            capped[0], sibling,
+            "an already-repinned session must not chase a third seat"
+        );
+        assert_eq!(
+            router.sticky_pins.get("S").expect("still pinned").state_key,
+            sibling,
+            "the pin must remain on the sibling -- no second migration"
+        );
     }
 }
 
