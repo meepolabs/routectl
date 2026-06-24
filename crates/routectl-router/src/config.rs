@@ -1763,8 +1763,8 @@ pub struct ProviderRuntimePolicy {
     /// How dispatch picks among multiple OAuth seats configured for this
     /// provider's credential pool. `fill-first` (the default) drains one
     /// seat before moving to the next; `round-robin` spreads load across
-    /// seats. Pure config plumbing for now -- no dispatch path consumes
-    /// it yet.
+    /// seats. Applied per request at dispatch time whenever the
+    /// provider's credential pool resolves to more than one seat.
     #[serde(default)]
     pub seat_selection: SeatSelection,
 }
