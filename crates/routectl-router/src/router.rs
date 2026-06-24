@@ -106,6 +106,13 @@ pub struct Router {
     /// seat 0 is benign at single-operator scale). `FillFirst` pools
     /// and non-pooled models have no entry here.
     round_robin: crate::seat_pool::RoundRobinCursors,
+    /// Bounded LRU map of conversation session key -> pinned seat
+    /// `state_key`, for `StickyLeastLoaded` selection. In sharp contrast to
+    /// `round_robin` (which is dropped on a Router rebuild because resetting
+    /// to seat 0 is benign), these pins MUST survive a hot-reload: dropping
+    /// them would scatter every live conversation off its warm-cache seat,
+    /// causing a mass cold-miss. See `carry_over_sticky_from`.
+    sticky_pins: crate::seat_pool::StickyPins,
 }
 
 /// Per-request switches that the HTTP handler can flip via header
@@ -384,6 +391,7 @@ impl Router {
             resolved_models: BTreeMap::new(),
             alias_glob_index,
             round_robin: Default::default(),
+            sticky_pins: Default::default(),
         }
     }
 
@@ -462,6 +470,30 @@ impl Router {
             if self.state.contains_key(key.as_str()) {
                 self.state.insert(key.clone(), state.clone());
             }
+        }
+    }
+
+    /// Carry the previous Router's `StickyLeastLoaded` session->seat pins
+    /// into this freshly-built Router during a hot-reload.
+    ///
+    /// This carry-over is MANDATORY. Each pin keeps a live conversation on
+    /// the one seat holding its warm prompt cache; dropping the pins on a
+    /// reload would re-pin every conversation from scratch and scatter them
+    /// across seats -- a mass cold-miss across all in-flight conversations.
+    /// (By contrast, the round-robin cursors are deliberately dropped on a
+    /// reload because a reset to seat 0 costs at most one mis-rotated
+    /// request -- benign. Pins are not benign, so they survive here.)
+    ///
+    /// Entries are replayed in LRU order (least-recently-used first) so the
+    /// destination map preserves the source's recency ordering, keeping the
+    /// eviction frontier consistent across the rebuild.
+    ///
+    /// Called by the hot-reload coordinator in routectl-cli immediately
+    /// after building a replacement Router and before swapping it in,
+    /// alongside `carry_over_runtime_state_from`.
+    pub fn carry_over_sticky_from(&mut self, previous: &Router) {
+        for (session_key, state_key) in previous.sticky_pins.export_entries() {
+            self.sticky_pins.put(&session_key, state_key);
         }
     }
 
@@ -3057,6 +3089,30 @@ mod tests {
         assert!(
             !new.state.contains_key("model-x"),
             "carry_over must not inject old-only nicknames into the new router",
+        );
+    }
+
+    #[test]
+    fn carry_over_sticky_from_preserves_pins() {
+        // Regression guard for the silent-collapse trap: a hot-reload must
+        // NOT drop StickyLeastLoaded pins, or every live conversation cold-
+        // misses its warm-cache seat.
+
+        // Arrange: pin a session in the outgoing Router.
+        let config = Arc::new(Config::default());
+        let before = Router::new(config.clone());
+        before.sticky_pins.put("sess-1", "opus#seat-b".into());
+
+        let mut after = Router::new(config.clone());
+
+        // Act
+        after.carry_over_sticky_from(&before);
+
+        // Assert: the pin survived the rebuild.
+        let entries = after.sticky_pins.export_entries();
+        assert!(
+            entries.contains(&("sess-1".to_string(), "opus#seat-b".to_string())),
+            "carry_over_sticky_from must preserve session->seat pins across a rebuild",
         );
     }
 }

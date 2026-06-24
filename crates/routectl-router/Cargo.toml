@@ -31,6 +31,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 parking_lot = "0.12"
+lru.workspace = true
 url.workspace = true
 
 [dev-dependencies]
