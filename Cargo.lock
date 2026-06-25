@@ -2496,7 +2496,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
- "cookie_store 0.21.1",
+ "cookie_store 0.22.1",
  "eventsource-stream",
  "futures",
  "http 1.4.2",
