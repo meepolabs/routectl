@@ -289,6 +289,33 @@ pub struct DispatchedStream {
     pub result: Result<BoxStream<'static, Result<ChatChunk>>>,
 }
 
+/// A request feature key (e.g. `web_search`, `structured_output`). Same
+/// vocabulary as `crate::feature_keys`; aliased here so the feature
+/// filter's decision seam reads at the right level of intent.
+type FeatureKey = String;
+
+/// Which static list flagged a feature as unsupported for a target.
+/// The feature filter's decision site returns this so the skip log can
+/// distinguish a provider-scoped restriction from a model-scoped one.
+/// A later increment adds a `Learned` variant here for the adaptive cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterSource {
+    /// Matched the per-provider `unsupported_features` list.
+    ProviderStatic,
+    /// Matched the per-model `unsupported_features` list.
+    ModelStatic,
+}
+
+impl FilterSource {
+    /// Stable lowercase token for the skip-log `source` field.
+    fn as_str(self) -> &'static str {
+        match self {
+            FilterSource::ProviderStatic => "provider",
+            FilterSource::ModelStatic => "model",
+        }
+    }
+}
+
 /// One hop in the resolved dispatch chain. Built from either a
 /// `Arc<ResolvedModel>` (v0.6.0 path) or a parsed `provider:model`
 /// literal (legacy path). The dispatch loop reads from this struct
@@ -330,6 +357,15 @@ struct DispatchTarget {
     /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
     /// bump rather than a heap allocation.
     effort_levels: std::sync::Arc<[String]>,
+    /// Operator-declared per-MODEL `unsupported_features` list. Threaded
+    /// from `ResolvedModel.unsupported_features` so the feature filter
+    /// can union it with the per-PROVIDER list, keyed on this target's
+    /// nickname (not provider) -- two nicknames on one provider filter
+    /// independently. Empty means no model-scoped restriction.
+    ///
+    /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
+    /// bump rather than a heap allocation.
+    model_unsupported_features: std::sync::Arc<[String]>,
     /// Model nickname for tracing.
     nickname: Option<String>,
     /// The shared resolved model this target dispatches to. Carried as
@@ -1024,8 +1060,9 @@ impl Router {
 
     /// Filter the resolved chain by request features. Per-provider
     /// `unsupported_features` lists are consulted via the provider
-    /// table; an entry whose `unsupported_features` intersects the
-    /// request feature set is dropped with a DEBUG log.
+    /// table; the per-model list is carried on the target. An entry
+    /// whose union of those two lists intersects the request feature
+    /// set is dropped with a DEBUG log (tagging the matching source).
     ///
     /// No-ops when `features` is empty (no built-in tool in the
     /// request -> nothing to filter against). Returns
@@ -1045,25 +1082,14 @@ impl Router {
         }
         let mut filtered: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
         for target in chain {
-            let unsupported_intersect = self
-                .config
-                .providers
-                .get(&target.provider_name)
-                .map(|e| {
-                    let unsupported = &e.runtime().unsupported_features;
-                    features
-                        .iter()
-                        .find(|f| unsupported.iter().any(|u| u == *f))
-                        .cloned()
-                })
-                .unwrap_or(None);
-            match unsupported_intersect {
-                Some(feature) => {
+            match self.unsupported_feature_for_target(&target, features) {
+                Some((feature, source)) => {
                     tracing::debug!(
                         provider = %target.provider_name,
                         model = %target.nickname.as_deref().unwrap_or(""),
                         feature = %feature,
-                        "provider skipped: feature in unsupported_features list",
+                        source = %source.as_str(),
+                        "target skipped: feature in unsupported_features list",
                     );
                 }
                 None => {
@@ -1085,6 +1111,48 @@ impl Router {
             ));
         }
         Ok(filtered)
+    }
+
+    /// The single decision site for "is any requested feature
+    /// unsupported for this target, and by which source". Returns the
+    /// FIRST matched `(feature, source)` or `None` if the target
+    /// supports every requested feature.
+    ///
+    /// The union is over two static lists: the per-PROVIDER list (keyed
+    /// on `target.provider_name`, via the provider table) and the
+    /// per-MODEL list (carried on the target, keyed on its nickname).
+    /// A feature is unsupported if EITHER list contains it. Provider is
+    /// consulted first, so a feature listed at both scopes reports
+    /// `ProviderStatic`.
+    ///
+    /// A later increment adds a `Learned` arm here -- this stays the one
+    /// decision site so the adaptive cache plugs in without touching the
+    /// filter loop.
+    fn unsupported_feature_for_target(
+        &self,
+        target: &DispatchTarget,
+        features: &[FeatureKey],
+    ) -> Option<(FeatureKey, FilterSource)> {
+        let provider_unsupported = self
+            .config
+            .providers
+            .get(&target.provider_name)
+            .map(|e| &e.runtime().unsupported_features);
+        for feature in features {
+            if let Some(list) = provider_unsupported {
+                if list.iter().any(|u| u == feature) {
+                    return Some((feature.clone(), FilterSource::ProviderStatic));
+                }
+            }
+            if target
+                .model_unsupported_features
+                .iter()
+                .any(|u| u == feature)
+            {
+                return Some((feature.clone(), FilterSource::ModelStatic));
+            }
+        }
+        None
     }
 
     pub async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
@@ -2833,6 +2901,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         provider: Some(m.provider.clone()),
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
+        model_unsupported_features: m.unsupported_features.clone(),
         nickname: Some(m.nickname.clone()),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
@@ -2863,6 +2932,7 @@ fn dispatch_target_for_seat(
         provider: Some(seat.provider.clone()),
         supports_adaptive_thinking: m.supports_adaptive_thinking,
         effort_levels: m.effort_levels.clone(),
+        model_unsupported_features: m.unsupported_features.clone(),
         nickname: Some(m.nickname.clone()),
         reasoning_dialect: m.reasoning_dialect,
         history_reasoning: m.history_reasoning,
@@ -6768,6 +6838,233 @@ mod feature_filter_tests {
         }
         assert_eq!(captured_bedrock.lock().len(), 0);
         assert_eq!(captured_anthropic.lock().len(), 0);
+    }
+
+    // --- per-MODEL unsupported_features (unioned with the
+    // per-provider list, keyed on nickname so two models on one provider
+    // filter independently) ---
+
+    /// Build a router whose alias chain is two MODELS on the SAME single
+    /// provider: `["mA" -> "mB"]`. The provider itself declares NO
+    /// unsupported features; each model carries its own per-model list.
+    /// Proves nickname-keying: two nicknames on one provider filter
+    /// independently. Returns per-model captured-request logs.
+    fn build_router_two_models_one_provider(
+        unsupported_model_a: Vec<String>,
+        unsupported_model_b: Vec<String>,
+    ) -> (Router, CapturedRequests, CapturedRequests) {
+        let mut config = Config::default();
+        config.providers.insert(
+            "shared-prov".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                user_agent: None,
+                cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
+                runtime: ProviderRuntimePolicy {
+                    unsupported_features: vec![],
+                    ..Default::default()
+                },
+            },
+        );
+        config.aliases.insert(
+            "alias".into(),
+            AliasValue::Chain(vec!["mA".into(), "mB".into()]),
+        );
+
+        let mut router = Router::new(Arc::new(config));
+        let captured_a: CapturedRequests = Arc::new(ParkingMutex::new(Vec::new()));
+        let captured_b: CapturedRequests = Arc::new(ParkingMutex::new(Vec::new()));
+        let p_a: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "shared-prov".into(),
+            captured: captured_a.clone(),
+        });
+        let p_b: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "shared-prov".into(),
+            captured: captured_b.clone(),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "mA".into(),
+            Arc::new(
+                ResolvedModel::new("mA", "shared-prov", p_a, "upstream-a")
+                    .with_unsupported_features(unsupported_model_a),
+            ),
+        );
+        models.insert(
+            "mB".into(),
+            Arc::new(
+                ResolvedModel::new("mB", "shared-prov", p_b, "upstream-b")
+                    .with_unsupported_features(unsupported_model_b),
+            ),
+        );
+        router.install_resolved_models(models);
+        (router, captured_a, captured_b)
+    }
+
+    #[tokio::test]
+    async fn model_unsupported_drops_only_that_nickname_not_sibling() {
+        // (a) Two models on ONE provider. mA declares structured_output
+        // unsupported; mB does NOT. An SO request must skip mA and land
+        // on mB -- proving the model list is keyed on NICKNAME, not on
+        // the (shared) provider name.
+        let (router, captured_a, captured_b) =
+            build_router_two_models_one_provider(vec!["structured_output".into()], vec![]);
+        let req = structured_output_request("alias");
+        let resp = router.complete(req).await.expect("dispatch must succeed");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("shared-prov"));
+        assert_eq!(
+            captured_a.lock().len(),
+            0,
+            "mA must be skipped on its per-model unsupported list",
+        );
+        assert_eq!(
+            captured_b.lock().len(),
+            1,
+            "sibling mB on the same provider must still be tried",
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_model_lists_leave_routing_unchanged() {
+        // (c) Neither model declares anything unsupported. An SO request
+        // dispatches to the first chain entry exactly as before.
+        let (router, captured_a, captured_b) = build_router_two_models_one_provider(vec![], vec![]);
+        let req = structured_output_request("alias");
+        let resp = router.complete(req).await.expect("ok");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("shared-prov"));
+        assert_eq!(
+            captured_a.lock().len(),
+            1,
+            "empty per-model lists -> filter is a no-op, first entry takes it",
+        );
+        assert_eq!(captured_b.lock().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn both_models_unsupported_returns_not_implemented_naming_feature() {
+        // (d) Both models declare the feature unsupported via the static
+        // union. The chain filters to empty -> 501 NotImplemented naming
+        // the feature, no upstream attempt.
+        let (router, captured_a, captured_b) = build_router_two_models_one_provider(
+            vec!["structured_output".into()],
+            vec!["structured_output".into()],
+        );
+        let req = structured_output_request("alias");
+        let err = router.complete(req).await.unwrap_err();
+        match err {
+            Error::NotImplemented(alias, msg) => {
+                assert_eq!(alias, "alias");
+                assert!(
+                    msg.contains("structured_output"),
+                    "error message must name the feature; got: {msg}",
+                );
+            }
+            other => panic!("expected Error::NotImplemented; got {other:?}"),
+        }
+        assert_eq!(captured_a.lock().len(), 0);
+        assert_eq!(captured_b.lock().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn route_not_strip_leaves_output_config_intact() {
+        // (f) ROUTE-not-STRIP: mA is incapable, mB is capable. The
+        // filter only DROPS the incapable target -- it must never mutate
+        // the request body. The dispatched request on mB must still
+        // carry the original output_config.format untouched.
+        let (router, _captured_a, captured_b) =
+            build_router_two_models_one_provider(vec!["structured_output".into()], vec![]);
+        let req = structured_output_request("alias");
+        let resp = router.complete(req).await.expect("dispatch must succeed");
+        assert_eq!(resp.routectl_provider.as_deref(), Some("shared-prov"));
+        let dispatched = captured_b.lock();
+        assert_eq!(dispatched.len(), 1, "capable mB must receive the request");
+        let extras = dispatched[0]
+            .provider_extras
+            .as_ref()
+            .expect("filter must not strip provider_extras");
+        assert_eq!(
+            extras
+                .get("output_config")
+                .and_then(|c| c.get("format"))
+                .and_then(|f| f.get("type"))
+                .and_then(|t| t.as_str()),
+            Some("json_schema"),
+            "output_config.format must reach the capable target unmodified",
+        );
+    }
+
+    #[test]
+    fn helper_distinguishes_provider_and_model_source() {
+        // (e) Unit-test the decision seam directly: provider-scoped vs
+        // model-scoped matches return distinct FilterSource variants;
+        // a supported feature returns None. Also pins the precedence:
+        // a feature listed at BOTH scopes reports ProviderStatic (the
+        // provider list is consulted first).
+        let mut config = Config::default();
+        config.providers.insert(
+            "prov-blocks-ws".into(),
+            ProviderEntry::OpenaiCompat {
+                base_url: "https://placeholder.invalid/v1".into(),
+                api_key_ref: "literal:k".into(),
+                header_extras: BTreeMap::new(),
+                payload_extras: None,
+                user_agent: None,
+                cache_capability: None,
+                auto_emit_top_level_breakpoint: None,
+                reduction_enabled: None,
+                runtime: ProviderRuntimePolicy {
+                    unsupported_features: vec!["web_search".into()],
+                    ..Default::default()
+                },
+            },
+        );
+        let router = Router::new(Arc::new(config));
+        let stub: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "prov-blocks-ws".into(),
+            captured: Arc::new(ParkingMutex::new(Vec::new())),
+        });
+        let model = Arc::new(
+            ResolvedModel::new("m", "prov-blocks-ws", stub, "u")
+                .with_unsupported_features(vec!["structured_output".into()]),
+        );
+        let target = into_one_dispatch_target(model);
+
+        // Provider-scoped match.
+        assert_eq!(
+            router.unsupported_feature_for_target(&target, &["web_search".to_string()]),
+            Some(("web_search".to_string(), FilterSource::ProviderStatic)),
+        );
+        // Model-scoped match.
+        assert_eq!(
+            router.unsupported_feature_for_target(&target, &["structured_output".to_string()]),
+            Some(("structured_output".to_string(), FilterSource::ModelStatic)),
+        );
+        // Supported feature -> None.
+        assert_eq!(
+            router.unsupported_feature_for_target(&target, &["computer_use".to_string()]),
+            None,
+        );
+        // Both scopes list a (different) feature: the FIRST requested
+        // feature that matches wins, and web_search resolves to the
+        // provider scope.
+        assert_eq!(
+            router.unsupported_feature_for_target(
+                &target,
+                &["web_search".to_string(), "structured_output".to_string()],
+            ),
+            Some(("web_search".to_string(), FilterSource::ProviderStatic)),
+        );
+    }
+
+    #[test]
+    fn filter_source_as_str_tokens() {
+        assert_eq!(FilterSource::ProviderStatic.as_str(), "provider");
+        assert_eq!(FilterSource::ModelStatic.as_str(), "model");
     }
 }
 
