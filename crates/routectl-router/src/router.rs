@@ -116,6 +116,14 @@ pub struct Router {
     /// them would scatter every live conversation off its warm-cache seat,
     /// causing a mass cold-miss. See `carry_over_sticky_from`.
     sticky_pins: crate::seat_pool::StickyPins,
+    /// Per-session K-estimator window store, sibling to `sticky_pins`.
+    /// Triple-keyed by (session, provider_kind, model) so a session that
+    /// switches provider or model does not bleed its cache-reuse history
+    /// onto the new triple. MUST survive a hot-reload for the same reason
+    /// the sticky pins do: a wipe collapses every learned estimate back to
+    /// `Cold` and silently un-arms the cost gate. See
+    /// `carry_over_k_store_from`.
+    pub k_session_store: crate::k_estimator::KSessionStore,
 }
 
 /// Per-request switches that the HTTP handler can flip via header
@@ -465,6 +473,7 @@ impl Router {
             alias_glob_index,
             round_robin: Default::default(),
             sticky_pins: Default::default(),
+            k_session_store: Default::default(),
         }
     }
 
@@ -568,6 +577,27 @@ impl Router {
         for (session_key, pin) in previous.sticky_pins.export_entries() {
             self.sticky_pins.put(&session_key, pin);
         }
+    }
+
+    /// Carry the previous Router's per-session K-estimator windows into
+    /// this freshly-built Router during a hot-reload.
+    ///
+    /// Mandatory for the same reason `carry_over_sticky_from` is mandatory:
+    /// each window is a learned per-(session, provider_kind, model) cache-
+    /// reuse history. Dropping the windows on a rebuild would collapse every
+    /// estimate back to `Cold`, which the cost gate refuses to cut on, so a
+    /// hot-reload would silently un-arm advisory live-cut work and leave the
+    /// operator looking at a wall of cold defaults until traffic re-warmed
+    /// the store -- exactly the failure mode the sticky-pin carry-over was
+    /// added to prevent, applied to the same key space.
+    ///
+    /// Entries are replayed in LRU order (least-recently-used first) so the
+    /// destination map preserves the source's recency ordering. A scattered
+    /// (e.g. HashMap-iteration-order) carry-over would race the eviction
+    /// frontier across the rebuild.
+    pub fn carry_over_k_store_from(&mut self, previous: &Router) {
+        self.k_session_store
+            .import_entries(previous.k_session_store.export_entries());
     }
 
     /// Number of dispatch seats a resolved model expands to: `Some(n)`
@@ -3497,6 +3527,64 @@ mod tests {
             "carry_over_sticky_from must preserve session->seat pins (with the \
              repinned flag) across a rebuild",
         );
+    }
+
+    #[test]
+    fn carry_over_k_store_from_preserves_windows_and_lru_order() {
+        // Regression guard for the silent-collapse trap, K-store edition: a
+        // hot-reload must NOT drop per-session K windows, and it must keep
+        // their LRU ordering so the destination's eviction frontier matches
+        // what the source would have evicted next.
+        use crate::k_estimator::{KSessionKey, KSessionWindow, Sample};
+        use std::time::{Duration, UNIX_EPOCH};
+
+        fn key(session: &str) -> KSessionKey {
+            KSessionKey {
+                session_key: session.into(),
+                provider_kind: "anthropic-api".into(),
+                model: "opus".into(),
+            }
+        }
+
+        fn sample(secs: u64, reused: bool) -> Sample {
+            Sample {
+                ts: UNIX_EPOCH + Duration::from_secs(secs),
+                observed_reuse: reused,
+            }
+        }
+
+        // Arrange: insert A, B, C in that order, then touch A so the source's
+        // LRU order is [B (LRU), C, A (MRU)].
+        let config = Arc::new(Config::default());
+        let before = Router::new(config.clone());
+        let mut win_a = KSessionWindow::new();
+        win_a.push(sample(1, true));
+        let mut win_b = KSessionWindow::new();
+        win_b.push(sample(2, false));
+        let mut win_c = KSessionWindow::new();
+        win_c.push(sample(3, true));
+        before.k_session_store.put(key("A"), win_a.clone());
+        before.k_session_store.put(key("B"), win_b.clone());
+        before.k_session_store.put(key("C"), win_c.clone());
+        let _ = before.k_session_store.get(&key("A"));
+
+        let mut after = Router::new(config.clone());
+
+        // Act
+        after.carry_over_k_store_from(&before);
+
+        // Assert: every entry survived AND the LRU order matches the source.
+        // A scattered carry-over (e.g. HashMap iteration order) would pass
+        // the per-key survival check but fail this ordering one.
+        let entries = after.k_session_store.export_entries();
+        let observed_keys: Vec<&KSessionKey> = entries.iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            observed_keys,
+            vec![&key("B"), &key("C"), &key("A")],
+            "carry_over_k_store_from must preserve LRU recency order",
+        );
+        let observed_windows: Vec<&KSessionWindow> = entries.iter().map(|(_, w)| w).collect();
+        assert_eq!(observed_windows, vec![&win_b, &win_c, &win_a]);
     }
 }
 

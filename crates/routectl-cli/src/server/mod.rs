@@ -897,6 +897,7 @@ async fn rebuild_router_for_seat_change(
     // build up; a freshly-added seat starts with fresh state.
     new_router.carry_over_runtime_state_from(&router_swap.load_full());
     new_router.carry_over_sticky_from(&router_swap.load_full());
+    new_router.carry_over_k_store_from(&router_swap.load_full());
     router_swap.store(Arc::new(new_router));
     tracing::info!(
         seats_before = before.len(),
@@ -941,6 +942,7 @@ async fn handle_config_reload(
     // not reset gates that took time to build up.
     new_router.carry_over_runtime_state_from(&router_swap.load_full());
     new_router.carry_over_sticky_from(&router_swap.load_full());
+    new_router.carry_over_k_store_from(&router_swap.load_full());
 
     router_swap.store(Arc::new(new_router));
 

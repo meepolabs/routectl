@@ -11,6 +11,7 @@ pub mod cost_gate;
 pub mod factory;
 pub(crate) mod feature_keys;
 pub mod glob;
+pub mod k_estimator;
 pub mod resolved;
 pub mod router;
 pub mod runtime_state;
@@ -40,6 +41,10 @@ pub use factory::{
     validate_registry_patterns, validate_retry_policy, BuildOptions,
 };
 pub use glob::{AliasPattern, PrefixIndex};
+pub use k_estimator::{
+    Confidence, EstimateSource, KEstimate, KEstimator, KQuery, KSessionKey, KSessionStore,
+    KSessionWindow, Sample, K_SESSION_CAPACITY,
+};
 pub use resolved::ResolvedModel;
 pub use router::{
     DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions, ALIAS_MAX_RECURSION_DEPTH,
