@@ -144,6 +144,14 @@ pub struct UsageRecord {
     /// count but no K* -- no trusted pricing), or when a verified row carried
     /// no finite break-even. Recording only.
     pub would_trim_break_even_k: Option<f64>,
+    /// Non-mutating steady-state would-trim advisory: the per-session K
+    /// estimator's lower confidence bound `k_floor`, recorded ONLY when the
+    /// estimator returned a `Calibrated` confidence for the request's
+    /// (session, provider_kind, model) triple. `None` for a `Cold` / `Low`
+    /// estimate (insufficient session history), when the pricing cell was
+    /// unverified (no K* to compare against), and when no would-cut candidate
+    /// was proposed. Recording only.
+    pub would_trim_k_floor: Option<f64>,
 
     // TIMING
     pub latency_ms: i64,
@@ -278,6 +286,7 @@ mod tests {
             selection_decision: Some("sticky_stay".to_string()),
             would_trim_tokens: Some(40_000),
             would_trim_break_even_k: Some(50.0),
+            would_trim_k_floor: Some(60.0),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -336,6 +345,7 @@ mod tests {
             selection_decision: None,
             would_trim_tokens: None,
             would_trim_break_even_k: None,
+            would_trim_k_floor: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

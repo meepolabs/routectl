@@ -162,6 +162,31 @@ fn migrate_v4_to_v5(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v5 -> v6 step atomically: add the nullable `would_trim_k_floor`
+/// column (the per-session K estimator's lower confidence bound, recorded only
+/// for a `Calibrated` estimate), bump `PRAGMA user_version` to 6, and update
+/// the human-readable `meta.schema_version` row. All in one transaction so a
+/// crash mid-step rolls back rather than landing a column-without-version
+/// state. Existing rows survive with the new column NULL.
+///
+/// On a FRESH DB the v0 -> v1 step created `requests` from the current schema,
+/// which already carries the column. The loop still enters this arm
+/// (v0->v1 stamps user_version=1, not SCHEMA_VERSION), so guard the
+/// `ADD COLUMN` against a pre-existing column to keep the fresh path safe.
+fn migrate_v5_to_v6(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    if !column_exists(&tx, "requests", "would_trim_k_floor")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_k_floor REAL")?;
+    }
+    tx.execute_batch("PRAGMA user_version = 6")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "6"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -211,6 +236,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             2 => migrate_v2_to_v3(conn)?,
             3 => migrate_v3_to_v4(conn)?,
             4 => migrate_v4_to_v5(conn)?,
+            5 => migrate_v5_to_v6(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;

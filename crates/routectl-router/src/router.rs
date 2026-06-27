@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
@@ -123,7 +123,23 @@ pub struct Router {
     /// the sticky pins do: a wipe collapses every learned estimate back to
     /// `Cold` and silently un-arms the cost gate. See
     /// `carry_over_k_store_from`.
-    pub k_session_store: crate::k_estimator::KSessionStore,
+    ///
+    /// Held behind an `Arc` so the in-process [`KEstimator`] reader
+    /// (`k_estimator` below) can share the SAME store as the dispatch path
+    /// that records samples into it -- the reader observes every sample the
+    /// writer lands, without any cross-store copy or refresh.
+    pub k_session_store: Arc<crate::k_estimator::KSessionStore>,
+    /// K-estimator reader over `k_session_store`. The constructor wires the
+    /// default [`crate::k_estimator::LedgerBackedK`] over a clone of the
+    /// `k_session_store` `Arc`, so a sample recorded into the store is
+    /// immediately visible to the next `estimate(...)` call.
+    ///
+    /// No carry-over field of its own: a hot-reload constructs a fresh
+    /// store + a fresh estimator (the estimator points at the fresh store),
+    /// then `carry_over_k_store_from` populates the fresh store from the
+    /// previous router's entries -- so the fresh estimator transparently
+    /// sees the carried samples.
+    k_estimator: Arc<dyn crate::k_estimator::KEstimator>,
 }
 
 /// Per-request switches that the HTTP handler can flip via header
@@ -239,6 +255,14 @@ pub struct DispatchMeta {
     /// freed-token count but no K* -- no trusted pricing), OR the verified
     /// row carried no finite break-even. Recording only.
     pub would_trim_break_even_k: Option<f64>,
+    /// Non-mutating steady-state would-trim advisory: the lower confidence
+    /// bound `k_floor` of the per-session K estimate, recorded ONLY when the
+    /// K estimator returned a `Calibrated` confidence (the only bound the
+    /// cost gate may consult to authorize a future cut). `None` for a
+    /// `Cold` / `Low` estimate (insufficient history), for an unverified
+    /// pricing cell (no `break_even_k` to compare against), and when no
+    /// would-cut candidate was proposed. Recording only.
+    pub would_trim_k_floor: Option<f64>,
 }
 
 impl DispatchMeta {
@@ -260,6 +284,7 @@ impl DispatchMeta {
             selection_decision: None,
             would_trim_tokens: None,
             would_trim_break_even_k: None,
+            would_trim_k_floor: None,
         }
     }
 
@@ -465,6 +490,10 @@ impl Router {
             }
         }
 
+        let k_session_store = Arc::new(crate::k_estimator::KSessionStore::default());
+        let k_estimator: Arc<dyn crate::k_estimator::KEstimator> = Arc::new(
+            crate::k_estimator::LedgerBackedK::new(k_session_store.clone()),
+        );
         Self {
             config,
             providers: Default::default(),
@@ -473,7 +502,8 @@ impl Router {
             alias_glob_index,
             round_robin: Default::default(),
             sticky_pins: Default::default(),
-            k_session_store: Default::default(),
+            k_session_store,
+            k_estimator,
         }
     }
 
@@ -2354,6 +2384,19 @@ impl Router {
     /// unverified row carries no trusted multipliers, so a break-even number
     /// would be misleading. This matches the offline prompt-size advisory
     /// convention (compute `break_even_k` only when `row.verified`).
+    ///
+    /// Additionally, when a candidate exists, consults the in-process
+    /// [`crate::k_estimator::KEstimator`] over the request's
+    /// `inbound_session_key` and the SAME pricing row's `ttl_seconds` (so
+    /// the per-run TTL split matches the economics that produced K*). The
+    /// estimate's `k_floor` is stamped onto `meta.would_trim_k_floor` only
+    /// for a `Calibrated` confidence (the only bound the cost gate may
+    /// consult to authorize a cut). The met/unmet/cold/unpriced verdict is
+    /// DERIVED downstream from the numeric advisory columns
+    /// (`would_trim_tokens`, `would_trim_break_even_k`, `would_trim_k_floor`);
+    /// this function never overwrites `meta.reduction_strategy`, which
+    /// remains owned by the reduction path. Advisory only -- the
+    /// dispatched bytes never change.
     fn record_would_trim(
         &self,
         attempt_req: &ChatRequest,
@@ -2375,10 +2418,43 @@ impl Router {
             &self.config.cache_pricing,
         );
         meta.would_trim_tokens = Some(plan.candidate.d);
-        meta.would_trim_break_even_k = row
+        let break_even = row
             .verified
             .then(|| break_even_k(&row, &plan.candidate))
             .flatten();
+        meta.would_trim_break_even_k = break_even;
+
+        // Consult the K estimator over the SAME row whose TTL priced K*: the
+        // estimator's per-run split uses `row.ttl_seconds` as the same TTL the
+        // economics did, so a `k_floor` is comparable to `break_even`. The
+        // current sample for THIS turn is recorded post-response in
+        // `record_k_sample`, so the estimator reads PRIOR-turn samples only.
+        let estimate = self.k_estimator.estimate(&crate::k_estimator::KQuery {
+            session_key: attempt_req.routectl_internal.inbound_session_key.as_deref(),
+            provider_kind: provider_kind.unwrap_or(""),
+            model,
+            ttl: Duration::from_secs(u64::from(row.ttl_seconds)),
+            now: SystemTime::now(),
+        });
+
+        meta.would_trim_k_floor = would_trim_k_floor_for_meta(break_even, &estimate);
+    }
+}
+
+/// Pure helper that selects the `would_trim_k_floor` value recorded by
+/// `Router::record_would_trim`. Returns `Some(estimate.k_floor)` only when
+/// `break_even` is a verified-row K* AND the estimator's confidence is
+/// `Calibrated`; every other case records `None`. The met/unmet/cold/
+/// unpriced verdict is derived downstream as a pure query over the numeric
+/// advisory columns (`would_trim_break_even_k`, `would_trim_k_floor`).
+fn would_trim_k_floor_for_meta(
+    break_even: Option<f64>,
+    estimate: &crate::k_estimator::KEstimate,
+) -> Option<f64> {
+    if break_even.is_some() && estimate.confidence == crate::k_estimator::Confidence::Calibrated {
+        Some(estimate.k_floor)
+    } else {
+        None
     }
 }
 
@@ -3663,6 +3739,112 @@ mod tests {
             .expect("triple recorded");
         let reuse: Vec<bool> = window.iter().map(|s| s.observed_reuse).collect();
         assert_eq!(reuse, vec![true, false]);
+    }
+
+    /// A fresh router's `k_estimator` reads the store entries imported by
+    /// `carry_over_k_store_from`: the estimator field needs no carry-over of
+    /// its own because the constructor points it at the same store the
+    /// carry-over populates. Builds a `Calibrated`-sized window in the source,
+    /// carries it over, and proves the new router's estimator returns a
+    /// non-cold estimate for the carried triple.
+    #[test]
+    fn carried_store_is_read_by_new_routers_estimator() {
+        use crate::k_estimator::{Confidence, KQuery, KSessionKey, KSessionWindow, Sample};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        // Arrange: enough TTL-separated runs in the source store that the
+        // estimator classifies the triple as `Calibrated` (>= 8 runs). Each
+        // run is one reuse hit separated from the next by more than the TTL.
+        let ttl = Duration::from_secs(300);
+        let mut window = KSessionWindow::new();
+        for i in 0..12u64 {
+            window.push(Sample {
+                ts: UNIX_EPOCH + Duration::from_secs(i * 10_000),
+                observed_reuse: true,
+            });
+        }
+        let key = KSessionKey {
+            session_key: "carried-sess".into(),
+            provider_kind: "anthropic-api".into(),
+            model: "opus".into(),
+        };
+
+        let config = Arc::new(Config::default());
+        let before = Router::new(config.clone());
+        before.k_session_store.put(key.clone(), window);
+
+        // Act: a freshly-built router imports the source's entries, then its
+        // OWN estimator (pointed at its own store at construction) is queried.
+        let mut after = Router::new(config);
+        after.carry_over_k_store_from(&before);
+        let estimate = after.k_estimator.estimate(&KQuery {
+            session_key: Some("carried-sess"),
+            provider_kind: "anthropic-api",
+            model: "opus",
+            ttl,
+            now: SystemTime::now(),
+        });
+
+        // Assert: the estimator saw the carried samples (not a cold default).
+        assert_eq!(
+            estimate.confidence,
+            Confidence::Calibrated,
+            "new router's estimator must read the carried-over store",
+        );
+        assert!(estimate.samples >= 12);
+    }
+
+    /// The `would_trim_k_floor_for_meta` truth table, one assertion per row.
+    /// The verdict (met / unmet / cold / unpriced) is derived downstream from
+    /// the numeric advisory columns; here we only pin the recorded Option.
+    #[test]
+    fn would_trim_k_floor_for_meta_truth_table() {
+        use crate::k_estimator::{Confidence, EstimateSource, KEstimate};
+
+        fn estimate(k_floor: f64, confidence: Confidence) -> KEstimate {
+            KEstimate {
+                k_floor,
+                k_point: k_floor,
+                k_ceiling: k_floor,
+                samples: 16,
+                confidence,
+                source: EstimateSource::LiveLedger,
+            }
+        }
+
+        // Row 1: Some(K*), Calibrated, k_floor >= K* -> Some(k_floor).
+        assert_eq!(
+            would_trim_k_floor_for_meta(Some(50.0), &estimate(60.0, Confidence::Calibrated)),
+            Some(60.0),
+        );
+
+        // Row 2: Some(K*), Calibrated, k_floor < K* -> Some(k_floor)
+        // (both met and unmet record the floor; the comparison is derived).
+        assert_eq!(
+            would_trim_k_floor_for_meta(Some(50.0), &estimate(40.0, Confidence::Calibrated)),
+            Some(40.0),
+        );
+
+        // Row 3a: Some(K*), Low -> None.
+        assert_eq!(
+            would_trim_k_floor_for_meta(Some(50.0), &estimate(99.0, Confidence::Low)),
+            None,
+        );
+
+        // Row 3b: Some(K*), Cold -> None.
+        assert_eq!(
+            would_trim_k_floor_for_meta(Some(50.0), &estimate(0.0, Confidence::Cold)),
+            None,
+        );
+
+        // Row 4: None (unverified pricing), any confidence -> None.
+        for conf in [Confidence::Calibrated, Confidence::Low, Confidence::Cold] {
+            assert_eq!(
+                would_trim_k_floor_for_meta(None, &estimate(99.0, conf)),
+                None,
+                "conf={conf:?}",
+            );
+        }
     }
 }
 
