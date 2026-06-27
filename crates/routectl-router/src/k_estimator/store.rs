@@ -136,6 +136,27 @@ impl KSessionStore {
         self.sessions.lock().get(key).cloned()
     }
 
+    /// Append one live `sample` to the window for `key`, creating an empty
+    /// window first when the triple is unseen, and bump the triple's LRU
+    /// recency. The whole get-or-insert-then-push happens under a single
+    /// lock so a concurrent dispatch can never observe a half-updated
+    /// window or race two pushes into the same slot.
+    ///
+    /// This is the live-recording mutator: it mutates the stored window in
+    /// place via `get_mut` rather than the `get().cloned()` -> push ->
+    /// `put` round-trip, so a chatty session does not clone its whole ring
+    /// on every turn.
+    pub fn record_sample(&self, key: KSessionKey, sample: Sample) {
+        let mut guard = self.sessions.lock();
+        if let Some(window) = guard.get_mut(&key) {
+            window.push(sample);
+        } else {
+            let mut window = KSessionWindow::new();
+            window.push(sample);
+            guard.put(key, window);
+        }
+    }
+
     /// Number of live triples currently tracked.
     pub fn len(&self) -> usize {
         self.sessions.lock().len()
@@ -241,6 +262,150 @@ mod tests {
             store.get(&key("sess-2", "anthropic-api", "opus")),
             None,
             "session_key mismatch must miss",
+        );
+    }
+
+    #[test]
+    fn record_sample_creates_then_appends_within_one_triple() {
+        // Arrange
+        let store = KSessionStore::new();
+        let k = key("sess-1", "anthropic-api", "opus");
+
+        // Act: first record creates a 1-sample window.
+        store.record_sample(
+            k.clone(),
+            Sample {
+                ts: UNIX_EPOCH + Duration::from_secs(1),
+                observed_reuse: true,
+            },
+        );
+
+        // Assert
+        let after_first = store.get(&k).expect("triple created");
+        assert_eq!(after_first.len(), 1);
+        assert!(after_first.iter().next().expect("sample").observed_reuse);
+
+        // Act: a second record appends to the SAME window.
+        store.record_sample(
+            k.clone(),
+            Sample {
+                ts: UNIX_EPOCH + Duration::from_secs(2),
+                observed_reuse: false,
+            },
+        );
+
+        // Assert: two samples, in arrival order.
+        let after_second = store.get(&k).expect("triple present");
+        assert_eq!(after_second.len(), 2);
+        let reuse: Vec<bool> = after_second.iter().map(|s| s.observed_reuse).collect();
+        assert_eq!(reuse, vec![true, false]);
+    }
+
+    #[test]
+    fn record_sample_respects_per_window_cap() {
+        // Arrange: record more than the window cap into one triple.
+        let store = KSessionStore::new();
+        let k = key("sess-1", "anthropic-api", "opus");
+
+        // Act
+        for i in 0..(SAMPLES_PER_WINDOW + 10) {
+            store.record_sample(
+                k.clone(),
+                Sample {
+                    ts: UNIX_EPOCH + Duration::from_secs(i as u64),
+                    observed_reuse: false,
+                },
+            );
+        }
+
+        // Assert: the window stays capped and dropped the oldest entries.
+        let window = store.get(&k).expect("triple present");
+        assert_eq!(window.len(), SAMPLES_PER_WINDOW);
+        let oldest = window.iter().next().expect("non-empty window");
+        assert_eq!(oldest.ts, UNIX_EPOCH + Duration::from_secs(10));
+    }
+
+    #[test]
+    fn record_sample_keeps_distinct_triples_separate() {
+        // Arrange + Act: three triples differing by one component each.
+        let store = KSessionStore::new();
+        let mk = |k: KSessionKey| {
+            store.record_sample(
+                k,
+                Sample {
+                    ts: UNIX_EPOCH,
+                    observed_reuse: true,
+                },
+            )
+        };
+        mk(key("s1", "anthropic-api", "opus"));
+        mk(key("s1", "bedrock", "opus"));
+        mk(key("s1", "anthropic-api", "sonnet"));
+
+        // Assert: three independent windows, each carrying one sample.
+        assert_eq!(store.len(), 3);
+        assert_eq!(
+            store
+                .get(&key("s1", "anthropic-api", "opus"))
+                .map(|w| w.len()),
+            Some(1)
+        );
+        assert_eq!(
+            store.get(&key("s1", "bedrock", "opus")).map(|w| w.len()),
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .get(&key("s1", "anthropic-api", "sonnet"))
+                .map(|w| w.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn record_sample_bumps_lru_recency() {
+        // Arrange: fill to capacity so the next insert forces an eviction,
+        // then record into the oldest triple to promote it to MRU.
+        let store = KSessionStore::new();
+        for i in 0..K_SESSION_CAPACITY {
+            store.record_sample(
+                key(&format!("sess-{i}"), "anthropic-api", "opus"),
+                Sample {
+                    ts: UNIX_EPOCH,
+                    observed_reuse: false,
+                },
+            );
+        }
+        let oldest = key("sess-0", "anthropic-api", "opus");
+
+        // Act: recording into the LRU triple bumps it to MRU.
+        store.record_sample(
+            oldest.clone(),
+            Sample {
+                ts: UNIX_EPOCH + Duration::from_secs(1),
+                observed_reuse: true,
+            },
+        );
+        // Now the new LRU is sess-1; an overflow insert must evict THAT,
+        // not the just-bumped sess-0.
+        store.record_sample(
+            key("sess-overflow", "anthropic-api", "opus"),
+            Sample {
+                ts: UNIX_EPOCH,
+                observed_reuse: false,
+            },
+        );
+
+        // Assert: the bumped triple survived; the new LRU was evicted.
+        assert_eq!(store.len(), K_SESSION_CAPACITY);
+        assert!(
+            store.get(&oldest).is_some(),
+            "recording bumped the LRU triple to MRU, so it must survive the overflow"
+        );
+        assert_eq!(
+            store.get(&key("sess-1", "anthropic-api", "opus")),
+            None,
+            "the post-bump LRU triple must be the one evicted"
         );
     }
 

@@ -166,6 +166,10 @@ async fn complete_response<A: IngressAdapter>(
     draft: UsageRecord,
 ) -> Response {
     let mut capture = UsageCapture::new(draft, usage, adapter.id().to_string());
+    // Extract the canonical live session key BEFORE dispatch moves `req`
+    // into the router. POST-response K-sample recording (below) keys on
+    // this value, NOT the header-only usage `session_id`.
+    let session_key = req.routectl_internal.inbound_session_key.clone();
     let dispatched = router.complete_with_options(req, opts).await;
     capture.observe_meta(&dispatched.meta);
     match dispatched.result {
@@ -173,6 +177,11 @@ async fn complete_response<A: IngressAdapter>(
             // Non-streaming first byte == the response being ready.
             capture.mark_first_byte();
             capture.observe_response(&resp);
+            // Best-effort, post-response: record the observed cache-reuse
+            // into the per-session K-estimator store. Never affects the
+            // response; a keyless / no-served-target request is skipped
+            // inside the helper.
+            capture.record_k_sample(&router, session_key.as_deref());
             match adapter.render_response(resp) {
                 Ok(body) => {
                     // Upstream delivered AND we serialized it: this is the
@@ -220,6 +229,10 @@ async fn stream_response<A: IngressAdapter + 'static>(
 ) -> Response {
     let envelope = adapter.error_envelope_shape();
     let mut capture = UsageCapture::new(draft, usage, adapter.id().to_string());
+    // Extract the canonical live session key BEFORE dispatch moves `req`
+    // into the router; it rides into the render task for POST-response
+    // K-sample recording at natural end-of-stream.
+    let session_key = req.routectl_internal.inbound_session_key.clone();
     let dispatched = router.stream_with_options(req, opts).await;
     capture.observe_meta(&dispatched.meta);
 
@@ -256,7 +269,10 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // fallback). `adapter` moves in too, so neither is reachable after
     // the spawn; the dir-4 egress-headers trace uses the pre-spawn
     // `egress_id` clone.
-    tokio::spawn(render_stream_task(upstream, adapter, capture, tx).instrument(parent_span));
+    tokio::spawn(
+        render_stream_task(upstream, adapter, capture, tx, router, session_key)
+            .instrument(parent_span),
+    );
 
     let receiver_stream =
         ReceiverStream::new(rx).map(|ev| Ok::<Event, std::convert::Infallible>(sse_to_axum(ev)));
@@ -300,6 +316,8 @@ async fn render_stream_task<A: IngressAdapter>(
     adapter: A,
     mut capture: UsageCapture,
     tx: tokio::sync::mpsc::Sender<SseEvent>,
+    router: Arc<routectl_router::Router>,
+    session_key: Option<String>,
 ) {
     let mut upstream = upstream;
     let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state();
@@ -403,8 +421,11 @@ async fn render_stream_task<A: IngressAdapter>(
             return;
         }
     }
-    // Natural EOS reached. Finalize the row as a clean completion; the
-    // egress trace-summary fires from inside `finalize`.
+    // Natural EOS reached. Record the observed cache-reuse into the per-
+    // session K-estimator store BEFORE finalizing -- best-effort, never
+    // affects the bytes already sent. Then finalize the row as a clean
+    // completion; the egress trace-summary fires from inside `finalize`.
+    capture.record_k_sample(&router, session_key.as_deref());
     capture.finalize(Outcome::Ok);
 }
 

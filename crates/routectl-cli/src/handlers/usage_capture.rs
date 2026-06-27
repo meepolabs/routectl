@@ -114,6 +114,15 @@ pub(crate) fn epoch_ms_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Convert an epoch-millis timestamp (as stored on `UsageRecord::ts_start`)
+/// back into a `SystemTime`, clamping a theoretical negative value to the
+/// epoch. The inverse of `epoch_ms_now`; used to hand the request start
+/// time to the K-estimator store so live samples age on the same clock the
+/// ledger rebuild reads.
+fn ms_to_system_time(ms: i64) -> SystemTime {
+    UNIX_EPOCH + std::time::Duration::from_millis(ms.max(0) as u64)
+}
+
 /// Map a dispatch `Err` to its terminal `Outcome` using the documented
 /// `DispatchMeta` contract: `attempt_count == 0` means the gate / breaker
 /// refused before any upstream contact (`gate_blocked`); any attempt that
@@ -410,8 +419,39 @@ impl UsageCapture {
         self.record.error_class = Some(error_class_of(e).to_string());
     }
 
+    /// Record one live cache-reuse observation into the router's per-session
+    /// K-estimator store, from the columns already stamped on this capture's
+    /// draft (`provider_kind` / `model` via `observe_meta`, `cache_read` via
+    /// `observe_response` / `observe_chunk`).
+    ///
+    /// Best-effort and POST-response: call it after the served target and
+    /// the response usage are observed, around `finalize`. It must never
+    /// change the response or fail the request.
+    ///
+    /// `session_key` is the request's `inbound_session_key`, extracted
+    /// BEFORE dispatch (the request is moved into the router) and threaded
+    /// in here. A keyless request, or one with no served target (a
+    /// pre-dispatch failure leaving `provider_kind` / `model` unset), is
+    /// skipped: there is no triple to accumulate against. The served
+    /// `provider_kind` / `model` are the SAME values a later K query will
+    /// key on, so they must come from the dispatch meta, not the request.
+    pub(crate) fn record_k_sample(
+        &self,
+        router: &routectl_router::Router,
+        session_key: Option<&str>,
+    ) {
+        let (Some(provider_kind), Some(model)) = (
+            self.record.provider_kind.as_deref(),
+            self.record.model.as_deref(),
+        ) else {
+            return;
+        };
+        let cache_read = self.record.cache_read.unwrap_or(0);
+        let ts = ms_to_system_time(self.record.ts_start);
+        router.record_k_sample(session_key, provider_kind, model, cache_read, ts);
+    }
+
     /// Stamp timing + outcome and emit the row exactly once. Idempotent:
-    /// a second call (e.g. Drop after an explicit finalize) is a no-op.
     /// Never blocks / awaits / panics -- safe from Drop.
     pub(crate) fn finalize(&mut self, outcome: Outcome) {
         if self.finalized {

@@ -14,6 +14,7 @@ use crate::handlers;
 
 pub mod auth;
 pub mod file_watch;
+pub mod k_rebuild;
 pub mod request_id;
 pub mod secrets;
 
@@ -158,6 +159,15 @@ pub async fn serve_on_listener(
     let secrets: Arc<dyn SecretStore> = Arc::new(composite);
 
     let router = build_router_from_config(config.clone(), secrets.clone()).await?;
+
+    // One-shot warm of the K-estimator session store from the usage
+    // ledger, on the owned `router` BEFORE it is wrapped in the ArcSwap.
+    // Best-effort: a missing / unreadable DB skips the warm and leaves the
+    // store cold. Runs ONLY here at the initial bootstrap -- NOT on a
+    // hot-reload, where `carry_over_k_store_from` preserves the live store
+    // (re-warming there would clobber fresher live samples with older
+    // ledger history).
+    k_rebuild::warm_k_store_from_ledger(&config.usage.db_path, &router.k_session_store);
 
     let bound = listener
         .local_addr()

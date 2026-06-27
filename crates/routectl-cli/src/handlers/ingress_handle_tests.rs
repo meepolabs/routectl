@@ -823,7 +823,15 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("anthropic", &sample_request("m", true), "req-stream-err");
-    render_stream_task(upstream, AnthropicIngress, capture, tx).await;
+    render_stream_task(
+        upstream,
+        AnthropicIngress,
+        capture,
+        tx,
+        k_test_router(),
+        None,
+    )
+    .await;
     let events = drain(rx).await;
 
     // Assert: prefix chunk events + terminal error event.
@@ -889,7 +897,7 @@ async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("openai", &sample_request("m", true), "req-openai-err");
-    render_stream_task(upstream, OpenAiIngress, capture, tx).await;
+    render_stream_task(upstream, OpenAiIngress, capture, tx, k_test_router(), None).await;
     let events = drain(rx).await;
 
     // Assert: three events. OpenAI emits unnamed (bare data:)
@@ -935,7 +943,7 @@ async fn render_stream_task_natural_eos_emits_render_eos_not_error() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("openai", &sample_request("m", true), "req-openai-eos");
-    render_stream_task(upstream, OpenAiIngress, capture, tx).await;
+    render_stream_task(upstream, OpenAiIngress, capture, tx, k_test_router(), None).await;
     let events = drain(rx).await;
 
     // Assert: chunk + [DONE]. No error chunk.
@@ -1041,7 +1049,7 @@ async fn render_stream_task_anthropic_render_chunk_failure_emits_terminal_error(
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("anthropic", &sample_request("m", true), "req-render-fail");
-    render_stream_task(upstream, adapter, capture, tx).await;
+    render_stream_task(upstream, adapter, capture, tx, k_test_router(), None).await;
     let events = drain(rx).await;
 
     // Assert: prefix chunk events from the first chunk, then the
@@ -1226,7 +1234,7 @@ async fn capture_stream_natural_eos_emits_single_ok_row() {
     let capture = rig.capture("openai", &sample_request("a", true), "req-stream-ok");
 
     // Act
-    render_stream_task(upstream, OpenAiIngress, capture, tx).await;
+    render_stream_task(upstream, OpenAiIngress, capture, tx, k_test_router(), None).await;
     let _ = drain(rx).await;
     let rows = rig.flush_and_read().await;
 
@@ -1256,7 +1264,7 @@ async fn capture_stream_mid_stream_error_emits_upstream_error_row() {
     let capture = rig.capture("openai", &sample_request("a", true), "req-stream-mid-err");
 
     // Act
-    render_stream_task(upstream, OpenAiIngress, capture, tx).await;
+    render_stream_task(upstream, OpenAiIngress, capture, tx, k_test_router(), None).await;
     let _ = drain(rx).await;
     let rows = rig.flush_and_read().await;
 
@@ -1391,6 +1399,89 @@ async fn dispatch_err_gate_blocked_maps_to_gate_blocked() {
     );
 }
 
+/// Live K-sample recording through the capture guard: a completed dispatch
+/// whose served target is known lands one sample in the router's per-session
+/// K store when the request carried a session key, and lands NONE when it
+/// did not. Drives the same `observe_meta` -> `record_k_sample` sequence the
+/// handler runs, against a real router-built `DispatchMeta`.
+#[tokio::test]
+async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
+    use routectl_router::{
+        AliasValue, Config, KSessionKey, ModelEntry, ProviderEntry, RetryPolicy,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    // Arrange: a single-entry chain pointed at an unreachable upstream.
+    // The dispatch fails, but the chain walk still stamps the served
+    // provider_kind / model onto the meta -- enough for a recording.
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".to_string(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        retry,
+        ..Default::default()
+    });
+    let router = Arc::new(build_test_router(config).await);
+
+    // Act (keyed): run a dispatch, stamp the meta onto a capture, then
+    // record with a session key.
+    let rig = CaptureRig::new();
+    let req = sample_request("a", false);
+    let mut capture = rig.capture("openai", &req, "req-k");
+    let dispatched = router.complete_with_options(req, Default::default()).await;
+    capture.observe_meta(&dispatched.meta);
+    let provider_kind = dispatched
+        .meta
+        .served_provider_kind
+        .clone()
+        .expect("served provider_kind is stamped on the failing meta");
+    let model = dispatched
+        .meta
+        .served_model
+        .clone()
+        .expect("served model is stamped on the failing meta");
+    capture.record_k_sample(&router, Some("sess-live"));
+
+    // Assert: exactly one sample under the served triple.
+    let window = router
+        .k_session_store
+        .get(&KSessionKey {
+            session_key: "sess-live".into(),
+            provider_kind,
+            model,
+        })
+        .expect("keyed request recorded a sample");
+    assert_eq!(window.len(), 1);
+
+    // Act (keyless): a fresh capture over a fresh router records nothing.
+    let router2 = Arc::new(build_test_router(Arc::clone(&router.config)).await);
+    let req2 = sample_request("a", false);
+    let mut capture2 = rig.capture("openai", &req2, "req-k-none");
+    let dispatched2 = router2
+        .complete_with_options(req2, Default::default())
+        .await;
+    capture2.observe_meta(&dispatched2.meta);
+    capture2.record_k_sample(&router2, None);
+
+    // Assert: a keyless request leaves the store empty.
+    assert!(
+        router2.k_session_store.is_empty(),
+        "a keyless request must not be recorded",
+    );
+}
+
 /// Build a `Router` from `config` for the dispatch-meta tests, wiring an
 /// in-memory secret store (the `literal:` ref resolves through it).
 async fn build_test_router(
@@ -1402,6 +1493,17 @@ async fn build_test_router(
     crate::server::build_router_from_config(config, secrets)
         .await
         .expect("build router")
+}
+
+/// A bare `Arc<Router>` for the `render_stream_task` tests that only need a
+/// recording target for the POST-EOS K-sample call. The default config has
+/// no routes, but recording never dispatches -- it only takes a lock on the
+/// session store -- so an empty router is sufficient.
+fn k_test_router() -> std::sync::Arc<routectl_router::Router> {
+    use std::sync::Arc;
+    Arc::new(routectl_router::Router::new(Arc::new(
+        routectl_router::Config::default(),
+    )))
 }
 
 /// A degenerate `[cache_pricing]` override (rm <= 0.0) must fail the
