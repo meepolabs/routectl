@@ -284,6 +284,64 @@ pub fn ttfbs(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<(GroupKey, i6
     Ok(rows)
 }
 
+/// One raw reuse sample for the K estimator's rebuild path. Usage-LOCAL:
+/// epoch-ms timestamp and signed counts as stored, with no router types. The
+/// caller (the router-side rebuild) owns the reuse definition and the
+/// SystemTime conversion; this layer only hands back the columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReuseSampleRow {
+    /// Inbound session identifier the request was recorded under.
+    pub session_id: String,
+    /// Stable provider-kind token of the served target.
+    pub provider_kind: String,
+    /// Served model nickname.
+    pub model: String,
+    /// Request start time, epoch-millis UTC.
+    pub ts_start_ms: i64,
+    /// Cached prefix tokens re-read on the upstream response. NULL coalesces
+    /// to 0.
+    pub cache_read: i64,
+}
+
+const REUSE_SAMPLES_SQL: &str = "\
+SELECT ts_start, session_id, provider_kind, model, COALESCE(cache_read, 0)
+FROM requests
+WHERE ts_start >= ?1
+  AND session_id IS NOT NULL
+  AND provider_kind IS NOT NULL
+  AND model IS NOT NULL
+ORDER BY ts_start ASC
+LIMIT ?2";
+
+/// Raw reuse samples whose request start time is at or after `window_start_ms`,
+/// ordered oldest-first, capped at `limit`.
+///
+/// Rows without a `session_id`, `provider_kind`, or `model` are filtered out:
+/// the K estimator keys on the full (session, provider_kind, model) triple, so
+/// a NULL in any of the three has no usable identity and is dropped rather than
+/// mapped to a sentinel. `cache_read` is COALESCEd to 0 (a NULL counter is a
+/// no-reuse observation). Plain data; the router derives the reuse boolean and
+/// the `SystemTime` from these columns.
+pub fn read_reuse_samples_since(
+    conn: &rusqlite::Connection,
+    window_start_ms: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<ReuseSampleRow>> {
+    let mut stmt = conn.prepare(REUSE_SAMPLES_SQL)?;
+    let rows = stmt
+        .query_map(rusqlite::params![window_start_ms, limit as i64], |row| {
+            Ok(ReuseSampleRow {
+                ts_start_ms: row.get(0)?,
+                session_id: row.get(1)?,
+                provider_kind: row.get(2)?,
+                model: row.get(3)?,
+                cache_read: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -998,5 +1056,148 @@ mod tests {
         assert!(!values.contains(&33));
         assert!(!values.contains(&44));
         assert!(!values.contains(&55));
+    }
+
+    /// Insert a row exercising the reuse-sample columns: nullable
+    /// `session_id`, `provider_kind`, `model`, and `cache_read`.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_reuse_row(
+        db: &UsageDb,
+        request_id: &str,
+        ts_start: i64,
+        session_id: Option<&str>,
+        provider_kind: Option<&str>,
+        model: Option<&str>,
+        cache_read: Option<i64>,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider_kind, session_id, stream, outcome, \
+                 latency_ms, tool_count, msg_count, attempt_count, fallback_count, cache_read) \
+                 VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', ?3, ?4, ?5, 1, 'ok', \
+                 5, 0, 0, 1, 0, ?6)",
+                rusqlite::params![
+                    ts_start,
+                    request_id,
+                    model,
+                    provider_kind,
+                    session_id,
+                    cache_read,
+                ],
+            )
+            .expect("insert reuse row");
+    }
+
+    #[test]
+    fn read_reuse_samples_filters_nulls_coalesces_and_orders() {
+        // Arrange: a mix of complete and partial rows, two triples, delivered
+        // out of ts order, plus an out-of-window row.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        // Complete rows for triple A (one with NULL cache_read -> 0).
+        insert_reuse_row(
+            &db,
+            "a2",
+            200,
+            Some("s1"),
+            Some("anthropic-api"),
+            Some("opus"),
+            Some(42),
+        );
+        insert_reuse_row(
+            &db,
+            "a1",
+            100,
+            Some("s1"),
+            Some("anthropic-api"),
+            Some("opus"),
+            None,
+        );
+        // A second triple (different provider_kind).
+        insert_reuse_row(
+            &db,
+            "b1",
+            150,
+            Some("s1"),
+            Some("bedrock"),
+            Some("opus"),
+            Some(7),
+        );
+        // NULL session_id -> filtered out (no usable triple identity).
+        insert_reuse_row(
+            &db,
+            "n-sess",
+            120,
+            None,
+            Some("anthropic-api"),
+            Some("opus"),
+            Some(9),
+        );
+        // NULL provider_kind -> filtered out.
+        insert_reuse_row(&db, "n-pk", 130, Some("s2"), None, Some("opus"), Some(9));
+        // NULL model -> filtered out.
+        insert_reuse_row(
+            &db,
+            "n-model",
+            140,
+            Some("s2"),
+            Some("anthropic-api"),
+            None,
+            Some(9),
+        );
+        // Out of window (ts < window_start).
+        insert_reuse_row(
+            &db,
+            "old",
+            50,
+            Some("s1"),
+            Some("anthropic-api"),
+            Some("opus"),
+            Some(99),
+        );
+
+        // Act: window starts at 100.
+        let rows = read_reuse_samples_since(db.conn(), 100, 100).expect("read");
+
+        // Assert: three rows survive (the three complete, in-window rows),
+        // ordered ascending by ts.
+        let ids: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
+        assert_eq!(ids, vec![100, 150, 200]);
+        // NULL cache_read coalesced to 0 on a1.
+        let a1 = rows.iter().find(|r| r.ts_start_ms == 100).expect("a1");
+        assert_eq!(a1.cache_read, 0);
+        assert_eq!(a1.session_id, "s1");
+        assert_eq!(a1.provider_kind, "anthropic-api");
+        assert_eq!(a1.model, "opus");
+        // The cross-provider row maps its own provider_kind.
+        let b1 = rows.iter().find(|r| r.ts_start_ms == 150).expect("b1");
+        assert_eq!(b1.provider_kind, "bedrock");
+        assert_eq!(b1.cache_read, 7);
+    }
+
+    #[test]
+    fn read_reuse_samples_respects_limit() {
+        // Arrange: five eligible rows.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        for i in 0..5i64 {
+            insert_reuse_row(
+                &db,
+                &format!("r{i}"),
+                100 + i,
+                Some("s1"),
+                Some("anthropic-api"),
+                Some("opus"),
+                Some(1),
+            );
+        }
+
+        // Act: cap at 3.
+        let rows = read_reuse_samples_since(db.conn(), 0, 3).expect("read");
+
+        // Assert: the three OLDEST (ascending order, then LIMIT).
+        let ids: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
+        assert_eq!(ids, vec![100, 101, 102]);
     }
 }
