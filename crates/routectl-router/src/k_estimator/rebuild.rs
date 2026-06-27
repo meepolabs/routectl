@@ -38,6 +38,29 @@ pub struct LedgerSampleRow {
     pub cache_read: u64,
 }
 
+impl LedgerSampleRow {
+    /// Construct a row from the mapped ledger columns. Provided because the
+    /// type is `#[non_exhaustive]`: a concrete `LedgerReader` lives in a
+    /// different crate and cannot use a struct literal, so it builds rows
+    /// through here. A later additive column gets a defaulted parameter or a
+    /// dedicated setter without breaking this signature's callers.
+    pub fn new(
+        session_key: String,
+        provider_kind: String,
+        model: String,
+        ts: SystemTime,
+        cache_read: u64,
+    ) -> Self {
+        Self {
+            session_key,
+            provider_kind,
+            model,
+            ts,
+            cache_read,
+        }
+    }
+}
+
 /// Dependency-inversion seam between the usage ledger and the K estimator.
 ///
 /// The concrete implementation lives in the binary that depends on both the

@@ -600,6 +600,47 @@ impl Router {
             .import_entries(previous.k_session_store.export_entries());
     }
 
+    /// Record one live cache-reuse observation into the per-session K
+    /// estimator store. Called best-effort from the ingress capture path
+    /// AFTER a dispatched response's `cache_read` and served target are
+    /// known.
+    ///
+    /// Keyless requests (a one-shot probe, an unauthenticated dev call)
+    /// carry no session identity and are not tracked: there is no stable
+    /// triple to accumulate against, so the call is a no-op rather than
+    /// keyed on an empty string. A keyed request builds the
+    /// (session, provider_kind, model) triple and appends a sample whose
+    /// `observed_reuse` is `cache_read > 0` (the router owns the reuse
+    /// definition, mirroring the ledger rebuild).
+    ///
+    /// This is a single mutex lock plus a small push; it must never fail,
+    /// panic, or meaningfully slow the request, so it returns nothing and
+    /// swallows the keyless case silently.
+    pub fn record_k_sample(
+        &self,
+        session_key: Option<&str>,
+        provider_kind: &str,
+        model: &str,
+        cache_read: u64,
+        ts: std::time::SystemTime,
+    ) {
+        let Some(session_key) = session_key else {
+            return;
+        };
+        let key = crate::k_estimator::KSessionKey {
+            session_key: session_key.to_string(),
+            provider_kind: provider_kind.to_string(),
+            model: model.to_string(),
+        };
+        self.k_session_store.record_sample(
+            key,
+            crate::k_estimator::Sample {
+                ts,
+                observed_reuse: cache_read > 0,
+            },
+        );
+    }
+
     /// Number of dispatch seats a resolved model expands to: `Some(n)`
     /// for a pooled (multi-seat) model, `None` for a non-pooled
     /// single-target model (a lone seat collapses to the single-target
@@ -3585,6 +3626,43 @@ mod tests {
         );
         let observed_windows: Vec<&KSessionWindow> = entries.iter().map(|(_, w)| w).collect();
         assert_eq!(observed_windows, vec![&win_b, &win_c, &win_a]);
+    }
+
+    #[test]
+    fn record_k_sample_skips_keyless_and_records_keyed() {
+        use crate::k_estimator::KSessionKey;
+        use std::time::UNIX_EPOCH;
+
+        // Arrange
+        let config = Arc::new(Config::default());
+        let router = Router::new(config);
+
+        // Act: a keyless request must NOT create any window.
+        router.record_k_sample(None, "anthropic-api", "opus", 5, UNIX_EPOCH);
+
+        // Assert: the store stays empty -- keyless requests are untracked.
+        assert!(
+            router.k_session_store.is_empty(),
+            "a keyless request must not be recorded",
+        );
+
+        // Act: a keyed request with a cache hit records one reuse sample.
+        router.record_k_sample(Some("sess-1"), "anthropic-api", "opus", 7, UNIX_EPOCH);
+        // A keyed request with no cache hit records a no-reuse sample.
+        router.record_k_sample(Some("sess-1"), "anthropic-api", "opus", 0, UNIX_EPOCH);
+
+        // Assert: both samples landed under the one triple, with
+        // observed_reuse tracking cache_read > 0.
+        let window = router
+            .k_session_store
+            .get(&KSessionKey {
+                session_key: "sess-1".into(),
+                provider_kind: "anthropic-api".into(),
+                model: "opus".into(),
+            })
+            .expect("triple recorded");
+        let reuse: Vec<bool> = window.iter().map(|s| s.observed_reuse).collect();
+        assert_eq!(reuse, vec![true, false]);
     }
 }
 
