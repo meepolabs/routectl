@@ -208,6 +208,7 @@ mod tests {
             selection_decision: None,
             would_trim_tokens: None,
             would_trim_break_even_k: None,
+            would_trim_k_floor: None,
         }
     }
 

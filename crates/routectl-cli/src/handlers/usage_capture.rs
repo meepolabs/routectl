@@ -69,6 +69,7 @@ pub(crate) fn build_usage_draft(
         selection_decision: None,
         would_trim_tokens: None,
         would_trim_break_even_k: None,
+        would_trim_k_floor: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -282,6 +283,7 @@ impl UsageCapture {
         self.record.selection_decision = meta.selection_decision.map(|s| s.to_string());
         self.record.would_trim_tokens = meta.would_trim_tokens;
         self.record.would_trim_break_even_k = meta.would_trim_break_even_k;
+        self.record.would_trim_k_floor = meta.would_trim_k_floor;
     }
 
     /// Stamp the token / quota / finish columns from a non-streaming

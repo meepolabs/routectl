@@ -1506,6 +1506,132 @@ fn k_test_router() -> std::sync::Arc<routectl_router::Router> {
     )))
 }
 
+/// Build an `Arc<Router>` over a one-entry chain (unreachable upstream) and a
+/// `DispatchMeta` whose served `provider_kind` / `model` are stamped, so a
+/// stream capture seeded via `observe_meta(&meta)` has the triple a K-sample
+/// recording keys on. The dispatch fails (the upstream is unreachable) but the
+/// chain walk still stamps the served identity onto the meta.
+async fn k_recording_router_and_meta() -> (
+    std::sync::Arc<routectl_router::Router>,
+    routectl_router::DispatchMeta,
+) {
+    use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".to_string(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        retry,
+        ..Default::default()
+    });
+    let router = Arc::new(build_test_router(config).await);
+    let req = sample_request("a", true);
+    let dispatched = router.complete_with_options(req, Default::default()).await;
+    (router, dispatched.meta)
+}
+
+/// End-to-end K-sample recording through `render_stream_task`: a natural-EOS
+/// stream carrying a session key lands EXACTLY ONE sample in the router's
+/// per-session store, and a mid-stream-error stream lands ZERO (the error
+/// path returns before the post-EOS recording). Drives the real streaming
+/// helper with a seeded capture so the served triple is present.
+#[tokio::test]
+async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
+    use crate::ingress::openai::OpenAiIngress;
+    use routectl_router::KSessionKey;
+
+    // Arrange (EOS): a router + a meta with the served triple stamped.
+    let (router, meta) = k_recording_router_and_meta().await;
+    let provider_kind = meta
+        .served_provider_kind
+        .clone()
+        .expect("served provider_kind stamped on meta");
+    let model = meta
+        .served_model
+        .clone()
+        .expect("served model stamped on meta");
+
+    let rig = CaptureRig::new();
+    let mut capture = rig.capture("openai", &sample_request("a", true), "req-k-eos");
+    capture.observe_meta(&meta);
+
+    let upstream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
+        Box::pin(futures::stream::iter(vec![Ok(streaming_text_chunk("hi"))]));
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+
+    // Act (EOS): drive the stream to natural completion with a session key.
+    render_stream_task(
+        upstream,
+        OpenAiIngress,
+        capture,
+        tx,
+        Arc::clone(&router),
+        Some("sess".to_string()),
+    )
+    .await;
+    let _ = drain(rx).await;
+
+    // Assert: exactly one sample under the served triple.
+    let window = router
+        .k_session_store
+        .get(&KSessionKey {
+            session_key: "sess".into(),
+            provider_kind: provider_kind.clone(),
+            model: model.clone(),
+        })
+        .expect("natural-EOS stream recorded a sample");
+    assert_eq!(
+        window.len(),
+        1,
+        "natural EOS must record exactly one sample"
+    );
+
+    // Arrange (mid-stream error): a fresh router so the store starts empty.
+    let (router_err, meta_err) = k_recording_router_and_meta().await;
+    let rig_err = CaptureRig::new();
+    let mut capture_err = rig_err.capture("openai", &sample_request("a", true), "req-k-err");
+    capture_err.observe_meta(&meta_err);
+
+    let upstream_err: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
+        Box::pin(futures::stream::iter(vec![
+            Ok(streaming_text_chunk("hi")),
+            Err(Error::upstream("p", 503, "Service Unavailable")),
+        ]));
+    let (tx_err, rx_err) = tokio::sync::mpsc::channel::<SseEvent>(64);
+
+    // Act (error): drive the stream to a mid-stream upstream error.
+    render_stream_task(
+        upstream_err,
+        OpenAiIngress,
+        capture_err,
+        tx_err,
+        Arc::clone(&router_err),
+        Some("sess".to_string()),
+    )
+    .await;
+    let _ = drain(rx_err).await;
+
+    // Assert: the error path returns before the post-EOS recording, so the
+    // store stays empty.
+    assert!(
+        router_err.k_session_store.is_empty(),
+        "a mid-stream-error stream must not record a K sample",
+    );
+}
+
 /// A degenerate `[cache_pricing]` override (rm <= 0.0) must fail the
 /// server bootstrap, surfaced as a config error rather than silently going
 /// inert. Drives the real `build_router_from_config` startup path.

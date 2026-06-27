@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -119,7 +119,17 @@ CREATE TABLE IF NOT EXISTS requests (
     -- or migrated from v4 via `ALTER TABLE ... ADD COLUMN` (which always
     -- appends). The live request is NEVER mutated -- this is recording only.
     would_trim_tokens INTEGER,
-    would_trim_break_even_k REAL
+    would_trim_break_even_k REAL,
+
+    -- STEADY-STATE WOULD-TRIM K FLOOR (v6): the per-session K estimator's
+    -- lower confidence bound `k_floor`, recorded only when the estimate was
+    -- `Calibrated` for the request's (session, provider_kind, model) triple.
+    -- NULL for a cold / thin estimate, for an unverified pricing cell, and
+    -- when the trimmer proposed no cut. Appended last so it lands in the same
+    -- ordinal position whether the DB was created fresh at v6 or migrated from
+    -- v5 via `ALTER TABLE ... ADD COLUMN` (which always appends). The live
+    -- request is NEVER mutated -- this is recording only.
+    would_trim_k_floor REAL
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

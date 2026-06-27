@@ -966,6 +966,119 @@ mod tests {
         assert_eq!(meta_version, SCHEMA_VERSION.to_string());
     }
 
+    /// A v5 DB (created before the per-session K-floor column existed) must
+    /// migrate to v6: `would_trim_k_floor` is added, `user_version` becomes 6,
+    /// and any pre-existing row survives with the new column NULL (and its
+    /// prior would-trim columns intact). Builds a genuine v5 `requests` table
+    /// so the ALTER path -- not the fresh-schema path -- is exercised.
+    #[test]
+    fn old_v5_db_migrates_to_v6_preserving_rows() {
+        // Arrange: a v5-shaped DB carrying the two would-trim advisory columns.
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        conn.execute_batch(
+            "CREATE TABLE requests (
+                ts_start INTEGER NOT NULL,
+                ts_end INTEGER NOT NULL,
+                request_id TEXT NOT NULL UNIQUE,
+                ingress_dialect TEXT NOT NULL,
+                requested_model TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                stream INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                msg_count INTEGER NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                fallback_count INTEGER NOT NULL,
+                strategy TEXT,
+                reduction_strategy TEXT,
+                selection_decision TEXT,
+                would_trim_tokens INTEGER,
+                would_trim_break_even_k REAL
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '5');
+            INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                msg_count, attempt_count, fallback_count, strategy, reduction_strategy, \
+                selection_decision, would_trim_tokens, would_trim_break_even_k) \
+                VALUES (1, 2, 'v5-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0, \
+                'auto_emitted', 'cost_gate:would_trim', 'sticky_stay', 40000, 50.0);
+            PRAGMA user_version = 5;",
+        )
+        .expect("build v5 db");
+        assert_eq!(user_version(&conn), 5);
+
+        // Act
+        let version = migrate_to_current(&conn, 0).expect("migrate v5->v6");
+
+        // Assert: landed at v6, the column exists, the old row survived with a
+        // NULL k-floor (and its prior would-trim values intact), and meta
+        // tracks the new version.
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        let present: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name=?1")
+            .expect("prepare")
+            .exists(["would_trim_k_floor"])
+            .expect("query");
+        assert!(present, "v6 DB must carry the would_trim_k_floor column");
+        // The prior would-trim values survive intact.
+        let (wt_tokens, wt_k): (Option<i64>, Option<f64>) = conn
+            .query_row(
+                "SELECT would_trim_tokens, would_trim_break_even_k \
+                 FROM requests WHERE request_id='v5-row'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("old row survives");
+        assert_eq!(wt_tokens, Some(40_000));
+        assert_eq!(wt_k, Some(50.0));
+        // The new column reads NULL on the migrated old row.
+        let k_floor: Option<f64> = conn
+            .query_row(
+                "SELECT would_trim_k_floor FROM requests WHERE request_id='v5-row'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("old row survives");
+        assert!(
+            k_floor.is_none(),
+            "migrated v5 row must have NULL would_trim_k_floor"
+        );
+        let meta_version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("meta schema_version");
+        assert_eq!(meta_version, SCHEMA_VERSION.to_string());
+    }
+
+    /// A fresh DB opens directly at the current version with the
+    /// `would_trim_k_floor` column present.
+    #[test]
+    fn fresh_db_opens_at_v6_with_k_floor_column() {
+        // Arrange + Act
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open fresh");
+
+        // Assert
+        assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+        let present: bool = db
+            .conn()
+            .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name='would_trim_k_floor'")
+            .expect("prepare")
+            .exists([])
+            .expect("query");
+        assert!(
+            present,
+            "fresh v6 DB must carry the would_trim_k_floor column"
+        );
+    }
+
     /// A fresh DB opens directly at the current version with the steady-state
     /// would-trim columns present.
     #[test]
@@ -1101,6 +1214,7 @@ mod tests {
             ("selection_decision", false),
             ("would_trim_tokens", false),
             ("would_trim_break_even_k", false),
+            ("would_trim_k_floor", false),
         ];
 
         let (_dir, path) = temp_db_path();
