@@ -12,8 +12,12 @@
 //! usage ledger, and the dispatch helper that consults it, land in additive
 //! follow-up work; until then nothing in the router calls into here.
 
+pub mod default_impl;
+pub mod rebuild;
 pub mod store;
 
+pub use default_impl::LedgerBackedK;
+pub use rebuild::{rebuild_into, LedgerReader, LedgerSampleRow};
 pub use store::{KSessionKey, KSessionStore, KSessionWindow, Sample, K_SESSION_CAPACITY};
 
 use std::time::{Duration, SystemTime};

@@ -42,8 +42,9 @@ pub use factory::{
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{
-    Confidence, EstimateSource, KEstimate, KEstimator, KQuery, KSessionKey, KSessionStore,
-    KSessionWindow, Sample, K_SESSION_CAPACITY,
+    rebuild_into, Confidence, EstimateSource, KEstimate, KEstimator, KQuery, KSessionKey,
+    KSessionStore, KSessionWindow, LedgerBackedK, LedgerReader, LedgerSampleRow, Sample,
+    K_SESSION_CAPACITY,
 };
 pub use resolved::ResolvedModel;
 pub use router::{
