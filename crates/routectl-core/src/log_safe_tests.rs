@@ -1286,6 +1286,19 @@ fn redact_replaces_bare_x_api_key_with_redacted() {
 }
 
 #[test]
+fn redact_replaces_bare_x_goog_api_key_with_redacted() {
+    // Google Gemini api keys ride on `x-goog-api-key`. Like `x-api-key`,
+    // there is no Bearer scheme to preserve -- collapse to `[REDACTED]`
+    // so an enabled header trace never carries the live Gemini key.
+    let mut headers =
+        super::headers_to_json([("x-goog-api-key", b"gemini-key-not-real".as_slice())]);
+    super::redact_header_values(&mut headers);
+    let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+    assert_eq!(pair[0].as_str(), Some("x-goog-api-key"));
+    assert_eq!(pair[1].as_str(), Some("[REDACTED]"));
+}
+
+#[test]
 fn redact_preserves_non_secret_headers_verbatim() {
     // Only secret-bearing names are redacted; anthropic-version /
     // anthropic-beta / originator must round-trip unchanged so the

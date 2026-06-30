@@ -878,6 +878,7 @@ pub fn headers_to_json<'a>(
 ///                                providers (codex / chatgpt-oauth,
 ///                                anthropic-oauth) and api-key bearer.
 /// `x-api-key`                -- Anthropic-API key.
+/// `x-goog-api-key`           -- Google Gemini API key.
 /// `proxy-authorization`      -- mirror of `authorization` for
 ///                                proxy-tunneled requests.
 /// `set-cookie` / `cookie`    -- session credentials on either
@@ -886,6 +887,7 @@ pub fn headers_to_json<'a>(
 const REDACT_HEADER_NAMES: &[&str] = &[
     "authorization",
     "x-api-key",
+    "x-goog-api-key",
     "proxy-authorization",
     "set-cookie",
     "cookie",
