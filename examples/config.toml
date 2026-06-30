@@ -81,8 +81,6 @@ creds  = { kind = "default-chain" }
 
 # Gemini via the Cloud Code ("antigravity") surface. Uses the OAuth
 # identity stored by `routectl login antigravity` -- no static key.
-# Requires a gemini-enabled build (the default release binary omits the
-# gemini provider); uncomment when running such a build.
 # [providers.gemini-cloudcode]
 # kind        = "gemini"
 # api_key_ref = "oauth://antigravity"
