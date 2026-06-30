@@ -1672,7 +1672,7 @@ mod tests {
         let ua = header("user-agent");
         // A None/absent UA also satisfies this: the claim is "the codex UA
         // prefix is not stamped on the shared client," not "some UA is
-        // always present." map_or(true, ..) makes absence pass by design.
+        // always present." is_none_or(..) makes absence pass by design.
         assert!(
             ua.as_deref()
                 .is_none_or(|u| !u.starts_with("codex_cli_rs/")),
