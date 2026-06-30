@@ -2702,6 +2702,100 @@ mod multi_turn_tool_use_tests {
         );
     }
 
+    /// The `supports_adaptive_thinking` flag drives the Anthropic egress
+    /// thinking wire-shape. This flag has NO code-level per-model source: it
+    /// is set by the operator in config. A mis-set flag produces a
+    /// fallback-inducing 400 on the upstream. This test pins the
+    /// wire-shape-follows-flag invariant (not a per-model capability mapping):
+    /// the flag value alone determines adaptive vs. legacy shape.
+    ///
+    /// Invariant:
+    ///   supports_adaptive_thinking=true  -> adaptive wire shape
+    ///   supports_adaptive_thinking=false -> legacy wire shape
+    #[test]
+    fn per_model_adaptive_thinking_wire_shape_contract() {
+        use routectl_core::ReasoningConfig;
+
+        struct Row {
+            model: &'static str,
+            adaptive: bool,
+            expect_adaptive_shape: bool,
+        }
+
+        let rows = [
+            Row {
+                model: "claude-opus-4-8",
+                adaptive: true,
+                expect_adaptive_shape: true,
+            },
+            Row {
+                model: "claude-opus-4-7",
+                adaptive: true,
+                expect_adaptive_shape: true,
+            },
+            Row {
+                model: "claude-haiku-4-5",
+                adaptive: false,
+                expect_adaptive_shape: false,
+            },
+        ];
+
+        for row in &rows {
+            let mut req = ChatRequest {
+                model: row.model.into(),
+                messages: vec![user_msg("hi")],
+                max_tokens: Some(8192),
+                reasoning: Some(ReasoningConfig {
+                    effort: Some("high".into()),
+                    max_tokens: None,
+                    exclude: None,
+                    enabled: Some(true),
+                }),
+                ..Default::default()
+            };
+            req.routectl_internal.supports_adaptive_thinking = row.adaptive;
+
+            let body = normalize(
+                "test",
+                &req,
+                req.routectl_internal.supports_adaptive_thinking,
+                &[],
+                false,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("normalize failed for {}: {e}", row.model));
+
+            let thinking = body
+                .get("thinking")
+                .unwrap_or_else(|| panic!("thinking field absent for {}", row.model));
+
+            if row.expect_adaptive_shape {
+                assert_eq!(
+                    thinking["type"], "adaptive",
+                    "model {} with adaptive=true must emit adaptive shape",
+                    row.model
+                );
+                assert!(
+                    thinking.get("budget_tokens").is_none(),
+                    "adaptive shape must not carry budget_tokens ({})",
+                    row.model
+                );
+            } else {
+                assert_ne!(
+                    thinking["type"], "adaptive",
+                    "model {} with adaptive=false must NOT emit adaptive shape",
+                    row.model
+                );
+                assert!(
+                    thinking.get("budget_tokens").is_some() || thinking["type"] == "enabled",
+                    "non-adaptive shape must be legacy enabled for {} (got: {})",
+                    row.model,
+                    thinking
+                );
+            }
+        }
+    }
+
     /// Operator cap applied: max_thinking_budget=2000 with max_tokens=10000
     /// clamps the budget DOWN to 2000 before Anthropic's window clamp runs.
     #[test]
