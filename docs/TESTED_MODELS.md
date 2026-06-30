@@ -272,6 +272,46 @@ Wire-shape notes for the native Gemini surface:
 See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#gemini-native-kind--gemini)
 for the full mapping and the before/after fidelity note.
 
+## Cloud Code Gemini (`kind = "gemini"`, `auth_mode = "cloud-code"`, antigravity OAuth)
+
+Hits the Cloud Code ("antigravity") surface: `cloudcode-pa`
+`/v1internal:{generate,stream}Content` with an OAuth bearer
+(`Authorization: Bearer <token>`, NOT `x-goog-api-key`). The inner
+Gemini translation is reused unchanged from the api-key path; only the
+transport wrapper, auth, base, and project resolution differ. See
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code)
+for the wire details.
+
+Human gate (one-time): the operator runs `routectl login antigravity`
+once -- a live Google consent in a browser -- to mint the
+`oauth://antigravity` credential. After that the bearer is reused (and
+refreshed) without further interaction.
+
+Required env var for the live matrix:
+```bash
+export GEMINI_OAUTH_ACCESS_TOKEN="$(jq -r '.providers.antigravity.access_token' \
+  ~/.config/routectl/credentials.json)"
+```
+
+Run the Cloud Code Gemini matrix:
+```bash
+cargo test -p routectl-cli --features live-integration --release \
+  --test live_matrix oauth_antigravity -- --nocapture --test-threads=1
+```
+
+| Model | Mode | Status | Notes |
+|---|---|---|---|
+| `gemini-2.5-flash` | complete + stream (oauth://antigravity) | PENDING | Bearer resolved through `OAuthStore` (tempdir credentials.json); project id auto-resolved live via loadCodeAssist / onboardUser. Skipped (clean) until the operator runs `routectl login antigravity` and sets `GEMINI_OAUTH_ACCESS_TOKEN`. |
+| `gemini-2.5-pro` | complete + stream (oauth://antigravity) | PENDING | Same path; reasoning-capable. Skipped until the operator login + env var are present. |
+
+Deterministic coverage (GREEN in CI now): the Cloud Code transport is
+pinned by wiremock tests in `crates/routectl-providers/src/gemini/mod.rs`
+that run keyless in CI today --
+`envelope_wrap_and_response_unwrap` (non-stream), `stream_unwraps_response_envelope`
+(stream), `onboards_via_loadcodeassist`, `onboards_via_onboarduser`, and
+`preserves_reasoning_and_structured_output`. The live rows above are
+PENDING the one-time operator login and skip cleanly until then.
+
 ## Client x provider compatibility matrix
 
 Coverage = which call modes are reachable end-to-end through routectl.
@@ -286,6 +326,7 @@ per-provider tables above; this table is the at-a-glance summary.
 | bedrock (invoke + converse) | yes | yes | Anthropic body on InvokeModel; vendor-neutral Converse |
 | openai-responses | stream-only (`complete` force-streams) | yes | Flat Responses tool shape, encrypted_content reasoning replay |
 | **gemini (native)** | yes | yes | Full on the four named features: systemInstruction, thinkingConfig, functionDeclarations, usageMetadata cached-content + thoughts tokens |
+| **gemini (Cloud Code, OAuth)** | yes | yes | `auth_mode = "cloud-code"`: Bearer against cloudcode-pa `/v1internal`; `{project,request,model}` envelope + `response` unwrap; inner Gemini translation reused unchanged. Wiremock-pinned in CI; live rows PENDING `routectl login antigravity` |
 
 ## Adding a new model
 
