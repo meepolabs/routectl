@@ -20,6 +20,7 @@ doc. If it 4xxs or behaves weirdly, find the matching row.
 | **Anthropic + 1M-context beta** | `[providers.X] header_extras = { "anthropic-beta" = "context-1m-2025-08-07" }` |
 | **OAuth bearer to Anthropic** | `[providers.X] auth_kind = "oauth-bearer"` + the matching beta header |
 | **DeepSeek /anthropic endpoint + claude-code context-management** | `[providers.X] context_management = true` |
+| **Google Gemini (native)** | `[providers.X] kind = "gemini"` + `api_key_ref = "env://GEMINI_API_KEY"`; safetySettings / topK flow through `payload_extras` |
 
 ## Per-model config
 
@@ -325,6 +326,100 @@ The OAuth refresh client (used for `grant_type=refresh_token` POSTs to `https://
 - Responses-API request:       `codex-api/src/endpoint/responses.rs`
 
 **Compatibility-contract risk**: future deviations (a UA bump on the routectl side that codex did not ship; a missing identity header; a refresh-client header re-ordering) are NOT debuggable as build / wire errors. The first symptom is a refresh endpoint that 401s on every retry. A mismatch with the targeted codex client contract can cause the upstream to reject the refresh token and require the operator to re-authenticate through the ChatGPT web UI. Treat any change here with the same gravity as a database migration on a production system.
+
+## Gemini (native, `kind = "gemini"`)
+
+The native Gemini egress (`generateContent` / `streamGenerateContent`)
+replaces the older openai-compat shim. It talks the Gemini REST wire
+shape directly, so it does not coerce requests through the OpenAI
+schema first.
+
+**Auth model (decision):** API key only, sent as the `x-goog-api-key`
+HTTP header (NOT `Authorization: Bearer`). The key is resolved per
+request from `api_key_ref`, so a routectl-managed `oauth://` or
+`file://` source can rotate it without a daemon restart. Vertex AI /
+Google OAuth (ADC, service accounts) is explicitly NOT implemented. It
+is reachable later by pointing `base_url` at a Vertex endpoint -- no
+new provider kind required.
+
+**Model path shape:** the provider appends the model id and method to
+`base_url`:
+
+- non-stream: `{base_url}/models/{model}:generateContent`
+- stream:     `{base_url}/models/{model}:streamGenerateContent?alt=sse`
+
+`base_url` defaults to
+`https://generativelanguage.googleapis.com/v1beta`.
+
+**thinkingConfig budget mapping:** the canonical `reasoning` controls
+map to `generationConfig.thinkingConfig`:
+
+| Canonical input | `thinkingBudget` |
+|---|---|
+| `reasoning.enabled = false` | (no thinkingConfig emitted -- thinking off) |
+| explicit `reasoning.max_tokens = N` | `N` verbatim |
+| `reasoning.effort = "<level>"` | budget via the effort table (`minimal=512`, `low=1024`, `medium=8192`, `high=24576`, `xhigh=32768`, `max=128000`) |
+| reasoning present, neither set | `-1` (dynamic -- the model picks) |
+
+`includeThoughts` is set to `true` whenever thinking is on and
+`reasoning.exclude` is not `true`, so thought summaries stream back and
+lift into canonical `reasoning` / `reasoning_details[]`.
+
+**thoughtSignature reasoning replay:** Gemini returns an opaque
+`thoughtSignature` on thinking parts. routectl carries it on the
+emitted `reasoning_details[]` entry (format tag `gemini-v1`). On a
+follow-up turn the request translator replays prior-turn reasoning as
+`thought` parts carrying that signature ahead of the assistant text, so
+multi-turn thinking continuity is preserved.
+
+**Structured-output mapping:** the canonical OpenAI-shape
+`response_format` maps to `generationConfig`:
+
+- `{type: "json_schema", json_schema: {schema}}` ->
+  `responseMimeType: "application/json"` + `responseSchema: <schema>`
+- `{type: "json_object"}` -> `responseMimeType: "application/json"`
+  (no schema)
+- anything else / absent -> neither field emitted
+
+**payload_extras / safetySettings:** knobs the canonical schema does
+not carry natively flow through `[providers.X] payload_extras` (merged
+into the outbound body). The two common ones are `safetySettings` (the
+per-category harm-block thresholds) and `generationConfig.topK`.
+
+```toml
+[providers.gemini]
+kind        = "gemini"
+api_key_ref = "env://GEMINI_API_KEY"
+payload_extras = { safetySettings = [
+  { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_NONE" },
+], generationConfig = { topK = 40 } }
+```
+
+**usageMetadata token accounting:** the Gemini `usageMetadata` block
+maps to canonical `Usage`:
+
+- `cachedContentTokenCount` -> `cache_read_input_tokens` (surfaced when
+  non-zero; this is the implicit-prefix-cache read count Gemini bills at
+  a discount)
+- `thoughtsTokenCount` -> `reasoning_tokens` (surfaced when non-zero)
+- `cache_creation_input_tokens` is left `None` -- Gemini's prefix cache
+  is automatic with free writes, so there is no write count to surface.
+
+### Before/after fidelity: native Gemini vs the openai-compat shim
+
+The native provider beats the prior openai-compat shim on four named
+features:
+
+| Feature | openai-compat shim (before) | native gemini (after) |
+|---|---|---|
+| **systemInstruction** | system prompt folded into a synthetic `system`-role chat message; the model treats it as a conversation turn, not a system directive | system content lifted into the native top-level `systemInstruction.parts` (no role), the shape Gemini expects |
+| **thinkingConfig** | no native thinking control -- effort / budget either dropped or coerced through an OpenAI-shape field Gemini ignores | `generationConfig.thinkingConfig` with explicit `thinkingBudget` (verbatim / effort-table / dynamic `-1`) and `includeThoughts` |
+| **functionDeclarations** | tools coerced into OpenAI `{type:"function",function:{...}}` shape, then best-effort re-mapped; schema-drift risk | tools emitted as native `tools[].functionDeclarations[]`, the Gemini-native tool schema |
+| **usageMetadata cache** | `cachedContentTokenCount` lost -- the shim's OpenAI-shape usage parse has no slot for it, so cache-read savings were invisible to usage accounting | `cachedContentTokenCount` surfaced as `cache_read_input_tokens`; `thoughtsTokenCount` surfaced as `reasoning_tokens` |
+
+Net: the shim loses the system-prompt role distinction, all native
+thinking control, the exact tool schema, and the cache-read token
+count. Native gains all four, end to end.
 
 ## Cross-cutting timing notes
 
