@@ -22,9 +22,9 @@ pub use db::{open, open_readonly, OpenError, UsageDb};
 pub use handle::{UsageCounters, UsageHandle};
 pub use migrate::MigrateError;
 pub use query::{
-    aggregate, k_calibration_summary, latest_quota, read_reuse_samples_since, ttfbs,
-    would_trim_summary, AggRow, GroupKey, KCalibration, QueryError, QuotaSnapshot, ReuseSampleRow,
-    WouldTrimSummary,
+    aggregate, k_calibration_summary, latest_quota, read_reuse_samples_since,
+    shadow_misfire_summary, ttfbs, would_trim_summary, AggRow, GroupKey, KCalibration, QueryError,
+    QuotaSnapshot, ReuseSampleRow, ShadowMisfireSummary, WouldTrimSummary,
 };
 pub use record::{Outcome, ParseOutcomeError, UsageRecord};
 pub use retention::{prune, PruneOutcome};

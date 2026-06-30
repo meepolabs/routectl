@@ -14,10 +14,12 @@
 
 pub mod default_impl;
 pub mod rebuild;
+pub mod shadow;
 pub mod store;
 
 pub use default_impl::LedgerBackedK;
 pub use rebuild::{rebuild_into, LedgerReader, LedgerSampleRow};
+pub use shadow::{ShadowOutcome, ShadowStore};
 pub use store::{KSessionKey, KSessionStore, KSessionWindow, Sample, K_SESSION_CAPACITY};
 
 use std::time::{Duration, SystemTime};

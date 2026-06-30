@@ -300,6 +300,44 @@ pub fn would_trim_summary(
     Ok(summary)
 }
 
+/// Windowed shadow misfire monitor summary. Counts candidate turns compared
+/// (rows where `would_trim_shadow_misfire IS NOT NULL`) and misfire turns
+/// (`would_trim_shadow_misfire = 1`). A misfire means the trimmed cacheable
+/// prefix fingerprint shifted turn-to-turn -- the canary that a live cut would
+/// break the upstream cache. Plain data; the caller decides how to display it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShadowMisfireSummary {
+    /// Count of turns where a shadow comparison was made (NOT NULL).
+    pub compared_turns: i64,
+    /// Count of turns where the fingerprint differed (Misfire, value = 1).
+    pub misfire_turns: i64,
+}
+
+const SHADOW_MISFIRE_SQL: &str = "\
+SELECT
+    COUNT(would_trim_shadow_misfire)                                      AS compared_turns,
+    COALESCE(SUM(CASE WHEN would_trim_shadow_misfire = 1 THEN 1 ELSE 0 END), 0) AS misfire_turns
+FROM requests
+WHERE ts_start >= ?1 AND ts_start < ?2";
+
+/// The window's shadow misfire monitor summary. `COUNT(col)` ignores NULLs,
+/// so `compared_turns` is the number of turns the monitor compared. All fields
+/// are 0 when no row in the window carried a shadow observation.
+pub fn shadow_misfire_summary(
+    db: &UsageDb,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<ShadowMisfireSummary, QueryError> {
+    let mut stmt = db.conn().prepare(SHADOW_MISFIRE_SQL)?;
+    let summary = stmt.query_row([from_ms, to_ms], |row| {
+        Ok(ShadowMisfireSummary {
+            compared_turns: row.get(0)?,
+            misfire_turns: row.get(1)?,
+        })
+    })?;
+    Ok(summary)
+}
+
 /// K-estimator calibration triple over all history. Populated by
 /// `k_calibration_summary`; zero-fields indicate no calibrated predictions.
 ///

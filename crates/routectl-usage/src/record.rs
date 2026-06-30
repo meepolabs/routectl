@@ -152,6 +152,12 @@ pub struct UsageRecord {
     /// unverified (no K* to compare against), and when no would-cut candidate
     /// was proposed. Recording only.
     pub would_trim_k_floor: Option<f64>,
+    /// Non-mutating shadow misfire monitor advisory: `Some(0)` when the
+    /// trimmed cacheable prefix fingerprint matched the stored value for this
+    /// (session, provider_kind, model) triple (Stable), `Some(1)` when it
+    /// differed (Misfire), `None` when no session key was present or this was
+    /// the first observation for the triple (FirstSeen). Recording only.
+    pub would_trim_shadow_misfire: Option<i64>,
 
     // TIMING
     pub latency_ms: i64,
@@ -287,6 +293,7 @@ mod tests {
             would_trim_tokens: Some(40_000),
             would_trim_break_even_k: Some(50.0),
             would_trim_k_floor: Some(60.0),
+            would_trim_shadow_misfire: None,
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -346,6 +353,7 @@ mod tests {
             would_trim_tokens: None,
             would_trim_break_even_k: None,
             would_trim_k_floor: None,
+            would_trim_shadow_misfire: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

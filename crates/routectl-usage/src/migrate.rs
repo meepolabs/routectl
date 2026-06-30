@@ -187,6 +187,32 @@ fn migrate_v5_to_v6(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v6 -> v7 step atomically: add the nullable
+/// `would_trim_shadow_misfire` column (the shadow misfire monitor advisory:
+/// 0 = Stable, 1 = Misfire, NULL = FirstSeen or no session key), bump
+/// `PRAGMA user_version` to 7, and update the human-readable
+/// `meta.schema_version` row. All in one transaction so a crash mid-step
+/// rolls back rather than landing a column-without-version state. Existing
+/// rows survive with the new column NULL.
+///
+/// On a FRESH DB the v0 -> v1 step created `requests` from the current schema,
+/// which already carries the column. The loop still enters this arm
+/// (v0->v1 stamps user_version=1, not SCHEMA_VERSION), so guard the
+/// `ADD COLUMN` against a pre-existing column to keep the fresh path safe.
+fn migrate_v6_to_v7(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    if !column_exists(&tx, "requests", "would_trim_shadow_misfire")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_shadow_misfire INTEGER")?;
+    }
+    tx.execute_batch("PRAGMA user_version = 7")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "7"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -237,6 +263,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             3 => migrate_v3_to_v4(conn)?,
             4 => migrate_v4_to_v5(conn)?,
             5 => migrate_v5_to_v6(conn)?,
+            6 => migrate_v6_to_v7(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;
