@@ -18,7 +18,8 @@ pub mod runtime_state;
 pub(crate) mod seat_pool;
 
 pub use cache_pricing::{
-    lookup, lookup_with_overrides, validate_overrides, CachePricingOverride, CachePricingRow,
+    baked_table_rows, is_stale_today, lookup, lookup_with_overrides, stale_after_days,
+    validate_overrides, BakedPricingRow, CachePricingOverride, CachePricingRow,
     CachePricingSelector,
 };
 pub use config::{

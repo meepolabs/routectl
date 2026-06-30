@@ -100,6 +100,24 @@ pub struct CachePricingRow {
     pub source: &'static str,
 }
 
+/// Intern a `verified_at` date string, leaking at most one allocation per
+/// distinct value for the process lifetime. The cardinality is tiny (date
+/// strings like "2026-07-01"), so the total leak is bounded. The small lock
+/// sits on the advisory would-trim path only; it is never held across I/O.
+fn intern_verified_at(s: &str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static INTERN: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    let m = INTERN.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&v) = g.get(s) {
+        return v;
+    }
+    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
+    g.insert(s.to_owned(), leaked);
+    leaked
+}
+
 impl CachePricingRow {
     /// The conservative SENTINEL row: the most-expensive-to-break shape, so
     /// an unknown / unverified cell forces KEEP at the margin in the
@@ -128,10 +146,26 @@ impl CachePricingRow {
     /// RELIABILITY GUARD: a degenerate override is rejected up front via
     /// [`CachePricingOverride::validate`] (a below-sentinel `wm` without the
     /// cost-risk ack, or a non-positive `rm`). On success the override fields
-    /// merge over the baked values and the row is stamped `verified = true`
-    /// with an `"operator-override"` provenance.
+    /// merge over the baked values and the row is stamped `verified = true`.
+    ///
+    /// Provenance: when the override is a pure verification stamp (only
+    /// `verified_at` set, all value fields `None`), `source` is set to
+    /// `"operator-verified"`; otherwise `"operator-override"`.
+    ///
+    /// `verified_at`: when `ov.verified_at` is `Some`, the returned row
+    /// carries that date string (leaked to `'static` for the field type);
+    /// when `None`, the baked `verified_at` is inherited unchanged.
     pub fn with_overrides(&self, ov: &CachePricingOverride) -> Result<Self, String> {
         ov.validate()?;
+        let verified_at: &'static str = match &ov.verified_at {
+            Some(s) => intern_verified_at(s),
+            None => self.verified_at,
+        };
+        let source: &'static str = if ov.is_pure_verification() {
+            "operator-verified"
+        } else {
+            "operator-override"
+        };
         Ok(Self {
             wm: ov.wm.unwrap_or(self.wm),
             rm: ov.rm.unwrap_or(self.rm),
@@ -140,13 +174,10 @@ impl CachePricingRow {
             has_storage_rent: ov.has_storage_rent.unwrap_or(self.has_storage_rent),
             storage_rent: ov.storage_rent.unwrap_or(self.storage_rent),
             auto_cacher: ov.auto_cacher.unwrap_or(self.auto_cacher),
-            // An overridden cell is operator-asserted; treat it as verified
-            // so the consuming gate trusts it, but keep the provenance
-            // string honest.
             verified: true,
             tier: self.tier,
-            verified_at: self.verified_at,
-            source: "operator-override",
+            verified_at,
+            source,
         })
     }
 }
@@ -155,6 +186,11 @@ impl CachePricingRow {
 /// cell, deserialized from a `[cache_pricing]` TOML entry. Every field is
 /// optional; an omitted field inherits the baked-in value (see
 /// [`CachePricingRow::with_overrides`]).
+///
+/// Setting only `verified_at` (all value fields `None`) is a pure
+/// verification stamp: the operator confirms the baked values are still
+/// correct as of the given date without re-asserting any numbers. The
+/// merged row will carry `source = "operator-verified"` in that case.
 ///
 /// `Eq` is deliberately NOT derived: the multipliers are `f32`.
 /// `#[serde(deny_unknown_fields)]` rejects typos at config-load time.
@@ -175,6 +211,13 @@ pub struct CachePricingOverride {
     pub storage_rent: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_cacher: Option<bool>,
+    /// Operator-supplied verification date (`"YYYY-MM-DD"`). When set,
+    /// the merged row's `verified_at` is updated to this value. A pure
+    /// verification stamp (all value fields `None`, only `verified_at`
+    /// set) produces `source = "operator-verified"`; a value-plus-date
+    /// override still produces `source = "operator-override"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
     /// Operator's explicit acknowledgement that a below-sentinel `wm` is
     /// intended. Required when `wm` is set below the sentinel; otherwise
     /// the merge is rejected.
@@ -190,6 +233,9 @@ impl CachePricingOverride {
     /// multiplier makes a cache break look falsely profitable. A non-positive
     /// `rm` is rejected unconditionally (the ack flag does not exempt it): a
     /// zero or negative read multiplier makes the break-even math degenerate.
+    /// A `verified_at` value that does not parse as `YYYY-MM-DD` is rejected
+    /// so a malformed stamp fails fast at startup rather than silently going
+    /// wrong at staleness-check time.
     /// Shared by the merge path ([`CachePricingRow::with_overrides`]) and the
     /// startup validate-only pass ([`validate_overrides`]).
     pub fn validate(&self) -> Result<(), String> {
@@ -211,7 +257,28 @@ impl CachePricingOverride {
                 ));
             }
         }
+        if let Some(s) = &self.verified_at {
+            if parse_epoch_day(s).is_none() {
+                return Err(format!(
+                    "cache-pricing override: verified_at = \"{s}\" is not a valid YYYY-MM-DD date"
+                ));
+            }
+        }
         Ok(())
+    }
+
+    /// True when this override is a pure verification stamp: no value fields
+    /// are set and `verified_at` is `Some`. The merged row gets
+    /// `source = "operator-verified"` rather than `"operator-override"`.
+    fn is_pure_verification(&self) -> bool {
+        self.wm.is_none()
+            && self.rm.is_none()
+            && self.ttl_seconds.is_none()
+            && self.min_prefix_tokens.is_none()
+            && self.has_storage_rent.is_none()
+            && self.storage_rent.is_none()
+            && self.auto_cacher.is_none()
+            && self.verified_at.is_some()
     }
 }
 
@@ -1155,6 +1222,41 @@ fn warn_if_stale_at(today: i64) {
     }
 }
 
+/// One entry from the baked pricing table, exposing the provider kind and
+/// model glob alongside the pricing row. Returned by [`baked_table_rows`].
+pub struct BakedPricingRow {
+    pub provider_kind: &'static str,
+    pub model_glob: &'static str,
+    pub row: CachePricingRow,
+}
+
+/// Return a `Vec` of every entry in the baked pricing table in table order.
+/// Each element carries the provider kind, model glob, and the full
+/// [`CachePricingRow`]. The vec length equals the number of baked cells.
+pub fn baked_table_rows() -> Vec<BakedPricingRow> {
+    TABLE
+        .iter()
+        .map(|cell| BakedPricingRow {
+            provider_kind: cell.provider_kind,
+            model_glob: cell.model_glob,
+            row: cell.row,
+        })
+        .collect()
+}
+
+/// True when `verified_at` is more than [`stale_after_days`] before today
+/// (as measured by the system clock). Wraps [`is_stale`] with the live
+/// clock for callers that do not need a pinned test clock.
+pub fn is_stale_today(verified_at: &str) -> bool {
+    is_stale(verified_at, today_epoch_day())
+}
+
+/// The staleness horizon in days. A baked row whose `verified_at` is more
+/// than this many days before today triggers a startup WARN.
+pub const fn stale_after_days() -> i64 {
+    STALE_AFTER_DAYS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1755,5 +1857,195 @@ mod tests {
                 cell.provider_kind, cell.model_glob,
             );
         }
+    }
+
+    // -- verified_at override field tests -----------------------------------
+
+    #[test]
+    fn validate_accepts_well_formed_verified_at() {
+        // Arrange
+        let ov = CachePricingOverride {
+            verified_at: Some("2026-07-01".to_string()),
+            ..Default::default()
+        };
+
+        // Act / Assert
+        assert!(ov.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_malformed_verified_at_naming_the_value() {
+        // Arrange
+        let ov = CachePricingOverride {
+            verified_at: Some("not-a-date".to_string()),
+            ..Default::default()
+        };
+
+        // Act
+        let err = ov.validate().expect_err("malformed date must be rejected");
+
+        // Assert: error message names the bad value and the expected shape.
+        assert!(err.contains("not-a-date"), "msg: {err}");
+        assert!(err.contains("YYYY-MM-DD"), "msg: {err}");
+    }
+
+    #[test]
+    fn with_overrides_pure_verification_sets_operator_verified_source() {
+        // Arrange: only verified_at set -- a pure verification stamp.
+        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
+        let ov = CachePricingOverride {
+            verified_at: Some("2026-07-01".to_string()),
+            ..Default::default()
+        };
+
+        // Act
+        let merged = baked.with_overrides(&ov).expect("accepted");
+
+        // Assert: verified true, source operator-verified, date updated,
+        // all value fields inherited from the baked row.
+        assert!(merged.verified);
+        assert_eq!(merged.source, "operator-verified");
+        assert_eq!(merged.verified_at, "2026-07-01");
+        assert_eq!(merged.wm, baked.wm);
+        assert_eq!(merged.rm, baked.rm);
+        assert_eq!(merged.ttl_seconds, baked.ttl_seconds);
+        assert_eq!(merged.min_prefix_tokens, baked.min_prefix_tokens);
+        assert_eq!(merged.auto_cacher, baked.auto_cacher);
+    }
+
+    #[test]
+    fn with_overrides_value_plus_verified_at_sets_operator_override_source() {
+        // Arrange: a value field AND verified_at both set.
+        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
+        let ov = CachePricingOverride {
+            min_prefix_tokens: Some(512),
+            verified_at: Some("2026-07-01".to_string()),
+            ..Default::default()
+        };
+
+        // Act
+        let merged = baked.with_overrides(&ov).expect("accepted");
+
+        // Assert: source is operator-override (not operator-verified),
+        // date is the override date, value field applied.
+        assert!(merged.verified);
+        assert_eq!(merged.source, "operator-override");
+        assert_eq!(merged.verified_at, "2026-07-01");
+        assert_eq!(merged.min_prefix_tokens, 512);
+    }
+
+    #[test]
+    fn with_overrides_no_verified_at_inherits_baked_verified_at() {
+        // Arrange: a value-only override, no verified_at. The merged row
+        // must be byte-identical to the current behavior (source
+        // "operator-override", verified_at inherited from the baked row).
+        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
+        let ov = CachePricingOverride {
+            ttl_seconds: Some(3_600),
+            ..Default::default()
+        };
+
+        // Act
+        let merged = baked.with_overrides(&ov).expect("accepted");
+
+        // Assert: verified_at unchanged, source operator-override.
+        assert_eq!(merged.verified_at, baked.verified_at);
+        assert_eq!(merged.source, "operator-override");
+        assert_eq!(merged.ttl_seconds, 3_600);
+        assert_eq!(merged.wm, baked.wm);
+    }
+
+    // -- baked_table_rows tests ---------------------------------------------
+
+    #[test]
+    fn baked_table_rows_is_non_empty_covers_all_four_provider_kinds() {
+        // Arrange / Act
+        let rows = baked_table_rows();
+
+        // Assert: non-empty and all four known provider kinds present.
+        assert!(!rows.is_empty());
+        let kinds: Vec<&str> = rows.iter().map(|r| r.provider_kind).collect();
+        for kind in &[
+            "anthropic-api",
+            "bedrock",
+            "openai-responses",
+            "openai-compat",
+        ] {
+            assert!(
+                kinds.contains(kind),
+                "provider kind {kind} missing from baked_table_rows"
+            );
+        }
+    }
+
+    #[test]
+    fn baked_table_rows_length_matches_table_constant() {
+        // TABLE is reachable from inside this module.
+        assert_eq!(baked_table_rows().len(), TABLE.len());
+    }
+
+    // -- is_stale_today / stale_after_days tests ----------------------------
+
+    #[test]
+    fn is_stale_today_returns_false_for_recent_baked_stamp() {
+        // VERIFIED_AT is the baked stamp ("2026-06-24"); it was within 90
+        // days of the time this test was written, so is_stale_today should
+        // return false when the real clock is near that date.
+        // Use parse_epoch_day for a deterministic test: pin a synthetic
+        // "today" 10 days after the stamp and call the inner is_stale.
+        let stamp = parse_epoch_day(VERIFIED_AT).expect("parse VERIFIED_AT");
+        assert!(!is_stale(VERIFIED_AT, stamp + 10));
+    }
+
+    #[test]
+    fn stale_after_days_returns_ninety() {
+        // The constant must match the documented 90-day horizon.
+        assert_eq!(stale_after_days(), 90);
+    }
+
+    #[test]
+    fn is_stale_today_boundary_exactly_stale_after_days_is_not_stale() {
+        // is_stale uses strict `>`, so exactly STALE_AFTER_DAYS is still fresh;
+        // one day more is stale. Mirrors the existing boundary test but via the
+        // public is_stale_today wrapper (backed by a pinned inner call).
+        let stamp = parse_epoch_day("2026-01-01").expect("parse");
+        // The public is_stale_today reads the real clock; test the inner helper
+        // directly with the same pinned logic the other staleness tests use.
+        assert!(!is_stale("2026-01-01", stamp + stale_after_days()));
+        assert!(is_stale("2026-01-01", stamp + stale_after_days() + 1));
+    }
+
+    #[test]
+    fn is_stale_today_public_real_clock_smoke() {
+        // Far-future stamp: never stale against any reasonable real clock.
+        assert!(!is_stale_today("2099-01-01"));
+        // Ancient stamp: always stale.
+        assert!(is_stale_today("1971-01-01"));
+    }
+
+    #[test]
+    fn with_overrides_interns_verified_at_no_per_call_leak() {
+        // Arrange: two separate CachePricingOverride values with the same
+        // verified_at string. The interner must return the same &'static str
+        // pointer for both, proving no per-call allocation occurs.
+        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
+        let ov1 = CachePricingOverride {
+            verified_at: Some("2026-07-01".to_string()),
+            ..Default::default()
+        };
+        let ov2 = CachePricingOverride {
+            verified_at: Some("2026-07-01".to_string()),
+            ..Default::default()
+        };
+
+        // Act
+        let r1 = baked.with_overrides(&ov1).expect("accepted");
+        let r2 = baked.with_overrides(&ov2).expect("accepted");
+
+        // Assert: same pointer -- interned, not freshly leaked each call.
+        assert!(
+            std::ptr::eq(r1.verified_at.as_ptr(), r2.verified_at.as_ptr()),
+            "verified_at must be the same interned pointer for identical strings"
+        );
     }
 }
