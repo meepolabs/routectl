@@ -19,6 +19,7 @@
 use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use routectl_core::Error;
@@ -54,7 +55,8 @@ const ONBOARD_MAX_ATTEMPTS: u32 = 5;
 const ERROR_BODY_CAP: usize = 500;
 
 /// Selects which Gemini wire dialect a provider speaks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum GeminiAuthMode {
     /// Public `generativelanguage.googleapis.com` REST surface with an
     /// `x-goog-api-key` header.
