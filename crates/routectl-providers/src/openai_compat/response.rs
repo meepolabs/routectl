@@ -300,7 +300,7 @@ pub(crate) fn coalesce_reasoning_content_in_response(mut raw: Value) -> Value {
 /// non-null string. Always strips `reasoning_content` after.
 pub(crate) fn merge_reasoning_keys(obj: &mut serde_json::Map<String, Value>) {
     let rc = obj.remove("reasoning_content");
-    let r_is_null = obj.get("reasoning").map_or(true, |v| v.is_null());
+    let r_is_null = obj.get("reasoning").is_none_or(|v| v.is_null());
     if r_is_null {
         // Either no `reasoning` key, or it's null. Promote rc if non-null.
         match rc {

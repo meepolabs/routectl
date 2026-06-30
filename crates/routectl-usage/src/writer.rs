@@ -341,7 +341,7 @@ impl WriterState {
                 error = err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
                 "usage writer degraded -- dropping rows it cannot persist"
             );
-        } else if (prior + 1) % WRITE_ERROR_LOG_INTERVAL == 0 {
+        } else if (prior + 1).is_multiple_of(WRITE_ERROR_LOG_INTERVAL) {
             tracing::error!(
                 target: "routectl_usage::writer",
                 write_errors = prior + 1,
