@@ -1083,10 +1083,10 @@ fn best_override<'a>(
         }
         let len = selector_glob_specificity(&selector.model_glob);
         if selector.provider_kind == provider_kind {
-            if exact.map_or(true, |(best, _)| len > best) {
+            if exact.is_none_or(|(best, _)| len > best) {
                 exact = Some((len, ov));
             }
-        } else if selector.provider_kind == "*" && star.map_or(true, |(best, _)| len > best) {
+        } else if selector.provider_kind == "*" && star.is_none_or(|(best, _)| len > best) {
             star = Some((len, ov));
         }
     }

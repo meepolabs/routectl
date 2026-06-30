@@ -306,7 +306,7 @@ fn coalesce_message_reasoning_keys(body: &mut Value) {
             continue;
         };
         let rc = obj.remove("reasoning_content");
-        let r_is_null = obj.get("reasoning").map_or(true, |v| v.is_null());
+        let r_is_null = obj.get("reasoning").is_none_or(|v| v.is_null());
         if r_is_null {
             match rc {
                 Some(v) if !v.is_null() => {

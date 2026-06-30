@@ -154,7 +154,7 @@ impl UsageHandle {
 
     fn note_overflow_drop(&self) {
         let prior = self.counters.incr_dropped_full();
-        if prior == 0 || (prior + 1) % DROP_WARN_INTERVAL == 0 {
+        if prior == 0 || (prior + 1).is_multiple_of(DROP_WARN_INTERVAL) {
             tracing::warn!(
                 target: "routectl_usage::handle",
                 dropped_total = prior + 1,

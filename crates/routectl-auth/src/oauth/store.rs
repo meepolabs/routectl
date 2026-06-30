@@ -1675,7 +1675,7 @@ mod tests {
         // always present." map_or(true, ..) makes absence pass by design.
         assert!(
             ua.as_deref()
-                .map_or(true, |u| !u.starts_with("codex_cli_rs/")),
+                .is_none_or(|u| !u.starts_with("codex_cli_rs/")),
             "shared client must NOT stamp the codex User-Agent, got: {ua:?}",
         );
     }
