@@ -3264,6 +3264,30 @@ mod is_fallbackable_status_tests {
         assert!(!p.is_fallbackable_status(301));
     }
 
+    /// 400-fallbackability under the SHIPPED Default impl is load-bearing for
+    /// structured-output rescue on Bedrock: a fallback triggered by a 400
+    /// carries the request to an alternate provider. A future Default that
+    /// ships a denylist containing 400 would silently break SO rescue.
+    /// This test pins the actual Default impl, not a hand-zeroed policy.
+    #[test]
+    fn default_policy_400_is_fallbackable() {
+        assert!(
+            RetryPolicy::default().is_fallbackable_status(400),
+            "default RetryPolicy must treat 400 as fallbackable (load-bearing for SO rescue)"
+        );
+        // Companion: a policy with 400 in the denylist must yield false,
+        // documenting the break mode so an operator who reaches for
+        // retry_denylist = [400] understands the consequence.
+        let blocking = RetryPolicy {
+            retry_denylist: Some(vec![400]),
+            ..Default::default()
+        };
+        assert!(
+            !blocking.is_fallbackable_status(400),
+            "a denylist containing 400 must block 400-fallback (breaks SO rescue)"
+        );
+    }
+
     #[test]
     fn default_policy_retries_520_via_fallthrough() {
         // With the default RetryPolicy (empty allowlist + None denylist),
