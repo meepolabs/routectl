@@ -138,6 +138,15 @@ pub struct TokenRecord {
     /// minted by newer ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+
+    /// Cloud Code project id resolved for this credential (e.g.
+    /// `projects/<id>`). Populated by the Gemini provider on first use
+    /// and persisted so subsequent startups skip the resolution round
+    /// trip. Optional in the on-disk shape so older binaries (and
+    /// credentials minted before Cloud Code support) continue to parse
+    /// without error. None means "not yet resolved".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_project_id: Option<String>,
 }
 
 fn default_token_type() -> String {
@@ -262,6 +271,7 @@ mod tests {
             account: AccountInfo::default(),
             obtained_at_unix: 0,
             session_id: None,
+            cloud_project_id: None,
         }
     }
 
@@ -311,6 +321,7 @@ mod tests {
                 },
                 obtained_at_unix: 1_899_000_000,
                 session_id: None,
+                cloud_project_id: None,
             },
         );
         let json = serde_json::to_string(&cf).unwrap();
@@ -456,5 +467,71 @@ mod tests {
         assert_eq!(rec.expires_at_unix, 1_900_000_000);
         assert_eq!(rec.obtained_at_unix, 1_899_000_000);
         assert_eq!(rec.scopes, vec!["user:inference".to_string()]);
+    }
+
+    #[test]
+    fn cloud_project_id_round_trips_when_present() {
+        // Arrange: a record with cloud_project_id set.
+        let mut cf = CredentialsFile::empty();
+        cf.upsert(
+            "anthropic",
+            TokenRecord {
+                access_token: SecretToken::new("tok"),
+                refresh_token: SecretToken::new("rtok"),
+                token_type: "Bearer".into(),
+                expires_at_unix: 1_900_000_000,
+                scopes: vec![],
+                account: AccountInfo::default(),
+                obtained_at_unix: 1_899_000_000,
+                session_id: None,
+                cloud_project_id: Some("projects/my-gcp-project".into()),
+            },
+        );
+        // Act
+        let json = serde_json::to_string(&cf).unwrap();
+        let parsed: CredentialsFile = serde_json::from_str(&json).unwrap();
+        // Assert
+        assert_eq!(
+            parsed.get("anthropic").unwrap().cloud_project_id.as_deref(),
+            Some("projects/my-gcp-project")
+        );
+        assert!(json.contains("cloud_project_id"));
+    }
+
+    #[test]
+    fn cloud_project_id_defaults_to_none_when_absent_in_json() {
+        // Arrange: JSON without cloud_project_id (older binary's output).
+        let json = r#"{
+            "schema_version": 1,
+            "providers": {
+                "anthropic": {
+                    "access_token": "tok",
+                    "refresh_token": "rtok",
+                    "expires_at_unix": 1900000000,
+                    "obtained_at_unix": 1899000000
+                }
+            }
+        }"#;
+        // Act
+        let parsed: CredentialsFile = serde_json::from_str(json).unwrap();
+        // Assert: backward-compat -- missing field deserializes as None.
+        assert!(
+            parsed.get("anthropic").unwrap().cloud_project_id.is_none(),
+            "absent cloud_project_id must deserialize as None"
+        );
+    }
+
+    #[test]
+    fn cloud_project_id_none_is_omitted_from_json() {
+        // Arrange: a record with cloud_project_id: None.
+        let mut cf = CredentialsFile::empty();
+        cf.upsert("anthropic", rec_at(1_900_000_000));
+        // Act
+        let json = serde_json::to_string(&cf).unwrap();
+        // Assert: skip_serializing_if = "Option::is_none" must suppress the field.
+        assert!(
+            !json.contains("cloud_project_id"),
+            "None cloud_project_id must be omitted from serialized JSON"
+        );
     }
 }

@@ -8,6 +8,7 @@
 //! Wire reference: <https://ai.google.dev/api/generate-content>
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -17,15 +18,18 @@ use serde_json::Value;
 
 use routectl_core::{
     debug_upstream_error_body, extract_upstream_message, is_json_error_envelope, sanitize_for_log,
-    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
-    Provider, Result, StaticToken, TokenSource,
+    sanitize_upstream_body, trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest,
+    ChatResponse, CloudProjectCache, Error, Provider, Result, StaticToken, TokenSource,
 };
 
 pub(crate) mod auth;
+pub(crate) mod cloudcode;
 pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod sse;
 pub(crate) mod types;
+
+pub use cloudcode::GeminiAuthMode;
 
 /// Format tag stamped on every reasoning_details entry emitted by the
 /// Gemini provider. A downstream ingress echoing reasoning back must see
@@ -51,6 +55,15 @@ pub struct GeminiConfig {
     pub header_extras: Vec<(String, String)>,
     /// Override the outbound User-Agent.
     pub user_agent: Option<String>,
+    /// Selects the wire dialect: public REST (`ApiKey`) or Cloud Code.
+    pub mode: GeminiAuthMode,
+    /// Project-id cache for the Cloud Code path. `None` in `ApiKey` mode.
+    pub project_cache: Option<Arc<dyn CloudProjectCache>>,
+    /// Base URL for the Cloud Code `onboardUser` endpoint (the reference
+    /// onboards against the "daily" host). Unused in `ApiKey` mode.
+    pub onboard_base_url: String,
+    /// Poll interval between `onboardUser` attempts.
+    pub onboard_poll_interval: Duration,
 }
 
 impl std::fmt::Debug for GeminiConfig {
@@ -61,9 +74,16 @@ impl std::fmt::Debug for GeminiConfig {
             .field("base_url", &self.base_url)
             .field("header_extras_len", &self.header_extras.len())
             .field("user_agent", &self.user_agent)
+            .field("mode", &self.mode)
+            .field("project_cache", &self.project_cache.is_some())
+            .field("onboard_base_url", &self.onboard_base_url)
+            .field("onboard_poll_interval", &self.onboard_poll_interval)
             .finish()
     }
 }
+
+/// Default poll interval between `onboardUser` attempts.
+const ONBOARD_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 impl GeminiConfig {
     /// Construct with a static API key string.
@@ -71,7 +91,9 @@ impl GeminiConfig {
         Self::new_with_auth(id, Arc::new(StaticToken::new(api_key)))
     }
 
-    /// Construct with a custom `TokenSource`.
+    /// Construct with a custom `TokenSource`. Defaults to `ApiKey` mode;
+    /// the Cloud Code fields are populated with inert defaults so callers
+    /// (and the router factory) need not name them.
     pub fn new_with_auth(id: impl Into<String>, auth: Arc<dyn TokenSource>) -> Self {
         Self {
             id: id.into(),
@@ -79,6 +101,31 @@ impl GeminiConfig {
             base_url: DEFAULT_BASE_URL.to_string(),
             header_extras: Vec::new(),
             user_agent: None,
+            mode: GeminiAuthMode::ApiKey,
+            project_cache: None,
+            onboard_base_url: cloudcode::DAILY_BASE_URL.to_string(),
+            onboard_poll_interval: ONBOARD_POLL_INTERVAL,
+        }
+    }
+
+    /// Construct a Cloud Code ("antigravity") egress: bearer-token auth
+    /// against `cloudcode-pa.googleapis.com`, project id resolved lazily
+    /// through `project_cache` (onboarding against the daily host).
+    pub fn new_cloud_code(
+        id: impl Into<String>,
+        auth: Arc<dyn TokenSource>,
+        project_cache: Arc<dyn CloudProjectCache>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            auth,
+            base_url: cloudcode::PROD_BASE_URL.to_string(),
+            header_extras: Vec::new(),
+            user_agent: Some(cloudcode::SHORT_USER_AGENT.to_string()),
+            mode: GeminiAuthMode::CloudCode,
+            project_cache: Some(project_cache),
+            onboard_base_url: cloudcode::DAILY_BASE_URL.to_string(),
+            onboard_poll_interval: ONBOARD_POLL_INTERVAL,
         }
     }
 }
@@ -102,6 +149,44 @@ impl GeminiProvider {
     fn stream_url(&self, model: &str) -> String {
         let base = self.cfg.base_url.trim_end_matches('/');
         format!("{base}/models/{model}:streamGenerateContent?alt=sse")
+    }
+
+    /// Cloud Code generate URL: a fixed `v1internal` path (the model lives
+    /// in the request envelope, not the URL).
+    fn cloudcode_generate_url(&self) -> String {
+        let base = self.cfg.base_url.trim_end_matches('/');
+        format!("{base}{}", cloudcode::GENERATE_PATH)
+    }
+
+    fn cloudcode_stream_url(&self) -> String {
+        let base = self.cfg.base_url.trim_end_matches('/');
+        format!("{base}{}", cloudcode::STREAM_PATH)
+    }
+
+    /// Resolve the Cloud Code project id, preferring the cache. On a cache
+    /// miss this runs the onboarding HTTP once and seeds the cache, so a
+    /// populated cache short-circuits onboarding on every later request.
+    async fn cloud_project_id(&self, token: &str) -> Result<String> {
+        let cache = self.cfg.project_cache.as_ref().ok_or_else(|| {
+            Error::Internal(format!(
+                "gemini provider `{}`: cloud_code mode without project_cache",
+                self.cfg.id
+            ))
+        })?;
+        if let Some(p) = cache.get().await {
+            return Ok(p);
+        }
+        let p = cloudcode::resolve_project_id(
+            &self.client,
+            token,
+            &self.cfg.base_url,
+            &self.cfg.onboard_base_url,
+            self.cfg.onboard_poll_interval,
+            &self.cfg.id,
+        )
+        .await?;
+        cache.put(p.clone()).await?;
+        Ok(p)
     }
 
     fn build_headers(
@@ -152,6 +237,27 @@ impl Provider for GeminiProvider {
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        match self.cfg.mode {
+            GeminiAuthMode::ApiKey => self.complete_api_key(req).await,
+            GeminiAuthMode::CloudCode => self.complete_cloud_code(req).await,
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        match self.cfg.mode {
+            GeminiAuthMode::ApiKey => self.stream_api_key(req).await,
+            GeminiAuthMode::CloudCode => self.stream_cloud_code(req).await,
+        }
+    }
+
+    async fn on_auth_failure(&self) -> Result<()> {
+        self.cfg.auth.on_auth_failure().await
+    }
+}
+
+impl GeminiProvider {
+    async fn complete_api_key(&self, req: ChatRequest) -> Result<ChatResponse> {
         let body = self.normalize_request(&req)?;
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
@@ -198,8 +304,67 @@ impl Provider for GeminiProvider {
         Ok(chat_resp)
     }
 
-    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
-    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+    async fn complete_cloud_code(&self, req: ChatRequest) -> Result<ChatResponse> {
+        let inner = self.normalize_request(&req)?;
+        // Resolve credential + project id BEFORE tracing the wrapped body
+        // so the trace reflects exactly what hits the wire (envelope with
+        // the resolved project, never the raw inner body).
+        let token = self.cfg.auth.token().await?;
+        let project = self.cloud_project_id(&token).await?;
+        let body = cloudcode::wrap_envelope(inner, &project, &req.model);
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
+
+        let url = self.cloudcode_generate_url();
+        // Cloud Code whitelists Content-Type / User-Agent / Authorization
+        // only -- header_extras must NOT flow on this path. The short UA is
+        // applied to the shared client at build time.
+        let rb = auth::apply_bearer(self.client.post(&url), &token)?;
+        let request = rb
+            .header("content-type", "application/json")
+            .json(&body)
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
+
+        if status >= 400 {
+            let headers = resp.headers().clone();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(map_gemini_upstream_error(
+                &self.cfg.id,
+                status,
+                &headers,
+                &body_text,
+            ));
+        }
+
+        let raw_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
+
+        // Cloud Code nests the real response under `response`; peel it off
+        // so the shared translator sees the public-surface shape.
+        let mut chat_resp = self.normalize_response(cloudcode::unwrap_response(raw_body))?;
+        chat_resp.routectl_provider = Some(self.cfg.id.clone());
+        Ok(chat_resp)
+    }
+
+    async fn stream_api_key(
+        &self,
+        req: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let body = self.normalize_request(&req)?;
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
@@ -234,7 +399,60 @@ impl Provider for GeminiProvider {
         }
 
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
+        Ok(self.drain_stream(resp, false))
+    }
 
+    async fn stream_cloud_code(
+        &self,
+        req: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        let inner = self.normalize_request(&req)?;
+        let token = self.cfg.auth.token().await?;
+        let project = self.cloud_project_id(&token).await?;
+        let body = cloudcode::wrap_envelope(inner, &project, &req.model);
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
+
+        let url = self.cloudcode_stream_url();
+        let rb = auth::apply_bearer(self.client.post(&url), &token)?;
+        let request = rb
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .json(&body)
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let headers = resp.headers().clone();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(map_gemini_upstream_error(
+                &self.cfg.id,
+                status,
+                &headers,
+                &body_text,
+            ));
+        }
+
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
+        Ok(self.drain_stream(resp, true))
+    }
+
+    /// Drain an SSE response into canonical chunks via the shared Gemini
+    /// state machine. When `unwrap_cloud_code` is set, each event's data is
+    /// peeled out of its `{"response": ...}` envelope before parsing.
+    fn drain_stream(
+        &self,
+        resp: reqwest::Response,
+        unwrap_cloud_code: bool,
+    ) -> BoxStream<'static, Result<ChatChunk>> {
         let provider_id = self.cfg.id.clone();
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
@@ -252,7 +470,12 @@ impl Provider for GeminiProvider {
                         if event.data.is_empty() {
                             continue;
                         }
-                        let parsed = match sse::parse_data_line(&provider_id, &event.data) {
+                        let data = if unwrap_cloud_code {
+                            cloudcode::unwrap_sse_data(&event.data)
+                        } else {
+                            event.data.clone()
+                        };
+                        let parsed = match sse::parse_data_line(&provider_id, &data) {
                             Ok(p) => p,
                             Err(e) => {
                                 yield Err(e);
@@ -275,16 +498,12 @@ impl Provider for GeminiProvider {
             }
         };
 
-        Ok(routectl_core::wrap_stream_with_summary(
+        routectl_core::wrap_stream_with_summary(
             stream,
             "upstream",
             PROVIDER_KIND,
             self.cfg.id.clone(),
-        ))
-    }
-
-    async fn on_auth_failure(&self) -> Result<()> {
-        self.cfg.auth.on_auth_failure().await
+        )
     }
 }
 
@@ -357,6 +576,20 @@ mod e2e_tests {
     fn make_provider(base_url: &str) -> GeminiProvider {
         let mut cfg = GeminiConfig::new("gemini:test", "test-api-key");
         cfg.base_url = base_url.to_string();
+        GeminiProvider::new(cfg)
+    }
+
+    const CLOUD_CODE_TOKEN: &str = "ya29.test-bearer";
+
+    fn make_cloud_code_provider(
+        base_url: &str,
+        cache: Arc<dyn routectl_core::CloudProjectCache>,
+    ) -> GeminiProvider {
+        let auth: Arc<dyn TokenSource> = Arc::new(StaticToken::new(CLOUD_CODE_TOKEN));
+        let mut cfg = GeminiConfig::new_cloud_code("gemini:test", auth, cache);
+        cfg.base_url = base_url.to_string();
+        cfg.onboard_base_url = base_url.to_string();
+        cfg.onboard_poll_interval = std::time::Duration::from_millis(1);
         GeminiProvider::new(cfg)
     }
 
@@ -604,5 +837,251 @@ mod e2e_tests {
         provider.on_auth_failure().await.expect("ok");
         provider.on_auth_failure().await.expect("ok");
         assert_eq!(src.calls.load(Ordering::SeqCst), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // Cloud Code ("antigravity") egress
+    // -----------------------------------------------------------------
+
+    use routectl_core::{CloudProjectCache, InMemoryProjectCache};
+    use serde_json::{json, Value};
+    use wiremock::matchers::{body_partial_json, header, header_exists};
+
+    const GENERATE_PATH: &str = "/v1internal:generateContent";
+    const STREAM_PATH: &str = "/v1internal:streamGenerateContent";
+    const LOAD_PATH: &str = "/v1internal:loadCodeAssist";
+    const ONBOARD_PATH: &str = "/v1internal:onboardUser";
+
+    #[tokio::test]
+    async fn envelope_wrap_and_response_unwrap() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(header(
+                "authorization",
+                format!("Bearer {CLOUD_CODE_TOKEN}").as_str(),
+            ))
+            .and(body_partial_json(json!({
+                "project": "proj-1",
+                "model": "gemini-2.5-pro",
+            })))
+            .respond_with(move |req: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&req.body).expect("json body");
+                assert!(
+                    body["request"]["contents"].is_array(),
+                    "envelope must carry request.contents; got {body}"
+                );
+                assert!(
+                    req.headers.get("x-goog-api-key").is_none(),
+                    "Cloud Code path must not send x-goog-api-key"
+                );
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"response": gemini_ok_response()}))
+            })
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::with("proj-1"));
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        let resp = provider.complete(base_req()).await.expect("complete ok");
+
+        assert_eq!(resp.id, "resp-abc");
+        assert_eq!(resp.model, "gemini-2.5-pro-001");
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "pong"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(resp.routectl_provider.as_deref(), Some("gemini:test"));
+    }
+
+    #[tokio::test]
+    async fn onboards_via_loadcodeassist() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"cloudaicompanionProject": "proj-xyz"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(body_partial_json(json!({"project": "proj-xyz"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"response": gemini_ok_response()})),
+            )
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        provider.complete(base_req()).await.expect("first ok");
+        provider.complete(base_req()).await.expect("second ok");
+        // Mock `.expect(1)` on loadCodeAssist verifies on server drop that
+        // onboarding ran exactly once -- the cache short-circuits the second.
+    }
+
+    #[tokio::test]
+    async fn onboards_via_onboarduser() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(LOAD_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "allowedTiers": [{"id": "free-tier", "isDefault": true}]
+                    })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(ONBOARD_PATH))
+            .and(header_exists("x-goog-api-client"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "done": true,
+                        "response": {"cloudaicompanionProject": "proj-onboard"}
+                    })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(body_partial_json(json!({"project": "proj-onboard"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"response": gemini_ok_response()})),
+            )
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::new());
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        let resp = provider.complete(base_req()).await.expect("complete ok");
+        assert_eq!(resp.id, "resp-abc");
+    }
+
+    #[tokio::test]
+    async fn stream_unwraps_response_envelope() {
+        let sse_body = concat!(
+            "data: {\"response\": {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"po\"}],\"role\":\"model\"},\"index\":0}],\"responseId\":\"r1\",\"modelVersion\":\"gemini-2.5-pro-001\"}}\n\n",
+            "data: {\"response\": {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ng\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}}\n\n",
+        );
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(STREAM_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::with("proj-1"));
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        let stream = provider.stream(base_req()).await.expect("stream ok");
+        let chunks: Vec<ChatChunk> = stream
+            .map(|r| r.expect("chunk ok"))
+            .collect::<Vec<_>>()
+            .await;
+
+        let role_seen = chunks.iter().any(|c| {
+            matches!(
+                c.choices[0].delta.role,
+                Some(routectl_core::Role::Assistant)
+            )
+        });
+        assert!(role_seen, "expected an opening role chunk");
+
+        let text: String = chunks
+            .iter()
+            .filter_map(|c| c.choices[0].delta.content.clone())
+            .collect();
+        assert_eq!(text, "pong");
+
+        let terminal = chunks
+            .iter()
+            .find(|c| c.choices[0].finish_reason.is_some())
+            .expect("terminal chunk");
+        assert_eq!(terminal.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = terminal.usage.as_ref().expect("usage on terminal");
+        assert_eq!(usage.prompt_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(7));
+    }
+
+    #[tokio::test]
+    async fn preserves_reasoning_and_structured_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(GENERATE_PATH))
+            .and(body_partial_json(json!({
+                "request": {
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "responseSchema": {"type": "object", "properties": {"answer": {"type": "string"}}}
+                    }
+                }
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "response": {
+                            "candidates": [{
+                                "content": {
+                                    "parts": [
+                                        {"thought": true, "text": "reasoning...", "thoughtSignature": "sig"},
+                                        {"text": "answer"}
+                                    ],
+                                    "role": "model"
+                                },
+                                "finishReason": "STOP",
+                                "index": 0
+                            }],
+                            "modelVersion": "gemini-2.5-pro-001",
+                            "responseId": "resp-rs"
+                        }
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let cache: Arc<dyn CloudProjectCache> = Arc::new(InMemoryProjectCache::with("proj-1"));
+        let provider = make_cloud_code_provider(&server.uri(), cache);
+
+        let req = ChatRequest {
+            response_format: Some(json!({
+                "type": "json_schema",
+                "json_schema": {"schema": {"type": "object", "properties": {"answer": {"type": "string"}}}}
+            })),
+            ..base_req()
+        };
+
+        let resp = provider.complete(req).await.expect("complete ok");
+
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "answer"),
+            other => panic!("expected Text answer, got {other:?}"),
+        }
+        let details = &resp.choices[0].message.reasoning_details;
+        assert_eq!(details.len(), 1, "one reasoning detail expected");
+        assert_eq!(details[0].format.as_deref(), Some(GEMINI_FORMAT));
+        assert_eq!(details[0].payload["text"], "reasoning...");
+        assert_eq!(details[0].payload["thought_signature"], "sig");
     }
 }

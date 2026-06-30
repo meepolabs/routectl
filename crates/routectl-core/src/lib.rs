@@ -5,6 +5,7 @@
 //! `provider` for the per-backend trait.
 
 pub mod cache_control;
+pub mod cloud_project;
 pub mod content_part;
 pub mod context_reduction;
 pub mod error;
@@ -31,6 +32,7 @@ pub use cache_control::{
     compute_frozen_floor, mutable_suffix_start, validate_source, Breakpoint, BreakpointPosition,
     CacheBreakpointSource, CacheControl, FrozenFloor, OwnedBreakpoint,
 };
+pub use cloud_project::{CloudProjectCache, InMemoryProjectCache};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use context_reduction::{
     apply_json_minify, minify_json_whitespace, ReductionDelta, ReductionOutcome,

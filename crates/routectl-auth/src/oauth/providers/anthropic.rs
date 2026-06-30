@@ -422,6 +422,7 @@ fn map_to_record(parsed: Resp, flow: TokenFlow) -> TokenRecord {
         account,
         obtained_at_unix: now,
         session_id,
+        cloud_project_id: None,
     }
 }
 
