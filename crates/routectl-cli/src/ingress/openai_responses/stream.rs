@@ -550,8 +550,11 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
     flush_tool_calls(state, &mut events);
 
     let finish_reason = state.pending_finish_reason.clone();
-    let (status, _incomplete) = status_from_finish_reason(finish_reason.as_deref());
-    let body = response_skeleton(state, &status, finished_output, state.pending_usage.clone());
+    let (status, incomplete_details) = status_from_finish_reason(finish_reason.as_deref());
+    let mut body = response_skeleton(state, &status, finished_output, state.pending_usage.clone());
+    if let (Some(obj), Some(details)) = (body.as_object_mut(), incomplete_details) {
+        obj.insert("incomplete_details".into(), details);
+    }
     push_response_event(state, &mut events, "response.completed", body);
     state.finished = true;
     events
@@ -732,10 +735,12 @@ fn push_event(
         .expect("push_event extras must be a JSON object");
     obj.insert("type".into(), Value::String(event_name.into()));
     obj.insert("sequence_number".into(), json!(seq));
-    events.push(SseEvent::named(
-        event_name,
-        serde_json::to_string(&extras).unwrap_or_default(),
-    ));
+    match serde_json::to_string(&extras) {
+        Ok(json) => events.push(SseEvent::named(event_name, json)),
+        Err(e) => tracing::error!(
+            "openai-responses ingress: failed to serialize SSE event {event_name}: {e}"
+        ),
+    }
 }
 
 /// Push an event whose payload is `{type, sequence_number, response}`.

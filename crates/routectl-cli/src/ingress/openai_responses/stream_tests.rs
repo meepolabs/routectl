@@ -512,6 +512,24 @@ fn finish_reason_length_maps_to_incomplete_status() {
     let events = render_eos_internal(&mut state);
     let completed = data_of(&events, "response.completed");
     assert_eq!(completed["response"]["status"], "incomplete");
+    assert_eq!(
+        completed["response"]["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+}
+
+#[test]
+fn finish_reason_content_filter_maps_to_incomplete_with_reason() {
+    let mut state = fresh();
+    let _ = render(&mut state, text_chunk("hi"));
+    let _ = render(&mut state, finish_chunk("content_filter", None));
+    let events = render_eos_internal(&mut state);
+    let completed = data_of(&events, "response.completed");
+    assert_eq!(completed["response"]["status"], "incomplete");
+    assert_eq!(
+        completed["response"]["incomplete_details"]["reason"],
+        "content_filter"
+    );
 }
 
 #[test]
