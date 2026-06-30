@@ -28,12 +28,14 @@
 pub(crate) mod file_io;
 pub(crate) mod login;
 pub(crate) mod pkce;
+pub(crate) mod project_cache;
 pub(crate) mod providers;
 pub(crate) mod rate_limit;
 pub(crate) mod store;
 pub mod types;
 
 pub use login::{run as run_login, LoginOptions};
+pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
 pub use store::OAuthStore;
 pub use types::{

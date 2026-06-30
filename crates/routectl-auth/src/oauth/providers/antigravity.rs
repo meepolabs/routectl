@@ -429,6 +429,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         },
         obtained_at_unix: unix_now(),
         session_id: None,
+        cloud_project_id: None,
     })
 }
 

@@ -58,4 +58,24 @@ pub trait SecretStore: Send + Sync {
     async fn peek_session_id(&self, _secret_ref: &SecretRef) -> Option<String> {
         None
     }
+
+    /// Best-effort read of the Cloud Code project id persisted for a
+    /// credential. Returns `None` by default: `env://`, `file://`, and
+    /// `literal:` refs carry no project-id metadata. The OAuth store
+    /// overrides this to return the `cloud_project_id` of the named
+    /// seat's record, so the Gemini provider can skip the project-id
+    /// resolution round trip on warm restarts. A non-oauth ref or a
+    /// missing or un-onboarded record yields `None`.
+    async fn peek_cloud_project_id(&self, _secret_ref: &SecretRef) -> Option<String> {
+        None
+    }
+
+    /// Persist a resolved Cloud Code project id for the credential
+    /// named by `secret_ref`. Default no-op for `env://`, `file://`,
+    /// and `literal:` refs (they have no writable backing store). The
+    /// OAuth store overrides this to write back to the credentials file
+    /// atomically. Errors propagate (e.g. disk write failures).
+    async fn set_cloud_project_id(&self, _secret_ref: &SecretRef, _project_id: &str) -> Result<()> {
+        Ok(())
+    }
 }

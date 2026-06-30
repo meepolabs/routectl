@@ -209,6 +209,43 @@ impl OAuthStore {
             .and_then(|rec| rec.session_id.clone())
     }
 
+    /// Read the Cloud Code project id recorded for `provider` (a seat
+    /// key), if any. Read-only: no expiry check, no refresh, no network.
+    /// Returns `None` when the provider has no stored record (not logged
+    /// in) OR when the record carries no `cloud_project_id` (a
+    /// credential minted before Cloud Code support, or one that has not
+    /// yet resolved a project id). The Gemini provider reads this at
+    /// startup to skip the project-id resolution round trip on warm
+    /// restarts.
+    pub async fn peek_cloud_project_id(&self, provider: &str) -> Option<String> {
+        self.inner
+            .file
+            .read()
+            .await
+            .get(provider)
+            .and_then(|rec| rec.cloud_project_id.clone())
+    }
+
+    /// Persist a resolved Cloud Code project id for `provider` (a seat
+    /// key). Looks up the existing record, sets `cloud_project_id`, and
+    /// writes back atomically using the same disk-first ordering as
+    /// `write_record`. Returns `OAuthError::NotLoggedIn` when no record
+    /// exists for `provider` -- the Gemini provider must be logged in
+    /// before a project id can be cached.
+    pub async fn set_cloud_project_id(&self, provider: &str, project_id: &str) -> OAuthResult<()> {
+        let mut guard = self.inner.file.write().await;
+        let mut rec = guard
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| OAuthError::NotLoggedIn(provider.to_string()))?;
+        rec.cloud_project_id = Some(project_id.to_string());
+        let mut staged = guard.clone();
+        staged.upsert(provider, rec);
+        file_io::save(&self.inner.path, &staged).await?;
+        *guard = staged;
+        Ok(())
+    }
+
     /// Persist a token record atomically. Disk write happens FIRST,
     /// off a clone of the current in-memory state; the in-memory cache
     /// only commits on a successful save. This way a failed disk write
@@ -619,6 +656,26 @@ impl SecretStore for OAuthStore {
         OAuthStore::peek_session_id(self, &seat_key(provider, label.as_deref())).await
     }
 
+    async fn peek_cloud_project_id(&self, secret_ref: &SecretRef) -> Option<String> {
+        // Non-oauth refs carry no project-id metadata; map to None
+        // rather than an error (same pattern as peek_session_id).
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
+            _ => return None,
+        };
+        OAuthStore::peek_cloud_project_id(self, &seat_key(provider, label.as_deref())).await
+    }
+
+    async fn set_cloud_project_id(&self, secret_ref: &SecretRef, project_id: &str) -> Result<()> {
+        let (provider, label) = match secret_ref {
+            SecretRef::OAuth { provider, label } => (provider, label),
+            _ => return Ok(()),
+        };
+        OAuthStore::set_cloud_project_id(self, &seat_key(provider, label.as_deref()), project_id)
+            .await
+            .map_err(Error::from)
+    }
+
     async fn list_seats(&self, secret_ref: &SecretRef) -> Result<Vec<SecretRef>> {
         let (provider, label) = match secret_ref {
             SecretRef::OAuth { provider, label } => (provider, label),
@@ -692,6 +749,7 @@ mod tests {
             account: AccountInfo::default(),
             obtained_at_unix: 0,
             session_id: None,
+            cloud_project_id: None,
         }
     }
 
@@ -2266,5 +2324,114 @@ mod tests {
 
         let sid = SecretStore::peek_session_id(&store, &SecretRef::Env("FOO".into())).await;
         assert!(sid.is_none(), "non-oauth ref must yield None");
+    }
+
+    // ---- cloud_project_id ----
+
+    #[tokio::test]
+    async fn set_cloud_project_id_then_peek_returns_value() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        // Act
+        store
+            .set_cloud_project_id("anthropic", "projects/my-project")
+            .await
+            .unwrap();
+        // Assert
+        let pid = store.peek_cloud_project_id("anthropic").await;
+        assert_eq!(
+            pid.as_deref(),
+            Some("projects/my-project"),
+            "peek after set must return the stored value"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_cloud_project_id_persists_across_reload() {
+        // Arrange: write a record, set the project id, reload, verify
+        // it survived.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        store
+            .write_record("anthropic", rec_at(unix_now() + 3600))
+            .await
+            .unwrap();
+        store
+            .set_cloud_project_id("anthropic", "projects/persistent")
+            .await
+            .unwrap();
+        // Reopen from disk.
+        let reopened = OAuthStore::open(&path).await.unwrap();
+        let pid = reopened.peek_cloud_project_id("anthropic").await;
+        assert_eq!(
+            pid.as_deref(),
+            Some("projects/persistent"),
+            "cloud_project_id must survive reload_from_disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_cloud_project_id_errors_when_no_record() {
+        // Arrange: empty store.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        // Act
+        let result = store
+            .set_cloud_project_id("anthropic", "projects/no-record")
+            .await;
+        // Assert
+        assert!(
+            result.is_err(),
+            "set_cloud_project_id on a missing record must return an error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("routectl login anthropic") || msg.contains("no credentials"),
+            "expected NotLoggedIn guidance, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_cloud_project_id_none_for_missing_record() {
+        // Arrange: empty store.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        // Act + Assert
+        assert!(
+            store.peek_cloud_project_id("anthropic").await.is_none(),
+            "missing record must yield None"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_cloud_project_id_via_secret_store_trait_none_for_non_oauth_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        let pid = SecretStore::peek_cloud_project_id(&store, &SecretRef::Env("FOO".into())).await;
+        assert!(pid.is_none(), "non-oauth ref must yield None");
+    }
+
+    #[tokio::test]
+    async fn set_cloud_project_id_via_secret_store_trait_non_oauth_ref_is_noop() {
+        // Non-oauth refs use the default no-op; must not error.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        let result =
+            SecretStore::set_cloud_project_id(&store, &SecretRef::Env("FOO".into()), "proj").await;
+        assert!(
+            result.is_ok(),
+            "non-oauth ref must be a no-op, not an error"
+        );
     }
 }

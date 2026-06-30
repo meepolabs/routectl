@@ -245,6 +245,7 @@ mod tests {
             },
             obtained_at_unix: 1_899_000_000,
             session_id: None,
+            cloud_project_id: None,
         }
     }
 

@@ -534,6 +534,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         account: AccountInfo { email, account_id },
         obtained_at_unix: unix_now(),
         session_id,
+        cloud_project_id: None,
     })
 }
 
