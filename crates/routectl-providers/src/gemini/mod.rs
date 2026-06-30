@@ -1,0 +1,382 @@
+//! Native Google Gemini egress provider.
+//!
+//! Sends requests to `POST {base_url}/models/{model}:generateContent`
+//! using the Gemini REST API (v1beta). Authentication is via the
+//! `x-goog-api-key` header.
+//!
+//! Slice 1: non-streaming `complete()`. Streaming is slice 2.
+//!
+//! Wire reference: <https://ai.google.dev/api/generate-content>
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use reqwest::Client;
+use serde_json::Value;
+
+use routectl_core::{
+    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
+    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
+    Provider, Result, StaticToken, TokenSource,
+};
+
+pub(crate) mod auth;
+pub(crate) mod request;
+pub(crate) mod response;
+pub(crate) mod types;
+
+const PROVIDER_KIND: &str = "gemini";
+const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+/// Resolved configuration for one Gemini provider entry.
+#[derive(Clone)]
+pub struct GeminiConfig {
+    /// Stable id used in errors and on `routectl_provider` response fields.
+    /// Format: `gemini:<table-key>`.
+    pub id: String,
+    /// API key source. Resolved per request via `auth.token().await`.
+    pub auth: Arc<dyn TokenSource>,
+    /// Gemini API base URL. Default: `https://generativelanguage.googleapis.com/v1beta`.
+    pub base_url: String,
+    /// Provider-level extra HTTP headers.
+    pub header_extras: Vec<(String, String)>,
+    /// Override the outbound User-Agent.
+    pub user_agent: Option<String>,
+}
+
+impl std::fmt::Debug for GeminiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiConfig")
+            .field("id", &self.id)
+            .field("auth", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("header_extras_len", &self.header_extras.len())
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
+}
+
+impl GeminiConfig {
+    /// Construct with a static API key string.
+    pub fn new(id: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self::new_with_auth(id, Arc::new(StaticToken::new(api_key)))
+    }
+
+    /// Construct with a custom `TokenSource`.
+    pub fn new_with_auth(id: impl Into<String>, auth: Arc<dyn TokenSource>) -> Self {
+        Self {
+            id: id.into(),
+            auth,
+            base_url: DEFAULT_BASE_URL.to_string(),
+            header_extras: Vec::new(),
+            user_agent: None,
+        }
+    }
+}
+
+pub struct GeminiProvider {
+    cfg: GeminiConfig,
+    client: Client,
+}
+
+impl GeminiProvider {
+    pub fn new(cfg: GeminiConfig) -> Self {
+        let client = crate::http_client::build(cfg.user_agent.as_deref());
+        Self { cfg, client }
+    }
+
+    fn generate_url(&self, model: &str) -> String {
+        let base = self.cfg.base_url.trim_end_matches('/');
+        format!("{base}/models/{model}:generateContent")
+    }
+
+    fn build_headers(
+        &self,
+        rb: reqwest::RequestBuilder,
+        req: &ChatRequest,
+        key: &str,
+    ) -> Result<reqwest::RequestBuilder> {
+        let mut rb = auth::apply(rb, key)?;
+
+        let source = crate::http_client::effective_header_extras(
+            &self.cfg.header_extras,
+            req.routectl_internal.header_extras.as_ref(),
+        );
+        let mut header_map = reqwest::header::HeaderMap::new();
+        crate::http_client::apply_header_extras(&mut header_map, &source, &self.cfg.id, &[]);
+        if !header_map.is_empty() {
+            rb = rb.headers(header_map);
+        }
+        Ok(rb)
+    }
+}
+
+#[async_trait]
+impl Provider for GeminiProvider {
+    fn id(&self) -> &str {
+        &self.cfg.id
+    }
+
+    fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
+        let r = request::translate(&self.cfg.id, req)?;
+        serde_json::to_value(&r).map_err(|e| Error::normalize_request(&self.cfg.id, e.to_string()))
+    }
+
+    fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
+        let typed: types::GenerateContentResponse = serde_json::from_value(raw)
+            .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
+        response::translate(&self.cfg.id, typed)
+    }
+
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        let body = self.normalize_request(&req)?;
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
+
+        let key = self.cfg.auth.token().await?;
+        let url = self.generate_url(&req.model);
+        let rb = self.build_headers(self.client.post(&url), &req, &key)?;
+        let request = rb
+            .header("content-type", "application/json")
+            .json(&body)
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
+
+        if status >= 400 {
+            let headers = resp.headers().clone();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(map_gemini_upstream_error(
+                &self.cfg.id,
+                status,
+                &headers,
+                &body_text,
+            ));
+        }
+
+        let raw_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
+
+        let mut chat_resp = self.normalize_response(raw_body)?;
+        chat_resp.routectl_provider = Some(self.cfg.id.clone());
+        Ok(chat_resp)
+    }
+
+    #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        // TODO(slice-2): implement SSE streaming via streamGenerateContent
+        let _ = req;
+        Err(Error::NotImplemented(
+            self.cfg.id.clone(),
+            "stream (slice-2)".into(),
+        ))
+    }
+
+    async fn on_auth_failure(&self) -> Result<()> {
+        self.cfg.auth.on_auth_failure().await
+    }
+}
+
+fn build_error_excerpt(body_text: &str) -> String {
+    serde_json::from_str::<Value>(body_text)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.pointer("/error/message"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| sanitize_upstream_body(body_text))
+}
+
+fn map_gemini_upstream_error(
+    provider_id: &str,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body_text: &str,
+) -> Error {
+    let header_hint = if crate::retry_after::is_rate_limit_status(status) {
+        crate::retry_after::parse_retry_after(headers)
+    } else {
+        None
+    };
+    debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
+    let msg = build_error_excerpt(body_text);
+    let safe_excerpt = sanitize_for_log(&msg);
+    crate::upstream_log::warn_upstream_failure(provider_id, status, None, &safe_excerpt, "gemini");
+    let err_body = if is_json_error_envelope(body_text) {
+        body_text.to_string()
+    } else {
+        msg
+    };
+    Error::upstream_with_retry_after(provider_id, status, err_body, header_hint)
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end tests (wiremock-driven complete path)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+    use routectl_core::{ChatRequest, MessageContent, TokenSource};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_provider(base_url: &str) -> GeminiProvider {
+        let mut cfg = GeminiConfig::new("gemini:test", "test-api-key");
+        cfg.base_url = base_url.to_string();
+        GeminiProvider::new(cfg)
+    }
+
+    fn base_req() -> ChatRequest {
+        ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![routectl_core::Message {
+                refusal: None,
+                role: routectl_core::Role::User,
+                content: MessageContent::Text("ping".into()),
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            max_tokens: Some(64),
+            ..Default::default()
+        }
+    }
+
+    fn gemini_ok_response() -> serde_json::Value {
+        serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "pong"}],
+                    "role": "model"
+                },
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 1,
+                "totalTokenCount": 6
+            },
+            "modelVersion": "gemini-2.5-pro-001",
+            "responseId": "resp-abc"
+        })
+    }
+
+    #[tokio::test]
+    async fn complete_returns_chat_response_on_200() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-pro:generateContent"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(gemini_ok_response()),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let resp = provider.complete(base_req()).await.expect("complete ok");
+
+        assert_eq!(resp.id, "resp-abc");
+        assert_eq!(resp.model, "gemini-2.5-pro-001");
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "pong"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(resp.routectl_provider.as_deref(), Some("gemini:test"));
+    }
+
+    #[tokio::test]
+    async fn complete_non_2xx_returns_upstream_error_with_body_excerpt() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-pro:generateContent"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"API key not valid.","status":"INVALID_ARGUMENT"}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let err = provider
+            .complete(base_req())
+            .await
+            .expect_err("expected err");
+        match err {
+            Error::Upstream { status, body, .. } => {
+                assert_eq!(status, 400);
+                assert!(body.contains("API key not valid"), "body: {body}");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_debug_redacts_api_key() {
+        let cfg = GeminiConfig::new("gemini:test", "super-secret-api-key");
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("super-secret-api-key"),
+            "Debug must not leak the API key; got: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "Debug must mark the auth field redacted; got: {dbg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_auth_failure_delegates_to_token_source() {
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct CountingToken {
+            calls: AtomicUsize,
+        }
+        impl std::fmt::Debug for CountingToken {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("CountingToken").finish()
+            }
+        }
+        #[async_trait]
+        impl TokenSource for CountingToken {
+            async fn token(&self) -> Result<String> {
+                Ok("key".into())
+            }
+            async fn on_auth_failure(&self) -> Result<()> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let src = Arc::new(CountingToken::default());
+        let mut cfg = GeminiConfig::new("gemini:test", "unused");
+        cfg.auth = src.clone() as Arc<dyn TokenSource>;
+        let provider = GeminiProvider::new(cfg);
+
+        provider.on_auth_failure().await.expect("ok");
+        provider.on_auth_failure().await.expect("ok");
+        assert_eq!(src.calls.load(Ordering::SeqCst), 2);
+    }
+}

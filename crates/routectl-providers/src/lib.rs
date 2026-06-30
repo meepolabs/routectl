@@ -36,7 +36,8 @@ pub(crate) mod header_trace;
     feature = "openai-compat",
     feature = "anthropic-api",
     feature = "bedrock",
-    feature = "openai-responses"
+    feature = "openai-responses",
+    feature = "gemini"
 ))]
 pub(crate) mod upstream_log;
 
@@ -48,7 +49,8 @@ pub(crate) mod upstream_log;
     feature = "openai-compat",
     feature = "anthropic-api",
     feature = "bedrock",
-    feature = "openai-responses"
+    feature = "openai-responses",
+    feature = "gemini"
 ))]
 pub mod retry_after;
 
@@ -105,3 +107,6 @@ pub mod bedrock;
 
 #[cfg(feature = "openai-responses")]
 pub mod openai_responses;
+
+#[cfg(feature = "gemini")]
+pub mod gemini;
