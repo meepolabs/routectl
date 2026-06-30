@@ -30,7 +30,7 @@ once; jump to the doc that matches your task.
 - `routectl-auth` -- `SecretStore` trait + default resolver for
   `env://`, `file://`, `literal:`, and `oauth://` references
 - `routectl-cli` -- axum HTTP server, clap subcommands
-  (serve / login / logout / refresh / whoami / test / config / usage),
+  (serve / login / logout / refresh / whoami / test / config / usage / pricing),
   live matrix integration tests
 - `routectl-usage` -- SQLite per-request usage accounting:
   `UsageRecord`, `UsageHandle`, cost estimation, retention pruning,
