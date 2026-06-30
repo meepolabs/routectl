@@ -36,6 +36,23 @@ use serde_json::Value;
 
 use crate::cost_gate::PrefixReductionCandidate;
 
+/// FNV-1a 64-bit offset basis and prime. Inline implementation avoids a
+/// new crate dep; FNV is stable across Rust toolchain versions (unlike
+/// `std::collections::hash_map::DefaultHasher`, whose output is explicitly
+/// not guaranteed stable across versions or compilations).
+const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+
+/// Compute an FNV-1a 64-bit hash of an arbitrary byte slice.
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 /// Bytes-per-token divisor for the rough token estimate. Matches
 /// `routectl_core::context_reduction`'s `BYTES_PER_TOKEN_ESTIMATE` so the
 /// trimmer's `d` / `c` / `c_after` counts are consistent with the rest of the
@@ -255,6 +272,29 @@ pub fn apply_trim_plan(req: &ChatRequest, plan: &SteadyStateTrimPlan) -> ChatReq
         substitute_placeholder(part);
     }
     out
+}
+
+/// Stable hash of the trimmed CACHEABLE FRONT for the shadow misfire monitor.
+///
+/// The cacheable front is `messages[0..plan.span.end]` of the request after
+/// the trim plan is applied. This covers the immutable head PLUS the elided
+/// span -- the only region whose byte identity must remain stable turn-to-turn
+/// for the upstream exact-prefix cache to stay warm. The tail
+/// (`messages[plan.span.end..]`) is intentionally EXCLUDED: it grows with
+/// every appended turn and is the extension the cache indexes into, not the
+/// fixed anchor. Hashing the tail would produce a different value on every
+/// turn by construction, yielding a spurious Misfire on every turn.
+///
+/// The hash is computed over the JSON serialization of the trimmed-front
+/// messages and is deterministic across calls for identical content. FNV-1a
+/// 64-bit provides stable output across Rust versions (unlike
+/// `DefaultHasher`). Pure: no clock, no I/O, no randomness.
+#[must_use]
+pub fn trimmed_prefix_fingerprint(req: &ChatRequest, plan: &SteadyStateTrimPlan) -> u64 {
+    let trimmed = apply_trim_plan(req, plan);
+    let front = trimmed.messages.get(..plan.span.end).unwrap_or(&[]);
+    let serialized = serde_json::to_string(front).unwrap_or_default();
+    fnv1a_hash(serialized.as_bytes())
 }
 
 /// Replace a tool payload with the fixed placeholder string in place. Leaves
@@ -642,6 +682,87 @@ mod tests {
         assert_eq!(prefix_n, prefix_n1, "trimmed prefix shifted under growth");
         // Sanity: N+1 is strictly longer (the appended turn).
         assert!(trimmed_n1.messages.len() > trimmed_n.messages.len());
+    }
+
+    #[test]
+    fn fingerprint_stable_across_growth_turns() {
+        // The trimmed-prefix fingerprint must be byte-stable across >= 3
+        // growth turns: every turn that grows the tail (appended messages)
+        // must produce the SAME fingerprint as turn N, because the head
+        // content the fingerprint covers is immutable.
+        let base = long_conversation(6, 12_000);
+        let params = SteadyStateTrimParams::default();
+        let plan_base = propose_steady_state_trim(&base, &params).expect("plan base");
+        let fp_base = trimmed_prefix_fingerprint(&base, &plan_base);
+
+        for growth in 1..=3usize {
+            let mut grown = base.clone();
+            for i in 0..growth {
+                grown.messages.push(user_msg(&format!("growth {i}")));
+                grown.messages.push(assistant_msg(&format!("reply {i}")));
+            }
+            let plan_g = propose_steady_state_trim(&grown, &params).expect("plan grown");
+            let fp_g = trimmed_prefix_fingerprint(&grown, &plan_g);
+            assert_eq!(fp_base, fp_g, "fingerprint drifted at growth step {growth}",);
+        }
+    }
+
+    #[test]
+    fn fingerprint_differs_when_front_content_perturbed() {
+        // Perturbing the front (head) content must change the fingerprint
+        // so that a real prefix shift is detected as a Misfire.
+        let base = long_conversation(6, 12_000);
+        let params = SteadyStateTrimParams::default();
+        let plan = propose_steady_state_trim(&base, &params).expect("plan");
+        let fp_base = trimmed_prefix_fingerprint(&base, &plan);
+
+        // Replace the first message (front head) content.
+        let mut perturbed = base.clone();
+        perturbed.messages[0] = user_msg("completely different first message XXXX");
+        let plan_p = propose_steady_state_trim(&perturbed, &params).expect("plan perturbed");
+        let fp_perturbed = trimmed_prefix_fingerprint(&perturbed, &plan_p);
+
+        assert_ne!(
+            fp_base, fp_perturbed,
+            "fingerprint did not change when front content was perturbed",
+        );
+    }
+
+    #[test]
+    fn shadow_store_first_seen_then_stable_then_misfire() {
+        // Full lifecycle: first call -> FirstSeen, same fingerprint -> Stable,
+        // different fingerprint -> Misfire.
+        use crate::k_estimator::{KSessionKey, ShadowOutcome, ShadowStore};
+        use std::time::UNIX_EPOCH;
+
+        let store = ShadowStore::new();
+        let key = KSessionKey {
+            session_key: "sess-ctx".into(),
+            provider_kind: "anthropic-api".into(),
+            model: "opus".into(),
+        };
+
+        let base = long_conversation(6, 12_000);
+        let params = SteadyStateTrimParams::default();
+        let plan = propose_steady_state_trim(&base, &params).expect("plan");
+        let fp = trimmed_prefix_fingerprint(&base, &plan);
+
+        // First call: no stored entry.
+        let o1 = store.record_and_compare(key.clone(), fp, UNIX_EPOCH);
+        assert_eq!(o1, ShadowOutcome::FirstSeen);
+
+        // Same fingerprint: Stable.
+        let o2 = store.record_and_compare(key.clone(), fp, UNIX_EPOCH);
+        assert_eq!(o2, ShadowOutcome::Stable);
+
+        // Different fingerprint (perturbed front): Misfire.
+        let mut perturbed = base.clone();
+        perturbed.messages[0] = user_msg("different first message for misfire test");
+        let plan_p = propose_steady_state_trim(&perturbed, &params).expect("plan p");
+        let fp_p = trimmed_prefix_fingerprint(&perturbed, &plan_p);
+        assert_ne!(fp, fp_p, "perturbed fingerprint must differ from base");
+        let o3 = store.record_and_compare(key, fp_p, UNIX_EPOCH);
+        assert_eq!(o3, ShadowOutcome::Misfire);
     }
 
     #[test]

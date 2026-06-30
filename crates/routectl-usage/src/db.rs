@@ -1215,6 +1215,7 @@ mod tests {
             ("would_trim_tokens", false),
             ("would_trim_break_even_k", false),
             ("would_trim_k_floor", false),
+            ("would_trim_shadow_misfire", false),
         ];
 
         let (_dir, path) = temp_db_path();

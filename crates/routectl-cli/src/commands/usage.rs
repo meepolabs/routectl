@@ -19,9 +19,9 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 
 use routectl_router::Config;
 use routectl_usage::{
-    aggregate, estimate_cost_tokens, k_calibration_summary, latest_quota, open_readonly, ttfbs,
-    would_trim_summary, AggRow, GroupKey, KCalibration, OpenError, QueryError, QuotaSnapshot,
-    Rates, UsageDb, WouldTrimSummary,
+    aggregate, estimate_cost_tokens, k_calibration_summary, latest_quota, open_readonly,
+    shadow_misfire_summary, ttfbs, would_trim_summary, AggRow, GroupKey, KCalibration, OpenError,
+    QueryError, QuotaSnapshot, Rates, ShadowMisfireSummary, UsageDb, WouldTrimSummary,
 };
 
 /// Parsed `routectl usage` arguments, already validated by clap.
@@ -349,6 +349,9 @@ pub struct WindowReport {
     /// Steady-state would-trim opportunity over the window (advisory; only
     /// populated and surfaced under `--detail`).
     pub would_trim: WouldTrimSummary,
+    /// Shadow misfire monitor summary over the window (advisory; only
+    /// populated and surfaced under `--detail`).
+    pub shadow_misfire: ShadowMisfireSummary,
 }
 
 /// True iff `provider` is a managed-OAuth subscription provider: its
@@ -549,6 +552,13 @@ pub fn build_window_report(
         WouldTrimSummary::default()
     };
 
+    // Shadow misfire monitor: only queried (and surfaced) under --detail.
+    let shadow_misfire = if detail {
+        shadow_misfire_summary(db, bounds.from_ms, bounds.to_ms)?
+    } else {
+        ShadowMisfireSummary::default()
+    };
+
     let mut display_rows: Vec<DisplayRow> = groups
         .into_iter()
         .map(|(label, acc)| finalize_row(label, acc, &ttft))
@@ -571,6 +581,7 @@ pub fn build_window_report(
         cache_hit_rate,
         total_errors,
         would_trim,
+        shadow_misfire,
     })
 }
 
@@ -854,6 +865,7 @@ pub fn render_report(report: &WindowReport) -> String {
     if report.detail {
         out.push_str(&render_latency_summary(report));
         out.push_str(&render_would_trim(report));
+        out.push_str(&render_shadow_misfire(report));
     }
     if let Some(q) = &report.quota {
         out.push_str(&render_quota(q));
@@ -912,6 +924,25 @@ fn render_would_trim(report: &WindowReport) -> String {
         wt.verdict_unmet,
         wt.verdict_cold,
         wt.verdict_unpriced,
+    )
+}
+
+/// One-line shadow misfire monitor advisory: the number of candidate turns
+/// compared and the misfire count. Advisory (recording-only); emitted only
+/// under `--detail`, and only when comparisons have been made.
+fn render_shadow_misfire(report: &WindowReport) -> String {
+    let s = &report.shadow_misfire;
+    if s.compared_turns == 0 {
+        return String::new();
+    }
+    let pct = if s.compared_turns > 0 {
+        (100.0 * s.misfire_turns as f64 / s.compared_turns as f64).round() as i64
+    } else {
+        0
+    };
+    format!(
+        "shadow: {} candidate turns compared, {} misfires ({}%)\n",
+        s.compared_turns, s.misfire_turns, pct,
     )
 }
 

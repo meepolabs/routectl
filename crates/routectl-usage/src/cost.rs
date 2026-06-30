@@ -209,6 +209,7 @@ mod tests {
             would_trim_tokens: None,
             would_trim_break_even_k: None,
             would_trim_k_floor: None,
+            would_trim_shadow_misfire: None,
         }
     }
 

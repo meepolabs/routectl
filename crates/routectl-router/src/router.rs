@@ -22,7 +22,9 @@ use crate::cache_pricing::lookup_with_overrides;
 use crate::config::{
     AliasValue, CacheCapability, Config, HistoryReasoning, ReasoningDialect, RetryPolicy,
 };
-use crate::context_trim::{propose_steady_state_trim, SteadyStateTrimParams};
+use crate::context_trim::{
+    propose_steady_state_trim, trimmed_prefix_fingerprint, SteadyStateTrimParams,
+};
 use crate::cost_gate::break_even_k;
 use crate::glob::PrefixIndex;
 use crate::resolved::ResolvedModel;
@@ -140,6 +142,12 @@ pub struct Router {
     /// previous router's entries -- so the fresh estimator transparently
     /// sees the carried samples.
     k_estimator: Arc<dyn crate::k_estimator::KEstimator>,
+    /// In-process session-keyed last-fingerprint store for the shadow misfire
+    /// monitor. Keyed by the same (session, provider_kind, model) triple as
+    /// `k_session_store`. Not carried over on a hot-reload: the monitor
+    /// treats the first turn after a reload as `FirstSeen`, which is the
+    /// safe default (no false misfire on a fresh fingerprint after a reload).
+    shadow_store: Arc<crate::k_estimator::ShadowStore>,
 }
 
 /// Per-request switches that the HTTP handler can flip via header
@@ -263,6 +271,13 @@ pub struct DispatchMeta {
     /// pricing cell (no `break_even_k` to compare against), and when no
     /// would-cut candidate was proposed. Recording only.
     pub would_trim_k_floor: Option<f64>,
+    /// Non-mutating shadow misfire monitor: `Some(0)` when the trimmed
+    /// cacheable prefix hash matched the prior turn for this session triple
+    /// (Stable), `Some(1)` when it differed (Misfire -- the real cut would
+    /// have broken the upstream cache), `None` for a `FirstSeen` observation,
+    /// when no session key was present, or when no would-cut candidate was
+    /// proposed. Recording only -- the dispatched bytes are NEVER mutated.
+    pub would_trim_shadow_misfire: Option<i64>,
 }
 
 impl DispatchMeta {
@@ -285,6 +300,7 @@ impl DispatchMeta {
             would_trim_tokens: None,
             would_trim_break_even_k: None,
             would_trim_k_floor: None,
+            would_trim_shadow_misfire: None,
         }
     }
 
@@ -494,6 +510,7 @@ impl Router {
         let k_estimator: Arc<dyn crate::k_estimator::KEstimator> = Arc::new(
             crate::k_estimator::LedgerBackedK::new(k_session_store.clone()),
         );
+        let shadow_store = Arc::new(crate::k_estimator::ShadowStore::default());
         Self {
             config,
             providers: Default::default(),
@@ -504,6 +521,7 @@ impl Router {
             sticky_pins: Default::default(),
             k_session_store,
             k_estimator,
+            shadow_store,
         }
     }
 
@@ -2438,6 +2456,38 @@ impl Router {
         });
 
         meta.would_trim_k_floor = would_trim_k_floor_for_meta(break_even, &estimate);
+
+        // Shadow misfire monitor: recording only, never mutates attempt_req.
+        // Compute a fingerprint of the trimmed cacheable prefix and compare it
+        // against the stored value for this (session, provider_kind, model) triple.
+        // A Misfire means the prefix shifted turn-to-turn -- the canary that a
+        // real cut would break the upstream cache.
+        if let Some(session_key) = attempt_req.routectl_internal.inbound_session_key.as_deref() {
+            let fp = trimmed_prefix_fingerprint(attempt_req, &plan);
+            let shadow_key = crate::k_estimator::KSessionKey {
+                session_key: session_key.to_string(),
+                provider_kind: provider_kind.unwrap_or("").to_string(),
+                model: model.to_string(),
+            };
+            let outcome = self
+                .shadow_store
+                .record_and_compare(shadow_key, fp, SystemTime::now());
+            match outcome {
+                crate::k_estimator::ShadowOutcome::Stable => {
+                    meta.would_trim_shadow_misfire = Some(0);
+                }
+                crate::k_estimator::ShadowOutcome::Misfire => {
+                    meta.would_trim_shadow_misfire = Some(1);
+                    tracing::warn!(
+                        session_key = %session_key,
+                        provider_kind = provider_kind.unwrap_or(""),
+                        model = %model,
+                        "would_trim_shadow_misfire: trimmed cacheable prefix shifted turn-to-turn",
+                    );
+                }
+                crate::k_estimator::ShadowOutcome::FirstSeen => {}
+            }
+        }
     }
 }
 

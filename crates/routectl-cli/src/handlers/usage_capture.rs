@@ -70,6 +70,7 @@ pub(crate) fn build_usage_draft(
         would_trim_tokens: None,
         would_trim_break_even_k: None,
         would_trim_k_floor: None,
+        would_trim_shadow_misfire: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -284,6 +285,7 @@ impl UsageCapture {
         self.record.would_trim_tokens = meta.would_trim_tokens;
         self.record.would_trim_break_even_k = meta.would_trim_break_even_k;
         self.record.would_trim_k_floor = meta.would_trim_k_floor;
+        self.record.would_trim_shadow_misfire = meta.would_trim_shadow_misfire;
     }
 
     /// Stamp the token / quota / finish columns from a non-streaming

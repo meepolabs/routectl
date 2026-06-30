@@ -29,8 +29,8 @@ pub use config::{
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
 pub use context_trim::{
-    apply_trim_plan, propose_steady_state_trim, ElisionMark, SteadyStateTrimParams,
-    SteadyStateTrimPlan,
+    apply_trim_plan, propose_steady_state_trim, trimmed_prefix_fingerprint, ElisionMark,
+    SteadyStateTrimParams, SteadyStateTrimPlan,
 };
 pub use cost_gate::{break_even_k, evaluate, GateDecision, KeepReason, PrefixReductionCandidate};
 #[cfg(feature = "bedrock")]
@@ -44,7 +44,7 @@ pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{
     rebuild_into, Confidence, EstimateSource, KEstimate, KEstimator, KQuery, KSessionKey,
     KSessionStore, KSessionWindow, LedgerBackedK, LedgerReader, LedgerSampleRow, Sample,
-    K_SESSION_CAPACITY,
+    ShadowOutcome, ShadowStore, K_SESSION_CAPACITY,
 };
 pub use resolved::ResolvedModel;
 pub use router::{

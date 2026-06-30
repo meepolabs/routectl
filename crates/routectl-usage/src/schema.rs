@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -129,7 +129,14 @@ CREATE TABLE IF NOT EXISTS requests (
     -- ordinal position whether the DB was created fresh at v6 or migrated from
     -- v5 via `ALTER TABLE ... ADD COLUMN` (which always appends). The live
     -- request is NEVER mutated -- this is recording only.
-    would_trim_k_floor REAL
+    would_trim_k_floor REAL,
+
+    -- SHADOW MISFIRE MONITOR (v7): 0 = Stable (prefix byte-identical),
+    -- 1 = Misfire (prefix shifted turn-to-turn), NULL = FirstSeen or no session
+    -- key. Appended last so it lands in the same ordinal position whether the
+    -- DB was created fresh at v7 or migrated from v6 via `ALTER TABLE ... ADD
+    -- COLUMN` (which always appends). The live request is NEVER mutated.
+    would_trim_shadow_misfire INTEGER
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query
