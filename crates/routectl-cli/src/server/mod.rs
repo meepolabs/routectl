@@ -640,10 +640,10 @@ fn build_axum_router(
     let public = AxumRouter::new().route("/health", get(handlers::health::health));
 
     // Authenticated routes: /v1/models lists configured aliases (low
-    // sensitivity but still gated when auth is on); /v1/chat/completions
-    // and /v1/messages carry the body of every request and forward
-    // upstream. /v1/messages/count_tokens is a probe call claude-code
-    // uses for context-budget display.
+    // sensitivity but still gated when auth is on); /v1/chat/completions,
+    // /v1/messages, and /v1/responses carry the body of every request and
+    // forward upstream. /v1/messages/count_tokens is a probe call
+    // claude-code uses for context-budget display.
     let mut authed = AxumRouter::new()
         .route("/v1/models", get(handlers::models::list_models))
         .route(
@@ -655,6 +655,7 @@ fn build_axum_router(
             "/v1/messages/count_tokens",
             post(handlers::messages_count_tokens::count_tokens),
         )
+        .route("/v1/responses", post(handlers::responses::responses))
         .layer(DefaultBodyLimit::max(max_body_bytes));
 
     // Mount the auth middleware only when tokens are configured.
