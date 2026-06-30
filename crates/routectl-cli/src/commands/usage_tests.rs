@@ -542,6 +542,7 @@ fn multi_window_summary_emits_four_blocks() {
         by: None,
         detail: false,
         db: None,
+        k_calibration: false,
     };
     let blocks = build_blocks(&db, &config, &args, fixed_now()).unwrap();
     assert_eq!(blocks.len(), 4);
@@ -634,6 +635,92 @@ fn ttft_cell_renders_dash_for_empty_group() {
     // Arrange + Act + Assert
     assert_eq!(ttft_cell(None), "-");
     assert_eq!(ttft_cell(Some(6512)), "6.5s");
+}
+
+#[test]
+fn build_output_k_calibration_returns_calibration_report_not_window_blocks() {
+    // Arrange: a plain usage row; no calibrated rows, so the no-data message
+    // is the calibration path output. This is distinct from any window-block title.
+    let (_dir, _path, db) = temp_db();
+    // A plain usage row to ensure window blocks would be non-empty if produced.
+    insert_row(
+        &db,
+        "r1",
+        1000,
+        "m",
+        "paid",
+        "up-paid",
+        "al",
+        "ok",
+        Some(10),
+        Some(10),
+        5,
+    );
+    let config = cost_config();
+    let args = UsageArgs {
+        window: WindowFlag::None,
+        since: None,
+        until: None,
+        by: None,
+        detail: false,
+        db: None,
+        k_calibration: true,
+    };
+
+    // Act
+    let output = build_output(&db, &config, &args, fixed_now()).unwrap();
+
+    // Assert: calibration-path output present (no-data message), not window blocks.
+    assert!(
+        output.contains("no calibrated predictions"),
+        "k_calibration=true must return the calibration path output: {output}"
+    );
+    assert!(
+        !output.contains("== today =="),
+        "k_calibration=true must not contain a window-block title: {output}"
+    );
+}
+
+#[test]
+fn build_output_normal_returns_window_blocks_not_calibration_report() {
+    // Arrange: empty DB, no calibrated rows, k_calibration=false.
+    let (_dir, _path, db) = temp_db();
+    insert_row(
+        &db,
+        "r1",
+        1000,
+        "m",
+        "paid",
+        "up-paid",
+        "al",
+        "ok",
+        Some(10),
+        Some(10),
+        5,
+    );
+    let config = cost_config();
+    let args = UsageArgs {
+        window: WindowFlag::None,
+        since: None,
+        until: None,
+        by: None,
+        detail: false,
+        db: None,
+        k_calibration: false,
+    };
+
+    // Act
+    let output = build_output(&db, &config, &args, fixed_now()).unwrap();
+
+    // Assert: multi-window output present, no calibration header.
+    assert!(
+        output.contains("== today =="),
+        "k_calibration=false must return window blocks: {output}"
+    );
+    assert!(
+        !output.contains("k-calibration"),
+        "k_calibration=false must not contain the calibration report: {output}"
+    );
 }
 
 // The render-layer, quota-line, --since-title, and --by-model tests live in
