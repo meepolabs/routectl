@@ -198,6 +198,10 @@ enum Cmd {
         /// Override the usage DB path. Defaults to `[usage] db_path`.
         #[arg(long)]
         db: Option<PathBuf>,
+        /// Print the K-estimator calibration diagnostic over all history
+        /// and exit. Window, --by, and --detail flags are ignored.
+        #[arg(long = "k-calibration")]
+        k_calibration: bool,
     },
 }
 
@@ -344,6 +348,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             by,
             detail,
             db,
+            k_calibration,
         } => {
             let config = load_config(cli.config.as_deref())?;
             let window = if today {
@@ -364,6 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 by: by.as_deref().and_then(commands::usage::GroupDim::parse),
                 detail,
                 db,
+                k_calibration,
             };
             if let Err(e) = commands::usage::run(&config, &args) {
                 eprintln!("error: {e}");

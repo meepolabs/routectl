@@ -19,8 +19,9 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 
 use routectl_router::Config;
 use routectl_usage::{
-    aggregate, estimate_cost_tokens, latest_quota, open_readonly, ttfbs, would_trim_summary,
-    AggRow, GroupKey, OpenError, QueryError, QuotaSnapshot, Rates, UsageDb, WouldTrimSummary,
+    aggregate, estimate_cost_tokens, k_calibration_summary, latest_quota, open_readonly, ttfbs,
+    would_trim_summary, AggRow, GroupKey, KCalibration, OpenError, QueryError, QuotaSnapshot,
+    Rates, UsageDb, WouldTrimSummary,
 };
 
 /// Parsed `routectl usage` arguments, already validated by clap.
@@ -32,6 +33,8 @@ pub struct UsageArgs {
     pub by: Option<GroupDim>,
     pub detail: bool,
     pub db: Option<PathBuf>,
+    /// When true, emit only the k-calibration diagnostic and return.
+    pub k_calibration: bool,
 }
 
 /// The mutually-exclusive calendar-window selector. `None` (no flag and no
@@ -893,15 +896,22 @@ fn render_latency_summary(report: &WindowReport) -> String {
 /// candidate tokens over the window. Advisory (non-mutating recording);
 /// emitted only under `--detail`, and only when there is an opportunity, so a
 /// window with no candidates stays uncluttered.
+///
+/// The verdict line is derived at render time from the persisted numeric
+/// columns; it is never a stored token and never touches `reduction_strategy`.
 fn render_would_trim(report: &WindowReport) -> String {
     let wt = &report.would_trim;
     if wt.candidate_requests == 0 {
         return String::new();
     }
     format!(
-        "would-trim: {} reqs with a would-cut candidate, {} tokens (advisory; not applied)\n",
+        "would-trim: {} reqs with a would-cut candidate, {} tokens (advisory; not applied)\n  verdict: met={} unmet={} cold={} unpriced={}\n",
         wt.candidate_requests,
         human_count(wt.would_trim_tokens),
+        wt.verdict_met,
+        wt.verdict_unmet,
+        wt.verdict_cold,
+        wt.verdict_unpriced,
     )
 }
 
@@ -980,11 +990,53 @@ const LEGEND: &str = concat!(
     "                and a would-trim opportunity line (advisory steady-state-trim candidates; never applied)",
 );
 
+// --- k-calibration report -----------------------------------------------
+
+const K_CALIBRATION_COVERAGE_PASS: f64 = 0.90;
+const K_CALIBRATION_ACCURACY_PASS: f64 = 0.40;
+const K_CALIBRATION_SUFFICIENCY_PASS: usize = 200;
+
+fn gate_label(pass: bool) -> &'static str {
+    if pass {
+        "PASS"
+    } else {
+        "FAIL"
+    }
+}
+
+/// Render the k-calibration ASCII report. Consistent with the usage output
+/// style. Returns a no-data message when `cal.n == 0`.
+pub fn render_k_calibration(cal: &KCalibration) -> String {
+    if cal.n == 0 {
+        return "no calibrated predictions recorded yet\n".to_string();
+    }
+    let cov_pass = cal.coverage >= K_CALIBRATION_COVERAGE_PASS;
+    let acc_pass = cal.accuracy <= K_CALIBRATION_ACCURACY_PASS;
+    let suf_pass = cal.n >= K_CALIBRATION_SUFFICIENCY_PASS;
+    let overall = cov_pass && acc_pass && suf_pass;
+    format!(
+        "== k-calibration (all history) ==\ncoverage     {:.2}   (>= {:.2})  {}\naccuracy     {:.2}   (<= {:.2})  {}\nsufficiency  {}    (>= {})   {}\noverall: {}\n",
+        cal.coverage,
+        K_CALIBRATION_COVERAGE_PASS,
+        gate_label(cov_pass),
+        cal.accuracy,
+        K_CALIBRATION_ACCURACY_PASS,
+        gate_label(acc_pass),
+        cal.n,
+        K_CALIBRATION_SUFFICIENCY_PASS,
+        gate_label(suf_pass),
+        gate_label(overall),
+    )
+}
+
 // --- entry point --------------------------------------------------------
 
 /// Run `routectl usage`. Resolves the DB path, opens read-only, builds the
 /// requested report(s), and prints them. `NoData` is a friendly message +
 /// exit 0; `VersionTooNew` is a hard error.
+///
+/// When `--k-calibration` is set, emits only the calibration report over all
+/// history and returns immediately (window/by/detail flags are ignored).
 pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = args
         .db
@@ -1004,9 +1056,26 @@ pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::
     };
 
     let now = Local::now();
-    let blocks = build_blocks(&db, config, args, now)?;
-    print!("{}", blocks.join("\n"));
+    let output = build_output(&db, config, args, now)?;
+    print!("{output}");
     Ok(())
+}
+
+/// Build the output string for the usage command: the k-calibration report
+/// when `args.k_calibration` is set, else the joined window blocks. Separated
+/// from `run` so it is testable without touching stdout or the clock.
+pub fn build_output(
+    db: &UsageDb,
+    config: &Config,
+    args: &UsageArgs,
+    now: DateTime<Local>,
+) -> Result<String, UsageError> {
+    if args.k_calibration {
+        let cal = k_calibration_summary(db)?;
+        return Ok(render_k_calibration(&cal));
+    }
+    let blocks = build_blocks(db, config, args, now)?;
+    Ok(blocks.join("\n"))
 }
 
 /// Build the rendered report blocks for the request: the multi-window

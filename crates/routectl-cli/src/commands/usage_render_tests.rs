@@ -765,6 +765,7 @@ fn since_with_until_builds_single_range_titled_block() {
         by: None,
         detail: false,
         db: None,
+        k_calibration: false,
     };
 
     // Act
@@ -787,6 +788,7 @@ fn since_without_until_builds_single_open_ended_block() {
         by: None,
         detail: false,
         db: None,
+        k_calibration: false,
     };
 
     // Act
@@ -921,5 +923,242 @@ fn displayed_input_unchanged_for_write_less_provider() {
         cells.get(3).copied(),
         Some("100"),
         "write-less provider input must equal fresh input: {row_line:?}"
+    );
+}
+
+/// Insert a would-trim candidate row with the verdict-related advisory
+/// columns. `break_even` = None means unpriced; `k_floor` = None means cold.
+fn would_trim_verdict_row(
+    db: &UsageDb,
+    request_id: &str,
+    would_trim_tokens: i64,
+    break_even: Option<f64>,
+    k_floor: Option<f64>,
+) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             would_trim_tokens, would_trim_break_even_k, would_trim_k_floor) \
+             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', 'm', 'paid', \
+             'up-paid', 0, 'ok', 5, 0, 0, 1, 0, ?2, ?3, ?4)",
+            rusqlite::params![request_id, would_trim_tokens, break_even, k_floor],
+        )
+        .expect("insert would-trim verdict row");
+}
+
+#[test]
+fn would_trim_verdict_counts_one_of_each_shape() {
+    // Arrange: one row of each verdict shape.
+    //   unpriced : break_even=None
+    //   cold     : break_even=Some(2.0), k_floor=None
+    //   met      : break_even=Some(2.0), k_floor=Some(3.0)  (3 >= 2)
+    //   unmet    : break_even=Some(5.0), k_floor=Some(2.0)  (2 < 5)
+    let (_dir, _path, db) = temp_db();
+    would_trim_verdict_row(&db, "v-unpriced", 10_000, None,        None);
+    would_trim_verdict_row(&db, "v-cold",     10_000, Some(2.0),   None);
+    would_trim_verdict_row(&db, "v-met",      10_000, Some(2.0),   Some(3.0));
+    would_trim_verdict_row(&db, "v-unmet",    10_000, Some(5.0),   Some(2.0));
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act
+    let wt = &report.would_trim;
+
+    // Assert: counts partition the 4 candidate rows exactly.
+    assert_eq!(wt.candidate_requests, 4);
+    assert_eq!(wt.verdict_met,      1, "met");
+    assert_eq!(wt.verdict_unmet,    1, "unmet");
+    assert_eq!(wt.verdict_cold,     1, "cold");
+    assert_eq!(wt.verdict_unpriced, 1, "unpriced");
+}
+
+#[test]
+fn would_trim_render_verdict_line_present_when_candidates() {
+    // Arrange
+    let (_dir, _path, db) = temp_db();
+    would_trim_verdict_row(&db, "vm1", 20_000, Some(2.0), Some(3.0));
+    would_trim_verdict_row(&db, "vm2", 20_000, Some(5.0), Some(2.0));
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: first line survives, verdict line appended.
+    assert!(
+        out.contains("would-trim:"),
+        "first line must be present: {out}"
+    );
+    assert!(
+        out.contains("verdict: met=1 unmet=1 cold=0 unpriced=0"),
+        "verdict line must match counts: {out}"
+    );
+}
+
+#[test]
+fn would_trim_render_no_verdict_line_when_zero_candidates() {
+    // Arrange: no candidates at all.
+    let (_dir, _path, db) = temp_db();
+    paid_row(&db, "plain", Some(10), Some(20));
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act + Assert: verdict line must not appear.
+    let out = render_report(&report);
+    assert!(
+        !out.contains("verdict:"),
+        "no verdict line when no candidates: {out}"
+    );
+}
+
+// --- k-calibration render tests ------------------------------------------
+
+/// Insert a calibration row: a request with a k_floor and enough session
+/// context to drive the whole-session realized-reuse count. `session_id`,
+/// `provider_kind`, and `model` must be non-NULL so the calibration SQL
+/// includes it. `cache_read > 0` rows count as a reuse event.
+fn insert_calib_row(
+    db: &UsageDb,
+    request_id: &str,
+    session_id: &str,
+    provider_kind: &str,
+    model: &str,
+    k_floor: f64,
+    cache_read: i64,
+) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, provider_kind, \
+             session_id, stream, outcome, latency_ms, tool_count, msg_count, \
+             attempt_count, fallback_count, would_trim_tokens, \
+             would_trim_break_even_k, would_trim_k_floor, cache_read) \
+             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', ?4, 'paid', \
+             'up-paid', ?3, ?2, 0, 'ok', 5, 0, 0, 1, 0, 10, 1.0, ?5, ?6)",
+            rusqlite::params![
+                request_id, session_id, provider_kind, model, k_floor, cache_read
+            ],
+        )
+        .expect("insert calibration row");
+}
+
+#[test]
+fn k_calibration_zero_n_returns_friendly_no_data() {
+    // Arrange: empty DB.
+    let (_dir, _path, db) = temp_db();
+
+    // Act
+    let cal = k_calibration_summary(&db).unwrap();
+    let out = render_k_calibration(&cal);
+
+    // Assert: no-data path, not a divide-by-zero panic.
+    assert_eq!(cal.n, 0);
+    assert!(
+        out.contains("no calibrated predictions"),
+        "must surface friendly message: {out}"
+    );
+}
+
+#[test]
+fn k_calibration_known_population_matches_hand_computed_values() {
+    // Arrange: 3 rows in distinct sessions, all with a k_floor.
+    // Per-row session realized reuse = COUNT WHERE cache_read > 0 in
+    // that (session, provider_kind, model) group:
+    //   s1: r1 cache_read=2 > 0 -> realized=1; floor=1.0 -> covered (1>=1)
+    //   s2: r2 cache_read=1 > 0 -> realized=1; floor=2.0 -> NOT covered (1<2)
+    //   s3: r3 cache_read=0     -> realized=0; floor=0.5 -> NOT covered (0<0.5)
+    // max_realized = 1
+    // coverage = 1/3
+    // errors: |1.0-1|/1=0.0, |2.0-1|/1=1.0, |0.5-0|/1=0.5
+    // sorted: [0.0, 0.5, 1.0]  median = 0.5
+    let (_dir, _path, db) = temp_db();
+    insert_calib_row(&db, "r1", "s1", "anth", "m1", 1.0, 2);
+    insert_calib_row(&db, "r2", "s2", "anth", "m1", 2.0, 1);
+    insert_calib_row(&db, "r3", "s3", "anth", "m1", 0.5, 0);
+
+    // Act
+    let cal = k_calibration_summary(&db).unwrap();
+
+    // Assert hand-computed values.
+    assert_eq!(cal.n, 3, "population must be 3");
+    let coverage_expected = 1.0_f64 / 3.0;
+    assert!(
+        (cal.coverage - coverage_expected).abs() < 1e-9,
+        "coverage mismatch: got {}, expected {}",
+        cal.coverage,
+        coverage_expected
+    );
+    assert!(
+        (cal.accuracy - 0.5).abs() < 1e-9,
+        "accuracy (median error) mismatch: got {}",
+        cal.accuracy
+    );
+}
+
+#[test]
+fn k_calibration_sufficiency_below_200_fails() {
+    // Arrange: 3 rows -> n=3 < 200.
+    let (_dir, _path, db) = temp_db();
+    insert_calib_row(&db, "x1", "s1", "a", "m", 1.0, 1);
+    insert_calib_row(&db, "x2", "s2", "a", "m", 1.0, 1);
+    insert_calib_row(&db, "x3", "s3", "a", "m", 1.0, 1);
+
+    let cal = k_calibration_summary(&db).unwrap();
+    let out = render_k_calibration(&cal);
+
+    assert!(
+        out.contains("sufficiency") && out.contains("FAIL"),
+        "sufficiency must FAIL when n < 200: {out}"
+    );
+    assert!(
+        out.contains("overall: FAIL"),
+        "overall must FAIL: {out}"
+    );
+}
+
+#[test]
+fn k_calibration_render_all_pass_when_thresholds_met() {
+    // Arrange: craft a KCalibration that passes all three gates.
+    let cal = KCalibration {
+        n: 250,
+        coverage: 0.92,
+        accuracy: 0.30,
+    };
+
+    let out = render_k_calibration(&cal);
+
+    assert!(out.contains("overall: PASS"), "all gates pass: {out}");
+    assert!(!out.contains("FAIL"), "no FAIL in output: {out}");
+}
+
+#[test]
+fn k_calibration_multi_row_per_session_both_see_group_realized() {
+    // Arrange: two rows sharing the same (session_id, provider_kind, model).
+    // One row has cache_read > 0 (a reuse event), the other cache_read = 0.
+    // The GROUP-BY join must assign realized = 1 to BOTH rows (the whole-session
+    // aggregate for their group has exactly one cache-read hit). The population
+    // is n=2; coverage = 1 (both rows have realized=1 >= their floor of 0.5);
+    // errors: both |0.5 - 1| / 1 = 0.5, so median accuracy = 0.5.
+    let (_dir, _path, db) = temp_db();
+    // Row A: has cache_read=5 (reuse event)
+    insert_calib_row(&db, "mc1", "shared-sess", "anth", "opus", 0.5, 5);
+    // Row B: same (session, provider_kind, model), no cache hit
+    insert_calib_row(&db, "mc2", "shared-sess", "anth", "opus", 0.5, 0);
+
+    // Act
+    let cal = k_calibration_summary(&db).unwrap();
+
+    // Assert: BOTH rows see realized=1 (the group's aggregate reuse count).
+    assert_eq!(cal.n, 2, "both calibrated rows are counted");
+    // coverage: realized(1) >= floor(0.5) for both rows -> 2/2 = 1.0
+    assert!(
+        (cal.coverage - 1.0).abs() < 1e-9,
+        "both rows should be covered (realized=1 >= floor=0.5): coverage={}",
+        cal.coverage
+    );
+    // accuracy: median of [|0.5-1|/1, |0.5-1|/1] = median([0.5, 0.5]) = 0.5
+    assert!(
+        (cal.accuracy - 0.5).abs() < 1e-9,
+        "accuracy (median error) should be 0.5: got {}",
+        cal.accuracy
     );
 }

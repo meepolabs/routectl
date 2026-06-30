@@ -221,7 +221,9 @@ pub fn latest_quota(db: &UsageDb) -> Result<Option<QuotaSnapshot>, QueryError> {
 
 /// Windowed steady-state would-trim opportunity: how many requests in the
 /// window carried a non-mutating would-cut candidate, and the summed
-/// `would_trim_tokens` (the candidate freed-token count `d`) over them. Plain
+/// `would_trim_tokens` (the candidate freed-token count `d`) over them. The
+/// verdict counts (`met`/`unmet`/`cold`/`unpriced`) are derived at query time
+/// from the numeric advisory columns -- never persisted as a token. Plain
 /// data; the caller decides how to display it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WouldTrimSummary {
@@ -230,19 +232,55 @@ pub struct WouldTrimSummary {
     pub candidate_requests: i64,
     /// Summed `would_trim_tokens` over those requests.
     pub would_trim_tokens: i64,
+    /// Priced + Calibrated + floor >= K*: the estimator predicted reuse
+    /// was sufficient; a real cut would have been authorized.
+    pub verdict_met: i64,
+    /// Priced + Calibrated + floor < K*: estimator ran but predicted
+    /// insufficient reuse to justify the cut.
+    pub verdict_unmet: i64,
+    /// Priced but not yet Calibrated (no floor stamped): estimator has
+    /// not seen enough samples to make a confidence call.
+    pub verdict_cold: i64,
+    /// No verified pricing row: K* could not be computed.
+    pub verdict_unpriced: i64,
 }
 
+/// The verdict classification logic mirrors router.rs `would_trim_k_floor_for_meta`:
+///   unpriced : would_trim_break_even_k IS NULL
+///   cold     : break_even NOT NULL AND k_floor IS NULL
+///   met      : k_floor NOT NULL AND k_floor >= would_trim_break_even_k
+///   unmet    : k_floor NOT NULL AND k_floor < would_trim_break_even_k
+/// The WHERE gate restricts the verdict counts to candidate rows only.
 const WOULD_TRIM_SQL: &str = "\
 SELECT
-    COUNT(would_trim_tokens)               AS candidate_requests,
-    COALESCE(SUM(would_trim_tokens), 0)    AS would_trim_tokens
+    COUNT(would_trim_tokens)                                            AS candidate_requests,
+    COALESCE(SUM(would_trim_tokens), 0)                                AS would_trim_tokens,
+    SUM(CASE WHEN would_trim_tokens IS NOT NULL
+              AND would_trim_k_floor IS NOT NULL
+              AND would_trim_break_even_k IS NOT NULL
+              AND would_trim_k_floor >= would_trim_break_even_k
+         THEN 1 ELSE 0 END)                                            AS verdict_met,
+    SUM(CASE WHEN would_trim_tokens IS NOT NULL
+              AND would_trim_k_floor IS NOT NULL
+              AND would_trim_break_even_k IS NOT NULL
+              AND would_trim_k_floor < would_trim_break_even_k
+         THEN 1 ELSE 0 END)                                            AS verdict_unmet,
+    SUM(CASE WHEN would_trim_tokens IS NOT NULL
+              AND would_trim_break_even_k IS NOT NULL
+              AND would_trim_k_floor IS NULL
+         THEN 1 ELSE 0 END)                                            AS verdict_cold,
+    SUM(CASE WHEN would_trim_tokens IS NOT NULL
+              AND would_trim_break_even_k IS NULL
+         THEN 1 ELSE 0 END)                                            AS verdict_unpriced
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2";
 
 /// The window's steady-state would-trim opportunity. `COUNT(col)` ignores
 /// NULLs, so `candidate_requests` is the number of requests the trimmer
 /// flagged; `would_trim_tokens` is the summed candidate freed-token count.
-/// Both are 0 when no row in the window carried a candidate.
+/// The verdict counts partition the candidate rows by the derived
+/// met/unmet/cold/unpriced classification. All fields are 0 when no row in
+/// the window carried a candidate.
 pub fn would_trim_summary(
     db: &UsageDb,
     from_ms: i64,
@@ -253,9 +291,141 @@ pub fn would_trim_summary(
         Ok(WouldTrimSummary {
             candidate_requests: row.get(0)?,
             would_trim_tokens: row.get(1)?,
+            verdict_met: row.get(2)?,
+            verdict_unmet: row.get(3)?,
+            verdict_cold: row.get(4)?,
+            verdict_unpriced: row.get(5)?,
         })
     })?;
     Ok(summary)
+}
+
+/// K-estimator calibration triple over all history. Populated by
+/// `k_calibration_summary`; zero-fields indicate no calibrated predictions.
+///
+/// The calibration measures the FLOOR (p10 of the K distribution), which is
+/// the persisted gate-authorizing column. The spec's "p50" label refers to
+/// the predicted typical reuse; only the floor is persisted, so v1 calibrates
+/// the floor. The whole-session realized-reuse metric (`a`) is an optimistic
+/// upper bound: it counts all cache-read hits within the session regardless of
+/// TTL alignment. TTL-windowed refinement is a v2 concern; this v1 uses the
+/// whole-session count as a conservative-on-the-denominator measure that
+/// remains auditable without sub-second replay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KCalibration {
+    /// Population size: rows with `would_trim_k_floor IS NOT NULL`.
+    pub n: usize,
+    /// Fraction of population where realized reuse >= predicted floor.
+    /// PASS threshold: >= 0.90.
+    pub coverage: f64,
+    /// Median of |floor - realized| / max_realized_reuse over the population.
+    /// PASS threshold: <= 0.40.
+    pub accuracy: f64,
+}
+
+/// Per-row data pulled from the DB for the calibration computation.
+struct CalibRow {
+    floor: f64,
+    /// Whole-session realized K: COUNT of rows in the same
+    /// (session_id, provider_kind, model) group with cache_read > 0.
+    realized: i64,
+}
+
+/// A single read-only GROUP-BY join pulls each calibrated row's floor plus
+/// its whole-session realized reuse; coverage, sufficiency, and the median
+/// accuracy are thin Rust reductions because SQLite lacks a native MEDIAN.
+///
+/// `session_reuse` computes whole-session realized K once per
+/// (session_id, provider_kind, model) group. The JOIN then attaches each
+/// calibrated row's floor to its group's realized count. NULL-session rows
+/// and rows without provider_kind or model are excluded by the WHERE guards
+/// in both the CTE and the outer query.
+const K_CALIBRATION_SQL: &str = "\
+WITH session_reuse AS (
+    SELECT session_id, provider_kind, model,
+           SUM(CASE WHEN cache_read > 0 THEN 1 ELSE 0 END) AS realized
+    FROM requests
+    WHERE session_id IS NOT NULL AND provider_kind IS NOT NULL AND model IS NOT NULL
+    GROUP BY session_id, provider_kind, model
+)
+SELECT r.would_trim_k_floor AS floor, sr.realized AS realized
+FROM requests r
+JOIN session_reuse sr
+  ON sr.session_id = r.session_id AND sr.provider_kind = r.provider_kind AND sr.model = r.model
+WHERE r.would_trim_k_floor IS NOT NULL
+  AND r.would_trim_k_floor >= 0.0
+  AND r.session_id IS NOT NULL AND r.provider_kind IS NOT NULL AND r.model IS NOT NULL";
+
+/// K-estimator calibration over all history. Measures how well the recorded
+/// floor predictions track whole-session realized reuse. Returns a
+/// `KCalibration` with n=0 when there are no calibrated predictions.
+///
+/// The median is computed in Rust over the pulled per-row error values for
+/// auditability; SQLite's median extension is non-standard.
+pub fn k_calibration_summary(db: &UsageDb) -> Result<KCalibration, QueryError> {
+    let mut stmt = db.conn().prepare(K_CALIBRATION_SQL)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CalibRow {
+                floor: row.get(0)?,
+                realized: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let n = rows.len();
+    if n == 0 {
+        return Ok(KCalibration {
+            n: 0,
+            coverage: 0.0,
+            accuracy: 0.0,
+        });
+    }
+
+    let max_realized = rows
+        .iter()
+        .map(|r| r.realized)
+        .max()
+        .expect("non-empty: n==0 is guarded above");
+
+    let coverage = rows.iter().filter(|r| r.realized as f64 >= r.floor).count() as f64 / n as f64;
+
+    // Global-max normalizer: median(|floor - actual| / max_realized). A
+    // high-reuse outlier session compresses other rows' relative error;
+    // per-row normalization is a v2 consideration.
+    let mut errors: Vec<f64> = rows
+        .iter()
+        .map(|r| {
+            let diff = (r.floor - r.realized as f64).abs();
+            if max_realized > 0 {
+                diff / max_realized as f64
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    errors.sort_by(|a, b| a.total_cmp(b));
+    let accuracy = median_f64(&errors);
+
+    Ok(KCalibration {
+        n,
+        coverage,
+        accuracy,
+    })
+}
+
+/// Nearest-rank median of a non-empty sorted slice.
+fn median_f64(sorted: &[f64]) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let n = sorted.len();
+    let mid = n / 2;
+    if n % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
 }
 
 const TTFBS_SQL: &str = "\
