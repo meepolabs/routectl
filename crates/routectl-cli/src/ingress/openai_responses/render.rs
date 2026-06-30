@@ -123,7 +123,7 @@ fn build_output(msg: &Message) -> Vec<Value> {
 
     output.extend(build_reasoning_items(&msg.reasoning_details));
 
-    if let Some(message_item) = build_message_item(&msg.content) {
+    if let Some(message_item) = build_message_item(&msg.content, msg.refusal.as_deref()) {
         output.push(message_item);
     }
 
@@ -133,12 +133,16 @@ fn build_output(msg: &Message) -> Vec<Value> {
 }
 
 /// Build a single `message` output item from the canonical message
-/// content. Returns None when there is no renderable content (a pure
-/// tool-call or pure-reasoning turn emits no message item). Plain text
-/// becomes an `output_text` block; a `refusal` Other becomes a `refusal`
-/// block; any other Other is re-emitted verbatim as `{type, ...extras}`.
-fn build_message_item(content: &MessageContent) -> Option<Value> {
-    let blocks = build_content_blocks(content);
+/// content and optional refusal string. Returns None when there is no
+/// renderable content (a pure tool-call or pure-reasoning turn emits no
+/// message item). Plain text becomes an `output_text` block; a
+/// `refusal` Other or the canonical `msg.refusal` string become a
+/// `refusal` block; any other Other is re-emitted verbatim.
+fn build_message_item(content: &MessageContent, refusal: Option<&str>) -> Option<Value> {
+    let mut blocks = build_content_blocks(content);
+    if let Some(r) = refusal {
+        blocks.push(json!({"type": "refusal", "refusal": r}));
+    }
     if blocks.is_empty() {
         return None;
     }
@@ -269,9 +273,8 @@ fn build_reasoning_items(details: &[ReasoningDetail]) -> Vec<Value> {
         let key = d.id.clone();
         if !groups.contains_key(&key) {
             order.push(key.clone());
-            groups.insert(key.clone(), ReasoningItemBuilder::default());
         }
-        let group = groups.get_mut(&key).expect("inserted above");
+        let group = groups.entry(key).or_default();
         accumulate_reasoning_detail(group, d);
     }
 

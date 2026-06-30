@@ -577,6 +577,49 @@ fn mixed_text_and_refusal_parts_preserve_order() {
 }
 
 #[test]
+fn canonical_refusal_field_renders_as_refusal_content_block() {
+    // A ChatResponse where the upstream set msg.refusal (not via a
+    // ContentPart::Other) must still produce a refusal block in output[].
+    // Regression guard for the dedicated refusal field path in
+    // build_message_item.
+    // Arrange
+    let mut msg = assistant_message(MessageContent::Null);
+    msg.refusal = Some("I can't help with that.".into());
+
+    // Act
+    let v = render(msg, Some("stop"));
+
+    // Assert: one message item with one refusal block.
+    let items = output(&v);
+    assert_eq!(items.len(), 1, "expected one message output item");
+    assert_eq!(items[0]["type"], "message");
+    let blocks = items[0]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "refusal");
+    assert_eq!(blocks[0]["refusal"], "I can't help with that.");
+}
+
+#[test]
+fn canonical_refusal_field_appended_after_text_content() {
+    // When both text content and msg.refusal are present, the refusal
+    // block appears after the text block (not instead of it).
+    // Arrange
+    let mut msg = assistant_message(MessageContent::Parts(vec![text_part("Preamble.")]));
+    msg.refusal = Some("declined".into());
+
+    // Act
+    let v = render(msg, Some("stop"));
+
+    // Assert: two blocks in order: output_text, refusal.
+    let blocks = output(&v)[0]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0]["type"], "output_text");
+    assert_eq!(blocks[0]["text"], "Preamble.");
+    assert_eq!(blocks[1]["type"], "refusal");
+    assert_eq!(blocks[1]["refusal"], "declined");
+}
+
+#[test]
 fn tool_use_part_is_not_emitted_as_a_content_block() {
     // The egress parses a function_call into BOTH tool_calls and a
     // ToolUse part. The renderer uses tool_calls as the source of truth

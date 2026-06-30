@@ -562,7 +562,7 @@ fn attach_reasoning(messages: &mut Vec<Message>, item: &Value) {
     {
         details.push(reasoning_detail(
             ReasoningDetailKind::Encrypted,
-            id.clone(),
+            id,
             serde_json::json!({ "encrypted_content": sig }),
         ));
     }
