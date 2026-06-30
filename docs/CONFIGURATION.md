@@ -338,6 +338,59 @@ Both shapes are wired for Anthropic models on Bedrock; see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#bedrock-any-region) for the
 adaptive-thinking interaction.
 
+## `[providers.X]` Gemini (`kind = "gemini"`)
+
+A `gemini`-kind provider talks to the native Google Gemini REST API
+(`generateContent` / `streamGenerateContent`), NOT the openai-compat
+shim. It wins native fidelity on `systemInstruction`, `contents`/`parts`,
+`functionDeclarations`, `generationConfig` (incl. `thinkingConfig`), and
+the `usageMetadata` cached-content + thoughts token accounting. See
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#gemini-native-kind--gemini) for
+the per-feature mapping and the before/after fidelity note.
+
+```toml
+[providers.gemini]
+kind        = "gemini"
+api_key_ref = "env://GEMINI_API_KEY"
+# base_url defaults to the public v1beta endpoint; omit unless you are
+# pointing at a Vertex-style endpoint (see below).
+# base_url  = "https://generativelanguage.googleapis.com/v1beta"
+
+[models.gemini-flash]
+provider = "gemini"
+upstream = "gemini-2.5-flash"
+
+[aliases]
+"gemini-*" = "gemini-flash"
+```
+
+Fields:
+
+- `api_key_ref` (required) -- secret-URI (`env://`, `file://`,
+  `literal:`, `oauth://`) resolving to a Google AI Studio API key. The
+  resolved key is sent as the `x-goog-api-key` request header. A
+  routectl-managed token source may rotate the key without a daemon
+  restart.
+- `base_url` (optional, default
+  `https://generativelanguage.googleapis.com/v1beta`) -- the API base.
+  The provider appends `/models/{model}:generateContent` (non-stream)
+  and `/models/{model}:streamGenerateContent?alt=sse` (stream). Point
+  this at a Vertex AI endpoint to reach Gemini through Vertex once that
+  surface is exercised; the path shape is the documented seam.
+- `header_extras` (optional) -- provider-level extra request headers,
+  merged per the [header_extras merge](#header_extras-merge) rules.
+- `payload_extras` (optional) -- provider-level JSON merged into the
+  outbound request body. This is the flow-through path for knobs the
+  canonical schema does not carry natively -- notably `safetySettings`
+  and `generationConfig.topK`. Merged per the
+  [payload_extras merge](#payload_extras-merge) rules.
+- `user_agent` (optional) -- override the outbound `User-Agent`.
+
+Auth decision: Gemini auth is API-key only, via the `x-goog-api-key`
+header. Vertex AI / Google OAuth (ADC, service-account) is explicitly
+NOT implemented; it is reachable later by pointing `base_url` at a
+Vertex endpoint without a new provider kind.
+
 ## Per-provider capability filter (`unsupported_features`)
 
 Some upstreams reject specific built-in tool shapes (Bedrock, for

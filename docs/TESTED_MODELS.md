@@ -232,6 +232,61 @@ Wire-shape notes for the chatgpt-oauth surface:
 | `gpt-5.4-mini` | complete + stream | PASS | Faster/cheaper variant |
 | `gpt-5.4-mini` | complete (oauth://codex) | PASS | Bearer resolved through `OAuthStore` (tempdir credentials.json); ChatGPT account id auto-derived from the JWT `chatgpt_account_id` claim (no `account_id_ref`). Skipped when `OPENAI_OAUTH_ACCESS_TOKEN` is unset. |
 
+## Native Google Gemini (`kind = "gemini"`)
+
+Hits the public Gemini REST endpoint
+(`https://generativelanguage.googleapis.com/v1beta`) with an API key
+sent as the `x-goog-api-key` header. This exercises the native provider
+(`generateContent` / `streamGenerateContent`), NOT the openai-compat
+shim. Skipped unless `GEMINI_API_KEY` is set.
+
+Required env var for the live matrix:
+```bash
+export GEMINI_API_KEY=...   # Google AI Studio API key
+```
+
+Run the Gemini matrix:
+```bash
+cargo test -p routectl-cli --features live-integration --release \
+  --test live_matrix gemini -- --nocapture --test-threads=1
+```
+
+| Model | Mode | Notes |
+|---|---|---|
+| `gemini-2.5-flash` | complete + stream | Fast / cheap reference; thinkingConfig + usageMetadata exercised |
+| `gemini-2.5-pro` | complete + stream | Reasoning-capable; `thoughtsTokenCount` -> `reasoning_tokens`, `thoughtSignature` replay |
+
+Wire-shape notes for the native Gemini surface:
+
+- **systemInstruction**: canonical system content is lifted into the
+  native top-level `systemInstruction.parts` (no role), not a synthetic
+  `system`-role chat message.
+- **thinkingConfig**: canonical `reasoning` controls map to
+  `generationConfig.thinkingConfig` (explicit budget verbatim / effort
+  table / dynamic `-1`); `includeThoughts` follows `reasoning.exclude`.
+- **functionDeclarations**: tools emitted as native
+  `tools[].functionDeclarations[]`, not OpenAI `{type,function}` shape.
+- **usageMetadata**: `cachedContentTokenCount` ->
+  `cache_read_input_tokens`, `thoughtsTokenCount` -> `reasoning_tokens`.
+
+See [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#gemini-native-kind--gemini)
+for the full mapping and the before/after fidelity note.
+
+## Client x provider compatibility matrix
+
+Coverage = which call modes are reachable end-to-end through routectl.
+Fidelity = how faithfully the native wire shape is preserved on each
+provider's distinguishing features. PASS/flaky/skip statuses live in the
+per-provider tables above; this table is the at-a-glance summary.
+
+| Provider (`kind`) | Non-stream | Stream | Fidelity highlights |
+|---|---|---|---|
+| openai-compat | yes | yes | OpenAI Chat Completions wire shape; reasoning lifted per dialect |
+| anthropic-api | yes | yes | Native Messages blocks, thinking, cache_control, unified rate-limit headers |
+| bedrock (invoke + converse) | yes | yes | Anthropic body on InvokeModel; vendor-neutral Converse |
+| openai-responses | stream-only (`complete` force-streams) | yes | Flat Responses tool shape, encrypted_content reasoning replay |
+| **gemini (native)** | yes | yes | Full on the four named features: systemInstruction, thinkingConfig, functionDeclarations, usageMetadata cached-content + thoughts tokens |
+
 ## Adding a new model
 
 If you find a model not in the matrix that you want covered:

@@ -1565,6 +1565,26 @@ impl ProviderEntry {
         }
     }
 
+    /// Construct a `Gemini` entry with sane defaults. The only required
+    /// field is `api_key_ref` (resolved and sent as the `x-goog-api-key`
+    /// header); `base_url` defaults to the public v1beta endpoint and
+    /// everything else defaults to empty / `None`. Use `with_header_extras`
+    /// / `with_payload_extras` to populate the optional fields.
+    #[cfg(feature = "gemini")]
+    pub fn gemini(api_key_ref: impl Into<String>) -> Self {
+        Self::Gemini {
+            api_key_ref: api_key_ref.into(),
+            base_url: default_gemini_base(),
+            header_extras: BTreeMap::new(),
+            payload_extras: None,
+            user_agent: None,
+            cache_capability: None,
+            auto_emit_top_level_breakpoint: None,
+            reduction_enabled: None,
+            runtime: ProviderRuntimePolicy::default(),
+        }
+    }
+
     pub fn with_auth_kind(mut self, kind: AuthKind) -> Self {
         match &mut self {
             Self::AnthropicApi { auth_kind, .. } => *auth_kind = kind,
@@ -2116,6 +2136,8 @@ mod tests {
             ProviderEntry::openai_responses("literal:k").kind_str(),
             "openai-responses",
         );
+        #[cfg(feature = "gemini")]
+        assert_eq!(ProviderEntry::gemini("literal:k").kind_str(), "gemini",);
         #[cfg(feature = "bedrock")]
         {
             let bedrock = ProviderEntry::Bedrock {
@@ -2132,6 +2154,27 @@ mod tests {
                 runtime: Default::default(),
             };
             assert_eq!(bedrock.kind_str(), "bedrock");
+        }
+    }
+
+    #[cfg(feature = "gemini")]
+    #[test]
+    fn gemini_constructor_defaults() {
+        let entry = ProviderEntry::gemini("env://GEMINI_API_KEY");
+        assert_eq!(entry.kind_str(), "gemini");
+        assert_eq!(entry.api_key_ref(), Some("env://GEMINI_API_KEY"));
+        match entry {
+            ProviderEntry::Gemini {
+                base_url,
+                header_extras,
+                payload_extras,
+                ..
+            } => {
+                assert_eq!(base_url, "https://generativelanguage.googleapis.com/v1beta",);
+                assert!(header_extras.is_empty());
+                assert!(payload_extras.is_none());
+            }
+            other => panic!("expected Gemini entry; got {other:?}"),
         }
     }
 
