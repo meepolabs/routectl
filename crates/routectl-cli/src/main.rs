@@ -12,6 +12,7 @@
 //!            credentials store.
 //!   test     One-shot completion against an alias or model nickname.
 //!   config   Validate or print the resolved config.
+//!   pricing  Inspect or stamp the cache-economics pricing manifest.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -203,6 +204,11 @@ enum Cmd {
         #[arg(long = "k-calibration")]
         k_calibration: bool,
     },
+    /// Inspect or stamp the cache-economics pricing manifest.
+    Pricing {
+        #[command(subcommand)]
+        action: PricingCmd,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -213,6 +219,15 @@ enum ConfigCmd {
     Show,
     /// Print the example config to stdout.
     Example,
+}
+
+#[derive(Debug, Subcommand)]
+enum PricingCmd {
+    /// List the effective cache-economics pricing manifest.
+    List,
+    /// Stamp a baked pricing row verified as of today.
+    /// `selector` is `"provider_kind:model_glob"` (e.g. `openai-compat:grok-*`).
+    Verify { selector: String },
 }
 
 #[tokio::main]
@@ -376,6 +391,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Cmd::Pricing { action } => match action {
+            PricingCmd::List => {
+                let config = load_config(cli.config.as_deref())?;
+                if let Err(e) = commands::pricing::list(&config) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            PricingCmd::Verify { selector } => {
+                if let Err(e) = commands::pricing::verify(&selector) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
     }
 
     Ok(())
@@ -399,8 +429,10 @@ fn load_config(
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
 
-    let cfg: routectl_router::Config = toml::from_str(&text)
+    let mut cfg: routectl_router::Config = toml::from_str(&text)
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
+
+    commands::pricing::load_and_merge_verifications(&mut cfg);
 
     Ok(cfg)
 }
