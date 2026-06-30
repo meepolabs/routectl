@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use routectl_providers::anthropic_api::{AuthKind, CloakConfig};
+#[cfg(feature = "gemini")]
+use routectl_providers::gemini::GeminiAuthMode;
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use serde::{Deserialize, Serialize};
@@ -1198,7 +1200,12 @@ pub enum ProviderEntry {
     Gemini {
         /// Resolves to the Gemini API key (sent as `x-goog-api-key`).
         api_key_ref: String,
-        /// Endpoint base URL. Default: `https://generativelanguage.googleapis.com/v1beta`.
+        /// Endpoint base URL. Default (api-key mode):
+        /// `https://generativelanguage.googleapis.com/v1beta`. In
+        /// `cloud-code` mode the effective default is
+        /// `cloudcode-pa.googleapis.com`; leave this unset for cloud-code
+        /// unless targeting a test/staging host (it is only forwarded to
+        /// the provider when it differs from the public-surface default).
         #[serde(default = "default_gemini_base")]
         base_url: String,
         /// Provider-level header extras.
@@ -1210,6 +1217,13 @@ pub enum ProviderEntry {
         /// Override the outbound User-Agent.
         #[serde(default)]
         user_agent: Option<String>,
+        /// Selects the Gemini wire dialect. `api-key` (default) uses the
+        /// public `generativelanguage.googleapis.com` REST surface with the
+        /// `x-goog-api-key` header. `cloud-code` uses the Cloud Code
+        /// ("antigravity") surface with an OAuth bearer; in that mode
+        /// `api_key_ref` MUST be an `oauth://<provider>` reference.
+        #[serde(default)]
+        auth_mode: GeminiAuthMode,
         /// Operator override for this entry's prompt-cache capability.
         /// `None` -> use the conservative per-kind default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1578,6 +1592,7 @@ impl ProviderEntry {
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
+            auth_mode: GeminiAuthMode::default(),
             cache_capability: None,
             auto_emit_top_level_breakpoint: None,
             reduction_enabled: None,
@@ -1589,6 +1604,15 @@ impl ProviderEntry {
         match &mut self {
             Self::AnthropicApi { auth_kind, .. } => *auth_kind = kind,
             _ => panic!("ProviderEntry::with_auth_kind only applies to anthropic-api"),
+        }
+        self
+    }
+
+    #[cfg(feature = "gemini")]
+    pub fn with_gemini_auth_mode(mut self, mode: GeminiAuthMode) -> Self {
+        match &mut self {
+            Self::Gemini { auth_mode, .. } => *auth_mode = mode,
+            _ => panic!("ProviderEntry::with_gemini_auth_mode only applies to gemini"),
         }
         self
     }
@@ -1948,7 +1972,7 @@ fn default_anthropic_version() -> String {
 }
 
 #[cfg(feature = "gemini")]
-fn default_gemini_base() -> String {
+pub(crate) fn default_gemini_base() -> String {
     "https://generativelanguage.googleapis.com/v1beta".into()
 }
 
@@ -2113,6 +2137,8 @@ impl Default for RetryPolicy {
 #[cfg(test)]
 mod tests {
     use super::{CacheCapability, Config, ProviderEntry, ReductionConfig};
+    #[cfg(feature = "gemini")]
+    use routectl_providers::gemini::GeminiAuthMode;
 
     #[test]
     #[should_panic(expected = "with_anthropic_version")]
@@ -2173,6 +2199,43 @@ mod tests {
                 assert_eq!(base_url, "https://generativelanguage.googleapis.com/v1beta",);
                 assert!(header_extras.is_empty());
                 assert!(payload_extras.is_none());
+            }
+            other => panic!("expected Gemini entry; got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "gemini")]
+    #[test]
+    fn gemini_auth_mode_defaults_to_api_key_when_omitted() {
+        let toml_text = r#"
+[providers.gemini]
+kind = "gemini"
+api_key_ref = "env://GEMINI_API_KEY"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse omitted auth_mode");
+        let entry = cfg.providers.get("gemini").expect("gemini provider");
+        match entry {
+            ProviderEntry::Gemini { auth_mode, .. } => {
+                assert_eq!(*auth_mode, GeminiAuthMode::ApiKey);
+            }
+            other => panic!("expected Gemini entry; got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "gemini")]
+    #[test]
+    fn gemini_auth_mode_parses_cloud_code() {
+        let toml_text = r#"
+[providers.gemini]
+kind = "gemini"
+api_key_ref = "oauth://antigravity"
+auth_mode = "cloud-code"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse cloud-code auth_mode");
+        let entry = cfg.providers.get("gemini").expect("gemini provider");
+        match entry {
+            ProviderEntry::Gemini { auth_mode, .. } => {
+                assert_eq!(*auth_mode, GeminiAuthMode::CloudCode);
             }
             other => panic!("expected Gemini entry; got {other:?}"),
         }

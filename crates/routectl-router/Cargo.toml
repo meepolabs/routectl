@@ -41,3 +41,4 @@ url.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 serial_test = "3"
 tempfile = "3"
+wiremock.workspace = true

@@ -5,7 +5,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[cfg(feature = "gemini")]
+use routectl_auth::OAuthStoreProjectCache;
 use routectl_auth::{SecretRef, SecretStore};
+#[cfg(feature = "gemini")]
+use routectl_core::CloudProjectCache;
 use routectl_core::{Provider, Result};
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
 use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
@@ -19,7 +23,7 @@ use routectl_providers::openai_responses::{
 };
 
 #[cfg(feature = "gemini")]
-use routectl_providers::gemini::{GeminiConfig, GeminiProvider};
+use routectl_providers::gemini::{GeminiAuthMode, GeminiConfig, GeminiProvider};
 
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
@@ -411,21 +415,59 @@ async fn build_provider_inner(
             header_extras,
             payload_extras: _,
             user_agent,
+            auth_mode,
             cache_capability: _,
             auto_emit_top_level_breakpoint: _,
             reduction_enabled: _,
             runtime: _,
         } => {
-            validate_base_url_scheme(name, base_url)?;
-            let auth = resolve_token_source(&secrets, api_key_ref).await?;
-            let mut cfg = GeminiConfig::new_with_auth(format!("gemini:{name}"), auth);
-            cfg.base_url = base_url.clone();
-            cfg.header_extras = header_extras
+            let extras: Vec<(String, String)> = header_extras
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            cfg.user_agent = user_agent.clone();
-            Ok(Arc::new(GeminiProvider::new(cfg)))
+            match auth_mode {
+                GeminiAuthMode::ApiKey => {
+                    validate_base_url_scheme(name, base_url)?;
+                    let auth = resolve_token_source(&secrets, api_key_ref).await?;
+                    let mut cfg = GeminiConfig::new_with_auth(format!("gemini:{name}"), auth);
+                    cfg.base_url = base_url.clone();
+                    cfg.header_extras = extras;
+                    cfg.user_agent = user_agent.clone();
+                    Ok(Arc::new(GeminiProvider::new(cfg)))
+                }
+                GeminiAuthMode::CloudCode => {
+                    // The Cloud Code surface authenticates with a live OAuth
+                    // bearer, so validate the base-URL scheme before any token
+                    // can be attached to it (the api-key arm validates too; it
+                    // matters more here because the credential is a bearer).
+                    validate_base_url_scheme(name, base_url)?;
+                    let secret_ref = SecretRef::parse(api_key_ref).map_err(|e| {
+                        routectl_core::Error::Config(format!(
+                            "gemini provider `{name}`: auth_mode = \"cloud-code\" but api_key_ref (scheme `{}`) is not a valid secret URI: {e}",
+                            scheme_of(api_key_ref)
+                        ))
+                    })?;
+                    if !matches!(secret_ref, SecretRef::OAuth { .. }) {
+                        return Err(routectl_core::Error::Config(format!(
+                            "gemini provider `{name}`: auth_mode = \"cloud-code\" requires an oauth:// api_key_ref (got scheme `{}`); run `routectl login antigravity` and reference oauth://antigravity",
+                            scheme_of(api_key_ref)
+                        )));
+                    }
+                    let auth = resolve_token_source(&secrets, api_key_ref).await?;
+                    let project_cache: Arc<dyn CloudProjectCache> =
+                        Arc::new(OAuthStoreProjectCache::new(secrets.clone(), secret_ref));
+                    let mut cfg =
+                        GeminiConfig::new_cloud_code(format!("gemini:{name}"), auth, project_cache);
+                    if *base_url != crate::config::default_gemini_base() {
+                        cfg.base_url = base_url.clone();
+                    }
+                    if let Some(ua) = user_agent {
+                        cfg.user_agent = Some(ua.clone());
+                    }
+                    cfg.header_extras = extras;
+                    Ok(Arc::new(GeminiProvider::new(cfg)))
+                }
+            }
         }
     }
 }
@@ -3556,5 +3598,220 @@ mod validate_alias_patterns_tests {
     fn accepts_exact_and_trailing_star_keys() {
         let cfg = config_with_alias_keys(&["claude-opus-4-7-20251022", "claude-opus-*"]);
         validate_alias_patterns(&cfg).expect("clean alias keys must validate");
+    }
+}
+
+#[cfg(all(test, feature = "gemini"))]
+mod gemini_cloud_code_factory_tests {
+    //! Factory wiring for the Cloud Code ("antigravity") Gemini egress.
+    //! Covers the OAuth-ref guard, the CloudCode build path (driven
+    //! end-to-end against a mock so the `v1internal` surface is exercised),
+    //! and that the built config's Debug renders the auth field as
+    //! `[REDACTED]` rather than the underlying token source.
+
+    use super::*;
+    use crate::config::ProviderEntry;
+    use async_trait::async_trait;
+    use routectl_auth::{MemoryStore, SecretRef, SecretStore};
+    use routectl_core::{Error, MessageContent};
+    use std::sync::Arc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const CLOUD_CODE_TOKEN: &str = "ya29.test-bearer-do-not-log";
+
+    /// `SecretStore` stub that resolves any `oauth://` ref to a static
+    /// bearer token. Lets the factory build a real Cloud Code provider
+    /// whose `TokenSource` yields a usable token without a live OAuth
+    /// store. Non-oauth refs error so the static-ref guard test never
+    /// reaches this resolver.
+    struct OAuthTokenStub;
+
+    #[async_trait]
+    impl SecretStore for OAuthTokenStub {
+        async fn get(&self, secret_ref: &SecretRef) -> routectl_core::Result<String> {
+            match secret_ref {
+                SecretRef::OAuth { .. } => Ok(CLOUD_CODE_TOKEN.to_string()),
+                other => Err(Error::Auth(format!(
+                    "OAuthTokenStub only handles oauth://, got {other}"
+                ))),
+            }
+        }
+        async fn set(&self, _r: &SecretRef, _v: &str) -> routectl_core::Result<()> {
+            Ok(())
+        }
+        async fn delete(&self, _r: &SecretRef) -> routectl_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn cloud_code_entry(base_url: &str) -> ProviderEntry {
+        match ProviderEntry::gemini("oauth://antigravity")
+            .with_gemini_auth_mode(GeminiAuthMode::CloudCode)
+        {
+            ProviderEntry::Gemini {
+                api_key_ref,
+                header_extras,
+                payload_extras,
+                user_agent,
+                auth_mode,
+                cache_capability,
+                auto_emit_top_level_breakpoint,
+                reduction_enabled,
+                runtime,
+                ..
+            } => ProviderEntry::Gemini {
+                api_key_ref,
+                base_url: base_url.to_string(),
+                header_extras,
+                payload_extras,
+                user_agent,
+                auth_mode,
+                cache_capability,
+                auto_emit_top_level_breakpoint,
+                reduction_enabled,
+                runtime,
+            },
+            other => panic!("expected Gemini entry; got {other:?}"),
+        }
+    }
+
+    fn gemini_ok_response() -> serde_json::Value {
+        serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "pong"}], "role": "model"},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 1,
+                "totalTokenCount": 6
+            },
+            "modelVersion": "gemini-2.5-pro-001",
+            "responseId": "resp-abc"
+        })
+    }
+
+    fn base_req() -> routectl_core::ChatRequest {
+        routectl_core::ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![routectl_core::Message {
+                refusal: None,
+                role: routectl_core::Role::User,
+                content: MessageContent::Text("ping".into()),
+                reasoning: None,
+                reasoning_details: Vec::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            }],
+            max_tokens: Some(64),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_code_oauth_ref_builds_and_routes_v1internal() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1internal:loadCodeAssist"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({"cloudaicompanionProject": "proj-1"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1internal:generateContent"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({"response": gemini_ok_response()})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
+        let entry = cloud_code_entry(&server.uri());
+
+        let provider = build_provider("gemini-cc", &entry, secrets)
+            .await
+            .expect("cloud-code provider builds from oauth:// ref");
+
+        let resp = provider
+            .complete(base_req())
+            .await
+            .expect("complete routes through the Cloud Code v1internal surface");
+        match &resp.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "pong"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_code_static_ref_is_rejected() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry = ProviderEntry::gemini("env://GEMINI_API_KEY")
+            .with_gemini_auth_mode(GeminiAuthMode::CloudCode);
+
+        let err = match build_provider("gemini-cc", &entry, secrets).await {
+            Ok(_) => panic!("cloud-code mode must reject a non-oauth ref"),
+            Err(e) => e,
+        };
+        match err {
+            Error::Config(msg) => {
+                assert!(
+                    msg.contains("oauth"),
+                    "message must mention oauth; got: {msg}"
+                );
+            }
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_code_build_does_not_leak_token_in_debug() {
+        let secret_ref = SecretRef::parse("oauth://antigravity").expect("parse oauth ref");
+        let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
+        let auth = resolve_token_source(&secrets, "oauth://antigravity")
+            .await
+            .expect("token source resolves");
+        let project_cache: Arc<dyn CloudProjectCache> =
+            Arc::new(OAuthStoreProjectCache::new(secrets.clone(), secret_ref));
+        let cfg = GeminiConfig::new_cloud_code("gemini:gemini-cc", auth, project_cache);
+
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains(CLOUD_CODE_TOKEN),
+            "Debug must not leak the bearer token; got: {dbg}"
+        );
+        assert!(
+            dbg.contains("[REDACTED]"),
+            "Debug must mark the auth field redacted; got: {dbg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_code_rejects_disallowed_base_url_scheme() {
+        // The Cloud Code surface carries a live OAuth bearer, so a
+        // mistaken or hostile base_url must be rejected before any token
+        // can be sent to it. Build must fail on a non-http(s) scheme.
+        let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
+        let entry = cloud_code_entry("ftp://attacker.example");
+
+        let err = match build_provider("gemini-cc", &entry, secrets).await {
+            Ok(_) => panic!("cloud-code mode must reject a non-http(s) base_url"),
+            Err(e) => e,
+        };
+        match err {
+            Error::Config(msg) => assert!(
+                msg.contains("scheme") && msg.contains("not allowed"),
+                "expected a base_url scheme rejection; got: {msg}"
+            ),
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
     }
 }
