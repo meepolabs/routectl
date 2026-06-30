@@ -421,6 +421,48 @@ Net: the shim loses the system-prompt role distinction, all native
 thinking control, the exact tool schema, and the cache-read token
 count. Native gains all four, end to end.
 
+### Cloud Code (antigravity) egress mode (`auth_mode = "cloud-code"`)
+
+Setting `auth_mode = "cloud-code"` on a `gemini`-kind provider switches
+the egress from the API-key `generativelanguage` surface to the Cloud
+Code ("antigravity") surface. The inner Gemini request/response/SSE
+translation is REUSED UNCHANGED from the api-key path; only the
+transport wrapper, auth, base, and project resolution differ.
+
+**Auth model:** OAuth bearer, sent as `Authorization: Bearer <token>`
+(NOT `x-goog-api-key`). The bearer is resolved per request from an
+`oauth://antigravity` `api_key_ref`, so a refreshed token rotates in
+without a daemon restart. A one-time `routectl login antigravity` (live
+Google consent in a browser) mints the credential; the factory rejects
+any non-`oauth://` ref in this mode.
+
+**Base + path shape:** the base defaults to the `cloudcode-pa` endpoint
+and the provider appends the `v1internal` methods:
+
+- non-stream: `{base_url}/v1internal:generateContent`
+- stream:     `{base_url}/v1internal:streamGenerateContent`
+
+**Request envelope + response unwrap:** the inner Gemini request body is
+wrapped in a Cloud Code envelope `{project, request, model}` before
+send. On the response, the Cloud Code surface wraps the payload in a
+`response` field: routectl unwraps it on the non-stream body, and
+unwraps it per SSE chunk on the stream path, so downstream translation
+sees the same shape it would on the api-key path.
+
+**Project-id resolution:** the `project` field is resolved on first use
+via `loadCodeAssist`, falling back to `onboardUser` when loadCodeAssist
+does not yield a usable project. The resolved id is cached persistently
+in the OAuth credential record (`cloud_project_id`), so subsequent
+startups skip the resolution round trip. The onboarding calls carry the
+antigravity `User-Agent` and the Cloud Code control-plane headers.
+
+**Reused unchanged from the api-key path:** `thinkingConfig` budget
+mapping, `thoughtSignature` reasoning replay, `functionDeclarations`
+tool schema, structured-output (`responseMimeType` / `responseSchema`)
+mapping, and the `usageMetadata` cached-content + thoughts token
+accounting all behave identically -- the cloud-code mode only changes
+the outer transport.
+
 ## Cross-cutting timing notes
 
 ### `stream_first_byte_timeout_ms`

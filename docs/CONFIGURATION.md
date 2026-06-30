@@ -410,11 +410,44 @@ Fields:
   and `generationConfig.topK`. Merged per the
   [payload_extras merge](#payload_extras-merge) rules.
 - `user_agent` (optional) -- override the outbound `User-Agent`.
+- `auth_mode` (optional, default `"api-key"`) -- selects how the
+  provider authenticates:
+  - `"api-key"` (default) -- the API-key path described above:
+    `api_key_ref` resolves to a Google AI Studio key, sent as
+    `x-goog-api-key` against the `generativelanguage` base.
+  - `"cloud-code"` -- the Cloud Code ("antigravity") OAuth-bearer path:
+    `api_key_ref` MUST be an `oauth://` ref, the resolved bearer is sent
+    as `Authorization: Bearer` (NOT `x-goog-api-key`), and the base
+    defaults to the `cloudcode-pa` `/v1internal:*` endpoint. The Cloud
+    Code project id is auto-resolved on first use and cached in the
+    credential record. See the cloud-code stanza below and
+    [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#cloud-code-antigravity-egress-mode-auth_mode--cloud-code).
 
-Auth decision: Gemini auth is API-key only, via the `x-goog-api-key`
-header. Vertex AI / Google OAuth (ADC, service-account) is explicitly
-NOT implemented; it is reachable later by pointing `base_url` at a
-Vertex endpoint without a new provider kind.
+Cloud Code (OAuth) stanza:
+
+```toml
+[providers.gemini-cloud-code]
+kind        = "gemini"
+auth_mode   = "cloud-code"
+api_key_ref = "oauth://antigravity"
+# base_url defaults to the cloudcode-pa endpoint in cloud-code mode;
+# omit it. The Cloud Code project id is auto-resolved and persisted.
+
+[models.gemini-flash]
+provider = "gemini-cloud-code"
+upstream = "gemini-2.5-flash"
+```
+
+Auth decision: by default Gemini auth is API-key only, via the
+`x-goog-api-key` header. Setting `auth_mode = "cloud-code"` adds an
+OAuth-bearer path against the Cloud Code ("antigravity") surface: it
+requires a one-time `routectl login antigravity` (live Google consent in
+a browser) and an `oauth://antigravity` `api_key_ref`. In that mode the
+base defaults to the `cloudcode-pa` endpoint and the Cloud Code project
+id is auto-resolved (via loadCodeAssist, falling back to onboardUser) and
+cached in the credential record. Vertex AI / Google service-account ADC
+is still NOT implemented; it is reachable later by pointing `base_url` at
+a Vertex endpoint without a new provider kind.
 
 ## Per-provider capability filter (`unsupported_features`)
 
