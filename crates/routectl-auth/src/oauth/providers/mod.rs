@@ -11,6 +11,7 @@
 //! and need code-review discipline when they shift.
 
 pub(crate) mod anthropic;
+pub(crate) mod antigravity;
 pub(crate) mod codex;
 pub(crate) mod xai;
 
@@ -133,6 +134,7 @@ pub(crate) fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
         "anthropic" => Ok(&anthropic::Anthropic),
         "codex" => Ok(&codex::Codex),
         "xai" => Ok(&xai::Xai),
+        "antigravity" => Ok(&antigravity::Antigravity),
         other => Err(OAuthError::UnknownProvider(other.to_string())),
     }
 }
@@ -145,7 +147,7 @@ pub(crate) fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
 /// set in lockstep with the registry. The operator-visible "unknown oauth
 /// provider" text is built from `OAuthError::Display`.
 pub fn known_provider_ids() -> &'static [&'static str] {
-    &["anthropic", "codex", "xai"]
+    &["anthropic", "codex", "xai", "antigravity"]
 }
 
 /// Test-only re-exports for the integration tests under
