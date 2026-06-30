@@ -9,10 +9,11 @@ publish.workspace = true
 description = "Provider implementations for routectl."
 
 [features]
-default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses"]
+default = ["openai-compat", "anthropic-api", "bedrock", "openai-responses", "gemini"]
 "openai-compat" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:bytes", "dep:async-stream", "dep:tokio", "dep:regex"]
 "anthropic-api" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:uuid", "dep:async-stream", "dep:tokio", "dep:lru", "dep:base64", "dep:xxhash-rust"]
 "openai-responses" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio", "dep:cookie_store", "dep:reqwest_cookie_store", "dep:tempfile"]
+"gemini" = ["dep:reqwest", "dep:eventsource-stream", "dep:chrono", "dep:async-stream", "dep:uuid", "dep:tokio"]
 # Exposes test-only helpers (e.g. AnthropicApiProvider::seed_thinking_for_test)
 # that must not appear in production builds. Required when running integration
 # tests that pre-populate the thinking cache.

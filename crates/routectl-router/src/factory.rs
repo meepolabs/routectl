@@ -18,6 +18,9 @@ use routectl_providers::openai_responses::{
     AuthKind as OpenaiResponsesAuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
 };
 
+#[cfg(feature = "gemini")]
+use routectl_providers::gemini::{GeminiConfig, GeminiProvider};
+
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{Config, ProviderEntry};
@@ -401,6 +404,29 @@ async fn build_provider_inner(
             };
             Ok(Arc::new(BedrockProvider::new(cfg, resolved)))
         }
+        #[cfg(feature = "gemini")]
+        ProviderEntry::Gemini {
+            api_key_ref,
+            base_url,
+            header_extras,
+            payload_extras: _,
+            user_agent,
+            cache_capability: _,
+            auto_emit_top_level_breakpoint: _,
+            reduction_enabled: _,
+            runtime: _,
+        } => {
+            validate_base_url_scheme(name, base_url)?;
+            let auth = resolve_token_source(&secrets, api_key_ref).await?;
+            let mut cfg = GeminiConfig::new_with_auth(format!("gemini:{name}"), auth);
+            cfg.base_url = base_url.clone();
+            cfg.header_extras = header_extras
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            cfg.user_agent = user_agent.clone();
+            Ok(Arc::new(GeminiProvider::new(cfg)))
+        }
     }
 }
 
@@ -557,6 +583,8 @@ fn entry_with_api_key_ref(entry: &ProviderEntry, seat_uri: &str) -> Option<Provi
         ProviderEntry::AnthropicApi { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
         #[cfg(feature = "openai-responses")]
         ProviderEntry::OpenaiResponses { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
+        #[cfg(feature = "gemini")]
+        ProviderEntry::Gemini { api_key_ref, .. } => *api_key_ref = seat_uri.to_string(),
         #[cfg(feature = "bedrock")]
         ProviderEntry::Bedrock { .. } => return None,
     }

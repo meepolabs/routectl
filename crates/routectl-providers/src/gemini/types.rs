@@ -1,0 +1,255 @@
+//! Google Gemini REST API wire types.
+//!
+//! Request side: Serialize-only structs for the `generateContent` body.
+//! Response side: Deserialize-only structs for the `generateContent` response.
+//!
+//! Reference: <https://ai.google.dev/api/generate-content>
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+// ---------------------------------------------------------------------------
+// Request types
+// ---------------------------------------------------------------------------
+
+/// Top-level request body for `POST models/{model}:generateContent`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GenerateContentRequest {
+    pub(crate) contents: Vec<Content>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) system_instruction: Option<SystemInstruction>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tools: Option<Vec<GeminiTool>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_config: Option<ToolConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) generation_config: Option<GenerationConfig>,
+}
+
+/// A conversation turn: one or more `parts` attributed to a `role`.
+///
+/// Gemini's `systemInstruction` has no `role` field; use `SystemInstruction`
+/// for that. The `Content` type is only for `contents[]` entries.
+#[derive(Debug, Serialize)]
+pub(crate) struct Content {
+    pub(crate) role: String,
+    pub(crate) parts: Vec<Part>,
+}
+
+/// System prompt carrier. Gemini separates this from `contents[]` and
+/// forbids a `role` field on it -- only `parts` is sent.
+#[derive(Debug, Serialize)]
+pub(crate) struct SystemInstruction {
+    pub(crate) parts: Vec<Part>,
+}
+
+/// One part within a `Content`. Exactly one field is non-None per instance.
+///
+/// Slice-2 will add a `thought` variant for thinkingConfig reasoning.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Part {
+    /// Plain text content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text: Option<String>,
+
+    /// Inline binary data (images, audio, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) inline_data: Option<InlineData>,
+
+    /// Model-emitted tool call. Assistant turns carry these.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) function_call: Option<FunctionCallPart>,
+
+    /// Tool result returned in a user turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) function_response: Option<FunctionResponsePart>,
+    // TODO(slice-2): add `thought: Option<ThoughtPart>` here for thinkingConfig
+}
+
+/// Binary payload embedded directly in the request.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InlineData {
+    pub(crate) mime_type: String,
+    pub(crate) data: String,
+}
+
+/// A function invocation emitted by the model in an assistant turn.
+#[derive(Debug, Serialize)]
+pub(crate) struct FunctionCallPart {
+    pub(crate) name: String,
+    pub(crate) args: Value,
+}
+
+/// A tool result returned by the caller in a user turn.
+///
+/// Gemini convention: tool results come back as a user-turn
+/// `functionResponse` part (not a separate role). The `name` must match
+/// the `functionCall.name` from the preceding assistant turn.
+#[derive(Debug, Serialize)]
+pub(crate) struct FunctionResponsePart {
+    pub(crate) name: String,
+    pub(crate) response: Value,
+}
+
+/// Tool definitions supplied to the model.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GeminiTool {
+    pub(crate) function_declarations: Vec<FunctionDeclaration>,
+}
+
+/// One function the model may call.
+#[derive(Debug, Serialize)]
+pub(crate) struct FunctionDeclaration {
+    pub(crate) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parameters: Option<Value>,
+}
+
+/// Controls how the model invokes tools.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ToolConfig {
+    pub(crate) function_calling_config: FunctionCallingConfig,
+}
+
+/// Function-calling mode and optional name filter.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FunctionCallingConfig {
+    pub(crate) mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) allowed_function_names: Option<Vec<String>>,
+}
+
+/// Sampling / output-shape parameters.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) temperature: Option<f64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) top_p: Option<f64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) top_k: Option<f64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output_tokens: Option<u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) stop_sequences: Option<Vec<String>>,
+    // TODO(slice-2): add `thinking_config: Option<ThinkingConfig>` here
+}
+
+// ---------------------------------------------------------------------------
+// Response types
+// ---------------------------------------------------------------------------
+
+/// Top-level response from `generateContent`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GenerateContentResponse {
+    #[serde(default)]
+    pub(crate) candidates: Vec<Candidate>,
+
+    #[serde(default)]
+    pub(crate) usage_metadata: Option<UsageMetadata>,
+
+    /// Returned model id (may differ from the requested id when the model
+    /// was aliased or auto-upgraded by the API).
+    #[serde(default)]
+    pub(crate) model_version: Option<String>,
+
+    /// Unique response id. Used as the canonical `ChatResponse.id`.
+    #[serde(default)]
+    pub(crate) response_id: Option<String>,
+}
+
+/// One candidate in the response. Non-streaming responses have one.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Candidate {
+    pub(crate) content: Option<ResponseContent>,
+    pub(crate) finish_reason: Option<String>,
+    /// Candidate index. Consumed by the streaming path (slice 2); kept
+    /// for wire fidelity on the non-stream path.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) index: u32,
+}
+
+/// Content block inside a candidate.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResponseContent {
+    #[serde(default)]
+    pub(crate) parts: Vec<ResponsePart>,
+    /// Wire role ("model"). The canonical message is always emitted as
+    /// `Role::Assistant`, so this is retained for wire fidelity only.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) role: Option<String>,
+}
+
+/// One part in a candidate's content. A part carries exactly one data field.
+///
+/// Slice-2 will add a `thought` field for thinkingConfig reasoning.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResponsePart {
+    pub(crate) text: Option<String>,
+    pub(crate) function_call: Option<ResponseFunctionCall>,
+    // TODO(slice-2): add `thought: Option<bool>` to detect reasoning parts
+}
+
+/// A function call emitted by the model in the response.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResponseFunctionCall {
+    pub(crate) name: String,
+    /// JSON object of arguments. Gemini returns this as a raw JSON object,
+    /// not a serialized string -- we serialize to string for the canonical
+    /// ToolCall.function.arguments field.
+    #[serde(default)]
+    pub(crate) args: Value,
+}
+
+/// Token count breakdown from the response.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UsageMetadata {
+    #[serde(default)]
+    pub(crate) prompt_token_count: u32,
+
+    #[serde(default)]
+    pub(crate) candidates_token_count: u32,
+
+    #[serde(default)]
+    pub(crate) total_token_count: u32,
+
+    /// Tokens served from the context cache (implicit or explicit).
+    /// Maps to `cache_read_input_tokens` in the canonical Usage.
+    #[serde(default)]
+    pub(crate) cached_content_token_count: u32,
+
+    /// Reasoning tokens emitted by thinking-enabled models.
+    /// Maps to `reasoning_tokens` in the canonical Usage.
+    /// Slice-2 will surface these on the thinking path.
+    #[serde(default)]
+    pub(crate) thoughts_token_count: u32,
+
+    /// Tokens consumed by tool-use prompts (Gemini-internal). Parsed for
+    /// wire fidelity; not separately modeled in the canonical `Usage`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) tool_use_prompt_token_count: u32,
+}

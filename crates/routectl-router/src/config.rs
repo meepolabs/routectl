@@ -945,6 +945,10 @@ impl CacheCapability {
             // OpenAI auto-caches server-side; there is no explicit
             // breakpoint to emit, but `cached_tokens` IS reported back.
             "openai-responses" => Self::new(false, true),
+            // Gemini has implicit prefix caching (automatic, free writes)
+            // and explicit context caching. No top-level breakpoint to
+            // emit, but `cachedContentTokenCount` is reported back.
+            "gemini" => Self::new(false, true),
             // openai-compat and every unknown kind: emit nothing.
             _ => Self::new(false, false),
         }
@@ -1188,6 +1192,43 @@ pub enum ProviderEntry {
         #[serde(default, flatten)]
         runtime: ProviderRuntimePolicy,
     },
+    /// Native Google Gemini provider (REST v1beta `generateContent`).
+    #[cfg(feature = "gemini")]
+    #[non_exhaustive]
+    Gemini {
+        /// Resolves to the Gemini API key (sent as `x-goog-api-key`).
+        api_key_ref: String,
+        /// Endpoint base URL. Default: `https://generativelanguage.googleapis.com/v1beta`.
+        #[serde(default = "default_gemini_base")]
+        base_url: String,
+        /// Provider-level header extras.
+        #[serde(default)]
+        header_extras: BTreeMap<String, String>,
+        /// Provider-level payload extras.
+        #[serde(default)]
+        payload_extras: Option<Value>,
+        /// Override the outbound User-Agent.
+        #[serde(default)]
+        user_agent: Option<String>,
+        /// Operator override for this entry's prompt-cache capability.
+        /// `None` -> use the conservative per-kind default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_capability: Option<CacheCapability>,
+        /// Per-provider override for dispatch-path auto-emission of a
+        /// top-level `cache_control` breakpoint. `None` inherits the
+        /// global `[cache]` switch; `Some(false)` disables auto-emit for
+        /// this provider. Cache policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_emit_top_level_breakpoint: Option<bool>,
+        /// Per-provider override for the dispatch-path token-reduction
+        /// feature. `None` inherits the global `[reduction]` switch;
+        /// `Some(false)` disables reduction for this provider. Reduction
+        /// policy, not a runtime/rate knob.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reduction_enabled: Option<bool>,
+        #[serde(default, flatten)]
+        runtime: ProviderRuntimePolicy,
+    },
 }
 
 /// TOML-side mirror of `routectl_providers::bedrock::BedrockApiShape`.
@@ -1261,6 +1302,8 @@ impl ProviderEntry {
             Self::Bedrock { .. } => "bedrock",
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses { .. } => "openai-responses",
+            #[cfg(feature = "gemini")]
+            Self::Gemini { .. } => "gemini",
         }
     }
 
@@ -1276,6 +1319,8 @@ impl ProviderEntry {
             Self::OpenaiResponses { api_key_ref, .. } => Some(api_key_ref),
             #[cfg(feature = "bedrock")]
             Self::Bedrock { .. } => None,
+            #[cfg(feature = "gemini")]
+            Self::Gemini { api_key_ref, .. } => Some(api_key_ref),
         }
     }
 
@@ -1288,6 +1333,8 @@ impl ProviderEntry {
             Self::Bedrock { runtime, .. } => runtime,
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses { runtime, .. } => runtime,
+            #[cfg(feature = "gemini")]
+            Self::Gemini { runtime, .. } => runtime,
         }
     }
 
@@ -1302,6 +1349,8 @@ impl ProviderEntry {
             Self::Bedrock { header_extras, .. } => header_extras,
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses { header_extras, .. } => header_extras,
+            #[cfg(feature = "gemini")]
+            Self::Gemini { header_extras, .. } => header_extras,
         }
     }
 
@@ -1316,6 +1365,8 @@ impl ProviderEntry {
             Self::Bedrock { payload_extras, .. } => payload_extras.as_ref(),
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses { payload_extras, .. } => payload_extras.as_ref(),
+            #[cfg(feature = "gemini")]
+            Self::Gemini { payload_extras, .. } => payload_extras.as_ref(),
         }
     }
 
@@ -1385,6 +1436,10 @@ impl ProviderEntry {
             Self::OpenaiResponses {
                 cache_capability, ..
             } => cache_capability,
+            #[cfg(feature = "gemini")]
+            Self::Gemini {
+                cache_capability, ..
+            } => cache_capability,
         };
         override_value.unwrap_or_else(|| CacheCapability::for_provider_kind(self.kind_str()))
     }
@@ -1414,6 +1469,11 @@ impl ProviderEntry {
                 auto_emit_top_level_breakpoint,
                 ..
             } => *auto_emit_top_level_breakpoint,
+            #[cfg(feature = "gemini")]
+            Self::Gemini {
+                auto_emit_top_level_breakpoint,
+                ..
+            } => *auto_emit_top_level_breakpoint,
         }
     }
 
@@ -1440,6 +1500,10 @@ impl ProviderEntry {
             } => *reduction_enabled,
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses {
+                reduction_enabled, ..
+            } => *reduction_enabled,
+            #[cfg(feature = "gemini")]
+            Self::Gemini {
                 reduction_enabled, ..
             } => *reduction_enabled,
         }
@@ -1566,6 +1630,8 @@ impl ProviderEntry {
             Self::Bedrock { runtime, .. } => *runtime = rt,
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses { runtime, .. } => *runtime = rt,
+            #[cfg(feature = "gemini")]
+            Self::Gemini { runtime, .. } => *runtime = rt,
         }
         self
     }
@@ -1578,6 +1644,8 @@ impl ProviderEntry {
             Self::Bedrock { header_extras, .. } => *header_extras = headers,
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses { header_extras, .. } => *header_extras = headers,
+            #[cfg(feature = "gemini")]
+            Self::Gemini { header_extras, .. } => *header_extras = headers,
         }
         self
     }
@@ -1591,6 +1659,8 @@ impl ProviderEntry {
             Self::Bedrock { payload_extras, .. } => *payload_extras = slot,
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses { payload_extras, .. } => *payload_extras = slot,
+            #[cfg(feature = "gemini")]
+            Self::Gemini { payload_extras, .. } => *payload_extras = slot,
         }
         self
     }
@@ -1670,6 +1740,10 @@ impl ProviderEntry {
                     *a = redact_literal_secret(a);
                 }
             }
+            #[cfg(feature = "gemini")]
+            Self::Gemini { api_key_ref, .. } => {
+                *api_key_ref = redact_literal_secret(api_key_ref);
+            }
         }
     }
 
@@ -1692,6 +1766,8 @@ impl ProviderEntry {
                 }
                 v
             }
+            #[cfg(feature = "gemini")]
+            Self::Gemini { api_key_ref, .. } => vec![api_key_ref.as_str()],
         }
     }
 }
@@ -1849,6 +1925,11 @@ fn default_anthropic_base() -> String {
 
 fn default_anthropic_version() -> String {
     "2023-06-01".into()
+}
+
+#[cfg(feature = "gemini")]
+fn default_gemini_base() -> String {
+    "https://generativelanguage.googleapis.com/v1beta".into()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2161,6 +2242,12 @@ forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
         assert!(!responses.supports_top_level_cache_control);
         assert!(responses.cache_hit_observable);
 
+        // Gemini: implicit + explicit context caching; no top-level
+        // breakpoint to emit, but cachedContentTokenCount is reported.
+        let gemini = CacheCapability::for_provider_kind("gemini");
+        assert!(!gemini.supports_top_level_cache_control);
+        assert!(gemini.cache_hit_observable);
+
         let compat = CacheCapability::for_provider_kind("openai-compat");
         assert!(!compat.supports_top_level_cache_control);
         assert!(!compat.cache_hit_observable);
@@ -2169,6 +2256,80 @@ forward_client_headers = ["x-claude-code-session-id", "x-claude-code-agent-id"]
         let unknown = CacheCapability::for_provider_kind("some-future-kind");
         assert!(!unknown.supports_top_level_cache_control);
         assert!(!unknown.cache_hit_observable);
+    }
+
+    #[cfg(feature = "gemini")]
+    #[test]
+    fn gemini_provider_entry_parses_and_exposes_secret_uri() {
+        // Minimal: only api_key_ref -> base_url defaults to v1beta.
+        let toml_text = r#"
+[providers.g]
+kind = "gemini"
+api_key_ref = "literal:test-key"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse minimal");
+        match cfg.providers.get("g").expect("gemini provider") {
+            ProviderEntry::Gemini {
+                api_key_ref,
+                base_url,
+                ..
+            } => {
+                assert_eq!(api_key_ref, "literal:test-key");
+                assert_eq!(
+                    base_url, "https://generativelanguage.googleapis.com/v1beta",
+                    "base_url must default to the v1beta endpoint"
+                );
+            }
+            other => panic!("expected Gemini entry; got {other:?}"),
+        }
+
+        // Explicit base_url + header_extras.
+        let toml_text = r#"
+[providers.g]
+kind = "gemini"
+api_key_ref = "env://GEMINI_API_KEY"
+base_url = "https://example.test/v1beta"
+
+[providers.g.header_extras]
+x-custom = "v"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse explicit");
+        let entry = cfg.providers.get("g").expect("gemini provider");
+        match entry {
+            ProviderEntry::Gemini {
+                base_url,
+                header_extras,
+                ..
+            } => {
+                assert_eq!(base_url, "https://example.test/v1beta");
+                assert_eq!(header_extras.get("x-custom").map(String::as_str), Some("v"));
+            }
+            other => panic!("expected Gemini entry; got {other:?}"),
+        }
+
+        // kind discriminator + secret enumeration / redaction contract.
+        assert_eq!(entry.kind_str(), "gemini");
+        assert_eq!(entry.secret_uris(), vec!["env://GEMINI_API_KEY"]);
+    }
+
+    #[cfg(feature = "gemini")]
+    #[test]
+    fn gemini_redact_secrets_masks_literal_api_key() {
+        let toml_text = r#"
+[providers.g]
+kind = "gemini"
+api_key_ref = "literal:super-secret"
+"#;
+        let mut cfg: Config = toml::from_str(toml_text).expect("parse");
+        let entry = cfg.providers.get_mut("g").expect("gemini provider");
+        entry.redact_secrets();
+        match entry {
+            ProviderEntry::Gemini { api_key_ref, .. } => assert!(
+                !api_key_ref.contains("super-secret"),
+                "literal key must be redacted; got: {api_key_ref}"
+            ),
+            other => panic!("expected Gemini entry; got {other:?}"),
+        }
     }
 
     #[test]

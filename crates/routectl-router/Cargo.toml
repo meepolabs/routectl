@@ -9,13 +9,16 @@ publish.workspace = true
 description = "Fallback chains, retries, and alias resolution for routectl."
 
 [features]
-default = ["bedrock", "openai-responses"]
+default = ["bedrock", "openai-responses", "gemini"]
 # Forward the providers crate's `bedrock` feature so the router can
 # build BedrockProvider instances when this is enabled.
 bedrock = ["routectl-providers/bedrock"]
 # Forward the providers crate's `openai-responses` feature so the router
 # can build OpenAiResponsesProvider instances when this is enabled.
 "openai-responses" = ["routectl-providers/openai-responses"]
+# Forward the providers crate's `gemini` feature so the router can
+# build GeminiProvider instances when this is enabled.
+"gemini" = ["routectl-providers/gemini"]
 
 [dependencies]
 routectl-core.workspace = true
