@@ -12,14 +12,15 @@
 
 use serde_json::Value;
 
-use routectl_core::{ChatRequest, Result};
+use routectl_core::{ChatRequest, ReasoningDetail, Result};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
 use super::types::{
     Content, FunctionCallPart, FunctionCallingConfig, FunctionDeclaration, FunctionResponsePart,
     GeminiTool, GenerateContentRequest, GenerationConfig, InlineData, Part, SystemInstruction,
-    ToolConfig,
+    ThinkingConfig, ToolConfig,
 };
+use super::GEMINI_FORMAT;
 
 /// Build a `GenerateContentRequest` from a canonical `ChatRequest`.
 ///
@@ -109,7 +110,12 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                 }
             }
             Role::Assistant => {
-                let mut parts = content_to_parts(provider_id, &msg.content)?;
+                // Reasoning replay: Gemini-origin thinking is echoed back
+                // as thought parts (carrying the thoughtSignature) ahead of
+                // the visible output, so the model can continue its prior
+                // chain-of-thought. Foreign-provider reasoning is skipped.
+                let mut parts = reasoning_details_to_thought_parts(&msg.reasoning_details);
+                parts.extend(content_to_parts(provider_id, &msg.content)?);
                 // Assistant tool_calls -> functionCall parts.
                 if let Some(tool_calls_raw) = &msg.tool_calls {
                     for tc in tool_calls_raw {
@@ -143,15 +149,10 @@ fn build_contents(provider_id: &str, req: &ChatRequest) -> Result<Vec<Content>> 
                 };
                 contents.push(Content {
                     role: "user".into(),
-                    parts: vec![Part {
-                        text: None,
-                        inline_data: None,
-                        function_call: None,
-                        function_response: Some(FunctionResponsePart {
-                            name: tool_name,
-                            response: response_content,
-                        }),
-                    }],
+                    parts: vec![function_response_part(FunctionResponsePart {
+                        name: tool_name,
+                        response: response_content,
+                    })],
                 });
             }
         }
@@ -199,15 +200,10 @@ fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                Ok(Some(Part {
-                    text: None,
-                    inline_data: Some(InlineData {
-                        mime_type: mime,
-                        data,
-                    }),
-                    function_call: None,
-                    function_response: None,
-                }))
+                Ok(Some(inline_data_part(InlineData {
+                    mime_type: mime,
+                    data,
+                })))
             }
             KnownContentPart::ImageUrl { image_url, .. } => {
                 // OpenAI image_url: {url} -- Gemini inlineData needs base64.
@@ -224,15 +220,10 @@ fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<
                         let mime = &stripped[..semi];
                         let rest = &stripped[semi + 1..];
                         if let Some(b64) = rest.strip_prefix("base64,") {
-                            return Ok(Some(Part {
-                                text: None,
-                                inline_data: Some(InlineData {
-                                    mime_type: mime.to_string(),
-                                    data: b64.to_string(),
-                                }),
-                                function_call: None,
-                                function_response: None,
-                            }));
+                            return Ok(Some(inline_data_part(InlineData {
+                                mime_type: mime.to_string(),
+                                data: b64.to_string(),
+                            })));
                         }
                     }
                 }
@@ -243,15 +234,10 @@ fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<
                 id: _, name, input, ..
             } => {
                 // Assistant ToolUse block -> functionCall part.
-                Ok(Some(Part {
-                    text: None,
-                    inline_data: None,
-                    function_call: Some(FunctionCallPart {
-                        name: name.clone(),
-                        args: input.clone(),
-                    }),
-                    function_response: None,
-                }))
+                Ok(Some(function_call_part(FunctionCallPart {
+                    name: name.clone(),
+                    args: input.clone(),
+                })))
             }
             KnownContentPart::ToolResult {
                 content,
@@ -260,20 +246,20 @@ fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<
             } => {
                 // ToolResult in a parts array -> treat as functionResponse.
                 // We carry the content as the response body.
-                Ok(Some(Part {
-                    text: None,
-                    inline_data: None,
-                    function_call: None,
-                    function_response: Some(FunctionResponsePart {
-                        name: String::new(),
-                        response: content.clone(),
-                    }),
-                }))
+                Ok(Some(function_response_part(FunctionResponsePart {
+                    name: String::new(),
+                    response: content.clone(),
+                })))
             }
-            KnownContentPart::Thinking { thinking, .. } => {
-                // Reasoning content: pass as text in this slice.
-                // TODO(slice-2): emit as thought=true Part once thinkingConfig is wired.
-                Ok(Some(text_part(thinking.clone())))
+            KnownContentPart::Thinking {
+                thinking,
+                signature,
+            } => {
+                // Assistant reasoning replayed back as a thought part so
+                // the model can continue its chain-of-thought. The
+                // signature is Gemini's `thoughtSignature` from a prior
+                // turn (when this reasoning originated from Gemini).
+                Ok(Some(thought_part(thinking.clone(), signature.clone())))
             }
             KnownContentPart::RedactedThinking { .. } => {
                 // Redacted blocks have no text we can forward; drop silently.
@@ -292,15 +278,10 @@ fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let mime = mime_from_filename(filename);
-                Ok(Some(Part {
-                    text: None,
-                    inline_data: Some(InlineData {
-                        mime_type: mime.to_string(),
-                        data: data.to_string(),
-                    }),
-                    function_call: None,
-                    function_response: None,
-                }))
+                Ok(Some(inline_data_part(InlineData {
+                    mime_type: mime.to_string(),
+                    data: data.to_string(),
+                })))
             }
             KnownContentPart::Document { source, .. } => {
                 // Anthropic document: extract text or base64.
@@ -316,15 +297,10 @@ fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<
                     .get("media_type")
                     .and_then(Value::as_str)
                     .unwrap_or("application/pdf");
-                Ok(Some(Part {
-                    text: None,
-                    inline_data: Some(InlineData {
-                        mime_type: mime.to_string(),
-                        data: data.to_string(),
-                    }),
-                    function_call: None,
-                    function_response: None,
-                }))
+                Ok(Some(inline_data_part(InlineData {
+                    mime_type: mime.to_string(),
+                    data: data.to_string(),
+                })))
             }
         },
         ContentPart::Other {
@@ -382,12 +358,7 @@ fn tool_call_to_function_call_part(provider_id: &str, tc: &Value) -> Result<Opti
         );
         serde_json::json!({})
     });
-    Ok(Some(Part {
-        text: None,
-        inline_data: None,
-        function_call: Some(FunctionCallPart { name, args }),
-        function_response: None,
-    }))
+    Ok(Some(function_call_part(FunctionCallPart { name, args })))
 }
 
 // ---------------------------------------------------------------------------
@@ -489,10 +460,15 @@ fn build_tool_config(tool_choice: Option<&Value>) -> Option<ToolConfig> {
 // ---------------------------------------------------------------------------
 
 fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
+    let thinking_config = build_thinking_config(req);
+    let (response_mime_type, response_schema) = build_response_format(req);
+
     let has_any = req.temperature.is_some()
         || req.top_p.is_some()
         || req.max_tokens.is_some()
-        || req.stop.is_some();
+        || req.stop.is_some()
+        || thinking_config.is_some()
+        || response_mime_type.is_some();
 
     if !has_any {
         return None;
@@ -505,7 +481,71 @@ fn build_generation_config(req: &ChatRequest) -> Option<GenerationConfig> {
         top_k: None,
         max_output_tokens: req.max_tokens,
         stop_sequences: req.stop.clone(),
+        response_mime_type,
+        response_schema,
+        thinking_config,
     })
+}
+
+/// Dynamic-budget sentinel: tells Gemini to size the thinking budget
+/// itself. Used when reasoning is enabled without an explicit budget or
+/// effort level.
+const THINKING_BUDGET_DYNAMIC: i32 = -1;
+
+/// Map the canonical `reasoning` controls to Gemini's `thinkingConfig`.
+///
+///   - `enabled: Some(false)`         -> None (reasoning explicitly off)
+///   - explicit `max_tokens` (budget) -> that budget verbatim
+///   - explicit `effort`              -> budget via the effort table
+///   - reasoning present otherwise    -> dynamic budget (-1)
+///
+/// `include_thoughts` is true whenever thinking is on and not excluded,
+/// so thought summaries stream back and map to canonical reasoning.
+fn build_thinking_config(req: &ChatRequest) -> Option<ThinkingConfig> {
+    let reasoning = req.reasoning.as_ref()?;
+    if reasoning.enabled == Some(false) {
+        return None;
+    }
+
+    let thinking_budget = if let Some(budget) = reasoning.max_tokens {
+        Some(budget as i32)
+    } else if let Some(effort) = reasoning.effort.as_deref() {
+        crate::effort::budget_from_level(effort).map(|b| b as i32)
+    } else {
+        Some(THINKING_BUDGET_DYNAMIC)
+    };
+
+    let include_thoughts = reasoning.exclude != Some(true);
+
+    Some(ThinkingConfig {
+        thinking_budget,
+        include_thoughts: Some(include_thoughts),
+    })
+}
+
+/// Map the canonical OpenAI-shape `response_format` to Gemini's
+/// `responseMimeType` + `responseSchema`. Returns `(mime, schema)`:
+///
+/// - `{type:"json_schema", json_schema:{schema}}` -> `("application/json", Some(schema))`
+/// - `{type:"json_object"}` -> `("application/json", None)`
+/// - anything else / absent -> `(None, None)`
+fn build_response_format(req: &ChatRequest) -> (Option<String>, Option<Value>) {
+    let format = match req.response_format.as_ref() {
+        Some(f) => f,
+        None => return (None, None),
+    };
+    let kind = format.get("type").and_then(Value::as_str);
+    match kind {
+        Some("json_schema") => {
+            let schema = format
+                .get("json_schema")
+                .and_then(|js| js.get("schema"))
+                .cloned();
+            (Some("application/json".to_string()), schema)
+        }
+        Some("json_object") => (Some("application/json".to_string()), None),
+        _ => (None, None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +558,101 @@ fn text_part(text: String) -> Part {
         inline_data: None,
         function_call: None,
         function_response: None,
+        thought: None,
+        thought_signature: None,
+    }
+}
+
+/// A thinking part replayed back to the model on a follow-up turn. The
+/// `signature` is the opaque `thoughtSignature` Gemini handed back on a
+/// prior turn; the text is the reasoning summary.
+fn thought_part(text: String, signature: Option<String>) -> Part {
+    Part {
+        text: Some(text),
+        inline_data: None,
+        function_call: None,
+        function_response: None,
+        thought: Some(true),
+        thought_signature: signature,
+    }
+}
+
+fn inline_data_part(inline_data: InlineData) -> Part {
+    Part {
+        text: None,
+        inline_data: Some(inline_data),
+        function_call: None,
+        function_response: None,
+        thought: None,
+        thought_signature: None,
+    }
+}
+
+fn function_call_part(call: FunctionCallPart) -> Part {
+    Part {
+        text: None,
+        inline_data: None,
+        function_call: Some(call),
+        function_response: None,
+        thought: None,
+        thought_signature: None,
+    }
+}
+
+fn function_response_part(response: FunctionResponsePart) -> Part {
+    Part {
+        text: None,
+        inline_data: None,
+        function_call: None,
+        function_response: Some(response),
+        thought: None,
+        thought_signature: None,
+    }
+}
+
+/// Replay assistant reasoning_details as Gemini thought parts. Only
+/// details tagged with `GEMINI_FORMAT` are echoed back: their
+/// `payload.text` is the thinking summary and `payload.thought_signature`
+/// is the opaque token Gemini requires verbatim for chain-of-thought
+/// continuity. Foreign-provider reasoning (e.g. Anthropic, OpenAI) is
+/// skipped -- replaying it without a matching Gemini signature would not
+/// continue the model's reasoning and risks an upstream reject.
+fn reasoning_details_to_thought_parts(details: &[ReasoningDetail]) -> Vec<Part> {
+    details
+        .iter()
+        .filter(|d| d.format.as_deref() == Some(GEMINI_FORMAT))
+        .filter_map(|d| {
+            let text = d.payload.get("text").and_then(Value::as_str)?;
+            let signature = d
+                .payload
+                .get("thought_signature")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            Some(thought_part(text.to_string(), signature))
+        })
+        .collect()
+}
+
+/// Shallow-merge canonical `provider_extras` (the router's dispatch-time
+/// merge of provider + model `payload_extras`) into the outgoing Gemini
+/// body so operator-supplied knobs like `safetySettings`, `topK`, or
+/// extra `generationConfig` fields reach the wire. Entries that collide
+/// with a routectl-managed canonical key are dropped with a WARN so an
+/// operator cannot clobber the assembled `contents` / `tools` / etc.
+pub(crate) fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value) {
+    let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) else {
+        return;
+    };
+    for (k, v) in extra_obj {
+        if routectl_core::is_canonical_request_key(k) {
+            tracing::warn!(
+                provider = %provider_id,
+                key = %k,
+                "gemini: payload_extras attempted to override routectl-managed key; dropped"
+            );
+            continue;
+        }
+        body_obj.insert(k.clone(), v.clone());
     }
 }
 
@@ -771,5 +906,189 @@ mod tests {
             gc.stop_sequences.as_deref(),
             Some(["END".to_string()].as_slice())
         );
+    }
+
+    fn req_with_reasoning(r: routectl_core::ReasoningConfig) -> ChatRequest {
+        ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")],
+            reasoning: Some(r),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn thinking_config_from_effort_uses_budget_table() {
+        let req = req_with_reasoning(routectl_core::ReasoningConfig {
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        let tc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .thinking_config
+            .expect("thinking_config");
+        // "high" -> 24576 from the shared effort table.
+        assert_eq!(tc.thinking_budget, Some(24576));
+        assert_eq!(tc.include_thoughts, Some(true));
+    }
+
+    #[test]
+    fn thinking_config_from_explicit_budget() {
+        let req = req_with_reasoning(routectl_core::ReasoningConfig {
+            max_tokens: Some(2048),
+            ..Default::default()
+        });
+        let tc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .thinking_config
+            .expect("thinking_config");
+        assert_eq!(tc.thinking_budget, Some(2048));
+    }
+
+    #[test]
+    fn thinking_disabled_when_reasoning_enabled_false() {
+        let req = req_with_reasoning(routectl_core::ReasoningConfig {
+            enabled: Some(false),
+            ..Default::default()
+        });
+        // No other generationConfig knobs set -> the whole block is None.
+        assert!(translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .is_none());
+    }
+
+    #[test]
+    fn thinking_exclude_sets_include_thoughts_false() {
+        let req = req_with_reasoning(routectl_core::ReasoningConfig {
+            max_tokens: Some(100),
+            exclude: Some(true),
+            ..Default::default()
+        });
+        let tc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config")
+            .thinking_config
+            .expect("thinking_config");
+        assert_eq!(tc.include_thoughts, Some(false));
+    }
+
+    #[test]
+    fn response_format_json_schema_maps_to_response_schema() {
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")],
+            response_format: Some(json!({
+                "type": "json_schema",
+                "json_schema": {"schema": {"type": "object", "properties": {}}}
+            })),
+            ..Default::default()
+        };
+        let gc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config");
+        assert_eq!(gc.response_mime_type.as_deref(), Some("application/json"));
+        assert_eq!(gc.response_schema.expect("schema")["type"], "object");
+    }
+
+    #[test]
+    fn response_format_json_object_sets_mime_without_schema() {
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")],
+            response_format: Some(json!({"type": "json_object"})),
+            ..Default::default()
+        };
+        let gc = translate("gemini:test", &req)
+            .expect("translate")
+            .generation_config
+            .expect("generation_config");
+        assert_eq!(gc.response_mime_type.as_deref(), Some("application/json"));
+        assert!(gc.response_schema.is_none());
+    }
+
+    #[test]
+    fn gemini_reasoning_details_replayed_as_thought_parts() {
+        // One Gemini-origin detail (replayed) + one foreign detail (skipped).
+        let assistant = Message {
+            role: Role::Assistant,
+            content: MessageContent::Text("the answer".into()),
+            refusal: None,
+            reasoning: None,
+            reasoning_details: vec![
+                routectl_core::ReasoningDetail {
+                    kind: routectl_core::ReasoningDetailKind::Text,
+                    id: None,
+                    format: Some(crate::gemini::GEMINI_FORMAT.to_string()),
+                    index: Some(0),
+                    payload: json!({"text": "prior thought", "thought_signature": "sig9"}),
+                },
+                routectl_core::ReasoningDetail {
+                    kind: routectl_core::ReasoningDetailKind::Text,
+                    id: None,
+                    format: Some("anthropic-v1".to_string()),
+                    index: Some(0),
+                    payload: json!({"text": "foreign reasoning"}),
+                },
+            ],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+        let req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("q"), assistant],
+            ..Default::default()
+        };
+        let body = translate("gemini:test", &req).expect("translate");
+        let model_turn = body
+            .contents
+            .iter()
+            .find(|c| c.role == "model")
+            .expect("model turn");
+        let thoughts: Vec<&Part> = model_turn
+            .parts
+            .iter()
+            .filter(|p| p.thought == Some(true))
+            .collect();
+        assert_eq!(thoughts.len(), 1, "only the Gemini-origin detail replays");
+        assert_eq!(thoughts[0].text.as_deref(), Some("prior thought"));
+        assert_eq!(thoughts[0].thought_signature.as_deref(), Some("sig9"));
+        // The thought part precedes the visible answer text.
+        assert_eq!(
+            model_turn.parts.last().unwrap().text.as_deref(),
+            Some("the answer")
+        );
+    }
+
+    #[test]
+    fn payload_extras_merges_non_canonical_key() {
+        let mut body = json!({"contents": []});
+        let extras = json!({"safetySettings": [{"category": "HARM_CATEGORY_HATE_SPEECH"}]});
+        merge_payload_extras("gemini:test", &mut body, &extras);
+        assert!(
+            body.get("safetySettings").is_some(),
+            "safetySettings must merge in"
+        );
+    }
+
+    #[test]
+    fn payload_extras_drops_canonical_managed_key() {
+        // `tools` is a routectl-managed canonical key (and a real Gemini
+        // body key) -- payload_extras must not be allowed to clobber it.
+        let mut body = json!({"contents": [], "tools": [{"functionDeclarations": []}]});
+        let extras = json!({"tools": "operator-clobber", "safetySettings": []});
+        merge_payload_extras("gemini:test", &mut body, &extras);
+        assert!(
+            body["tools"].is_array(),
+            "assembled tools must be preserved"
+        );
+        assert!(body.get("safetySettings").is_some());
     }
 }

@@ -49,12 +49,11 @@ pub(crate) struct SystemInstruction {
 }
 
 /// One part within a `Content`. Exactly one field is non-None per instance.
-///
-/// Slice-2 will add a `thought` variant for thinkingConfig reasoning.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Part {
-    /// Plain text content.
+    /// Plain text content. When `thought` is true the text is the
+    /// model's reasoning summary, replayed back on a follow-up turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) text: Option<String>,
 
@@ -69,7 +68,17 @@ pub(crate) struct Part {
     /// Tool result returned in a user turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) function_response: Option<FunctionResponsePart>,
-    // TODO(slice-2): add `thought: Option<ThoughtPart>` here for thinkingConfig
+
+    /// Marks this part as a thinking part rather than visible output.
+    /// Only meaningful when replaying assistant reasoning back to the
+    /// model alongside `thought_signature`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thought: Option<bool>,
+
+    /// Opaque signature paired with a `thought` part. Gemini emits it on
+    /// reasoning parts and requires it verbatim on multi-turn replay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thought_signature: Option<String>,
 }
 
 /// Binary payload embedded directly in the request.
@@ -149,7 +158,35 @@ pub(crate) struct GenerationConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stop_sequences: Option<Vec<String>>,
-    // TODO(slice-2): add `thinking_config: Option<ThinkingConfig>` here
+
+    /// Output MIME type. Set to `application/json` to request structured
+    /// output (canonical `response_format`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) response_mime_type: Option<String>,
+
+    /// JSON schema constraining structured output. Paired with
+    /// `response_mime_type = "application/json"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) response_schema: Option<Value>,
+
+    /// Thinking controls (budget + whether thought summaries stream back).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking_config: Option<ThinkingConfig>,
+}
+
+/// Thinking controls placed inside `generationConfig`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThinkingConfig {
+    /// Token budget for the model's internal reasoning. `-1` requests a
+    /// dynamic budget; `0` disables thinking on capable models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking_budget: Option<i32>,
+
+    /// When true, the model streams thought summaries (mapped to
+    /// canonical reasoning) instead of hiding them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) include_thoughts: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,13 +240,19 @@ pub(crate) struct ResponseContent {
 
 /// One part in a candidate's content. A part carries exactly one data field.
 ///
-/// Slice-2 will add a `thought` field for thinkingConfig reasoning.
+/// A part with `thought == true` carries reasoning text (and an opaque
+/// `thought_signature` for multi-turn replay), not visible output.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResponsePart {
     pub(crate) text: Option<String>,
     pub(crate) function_call: Option<ResponseFunctionCall>,
-    // TODO(slice-2): add `thought: Option<bool>` to detect reasoning parts
+    /// True when `text` is a thinking summary rather than assistant output.
+    #[serde(default)]
+    pub(crate) thought: Option<bool>,
+    /// Opaque signature for replaying this reasoning part on a later turn.
+    #[serde(default)]
+    pub(crate) thought_signature: Option<String>,
 }
 
 /// A function call emitted by the model in the response.

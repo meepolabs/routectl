@@ -1,17 +1,17 @@
 //! Native Google Gemini egress provider.
 //!
 //! Sends requests to `POST {base_url}/models/{model}:generateContent`
-//! using the Gemini REST API (v1beta). Authentication is via the
+//! (non-streaming) or `:streamGenerateContent?alt=sse` (streaming) using
+//! the Gemini REST API (v1beta). Authentication is via the
 //! `x-goog-api-key` header.
-//!
-//! Slice 1: non-streaming `complete()`. Streaming is slice 2.
 //!
 //! Wire reference: <https://ai.google.dev/api/generate-content>
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
+use eventsource_stream::Eventsource;
+use futures::stream::{BoxStream, StreamExt};
 use reqwest::Client;
 use serde_json::Value;
 
@@ -24,7 +24,15 @@ use routectl_core::{
 pub(crate) mod auth;
 pub(crate) mod request;
 pub(crate) mod response;
+pub(crate) mod sse;
 pub(crate) mod types;
+
+/// Format tag stamped on every reasoning_details entry emitted by the
+/// Gemini provider. A downstream ingress echoing reasoning back must see
+/// the same tag across the non-streaming + streaming paths so the
+/// request translator can recognize Gemini-origin reasoning (which
+/// carries a `thought_signature`) and replay it as thought parts.
+pub(crate) const GEMINI_FORMAT: &str = "gemini-v1";
 
 const PROVIDER_KIND: &str = "gemini";
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -91,6 +99,11 @@ impl GeminiProvider {
         format!("{base}/models/{model}:generateContent")
     }
 
+    fn stream_url(&self, model: &str) -> String {
+        let base = self.cfg.base_url.trim_end_matches('/');
+        format!("{base}/models/{model}:streamGenerateContent?alt=sse")
+    }
+
     fn build_headers(
         &self,
         rb: reqwest::RequestBuilder,
@@ -120,7 +133,15 @@ impl Provider for GeminiProvider {
 
     fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
         let r = request::translate(&self.cfg.id, req)?;
-        serde_json::to_value(&r).map_err(|e| Error::normalize_request(&self.cfg.id, e.to_string()))
+        let mut body = serde_json::to_value(&r)
+            .map_err(|e| Error::normalize_request(&self.cfg.id, e.to_string()))?;
+        // Merge dispatch-time provider + model `payload_extras` (carried
+        // on `req.provider_extras`) so operator knobs like safetySettings
+        // / topK reach the wire.
+        if let Some(extras) = req.provider_extras.as_ref() {
+            request::merge_payload_extras(&self.cfg.id, &mut body, extras);
+        }
+        Ok(body)
     }
 
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
@@ -179,11 +200,86 @@ impl Provider for GeminiProvider {
 
     #[tracing::instrument(skip_all, fields(provider = %self.cfg.id, model = %sanitize_for_log(&req.model)))]
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        // TODO(slice-2): implement SSE streaming via streamGenerateContent
-        let _ = req;
-        Err(Error::NotImplemented(
+        let body = self.normalize_request(&req)?;
+        trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
+        routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
+
+        let key = self.cfg.auth.token().await?;
+        let url = self.stream_url(&req.model);
+        let rb = self.build_headers(self.client.post(&url), &req, &key)?;
+        let request = rb
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .json(&body)
+            .build()
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
+        let resp = self
+            .client
+            .execute(request)
+            .await
+            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let headers = resp.headers().clone();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(map_gemini_upstream_error(
+                &self.cfg.id,
+                status,
+                &headers,
+                &body_text,
+            ));
+        }
+
+        crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
+
+        let provider_id = self.cfg.id.clone();
+        let byte_stream = resp.bytes_stream();
+        let event_stream = byte_stream.eventsource();
+
+        let stream = async_stream::stream! {
+            let mut state = sse::GeminiStreamState::default();
+            futures::pin_mut!(event_stream);
+            while let Some(result) = event_stream.next().await {
+                match result {
+                    Err(e) => {
+                        yield Err(Error::Streaming(e.to_string()));
+                        return;
+                    }
+                    Ok(event) => {
+                        if event.data.is_empty() {
+                            continue;
+                        }
+                        let parsed = match sse::parse_data_line(&provider_id, &event.data) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                yield Err(e);
+                                return;
+                            }
+                        };
+                        match state.parse_event(&provider_id, parsed) {
+                            Err(e) => {
+                                yield Err(e);
+                                return;
+                            }
+                            Ok(chunks) => {
+                                for c in chunks {
+                                    yield Ok(c);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(routectl_core::wrap_stream_with_summary(
+            stream,
+            "upstream",
+            PROVIDER_KIND,
             self.cfg.id.clone(),
-            "stream (slice-2)".into(),
         ))
     }
 
