@@ -28,7 +28,7 @@
 use std::any::Any;
 
 use axum::http::HeaderMap;
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Result};
+use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 use serde_json::Value;
 
 use super::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass};
@@ -38,6 +38,7 @@ mod parse;
 #[path = "parse_tests.rs"]
 mod parse_tests;
 mod render;
+mod stream;
 
 use parse::translate_request;
 
@@ -68,21 +69,25 @@ pub struct ResponsesIngress;
 /// `response.function_call_arguments.delta`,
 /// `response.output_item.done`, `response.completed`, etc. -- every
 /// event carries a monotonic `sequence_number` and most carry an
-/// `output_index`. The SLICE 3 renderer runs a state machine that maps
+/// `output_index`. The renderer runs a state machine that maps
 /// canonical `ChatChunk`s onto that event sequence, mirroring the egress
 /// `sse.rs` reader in reverse and the anthropic ingress
 /// `AnthropicStreamState` in spirit.
 ///
-/// SLICE 3 fills these fields. They are declared now so the trait object
-/// the handler boxes has a stable concrete type across slices; the
-/// streaming slice will refine the exact shape.
+/// The canonical delta stream is single-choice and delta-only: at most
+/// one message/reasoning item is "open" at a time, and tool calls
+/// buffer by index then flush together (mirroring how the anthropic
+/// ingress buffers `tool_blocks` and flushes them at the terminal
+/// chunk). Item boundaries are synthesized: a new kind supersedes and
+/// closes the prior open item; everything left open flushes at EOS.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // SLICE 3: the streaming renderer reads/writes these.
 pub struct ResponsesStreamState {
     /// Have we emitted the opening `response.created` event yet? Set on
     /// the first chunk.
     started: bool,
-    /// True once the terminal `response.completed` event was emitted.
+    /// True once the terminal `response.completed` / `response.failed`
+    /// event was emitted. Idempotency guard for `render_eos` /
+    /// `render_error_eos`.
     finished: bool,
     /// Monotonic `sequence_number` counter stamped on every emitted
     /// event (the Responses protocol requires it to increase by one per
@@ -90,34 +95,72 @@ pub struct ResponsesStreamState {
     sequence_number: u64,
     /// Next `output_index` to allocate for a new output item.
     next_output_index: u64,
-    /// Per-output-index bookkeeping: which canonical channel
-    /// (text / reasoning / function_call) currently owns each open
-    /// output item, so deltas route to the right `output_index` and a
-    /// `response.output_item.done` closes the matching item.
-    open_items: Vec<OpenOutputItem>,
+    /// The single currently-open text/reasoning output item, if any.
+    /// Tool calls are buffered separately in `tool_buffers` and flushed
+    /// together, so they do not occupy this slot.
+    open: Option<OpenOutputItem>,
+    /// Buffered function-call items keyed by the canonical tool_call
+    /// `index`. Accumulates id/name/arguments across deltas; flushed as
+    /// `output_item.added` -> `function_call_arguments.delta` -> `.done`
+    /// -> `output_item.done` at the terminal chunk / EOS.
+    tool_buffers: Vec<ToolCallBuffer>,
     /// Response id echoed on every event (`resp_...`); cached from the
     /// first chunk or synthesized when the upstream omitted one.
     response_id: Option<String>,
     /// Model label echoed on `response.created` / `response.completed`.
     response_model: Option<String>,
+    /// `created_at` echoed on the response object. Captured as 0 when
+    /// the canonical chunk carries no timestamp (canonical chunks do
+    /// not model `created`), matching the non-stream renderer's handling
+    /// of a zero `ChatResponse.created`.
+    created_at: i64,
+    /// Buffered `finish_reason` from a terminal chunk, flushed into the
+    /// `response.completed` status at EOS (mirrors the anthropic
+    /// ingress `pending_finish_reason`).
+    pending_finish_reason: Option<String>,
+    /// Accumulated usage from the terminal/usage chunk, rendered into
+    /// the `response.completed` body.
+    pending_usage: Option<routectl_core::UsageDelta>,
+    /// Accumulated assistant text, replayed into the `response.completed`
+    /// body so it matches the non-stream render byte-for-byte. Cumulative
+    /// across the whole stream (the non-stream render concatenates all
+    /// assistant text into one message).
+    text_accumulator: String,
+    /// Text streamed into the CURRENT open message item, reset each time
+    /// a new message item opens. Drives the per-item `output_text.done`
+    /// body so a superseded item closes with only its own text.
+    current_text: String,
+    /// Accumulated reasoning details (summary / text / encrypted),
+    /// replayed into the completed body's `reasoning` items.
+    reasoning_accumulator: Vec<routectl_core::ReasoningDetail>,
 }
 
-/// Identity of one open Responses output item, tagged with the canonical
-/// channel feeding it. SLICE 3 grows this as the stream state machine
-/// needs (e.g. buffered partial tool-call arguments).
+/// One open Responses output item, tagged with the canonical channel
+/// feeding it, carrying the dense `output_index` it was allocated.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // SLICE 3: populated by the streaming renderer.
 enum OpenOutputItem {
-    /// An assistant text item (`output_text` deltas).
+    /// An assistant `message` item streaming `output_text` deltas. The
+    /// message-level `output_index` and the `content_index` of its
+    /// single text part are tracked so deltas and the closing
+    /// `output_text.done` / `content_part.done` carry the right indices.
     Text { output_index: u64 },
-    /// A reasoning item (`reasoning_summary_text` deltas).
-    Reasoning { output_index: u64 },
-    /// A function-call item (`function_call_arguments` deltas), keyed by
-    /// the canonical tool-call index it is buffering.
-    FunctionCall {
+    /// A `reasoning` item streaming summary / text deltas. `detail_id`
+    /// groups emitted details (matches slice 2's id-grouping); the
+    /// summary/text detail payloads accumulate so the closing
+    /// `output_item.done` carries the full reasoning item.
+    Reasoning {
         output_index: u64,
-        tool_call_index: u64,
+        detail_id: Option<String>,
     },
+}
+
+/// Buffered function-call item under construction across argument
+/// deltas. Mirrors the anthropic ingress `ToolBlockState`.
+#[derive(Debug, Default, Clone)]
+struct ToolCallBuffer {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 impl IngressStreamState for ResponsesStreamState {
@@ -162,29 +205,22 @@ impl IngressAdapter for ResponsesIngress {
 
     fn render_chunk(
         &self,
-        _chunk: ChatChunk,
-        _state: &mut dyn IngressStreamState,
+        chunk: ChatChunk,
+        state: &mut dyn IngressStreamState,
     ) -> Result<Vec<SseEvent>> {
-        // SLICE 3: the streaming renderer maps a canonical ChatChunk onto
-        // Responses SSE events via ResponsesStreamState. Stubbed for now.
-        Err(Error::Internal(
-            "openai-responses ingress: render_chunk not yet implemented (slice 3)".into(),
-        ))
+        stream::render_chunk_internal(chunk, stream::state_mut(state))
     }
 
-    fn render_eos(&self, _state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
-        // SLICE 3: emit the terminal `response.completed` event.
-        Vec::new()
+    fn render_eos(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
+        stream::render_eos_internal(stream::state_mut(state))
     }
 
     fn render_error_eos(
         &self,
-        _state: &mut dyn IngressStreamState,
-        _error: &dyn std::fmt::Display,
-        _class: &StreamErrorClass,
+        state: &mut dyn IngressStreamState,
+        error: &dyn std::fmt::Display,
+        class: &StreamErrorClass,
     ) -> Vec<SseEvent> {
-        // SLICE 3: emit a terminal `response.failed` / error event so
-        // SDK consumers see a clean failure rather than truncation.
-        Vec::new()
+        stream::render_error_eos_internal(stream::state_mut(state), error, class)
     }
 }

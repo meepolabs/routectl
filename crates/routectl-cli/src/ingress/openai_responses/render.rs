@@ -95,7 +95,7 @@ pub(super) fn render_responses_response(resp: ChatResponse) -> Result<Value> {
 ///   - None / anything else   -> "completed" (a finished turn is the
 ///     sensible default; the egress only ever emits the reasons above,
 ///     and a client treats an unknown finished turn as completed)
-fn status_from_finish_reason(finish_reason: Option<&str>) -> (String, Option<Value>) {
+pub(super) fn status_from_finish_reason(finish_reason: Option<&str>) -> (String, Option<Value>) {
     match finish_reason {
         Some("length") => (
             "incomplete".to_string(),
@@ -188,7 +188,7 @@ fn content_block_from_part(part: &ContentPart) -> Option<Value> {
 /// Responses wire shape (`ResponsesOutputContent::OutputText` always
 /// deserializes it via `#[serde(default)]`); emit an empty array since
 /// canonical does not carry annotations.
-fn output_text_block(text: &str) -> Value {
+pub(super) fn output_text_block(text: &str) -> Value {
     json!({"type": "output_text", "text": text, "annotations": []})
 }
 
@@ -213,7 +213,7 @@ fn build_function_call_items(msg: &Message) -> Vec<Value> {
     tool_calls.iter().map(function_call_item).collect()
 }
 
-fn function_call_item(tc: &Value) -> Value {
+pub(super) fn function_call_item(tc: &Value) -> Value {
     let call_id = tc.get("id").and_then(Value::as_str).unwrap_or_default();
     let func = tc.get("function");
     let name = func
@@ -342,7 +342,7 @@ fn reasoning_item(id: Option<String>, group: ReasoningItemBuilder) -> Value {
 /// `output_tokens_details` sub-objects are omitted entirely when their
 /// source field is None (matching the wire shape a client expects --
 /// no empty detail objects).
-fn render_usage(u: &routectl_core::Usage) -> Value {
+pub(super) fn render_usage(u: &routectl_core::Usage) -> Value {
     let mut obj = Map::new();
     obj.insert("input_tokens".into(), json!(u.prompt_tokens));
     if let Some(cached) = u.cache_read_input_tokens {

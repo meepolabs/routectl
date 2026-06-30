@@ -8,7 +8,7 @@ use super::*;
 use axum::http::header::HeaderName;
 use axum::http::HeaderMap;
 use routectl_core::{
-    ContentPart, KnownContentPart, MessageContent, ReasoningDetailKind, Role, SystemContent,
+    ContentPart, Error, KnownContentPart, MessageContent, ReasoningDetailKind, Role, SystemContent,
     ToolDef,
 };
 use serde_json::json;
@@ -942,16 +942,20 @@ fn render_response_emits_response_envelope() {
 }
 
 #[test]
-fn render_chunk_stub_errors_until_slice_3() {
+fn render_chunk_emits_response_created_on_first_chunk() {
+    // SLICE 3 implements the streaming render path: the first chunk opens
+    // the stream with a response.created event rather than erroring. Full
+    // lifecycle coverage lives in stream_tests.rs.
     // Arrange
     let chunk = ChatChunk::default();
     let mut state = ResponsesIngress.new_stream_state();
 
     // Act
-    let err = ResponsesIngress
+    let events = ResponsesIngress
         .render_chunk(chunk, state.as_mut())
-        .unwrap_err();
+        .expect("render_chunk should succeed");
 
     // Assert
-    assert!(matches!(err, Error::Internal(_)));
+    assert!(!events.is_empty());
+    assert_eq!(events[0].event.as_deref(), Some("response.created"));
 }
