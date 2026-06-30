@@ -1448,6 +1448,12 @@ impl Router {
                     continue 'chain;
                 }
 
+                // Cancellation backstop (see ProbeSlotGuard): if the gate
+                // admitted THIS dispatch as the half-open probe, free the slot
+                // should the future be dropped before an outcome arm settles
+                // it. Disarmed at each settle below; inert + a no-op otherwise.
+                let mut probe_guard = self.probe_slot_guard(state_key);
+
                 if attempts_made > 0 {
                     let jittered = add_jitter(backoff, policy.jitter_ms);
                     tokio::time::sleep(jittered).await;
@@ -1472,6 +1478,7 @@ impl Router {
                 match result {
                     Ok(mut resp) => {
                         self.record_success(state_key);
+                        probe_guard.disarm();
                         // Stamp the served upstream provider name only
                         // when the served target opts in
                         // (`visible_routectl_provider`, default true).
@@ -1529,6 +1536,7 @@ impl Router {
                             // stays locked open until restart.
                             if let Err(refresh_err) = provider.on_auth_failure().await {
                                 self.release_probe_slot(state_key);
+                                probe_guard.disarm();
                                 return Err(refresh_err);
                             }
                             // Refresh succeeded. Release the half-open probe
@@ -1542,6 +1550,7 @@ impl Router {
                             // fresh slot (the per-attempt accounting the
                             // in-loop gate promises).
                             self.release_probe_slot(state_key);
+                            probe_guard.disarm();
                             continue;
                         }
                         let do_fallback = should_fallback(&e, &policy, is_probe);
@@ -1573,6 +1582,7 @@ impl Router {
                             // should_fallback is false here), so the slot
                             // must be freed without a breaker debit.
                             self.release_probe_slot(state_key);
+                            probe_guard.disarm();
                             return Err(e);
                         }
                         // The honored upstream reset for THIS error (clamped
@@ -1595,6 +1605,7 @@ impl Router {
                                 }
                                 _ => self.record_failure(state_key),
                             }
+                            probe_guard.disarm();
                         }
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
@@ -1602,6 +1613,7 @@ impl Router {
                             // do_fallback already routed through
                             // record_failure (which clears the slot).
                             self.release_probe_slot(state_key);
+                            probe_guard.disarm();
                             return Err(e);
                         }
                         let can_retry_here = attempts_made < hard_cap
@@ -1637,6 +1649,7 @@ impl Router {
                             // locking the breaker open forever (mirrors the
                             // auth-retry Ok path).
                             self.release_probe_slot(state_key);
+                            probe_guard.disarm();
                             continue;
                         }
                         // Done with this provider. Decide fallback vs propagate.
@@ -1666,6 +1679,7 @@ impl Router {
                         // probe slot this attempt claimed so the breaker is
                         // not left locked open.
                         self.release_probe_slot(state_key);
+                        probe_guard.disarm();
                         return Err(e);
                     }
                 }
@@ -1801,11 +1815,18 @@ impl Router {
                 return Err(gate_err);
             }
 
+            // Cancellation backstop (see ProbeSlotGuard): free the half-open
+            // probe slot if this future is dropped before an outcome arm
+            // settles it. count_tokens fires constantly from the client, so a
+            // dropped probe here is the most likely latch trigger.
+            let mut probe_guard = self.probe_slot_guard(&target.state_key);
+
             let result = provider.count_tokens(attempt_req.clone()).await;
             attempts_made += 1;
             match result {
                 Ok(tc) => {
                     self.record_success(&target.state_key);
+                    probe_guard.disarm();
                     return Ok(tc);
                 }
                 Err(e) => {
@@ -1829,6 +1850,7 @@ impl Router {
                         // or the breaker stays locked open until restart.
                         if let Err(refresh_err) = provider.on_auth_failure().await {
                             self.release_probe_slot(&target.state_key);
+                            probe_guard.disarm();
                             return Err(refresh_err);
                         }
                         // Refresh succeeded. Release the half-open probe slot
@@ -1841,6 +1863,7 @@ impl Router {
                         // the breaker locked open until restart. Releasing here
                         // lets the re-gate claim a fresh slot.
                         self.release_probe_slot(&target.state_key);
+                        probe_guard.disarm();
                         continue;
                     }
                     // Mirror `complete_with_options::should_fallback`:
@@ -1874,12 +1897,14 @@ impl Router {
                             Some(h) => self.park_provider(&target.state_key, h),
                             None => self.record_failure(&target.state_key),
                         }
+                        probe_guard.disarm();
                     } else {
                         // Non-fallbackable client error (NotImplemented,
                         // 4xx): not counted against the breaker, but we
                         // must release any half-open probe slot this
                         // attempt claimed so the breaker is not locked.
                         self.release_probe_slot(&target.state_key);
+                        probe_guard.disarm();
                     }
                     return Err(e);
                 }
@@ -2063,6 +2088,13 @@ impl Router {
                 // below. Reading the flag at first-chunk time instead
                 // would race a concurrent dispatch.
                 let was_half_open_probe = self.is_half_open_probe(state_key);
+                // Cancellation backstop (see ProbeSlotGuard): free the
+                // half-open probe slot if this future is dropped before an
+                // outcome arm settles it (e.g. consumer disconnect during the
+                // first-chunk wait against a hung upstream). Re-reads the same
+                // flag as `was_half_open_probe` above; both reads are
+                // consistent under the single-probe invariant.
+                let mut probe_guard = self.probe_slot_guard(state_key);
 
                 let r = try_stream_with_first_chunk(
                     provider_name,
@@ -2105,6 +2137,10 @@ impl Router {
                                 st.lock().record_success();
                             }
                         }
+                        // The probe (if any) is settled; the wrapped stream's
+                        // BreakerAccounting owns the tail. Disarm so a drop here
+                        // does not free a slot a later probe may hold.
+                        probe_guard.disarm();
                         // Stamp the client-visible label on every Ok chunk
                         // (including the terminal / usage-only chunk) before
                         // the breaker wrap. The closure owns the label String
@@ -2141,6 +2177,7 @@ impl Router {
                             );
                             if let Err(refresh_err) = provider.on_auth_failure().await {
                                 self.release_probe_slot(state_key);
+                                probe_guard.disarm();
                                 return Err(refresh_err);
                             }
                             // Refresh succeeded. Release the half-open probe
@@ -2153,6 +2190,7 @@ impl Router {
                             // restart. Releasing here lets the re-gate claim a
                             // fresh slot.
                             self.release_probe_slot(state_key);
+                            probe_guard.disarm();
                             continue;
                         }
                         let do_fallback = should_fallback(&e, &policy, is_probe);
@@ -2182,6 +2220,7 @@ impl Router {
                             // NOT count as a provider fault, so free the slot
                             // without a breaker debit.
                             self.release_probe_slot(state_key);
+                            probe_guard.disarm();
                             return Err(e);
                         }
                         // Stream dispatch never retries the same provider (no
@@ -2196,6 +2235,7 @@ impl Router {
                                 Some(h) if !is_probe => self.park_provider(state_key, h),
                                 _ => self.record_failure(state_key),
                             }
+                            probe_guard.disarm();
                         }
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
@@ -2203,6 +2243,7 @@ impl Router {
                             // do_fallback already routed through
                             // record_failure (which clears the slot).
                             self.release_probe_slot(state_key);
+                            probe_guard.disarm();
                             return Err(e);
                         }
                         if do_fallback {
@@ -2239,6 +2280,7 @@ impl Router {
                         // probe slot this attempt claimed so the breaker is
                         // not left locked open.
                         self.release_probe_slot(state_key);
+                        probe_guard.disarm();
                         return Err(e);
                     }
                 }
@@ -2329,6 +2371,26 @@ impl Router {
         self.state
             .get(state_key)
             .is_some_and(|state| state.lock().half_open_probe_in_flight())
+    }
+
+    /// Build a `ProbeSlotGuard` for a dispatch that just passed the gate.
+    /// Armed iff `state_key` currently holds the half-open probe slot (i.e.
+    /// THIS dispatch was admitted as the probe); inert otherwise. The guard
+    /// releases the slot on drop unless an outcome disarms it -- the
+    /// cancellation-safety backstop for a dropped dispatch future.
+    ///
+    /// The `is_half_open_probe` read and the `state.get().cloned()` below are
+    /// two separate lock acquisitions, but the check is race-free under the
+    /// single-probe invariant: `try_dispatch` admits at most one
+    /// `half_open_in_flight` caller per cooldown, and the current caller has
+    /// not yet settled its slot, so no concurrent caller can clear or re-claim
+    /// it between the two reads.
+    fn probe_slot_guard(&self, state_key: &str) -> ProbeSlotGuard {
+        if self.is_half_open_probe(state_key) {
+            ProbeSlotGuard::new(self.state.get(state_key).cloned())
+        } else {
+            ProbeSlotGuard::new(None)
+        }
     }
 
     /// Resolve the retry policy for the wire `model` field. v0.6.0
@@ -3251,6 +3313,63 @@ fn wrap_with_breaker_accounting(
         accounting.record_success();
     };
     Box::pin(s)
+}
+
+/// RAII backstop that releases a half-open circuit-breaker probe slot if the
+/// dispatch future is dropped before any outcome settles it.
+///
+/// `gate_check` claims the single half-open probe slot
+/// (`half_open_in_flight = true`) BEFORE the dispatch awaits the upstream.
+/// Every synchronous outcome arm already settles the slot (`record_success` /
+/// `record_failure` / `park_provider` / `release_probe_slot`). The gap this
+/// guards is async CANCELLATION: if the future is dropped while awaiting a
+/// hung upstream (client disconnect or client-side timeout), none of those
+/// arms run and the slot stays claimed forever -- every later probe then sees
+/// `CircuitOpen` and the breaker latches open until process restart.
+///
+/// Held across the upstream `.await`(s); on drop it frees the slot unless an
+/// outcome already settled it (`disarm`, mirroring `BreakerAccounting`'s
+/// `settled` flag). Freeing -- rather than recording a failure -- is
+/// deliberate: a cancelled probe is no evidence of upstream health, so we free
+/// the slot while leaving `circuit_opened_at` + the cooldown intact; the next
+/// post-cooldown request becomes the probe and the breaker recovers.
+///
+/// Every synchronous settle site pairs its outcome call with `disarm()`.
+/// `record_failure` / `record_success` / `park_provider` already clear
+/// `half_open_in_flight` internally, so disarm there only suppresses a
+/// redundant (idempotent, harmless) drop-time release; `release_probe_slot`
+/// sites clear it explicitly. A NEW settle site MUST also call `disarm()`, or
+/// the guard's drop would free a slot a concurrent probe may have re-claimed.
+struct ProbeSlotGuard {
+    /// `Some` while armed; `None` once an outcome settled the slot or the
+    /// dispatch never claimed it.
+    state: Option<Arc<Mutex<ProviderState>>>,
+}
+
+impl ProbeSlotGuard {
+    /// Arm a guard for a dispatch that claimed the half-open probe slot. Pass
+    /// `None` for a dispatch that did not (closed breaker): the guard is then
+    /// inert and its drop is a no-op.
+    fn new(state: Option<Arc<Mutex<ProviderState>>>) -> Self {
+        Self { state }
+    }
+
+    /// An outcome has settled the slot; drop must not touch it.
+    fn disarm(&mut self) {
+        self.state = None;
+    }
+}
+
+impl Drop for ProbeSlotGuard {
+    fn drop(&mut self) {
+        if let Some(state) = &self.state {
+            // release_probe_slot is idempotent (it only sets a bool false). If
+            // a concurrent caller re-claimed the slot between our settle and
+            // this drop, freeing it here opens at most a transient extra probe
+            // window -- never a failure record, never a latch.
+            state.lock().release_probe_slot();
+        }
+    }
 }
 
 /// Open the upstream stream and pull the first chunk. If that initial step
@@ -7734,12 +7853,17 @@ mod auth_failure_recovery_tests {
 
 #[cfg(test)]
 mod circuit_breaker_slot_release_tests {
-    //! Regression: a half-open probe that fast-fails on 429/529 must
-    //! release the slot it claimed at the gate. Before the fix the
-    //! probe-fast-fail early-return skipped record_success/record_failure,
-    //! leaving `half_open_in_flight = true` forever -- every later gate
-    //! check returned CircuitOpen and the breaker was permanently locked
-    //! open for that provider until process restart.
+    //! Regression: a half-open probe must never leave `half_open_in_flight`
+    //! stuck `true`, or every later gate check returns CircuitOpen and the
+    //! breaker is permanently locked open for that provider until process
+    //! restart. Two leak classes are covered here:
+    //!   - synchronous early-returns (probe fast-fail on 429/529, 401-refresh)
+    //!     that must release the slot before returning/continuing;
+    //!   - async CANCELLATION: a dispatch future dropped while awaiting the
+    //!     upstream, after the gate claimed the slot but before any settle arm
+    //!     runs -- covered by the `ProbeSlotGuard` drop backstop. (A status-0
+    //!     transport error is NOT a synchronous leak: it is fallbackable, so
+    //!     record_failure already clears the slot and re-trips cleanly.)
     use super::*;
     use crate::config::{ProviderEntry, ProviderRuntimePolicy};
     use crate::resolved::ResolvedModel;
@@ -8736,6 +8860,373 @@ mod circuit_breaker_slot_release_tests {
             elapsed >= Duration::from_millis(250),
             "the in-loop sleep must be lengthened to ~the 300ms reset (got {elapsed:?}); \
              without the bump the 1ms baseline would fire the retry almost immediately",
+        );
+    }
+
+    // ---- MEE: cancellation-safety of the half-open probe slot ----
+    //
+    // A half-open probe claims the single probe slot at the gate BEFORE the
+    // dispatch awaits the upstream. If that future is DROPPED while awaiting a
+    // hung upstream (client disconnect / client-side timeout), none of the
+    // synchronous settle arms run; without `ProbeSlotGuard` the slot stays
+    // claimed forever and every later probe sees CircuitOpen -- a permanent
+    // latch until restart. These tests drop the dispatch future mid-await and
+    // assert the slot is freed and the breaker recovers.
+
+    /// Multi-surface provider that hangs (long sleep) on every surface while
+    /// `hang` is set, then succeeds once it is cleared. Per-surface call
+    /// counters record that a dispatch reached the (hung) upstream.
+    struct HangUntilClearedProvider {
+        id: String,
+        hang: Arc<std::sync::atomic::AtomicBool>,
+        complete_calls: Arc<AtomicUsize>,
+        stream_calls: Arc<AtomicUsize>,
+        count_tokens_calls: Arc<AtomicUsize>,
+    }
+
+    impl HangUntilClearedProvider {
+        fn new(id: &str, hang: Arc<std::sync::atomic::AtomicBool>) -> Self {
+            Self {
+                id: id.into(),
+                hang,
+                complete_calls: Arc::new(AtomicUsize::new(0)),
+                stream_calls: Arc::new(AtomicUsize::new(0)),
+                count_tokens_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        async fn maybe_hang(&self) {
+            if self.hang.load(Ordering::SeqCst) {
+                // Far longer than any test timeout: the dispatch future is
+                // dropped while parked here, exercising the cancellation path.
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for HangUntilClearedProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            self.complete_calls.fetch_add(1, Ordering::SeqCst);
+            self.maybe_hang().await;
+            Ok(ChatResponse {
+                id: format!("ok-{}", self.id),
+                model: req.model,
+                created: 0,
+                choices: vec![routectl_core::Choice {
+                    logprobs: None,
+                    index: 0,
+                    message: routectl_core::Message {
+                        refusal: None,
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+                upstream_meta: None,
+            })
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            self.maybe_hang().await;
+            let chunk = ChatChunk {
+                id: format!("ok-{}", self.id),
+                ..Default::default()
+            };
+            Ok(futures::stream::once(async move { Ok(chunk) }).boxed())
+        }
+        async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+            self.count_tokens_calls.fetch_add(1, Ordering::SeqCst);
+            self.maybe_hang().await;
+            Ok(TokenCount {
+                input_tokens: 7,
+                ..Default::default()
+            })
+        }
+    }
+
+    /// Multi-surface provider that always fails with a status-0 transport
+    /// error ("never reached the upstream HTTP layer") on every surface, with
+    /// per-surface call counters.
+    struct Status0Provider {
+        id: String,
+        complete_calls: Arc<AtomicUsize>,
+        stream_calls: Arc<AtomicUsize>,
+        count_tokens_calls: Arc<AtomicUsize>,
+    }
+
+    impl Status0Provider {
+        fn new(id: &str) -> Self {
+            Self {
+                id: id.into(),
+                complete_calls: Arc::new(AtomicUsize::new(0)),
+                stream_calls: Arc::new(AtomicUsize::new(0)),
+                count_tokens_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for Status0Provider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            self.complete_calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::upstream(&self.id, 0, "error sending request"))
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::upstream(&self.id, 0, "error sending request"))
+        }
+        async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+            self.count_tokens_calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::upstream(&self.id, 0, "error sending request"))
+        }
+    }
+
+    /// CircuitPhase the breaker reads at `now` WITHOUT mutating it (unlike
+    /// `breaker_open_at`, which claims a probe slot via `try_dispatch`).
+    fn circuit_phase(router: &Router) -> crate::runtime_state::CircuitPhase {
+        router
+            .capacity_snapshot_for("m", Instant::now())
+            .expect("per-model state slot exists")
+            .circuit
+    }
+
+    #[tokio::test]
+    async fn complete_half_open_cancelled_probe_releases_slot() {
+        let hang = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let provider = Arc::new(HangUntilClearedProvider::new("p", hang.clone()));
+        let router = build_router_with_provider_and_retry(
+            provider.clone() as Arc<dyn Provider>,
+            RetryPolicy::default(),
+        );
+        arm_half_open(&router);
+
+        // The half-open probe reaches the hung upstream and stalls; drop the
+        // dispatch future mid-await via a short timeout.
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(20), router.complete(plain_req())).await;
+        assert!(
+            cancelled.is_err(),
+            "the probe must still be awaiting the hung upstream when the timeout fires",
+        );
+        assert_eq!(
+            provider.complete_calls.load(Ordering::SeqCst),
+            1,
+            "the probe must have reached the (hung) upstream",
+        );
+        // Before the guard, the dropped future skipped every settle arm and the
+        // half-open slot stayed `true` forever -> permanent CircuitOpen latch.
+        assert!(
+            !slot_in_flight(&router),
+            "a cancelled half-open probe must release the slot",
+        );
+
+        // Recovery: clear the hang; the next dispatch is admitted as a fresh
+        // probe (a leaked slot would have latched CircuitOpen and skipped it).
+        hang.store(false, Ordering::SeqCst);
+        let recovered = router.complete(plain_req()).await;
+        assert!(
+            recovered.is_ok(),
+            "breaker must recover: next dispatch admitted + succeeds, got {recovered:?}",
+        );
+        assert_eq!(
+            provider.complete_calls.load(Ordering::SeqCst),
+            2,
+            "the recovery dispatch must reach the upstream, not a latched breaker",
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_half_open_cancelled_probe_releases_slot() {
+        let hang = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let provider = Arc::new(HangUntilClearedProvider::new("p", hang.clone()));
+        let router = build_router_with_provider_and_retry(
+            provider.clone() as Arc<dyn Provider>,
+            RetryPolicy::default(),
+        );
+        arm_half_open(&router);
+
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(20), router.count_tokens(plain_req())).await;
+        assert!(
+            cancelled.is_err(),
+            "the count_tokens probe must still be awaiting the hung upstream",
+        );
+        assert_eq!(provider.count_tokens_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !slot_in_flight(&router),
+            "a cancelled count_tokens probe must release the slot",
+        );
+
+        hang.store(false, Ordering::SeqCst);
+        let recovered = router.count_tokens(plain_req()).await;
+        assert!(
+            recovered.is_ok(),
+            "count_tokens must recover after a cancelled probe, got {recovered:?}",
+        );
+        assert_eq!(
+            provider.count_tokens_calls.load(Ordering::SeqCst),
+            2,
+            "the recovery count_tokens must reach the upstream",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_half_open_cancelled_probe_releases_slot() {
+        let hang = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let provider = Arc::new(HangUntilClearedProvider::new("p", hang.clone()));
+        let router = build_router_with_provider_and_retry(
+            provider.clone() as Arc<dyn Provider>,
+            RetryPolicy::default(),
+        );
+        arm_half_open(&router);
+
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(20), router.stream(plain_req())).await;
+        assert!(
+            cancelled.is_err(),
+            "the stream probe must still be awaiting the hung upstream",
+        );
+        assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !slot_in_flight(&router),
+            "a cancelled stream probe must release the slot",
+        );
+
+        hang.store(false, Ordering::SeqCst);
+        let recovered = router.stream(plain_req()).await;
+        assert!(
+            recovered.is_ok(),
+            "stream must recover after a cancelled probe, got {:?}",
+            recovered.as_ref().err(),
+        );
+        assert_eq!(
+            provider.stream_calls.load(Ordering::SeqCst),
+            2,
+            "the recovery stream must reach the upstream",
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_half_open_status0_retrips_and_recovers() {
+        let provider = Arc::new(Status0Provider::new("p"));
+        let router = build_router_with_provider_and_retry(
+            provider.clone() as Arc<dyn Provider>,
+            RetryPolicy::default(),
+        );
+        arm_half_open(&router);
+
+        let r1 = router.complete(plain_req()).await;
+        assert!(r1.is_err(), "status-0 probe surfaces an error");
+        let calls_after_first = provider.complete_calls.load(Ordering::SeqCst);
+        assert!(
+            calls_after_first >= 1,
+            "the probe (and any same-provider retries) reached the upstream",
+        );
+        assert!(
+            !slot_in_flight(&router),
+            "a status-0 half-open probe must release the slot (record_failure clears it)",
+        );
+        // Re-tripped (circuit_opened_at set) yet half-open-ready (slot free,
+        // baseline cooldown elapsed) -- recovered, NOT latched Open.
+        assert_eq!(
+            circuit_phase(&router),
+            crate::runtime_state::CircuitPhase::HalfOpenReady,
+            "status-0 probe must re-trip cleanly and leave the breaker recoverable",
+        );
+
+        // A fresh probe is admitted and reaches the upstream again.
+        let _ = router.complete(plain_req()).await;
+        assert!(
+            provider.complete_calls.load(Ordering::SeqCst) > calls_after_first,
+            "the post-cooldown probe must reach the upstream, not a latched breaker",
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_half_open_status0_retrips_and_recovers() {
+        let provider = Arc::new(Status0Provider::new("p"));
+        let router = build_router_with_provider_and_retry(
+            provider.clone() as Arc<dyn Provider>,
+            RetryPolicy::default(),
+        );
+        arm_half_open(&router);
+
+        let r1 = router.count_tokens(plain_req()).await;
+        assert!(r1.is_err());
+        assert_eq!(provider.count_tokens_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !slot_in_flight(&router),
+            "a status-0 count_tokens probe must release the slot",
+        );
+        assert_eq!(
+            circuit_phase(&router),
+            crate::runtime_state::CircuitPhase::HalfOpenReady,
+            "status-0 count_tokens probe must re-trip cleanly and stay recoverable",
+        );
+
+        let _ = router.count_tokens(plain_req()).await;
+        assert_eq!(
+            provider.count_tokens_calls.load(Ordering::SeqCst),
+            2,
+            "the post-cooldown count_tokens probe must reach the upstream",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_half_open_status0_retrips_and_recovers() {
+        let provider = Arc::new(Status0Provider::new("p"));
+        let router = build_router_with_provider_and_retry(
+            provider.clone() as Arc<dyn Provider>,
+            RetryPolicy::default(),
+        );
+        arm_half_open(&router);
+
+        let r1 = router.stream(plain_req()).await;
+        assert!(r1.is_err());
+        assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !slot_in_flight(&router),
+            "a status-0 stream probe must release the slot",
+        );
+        assert_eq!(
+            circuit_phase(&router),
+            crate::runtime_state::CircuitPhase::HalfOpenReady,
+            "status-0 stream probe must re-trip cleanly and stay recoverable",
+        );
+
+        let _ = router.stream(plain_req()).await;
+        assert_eq!(
+            provider.stream_calls.load(Ordering::SeqCst),
+            2,
+            "the post-cooldown stream probe must reach the upstream",
         );
     }
 }
