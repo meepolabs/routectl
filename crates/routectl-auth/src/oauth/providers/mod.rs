@@ -12,6 +12,7 @@
 
 pub(crate) mod anthropic;
 pub(crate) mod codex;
+pub(crate) mod xai;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -43,6 +44,16 @@ pub(crate) trait OAuthFlow: Send + Sync {
     /// Path the local callback server listens on (`/callback`).
     fn callback_path(&self) -> &'static str {
         "/callback"
+    }
+
+    /// Host the advertised redirect_uri is built against. Defaults to
+    /// `localhost` (the Anthropic / codex registration), which the login
+    /// driver pairs with a 127.0.0.1 bind because browsers resolve
+    /// `localhost` back to the loopback. A provider whose public client
+    /// registered its redirect against the literal `127.0.0.1` (xAI)
+    /// overrides this so the authorize step does not reject the redirect.
+    fn callback_host(&self) -> &'static str {
+        "localhost"
     }
 
     /// Fixed local callback port this provider's redirect URIs are
@@ -97,6 +108,7 @@ pub(crate) fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
     match provider_id {
         "anthropic" => Ok(&anthropic::Anthropic),
         "codex" => Ok(&codex::Codex),
+        "xai" => Ok(&xai::Xai),
         other => Err(OAuthError::UnknownProvider(other.to_string())),
     }
 }
@@ -109,7 +121,7 @@ pub(crate) fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
 /// set in lockstep with the registry. The operator-visible "unknown oauth
 /// provider" text is built from `OAuthError::Display`.
 pub fn known_provider_ids() -> &'static [&'static str] {
-    &["anthropic", "codex"]
+    &["anthropic", "codex", "xai"]
 }
 
 /// Test-only re-exports for the integration tests under
@@ -206,5 +218,15 @@ mod tests {
         for id in known_provider_ids() {
             assert!(lookup(id).is_ok(), "lookup missing entry for {id}");
         }
+    }
+
+    #[test]
+    fn callback_host_defaults_to_localhost_and_xai_overrides() {
+        // The default host (anthropic / codex) is `localhost`; xAI
+        // registered its loopback redirect against the literal IP, so it
+        // must override to `127.0.0.1`.
+        assert_eq!(lookup("anthropic").unwrap().callback_host(), "localhost");
+        assert_eq!(lookup("codex").unwrap().callback_host(), "localhost");
+        assert_eq!(lookup("xai").unwrap().callback_host(), "127.0.0.1");
     }
 }
