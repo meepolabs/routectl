@@ -50,6 +50,10 @@ pub(crate) struct GeminiStreamState {
     /// Sticky: set once any functionCall part is seen, so the terminal
     /// chunk maps to `tool_calls` even if the finishReason says STOP.
     saw_function_call: bool,
+    /// Set once a terminal chunk (finishReason and/or usage) has fired.
+    /// Guards against a trailing usage-only event emitting a second
+    /// terminal chunk or post-terminal content.
+    terminal_emitted: bool,
 }
 
 impl GeminiStreamState {
@@ -73,6 +77,13 @@ impl GeminiStreamState {
             }
         }
 
+        // Once the stream has terminated, ignore any trailing events
+        // (e.g. a usage-only keepalive after the finishReason event) so
+        // we never emit a second terminal chunk or post-terminal content.
+        if self.terminal_emitted {
+            return Ok(chunks);
+        }
+
         if !self.role_emitted {
             self.role_emitted = true;
             chunks.push(self.role_chunk());
@@ -90,6 +101,7 @@ impl GeminiStreamState {
 
         // A finishReason (and/or usageMetadata) marks the terminal event.
         if finish_reason_raw.is_some() || event.usage_metadata.is_some() {
+            self.terminal_emitted = true;
             chunks.push(self.terminal_chunk(finish_reason_raw.as_deref(), event.usage_metadata));
         }
 

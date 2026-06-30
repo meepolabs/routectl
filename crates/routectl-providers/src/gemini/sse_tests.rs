@@ -227,3 +227,70 @@ fn bad_sse_json_is_streaming_error() {
         "a malformed SSE payload must surface as Error::Streaming, got: {err:?}"
     );
 }
+
+#[test]
+fn trailing_usage_only_event_does_not_emit_second_terminal() {
+    let mut state = GeminiStreamState::default();
+    // Event 1: content + finishReason + usage -- the real terminal.
+    let first = state
+        .parse_event(
+            PID,
+            event(
+                vec![text_part("hi")],
+                Some("STOP"),
+                Some(UsageMetadata {
+                    prompt_token_count: 1,
+                    candidates_token_count: 1,
+                    total_token_count: 2,
+                    ..Default::default()
+                }),
+            ),
+        )
+        .expect("parse first");
+    assert_eq!(
+        first
+            .iter()
+            .filter(|c| c.choices[0].finish_reason.is_some())
+            .count(),
+        1,
+        "exactly one terminal chunk on the finish event"
+    );
+    // Event 2: a trailing usage-only event (no finishReason). The
+    // terminal_emitted guard must suppress a second terminal -- and any
+    // content -- so the stream has a single terminal frame.
+    let second = state
+        .parse_event(
+            PID,
+            event(
+                vec![],
+                None,
+                Some(UsageMetadata {
+                    total_token_count: 2,
+                    ..Default::default()
+                }),
+            ),
+        )
+        .expect("parse trailing");
+    assert!(
+        second.is_empty(),
+        "a post-terminal event must emit nothing; got {second:?}"
+    );
+}
+
+#[test]
+fn empty_candidates_event_without_usage_emits_only_role() {
+    // A prompt-level safety block can arrive as an event with no
+    // candidates and no usageMetadata. Today that yields just the role
+    // chunk and no terminal -- pin the behavior so a future change to
+    // surface a synthetic content_filter terminal is a conscious one.
+    let mut state = GeminiStreamState::default();
+    let ev = GenerateContentResponse {
+        candidates: vec![],
+        usage_metadata: None,
+        model_version: Some("gemini-2.5-pro".into()),
+        response_id: Some("resp-x".into()),
+    };
+    let chunks = state.parse_event(PID, ev).expect("parse ok");
+    assert_eq!(chunks.len(), 1, "only the opening role chunk");
+    assert!(chunks[0].choices[0].finish_reason.is_none());
+}

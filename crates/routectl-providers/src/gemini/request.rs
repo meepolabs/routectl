@@ -508,9 +508,12 @@ fn build_thinking_config(req: &ChatRequest) -> Option<ThinkingConfig> {
     }
 
     let thinking_budget = if let Some(budget) = reasoning.max_tokens {
-        Some(budget as i32)
+        // Gemini's thinkingBudget is i32; clamp rather than cast so a
+        // pathological u32 cannot wrap into a negative sentinel
+        // (-1 = dynamic, 0 = disabled).
+        Some(i32::try_from(budget).unwrap_or(i32::MAX))
     } else if let Some(effort) = reasoning.effort.as_deref() {
-        crate::effort::budget_from_level(effort).map(|b| b as i32)
+        crate::effort::budget_from_level(effort).map(|b| i32::try_from(b).unwrap_or(i32::MAX))
     } else {
         Some(THINKING_BUDGET_DYNAMIC)
     };
@@ -633,18 +636,36 @@ fn reasoning_details_to_thought_parts(details: &[ReasoningDetail]) -> Vec<Part> 
         .collect()
 }
 
+/// True when `key` is a request field routectl assembles itself and an
+/// operator/client must not be able to clobber via `payload_extras`.
+/// Chains the canonical-request-key set (model, messages, tools,
+/// response_format, reasoning, ...) with the Gemini wire-owned top-level
+/// keys this translator writes. Unknown top-level request keys are
+/// forwarded into `provider_extras` by both ingresses, so without the
+/// Gemini-key guard a client could smuggle a raw `contents` /
+/// `generationConfig` block that replaces the routectl-normalized body.
+fn is_gemini_managed_key(key: &str) -> bool {
+    routectl_core::is_canonical_request_key(key)
+        || matches!(
+            key,
+            "contents" | "systemInstruction" | "toolConfig" | "generationConfig"
+        )
+}
+
 /// Shallow-merge canonical `provider_extras` (the router's dispatch-time
 /// merge of provider + model `payload_extras`) into the outgoing Gemini
-/// body so operator-supplied knobs like `safetySettings`, `topK`, or
-/// extra `generationConfig` fields reach the wire. Entries that collide
-/// with a routectl-managed canonical key are dropped with a WARN so an
-/// operator cannot clobber the assembled `contents` / `tools` / etc.
+/// body so operator-supplied top-level knobs like `safetySettings` reach
+/// the wire. Entries that collide with a routectl-managed key (canonical
+/// fields or a Gemini wire-owned key per [`is_gemini_managed_key`]) are
+/// dropped with a WARN so neither an operator nor a client smuggling
+/// extras through an ingress can clobber the assembled `contents` /
+/// `generationConfig` / `tools` / etc.
 pub(crate) fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value) {
     let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) else {
         return;
     };
     for (k, v) in extra_obj {
-        if routectl_core::is_canonical_request_key(k) {
+        if is_gemini_managed_key(k) {
             tracing::warn!(
                 provider = %provider_id,
                 key = %k,
@@ -1090,5 +1111,34 @@ mod tests {
             "assembled tools must be preserved"
         );
         assert!(body.get("safetySettings").is_some());
+    }
+
+    #[test]
+    fn payload_extras_cannot_clobber_gemini_structural_keys() {
+        // contents / generationConfig are Gemini wire-owned keys (NOT
+        // canonical names), but a client can smuggle them via provider_extras
+        // through an ingress. They must be dropped, not allowed to replace
+        // the routectl-assembled body.
+        let mut body = json!({
+            "contents": [{"role": "user", "parts": [{"text": "real"}]}],
+            "generationConfig": {"temperature": 0.5}
+        });
+        let extras = json!({
+            "contents": "client-clobber",
+            "generationConfig": {"temperature": 9.9},
+            "systemInstruction": {"parts": [{"text": "evil"}]},
+            "toolConfig": "x"
+        });
+        merge_payload_extras("gemini:test", &mut body, &extras);
+        assert!(body["contents"].is_array(), "assembled contents preserved");
+        assert_eq!(
+            body["generationConfig"]["temperature"], 0.5,
+            "assembled generationConfig must not be replaced"
+        );
+        assert!(
+            body.get("systemInstruction").is_none(),
+            "smuggled systemInstruction must be dropped"
+        );
+        assert!(body.get("toolConfig").is_none());
     }
 }
