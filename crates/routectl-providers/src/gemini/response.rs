@@ -12,22 +12,31 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use routectl_core::{ChatResponse, Choice, Message, MessageContent, Result, Role, Usage};
+use routectl_core::{
+    ChatResponse, Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Result,
+    Role, Usage,
+};
 
 use super::types::{GenerateContentResponse, ResponsePart, UsageMetadata};
+use super::GEMINI_FORMAT;
 
 /// Translate a deserialized Gemini response into canonical `ChatResponse`.
 pub(crate) fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<ChatResponse> {
     let candidate = resp.candidates.into_iter().next();
 
-    let (text, tool_calls, finish_reason) = match candidate {
-        None => (String::new(), None, Some("stop".to_string())),
+    let (text, tool_calls, reasoning_details, finish_reason) = match candidate {
+        None => (String::new(), None, Vec::new(), Some("stop".to_string())),
         Some(c) => {
             let parts = c.content.map(|cont| cont.parts).unwrap_or_default();
-            let (text, tool_calls) = walk_parts(provider_id, &parts)?;
-            let has_tool_calls = tool_calls.is_some();
+            let walked = walk_parts(provider_id, &parts)?;
+            let has_tool_calls = walked.tool_calls.is_some();
             let finish = map_finish_reason(c.finish_reason.as_deref(), has_tool_calls);
-            (text, tool_calls, finish)
+            (
+                walked.text,
+                walked.tool_calls,
+                walked.reasoning_details,
+                finish,
+            )
         }
     };
 
@@ -42,7 +51,7 @@ pub(crate) fn translate(provider_id: &str, resp: GenerateContentResponse) -> Res
         role: Role::Assistant,
         content,
         reasoning: None,
-        reasoning_details: Vec::new(),
+        reasoning_details,
         name: None,
         tool_call_id: None,
         tool_calls,
@@ -75,19 +84,40 @@ pub(crate) fn translate(provider_id: &str, resp: GenerateContentResponse) -> Res
     })
 }
 
-/// Walk the candidate's `parts[]`. Returns:
-///   - concatenated text
-///   - OpenAI-shape `tool_calls` Vec if any functionCall parts were seen
-fn walk_parts(provider_id: &str, parts: &[ResponsePart]) -> Result<(String, Option<Vec<Value>>)> {
+/// Result of walking a candidate's `parts[]`.
+struct WalkedParts {
+    /// Concatenated visible (non-thought) text.
+    text: String,
+    /// OpenAI-shape `tool_calls` when any functionCall parts were seen.
+    tool_calls: Option<Vec<Value>>,
+    /// Canonical reasoning details collected from thought parts.
+    reasoning_details: Vec<ReasoningDetail>,
+}
+
+/// Walk the candidate's `parts[]`, separating visible text, tool calls,
+/// and thought (reasoning) parts. Thought parts carry their text and
+/// `thoughtSignature` into a canonical `ReasoningDetail` tagged with
+/// `GEMINI_FORMAT` so a downstream ingress can replay them.
+fn walk_parts(provider_id: &str, parts: &[ResponsePart]) -> Result<WalkedParts> {
     let mut text = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
+    let mut reasoning_details: Vec<ReasoningDetail> = Vec::new();
 
     for part in parts {
+        let is_thought = part.thought == Some(true);
         if let Some(t) = &part.text {
-            if !text.is_empty() {
-                text.push('\n');
+            if is_thought {
+                reasoning_details.push(thought_detail(
+                    t,
+                    part.thought_signature.as_deref(),
+                    reasoning_details.len() as u32,
+                ));
+            } else {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(t);
             }
-            text.push_str(t);
         }
         if let Some(fc) = &part.function_call {
             // Synthesize an OpenAI-shape tool_call with a generated id.
@@ -113,19 +143,42 @@ fn walk_parts(provider_id: &str, parts: &[ResponsePart]) -> Result<(String, Opti
                 }
             }));
         }
-        // TODO(slice-2): check part.thought to collect reasoning tokens
     }
 
-    let tool_calls_opt = if tool_calls.is_empty() {
+    let tool_calls = if tool_calls.is_empty() {
         None
     } else {
         Some(tool_calls)
     };
-    Ok((text, tool_calls_opt))
+    Ok(WalkedParts {
+        text,
+        tool_calls,
+        reasoning_details,
+    })
+}
+
+/// Build a canonical reasoning detail from a Gemini thought part. The
+/// `thoughtSignature` is preserved in the payload so it can be replayed
+/// verbatim on a follow-up turn.
+fn thought_detail(text: &str, signature: Option<&str>, index: u32) -> ReasoningDetail {
+    let mut payload = json!({ "text": text });
+    if let Some(sig) = signature {
+        payload["thought_signature"] = json!(sig);
+    }
+    ReasoningDetail {
+        kind: ReasoningDetailKind::Text,
+        id: None,
+        format: Some(GEMINI_FORMAT.to_string()),
+        index: Some(index),
+        payload,
+    }
 }
 
 /// Map Gemini's `finishReason` to the canonical finish_reason string.
-fn map_finish_reason(gemini_reason: Option<&str>, has_tool_calls: bool) -> Option<String> {
+pub(super) fn map_finish_reason(
+    gemini_reason: Option<&str>,
+    has_tool_calls: bool,
+) -> Option<String> {
     if has_tool_calls {
         return Some("tool_calls".to_string());
     }
@@ -187,6 +240,7 @@ mod tests {
                     parts: vec![ResponsePart {
                         text: Some(text.to_string()),
                         function_call: None,
+                        ..Default::default()
                     }],
                     role: Some("model".to_string()),
                 }),
@@ -229,6 +283,7 @@ mod tests {
                             name: "get_weather".into(),
                             args: serde_json::json!({"city": "Tokyo"}),
                         }),
+                        ..Default::default()
                     }],
                     role: Some("model".to_string()),
                 }),
@@ -335,5 +390,46 @@ mod tests {
         let usage = translate_usage(&meta);
         assert!(usage.cache_read_input_tokens.is_none());
         assert!(usage.reasoning_tokens.is_none());
+    }
+
+    #[test]
+    fn thought_parts_become_reasoning_details_not_content() {
+        let resp = GenerateContentResponse {
+            candidates: vec![Candidate {
+                content: Some(ResponseContent {
+                    parts: vec![
+                        ResponsePart {
+                            text: Some("let me think".into()),
+                            thought: Some(true),
+                            thought_signature: Some("sig-42".into()),
+                            ..Default::default()
+                        },
+                        ResponsePart {
+                            text: Some("the answer".into()),
+                            ..Default::default()
+                        },
+                    ],
+                    role: Some("model".into()),
+                }),
+                finish_reason: Some("STOP".into()),
+                index: 0,
+            }],
+            usage_metadata: None,
+            model_version: None,
+            response_id: Some("r".into()),
+        };
+        let chat = translate("gemini:test", resp).expect("translate ok");
+
+        // Visible content is only the non-thought text.
+        match &chat.choices[0].message.content {
+            MessageContent::Text(t) => assert_eq!(t, "the answer"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        // The thought part surfaces as a reasoning_detail carrying the signature.
+        let details = &chat.choices[0].message.reasoning_details;
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].format.as_deref(), Some(super::GEMINI_FORMAT));
+        assert_eq!(details[0].payload["text"], "let me think");
+        assert_eq!(details[0].payload["thought_signature"], "sig-42");
     }
 }
