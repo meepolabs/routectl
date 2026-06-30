@@ -317,10 +317,13 @@ async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
     Ok(s.to_string())
 }
 
-/// Map status + body to an `OAuthError`. On the refresh path a 401/400
-/// whose error code is `invalid_grant` means Google has revoked or
+/// Map status + body to an `OAuthError`. On the refresh path a 400/401
+/// whose `error` field is `invalid_grant` means Google has revoked or
 /// expired the refresh token -> `RefreshExpired` (operator guidance:
-/// re-run login). Any other refresh failure maps to `TokenEndpoint`
+/// re-run login). The status gate matters: a transient 5xx whose body
+/// incidentally carries `invalid_grant` must NOT terminate the refresh --
+/// it falls through to the generic `TokenEndpoint` path so the credential
+/// survives a retry. Any other refresh failure maps to `TokenEndpoint`
 /// without echoing the body (it may carry the long-lived refresh token);
 /// exchange failures keep the truncated body since the auth code is
 /// single-use and short-lived.
@@ -333,7 +336,9 @@ fn check_status_error(
     if status.is_success() {
         return Ok(());
     }
-    if is_refresh && is_invalid_grant(body) {
+    let invalid_grant_status =
+        status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED;
+    if is_refresh && invalid_grant_status && is_invalid_grant(body) {
         return Err(OAuthError::RefreshExpired("antigravity".into()));
     }
     Err(if is_refresh {
@@ -590,6 +595,43 @@ mod tests {
         match err {
             OAuthError::RefreshExpired(p) => assert_eq!(p, "antigravity"),
             other => panic!("expected RefreshExpired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_grant_on_401_maps_to_refresh_expired() {
+        let err = check_status_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            TOKEN_URL,
+            r#"{"error":"invalid_grant"}"#,
+            true,
+        )
+        .unwrap_err();
+        match err {
+            OAuthError::RefreshExpired(p) => assert_eq!(p, "antigravity"),
+            other => panic!("expected RefreshExpired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_grant_on_5xx_falls_through_to_token_endpoint() {
+        // A transient 5xx whose body incidentally carries invalid_grant
+        // must NOT terminate the credential as RefreshExpired -- the
+        // refresh should be retryable. It falls through to the generic
+        // TokenEndpoint path, which does not echo the body.
+        let err = check_status_error(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            TOKEN_URL,
+            r#"{"error":"invalid_grant","secret_echo":"do-not-log"}"#,
+            true,
+        )
+        .unwrap_err();
+        match err {
+            OAuthError::TokenEndpoint(m) => {
+                assert!(m.contains("503"), "got: {m}");
+                assert!(!m.contains("do-not-log"), "refresh body leaked: {m}");
+            }
+            other => panic!("expected TokenEndpoint, got {other:?}"),
         }
     }
 
