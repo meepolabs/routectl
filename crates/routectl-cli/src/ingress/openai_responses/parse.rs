@@ -268,9 +268,11 @@ fn build_messages_from_items(items: Vec<Value>) -> Vec<Message> {
             other => {
                 // Unknown item kind: degrade gracefully. Never panic,
                 // never error -- the known items still parse. (Acceptance
-                // C3.)
+                // C3.) `other` is client-controlled, so sanitize before it
+                // reaches a structured log field (log-injection guard, per
+                // routectl_core::log_safe).
                 tracing::warn!(
-                    item_kind = other,
+                    item_kind = %routectl_core::sanitize_for_log(other),
                     "openai-responses ingress: skipping unknown input item kind"
                 );
             }
@@ -351,8 +353,19 @@ fn parse_content_block(block: &Value) -> Option<ContentPart> {
         "input_image" => {
             // Responses ships the image as a flat `image_url` (a data: URI
             // or https URL) plus optional `detail`. Canonical's
-            // OpenAI-shape ImageUrl carries a nested `image_url` object.
-            let url = block.get("image_url").and_then(Value::as_str)?;
+            // OpenAI-shape ImageUrl carries a nested `image_url` object. A
+            // block missing the url is malformed; warn + drop (mirrors the
+            // egress, keeping ingress/egress behavior symmetric) rather
+            // than dropping silently and leaving no triage evidence.
+            let url = match block.get("image_url").and_then(Value::as_str) {
+                Some(u) => u,
+                None => {
+                    tracing::warn!(
+                        "openai-responses ingress: input_image block missing image_url; dropping"
+                    );
+                    return None;
+                }
+            };
             let mut image_url = Map::new();
             image_url.insert("url".into(), Value::String(url.to_string()));
             if let Some(detail) = block.get("detail").and_then(Value::as_str) {

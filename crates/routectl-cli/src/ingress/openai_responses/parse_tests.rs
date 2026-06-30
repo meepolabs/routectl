@@ -309,6 +309,24 @@ fn system_role_message_item_maps_to_role_system() {
     assert!(matches!(req.messages[0].role, Role::System));
 }
 
+#[test]
+fn developer_role_message_item_maps_to_role_system() {
+    // Arrange: the Responses `developer` role is a privileged-instruction
+    // role; canonical has no distinct developer role, so it folds into
+    // System (same target as `system`). Pin it so a later edit can't
+    // silently demote it to user.
+    let body = json!({
+        "model": "m",
+        "input": [{"type": "message", "role": "developer", "content": "dev"}]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert!(matches!(req.messages[0].role, Role::System));
+}
+
 // ---------------------------------------------------------------------------
 // function_call -> tool_calls
 // ---------------------------------------------------------------------------
@@ -848,20 +866,79 @@ fn store_absent_is_normal_stateless_path() {
     assert_eq!(req.messages.len(), 1);
 }
 
+#[test]
+fn store_true_with_previous_response_id_returns_400_not_warn() {
+    // Arrange: the two flags together must still hard-400 on
+    // previous_response_id (the reject runs before the store warn), never
+    // a store warn + silent wrong answer.
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "previous_response_id": "resp_x",
+        "store": true
+    });
+
+    // Act
+    let err = ResponsesIngress
+        .parse_request(&HeaderMap::new(), body)
+        .unwrap_err();
+
+    // Assert
+    assert!(matches!(err, Error::Validation(_)));
+}
+
+#[test]
+fn reasoning_item_opens_assistant_turn_when_none_trailing() {
+    // Arrange: a reasoning item with no preceding assistant message must
+    // open a fresh assistant turn to carry its details (same open-turn
+    // logic as function_call; pin it independently).
+    let body = json!({
+        "model": "m",
+        "input": [
+            {"type": "message", "role": "user", "content": "hi"},
+            {"type": "reasoning", "id": "rs_1",
+             "summary": [{"type": "summary_text", "text": "thinking"}]}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert: a fresh assistant turn carries the reasoning details.
+    assert_eq!(req.messages.len(), 2);
+    assert!(matches!(req.messages[1].role, Role::Assistant));
+    assert!(!req.messages[1].reasoning_details.is_empty());
+}
+
+#[test]
+fn openai_responses_format_constant_matches_egress_spelling() {
+    // The ingress redefines this tag rather than importing the egress's
+    // pub(crate) copy (hub-and-spoke forbids the cross-crate import). The
+    // two must stay byte-identical or reasoning replay silently breaks at
+    // the integration boundary. Machine-check the documented invariant;
+    // update BOTH constants together if the format tag ever changes.
+    assert_eq!(OPENAI_RESPONSES_FORMAT, "openai-responses-v1");
+}
+
 // ---------------------------------------------------------------------------
-// stub surfaces (SLICE 2/3 not yet implemented)
+// stub surfaces (SLICE 3 not yet implemented)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn render_response_stub_errors_until_slice_2() {
+fn render_response_emits_response_envelope() {
+    // SLICE 2 implements the non-stream renderer: a default
+    // ChatResponse renders a well-formed Responses `response` object
+    // (object/status/output present) rather than erroring.
     // Arrange
     let resp = ChatResponse::default();
 
     // Act
-    let err = ResponsesIngress.render_response(resp).unwrap_err();
+    let v = ResponsesIngress.render_response(resp).unwrap();
 
     // Assert
-    assert!(matches!(err, Error::Internal(_)));
+    assert_eq!(v["object"], "response");
+    assert_eq!(v["status"], "completed");
+    assert!(v["output"].is_array());
 }
 
 #[test]

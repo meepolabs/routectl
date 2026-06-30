@@ -37,6 +37,7 @@ mod parse;
 #[cfg(test)]
 #[path = "parse_tests.rs"]
 mod parse_tests;
+mod render;
 
 use parse::translate_request;
 
@@ -151,13 +152,8 @@ impl IngressAdapter for ResponsesIngress {
         translate_request(headers, body)
     }
 
-    fn render_response(&self, _resp: ChatResponse) -> Result<Value> {
-        // SLICE 2: the non-streaming renderer turns a canonical
-        // ChatResponse into a Responses `response` object. Stubbed so
-        // the crate compiles after SLICE 1.
-        Err(Error::Internal(
-            "openai-responses ingress: render_response not yet implemented (slice 2)".into(),
-        ))
+    fn render_response(&self, resp: ChatResponse) -> Result<Value> {
+        render::render_responses_response(resp)
     }
 
     fn new_stream_state(&self) -> Box<dyn IngressStreamState> {
