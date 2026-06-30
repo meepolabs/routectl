@@ -116,11 +116,18 @@ async fn run_browser(
 
     let bind = bind_callback_listener(requested_port, flow.preferred_callback_port()).await?;
     // Bind on 127.0.0.1 (no DNS, no IPv6 races) but advertise the
-    // redirect_uri using `localhost` because claude.ai's allowed
-    // redirect URIs for the public client are registered against
-    // `localhost`, not `127.0.0.1`. Browsers resolve `localhost`
-    // back to 127.0.0.1, so the callback still lands on our listener.
-    let redirect_uri = format!("http://localhost:{}{}", bind.port, flow.callback_path());
+    // redirect_uri using the provider's registered callback host. Most
+    // public clients (claude.ai, codex) register their allowed redirect
+    // URIs against `localhost`, which browsers resolve back to 127.0.0.1
+    // so the callback still lands on our listener. xAI registered its
+    // redirect against the literal `127.0.0.1` instead, so the host is
+    // provider-specific (see `OAuthFlow::callback_host`).
+    let redirect_uri = format!(
+        "http://{}:{}{}",
+        flow.callback_host(),
+        bind.port,
+        flow.callback_path()
+    );
 
     let (code_rx, server_handle) =
         spawn_callback_server(flow, bind.listener, pkce.state().to_string());
