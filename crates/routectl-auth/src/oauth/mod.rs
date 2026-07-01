@@ -61,7 +61,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum OAuthError {
-    #[error("unknown oauth provider `{0}` (known: anthropic, codex)")]
+    #[error("unknown oauth provider `{0}` (known: {known})", known = crate::oauth::known_provider_ids().join(", "))]
     UnknownProvider(String),
 
     #[error("no credentials for `{0}`; run `routectl login {0}` first")]
@@ -125,3 +125,25 @@ impl From<serde_json::Error> for OAuthError {
 
 /// `OAuthError`-flavored Result alias for use within this module.
 pub type OAuthResult<T> = std::result::Result<T, OAuthError>;
+
+#[cfg(test)]
+mod tests {
+    use super::{known_provider_ids, OAuthError};
+
+    /// The `UnknownProvider` operator message must enumerate the live
+    /// registry, not a stale hardcoded literal. Pins that the newly
+    /// registered `antigravity` provider appears in the "known: ..." list
+    /// so an operator correcting a typo sees every valid choice.
+    #[test]
+    fn unknown_provider_message_lists_all_known_ids() {
+        let msg = OAuthError::UnknownProvider("made-up".into()).to_string();
+        assert!(msg.contains("made-up"), "must echo the offending id: {msg}");
+        assert!(
+            msg.contains("antigravity"),
+            "known list must include antigravity: {msg}"
+        );
+        for id in known_provider_ids() {
+            assert!(msg.contains(id), "known list must include {id}: {msg}");
+        }
+    }
+}

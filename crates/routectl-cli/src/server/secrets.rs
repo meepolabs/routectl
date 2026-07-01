@@ -198,6 +198,63 @@ impl SecretStore for CompositeStore {
             _ => self.fallback.list_seats(secret_ref).await,
         }
     }
+
+    async fn peek_session_id(&self, secret_ref: &SecretRef) -> Option<String> {
+        match secret_ref {
+            // Route oauth:// session-id reads to the OAuth arm so the
+            // anthropic-api factory can stamp the Claude-Code session-id
+            // header from a logged-in session. When the OAuth arm is
+            // absent (no HOME/XDG) there is no record; return None.
+            // Fully-qualified call: OAuthStore also has an inherent
+            // `peek_session_id(&str)`, so plain method syntax would bind
+            // the inherent method instead of the trait one.
+            SecretRef::OAuth { .. } => match &self.oauth {
+                Some(oauth) => SecretStore::peek_session_id(oauth, secret_ref).await,
+                None => None,
+            },
+            _ => self.fallback.peek_session_id(secret_ref).await,
+        }
+    }
+
+    async fn peek_cloud_project_id(&self, secret_ref: &SecretRef) -> Option<String> {
+        match secret_ref {
+            // Route oauth:// project-id reads to the OAuth arm so the
+            // Gemini Cloud Code provider can skip the onboarding round
+            // trip on warm restarts. Without this override the read falls
+            // through to the trait no-op default and the cache always
+            // misses. When the OAuth arm is absent (no HOME/XDG) there is
+            // no record; return None. Fully-qualified call: OAuthStore
+            // also has an inherent `peek_cloud_project_id(&str)`.
+            SecretRef::OAuth { .. } => match &self.oauth {
+                Some(oauth) => SecretStore::peek_cloud_project_id(oauth, secret_ref).await,
+                None => None,
+            },
+            _ => self.fallback.peek_cloud_project_id(secret_ref).await,
+        }
+    }
+
+    async fn set_cloud_project_id(&self, secret_ref: &SecretRef, project_id: &str) -> Result<()> {
+        match secret_ref {
+            // Route oauth:// project-id writes to the OAuth arm so a
+            // resolved Cloud Code project id persists to the credentials
+            // file. Mirrors the `set` write path: when the OAuth arm is
+            // absent (no HOME/XDG) the write has no backing store and
+            // surfaces the same clear "OAuth store unavailable" error.
+            // Fully-qualified call: OAuthStore also has an inherent
+            // `set_cloud_project_id(&str, &str)`.
+            SecretRef::OAuth { .. } => match &self.oauth {
+                Some(oauth) => {
+                    SecretStore::set_cloud_project_id(oauth, secret_ref, project_id).await
+                }
+                None => Err(oauth_unavailable_err()),
+            },
+            _ => {
+                self.fallback
+                    .set_cloud_project_id(secret_ref, project_id)
+                    .await
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -574,5 +631,42 @@ mod tests {
         let env_ref = SecretRef::Env("FOO".into());
         let env_seats = store.list_seats(&env_ref).await.unwrap();
         assert_eq!(env_seats, vec![env_ref]);
+    }
+
+    /// The Cloud Code project-id cache round-trips through the REAL
+    /// composite -> OAuth seam: `set_cloud_project_id` then
+    /// `peek_cloud_project_id` on the same oauth:// ref returns the stored
+    /// value. Pre-fix the composite did not override these methods, so
+    /// they fell through to the trait no-op defaults -- the write was
+    /// silently dropped and every read missed, forcing the Cloud Code
+    /// onboarding round trip to re-run on every request. This test drives
+    /// the composite (not a raw OAuthStore) precisely because that seam
+    /// was the one that was untested.
+    #[tokio::test]
+    async fn composite_forwards_cloud_project_id_round_trip_to_oauth_arm() {
+        // Arrange: seed a record so the OAuth arm has a writable seat
+        // (set_cloud_project_id writes back to an existing record).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        seed_credentials_file(&path, "anthropic", "seed-access-token", now + 3600);
+        let store = CompositeStore::open_at(&path).await.unwrap();
+        let secret_ref = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: None,
+        };
+
+        // Act: write then read the project id THROUGH the composite.
+        store
+            .set_cloud_project_id(&secret_ref, "projects/round-trip")
+            .await
+            .expect("set_cloud_project_id must persist via the OAuth arm");
+        let got = store.peek_cloud_project_id(&secret_ref).await;
+
+        // Assert: the value persisted and reads back via the composite.
+        assert_eq!(got.as_deref(), Some("projects/round-trip"));
     }
 }
