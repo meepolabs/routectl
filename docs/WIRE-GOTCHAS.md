@@ -343,6 +343,35 @@ section names only the wire-level realities the egress handles.
   Gemini-specific -- the OpenAI / Anthropic family names its
   classifier `error.type`.
 
+## xAI (Grok) OAuth surface
+
+- **Redirect URI must be literal `127.0.0.1`, not `localhost`.** xAI's public
+  PKCE client registers `http://127.0.0.1:56121/callback` exactly. A callback
+  server that binds on `localhost` resolves to `::1` on dual-stack hosts,
+  producing a redirect-URI mismatch. The xAI provider's
+  `manual_redirect_url()` override hard-codes `http://127.0.0.1:56121/callback`
+  regardless of the actual bind address.
+
+- **Fixed callback port 56121 -- no fallback port.** The codex flow registers
+  both port 1455 and 1457 as fallbacks; xAI registers only 56121. The xAI
+  provider's `callback_port_candidates()` override returns `[56121]` only. If
+  that port is busy the login fails with a bind error rather than silently
+  using an unregistered port and receiving a redirect-URI-mismatch 400 from
+  xAI.
+
+- **Lazy refresh rotation.** xAI's token endpoint routinely omits
+  `refresh_token` from a successful refresh response. The prior refresh token
+  remains valid and is re-used. The `decode_token_response` path passes
+  `prior_refresh: Some(...)` so `map_to_record` falls back to the prior token
+  when the response body omits a new one.
+
+- **Status-gated `invalid_grant`.** xAI maps a dead refresh token to
+  `{"error":"invalid_grant"}`, but only on 400 or 401. A 5xx body carrying the
+  same error string is a transient fault; `check_status_error` in
+  `crates/routectl-auth/src/oauth/providers/xai.rs` gates `RefreshExpired`
+  on the status code (`400 || 401`) AND the error string, so a 503 with
+  `invalid_grant` does NOT terminate the credential.
+
 ## claude-code's hardcoded URL bypasses
 
 - claude-code performs `WebFetch`, `WebSearch`, `PushNotification`,
