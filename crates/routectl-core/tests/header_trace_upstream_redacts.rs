@@ -25,7 +25,8 @@ fn upstream_emit_redacts_set_cookie_and_security_token() {
     // in this process. Build an upstream response header set with a
     // session cookie + an STS security token (both secret) plus a
     // non-secret rate-limit header that must round-trip verbatim.
-    std::env::set_var("ROUTECTL_TRACE_HEADERS", "1");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("ROUTECTL_TRACE_HEADERS", "1") };
     assert!(
         header_trace_enabled(),
         "OnceLock must freeze to true after the env var is set first"

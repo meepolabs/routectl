@@ -268,13 +268,15 @@ mod tests {
         let path = dir.path().join("creds.json");
         let store = CompositeStore::open_at(&path).await.unwrap();
 
-        std::env::set_var("ROUTECTL_TEST_COMPOSITE_ENV", "value-via-env");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("ROUTECTL_TEST_COMPOSITE_ENV", "value-via-env") };
         let v = store
             .get(&SecretRef::Env("ROUTECTL_TEST_COMPOSITE_ENV".into()))
             .await
             .unwrap();
         assert_eq!(v, "value-via-env");
-        std::env::remove_var("ROUTECTL_TEST_COMPOSITE_ENV");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("ROUTECTL_TEST_COMPOSITE_ENV") };
     }
 
     #[tokio::test]
@@ -507,15 +509,18 @@ mod tests {
     impl EnvGuard {
         fn unset(key: &'static str) -> Self {
             let prev = std::env::var_os(key);
-            std::env::remove_var(key);
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var(key) };
             Self { key, prev }
         }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match self.prev.take() {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+                // TODO: Audit that the environment access only happens in single-threaded code.
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                // TODO: Audit that the environment access only happens in single-threaded code.
+                None => unsafe { std::env::remove_var(self.key) },
             }
         }
     }
@@ -538,13 +543,15 @@ mod tests {
             .expect("CompositeStore::open_default must tolerate missing HOME/XDG");
 
         // env:// refs still resolve through the MemoryStore arm.
-        std::env::set_var("ROUTECTL_TEST_COMPOSITE_NO_HOME", "value-via-env");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("ROUTECTL_TEST_COMPOSITE_NO_HOME", "value-via-env") };
         let v = store
             .get(&SecretRef::Env("ROUTECTL_TEST_COMPOSITE_NO_HOME".into()))
             .await
             .expect("env:// resolves with no HOME");
         assert_eq!(v, "value-via-env");
-        std::env::remove_var("ROUTECTL_TEST_COMPOSITE_NO_HOME");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("ROUTECTL_TEST_COMPOSITE_NO_HOME") };
 
         // oauth:// refs return a clear Error::Auth, not a panic.
         let err = store

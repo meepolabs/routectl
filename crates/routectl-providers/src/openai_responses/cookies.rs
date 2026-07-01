@@ -362,12 +362,15 @@ mod tests {
     #[test]
     fn default_cookie_path_honors_env_override() {
         let prior = std::env::var_os("ROUTECTL_COOKIE_FILE");
-        std::env::set_var("ROUTECTL_COOKIE_FILE", "/tmp/routectl-cookie-test.json");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("ROUTECTL_COOKIE_FILE", "/tmp/routectl-cookie-test.json") };
         let p = default_cookie_path().expect("path");
         assert_eq!(p, Path::new("/tmp/routectl-cookie-test.json"));
         match prior {
-            Some(v) => std::env::set_var("ROUTECTL_COOKIE_FILE", v),
-            None => std::env::remove_var("ROUTECTL_COOKIE_FILE"),
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            Some(v) => unsafe { std::env::set_var("ROUTECTL_COOKIE_FILE", v) },
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            None => unsafe { std::env::remove_var("ROUTECTL_COOKIE_FILE") },
         }
     }
 

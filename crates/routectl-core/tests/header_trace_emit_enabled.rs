@@ -30,7 +30,8 @@ fn header_emitters_fire_trace_events_when_tracing_enabled() {
     // read (nothing else in this process reads it), then a distinct
     // header marker per direction proves each emitter produced its OWN
     // line rather than one emitter firing four times.
-    std::env::set_var("ROUTECTL_TRACE_HEADERS", "1");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("ROUTECTL_TRACE_HEADERS", "1") };
     assert!(
         header_trace_enabled(),
         "OnceLock must freeze to true after the env var is set first"

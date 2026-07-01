@@ -142,7 +142,8 @@ reasoning_dialect = "deepseek"
 
 #[tokio::test]
 async fn build_with_missing_env_var_errors() {
-    std::env::remove_var("ROUTECTL_TEST_MISSING_KEY");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("ROUTECTL_TEST_MISSING_KEY") };
     let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
     let entry = ProviderEntry::anthropic_api("env://ROUTECTL_TEST_MISSING_KEY");
     match build_provider("anthropic", &entry, store.clone()).await {
@@ -247,7 +248,8 @@ async fn resolved_model_retains_env_secret_ref_for_openai_compat() {
     // Set the env var so MemoryStore's env:// arm can resolve at
     // build time. The retained `auth_secret_ref` is parsed from the
     // URI string regardless.
-    std::env::set_var("ROUTECTL_TEST_OPENAI_COMPAT_KEY", "sk-test-value");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("ROUTECTL_TEST_OPENAI_COMPAT_KEY", "sk-test-value") };
 
     let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
     let mut providers: BTreeMap<String, ProviderEntry> = BTreeMap::new();
@@ -269,7 +271,8 @@ async fn resolved_model_retains_env_secret_ref_for_openai_compat() {
     let (resolved, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
         .await
         .expect("build_resolved_models");
-    std::env::remove_var("ROUTECTL_TEST_OPENAI_COMPAT_KEY");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("ROUTECTL_TEST_OPENAI_COMPAT_KEY") };
 
     assert!(failed.is_empty(), "expected no failures: {failed:?}");
     let m = resolved.get("m").expect("m entry");

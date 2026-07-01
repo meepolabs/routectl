@@ -14,7 +14,8 @@ fn trace_body_cap_returns_override_when_env_unset() {
     // Arrange: env unset; seed config-side fallback Some(99_999).
     // Pass None for the other two knobs to prove they do not get
     // seeded by accident.
-    std::env::remove_var("ROUTECTL_TRACE_BODY_BYTES");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("ROUTECTL_TRACE_BODY_BYTES") };
     init_log_overrides(None, Some(99_999), None);
 
     // Act + Assert: the reader returns the override value, NOT the

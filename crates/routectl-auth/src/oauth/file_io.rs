@@ -406,12 +406,15 @@ mod tests {
     fn default_path_uses_xdg_config_home() {
         // Save & restore to be polite to other tests that rely on env.
         let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", "/x/y");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", "/x/y") };
         let p = default_path().unwrap();
         assert_eq!(p, PathBuf::from("/x/y/routectl/credentials.json"));
         match prev_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
         }
     }
 }

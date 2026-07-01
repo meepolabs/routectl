@@ -20,7 +20,8 @@ use routectl_core::{
 fn header_emitters_emit_nothing_when_tracing_disabled() {
     // Arrange: force the toggle OFF in this process independent of the
     // ambient environment, before the OnceLock freezes.
-    std::env::remove_var("ROUTECTL_TRACE_HEADERS");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("ROUTECTL_TRACE_HEADERS") };
     assert!(
         !header_trace_enabled(),
         "OnceLock must freeze to false when the env var is unset"
