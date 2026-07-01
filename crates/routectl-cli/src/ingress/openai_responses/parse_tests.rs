@@ -305,8 +305,17 @@ fn system_role_message_item_maps_to_role_system() {
     // Act
     let req = parse(body);
 
-    // Assert
-    assert!(matches!(req.messages[0].role, Role::System));
+    // Assert: in-array system items are lifted into req.system (matching
+    // lift_system_messages semantics), not left as loose Role::System
+    // messages in the messages array.
+    match req.system {
+        Some(SystemContent::Text(s)) => assert_eq!(s, "sys"),
+        other => panic!("expected SystemContent::Text, got {other:?}"),
+    }
+    assert!(
+        req.messages.is_empty(),
+        "system message must be removed from messages array"
+    );
 }
 
 #[test]
@@ -323,8 +332,16 @@ fn developer_role_message_item_maps_to_role_system() {
     // Act
     let req = parse(body);
 
-    // Assert
-    assert!(matches!(req.messages[0].role, Role::System));
+    // Assert: developer role items are lifted into req.system, not left
+    // as loose Role::System messages in the messages array.
+    match req.system {
+        Some(SystemContent::Text(s)) => assert_eq!(s, "dev"),
+        other => panic!("expected SystemContent::Text, got {other:?}"),
+    }
+    assert!(
+        req.messages.is_empty(),
+        "developer message must be removed from messages array"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -670,6 +687,119 @@ fn text_format_maps_to_response_format() {
 
     // Assert
     assert_eq!(req.response_format, Some(format));
+}
+
+#[test]
+fn instructions_and_in_array_system_item_both_preserved_in_system() {
+    // Arrange: both the top-level `instructions` field and an in-array
+    // system message carry content. The lift must merge both into
+    // req.system so neither is silently dropped.
+    let body = json!({
+        "model": "m",
+        "instructions": "from instructions",
+        "input": [
+            {"type": "message", "role": "system", "content": "from in-array system"},
+            {"type": "message", "role": "user", "content": "hello"}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert: both texts survive concatenated in req.system.
+    match &req.system {
+        Some(SystemContent::Text(s)) => {
+            assert!(
+                s.contains("from instructions"),
+                "instructions text missing from system: {s:?}"
+            );
+            assert!(
+                s.contains("from in-array system"),
+                "in-array system text missing from system: {s:?}"
+            );
+        }
+        other => panic!("expected SystemContent::Text, got {other:?}"),
+    }
+    // The system item is removed from the messages array; only the user
+    // message remains.
+    assert_eq!(req.messages.len(), 1);
+    assert!(matches!(req.messages[0].role, Role::User));
+}
+
+#[test]
+fn instructions_and_in_array_developer_item_both_preserved_in_system() {
+    // Arrange: same as above but with role "developer" (the o-series /
+    // Responses privileged-instruction variant of "system").
+    let body = json!({
+        "model": "m",
+        "instructions": "from instructions",
+        "input": [
+            {"type": "message", "role": "developer", "content": "from developer"},
+            {"type": "message", "role": "user", "content": "hello"}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    match &req.system {
+        Some(SystemContent::Text(s)) => {
+            assert!(
+                s.contains("from instructions"),
+                "instructions missing: {s:?}"
+            );
+            assert!(
+                s.contains("from developer"),
+                "developer text missing: {s:?}"
+            );
+        }
+        other => panic!("expected SystemContent::Text, got {other:?}"),
+    }
+    assert_eq!(req.messages.len(), 1);
+    assert!(matches!(req.messages[0].role, Role::User));
+}
+
+#[test]
+fn text_verbosity_survives_into_provider_extras() {
+    // Arrange: a `text` object carrying both `format` (which is lifted
+    // into response_format) and a sibling field `verbosity`. The sibling
+    // must survive into provider_extras.text for forward-compat, since
+    // "text" is a handled top-level field and the extras sweep never sees
+    // its contents.
+    let format = json!({"type": "text"});
+    let body = json!({
+        "model": "m",
+        "input": "hi",
+        "text": {
+            "format": format.clone(),
+            "verbosity": "detailed"
+        }
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert: format lifted into response_format.
+    assert_eq!(req.response_format.as_ref(), Some(&format));
+
+    // Assert: verbosity survives in provider_extras["text"].
+    let extras = req
+        .provider_extras
+        .as_ref()
+        .expect("provider_extras present");
+    let text_extras = extras
+        .get("text")
+        .expect("text key present in provider_extras");
+    assert_eq!(
+        text_extras["verbosity"], "detailed",
+        "verbosity must survive in provider_extras.text: {text_extras:?}"
+    );
+    // format must NOT be re-emitted in extras (it was lifted).
+    assert!(
+        text_extras.get("format").is_none(),
+        "format must not appear in provider_extras.text: {text_extras:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

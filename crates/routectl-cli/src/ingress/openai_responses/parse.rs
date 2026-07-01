@@ -38,7 +38,7 @@ use serde_json::{Map, Value};
 
 use routectl_core::{
     ChatRequest, ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningConfig,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, SystemBlock, SystemContent, ToolDef,
 };
 
 use super::OPENAI_RESPONSES_FORMAT;
@@ -105,6 +105,12 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         req.messages = build_messages(input);
     }
 
+    // Lift in-array system/developer messages into req.system. Mirrors
+    // openai.rs::lift_system_messages: these messages would otherwise
+    // remain as loose Role::System entries that mutual-exclusion egresses
+    // (anthropic-api, openai-compat) silently drop.
+    lift_system_messages(&mut req);
+
     // tools -> ToolDef[].
     if let Some(tools) = obj.remove("tools") {
         req.tools = build_tools(tools);
@@ -131,11 +137,17 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     }
 
     // text.format -> response_format (canonical structured-output slot).
-    if let Some(text) = obj.remove("text") {
+    // The unhandled remainder of the text object (e.g., text.verbosity)
+    // is saved for forward-compat: "text" is in HANDLED_TOP_LEVEL_FIELDS
+    // so the extras sweep never sees it; we forward the remainder manually.
+    let text_remainder = if let Some(text) = obj.remove("text") {
         if let Some(format) = extract_text_format(&text) {
             req.response_format = Some(format);
         }
-    }
+        text_without_format(text)
+    } else {
+        None
+    };
 
     // Plain scalar passthroughs that canonical models directly.
     if let Some(stream) = obj.remove("stream").and_then(|v| v.as_bool()) {
@@ -155,7 +167,12 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     // is intentionally not forwarded -- the upstream the request lands on
     // is chosen by the router, and forwarding a stale persistence flag
     // could surprise it).
-    let extras = sweep_extras(obj);
+    let mut extras = sweep_extras(obj);
+    // Merge the text remainder (subfields other than "format") so they
+    // survive the boundary even though "text" is a handled top-level key.
+    if let Some(rem) = text_remainder {
+        extras.insert("text".into(), Value::Object(rem));
+    }
     if !extras.is_empty() {
         req.provider_extras = Some(Value::Object(extras));
     }
@@ -206,6 +223,103 @@ fn warn_on_store(obj: &Map<String, Value>) {
              turn is answered from the full input, but the response is never persisted, so a \
              later retrieval by response id will not work)"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// lift in-array system/developer messages -> req.system
+// ---------------------------------------------------------------------------
+
+/// Lift any `Role::System` messages from `req.messages` into `req.system`,
+/// removing them from the messages array. Mirrors `openai.rs::lift_system_messages`
+/// so canonical consistency is maintained: the Responses wire allows
+/// in-array `{role:"system"}` / `{role:"developer"}` items alongside the
+/// top-level `instructions` field; downstream egresses that enforce
+/// system-is-not-a-turn (anthropic-api, openai-compat) would silently drop
+/// a loose `Role::System` message.
+///
+/// Merge strategy: when the existing `req.system` is plain text and no lifted
+/// block carries `cache_control`, the texts are concatenated with `\n`. When
+/// any block carries `cache_control` the result is `SystemContent::Blocks`
+/// (same as the openai ingress).
+fn lift_system_messages(req: &mut ChatRequest) {
+    let mut lifted_blocks: Vec<SystemBlock> = Vec::new();
+    req.messages.retain(|m| {
+        if !matches!(m.role, Role::System) {
+            return true;
+        }
+        match &m.content {
+            MessageContent::Text(t) => {
+                lifted_blocks.push(SystemBlock {
+                    kind: "text".into(),
+                    text: t.clone(),
+                    cache_control: None,
+                    citations: None,
+                });
+            }
+            MessageContent::Parts(parts) => {
+                for p in parts {
+                    if let ContentPart::Known(KnownContentPart::Text {
+                        text,
+                        cache_control,
+                    }) = p
+                    {
+                        lifted_blocks.push(SystemBlock {
+                            kind: "text".into(),
+                            text: text.clone(),
+                            cache_control: cache_control.clone(),
+                            citations: None,
+                        });
+                    }
+                }
+            }
+            MessageContent::Null => {}
+        }
+        false
+    });
+
+    if lifted_blocks.is_empty() {
+        return;
+    }
+
+    let needs_blocks = lifted_blocks
+        .iter()
+        .any(|b| b.cache_control.is_some() || b.citations.is_some());
+
+    match req.system.take() {
+        Some(SystemContent::Text(existing)) if !needs_blocks => {
+            let lifted_text = lifted_blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            req.system = Some(SystemContent::Text(format!("{existing}\n{lifted_text}")));
+        }
+        Some(SystemContent::Text(existing)) => {
+            let mut blocks = vec![SystemBlock {
+                kind: "text".into(),
+                text: existing,
+                cache_control: None,
+                citations: None,
+            }];
+            blocks.extend(lifted_blocks);
+            req.system = Some(SystemContent::Blocks(blocks));
+        }
+        Some(SystemContent::Blocks(mut blocks)) => {
+            blocks.extend(lifted_blocks);
+            req.system = Some(SystemContent::Blocks(blocks));
+        }
+        None if !needs_blocks => {
+            let lifted_text = lifted_blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            req.system = Some(SystemContent::Text(lifted_text));
+        }
+        None => {
+            req.system = Some(SystemContent::Blocks(lifted_blocks));
+        }
     }
 }
 
@@ -725,6 +839,23 @@ fn build_reasoning(reasoning: &Value) -> Option<ReasoningConfig> {
 /// ingress. Returns None when no `format` is present.
 fn extract_text_format(text: &Value) -> Option<Value> {
     text.as_object()?.get("format").cloned()
+}
+
+/// Strip `format` from a `text` object and return the remaining fields
+/// for forward-compat storage in `provider_extras`. Returns `None` when
+/// `text` is not an object or when no subfields remain after removing
+/// `format` (e.g., a text object that only carried `format`).
+fn text_without_format(text: Value) -> Option<Map<String, Value>> {
+    let mut obj = match text {
+        Value::Object(m) => m,
+        _ => return None,
+    };
+    obj.remove("format");
+    if obj.is_empty() {
+        None
+    } else {
+        Some(obj)
+    }
 }
 
 // ---------------------------------------------------------------------------
