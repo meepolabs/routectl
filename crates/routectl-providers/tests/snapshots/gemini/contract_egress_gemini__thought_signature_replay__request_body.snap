@@ -1,0 +1,40 @@
+---
+source: crates/routectl-providers/tests/contract_egress_gemini.rs
+expression: body
+---
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "What is 6 times 7?"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "text": "6 * 7 = 42",
+          "thought": true,
+          "thoughtSignature": "sig-abc"
+        },
+        {
+          "text": "The answer is 42."
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "text": "And 6 times 8?"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 256
+  }
+}

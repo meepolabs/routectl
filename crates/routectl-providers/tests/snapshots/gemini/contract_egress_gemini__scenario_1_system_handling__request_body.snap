@@ -1,0 +1,26 @@
+---
+source: crates/routectl-providers/tests/contract_egress_gemini.rs
+expression: body
+---
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Hello!"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 1024
+  },
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "You are a helpful assistant."
+      }
+    ]
+  }
+}

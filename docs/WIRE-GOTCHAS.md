@@ -285,6 +285,64 @@ this doc first for similar patterns. For operator-facing config recipes see
   `#[serde(skip_serializing_if = "String::is_empty")]` -- it is always
   emitted (possibly as `""`) so the server never sees the field missing.
 
+## Gemini (native) surface
+
+Operator-facing config recipes live in
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md) (`## Gemini (native)`); this
+section names only the wire-level realities the egress handles.
+
+- **Tool result -> user-turn `functionResponse`.** Gemini has no
+  dedicated tool role. A canonical `Role::Tool` message (and an
+  inline `ToolResult` content part) is emitted as a `role:"user"`
+  turn carrying a `functionResponse` part, whose `name` must match
+  the preceding `functionCall.name`. Assistant `tool_calls` /
+  `ToolUse` blocks map to `functionCall` parts on a `role:"model"`
+  turn. Handled by `build_contents` / `content_part_to_part` in
+  `crates/routectl-providers/src/gemini/request.rs`.
+
+- **System prompt -> `systemInstruction` with no role.** System
+  content (both `Role::System` messages and the Anthropic-ingress
+  top-level `system` field) is collected into the top-level
+  `systemInstruction.parts`, which Gemini forbids a `role` field on --
+  it is NOT a `contents[]` turn. Handled by `build_system_instruction`
+  in `crates/routectl-providers/src/gemini/request.rs`; the wire type
+  `SystemInstruction` in `gemini/types.rs` carries `parts` only.
+
+- **`thoughtSignature` reasoning replay.** Gemini emits an opaque
+  `thoughtSignature` on thinking parts and requires it verbatim on
+  multi-turn replay to continue a chain-of-thought. The response /
+  SSE path carries it on the emitted `reasoning_details[]` entry
+  (format tag `gemini-v1`, `payload.thought_signature`); the request
+  path replays only `gemini-v1`-tagged details as `thought` parts
+  ahead of the visible answer. Foreign-provider reasoning (Anthropic,
+  OpenAI) is dropped -- replaying it without a matching Gemini
+  signature would not continue reasoning and risks an upstream
+  reject. Handled by `reasoning_details_to_thought_parts` in
+  `gemini/request.rs`, `thought_detail` in `gemini/response.rs`, and
+  `reasoning_chunk` in `gemini/sse.rs`.
+
+  Residual seam: the `thoughtSignature` is only valid for the
+  originating Gemini turn. Reasoning that arrives without one (a
+  foreign detail, or a Gemini detail whose signature was stripped
+  upstream) is dropped from the replayed history rather than sent
+  unsigned -- the same class of loss as the Anthropic
+  unsigned-thinking-block seam above.
+
+- **Error envelope carries `status` + numeric `code`.** Gemini 4xx/5xx
+  bodies are `{"error":{"code":<int>,"message":...,"status":"<UPPER_
+  SNAKE>"}}`. `error.status` (e.g. `RESOURCE_EXHAUSTED`,
+  `INVALID_ARGUMENT`, `PERMISSION_DENIED`) is the classifier an SDK
+  branches on and lifts to `Error::Upstream.upstream_type`; the
+  numeric `error.code` lifts (stringified) to `upstream_code`. Handled
+  by `parse_gemini_error_classifier` / `map_gemini_upstream_error` in
+  `crates/routectl-providers/src/gemini/mod.rs`, which uses
+  `Error::upstream_full` so the classifier survives to the ingress
+  (rather than the generic collapse the older `upstream_with_retry_after`
+  path produced) while still parking the provider on a `Retry-After`
+  reset hint for rate-limit statuses. The `status` field name is
+  Gemini-specific -- the OpenAI / Anthropic family names its
+  classifier `error.type`.
+
 ## claude-code's hardcoded URL bypasses
 
 - claude-code performs `WebFetch`, `WebSearch`, `PushNotification`,
