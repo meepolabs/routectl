@@ -1083,6 +1083,14 @@ pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::
             );
             return Ok(());
         }
+        Err(OpenError::VersionTooOld { found, supported }) => {
+            println!(
+                "usage db at {} predates this binary (schema {found}, need {supported}); \
+                 start the service once to migrate it",
+                db_path.display()
+            );
+            return Ok(());
+        }
         Err(e) => return Err(Box::new(e)),
     };
 

@@ -87,6 +87,15 @@ pub enum OpenError {
     /// layout rather than silently misread it.
     #[error("usage db schema version {found} is newer than supported {supported}")]
     VersionTooNew { found: i64, supported: i64 },
+
+    /// The on-disk DB predates this binary (found < supported). A read-only
+    /// viewer refuses to query an unmigrated layout; start the service once
+    /// to migrate it, then retry.
+    #[error(
+        "usage db schema version {found} predates this binary (supported {supported}); \
+         start the service once to migrate it"
+    )]
+    VersionTooOld { found: i64, supported: i64 },
 }
 
 /// Current wall-clock time as epoch milliseconds. Saturates to 0 if the
@@ -221,8 +230,9 @@ pub fn open(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
 /// file out from under it. WAL readers do not block the writer, but a busy
 /// timeout is still set for safety. A missing file or a missing `requests`
 /// table surfaces as `NoData` so the CLI can print a friendly message; a
-/// DB newer than this binary surfaces as `VersionTooNew` rather than being
-/// misread.
+/// DB whose schema version does not exactly match this binary surfaces as
+/// `VersionTooNew` or `VersionTooOld` rather than being misread or crashing
+/// on a missing column.
 pub fn open_readonly(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
     let path = path.as_ref().to_path_buf();
     if !path.exists() {
@@ -248,15 +258,22 @@ pub fn open_readonly(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
     Ok(UsageDb { conn, path })
 }
 
-/// Reject a DB whose on-disk `PRAGMA user_version` is newer than this
-/// binary understands. Equal-or-older is readable by a non-migrating
-/// viewer.
+/// Reject a DB whose on-disk `PRAGMA user_version` is out of range for this
+/// binary. Too-new means the layout is unknown; too-old means the schema has
+/// unmigrated columns that would produce raw SQLite errors on first query.
+/// Equal is the only readable state for a non-migrating viewer.
 fn verify_readable_version(conn: &Connection) -> Result<(), OpenError> {
     let found: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(OpenError::Pragma)?;
     if found > SCHEMA_VERSION {
         return Err(OpenError::VersionTooNew {
+            found,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    if found < SCHEMA_VERSION {
+        return Err(OpenError::VersionTooOld {
             found,
             supported: SCHEMA_VERSION,
         });
@@ -1272,8 +1289,10 @@ mod tests {
     }
 
     #[test]
-    fn open_readonly_on_fresh_unwritten_db_returns_no_data() {
-        // Arrange: a file exists but has no `requests` table.
+    fn open_readonly_on_fresh_unwritten_db_returns_version_too_old() {
+        // Arrange: a file exists but has no `requests` table and user_version = 0
+        // (never migrated). VersionTooOld is now returned before the table check,
+        // which prevents a raw "no such column" SQLite error on first query.
         let (_dir, path) = temp_db_path();
         let _conn = Connection::open(&path).expect("create empty sqlite file");
 
@@ -1281,7 +1300,7 @@ mod tests {
         let result = open_readonly(&path);
 
         // Assert
-        assert!(matches!(result, Err(OpenError::NoData { .. })));
+        assert!(matches!(result, Err(OpenError::VersionTooOld { .. })));
     }
 
     #[test]
@@ -1326,6 +1345,27 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(OpenError::VersionTooNew { .. })));
+    }
+
+    #[test]
+    fn open_readonly_rejects_older_version() {
+        // Arrange: seed a fully-migrated DB, then roll user_version back to
+        // simulate a DB that predates this binary (e.g. a pre-migration file
+        // from an older install). The requests table exists so the version
+        // check is the only thing standing between the caller and a raw
+        // "no such column" SQLite error on first query.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("seed db");
+        db.conn()
+            .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION - 1))
+            .expect("roll version back");
+        drop(db);
+
+        // Act
+        let result = open_readonly(&path);
+
+        // Assert
+        assert!(matches!(result, Err(OpenError::VersionTooOld { .. })));
     }
 
     #[test]
