@@ -6,7 +6,11 @@ all-features = true
 
 [advisories]
 version = 2
-yanked = "warn"
+# Fail on yanked crates, not just warn. Cargo.lock is committed (this is a
+# binary, not a published lib), so a yank never breaks a downstream build
+# unexpectedly; surface it loudly instead. Move a specific advisory to `ignore`
+# below with a comment explaining why it is safe.
+yanked = "deny"
 ignore = []
 
 [licenses]
