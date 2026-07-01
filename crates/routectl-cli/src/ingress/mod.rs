@@ -14,7 +14,10 @@
 //! the router (alias resolution, retry, fallback) or core.
 
 use axum::http::{HeaderMap, StatusCode};
-use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Result};
+use routectl_core::{
+    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
+    Result, Role, SystemBlock, SystemContent,
+};
 use serde_json::Value;
 
 pub mod anthropic;
@@ -93,6 +96,106 @@ impl StreamErrorClass {
                 openai_type: STREAM_ERROR_TYPE.to_string(),
                 openai_code: STREAM_ERROR_TYPE.to_string(),
             },
+        }
+    }
+}
+
+/// If any `Role::System` messages are in `req.messages`, lift their text
+/// content into `req.system` and remove them from the messages array.
+/// No-op when there are no System messages.
+///
+/// Lifting strategy:
+/// - `MessageContent::Text` messages contribute a `SystemBlock` with no
+///   `cache_control` (same as before v0.7.0).
+/// - `MessageContent::Parts` messages contribute one `SystemBlock` per text
+///   part, preserving `cache_control` and `citations` from each part.
+///
+/// Output shape:
+/// - When no lifted block carries `cache_control` or `citations`, the result
+///   is concatenated into `SystemContent::Text` (backward-compatible).
+/// - When any block carries `cache_control` or `citations`, the result is
+///   `SystemContent::Blocks` so the per-block cache breakpoints survive the
+///   ingress boundary and reach the Anthropic / Bedrock egress intact.
+pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
+    let mut lifted_blocks: Vec<SystemBlock> = Vec::new();
+    req.messages.retain(|m| {
+        if !matches!(m.role, Role::System) {
+            return true;
+        }
+        match &m.content {
+            MessageContent::Text(t) => {
+                lifted_blocks.push(SystemBlock {
+                    kind: "text".into(),
+                    text: t.clone(),
+                    cache_control: None,
+                    citations: None,
+                });
+            }
+            MessageContent::Parts(parts) => {
+                // Non-text parts (images, documents) in a System message are
+                // not meaningful in canonical and would be dropped by egresses
+                // that do not support them; skip them here as before.
+                for p in parts {
+                    if let ContentPart::Known(KnownContentPart::Text {
+                        text,
+                        cache_control,
+                    }) = p
+                    {
+                        lifted_blocks.push(SystemBlock {
+                            kind: "text".into(),
+                            text: text.clone(),
+                            cache_control: cache_control.clone(),
+                            citations: None,
+                        });
+                    }
+                }
+            }
+            MessageContent::Null => {}
+        }
+        false
+    });
+
+    if lifted_blocks.is_empty() {
+        return;
+    }
+
+    let needs_blocks = lifted_blocks
+        .iter()
+        .any(|b| b.cache_control.is_some() || b.citations.is_some());
+
+    match req.system.take() {
+        Some(SystemContent::Text(existing)) if !needs_blocks => {
+            let lifted_text = lifted_blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            req.system = Some(SystemContent::Text(format!("{existing}\n{lifted_text}")));
+        }
+        Some(SystemContent::Text(existing)) => {
+            let mut blocks = vec![SystemBlock {
+                kind: "text".into(),
+                text: existing,
+                cache_control: None,
+                citations: None,
+            }];
+            blocks.extend(lifted_blocks);
+            req.system = Some(SystemContent::Blocks(blocks));
+        }
+        Some(SystemContent::Blocks(mut blocks)) => {
+            blocks.extend(lifted_blocks);
+            req.system = Some(SystemContent::Blocks(blocks));
+        }
+        None if !needs_blocks => {
+            let lifted_text = lifted_blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            req.system = Some(SystemContent::Text(lifted_text));
+        }
+        None => {
+            req.system = Some(SystemContent::Blocks(lifted_blocks));
         }
     }
 }

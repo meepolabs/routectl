@@ -19,7 +19,7 @@ use std::any::Any;
 use axum::http::HeaderMap;
 use routectl_core::{
     is_canonical_request_key, ChatChunk, ChatRequest, ChatResponse, ContentPart, Error,
-    KnownContentPart, MessageContent, Result, Role, SystemContent,
+    KnownContentPart, MessageContent, Result,
 };
 use serde_json::{Map, Value};
 
@@ -133,7 +133,7 @@ impl IngressAdapter for OpenAiIngress {
         // `req.system` here at ingress so every egress reads the same
         // shape. Concat with newlines when multiple system messages
         // are present (matching the legacy lift-from-egress behavior).
-        lift_system_messages(&mut req);
+        super::lift_system_messages(&mut req);
         // tool_choice and OpenAI function tools are NOT translated at
         // the ingress: different egresses want different shapes
         // (openai-compat passes through verbatim, Anthropic egress
@@ -405,110 +405,6 @@ fn normalize_reasoning_effort(body: &mut Value) {
     }
 }
 
-/// If any `Role::System` messages are in `req.messages`, lift their text
-/// content into `req.system` and remove them from the messages array.
-/// No-op when there are no System messages.
-///
-/// Lifting strategy:
-/// - `MessageContent::Text` messages contribute a `SystemBlock` with no
-///   `cache_control` (same as before v0.7.0).
-/// - `MessageContent::Parts` messages contribute one `SystemBlock` per text
-///   part, preserving `cache_control` and `citations` from each part.
-///
-/// Output shape:
-/// - When no lifted block carries `cache_control` or `citations`, the result
-///   is concatenated into `SystemContent::Text` (backward-compatible).
-/// - When any block carries `cache_control` or `citations`, the result is
-///   `SystemContent::Blocks` so the per-block cache breakpoints survive the
-///   ingress boundary and reach the Anthropic / Bedrock egress intact.
-fn lift_system_messages(req: &mut ChatRequest) {
-    let mut lifted_blocks: Vec<routectl_core::SystemBlock> = Vec::new();
-    req.messages.retain(|m| {
-        if !matches!(m.role, Role::System) {
-            return true;
-        }
-        match &m.content {
-            MessageContent::Text(t) => {
-                lifted_blocks.push(routectl_core::SystemBlock {
-                    kind: "text".into(),
-                    text: t.clone(),
-                    cache_control: None,
-                    citations: None,
-                });
-            }
-            MessageContent::Parts(parts) => {
-                // Preserve cache_control and citations from each text part
-                // so prompt-cache breakpoints survive the ingress boundary.
-                // Non-text parts (images, documents) in a System message are
-                // not meaningful in canonical and would be dropped by egresses
-                // that do not support them; skip them here as before.
-                for p in parts {
-                    if let ContentPart::Known(KnownContentPart::Text {
-                        text,
-                        cache_control,
-                    }) = p
-                    {
-                        lifted_blocks.push(routectl_core::SystemBlock {
-                            kind: "text".into(),
-                            text: text.clone(),
-                            cache_control: cache_control.clone(),
-                            citations: None,
-                        });
-                    }
-                }
-            }
-            MessageContent::Null => {}
-        }
-        false
-    });
-
-    if lifted_blocks.is_empty() {
-        return;
-    }
-
-    let needs_blocks = lifted_blocks
-        .iter()
-        .any(|b| b.cache_control.is_some() || b.citations.is_some());
-
-    match req.system.take() {
-        Some(SystemContent::Text(existing)) if !needs_blocks => {
-            let lifted_text = lifted_blocks
-                .iter()
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            req.system = Some(SystemContent::Text(format!("{existing}\n{lifted_text}")));
-        }
-        Some(SystemContent::Text(existing)) => {
-            // Upgrade the plain existing text to a Blocks vec so that
-            // cache_control on the lifted parts is not silently dropped.
-            let mut blocks = vec![routectl_core::SystemBlock {
-                kind: "text".into(),
-                text: existing,
-                cache_control: None,
-                citations: None,
-            }];
-            blocks.extend(lifted_blocks);
-            req.system = Some(SystemContent::Blocks(blocks));
-        }
-        Some(SystemContent::Blocks(mut blocks)) => {
-            blocks.extend(lifted_blocks);
-            req.system = Some(SystemContent::Blocks(blocks));
-        }
-        None if !needs_blocks => {
-            let lifted_text = lifted_blocks
-                .iter()
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            req.system = Some(SystemContent::Text(lifted_text));
-        }
-        None => {
-            req.system = Some(SystemContent::Blocks(lifted_blocks));
-        }
-    }
-}
-
 /// Strip `matched_stop_sequence` from every `Choice` in a `ChatResponse`.
 /// This is an Anthropic-internal field set by the egress to thread the
 /// matched stop sequence back to the Anthropic ingress via the canonical
@@ -656,7 +552,7 @@ mod tests {
     use crate::ingress::STREAM_ERROR_TYPE;
     use routectl_core::{
         Choice, ChunkChoice, ChunkDelta, Message, MessageContent, ReasoningConfig,
-        ReasoningDetailKind, Usage,
+        ReasoningDetailKind, Role, SystemContent, Usage,
     };
     use serde_json::json;
 
