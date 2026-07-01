@@ -22,8 +22,7 @@ use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use routectl_core::Error;
-use routectl_core::Result;
+use routectl_core::{sanitize_for_log, sanitize_upstream_body, Error, Result};
 
 // Wire constants. Kept private to this module: they are part of the
 // Cloud Code dialect, not configurable provider knobs.
@@ -51,8 +50,6 @@ const IDE_VERSION: &str = "1.0.13";
 const DEFAULT_TIER: &str = "free-tier";
 
 const ONBOARD_MAX_ATTEMPTS: u32 = 5;
-/// Cap on the upstream error-body excerpt carried into a routectl Error.
-const ERROR_BODY_CAP: usize = 500;
 
 /// Selects which Gemini wire dialect a provider speaks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,16 +170,68 @@ pub(crate) fn default_tier(load_resp: &Value) -> String {
     DEFAULT_TIER.to_string()
 }
 
-/// Trim and cap an upstream error body for inclusion in a routectl Error.
-/// Never carries the bearer token (the token is only ever set in the
-/// Authorization header, never echoed by these endpoints in a body).
+/// Trim and sanitize an upstream error body for inclusion in a routectl
+/// Error. Two-pass, mirroring the shared reference pattern (bedrock):
+/// `sanitize_upstream_body` trims edges, collapses HTML pages to a short
+/// marker, and caps length on a char boundary (never panics mid-codepoint
+/// on multibyte UTF-8); `sanitize_for_log` then strips the control / ANSI
+/// chars the first pass leaves. Never carries the bearer token (the token
+/// is only ever set in the Authorization header, never echoed by these
+/// endpoints in a body).
 fn clean_error_body(body: &str) -> String {
-    let trimmed = body.trim();
-    if trimmed.len() > ERROR_BODY_CAP {
-        trimmed[..ERROR_BODY_CAP].to_string()
+    sanitize_for_log(&sanitize_upstream_body(body))
+}
+
+/// Lift the Google Cloud Code error classifier from an onboarding error
+/// body. Google's envelope is `{"error":{"code":<num>,"status":"<CANONICAL>"}}`;
+/// `status` (e.g. `RESOURCE_EXHAUSTED`, `UNAUTHENTICATED`) becomes the
+/// upstream type and the numeric `code` becomes the upstream code, so a
+/// quota / auth failure stays distinguishable from a generic 429 / 401
+/// downstream. Returns `(None, None)` for a non-JSON or non-enveloped body.
+fn parse_cloudcode_error_classifier(body: &str) -> (Option<String>, Option<String>) {
+    let parsed: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+    let err = parsed.get("error");
+    let upstream_type = err
+        .and_then(|e| e.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let upstream_code = err.and_then(|e| e.get("code")).and_then(|c| match c {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    });
+    (upstream_type, upstream_code)
+}
+
+/// Map an onboarding (`loadCodeAssist` / `onboardUser`) HTTP failure into a
+/// routectl upstream error, preserving the Google Cloud Code classifier
+/// (`error.status` / `error.code`) and any rate-limit reset hint. Lifts the
+/// classifier via `Error::upstream_full` -- the path the reference providers
+/// use -- so a `RESOURCE_EXHAUSTED` / `UNAUTHENTICATED` is not collapsed
+/// into an indistinguishable generic 429 / 401.
+fn map_onboarding_error(
+    provider_id: &str,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body_text: &str,
+) -> Error {
+    let retry_after = if crate::retry_after::is_rate_limit_status(status) {
+        crate::retry_after::parse_retry_after(headers)
     } else {
-        trimmed.to_string()
-    }
+        None
+    };
+    let (upstream_type, upstream_code) = parse_cloudcode_error_classifier(body_text);
+    Error::upstream_full(
+        provider_id,
+        status,
+        clean_error_body(body_text),
+        retry_after,
+        upstream_type,
+        upstream_code,
+    )
 }
 
 /// POST `loadCodeAssist` and return the parsed JSON response. The caller
@@ -207,12 +256,14 @@ pub(crate) async fn load_code_assist(
         .map_err(|e| Error::upstream(provider_id, 0, e.to_string()))?;
 
     let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
     let body_text = resp.text().await.unwrap_or_default();
     if status >= 400 {
-        return Err(Error::upstream(
+        return Err(map_onboarding_error(
             provider_id,
             status,
-            clean_error_body(&body_text),
+            &headers,
+            &body_text,
         ));
     }
     serde_json::from_str(&body_text).map_err(|e| {
@@ -259,12 +310,14 @@ pub(crate) async fn onboard_user(
             .map_err(|e| Error::upstream(provider_id, 0, e.to_string()))?;
 
         let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
         let body_text = resp.text().await.unwrap_or_default();
         if status != 200 {
-            return Err(Error::upstream(
+            return Err(map_onboarding_error(
                 provider_id,
                 status,
-                clean_error_body(&body_text),
+                &headers,
+                &body_text,
             ));
         }
 
@@ -419,5 +472,75 @@ mod tests {
     fn default_tier_falls_back_to_free_tier() {
         let resp = json!({});
         assert_eq!(default_tier(&resp), "free-tier");
+    }
+
+    #[test]
+    fn clean_error_body_handles_multibyte_and_strips_control_chars() {
+        // A body far longer than the old fixed 500-byte cap whose byte 500
+        // lands inside a multibyte UTF-8 sequence used to panic on a raw
+        // byte slice ("byte index 500 is not a char boundary"). It also
+        // embeds control / ANSI chars an upstream could use for log
+        // injection. Build it, clean it, and assert: no panic, and the
+        // control chars do not survive.
+        let mut body = String::new();
+        body.push('\u{1b}'); // ESC (ANSI control), never trimmed
+        body.push('\r');
+        body.push('\n');
+        for _ in 0..300 {
+            body.push('\u{1F680}'); // 4-byte rocket emoji -> ~1200 bytes
+        }
+
+        // Must not panic on the mid-codepoint boundary.
+        let cleaned = clean_error_body(&body);
+
+        assert!(!cleaned.contains('\r'), "CR must be stripped");
+        assert!(!cleaned.contains('\n'), "LF must be stripped");
+        assert!(!cleaned.contains('\u{1b}'), "ESC must be stripped");
+    }
+
+    #[test]
+    fn parse_classifier_lifts_google_status_and_code() {
+        // Arrange: the Google Cloud Code error envelope.
+        let body = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}"#;
+
+        // Act
+        let (upstream_type, upstream_code) = parse_cloudcode_error_classifier(body);
+
+        // Assert
+        assert_eq!(upstream_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
+        assert_eq!(upstream_code.as_deref(), Some("429"));
+    }
+
+    #[test]
+    fn parse_classifier_returns_none_on_non_json_body() {
+        let (upstream_type, upstream_code) =
+            parse_cloudcode_error_classifier("503 Service Unavailable (plain text)");
+        assert!(upstream_type.is_none());
+        assert!(upstream_code.is_none());
+    }
+
+    #[test]
+    fn onboarding_error_preserves_google_classifier() {
+        // Arrange: an UNAUTHENTICATED body that a bare Error::upstream
+        // would have collapsed into an indistinguishable generic 401.
+        let body = r#"{"error":{"code":401,"status":"UNAUTHENTICATED","message":"bad token"}}"#;
+
+        // Act
+        let err = map_onboarding_error("gemini-cc", 401, &reqwest::header::HeaderMap::new(), body);
+
+        // Assert: the classifier survives onto the canonical error.
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(status, 401);
+                assert_eq!(upstream_type.as_deref(), Some("UNAUTHENTICATED"));
+                assert_eq!(upstream_code.as_deref(), Some("401"));
+            }
+            other => panic!("expected Error::Upstream, got {other:?}"),
+        }
     }
 }
