@@ -102,6 +102,31 @@ the bind address: `"refusing to serve on public bind '<addr>' without
 ::ffff:127.0.0.1) are exempt so the default local-dev workflow
 requires no auth.
 
+### Request routes
+
+routectl exposes three ingress dialects, all behind listener auth (and
+the `max_body_bytes` cap):
+
+- `POST /v1/chat/completions` -- OpenAI Chat Completions requests.
+- `POST /v1/messages` (+ `POST /v1/messages/count_tokens`) -- Anthropic
+  Messages requests.
+- `POST /v1/responses` -- OpenAI Responses API requests (the shape a
+  Codex client sends). routectl is stateless, so the Responses
+  server-side conversation state is handled deterministically:
+  - `previous_response_id` -> **HTTP 400** (`invalid_request_error`).
+    The reference points at a prior turn routectl never stored;
+    answering anyway would be a silent wrong answer. Configure the
+    client to send the full conversation `input` each turn.
+  - `store: true` without a `previous_response_id` -> **accepted**. The
+    current turn is self-contained so the answer is correct; the
+    persistence intent is ignored and logged at WARN (a later
+    retrieval-by-id against this stateless proxy will find nothing).
+  - `store: false` / absent -> normal stateless path.
+
+`GET /v1/models` lists the configured aliases; `GET /health` is the
+only route outside the auth layer (so liveness probes work under
+`--unsafe-public`).
+
 **`max_body_bytes`** (u32, default 33554432 -- 32 MiB)
 
 Caps the inbound HTTP body size for `/v1/messages` and

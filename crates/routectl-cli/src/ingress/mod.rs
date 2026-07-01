@@ -19,6 +19,7 @@ use serde_json::Value;
 
 pub mod anthropic;
 pub mod openai;
+pub mod openai_responses;
 
 /// Header used by harnesses that can override the canonical `model`
 /// field directly to pin routing to a specific configured alias.

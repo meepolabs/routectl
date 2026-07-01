@@ -4,4 +4,5 @@ pub mod ingress_handle;
 pub mod messages;
 pub mod messages_count_tokens;
 pub mod models;
+pub mod responses;
 pub mod usage_capture;

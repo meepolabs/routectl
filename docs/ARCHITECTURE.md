@@ -54,10 +54,10 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 
 - `crates/routectl-cli/` -- axum HTTP server, clap CLI (`serve`,
   `login`, `logout`, `refresh`, `whoami`, `test`, `config`,
-  `usage`), and the two ingress dialects (`openai.rs` for
+  `usage`), and the three ingress dialects (`openai.rs` for
   `POST /v1/chat/completions`, `anthropic/` for `POST /v1/messages`
-  + `POST /v1/messages/count_tokens`). Live matrix integration tests
-  live here.
+  + `POST /v1/messages/count_tokens`, `openai_responses/` for
+  `POST /v1/responses`). Live matrix integration tests live here.
 
 ## Hub-and-spoke contract
 
