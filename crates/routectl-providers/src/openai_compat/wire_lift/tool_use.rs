@@ -48,7 +48,7 @@ pub fn lift(
         let role = msg_obj
             .get("role")
             .and_then(|r| r.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         if role.as_deref() != Some("assistant") {
             continue;
         }

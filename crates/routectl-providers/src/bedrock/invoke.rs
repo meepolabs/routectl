@@ -417,8 +417,7 @@ fn insert_marker_on_candidate(messages: &mut [Value], cc: &Value) -> Option<Inse
             let is_eligible = map
                 .get("type")
                 .and_then(Value::as_str)
-                .map(is_cache_control_eligible_block_type)
-                .unwrap_or(false);
+                .is_some_and(is_cache_control_eligible_block_type);
             if !is_eligible {
                 continue;
             }

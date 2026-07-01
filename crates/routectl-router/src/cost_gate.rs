@@ -102,11 +102,11 @@ pub enum GateDecision {
 impl GateDecision {
     /// Stable, append-only reduction-strategy token for the usage ledger.
     /// These strings are a public contract: never rename, only add.
-    pub fn strategy_str(&self) -> &'static str {
+    pub const fn strategy_str(&self) -> &'static str {
         match self {
-            GateDecision::Keep { .. } => "cost_gate:keep",
-            GateDecision::Break { .. } => "cost_gate:break",
-            GateDecision::FreeBreak { .. } => "cost_gate:free_break",
+            Self::Keep { .. } => "cost_gate:keep",
+            Self::Break { .. } => "cost_gate:break",
+            Self::FreeBreak { .. } => "cost_gate:free_break",
         }
     }
 }

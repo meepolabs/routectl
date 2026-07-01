@@ -76,7 +76,7 @@ impl BuildOptions {
         Self::default()
     }
 
-    pub fn with_strict_translation(mut self, strict: bool) -> Self {
+    pub const fn with_strict_translation(mut self, strict: bool) -> Self {
         self.strict_translation = strict;
         self
     }
@@ -528,7 +528,7 @@ async fn resolve_bedrock_auth_for_entry(
 }
 
 #[cfg(feature = "bedrock")]
-fn map_bedrock_api_shape(s: BedrockApiShapeConfig) -> BedrockApiShape {
+const fn map_bedrock_api_shape(s: BedrockApiShapeConfig) -> BedrockApiShape {
     match s {
         BedrockApiShapeConfig::Invoke => BedrockApiShape::Invoke,
         BedrockApiShapeConfig::Converse => BedrockApiShape::Converse,
@@ -682,7 +682,7 @@ async fn build_seat_targets(
         return None;
     }
     let mut seats: Vec<crate::seat_pool::SeatTarget> = Vec::with_capacity(seat_refs.len());
-    for seat_ref in seat_refs.iter() {
+    for seat_ref in &seat_refs {
         let label = match seat_ref {
             SecretRef::OAuth { label, .. } => label.clone(),
             _ => None,
@@ -698,19 +698,18 @@ async fn build_seat_targets(
             default_provider.clone()
         } else {
             let seat_uri = seat_ref.to_string();
-            let seat_entry = match entry_with_api_key_ref(provider_entry, &seat_uri) {
-                Some(e) => e,
-                None => {
-                    // A provider kind with no single api_key_ref slot cannot
-                    // be seat-pinned; skip this seat, not the whole pool.
-                    tracing::warn!(
-                        provider = %provider_name,
-                        model = %nickname,
-                        seat = %state_key,
-                        "skipping OAuth pool seat (no api_key_ref to pin)",
-                    );
-                    continue;
-                }
+            let seat_entry = if let Some(e) = entry_with_api_key_ref(provider_entry, &seat_uri) {
+                e
+            } else {
+                // A provider kind with no single api_key_ref slot cannot
+                // be seat-pinned; skip this seat, not the whole pool.
+                tracing::warn!(
+                    provider = %provider_name,
+                    model = %nickname,
+                    seat = %state_key,
+                    "skipping OAuth pool seat (no api_key_ref to pin)",
+                );
+                continue;
             };
             match build_provider_with_options(
                 provider_name,
@@ -1144,7 +1143,7 @@ pub async fn build_resolved_models(
 /// `false` for any other shape. Used by the model-binding warning
 /// path to scope the guard to the only provider kind where the
 /// `context_management` emulation flag exists.
-fn anthropic_api_uses_context_management(entry: &ProviderEntry) -> bool {
+const fn anthropic_api_uses_context_management(entry: &ProviderEntry) -> bool {
     matches!(
         entry,
         ProviderEntry::AnthropicApi {
@@ -1274,8 +1273,9 @@ fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
                 // (`::a.b.c.d`) too, then fall back to the fe80::/10
                 // segment check for native IPv6.
                 None => ipv4_compatible_embedded(&ip)
-                    .map(|v4| v4.is_link_local())
-                    .unwrap_or((ip.segments()[0] & 0xffc0) == 0xfe80),
+                    .map_or((ip.segments()[0] & 0xffc0) == 0xfe80, |v4| {
+                        v4.is_link_local()
+                    }),
             },
             url::Host::Domain(_) => false,
         };
@@ -1310,8 +1310,7 @@ fn validate_base_url_scheme(provider_name: &str, base_url: &str) -> Result<()> {
                 url::Host::Ipv6(ip) => Some(match ip.to_ipv4_mapped() {
                     Some(v4) => v4.is_loopback(),
                     None => ipv4_compatible_embedded(&ip)
-                        .map(|v4| v4.is_loopback())
-                        .unwrap_or(ip.is_loopback()),
+                        .map_or(ip.is_loopback(), |v4| v4.is_loopback()),
                 }),
                 url::Host::Domain(_) => None,
             })
@@ -1589,9 +1588,8 @@ pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()>
         for level in &entry.effort_levels {
             if !VALID_EFFORT_TOKENS.contains(&level.as_str()) {
                 return Err(Error::Config(format!(
-                    "[models.{nickname}] effort_levels contains unknown value {:?}; \
-                     valid values are: minimal, low, medium, high, xhigh, max",
-                    level
+                    "[models.{nickname}] effort_levels contains unknown value {level:?}; \
+                     valid values are: minimal, low, medium, high, xhigh, max"
                 )));
             }
         }
@@ -3357,8 +3355,7 @@ mod validate_reasoning_defaults_tests {
             let cfg = config_with_model("single", entry);
             assert!(
                 validate_reasoning_defaults(&cfg).is_ok(),
-                "level {:?} should be accepted",
-                level
+                "level {level:?} should be accepted"
             );
         }
     }
@@ -3527,7 +3524,7 @@ mod validate_registry_patterns_tests {
         let mut cfg = Config::default();
         for key in keys {
             cfg.registry
-                .insert(key.to_string(), RegistryEntry::default());
+                .insert((*key).to_string(), RegistryEntry::default());
         }
         cfg
     }
@@ -3569,7 +3566,7 @@ mod validate_alias_patterns_tests {
         let mut cfg = Config::default();
         for key in keys {
             cfg.aliases
-                .insert(key.to_string(), AliasValue::Single("some-model".into()));
+                .insert((*key).to_string(), AliasValue::Single("some-model".into()));
         }
         cfg
     }

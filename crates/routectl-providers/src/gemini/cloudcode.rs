@@ -27,18 +27,18 @@ use routectl_core::{Error, Result, sanitize_for_log, sanitize_upstream_body};
 // Wire constants. Kept private to this module: they are part of the
 // Cloud Code dialect, not configurable provider knobs.
 
-pub(crate) const PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
-pub(crate) const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
+pub const PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
+pub const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 
-pub(crate) const GENERATE_PATH: &str = "/v1internal:generateContent";
-pub(crate) const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
+pub const GENERATE_PATH: &str = "/v1internal:generateContent";
+pub const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
 const LOAD_CODE_ASSIST_PATH: &str = "/v1internal:loadCodeAssist";
 const ONBOARD_USER_PATH: &str = "/v1internal:onboardUser";
 
 /// Short User-Agent sent on generate / stream / loadCodeAssist. Pinned to
 /// the reference client's fallback version for this slice; routectl does
 /// not run a live version-fetcher.
-pub(crate) const SHORT_USER_AGENT: &str =
+pub const SHORT_USER_AGENT: &str =
     "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)";
 /// Node User-Agent sent only on onboardUser (the reference uses the
 /// google-api-nodejs-client UA there).
@@ -68,7 +68,7 @@ pub enum GeminiAuthMode {
 /// The inner `GenerateContentRequest` carries no top-level `model` field
 /// (Gemini's `generateContent` puts the model in the URL); the Cloud Code
 /// surface instead names the model in the envelope, so it is added here.
-pub(crate) fn wrap_envelope(inner: Value, project_id: &str, model: &str) -> Value {
+pub fn wrap_envelope(inner: Value, project_id: &str, model: &str) -> Value {
     json!({
         "project": project_id,
         "request": inner,
@@ -81,7 +81,7 @@ pub(crate) fn wrap_envelope(inner: Value, project_id: &str, model: &str) -> Valu
 /// peel it off so the shared response translator sees the same shape the
 /// public REST surface returns. Lenient: a body that is not wrapped is
 /// passed through unchanged (matches the reference's tolerance).
-pub(crate) fn unwrap_response(raw: Value) -> Value {
+pub fn unwrap_response(raw: Value) -> Value {
     match raw.get("response") {
         Some(inner) if inner.is_object() => inner.clone(),
         _ => raw,
@@ -92,7 +92,7 @@ pub(crate) fn unwrap_response(raw: Value) -> Value {
 /// `{"response": {GenerateContentResponse}}` envelope; return the inner
 /// object serialized so the shared SSE parser sees the bare partial
 /// response. Anything that is not a wrapped object is returned unchanged.
-pub(crate) fn unwrap_sse_data(data: &str) -> String {
+pub fn unwrap_sse_data(data: &str) -> String {
     let parsed: Value = match serde_json::from_str(data) {
         Ok(v) => v,
         Err(_) => return data.to_string(),
@@ -115,7 +115,7 @@ fn onboarding_headers(rb: RequestBuilder, token: &str) -> RequestBuilder {
 /// `cloudaicompanionProject`, `projectId`, then `project`; each value may
 /// be a non-empty (trimmed) string, or an object whose `.id` is a
 /// non-empty string. Returns `None` when nothing usable is present.
-pub(crate) fn extract_project_id(obj: &Value) -> Option<String> {
+pub fn extract_project_id(obj: &Value) -> Option<String> {
     for key in ["cloudaicompanionProject", "projectId", "project"] {
         match obj.get(key) {
             Some(Value::String(s)) => {
@@ -141,7 +141,7 @@ pub(crate) fn extract_project_id(obj: &Value) -> Option<String> {
 /// Compute the onboarding tier from a `loadCodeAssist` response: the
 /// `allowedTiers[]` entry flagged `isDefault`, else `currentTier.id`, else
 /// the `free-tier` fallback.
-pub(crate) fn default_tier(load_resp: &Value) -> String {
+pub fn default_tier(load_resp: &Value) -> String {
     if let Some(tiers) = load_resp.get("allowedTiers").and_then(Value::as_array) {
         for tier in tiers {
             let is_default = tier.get("isDefault").and_then(Value::as_bool) == Some(true);
@@ -221,7 +221,7 @@ fn map_onboarding_error(
 
 /// POST `loadCodeAssist` and return the parsed JSON response. The caller
 /// reads the project id (or computes the default tier) from it.
-pub(crate) async fn load_code_assist(
+pub async fn load_code_assist(
     client: &Client,
     token: &str,
     generate_base: &str,
@@ -262,7 +262,7 @@ pub(crate) async fn load_code_assist(
 /// resolved project id. On a 200 with `done == true`, reads the id from the
 /// nested `response` object; otherwise sleeps `poll_interval` and retries.
 /// A non-200 is a hard error; exhausting the attempts is a hard error.
-pub(crate) async fn onboard_user(
+pub async fn onboard_user(
     client: &Client,
     token: &str,
     onboard_base: &str,
@@ -340,7 +340,7 @@ pub(crate) async fn onboard_user(
 /// Resolve the Cloud Code project id: read it from `loadCodeAssist`, or
 /// onboard via `onboardUser` when no project is provisioned yet. Ports the
 /// reference `FetchProjectID` flow.
-pub(crate) async fn resolve_project_id(
+pub async fn resolve_project_id(
     client: &Client,
     token: &str,
     generate_base: &str,

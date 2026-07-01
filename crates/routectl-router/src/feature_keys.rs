@@ -46,10 +46,7 @@ const STRUCTURED_OUTPUT_KEY: &str = "structured_output";
 /// needs constrained decoding -- see the module docs for the two
 /// trigger sources. Pure: takes only what it reads, holds no router
 /// state.
-pub(crate) fn derive_feature_keys(
-    tools: &[ToolDef],
-    provider_extras: Option<&Value>,
-) -> Vec<String> {
+pub fn derive_feature_keys(tools: &[ToolDef], provider_extras: Option<&Value>) -> Vec<String> {
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut keys: Vec<String> = Vec::new();
     for tool in tools {
@@ -88,7 +85,7 @@ fn needs_structured_output(tools: &[ToolDef], provider_extras: Option<&Value>) -
     }
     tools.iter().any(|tool| match tool {
         ToolDef::Custom(c) => c.strict == Some(true),
-        ToolDef::Other(v) => v.get("strict").and_then(|s| s.as_bool()) == Some(true),
+        ToolDef::Other(v) => v.get("strict").and_then(serde_json::Value::as_bool) == Some(true),
     })
 }
 
@@ -106,7 +103,7 @@ fn strip_date_suffix(s: &str) -> &str {
         return s;
     }
     let date_bytes = &bytes[suffix_start + 1..];
-    if date_bytes.iter().all(|b| b.is_ascii_digit()) {
+    if date_bytes.iter().all(u8::is_ascii_digit) {
         &s[..suffix_start]
     } else {
         s

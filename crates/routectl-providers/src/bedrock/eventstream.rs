@@ -119,20 +119,19 @@ fn handle_invoke_frame(
                     return Ok(None);
                 }
             };
-            let b64 = match outer.get("bytes").and_then(|v| v.as_str()) {
-                Some(s) => s,
-                None => {
-                    // Missing `bytes` field -- treat symmetrically with
-                    // the malformed-outer-JSON arm above: WARN and skip
-                    // the frame rather than killing the stream. One
-                    // malformed frame should not abort an in-flight
-                    // response.
-                    tracing::warn!(
-                        provider = %provider_id,
-                        "bedrock chunk payload missing `bytes` field; skipping"
-                    );
-                    return Ok(None);
-                }
+            let b64 = if let Some(s) = outer.get("bytes").and_then(|v| v.as_str()) {
+                s
+            } else {
+                // Missing `bytes` field -- treat symmetrically with
+                // the malformed-outer-JSON arm above: WARN and skip
+                // the frame rather than killing the stream. One
+                // malformed frame should not abort an in-flight
+                // response.
+                tracing::warn!(
+                    provider = %provider_id,
+                    "bedrock chunk payload missing `bytes` field; skipping"
+                );
+                return Ok(None);
             };
             let decoded = B64_STANDARD.decode(b64).map_err(|e| {
                 Error::Streaming(format!("bedrock chunk bytes not valid base64: {e}"))

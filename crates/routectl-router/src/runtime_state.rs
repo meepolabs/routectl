@@ -53,7 +53,7 @@ pub struct ProviderState {
 }
 
 /// Decision returned from the dispatch gate.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     /// Provider is healthy and within rate limits; dispatch.
     Allow,
@@ -75,7 +75,7 @@ impl ProviderState {
         );
         Self {
             rpm_capacity: policy.rpm_limit.map(|r| r as f64),
-            rpm_tokens: policy.rpm_limit.map(|r| r as f64).unwrap_or(0.0),
+            rpm_tokens: policy.rpm_limit.map_or(0.0, |r| r as f64),
             rpm_last_refill: now,
             circuit_failure_threshold: policy.circuit_failures,
             circuit_cooldown,
@@ -127,7 +127,7 @@ impl ProviderState {
     /// Mark the most recent dispatch as successful. Resets the
     /// circuit-breaker failure counter and closes a tripped circuit
     /// if this was a half-open probe.
-    pub fn record_success(&mut self) {
+    pub const fn record_success(&mut self) {
         self.consecutive_failures = 0;
         self.circuit_opened_at = None;
         self.half_open_in_flight = false;
@@ -138,7 +138,7 @@ impl ProviderState {
     /// when consecutive failures hit the configured threshold. If
     /// this was a half-open probe, re-trip the breaker by setting
     /// a fresh `circuit_opened_at = now`.
-    pub fn record_failure(&mut self, now: Instant) {
+    pub const fn record_failure(&mut self, now: Instant) {
         let was_half_open_probe = self.half_open_in_flight;
         self.half_open_in_flight = false;
 
@@ -176,7 +176,7 @@ impl ProviderState {
     /// carries the reset implies the caller reached the provider, which
     /// implies it owns the slot this call then releases. Calling it while
     /// another caller holds the slot would reset that caller's state.
-    pub fn force_open(&mut self, now: Instant, cooldown: Duration) {
+    pub const fn force_open(&mut self, now: Instant, cooldown: Duration) {
         self.circuit_opened_at = Some(now);
         self.active_cooldown = cooldown;
         // Release any in-flight probe slot so the new park window starts
@@ -193,11 +193,11 @@ impl ProviderState {
     /// `consecutive_failures` or `circuit_opened_at`: releasing a
     /// claimed slot is not a failure observation, so the breaker's trip
     /// state and counter stay unchanged.
-    pub fn release_probe_slot(&mut self) {
+    pub const fn release_probe_slot(&mut self) {
         self.half_open_in_flight = false;
     }
 
-    pub fn half_open_probe_in_flight(&self) -> bool {
+    pub const fn half_open_probe_in_flight(&self) -> bool {
         self.half_open_in_flight
     }
 
@@ -221,7 +221,9 @@ impl ProviderState {
             return self.rpm_tokens;
         }
         let refill_rate_per_ms = capacity / RPM_WINDOW_MS as f64;
-        (self.rpm_tokens + refill_rate_per_ms * elapsed_ms).min(capacity)
+        refill_rate_per_ms
+            .mul_add(elapsed_ms, self.rpm_tokens)
+            .min(capacity)
     }
 
     /// Read the gate's capacity WITHOUT mutating it. Takes `&self`, so the

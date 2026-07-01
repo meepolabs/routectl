@@ -616,7 +616,7 @@ fn tool_choice_string_passes_through_verbatim() {
 fn tool_choice_named_function_object_passes_through_verbatim() {
     // Arrange
     let tc = json!({"type": "function", "name": "get_weather"});
-    let body = json!({ "model": "m", "input": "hi", "tool_choice": tc.clone() });
+    let body = json!({ "model": "m", "input": "hi", "tool_choice": tc });
 
     // Act
     let req = parse(body);
@@ -681,7 +681,7 @@ fn text_format_maps_to_response_format() {
     let body = json!({
         "model": "m",
         "input": "hi",
-        "text": {"format": format.clone()}
+        "text": {"format": format}
     });
 
     // Act
@@ -774,7 +774,7 @@ fn text_verbosity_survives_into_provider_extras() {
         "model": "m",
         "input": "hi",
         "text": {
-            "format": format.clone(),
+            "format": format,
             "verbosity": "detailed"
         }
     });

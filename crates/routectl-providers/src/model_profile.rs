@@ -58,7 +58,7 @@ pub struct ModelProfile {
 impl ModelProfile {
     /// All-false default. Used for models we have no specific knowledge
     /// of, which should pass requests through unchanged.
-    pub const DEFAULT: ModelProfile = ModelProfile {
+    pub const DEFAULT: Self = Self {
         pattern: "",
         kind: MatchKind::Prefix,
         drops_sampling_params: false,

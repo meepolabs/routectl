@@ -56,7 +56,7 @@ use routectl_core::{ChatRequest, Error, Result};
 /// strict mode the two compose into a `strict_translation` validation
 /// error; in lenient mode they feed a structured warn before the caller
 /// drops the offending shape.
-pub(crate) fn reject_or_drop_unrepresentable(
+pub fn reject_or_drop_unrepresentable(
     id: &str,
     strict: bool,
     context: &str,
@@ -103,7 +103,7 @@ const LIFT_STEPS: &[(&str, LiftFn)] = &[
 /// Only used in tests; defined here (not in the test module) so it stays
 /// visible alongside `LIFT_STEPS` for maintenance.
 #[cfg(test)]
-pub(crate) const DOCUMENTED_DISPATCH_ORDER: &[&str] = &[
+pub const DOCUMENTED_DISPATCH_ORDER: &[&str] = &[
     "tools",
     "tool_choice",
     "content",
@@ -195,11 +195,7 @@ mod order_test {
         let result = lift_all("test", &mut obj, &req, false);
 
         // Assert
-        assert!(
-            result.is_ok(),
-            "lift_all failed on minimal req: {:?}",
-            result
-        );
+        assert!(result.is_ok(), "lift_all failed on minimal req: {result:?}");
     }
 
     /// Verifies the dependency-critical ordering: content lift must run

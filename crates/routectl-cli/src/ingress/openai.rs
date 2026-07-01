@@ -43,7 +43,7 @@ impl IngressStreamState for OpenAiStreamState {
 }
 
 impl IngressAdapter for OpenAiIngress {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "openai"
     }
 
@@ -306,7 +306,7 @@ fn coalesce_message_reasoning_keys(body: &mut Value) {
             continue;
         };
         let rc = obj.remove("reasoning_content");
-        let r_is_null = obj.get("reasoning").is_none_or(|v| v.is_null());
+        let r_is_null = obj.get("reasoning").is_none_or(serde_json::Value::is_null);
         if r_is_null {
             match rc {
                 Some(v) if !v.is_null() => {
@@ -388,20 +388,17 @@ fn normalize_reasoning_effort(body: &mut Value) {
         return;
     }
     let effort = obj.remove("reasoning_effort");
-    match obj.get_mut("reasoning") {
-        Some(Value::Object(reasoning)) => {
-            reasoning.entry("effort").or_insert_with(|| {
-                effort.expect("reasoning_effort confirmed present as a string above")
-            });
-        }
-        _ => {
-            let mut reasoning = Map::new();
-            reasoning.insert(
-                "effort".into(),
-                effort.expect("reasoning_effort confirmed present as a string above"),
-            );
-            obj.insert("reasoning".into(), Value::Object(reasoning));
-        }
+    if let Some(Value::Object(reasoning)) = obj.get_mut("reasoning") {
+        reasoning.entry("effort").or_insert_with(|| {
+            effort.expect("reasoning_effort confirmed present as a string above")
+        });
+    } else {
+        let mut reasoning = Map::new();
+        reasoning.insert(
+            "effort".into(),
+            effort.expect("reasoning_effort confirmed present as a string above"),
+        );
+        obj.insert("reasoning".into(), Value::Object(reasoning));
     }
 }
 
@@ -411,7 +408,7 @@ fn normalize_reasoning_effort(body: &mut Value) {
 /// layer. OpenAI Chat-Completions clients do not expect it and some SDKs
 /// error or forward it unexpectedly to callers.
 fn strip_matched_stop_sequence_from_response(mut resp: ChatResponse) -> ChatResponse {
-    for choice in resp.choices.iter_mut() {
+    for choice in &mut resp.choices {
         choice.matched_stop_sequence = None;
     }
     resp
@@ -421,7 +418,7 @@ fn strip_matched_stop_sequence_from_response(mut resp: ChatResponse) -> ChatResp
 /// Same rationale as `strip_matched_stop_sequence_from_response`: OpenAI
 /// streaming clients do not expect this Anthropic-internal field.
 fn strip_matched_stop_sequence_from_chunk(mut chunk: ChatChunk) -> ChatChunk {
-    for choice in chunk.choices.iter_mut() {
+    for choice in &mut chunk.choices {
         choice.matched_stop_sequence = None;
     }
     chunk
@@ -483,7 +480,7 @@ fn surface_cached_tokens_in_usage(value: &mut Value) {
 /// (OpenAI's shape for an assistant turn that is purely tool calls); any
 /// non-text part remaining -> keep the parts array verbatim.
 fn strip_tool_use_parts_when_tool_calls_present(mut resp: ChatResponse) -> ChatResponse {
-    for choice in resp.choices.iter_mut() {
+    for choice in &mut resp.choices {
         let has_tool_calls = choice
             .message
             .tool_calls
@@ -974,7 +971,7 @@ mod tests {
         assert_eq!(v["id"], "chatcmpl-1");
         assert_eq!(v["routectl_provider"], "test");
         // Suppress unused-import warnings.
-        let _ = MessageContent::Text("".into());
+        let _ = MessageContent::Text(String::new());
     }
 
     /// Build a canonical assistant message shaped like an Anthropic-shape

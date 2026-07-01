@@ -70,7 +70,7 @@ pub struct VolatileReport {
 }
 
 impl VolatileReport {
-    pub fn confidence(&self) -> VolatileConfidence {
+    pub const fn confidence(&self) -> VolatileConfidence {
         self.confidence
     }
 
@@ -115,8 +115,8 @@ struct Accumulator {
 }
 
 impl Accumulator {
-    fn new() -> Self {
-        Accumulator {
+    const fn new() -> Self {
+        Self {
             confidence: VolatileConfidence::None,
             kinds: Vec::new(),
         }
@@ -185,7 +185,7 @@ fn scan_tool(tool: &ToolDef, acc: &mut Accumulator) {
 /// delimiter sketch listed `:` among others; using it verbatim would break
 /// timestamp detection, so the colon (and the other in-pattern characters)
 /// are excluded here -- precision of the whole-token match wins.
-fn is_delimiter(c: char) -> bool {
+const fn is_delimiter(c: char) -> bool {
     c.is_whitespace()
         || matches!(
             c,
@@ -378,7 +378,7 @@ fn is_long_digit_run(token: &str) -> bool {
 }
 
 fn all_digits(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_digit())
+    !bytes.is_empty() && bytes.iter().all(u8::is_ascii_digit)
 }
 
 /// True iff every byte is a valid base64url character (`A-Za-z0-9-_`), with

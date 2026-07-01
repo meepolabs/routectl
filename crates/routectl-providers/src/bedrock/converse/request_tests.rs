@@ -582,8 +582,7 @@ fn tool_message_with_id_emits_user_role_with_tool_result() {
         .find(|m| {
             m["content"]
                 .as_array()
-                .map(|c| c.iter().any(|b| b.get("toolResult").is_some()))
-                .unwrap_or(false)
+                .is_some_and(|c| c.iter().any(|b| b.get("toolResult").is_some()))
         })
         .expect("expected synthesized tool_result message");
     assert_eq!(tool_msg["role"], "user");

@@ -332,14 +332,15 @@ fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
         KnownContentPart::File {
             file,
             cache_control,
-        } => match parse_file_document_source(file) {
-            Some((source, title)) => ContentBlock::Document {
-                source,
-                title,
-                citations: None,
-                cache_control: cache_control.clone(),
-            },
-            None => {
+        } => {
+            if let Some((source, title)) = parse_file_document_source(file) {
+                ContentBlock::Document {
+                    source,
+                    title,
+                    citations: None,
+                    cache_control: cache_control.clone(),
+                }
+            } else {
                 let media_type = file
                     .get("file_data")
                     .and_then(|v| v.as_str())
@@ -357,7 +358,7 @@ fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
                     media_type = media_type.as_deref().unwrap_or("<none>"),
                     reason,
                     "cannot translate OpenAI file part to an Anthropic document; \
-                     passing the block through verbatim (upstream will reject if unsupported)"
+                 passing the block through verbatim (upstream will reject if unsupported)"
                 );
                 let mut extras = serde_json::Map::new();
                 extras.insert("file".to_string(), file.clone());
@@ -367,7 +368,7 @@ fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
                     extras,
                 }
             }
-        },
+        }
         KnownContentPart::ToolUse {
             id,
             name,
@@ -413,11 +414,7 @@ fn translate_known_part(k: &KnownContentPart) -> ContentBlock {
 /// carries reasoning_details (tool-use continuity). thinking blocks with
 /// signatures must be passed back verbatim.
 fn build_assistant_content(id: &str, msg: &Message) -> Result<AnthropicContent> {
-    let has_tool_calls = msg
-        .tool_calls
-        .as_ref()
-        .map(|tc| !tc.is_empty())
-        .unwrap_or(false);
+    let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
     if msg.reasoning_details.is_empty() && !has_tool_calls {
         // No multi-turn reasoning to thread back AND no OpenAI-shape
         // tool_calls field to re-emit; fall through to the generic
@@ -618,7 +615,7 @@ fn append_assistant_message_blocks(blocks: &mut Vec<ContentBlock>, content: &Mes
         MessageContent::Text(_) | MessageContent::Null => {}
         MessageContent::Parts(parts) => {
             let cleaned = strip_text_after_tool_use(parts);
-            for p in cleaned.iter() {
+            for p in &cleaned {
                 blocks.push(translate_content_part(p));
             }
         }

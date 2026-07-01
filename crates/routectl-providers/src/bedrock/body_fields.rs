@@ -50,10 +50,10 @@ pub(super) enum FilterContext {
 }
 
 impl FilterContext {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
-            FilterContext::InvokeBody => "invoke_body",
-            FilterContext::ConverseAdditionalFields => "converse_additional_fields",
+            Self::InvokeBody => "invoke_body",
+            Self::ConverseAdditionalFields => "converse_additional_fields",
         }
     }
 }

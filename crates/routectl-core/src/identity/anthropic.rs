@@ -90,7 +90,7 @@ pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str
 ///
 /// 14 corpus-verified flags matching the set genuine Claude Code emits
 /// on the OAuth egress (confirmed against a captured request corpus).
-pub fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
+pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
     &[
         "claude-code-20250219",
         "oauth-2025-04-20",

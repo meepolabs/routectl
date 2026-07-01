@@ -64,8 +64,10 @@ pub async fn middleware(mut req: Request, next: Next) -> Response {
         .get(&X_REQUEST_ID)
         .and_then(|v| v.to_str().ok())
         .filter(|s| is_safe_request_id(s))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| Uuid::now_v7().to_string());
+        .map_or_else(
+            || Uuid::now_v7().to_string(),
+            std::string::ToString::to_string,
+        );
 
     let method = req.method().clone();
     // The URI path component is RFC-3986-encoded so newlines and ANSI

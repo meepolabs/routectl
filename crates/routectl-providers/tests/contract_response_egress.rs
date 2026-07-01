@@ -461,7 +461,7 @@ mod scenario_11_normalize_response_matched_stop_sequence {
             .expect("openai_compat normalize_response");
         apply_stop_sequence_heuristic(
             &mut resp_only_empty,
-            Some(vec!["".to_string(), "".to_string()].as_slice()),
+            Some(vec![String::new(), String::new()].as_slice()),
         );
         assert!(
             resp_only_empty.choices[0].matched_stop_sequence.is_none(),
@@ -474,7 +474,7 @@ mod scenario_11_normalize_response_matched_stop_sequence {
             .expect("openai_compat normalize_response");
         apply_stop_sequence_heuristic(
             &mut resp_mixed,
-            Some(vec!["".to_string(), "</answer>".to_string()].as_slice()),
+            Some(vec![String::new(), "</answer>".to_string()].as_slice()),
         );
         assert_eq!(
             resp_mixed.choices[0].matched_stop_sequence.as_deref(),
@@ -554,7 +554,7 @@ mod scenario_9_null_content_with_reasoning {
         // Content text must NOT get clobbered by the coalesce.
         match &resp.choices[0].message.content {
             routectl_core::MessageContent::Text(t) => {
-                assert_eq!(t, "The answer is 42.")
+                assert_eq!(t, "The answer is 42.");
             }
             other => panic!("expected Text content, got {other:?}"),
         }

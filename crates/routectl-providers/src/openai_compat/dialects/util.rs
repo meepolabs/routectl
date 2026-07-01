@@ -272,10 +272,10 @@ pub(super) fn preserve_history_reasoning_details(
         }
         let plaintext = m
             .remove("reasoning")
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .and_then(|v| v.as_str().map(std::string::ToString::to_string))
             .or_else(|| {
                 m.remove("reasoning_content")
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
             });
         if let Some(text) = plaintext
             && !text.is_empty()

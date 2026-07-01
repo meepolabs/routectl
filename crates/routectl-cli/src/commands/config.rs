@@ -80,7 +80,7 @@ pub async fn check(config: &Config) -> Result<()> {
         errors.push(e.to_string());
     }
     if let Err(e) = validate_overrides(&config.cache_pricing) {
-        errors.push(e.to_string());
+        errors.push(e);
     }
 
     println!("config check:");
@@ -113,7 +113,7 @@ pub async fn check(config: &Config) -> Result<()> {
 /// Print the resolved config with secrets redacted.
 pub fn show(config: &Config) -> Result<()> {
     let mut redacted = config.clone();
-    for (_, entry) in redacted.providers.iter_mut() {
+    for entry in redacted.providers.values_mut() {
         redact_entry(entry);
     }
     let s = toml::to_string_pretty(&redacted)

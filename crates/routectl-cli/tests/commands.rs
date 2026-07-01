@@ -84,7 +84,7 @@ async fn login_unknown_provider_errors_clearly() {
                 "expected known-providers list to mention anthropic and codex, got: {msg}",
             );
         }
-        Ok(_) => panic!("expected error for unknown provider"),
+        Ok(()) => panic!("expected error for unknown provider"),
         Err(other) => panic!("expected Auth error, got: {other:?}"),
     }
 }
@@ -145,7 +145,7 @@ async fn config_check_fails_for_alias_pointing_at_unknown_nickname() {
         Err(routectl_core::Error::Config(msg)) => {
             assert!(msg.contains("error"), "got: {msg}");
         }
-        Ok(_) => panic!("expected config error"),
+        Ok(()) => panic!("expected config error"),
         Err(other) => panic!("expected Config error, got: {other:?}"),
     }
 }
@@ -184,7 +184,7 @@ async fn config_check_fails_when_default_alias_points_to_unknown_nickname() {
 
     match commands::config::check(&config).await {
         Err(routectl_core::Error::Config(_)) => {}
-        Ok(_) => panic!("expected config error for unknown default-alias target"),
+        Ok(()) => panic!("expected config error for unknown default-alias target"),
         Err(other) => panic!("expected Config error, got: {other:?}"),
     }
 }
@@ -202,7 +202,7 @@ async fn config_check_fails_when_model_references_unknown_provider() {
 
     match commands::config::check(&config).await {
         Err(routectl_core::Error::Config(_)) => {}
-        Ok(_) => panic!("expected config error for unknown provider reference"),
+        Ok(()) => panic!("expected config error for unknown provider reference"),
         Err(other) => panic!("expected Config error, got: {other:?}"),
     }
 }
@@ -236,7 +236,7 @@ async fn config_check_fails_for_empty_alias_chain() {
 
     match commands::config::check(&config).await {
         Err(routectl_core::Error::Config(_)) => {}
-        Ok(_) => panic!("expected config error for empty alias chain"),
+        Ok(()) => panic!("expected config error for empty alias chain"),
         Err(other) => panic!("expected Config error, got: {other:?}"),
     }
 }

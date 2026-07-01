@@ -32,7 +32,7 @@ use crate::runtime_state::{CapacitySnapshot, CircuitPhase};
 /// and RPM bucket entry in `Router.state`. Built once at startup (the seat
 /// set is fixed) and cloned by reference (the `Arc`s) on every dispatch.
 #[derive(Clone)]
-pub(crate) struct SeatTarget {
+pub struct SeatTarget {
     /// Seat label (`None` for the default/pool seat, `Some(label)` for a
     /// labeled seat). Retained for tracing and `state_key` derivation.
     pub label: Option<String>,
@@ -57,7 +57,10 @@ impl std::fmt::Debug for SeatTarget {
             .field("provider_id", &self.provider.id())
             .field(
                 "auth_secret_ref",
-                &self.auth_secret_ref.as_ref().map(|sr| sr.to_string()),
+                &self
+                    .auth_secret_ref
+                    .as_ref()
+                    .map(std::string::ToString::to_string),
             )
             .finish()
     }
@@ -79,7 +82,7 @@ impl std::fmt::Debug for SeatTarget {
 /// for genuinely multi-seat oauth pools, this requires a deliberately
 /// adversarial config; the bare-nickname default-seat key (the common
 /// single-seat case) can never collide.
-pub(crate) fn seat_state_key(nickname: &str, label: Option<&str>) -> String {
+pub fn seat_state_key(nickname: &str, label: Option<&str>) -> String {
     match label {
         Some(label) => format!("{nickname}#{label}"),
         None => nickname.to_string(),
@@ -96,7 +99,7 @@ pub(crate) fn seat_state_key(nickname: &str, label: Option<&str>) -> String {
 /// next-in-rotation seat). `FillFirst` pools need no cursor and are never
 /// inserted here.
 #[derive(Debug, Default)]
-pub(crate) struct RoundRobinCursors {
+pub struct RoundRobinCursors {
     cursors: BTreeMap<String, AtomicUsize>,
 }
 
@@ -123,8 +126,8 @@ impl RoundRobinCursors {
 
 /// Pinned-seat record for one inbound conversation. Carries the seat's
 /// stable `state_key` plus a one-time overflow-repin marker.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SeatPin {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeatPin {
     pub(crate) state_key: String,
     /// True once this session has been migrated off its birth seat by a
     /// one-time overflow-repin. Caps migration at one and prevents an
@@ -153,7 +156,7 @@ const STICKY_PIN_CAPACITY: usize = 4096;
 /// would scatter every live conversation off its warm-cache seat -- a mass
 /// cold-miss across all in-flight conversations -- so the carry-over is
 /// mandatory, not benign.
-pub(crate) struct StickyPins {
+pub struct StickyPins {
     pins: Mutex<LruCache<String, SeatPin>>,
     /// Deterministic anti-herd tiebreak counter. When a birth pick finds
     /// several equally-least-loaded seats, the chooser rotates across them
@@ -231,7 +234,7 @@ impl StickyPins {
 /// Returns indices into the model's seat slice; the caller maps them back
 /// to [`SeatTarget`]s. An empty or single-element seat set yields the
 /// trivial order with no cursor traffic.
-pub(crate) fn seat_order_for_request(
+pub fn seat_order_for_request(
     nickname: &str,
     seat_count: usize,
     selection: SeatSelection,
@@ -268,8 +271,8 @@ fn order_home_first(home: usize, seat_count: usize) -> Vec<usize> {
 /// returned alongside; this enum tells the caller whether (and how) to update
 /// the pin. It also maps to the fixed-vocabulary `selection_decision` token
 /// recorded in the usage ledger, so each variant is an observable decision.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum SelectionOutcome {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionOutcome {
     /// Pin miss (birth): caller pins `home` with `repinned: false`.
     Birth { home: usize },
     /// Home healthy, OR already-repinned, OR no healthy sibling: no pin write.
@@ -344,7 +347,7 @@ fn pick_least_loaded(
 /// never chased further -- we never compare against or return to the original
 /// seat, so a recovered original cannot pull the session back (no A->B->A
 /// flap).
-pub(crate) fn sticky_least_loaded_order(
+pub fn sticky_least_loaded_order(
     seat_count: usize,
     pinned_index: Option<usize>,
     already_repinned: bool,
@@ -359,38 +362,35 @@ pub(crate) fn sticky_least_loaded_order(
     }
 
     let n = seat_count;
-    match pinned_index {
-        Some(home) => {
-            // Healthy home: keep serving it; no pin write.
-            if snapshots[home].is_dispatchable() {
-                return (order_home_first(home, n), SelectionOutcome::Stay { home });
-            }
-            // Already migrated once: do NOT chase further. The gate + fallback
-            // walk handles the dead home for this request. One-time cap.
-            if already_repinned {
-                return (order_home_first(home, n), SelectionOutcome::Stay { home });
-            }
-            // First migration: pick the least-loaded healthy SIBLING.
-            let siblings: Vec<usize> = (0..n).filter(|&i| i != home).collect();
-            match pick_least_loaded(&siblings, snapshots, tiebreak) {
-                Some(new_home) => (
-                    order_home_first(new_home, n),
-                    SelectionOutcome::OverflowRepin { home: new_home },
-                ),
-                // No healthy sibling: nowhere better. Stay (no flap, no pin);
-                // the gate handles the dead home.
-                None => (order_home_first(home, n), SelectionOutcome::Stay { home }),
-            }
+    if let Some(home) = pinned_index {
+        // Healthy home: keep serving it; no pin write.
+        if snapshots[home].is_dispatchable() {
+            return (order_home_first(home, n), SelectionOutcome::Stay { home });
         }
-        None => {
-            // Birth pick: candidate set = all seats.
-            let all: Vec<usize> = (0..n).collect();
-            match pick_least_loaded(&all, snapshots, tiebreak) {
-                Some(home) => (order_home_first(home, n), SelectionOutcome::Birth { home }),
-                // All parked/exhausted: home 0, fill-first order, no pin. A
-                // later turn re-picks once a seat is healthy.
-                None => (order_home_first(0, n), SelectionOutcome::DeferNoHealthy),
-            }
+        // Already migrated once: do NOT chase further. The gate + fallback
+        // walk handles the dead home for this request. One-time cap.
+        if already_repinned {
+            return (order_home_first(home, n), SelectionOutcome::Stay { home });
+        }
+        // First migration: pick the least-loaded healthy SIBLING.
+        let siblings: Vec<usize> = (0..n).filter(|&i| i != home).collect();
+        match pick_least_loaded(&siblings, snapshots, tiebreak) {
+            Some(new_home) => (
+                order_home_first(new_home, n),
+                SelectionOutcome::OverflowRepin { home: new_home },
+            ),
+            // No healthy sibling: nowhere better. Stay (no flap, no pin);
+            // the gate handles the dead home.
+            None => (order_home_first(home, n), SelectionOutcome::Stay { home }),
+        }
+    } else {
+        // Birth pick: candidate set = all seats.
+        let all: Vec<usize> = (0..n).collect();
+        match pick_least_loaded(&all, snapshots, tiebreak) {
+            Some(home) => (order_home_first(home, n), SelectionOutcome::Birth { home }),
+            // All parked/exhausted: home 0, fill-first order, no pin. A
+            // later turn re-picks once a seat is healthy.
+            None => (order_home_first(0, n), SelectionOutcome::DeferNoHealthy),
         }
     }
 }

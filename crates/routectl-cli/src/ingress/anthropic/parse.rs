@@ -227,7 +227,7 @@ fn sweep_anthropic_extras(obj: &mut Map<String, Value>) -> Value {
 /// instance both expand correctly.
 fn merge_inbound_anthropic_beta_header(headers: &HeaderMap, req: &mut ChatRequest) {
     let mut all: Vec<String> = req.anthropic_beta.clone();
-    for hv in headers.get_all("anthropic-beta").iter() {
+    for hv in &headers.get_all("anthropic-beta") {
         let Ok(s) = hv.to_str() else {
             tracing::warn!("anthropic ingress: anthropic-beta header is not valid UTF-8; ignoring");
             continue;
@@ -291,7 +291,7 @@ fn is_safe_beta_value(s: &str) -> bool {
 /// expecting a specific case in upstream-traffic captures should not
 /// rely on the original wire casing.
 fn capture_claude_code_headers(headers: &HeaderMap, req: &mut ChatRequest) {
-    for (name, val) in headers.iter() {
+    for (name, val) in headers {
         if !name
             .as_str()
             .to_ascii_lowercase()
@@ -360,7 +360,7 @@ fn merge_output_format(
     Some(Value::Object(obj))
 }
 
-fn value_type_name(v: &Value) -> &'static str {
+const fn value_type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
         Value::Bool(_) => "bool",
@@ -380,18 +380,21 @@ fn translate_thinking(t: &Value) -> ReasoningConfig {
     // saturating to u32::MAX with a WARN keeps the request consistent
     // with what the caller asked for and surfaces bizarre input
     // instead of corrupting it.
-    let budget = t.get("budget_tokens").and_then(|v| v.as_u64()).map(|n| {
-        if n > u64::from(u32::MAX) {
-            tracing::warn!(
-                requested = n,
-                capped = u32::MAX,
-                "anthropic ingress: budget_tokens exceeds u32::MAX; saturating",
-            );
-            u32::MAX
-        } else {
-            n as u32
-        }
-    });
+    let budget = t
+        .get("budget_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| {
+            if n > u64::from(u32::MAX) {
+                tracing::warn!(
+                    requested = n,
+                    capped = u32::MAX,
+                    "anthropic ingress: budget_tokens exceeds u32::MAX; saturating",
+                );
+                u32::MAX
+            } else {
+                n as u32
+            }
+        });
     match kind {
         "enabled" => ReasoningConfig {
             enabled: Some(true),

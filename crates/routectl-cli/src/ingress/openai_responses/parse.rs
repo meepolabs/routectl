@@ -317,7 +317,7 @@ fn push_message_item(messages: &mut Vec<Message>, item: &Value) {
 fn parse_role(role: Option<&str>) -> Role {
     match role {
         Some("assistant") => Role::Assistant,
-        Some("system") | Some("developer") => Role::System,
+        Some("system" | "developer") => Role::System,
         // user is the default for any other / missing role: a Responses
         // input item with no recognized role is overwhelmingly a user
         // turn, and defaulting to user keeps the conversation coherent.
@@ -372,14 +372,13 @@ fn parse_content_block(block: &Value) -> Option<ContentPart> {
             // block missing the url is malformed; warn + drop (mirrors the
             // egress, keeping ingress/egress behavior symmetric) rather
             // than dropping silently and leaving no triage evidence.
-            let url = match block.get("image_url").and_then(Value::as_str) {
-                Some(u) => u,
-                None => {
-                    tracing::warn!(
-                        "openai-responses ingress: input_image block missing image_url; dropping"
-                    );
-                    return None;
-                }
+            let url = if let Some(u) = block.get("image_url").and_then(Value::as_str) {
+                u
+            } else {
+                tracing::warn!(
+                    "openai-responses ingress: input_image block missing image_url; dropping"
+                );
+                return None;
             };
             let mut image_url = Map::new();
             image_url.insert("url".into(), Value::String(url.to_string()));
@@ -431,7 +430,7 @@ fn collapse_parts(parts: Vec<ContentPart>) -> MessageContent {
     MessageContent::Parts(parts)
 }
 
-fn user_text_message(text: String) -> Message {
+const fn user_text_message(text: String) -> Message {
     Message {
         role: Role::User,
         content: MessageContent::Text(text),
@@ -794,7 +793,7 @@ fn clamp_u32(n: u64) -> u32 {
     }
 }
 
-fn value_type_name(v: &Value) -> &'static str {
+const fn value_type_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
         Value::Bool(_) => "bool",

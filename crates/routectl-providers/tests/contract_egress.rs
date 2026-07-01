@@ -512,7 +512,7 @@ mod forward_compat_pins {
             messages: vec![common::user_msg("hi")],
             max_tokens: Some(1024),
             provider_extras: Some(json!({
-                "context_management": input.clone()
+                "context_management": input
             })),
             ..Default::default()
         };

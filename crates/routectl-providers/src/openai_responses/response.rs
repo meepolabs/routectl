@@ -38,7 +38,7 @@ use super::response_types::{
 };
 
 /// Translate a deserialized Responses body into canonical `ChatResponse`.
-pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<ChatResponse> {
+pub fn translate(provider_id: &str, body: ResponsesResponse) -> Result<ChatResponse> {
     let status = body.status.clone();
     let incomplete_reason = body
         .incomplete_details
@@ -259,7 +259,7 @@ fn walk_output(
                 // egress should re-emit the original text so the
                 // model sees the same input it produced.
                 let input_value: Value = serde_json::from_str(arguments)
-                    .unwrap_or_else(|_| Value::String(arguments.to_string()));
+                    .unwrap_or_else(|_| Value::String(arguments.clone()));
                 parts.push(ContentPart::Known(KnownContentPart::ToolUse {
                     id: call_id.clone(),
                     name: name.clone(),
@@ -320,7 +320,7 @@ fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageConte
 }
 
 /// Maps upstream status + incomplete_reason to a canonical finish_reason.
-pub(crate) fn map_finish_reason(
+pub fn map_finish_reason(
     status: Option<&str>,
     incomplete_reason: Option<&str>,
     has_function_call: bool,
@@ -355,13 +355,13 @@ fn translate_usage(u: &ResponsesUsage) -> Usage {
         .input_tokens_details
         .as_ref()
         .and_then(|v| v.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|n| n as u32);
     let reasoning_tokens = u
         .output_tokens_details
         .as_ref()
         .and_then(|v| v.get("reasoning_tokens"))
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|n| n as u32);
     Usage {
         prompt_tokens: u.input_tokens,
@@ -402,12 +402,11 @@ fn split_other_value(raw: &Value) -> (String, serde_json::Map<String, Value>) {
 /// absolute form (computed against `now`, clamped to >= 0). Any other
 /// error type -- or a body missing both fields -- yields `None`, so a
 /// non-usage-limit failure never parks the provider.
-pub(crate) fn codex_reset_hint(err_body: &Value) -> Option<Duration> {
+pub fn codex_reset_hint(err_body: &Value) -> Option<Duration> {
     let is_usage_limit = err_body
         .pointer("/error/type")
         .and_then(Value::as_str)
-        .map(|t| t == "usage_limit_reached")
-        .unwrap_or(false);
+        .is_some_and(|t| t == "usage_limit_reached");
     if !is_usage_limit {
         return None;
     }
@@ -430,14 +429,16 @@ pub(crate) fn codex_reset_hint(err_body: &Value) -> Option<Duration> {
 /// Build an `Error::Upstream` for a `status:"failed"` body. Lifts the
 /// `error.message` field when present so the operator-facing error
 /// is informative; falls back to a generic string otherwise.
-pub(crate) fn upstream_error_from_failed(provider_id: &str, body: &ResponsesResponse) -> Error {
+pub fn upstream_error_from_failed(provider_id: &str, body: &ResponsesResponse) -> Error {
     let msg = body
         .error
         .as_ref()
         .and_then(|v| v.get("message"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "openai-responses: response.status=failed".to_string());
+        .map_or_else(
+            || "openai-responses: response.status=failed".to_string(),
+            std::string::ToString::to_string,
+        );
     // `body.error` is the bare error object (`{type, message, ...}`);
     // `codex_reset_hint` expects it nested under `/error`, so wrap it.
     let retry_after = body

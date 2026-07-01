@@ -348,7 +348,7 @@ impl OpenAiResponsesProvider {
 /// `version` tracks `PINNED_CODEX_VERSION`; bump that constant each
 /// release so the wire fingerprint stays current (the chatgpt.com risk
 /// system flags stale fingerprints).
-fn default_codex_identity_headers() -> [(&'static str, &'static str); 3] {
+const fn default_codex_identity_headers() -> [(&'static str, &'static str); 3] {
     use routectl_core::identity::codex::{
         CODEX_ORIGINATOR, ORIGINATOR_HEADER_NAME, PINNED_CODEX_VERSION, RESIDENCY_HEADER_NAME,
         RESIDENCY_HEADER_VALUE,
@@ -582,14 +582,13 @@ impl Provider for OpenAiResponsesProvider {
         // same backfill need).
         let backfill_terminal = matches!(
             terminal_kind.as_deref(),
-            Some("response.completed") | Some("response.incomplete")
+            Some("response.completed" | "response.incomplete")
         );
         if backfill_terminal && !accumulated_items.is_empty() {
             let needs_backfill = raw_body
                 .get("output")
                 .and_then(Value::as_array)
-                .map(Vec::is_empty)
-                .unwrap_or(true);
+                .is_none_or(Vec::is_empty);
             if needs_backfill && let Some(obj) = raw_body.as_object_mut() {
                 obj.insert("output".into(), Value::Array(accumulated_items));
             }
@@ -601,38 +600,32 @@ impl Provider for OpenAiResponsesProvider {
         // operators can see the body shape that drove the error.
         trace_upstream_success_body(PROVIDER_KIND, &self.cfg.id, &raw_body);
 
-        match terminal_kind.as_deref() {
-            Some("response.failed") | Some("response.cancelled") => {
-                // Deserialize so we can use the typed error helper that
-                // pulls error.message out of the body. Falls back to a
-                // synthetic message when the body doesn't deserialize
-                // (matches the stream() path's behavior).
-                let typed: Result<crate::openai_responses::response_types::ResponsesResponse> =
-                    serde_json::from_value(raw_body.clone()).map_err(|e| {
-                        Error::upstream(
-                            &self.cfg.id,
-                            0,
-                            format!(
-                                "openai-responses: terminal {terminal:?} parse failed: {e}",
-                                terminal = terminal_kind
-                            ),
-                        )
-                    });
-                let err = match typed {
-                    Ok(body) => crate::openai_responses::response::upstream_error_from_failed(
+        if let Some("response.failed" | "response.cancelled") = terminal_kind.as_deref() {
+            // Deserialize so we can use the typed error helper that
+            // pulls error.message out of the body. Falls back to a
+            // synthetic message when the body doesn't deserialize
+            // (matches the stream() path's behavior).
+            let typed: Result<crate::openai_responses::response_types::ResponsesResponse> =
+                serde_json::from_value(raw_body.clone()).map_err(|e| {
+                    Error::upstream(
                         &self.cfg.id,
-                        &body,
-                    ),
-                    Err(e) => e,
-                };
-                tracing::warn!(
-                    provider = %self.cfg.id,
-                    terminal = %terminal_kind.as_deref().unwrap_or("?"),
-                    "openai-responses non-success terminal event",
-                );
-                return Err(err);
-            }
-            _ => {}
+                        0,
+                        format!("openai-responses: terminal {terminal_kind:?} parse failed: {e}"),
+                    )
+                });
+            let err = match typed {
+                Ok(body) => crate::openai_responses::response::upstream_error_from_failed(
+                    &self.cfg.id,
+                    &body,
+                ),
+                Err(e) => e,
+            };
+            tracing::warn!(
+                provider = %self.cfg.id,
+                terminal = %terminal_kind.as_deref().unwrap_or("?"),
+                "openai-responses non-success terminal event",
+            );
+            return Err(err);
         }
 
         let mut chat_resp = self.normalize_response(raw_body)?;
@@ -754,8 +747,10 @@ fn build_error_excerpt(body_text: &str) -> String {
         .as_ref()
         .and_then(|v| v.pointer("/error/message"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| sanitize_upstream_body(body_text))
+        .map_or_else(
+            || sanitize_upstream_body(body_text),
+            std::string::ToString::to_string,
+        )
 }
 
 /// Map a non-success Responses-API HTTP response into a canonical
@@ -1295,7 +1290,7 @@ mod e2e_tests {
                 }
             }),
         ];
-        let sse_body: String = events.iter().map(|e| format!("data: {}\n\n", e)).collect();
+        let sse_body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
         Mock::given(method("POST"))
             .and(path("/responses"))
             .respond_with(
@@ -1558,7 +1553,7 @@ mod header_merge_tests {
             .get_all(name)
             .iter()
             .filter_map(|v| v.to_str().ok())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect()
     }
 

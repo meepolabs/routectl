@@ -159,8 +159,7 @@ impl OpenAiCompatProvider {
     fn dialect_for(&self, req: &ChatRequest) -> ReasoningDialect {
         req.routectl_internal
             .reasoning_dialect
-            .map(ReasoningDialect::from)
-            .unwrap_or(self.cfg.reasoning_dialect)
+            .map_or(self.cfg.reasoning_dialect, ReasoningDialect::from)
     }
 
     /// Same fallback contract as `dialect_for` but for the history-
@@ -168,8 +167,7 @@ impl OpenAiCompatProvider {
     fn history_reasoning_for(&self, req: &ChatRequest) -> HistoryReasoning {
         req.routectl_internal
             .history_reasoning
-            .map(HistoryReasoning::from)
-            .unwrap_or(self.cfg.history_reasoning)
+            .map_or(self.cfg.history_reasoning, HistoryReasoning::from)
     }
 
     fn build_headers(&self, req: &ChatRequest) -> Result<HeaderMap> {
@@ -428,7 +426,7 @@ impl Provider for OpenAiCompatProvider {
                         // when the caller sent no stop sequences, avoiding
                         // allocation and string growth for the common case.
                         if request_stop.is_some() {
-                            for choice in chunk.choices.iter() {
+                            for choice in &chunk.choices {
                                 if let Some(t) = choice.delta.content.as_deref() {
                                     accumulate_choice_text(
                                         &mut accumulated_text,
@@ -445,7 +443,7 @@ impl Provider for OpenAiCompatProvider {
                         // after `normalize_response`. Each choice matches
                         // against its OWN accumulated buffer.
                         if let Some(stops) = request_stop.as_deref() {
-                            for choice in chunk.choices.iter_mut() {
+                            for choice in &mut chunk.choices {
                                 if choice.matched_stop_sequence.is_some() {
                                     continue;
                                 }

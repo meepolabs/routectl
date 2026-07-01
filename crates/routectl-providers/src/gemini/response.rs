@@ -21,7 +21,7 @@ use super::GEMINI_FORMAT;
 use super::types::{GenerateContentResponse, ResponsePart, UsageMetadata};
 
 /// Translate a deserialized Gemini response into canonical `ChatResponse`.
-pub(crate) fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<ChatResponse> {
+pub fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<ChatResponse> {
     let candidate = resp.candidates.into_iter().next();
 
     let (text, tool_calls, reasoning_details, finish_reason) = match candidate {

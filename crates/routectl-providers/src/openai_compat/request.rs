@@ -68,7 +68,10 @@ pub fn normalize(
                 "openai-compat egress: Claude Code billing/attribution system block dropped",
             );
         }
-        let text = filtered.as_ref().map(|s| s.flatten()).unwrap_or_default();
+        let text = filtered
+            .as_ref()
+            .map(routectl_core::SystemContent::flatten)
+            .unwrap_or_default();
         if !text.is_empty() {
             let messages = obj
                 .entry("messages")

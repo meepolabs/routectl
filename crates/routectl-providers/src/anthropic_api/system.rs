@@ -20,7 +20,7 @@ use crate::system_filter::is_billing_attribution_block;
 
 /// Convert canonical `SystemContent` to wire `AnthropicSystem`. Preserves
 /// per-block cache_control and citations.
-pub(crate) fn translate_system(s: &SystemContent) -> AnthropicSystem {
+pub fn translate_system(s: &SystemContent) -> AnthropicSystem {
     match s {
         SystemContent::Text(t) => AnthropicSystem::Text(t.clone()),
         SystemContent::Blocks(blocks) => AnthropicSystem::Blocks(
@@ -98,7 +98,7 @@ fn collect_system_texts(messages: &[Message]) -> Vec<String> {
 /// billing-aware `lift_legacy_system_stripped`; Converse is the only
 /// remaining caller of the unfiltered lift.
 #[cfg(feature = "bedrock")]
-pub(crate) fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
+pub fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
     let texts = collect_system_texts(messages);
     if texts.is_empty() {
         None
@@ -114,7 +114,7 @@ pub(crate) fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem
 /// leading-prefix predicate. Sets `dropped = true` when at least one block
 /// was removed so the caller can emit a single contents-free WARN. Returns
 /// None when nothing survives the strip (the system collapses to absent).
-pub(crate) fn lift_legacy_system_stripped(
+pub fn lift_legacy_system_stripped(
     messages: &[Message],
     dropped: &mut bool,
 ) -> Option<SystemContent> {

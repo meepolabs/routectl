@@ -41,7 +41,7 @@ pub struct LedgerBackedK {
 
 impl LedgerBackedK {
     /// Construct an estimator over the given shared session store.
-    pub fn new(store: Arc<KSessionStore>) -> Self {
+    pub const fn new(store: Arc<KSessionStore>) -> Self {
         Self { store }
     }
 }
@@ -87,7 +87,7 @@ impl KEstimator for LedgerBackedK {
 
 /// The all-zero cold estimate returned for a missing session, an unknown
 /// triple, or an empty window.
-fn cold_default() -> KEstimate {
+const fn cold_default() -> KEstimate {
     KEstimate {
         k_floor: 0.0,
         k_point: 0.0,
@@ -205,7 +205,7 @@ mod tests {
         w
     }
 
-    fn query<'a>(session: Option<&'a str>, ttl: Duration) -> KQuery<'a> {
+    fn query(session: Option<&str>, ttl: Duration) -> KQuery<'_> {
         KQuery {
             session_key: session,
             provider_kind: "anthropic-api",

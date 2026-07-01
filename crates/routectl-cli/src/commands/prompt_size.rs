@@ -60,19 +60,17 @@ impl AutoEmitProjection {
     /// One-line operator-facing description.
     pub fn describe(&self) -> String {
         match self {
-            AutoEmitProjection::CallerSupplied { breakpoints } => {
+            Self::CallerSupplied { breakpoints } => {
                 format!("caller-supplied ({breakpoints} breakpoints) -- auto-emit would not fire")
             }
-            AutoEmitProjection::WouldInject => {
-                "would inject 1 top-level ephemeral_5m breakpoint".to_string()
-            }
-            AutoEmitProjection::SkippedGloballyDisabled => {
+            Self::WouldInject => "would inject 1 top-level ephemeral_5m breakpoint".to_string(),
+            Self::SkippedGloballyDisabled => {
                 "skipped: globally_disabled ([cache] auto_emit_top_level_breakpoint = false)"
                     .to_string()
             }
-            AutoEmitProjection::SkippedNoCapability => "skipped: no_capability".to_string(),
-            AutoEmitProjection::SkippedVolatileVetoed => "skipped: volatile_vetoed".to_string(),
-            AutoEmitProjection::Indeterminate => "indeterminate (capability unknown)".to_string(),
+            Self::SkippedNoCapability => "skipped: no_capability".to_string(),
+            Self::SkippedVolatileVetoed => "skipped: volatile_vetoed".to_string(),
+            Self::Indeterminate => "indeterminate (capability unknown)".to_string(),
         }
     }
 }
@@ -85,7 +83,7 @@ pub struct TierSize {
 }
 
 impl TierSize {
-    fn from_bytes(bytes: usize) -> Self {
+    const fn from_bytes(bytes: usize) -> Self {
         Self {
             bytes,
             approx_tokens: bytes / BYTES_PER_TOKEN_ESTIMATE,
@@ -250,12 +248,11 @@ fn build_steady_state_economics(
     args: &ProjectionArgs,
 ) -> EconomicsProjection {
     let params = SteadyStateTrimParams::default();
-    match propose_steady_state_trim(req, &params) {
-        Some(plan) => price_candidate(plan.candidate, target, overrides, args, Some(true)),
-        None => {
-            let zero = PrefixReductionCandidate::new(0, 0, 0);
-            price_candidate(zero, target, overrides, args, Some(false))
-        }
+    if let Some(plan) = propose_steady_state_trim(req, &params) {
+        price_candidate(plan.candidate, target, overrides, args, Some(true))
+    } else {
+        let zero = PrefixReductionCandidate::new(0, 0, 0);
+        price_candidate(zero, target, overrides, args, Some(false))
     }
 }
 
@@ -354,7 +351,7 @@ fn system_tier_bytes(req: &ChatRequest) -> usize {
 
 /// TOOLS tier bytes: the `tools` array (absent -> 0).
 fn tools_tier_bytes(req: &ChatRequest) -> usize {
-    req.tools.as_ref().map(serialized_len).unwrap_or(0)
+    req.tools.as_ref().map_or(0, serialized_len)
 }
 
 /// MESSAGES tier bytes: every non-system message (system messages are counted
@@ -613,7 +610,7 @@ fn render_economics(economics: &EconomicsProjection) -> String {
 }
 
 /// Operator-facing trust label for a pricing cell.
-fn trust_label(verified: bool) -> &'static str {
+const fn trust_label(verified: bool) -> &'static str {
     if verified {
         "verified"
     } else {
@@ -642,7 +639,7 @@ fn describe_verdict(decision: &GateDecision) -> String {
 }
 
 /// Human-readable text for a `KeepReason`.
-fn describe_keep_reason(reason: &KeepReason) -> &'static str {
+const fn describe_keep_reason(reason: &KeepReason) -> &'static str {
     match reason {
         KeepReason::NetNegative => "net-negative at this reuse count",
         KeepReason::BelowMinPrefix => "remaining prefix below cacheable floor",

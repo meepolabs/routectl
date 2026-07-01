@@ -104,19 +104,19 @@ pub enum OAuthError {
 
 impl From<OAuthError> for routectl_core::Error {
     fn from(e: OAuthError) -> Self {
-        routectl_core::Error::Auth(e.to_string())
+        Self::Auth(e.to_string())
     }
 }
 
 impl From<std::io::Error> for OAuthError {
     fn from(e: std::io::Error) -> Self {
-        OAuthError::Io(e.to_string())
+        Self::Io(e.to_string())
     }
 }
 
 impl From<serde_json::Error> for OAuthError {
     fn from(e: serde_json::Error) -> Self {
-        OAuthError::CorruptedFile {
+        Self::CorruptedFile {
             path: "<unknown>".into(),
             detail: e.to_string(),
         }

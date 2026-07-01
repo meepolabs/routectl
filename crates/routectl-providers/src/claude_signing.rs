@@ -60,7 +60,7 @@ const ZERO_HEX: u8 = b'0';
 /// Every non-matching shape (no billing prefix, no cch token, malformed
 /// hex run) is a silent no-op. Infallible: never panics, never errors.
 /// The buffer length is unchanged.
-pub(crate) fn resign_cch_in_place(body: &mut [u8]) {
+pub fn resign_cch_in_place(body: &mut [u8]) {
     // The real billing block lives inside `system`. Scope the search to
     // the bytes from the `"system":` marker onward; a billing prefix in
     // user-controlled `messages` text (which serializes BEFORE `system`)
@@ -125,7 +125,7 @@ fn find_cch_hex_start(buf: &[u8], from: usize) -> Option<usize> {
 }
 
 /// True when `b` is a lowercase hex digit (`0-9` or `a-f`).
-fn is_lower_hex(b: &u8) -> bool {
+const fn is_lower_hex(b: &u8) -> bool {
     matches!(b, b'0'..=b'9' | b'a'..=b'f')
 }
 

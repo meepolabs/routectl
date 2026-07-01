@@ -29,3 +29,6 @@ tempfile = "3"
 # Tests drive `try_send` from an async context and need a runtime; the
 # `macros` + `rt` features power `#[tokio::test]`.
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[lints]
+workspace = true

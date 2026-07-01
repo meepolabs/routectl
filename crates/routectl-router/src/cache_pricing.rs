@@ -109,7 +109,7 @@ fn intern_verified_at(s: &str) -> &'static str {
     use std::sync::{Mutex, OnceLock};
     static INTERN: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
     let m = INTERN.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(&v) = g.get(s) {
         return v;
     }
@@ -271,7 +271,7 @@ impl CachePricingOverride {
     /// True when this override is a pure verification stamp: no value fields
     /// are set and `verified_at` is `Some`. The merged row gets
     /// `source = "operator-verified"` rather than `"operator-override"`.
-    fn is_pure_verification(&self) -> bool {
+    const fn is_pure_verification(&self) -> bool {
         self.wm.is_none()
             && self.rm.is_none()
             && self.ttl_seconds.is_none()

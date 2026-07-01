@@ -65,7 +65,7 @@ impl UsageWriter {
         capacity: usize,
         retention_days: u32,
         initial_enabled: bool,
-    ) -> (UsageHandle, UsageWriter) {
+    ) -> (UsageHandle, Self) {
         let counters = Arc::new(UsageCounters::default());
         let enabled = Arc::new(AtomicBool::new(initial_enabled));
         let (tx, rx) = mpsc::channel::<UsageRecord>(capacity.max(1));
@@ -93,7 +93,7 @@ impl UsageWriter {
         };
 
         let handle = UsageHandle::new(tx.clone(), enabled, Arc::clone(&counters));
-        let writer = UsageWriter {
+        let writer = Self {
             sender: Some(tx),
             done: Some(done_rx),
             join: Some(join),
@@ -113,9 +113,9 @@ impl UsageWriter {
         sender: mpsc::Sender<UsageRecord>,
         enabled: Arc<AtomicBool>,
         counters: Arc<UsageCounters>,
-    ) -> (UsageHandle, UsageWriter) {
+    ) -> (UsageHandle, Self) {
         let handle = UsageHandle::new(sender, enabled, Arc::clone(&counters));
-        let writer = UsageWriter {
+        let writer = Self {
             sender: None,
             done: None,
             join: None,
@@ -125,7 +125,7 @@ impl UsageWriter {
     }
 
     /// Read-only view of the shared health counters.
-    pub fn counters(&self) -> &Arc<UsageCounters> {
+    pub const fn counters(&self) -> &Arc<UsageCounters> {
         &self.counters
     }
 
@@ -171,7 +171,7 @@ impl UsageWriter {
                 // The thread ended without signalling done -- it panicked.
                 // Join now (instant: it is already gone) to surface the
                 // panic payload instead of silently abandoning it.
-                if let Some(Err(_)) = self.join.take().map(|j| j.join()) {
+                if let Some(Err(_)) = self.join.take().map(std::thread::JoinHandle::join) {
                     tracing::error!(
                         target: "routectl_usage::writer",
                         "usage writer thread panicked during drain"
@@ -338,7 +338,7 @@ impl WriterState {
             self.degraded = true;
             tracing::error!(
                 target: "routectl_usage::writer",
-                error = err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
+                error = err.as_ref().map(std::string::ToString::to_string).unwrap_or_default(),
                 "usage writer degraded -- dropping rows it cannot persist"
             );
         } else if (prior + 1).is_multiple_of(WRITE_ERROR_LOG_INTERVAL) {
@@ -726,7 +726,7 @@ mod tests {
     async fn drop_without_shutdown_is_non_blocking() {
         // Arrange: a live writer with rows queued behind it.
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0, true);
         for i in 0..100 {
             handle.try_send(record(&format!("drop-{i}")));
         }
@@ -749,7 +749,7 @@ mod tests {
     async fn shutdown_then_drop_does_not_double_join() {
         // Arrange
         let (_dir, path) = temp_path();
-        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+        let (handle, writer) = UsageWriter::start(path, CHANNEL_CAPACITY, 0, true);
         handle.try_send(record("once"));
         assert!(wait_persisted(handle.counters(), 1), "row not persisted");
 

@@ -26,7 +26,7 @@ pub mod json_diff;
 pub mod loader;
 pub mod sse_diff;
 
-pub(crate) use harness::{
+pub use harness::{
     FixtureOutcome, PHASE1_MODEL_DENYLIST, captured_root, headers_from_pairs, phase1_skip_reason,
 };
 pub use json_diff::{

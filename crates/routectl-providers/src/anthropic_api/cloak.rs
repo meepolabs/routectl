@@ -137,7 +137,7 @@ const MCP_DOUBLE_PREFIX: &str = "mcp__";
 /// that legitimately sent a mix of names by rewriting names the client
 /// never asked us to touch.
 #[derive(Debug, Default)]
-pub(crate) struct CloakResult {
+pub struct CloakResult {
     /// Maps an upstream (renamed) tool name back to the original
     /// client-supplied name. Contains ONLY names actually renamed on this
     /// request.
@@ -178,7 +178,7 @@ const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
 /// the provider handles so a non-CC client presents one consistent
 /// session over its lifetime.
 #[derive(Debug, Clone)]
-pub(crate) struct ClaudeCodeIdentity {
+pub struct ClaudeCodeIdentity {
     /// Logical session id. Prefers the credential's `session_id` (minted
     /// at login); otherwise a fresh uuid stable for the provider's life.
     /// Stamped as `x-claude-code-session-id` in `build_headers`.
@@ -198,9 +198,8 @@ impl ClaudeCodeIdentity {
     /// chars without adding a dependency. `account_uuid` is a standard
     /// dashed uuid.
     pub(crate) fn mint(session_id: Option<&str>) -> Self {
-        let session_id = session_id
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let session_id =
+            session_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
         let device_id = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -229,7 +228,7 @@ impl ClaudeCodeIdentity {
 /// `sensitive_words` obfuscation over system and message text. With a
 /// default (empty) `config`, the output adds nothing beyond the base
 /// cloak transforms.
-pub(crate) fn cloak_oauth_egress(
+pub fn cloak_oauth_egress(
     body: &mut Value,
     _req: &ChatRequest,
     identity: &ClaudeCodeIdentity,
@@ -438,8 +437,7 @@ fn rename_tools_array(
 fn tool_is_builtin(tool: &Value) -> bool {
     tool.get("type")
         .and_then(Value::as_str)
-        .map(|t| !t.is_empty())
-        .unwrap_or(false)
+        .is_some_and(|t| !t.is_empty())
 }
 
 /// Rename `tool_choice.name` when `tool_choice.type == "tool"`.
@@ -453,8 +451,7 @@ fn rename_tool_choice(
         .get("tool_choice")
         .and_then(|tc| tc.get("type"))
         .and_then(Value::as_str)
-        .map(|t| t == "tool")
-        .unwrap_or(false);
+        .is_some_and(|t| t == "tool");
     if !is_tool_choice {
         return;
     }
@@ -537,8 +534,7 @@ fn block_is_billing(block: &Value) -> bool {
     block
         .get("text")
         .and_then(Value::as_str)
-        .map(|t| t.trim_start().starts_with(BILLING_PREFIX))
-        .unwrap_or(false)
+        .is_some_and(|t| t.trim_start().starts_with(BILLING_PREFIX))
 }
 
 /// Reduce a non-CC client's `system` to the interactive identity line only,
@@ -712,8 +708,7 @@ fn mint_metadata_user_id(body: &mut Value, identity: &ClaudeCodeIdentity) {
         .get("metadata")
         .and_then(|m| m.get("user_id"))
         .and_then(Value::as_str)
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
+        .is_some_and(|s| !s.is_empty());
     if already_set {
         return;
     }
@@ -848,7 +843,7 @@ impl SensitiveWordMatcher {
     /// over a malformed payload.
     fn obfuscate_charwise(&self, text: &str) -> Option<String> {
         let orig: Vec<char> = text.chars().collect();
-        let lower: Vec<char> = text.chars().flat_map(|c| c.to_lowercase()).collect();
+        let lower: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
         // When per-char lowering changed the char count, give up rather
         // than risk corrupting the body. Sensitive-word obfuscation is a
         // best-effort hardening, not a correctness-critical transform.
@@ -915,7 +910,7 @@ fn push_obfuscated(out: &mut String, matched: &str) {
 }
 
 /// Length in bytes of the UTF-8 char beginning with `b`.
-fn utf8_char_len(b: u8) -> usize {
+const fn utf8_char_len(b: u8) -> usize {
     if b < 0x80 {
         1
     } else if b >> 5 == 0b110 {
@@ -1557,8 +1552,7 @@ mod tests {
         assert!(!arr.iter().any(|b| {
             b["text"]
                 .as_str()
-                .map(|t| t.starts_with(BILLING_PREFIX))
-                .unwrap_or(false)
+                .is_some_and(|t| t.starts_with(BILLING_PREFIX))
         }));
         let reminder = &body["messages"][0]["content"][0];
         assert_eq!(
@@ -1950,7 +1944,7 @@ mod tests {
 
         // Act: normalize two independent clones.
         let mut a = template.clone();
-        let mut b = template.clone();
+        let mut b = template;
         normalize_tool_names_to_mcp(&mut a);
         normalize_tool_names_to_mcp(&mut b);
 
@@ -2013,7 +2007,7 @@ mod tests {
         let mut via_config = template.clone();
         cloak_oauth_egress(&mut via_config, &req, &id, true, &CloakConfig::default());
 
-        let mut via_base = template.clone();
+        let mut via_base = template;
         strip_billing_block(&mut via_base);
         relocate_client_system(&mut via_base, false);
         mint_metadata_user_id(&mut via_base, &id);
@@ -2063,7 +2057,7 @@ mod tests {
         let mut via_config = template.clone();
         cloak_oauth_egress(&mut via_config, &req, &id, false, &CloakConfig::default());
 
-        let mut via_base = template.clone();
+        let mut via_base = template;
         strip_billing_block(&mut via_base);
         let _ = normalize_tool_names_to_mcp(&mut via_base);
 

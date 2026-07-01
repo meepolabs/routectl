@@ -350,8 +350,7 @@ impl AnthropicApiProvider {
             .header_extras
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, v)| v.as_str());
         for entry in config_betas.split(',') {
             let t = entry.trim();
             if !t.is_empty() && beta_seen.insert(t.to_string()) {
@@ -364,7 +363,7 @@ impl AnthropicApiProvider {
         // `allowed_betas` allowlist unconditionally -- that allowlist
         // gates only client-requested betas, never operator-pinned ones.
         // Empty for library consumers that bypass the router.
-        for entry in req.routectl_internal.operator_betas.iter() {
+        for entry in &req.routectl_internal.operator_betas {
             let t = entry.trim();
             if !t.is_empty() && beta_seen.insert(t.to_string()) {
                 merged_betas.push(t.to_string());
@@ -384,8 +383,8 @@ impl AnthropicApiProvider {
         if self.cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&self.cfg.base_url)
         {
             for t in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
-                if beta_seen.insert(t.to_string()) {
-                    merged_betas.push(t.to_string());
+                if beta_seen.insert((*t).to_string()) {
+                    merged_betas.push((*t).to_string());
                 }
             }
         }
@@ -1209,8 +1208,10 @@ async fn read_anthropic_error(
         .as_ref()
         .and_then(|v| v.pointer("/error/message"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| sanitize_upstream_body(&body_text));
+        .map_or_else(
+            || sanitize_upstream_body(&body_text),
+            std::string::ToString::to_string,
+        );
     // Lift the upstream classifier (Anthropic shape
     // `{type:"error",error:{type,message}}`) so an SDK that branches on
     // `error.type` keeps the upstream signal. Anthropic errors carry no
@@ -1230,7 +1231,7 @@ async fn read_anthropic_error(
     // so the sanitizer falls back to a status-only message -- never a raw
     // body dump.
     let err_body = if is_json_error_envelope(&body_text) {
-        body_text.clone()
+        body_text
     } else {
         msg.clone()
     };
@@ -2154,17 +2155,13 @@ mod tests {
 
     /// True when any `system` block's text starts with the billing prefix.
     fn body_has_billing(body: &Value) -> bool {
-        body["system"]
-            .as_array()
-            .map(|arr| {
-                arr.iter().any(|b| {
-                    b["text"]
-                        .as_str()
-                        .map(|t| t.trim_start().starts_with("x-anthropic-billing-header:"))
-                        .unwrap_or(false)
-                })
+        body["system"].as_array().is_some_and(|arr| {
+            arr.iter().any(|b| {
+                b["text"]
+                    .as_str()
+                    .is_some_and(|t| t.trim_start().starts_with("x-anthropic-billing-header:"))
             })
-            .unwrap_or(false)
+        })
     }
 
     /// (a) OauthBearer + api.anthropic.com + NON-CC req (no captured

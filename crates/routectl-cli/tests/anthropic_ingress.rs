@@ -813,7 +813,7 @@ async fn provider_extras_cannot_stomp_messages_or_system_via_anthropic_ingress()
         "provider_extras.messages must not stomp canonical messages; upstream got: {up}"
     );
     assert_eq!(
-        up["messages"].as_array().map(|a| a.len()),
+        up["messages"].as_array().map(std::vec::Vec::len),
         Some(1),
         "messages array length must be 1; upstream got: {up}"
     );
@@ -3033,7 +3033,7 @@ async fn count_tokens_path_unions_anthropic_beta_from_three_sources() {
     );
     // Dedup contract: each source appears at most once.
     let mut sorted = names.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     let mut dedup = sorted.clone();
     dedup.dedup();
     assert_eq!(

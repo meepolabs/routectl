@@ -244,7 +244,7 @@ pub(super) fn cache_fields_into(
 }
 
 impl IngressAdapter for AnthropicIngress {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "anthropic"
     }
 

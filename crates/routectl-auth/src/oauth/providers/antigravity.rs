@@ -78,7 +78,7 @@ const SCOPES: &[&str] = &[
 /// drive the loader toward OOM.
 const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
 
-pub(crate) struct Antigravity;
+pub struct Antigravity;
 
 #[async_trait]
 impl OAuthFlow for Antigravity {
@@ -298,7 +298,7 @@ async fn decode_token_response_traced(
 
 /// Short label for the error variant, used in the structured
 /// `error_kind` field on refresh-failure trace events.
-fn error_kind_label(e: &OAuthError) -> &'static str {
+const fn error_kind_label(e: &OAuthError) -> &'static str {
     match e {
         OAuthError::Network(_) => "network",
         OAuthError::TokenEndpoint(_) => "token_endpoint",

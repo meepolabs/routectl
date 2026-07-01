@@ -44,7 +44,7 @@ pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
 /// A stray `Retry-After` on any other status (400/401/500 etc.) must
 /// NOT park a provider, so the egress wiring gates hint extraction on
 /// this predicate.
-pub fn is_rate_limit_status(status: u16) -> bool {
+pub const fn is_rate_limit_status(status: u16) -> bool {
     matches!(status, 429 | 503 | 529)
 }
 

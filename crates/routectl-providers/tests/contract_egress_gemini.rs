@@ -279,7 +279,7 @@ mod response_thought_replay {
 mod stream_sequence {
     use super::*;
 
-    fn gemini_sse_body() -> &'static str {
+    const fn gemini_sse_body() -> &'static str {
         concat!(
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"let me think\",\"thought\":true,\"thoughtSignature\":\"sig-42\"}],\"role\":\"model\"},\"index\":0}],\"responseId\":\"resp-stream-1\",\"modelVersion\":\"gemini-2.5-pro-001\"}\n\n",
             "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello\"}],\"role\":\"model\"},\"index\":0}]}\n\n",

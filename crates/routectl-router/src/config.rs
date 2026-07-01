@@ -251,7 +251,7 @@ impl Default for UsageConfig {
     }
 }
 
-fn default_retention_days() -> u32 {
+const fn default_retention_days() -> u32 {
     90
 }
 
@@ -575,7 +575,7 @@ impl ModelEntry {
     /// shape. Projected via apply_layered_overlays into
     /// RoutectlInternal.supports_adaptive_thinking; the AnthropicApi
     /// egress reads it at request time.
-    pub fn with_supports_adaptive_thinking(mut self, b: bool) -> Self {
+    pub const fn with_supports_adaptive_thinking(mut self, b: bool) -> Self {
         self.supports_adaptive_thinking = b;
         self
     }
@@ -590,17 +590,17 @@ impl ModelEntry {
 
     /// Set the maximum thinking-token budget cap for this model.
     /// `0` means no operator cap.
-    pub fn with_max_thinking_budget(mut self, budget: u32) -> Self {
+    pub const fn with_max_thinking_budget(mut self, budget: u32) -> Self {
         self.max_thinking_budget = budget;
         self
     }
 
-    pub fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
+    pub const fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
         self.reasoning_dialect = Some(d);
         self
     }
 
-    pub fn with_history_reasoning(mut self, h: HistoryReasoning) -> Self {
+    pub const fn with_history_reasoning(mut self, h: HistoryReasoning) -> Self {
         self.history_reasoning = Some(h);
         self
     }
@@ -616,7 +616,7 @@ impl ModelEntry {
     }
 
     /// Set the model's selectability flag.
-    pub fn with_selectable(mut self, b: bool) -> Self {
+    pub const fn with_selectable(mut self, b: bool) -> Self {
         self.selectable = b;
         self
     }
@@ -660,7 +660,7 @@ impl ModelEntry {
     /// Set whether the response `routectl_provider` field is exposed to
     /// the client for this model. Defaults to `true`; set `false` to
     /// suppress the served-provider name on the response.
-    pub fn with_visible_routectl_provider(mut self, b: bool) -> Self {
+    pub const fn with_visible_routectl_provider(mut self, b: bool) -> Self {
         self.visible_routectl_provider = b;
         self
     }
@@ -674,7 +674,7 @@ impl ModelEntry {
     }
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -714,15 +714,15 @@ impl AliasValue {
     /// scale.
     pub fn nicknames(&self) -> NicknameIter<'_> {
         match self {
-            AliasValue::Single(s) => NicknameIter::Single(Some(s.as_str())),
-            AliasValue::Chain(v) => NicknameIter::Chain(v.iter()),
+            Self::Single(s) => NicknameIter::Single(Some(s.as_str())),
+            Self::Chain(v) => NicknameIter::Chain(v.iter()),
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         match self {
-            AliasValue::Single(_) => false,
-            AliasValue::Chain(v) => v.is_empty(),
+            Self::Single(_) => false,
+            Self::Chain(v) => v.is_empty(),
         }
     }
 }
@@ -744,7 +744,7 @@ impl<'a> Iterator for NicknameIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             NicknameIter::Single(opt) => opt.take(),
-            NicknameIter::Chain(iter) => iter.next().map(|s| s.as_str()),
+            NicknameIter::Chain(iter) => iter.next().map(std::string::String::as_str),
         }
     }
 }
@@ -847,11 +847,11 @@ pub struct ServerConfig {
     pub max_body_bytes: u32,
 }
 
-fn default_allow_disable_fallbacks() -> bool {
+const fn default_allow_disable_fallbacks() -> bool {
     true
 }
 
-fn default_max_body_bytes() -> u32 {
+const fn default_max_body_bytes() -> u32 {
     32 * 1024 * 1024
 }
 
@@ -881,7 +881,7 @@ fn default_host() -> String {
     "127.0.0.1".into()
 }
 
-fn default_port() -> u16 {
+const fn default_port() -> u16 {
     8787
 }
 
@@ -915,7 +915,7 @@ impl CacheCapability {
     /// Build a capability from its two flags. Use this for explicit
     /// construction from outside the crate (the struct is
     /// `#[non_exhaustive]`, so struct-literal syntax is unavailable there).
-    pub fn new(supports_top_level_cache_control: bool, cache_hit_observable: bool) -> Self {
+    pub const fn new(supports_top_level_cache_control: bool, cache_hit_observable: bool) -> Self {
         Self {
             supports_top_level_cache_control,
             cache_hit_observable,
@@ -1308,7 +1308,7 @@ impl ProviderEntry {
     /// the `kind = "..."` discriminant in the TOML provider table, so the
     /// returned value round-trips with operator configuration and is safe
     /// to surface in usage accounting / logs.
-    pub fn kind_str(&self) -> &'static str {
+    pub const fn kind_str(&self) -> &'static str {
         match self {
             Self::OpenaiCompat { .. } => "openai-compat",
             Self::AnthropicApi { .. } => "anthropic-api",
@@ -1340,7 +1340,7 @@ impl ProviderEntry {
 
     /// Get the runtime policy attached to this entry. Centralizes the
     /// match so the router doesn't repeat it.
-    pub fn runtime(&self) -> &ProviderRuntimePolicy {
+    pub const fn runtime(&self) -> &ProviderRuntimePolicy {
         match self {
             Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => runtime,
             #[cfg(feature = "bedrock")]
@@ -1355,7 +1355,7 @@ impl ProviderEntry {
     /// Per-provider `header_extras`. Returns a reference to the
     /// per-variant map so the dispatch-layer merge helpers can read
     /// without re-matching the enum.
-    pub fn header_extras(&self) -> &BTreeMap<String, String> {
+    pub const fn header_extras(&self) -> &BTreeMap<String, String> {
         match self {
             Self::OpenaiCompat { header_extras, .. } => header_extras,
             Self::AnthropicApi { header_extras, .. } => header_extras,
@@ -1371,7 +1371,7 @@ impl ProviderEntry {
     /// Per-provider `payload_extras`. Returns a reference (None when
     /// the operator did not configure any) so the dispatch-layer deep
     /// merge can borrow without cloning on the no-op path.
-    pub fn payload_extras(&self) -> Option<&Value> {
+    pub const fn payload_extras(&self) -> Option<&Value> {
         match self {
             Self::OpenaiCompat { payload_extras, .. } => payload_extras.as_ref(),
             Self::AnthropicApi { payload_extras, .. } => payload_extras.as_ref(),
@@ -1463,7 +1463,7 @@ impl ProviderEntry {
     /// global `[cache]` switch" (the dispatch path treats that as
     /// enabled); `Some(false)` disables auto-emit for this provider even
     /// when the global switch is on. Mirrors `cache_capability()`.
-    pub fn auto_emit_top_level_breakpoint(&self) -> Option<bool> {
+    pub const fn auto_emit_top_level_breakpoint(&self) -> Option<bool> {
         match self {
             Self::OpenaiCompat {
                 auto_emit_top_level_breakpoint,
@@ -1500,7 +1500,7 @@ impl ProviderEntry {
     /// reduction applies when the global `[reduction] enabled == true` AND
     /// this override is not explicitly `Some(false)`. That decision logic
     /// is NOT implemented here -- this is the config surface only.
-    pub fn reduction_enabled(&self) -> Option<bool> {
+    pub const fn reduction_enabled(&self) -> Option<bool> {
         match self {
             Self::OpenaiCompat {
                 reduction_enabled, ..
@@ -1668,7 +1668,7 @@ impl ProviderEntry {
     pub fn with_runtime(mut self, rt: ProviderRuntimePolicy) -> Self {
         match &mut self {
             Self::OpenaiCompat { runtime, .. } | Self::AnthropicApi { runtime, .. } => {
-                *runtime = rt
+                *runtime = rt;
             }
             #[cfg(feature = "bedrock")]
             Self::Bedrock { runtime, .. } => *runtime = rt,
@@ -1713,7 +1713,7 @@ impl ProviderEntry {
         let u = url.into();
         match &mut self {
             Self::OpenaiCompat { base_url, .. } | Self::AnthropicApi { base_url, .. } => {
-                *base_url = u
+                *base_url = u;
             }
             _ => panic!("ProviderEntry::with_base_url only applies to api-backed providers"),
         }
@@ -2661,21 +2661,21 @@ api_key_ref = "literal:k"
     #[test]
     fn reduction_block_parses_and_rejects_unknown_fields() {
         // Arrange + Act: explicit enable.
-        let toml_text = r#"
+        let toml_text = r"
 [reduction]
 enabled = true
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse enabled reduction block");
 
         // Assert
         assert!(cfg.reduction.enabled, "enabled = true must parse to true");
 
         // Arrange: an unknown key inside [reduction].
-        let bad = r#"
+        let bad = r"
 [reduction]
 enabled = true
 bogus = 1
-"#;
+";
 
         // Act + Assert: deny_unknown_fields must reject it.
         assert!(
@@ -3143,10 +3143,10 @@ host = "127.0.0.1"
     /// loop (e.g. `config show`).
     #[test]
     fn log_block_partial_redact_only_round_trips() {
-        let toml_text = r#"
+        let toml_text = r"
 [log]
 redact_prompts = true
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse partial");
         assert!(cfg.log.trace_headers.is_none());
         assert!(cfg.log.trace_body_bytes.is_none());
@@ -3165,12 +3165,12 @@ redact_prompts = true
     /// rename here surfaces against `docs/CONFIGURATION.md`.
     #[test]
     fn log_block_full_round_trips() {
-        let toml_text = r#"
+        let toml_text = r"
 [log]
 trace_headers = true
 trace_body_bytes = 32768
 redact_prompts = true
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse full");
         assert_eq!(cfg.log.trace_headers, Some(true));
         assert_eq!(cfg.log.trace_body_bytes, Some(32768));
@@ -3188,10 +3188,10 @@ redact_prompts = true
     /// rather than silently dropping the override.
     #[test]
     fn log_block_rejects_unknown_field() {
-        let toml_text = r#"
+        let toml_text = r"
 [log]
 trace_body_byte = 1024
-"#;
+";
         let err = toml::from_str::<Config>(toml_text).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -3441,7 +3441,7 @@ impl RetryPolicy {
     }
 }
 
-fn default_max_attempts() -> u32 {
+const fn default_max_attempts() -> u32 {
     2
 }
 
@@ -3451,15 +3451,15 @@ fn default_max_attempts() -> u32 {
 /// so a single hint cannot pin a provider out of rotation indefinitely.
 const DEFAULT_MAX_HONORED_RETRY_AFTER_MS: u64 = 3_600_000;
 
-fn default_probe_max_tokens() -> u32 {
+const fn default_probe_max_tokens() -> u32 {
     1
 }
 
-fn default_backoff_ms() -> u64 {
+const fn default_backoff_ms() -> u64 {
     250
 }
 
-fn default_backoff_multiplier() -> f64 {
+const fn default_backoff_multiplier() -> f64 {
     2.0
 }
 
@@ -3576,10 +3576,10 @@ mod is_fallbackable_status_tests {
         use crate::config::Config;
         use crate::factory::validate_retry_policy;
 
-        let toml_text = r#"
+        let toml_text = r"
 [retry]
 retry_denylist = [422]
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse denylist-only");
         let p = &cfg.retry;
         assert!(
@@ -3636,10 +3636,10 @@ retry_denylist = [422]
         // A `[retry]` block that omits `probe_max_tokens` defaults to 1
         // (Claude Code's max_tokens=1 probe is detected out of the box).
         use crate::config::Config;
-        let toml_text = r#"
+        let toml_text = r"
 [retry]
 max_attempts = 3
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         assert_eq!(cfg.retry.probe_max_tokens, 1);
         assert_eq!(cfg.retry.max_attempts, 3, "other fields unaffected");
@@ -3649,10 +3649,10 @@ max_attempts = 3
     fn probe_max_tokens_zero_parses_to_disable() {
         // `probe_max_tokens = 0` is the disable sentinel and round-trips.
         use crate::config::Config;
-        let toml_text = r#"
+        let toml_text = r"
 [retry]
 probe_max_tokens = 0
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         assert_eq!(cfg.retry.probe_max_tokens, 0);
     }
@@ -3670,10 +3670,10 @@ probe_max_tokens = 0
         use crate::config::Config;
         use std::time::Duration;
 
-        let toml_text = r#"
+        let toml_text = r"
 [retry]
 max_attempts = 3
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         assert!(
             cfg.retry.max_honored_retry_after_ms.is_none(),
@@ -3693,10 +3693,10 @@ max_attempts = 3
         use crate::config::Config;
         use std::time::Duration;
 
-        let toml_text = r#"
+        let toml_text = r"
 [retry]
 max_honored_retry_after_ms = 90000
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         assert_eq!(cfg.retry.max_honored_retry_after_ms, Some(90_000));
         assert_eq!(
@@ -3809,10 +3809,10 @@ host = "127.0.0.1"
     #[test]
     fn server_cap_knobs_explicit_values_round_trip() {
         use crate::config::Config;
-        let toml_text = r#"
+        let toml_text = r"
 [server]
 max_body_bytes = 67108864
-"#;
+";
         let cfg: Config = toml::from_str(toml_text).expect("parse");
         assert_eq!(cfg.server.max_body_bytes, 67_108_864);
     }
@@ -4109,11 +4109,11 @@ retention_days = 7
     #[test]
     fn usage_block_rejects_unknown_field() {
         // Arrange
-        let toml_text = r#"
+        let toml_text = r"
 [usage]
 enabled = true
 bogus_key = 1
-"#;
+";
         // Act
         let result = toml::from_str::<Config>(toml_text);
         // Assert

@@ -10,10 +10,10 @@
 //! because the vendor surfaces are reverse-engineered, undocumented,
 //! and need code-review discipline when they shift.
 
-pub(crate) mod anthropic;
-pub(crate) mod antigravity;
-pub(crate) mod codex;
-pub(crate) mod xai;
+pub mod anthropic;
+pub mod antigravity;
+pub mod codex;
+pub mod xai;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -24,14 +24,14 @@ use crate::oauth::{OAuthError, OAuthResult};
 
 /// Parameters the auth-URL builder needs from the login driver.
 /// Provider impls turn these into a vendor-specific URL.
-pub(crate) struct AuthParams<'a> {
+pub struct AuthParams<'a> {
     pub challenge: &'a str,
     pub state: &'a str,
     pub redirect_uri: &'a str,
 }
 
 #[async_trait]
-pub(crate) trait OAuthFlow: Send + Sync {
+pub trait OAuthFlow: Send + Sync {
     /// Stable id used in `oauth://<provider>` URIs and `routectl
     /// login <provider>`.
     fn provider_id(&self) -> &'static str;
@@ -129,7 +129,7 @@ pub(crate) trait OAuthFlow: Send + Sync {
 /// Look up a provider impl by id. Returns `OAuthError::UnknownProvider`
 /// (whose Display drives the operator-visible "known: ..." message
 /// from `known_provider_ids`) if the id is not registered.
-pub(crate) fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
+pub fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
     match provider_id {
         "anthropic" => Ok(&anthropic::Anthropic),
         "codex" => Ok(&codex::Codex),
@@ -146,7 +146,7 @@ pub(crate) fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
 /// build its clap allowed-provider set from this list, keeping the accepted
 /// set in lockstep with the registry. The operator-visible "unknown oauth
 /// provider" text is built from `OAuthError::Display`.
-pub fn known_provider_ids() -> &'static [&'static str] {
+pub const fn known_provider_ids() -> &'static [&'static str] {
     &["anthropic", "codex", "xai", "antigravity"]
 }
 
@@ -215,7 +215,7 @@ pub mod testing {
 /// count; multibyte UTF-8 input may be truncated on a non-char boundary
 /// in edge cases but the function never panics because we slice through
 /// `char_indices`.
-pub(crate) fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

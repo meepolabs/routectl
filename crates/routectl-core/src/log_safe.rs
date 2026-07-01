@@ -128,8 +128,7 @@ pub fn extract_upstream_message(body_text: &str) -> String {
         .as_ref()
         .and_then(|v| v.pointer("/error/message"))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| sanitize_upstream_body(body_text))
+        .map_or_else(|| sanitize_upstream_body(body_text), str::to_string)
 }
 
 /// True when `body_text` parses as JSON carrying a top-level `error`
@@ -833,7 +832,7 @@ pub const HDR_MSG_EGRESS: &str = "egress response headers";
 /// state) so both arms are unit-testable without touching the
 /// process-frozen [`header_trace_enabled`] `OnceLock` or installing a
 /// shared tracing subscriber.
-fn header_trace_should_emit(header_trace_on: bool, trace_level_on: bool) -> bool {
+const fn header_trace_should_emit(header_trace_on: bool, trace_level_on: bool) -> bool {
     header_trace_on && trace_level_on
 }
 
@@ -1133,18 +1132,17 @@ pub(crate) fn extract_structural_summary(body: &serde_json::Value) -> Structural
         .map(str::to_string);
     let max_tokens = obj
         .get("max_tokens")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|n| n as u32);
-    let stream = obj.get("stream").and_then(|v| v.as_bool());
+    let stream = obj.get("stream").and_then(serde_json::Value::as_bool);
 
     let thinking_shape = obj.get("thinking").and_then(|t| t.as_object()).map(|t| {
         match t.get("type").and_then(|v| v.as_str()) {
             Some("enabled") => {
                 let budget = t
                     .get("budget_tokens")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "?".to_string());
+                    .and_then(serde_json::Value::as_u64)
+                    .map_or_else(|| "?".to_string(), |n| n.to_string());
                 format!("enabled:{budget}")
             }
             Some("adaptive") => {
@@ -1202,14 +1200,12 @@ pub(crate) fn extract_structural_summary(body: &serde_json::Value) -> Structural
         .get("messages")
         .or_else(|| obj.get("input"))
         .and_then(|v| v.as_array())
-        .map(|a| a.len() as u32)
-        .unwrap_or(0);
+        .map_or(0, |a| a.len() as u32);
 
     let tools_len = obj
         .get("tools")
         .and_then(|v| v.as_array())
-        .map(|a| a.len() as u32)
-        .unwrap_or(0);
+        .map_or(0, |a| a.len() as u32);
 
     let anthropic_beta = obj
         .get("anthropic_beta")
@@ -1354,9 +1350,9 @@ pub fn trace_stream_summary(
     if !tracing::event_enabled!(tracing::Level::TRACE) {
         return;
     }
-    let prompt_tokens = usage.map(|u| u.prompt_tokens).unwrap_or(0);
-    let completion_tokens = usage.map(|u| u.completion_tokens).unwrap_or(0);
-    let total_tokens = usage.map(|u| u.total_tokens).unwrap_or(0);
+    let prompt_tokens = usage.map_or(0, |u| u.prompt_tokens);
+    let completion_tokens = usage.map_or(0, |u| u.completion_tokens);
+    let total_tokens = usage.map_or(0, |u| u.total_tokens);
     tracing::trace!(
         direction,
         kind,

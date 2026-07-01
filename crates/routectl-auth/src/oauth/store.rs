@@ -33,7 +33,7 @@ use crate::{SecretRef, SecretStore};
 /// flaky networks may want to widen this; pinned here as a const
 /// because no production driver has yet asked for per-deployment
 /// tuning.
-pub(crate) const REFRESH_LEAD_SECS: u64 = 300;
+pub const REFRESH_LEAD_SECS: u64 = 300;
 
 /// Routectl-managed OAuth credentials store. Cheap to clone; the
 /// inner state is `Arc`-shared so multiple `Provider` instances can
@@ -653,7 +653,7 @@ impl SecretStore for OAuthStore {
             SecretRef::OAuth { provider, label } => (provider, label),
             _ => return None,
         };
-        OAuthStore::peek_session_id(self, &seat_key(provider, label.as_deref())).await
+        Self::peek_session_id(self, &seat_key(provider, label.as_deref())).await
     }
 
     async fn peek_cloud_project_id(&self, secret_ref: &SecretRef) -> Option<String> {
@@ -663,7 +663,7 @@ impl SecretStore for OAuthStore {
             SecretRef::OAuth { provider, label } => (provider, label),
             _ => return None,
         };
-        OAuthStore::peek_cloud_project_id(self, &seat_key(provider, label.as_deref())).await
+        Self::peek_cloud_project_id(self, &seat_key(provider, label.as_deref())).await
     }
 
     async fn set_cloud_project_id(&self, secret_ref: &SecretRef, project_id: &str) -> Result<()> {
@@ -671,7 +671,7 @@ impl SecretStore for OAuthStore {
             SecretRef::OAuth { provider, label } => (provider, label),
             _ => return Ok(()),
         };
-        OAuthStore::set_cloud_project_id(self, &seat_key(provider, label.as_deref()), project_id)
+        Self::set_cloud_project_id(self, &seat_key(provider, label.as_deref()), project_id)
             .await
             .map_err(Error::from)
     }
@@ -869,10 +869,7 @@ mod tests {
         /// Max simultaneous `refresh_token` invocations observed. Only
         /// meaningful when built `with_concurrency_gauge`.
         fn max_in_flight(&self) -> u32 {
-            self.concurrency
-                .as_ref()
-                .map(ConcurrencyGauge::max)
-                .unwrap_or(0)
+            self.concurrency.as_ref().map_or(0, ConcurrencyGauge::max)
         }
     }
 

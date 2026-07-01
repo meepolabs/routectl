@@ -60,12 +60,12 @@ impl LoginOptions {
         Self::default()
     }
 
-    pub fn with_print_url(mut self, print_url: bool) -> Self {
+    pub const fn with_print_url(mut self, print_url: bool) -> Self {
         self.print_url = print_url;
         self
     }
 
-    pub fn with_callback_port(mut self, port: Option<u16>) -> Self {
+    pub const fn with_callback_port(mut self, port: Option<u16>) -> Self {
         self.callback_port = port;
         self
     }
@@ -543,10 +543,10 @@ const FAILURE_HTML: &str = r#"<!doctype html>
 /// expected CSRF `state` query param. Kept short and deliberately
 /// uninformative -- a co-resident process probing the port should not
 /// learn what the listener is waiting for.
-const REJECTED_HTML: &str = r#"<!doctype html>
+const REJECTED_HTML: &str = r"<!doctype html>
 <html><head><title>routectl</title></head>
 <body><p>Invalid callback.</p></body></html>
-"#;
+";
 
 #[cfg(test)]
 mod tests {

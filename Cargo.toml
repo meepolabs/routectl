@@ -120,3 +120,152 @@ codegen-units = 1
 # or the deploy target stops caring about binary size.
 opt-level = "z"
 panic = "abort"
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+# All 6 workspace crates are internal (publish = false). The CI gate runs
+# `-D warnings`, which promotes every warn to an error -- so missing_docs and
+# missing_debug_implementations cannot sit at "warn" without failing the gate
+# on ~285 private struct fields / variants. Enforcing full doc + Debug coverage
+# on non-public API has low value, so both are allowed at the workspace level.
+# Re-promote to "warn" per-crate if any crate's surface is ever published.
+missing_docs = "allow"
+missing_debug_implementations = "allow"
+
+[workspace.lints.clippy]
+# Lint groups at warn priority = -1 so specific allows below take precedence.
+pedantic = { level = "warn", priority = -1 }
+nursery  = { level = "warn", priority = -1 }
+cargo    = { level = "warn", priority = -1 }
+
+# Pedantic + nursery noise allowlist.
+module_name_repetitions    = "allow"
+must_use_candidate         = "allow"
+missing_errors_doc         = "allow"
+missing_panics_doc         = "allow"
+struct_excessive_bools     = "allow"
+# doc_markdown fires on SQL keywords (SELECT, PRAGMA), product names (SQLite),
+# and identifiers used in prose -- wrapping all of them in backticks degrades
+# readability without improving correctness in internal crates.
+doc_markdown               = "allow"
+# too_long_first_doc_paragraph fires widely on multi-sentence lead paragraphs
+# that are already clear; splitting them adds boilerplate, not signal.
+too_long_first_doc_paragraph = "allow"
+# float_cmp fires throughout cost.rs test assertions comparing computed f64
+# results -- these comparisons use exact expected values from the same
+# arithmetic, so epsilon-based comparison would add noise without benefit.
+float_cmp                  = "allow"
+
+# Cast allowlist -- all occur in token-counting and cost-estimation arithmetic
+# where the semantics are intentional and documented in-function.
+cast_precision_loss        = "allow"  # i64/usize -> f64 in cost arithmetic; intentional
+cast_possible_truncation   = "allow"  # token-count math; saturating semantics acceptable
+cast_lossless              = "allow"  # widening casts in accounting math; explicit is noise
+cast_sign_loss             = "allow"  # token counts are non-negative; sign-cast is safe
+cast_possible_wrap         = "allow"  # accounting counters; wrapping caught by tests
+
+# Cargo-group noise allowlist.
+multiple_crate_versions  = "allow"
+
+# Forward-compat catchalls: ContentPart::Other, ToolDef::Other, ContentBlock::Other
+# plus a wildcard arm let new Anthropic wire types ship without code edits
+# (CLAUDE.md "Hub-and-spoke contract"). Binding them to Known(_) would drop future
+# variants silently.
+match_wildcard_for_single_variants = "allow"
+
+# `renames`/`renamer`, `req`/`res`, cache-ttl variable pairs, etc. -- clear in
+# context; the lint fires on legitimate short names in local scope.
+similar_names             = "allow"
+
+# 24 call sites across 6 crates, many at trait-impl / dispatch boundaries or test
+# fixtures; churning ownership at every site is high risk, low signal for
+# internal publish=false code.
+needless_pass_by_value    = "allow"
+
+# Existing functions; structural refactor is a separate concern from lint adoption.
+too_many_lines            = "allow"
+
+# Many of these wrap infallible conversions to satisfy a common trait return type
+# (e.g. `fn foo() -> Result<...>` on a trait where some impls can fail). Unwrapping
+# would break the shared interface contract.
+unnecessary_wraps         = "allow"
+
+# Builder methods on config types throughout routectl-router deliberately return
+# Self so callers can chain. Adding #[must_use] to all 40+ builder methods has low
+# value for internal publish=false types.
+return_self_not_must_use  = "allow"
+
+# `default_trait_access` fires on `Default::default()` when a more specific type
+# path (e.g. `Map::default()`) is available. routectl uses `Default::default()`
+# extensively in struct-literal construction where the field type is unambiguous
+# from context. Requiring explicit type paths in every struct literal adds noise
+# without improving clarity.
+default_trait_access      = "allow"
+
+# `items_after_statements` fires on `use` items that appear after let bindings
+# in test functions. These localized imports are intentional (scoping test-only
+# deps like `futures::StreamExt` to the function that needs them) and should not
+# require hoisting above the Arrange section.
+items_after_statements    = "allow"
+
+# RwLock/Mutex write guards in async fns must live through the operation they protect.
+# Narrowing the scope would change drop semantics and risk data races. All flagged
+# sites hold locks intentionally for the duration of their guarded mutation.
+significant_drop_tightening = "allow"
+
+# Fires on `if let` guards that hold a mutex through the scrutinee expression.
+# Same reasoning as significant_drop_tightening: guard lifetime is intentional.
+significant_drop_in_scrutinee = "allow"
+
+# Manual Debug impls that omit sensitive fields (tokens, secrets) are deliberate;
+# auto-deriving would expose secret material to debug output.
+missing_fields_in_debug   = "allow"
+
+# Clone-then-assign is idiomatic when the destination is already initialized and
+# a move would require a temporary; the optimizer elides the redundancy anyway.
+assigning_clones          = "allow"
+
+# `map_or_else` with a non-trivial closure is often harder to read than an explicit
+# `match`; the match form is preferred in routectl for non-trivial branches.
+# Allowed at workspace level -- call sites that can trivially use map_or_else
+# have already been converted during the lint-adoption pass.
+option_if_let_else        = "allow"
+
+# Single-character names in scope are common in tests with parallel assert patterns
+# (a/b for two responses, k/v for key-value pairs). The lint fires at 5 total
+# single-char bindings in scope, which is a low threshold for router dispatch tests.
+many_single_char_names    = "allow"
+
+
+# --- Post-auto-fix residual allowlist (2026 conventions adoption) ---
+# `cargo clippy --fix` cleared ~2200 machine-applicable pedantic/nursery/cargo
+# findings (use_self, redundant_pub_crate, uninlined_format_args, const-fn,
+# collapsible-if let-chains, ...). These categories are the non-machine-
+# applicable style/nursery residual across the internal (publish = false)
+# crates. The lint GROUPS stay enabled (the bulk of pedantic/nursery/cargo
+# still fires to catch real issues); these specific style lints are allowed to
+# avoid a high-churn, behavior-risky manual refactor of working code. Tighten
+# per-crate when a surface is hardened.
+manual_let_else                     = "allow"
+unreadable_literal                  = "allow"
+match_same_arms                     = "allow"
+ref_option                          = "allow"
+format_push_string                  = "allow"
+trivially_copy_pass_by_ref          = "allow"
+needless_pass_by_ref_mut            = "allow"
+literal_string_with_formatting_args = "allow"
+doc_link_with_quotes                = "allow"
+needless_continue                   = "allow"
+unused_self                         = "allow"
+needless_collect                    = "allow"
+used_underscore_binding             = "allow"
+or_fun_call                         = "allow"
+branches_sharing_code               = "allow"
+redundant_clone                     = "allow"
+struct_field_names                  = "allow"
+single_match_else                   = "allow"
+semicolon_if_nothing_returned       = "allow"
+uninlined_format_args               = "allow"
+string_lit_as_bytes                 = "allow"
+redundant_closure_for_method_calls  = "allow"
+no_effect_underscore_binding        = "allow"
+format_collect                      = "allow"

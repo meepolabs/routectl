@@ -397,7 +397,7 @@ fn ingress_anthropic_multi_turn_with_tool_result() {
     // turn -- the alternation pin.
     match &req.messages[3].content {
         MessageContent::Text(t) => {
-            assert_eq!(t, "It is currently 72F and sunny in San Francisco.")
+            assert_eq!(t, "It is currently 72F and sunny in San Francisco.");
         }
         other => panic!("message[3] expected Text content (assistant), got {other:?}"),
     }
@@ -506,7 +506,7 @@ fn ingress_openai_multi_turn_with_tool_result() {
     // turn -- the alternation pin.
     match &req.messages[3].content {
         MessageContent::Text(t) => {
-            assert_eq!(t, "It is currently 72F and sunny in San Francisco.")
+            assert_eq!(t, "It is currently 72F and sunny in San Francisco.");
         }
         other => panic!("message[3] expected Text content (assistant), got {other:?}"),
     }

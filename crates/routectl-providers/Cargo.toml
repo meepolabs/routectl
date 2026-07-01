@@ -105,3 +105,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 pretty_assertions = "1"
 insta.workspace = true
 tracing-test = "0.2"
+
+[lints]
+workspace = true

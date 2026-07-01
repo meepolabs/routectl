@@ -79,7 +79,11 @@ pub fn get_weather_tool() -> ToolDef {
 }
 
 pub mod scenarios {
-    use super::*;
+    use super::{
+        CacheControl, ChatRequest, ChatResponse, Choice, ContentPart, CustomTool, KnownContentPart,
+        Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, SystemBlock,
+        SystemContent, ToolDef, assistant_text_msg, get_weather_tool, json, user_msg,
+    };
 
     /// Scenario 1: a single user turn with a top-level system prompt.
     ///

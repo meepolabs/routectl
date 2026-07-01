@@ -25,10 +25,7 @@ use super::{OpenAiResponsesConfig, extras};
 /// `ChatRequest`. The Provider's `complete()` toggles `stream` to
 /// false / `stream()` toggles it true; this orchestrator builds with
 /// `stream = false` and the caller flips as needed.
-pub(crate) fn translate(
-    cfg: &OpenAiResponsesConfig,
-    req: &ChatRequest,
-) -> Result<ResponsesRequest> {
+pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<ResponsesRequest> {
     warn_dropped_cache_control(req);
 
     let instructions = translate_system(req).unwrap_or_default();

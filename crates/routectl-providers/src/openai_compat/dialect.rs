@@ -33,7 +33,7 @@ impl ReasoningDialect {
     /// The `format` tag written into every `ReasoningDetail` produced by
     /// this dialect. Consumers can use this to re-route to the right
     /// continuation logic.
-    pub fn format_tag(self) -> &'static str {
+    pub const fn format_tag(self) -> &'static str {
         match self {
             Self::OpenAi => "openai-responses-v1",
             Self::DeepSeek => "deepseek-v1",
@@ -46,13 +46,13 @@ impl ReasoningDialect {
 
     /// Returns true if outgoing message history must have `reasoning_content`
     /// and `reasoning_details` stripped before sending to the upstream.
-    pub fn strip_history_reasoning(self) -> bool {
+    pub const fn strip_history_reasoning(self) -> bool {
         matches!(self, Self::DeepSeek | Self::Vllm)
     }
 
     /// Returns true if the response carries a `reasoning_content` field that
     /// must be lifted into `reasoning_details`.
-    pub fn lifts_reasoning_content(self) -> bool {
+    pub const fn lifts_reasoning_content(self) -> bool {
         matches!(self, Self::DeepSeek | Self::Vllm)
     }
 }

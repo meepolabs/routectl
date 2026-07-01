@@ -34,7 +34,7 @@ fn translate_custom_tool(c: &CustomTool) -> AnthropicTool {
     }
 }
 
-pub(crate) fn translate_tool(td: &ToolDef) -> AnthropicTool {
+pub fn translate_tool(td: &ToolDef) -> AnthropicTool {
     match td {
         ToolDef::Custom(c) => translate_custom_tool(c),
         ToolDef::Other(v) => {
@@ -65,12 +65,12 @@ fn openai_function_to_custom(v: &Value) -> Option<AnthropicTool> {
     let description = func
         .get("description")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
     let input_schema = func
         .get("parameters")
         .cloned()
         .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
-    let strict = func.get("strict").and_then(|v| v.as_bool());
+    let strict = func.get("strict").and_then(serde_json::Value::as_bool);
     Some(AnthropicTool::Custom {
         name,
         description,
@@ -119,18 +119,17 @@ pub(super) fn translate_tool_choice(tc: Option<&Value>, has_tools: bool) -> Opti
                     .get("function")
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str());
-                match name {
-                    Some(n) => Some(serde_json::json!({"type": TOOL_CHOICE_TYPE_TOOL, "name": n})),
-                    None => {
-                        tracing::warn!(
-                            "tool_choice with type=\"function\" but missing function.name; \
-                             passed through as-is and Anthropic will reject it"
-                        );
-                        Some(tc.clone())
-                    }
+                if let Some(n) = name {
+                    Some(serde_json::json!({"type": TOOL_CHOICE_TYPE_TOOL, "name": n}))
+                } else {
+                    tracing::warn!(
+                        "tool_choice with type=\"function\" but missing function.name; \
+                         passed through as-is and Anthropic will reject it"
+                    );
+                    Some(tc.clone())
                 }
             }
-            Some("auto") | Some("any") | Some("tool") | Some("none") => Some(tc.clone()),
+            Some("auto" | "any" | "tool" | "none") => Some(tc.clone()),
             _ => Some(tc.clone()),
         },
         _ => Some(tc.clone()),

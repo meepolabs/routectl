@@ -138,10 +138,10 @@ pub enum KnownContentPart {
 impl ContentPart {
     /// `cache_control` if the block carries one. Used by the validator and
     /// by egresses that need to count breakpoints.
-    pub fn cache_control(&self) -> Option<&CacheControl> {
+    pub const fn cache_control(&self) -> Option<&CacheControl> {
         match self {
-            ContentPart::Known(k) => k.cache_control(),
-            ContentPart::Other { cache_control, .. } => cache_control.as_ref(),
+            Self::Known(k) => k.cache_control(),
+            Self::Other { cache_control, .. } => cache_control.as_ref(),
         }
     }
 
@@ -149,37 +149,37 @@ impl ContentPart {
     /// `"server_tool_use"` for an Other variant).
     pub fn type_tag(&self) -> &str {
         match self {
-            ContentPart::Known(k) => k.type_tag(),
-            ContentPart::Other { type_tag, .. } => type_tag,
+            Self::Known(k) => k.type_tag(),
+            Self::Other { type_tag, .. } => type_tag,
         }
     }
 }
 
 impl KnownContentPart {
-    pub fn cache_control(&self) -> Option<&CacheControl> {
+    pub const fn cache_control(&self) -> Option<&CacheControl> {
         match self {
-            KnownContentPart::Text { cache_control, .. }
-            | KnownContentPart::Image { cache_control, .. }
-            | KnownContentPart::ImageUrl { cache_control, .. }
-            | KnownContentPart::File { cache_control, .. }
-            | KnownContentPart::Document { cache_control, .. }
-            | KnownContentPart::ToolUse { cache_control, .. }
-            | KnownContentPart::ToolResult { cache_control, .. } => cache_control.as_ref(),
-            KnownContentPart::Thinking { .. } | KnownContentPart::RedactedThinking { .. } => None,
+            Self::Text { cache_control, .. }
+            | Self::Image { cache_control, .. }
+            | Self::ImageUrl { cache_control, .. }
+            | Self::File { cache_control, .. }
+            | Self::Document { cache_control, .. }
+            | Self::ToolUse { cache_control, .. }
+            | Self::ToolResult { cache_control, .. } => cache_control.as_ref(),
+            Self::Thinking { .. } | Self::RedactedThinking { .. } => None,
         }
     }
 
-    pub fn type_tag(&self) -> &'static str {
+    pub const fn type_tag(&self) -> &'static str {
         match self {
-            KnownContentPart::Text { .. } => "text",
-            KnownContentPart::Image { .. } => "image",
-            KnownContentPart::ImageUrl { .. } => "image_url",
-            KnownContentPart::File { .. } => "file",
-            KnownContentPart::Document { .. } => "document",
-            KnownContentPart::ToolUse { .. } => "tool_use",
-            KnownContentPart::ToolResult { .. } => "tool_result",
-            KnownContentPart::Thinking { .. } => "thinking",
-            KnownContentPart::RedactedThinking { .. } => "redacted_thinking",
+            Self::Text { .. } => "text",
+            Self::Image { .. } => "image",
+            Self::ImageUrl { .. } => "image_url",
+            Self::File { .. } => "file",
+            Self::Document { .. } => "document",
+            Self::ToolUse { .. } => "tool_use",
+            Self::ToolResult { .. } => "tool_result",
+            Self::Thinking { .. } => "thinking",
+            Self::RedactedThinking { .. } => "redacted_thinking",
         }
     }
 }

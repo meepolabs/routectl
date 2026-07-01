@@ -41,7 +41,7 @@ use super::types::{SseDeltaUsage, SseMessage, SseMessageDelta};
 /// the full event Value preserved (including the `type` field) so the
 /// SSE state machine can log it and decide what to do.
 #[derive(Debug)]
-pub(crate) enum SseEvent {
+pub enum SseEvent {
     MessageStart {
         message: SseMessage,
     },
@@ -120,10 +120,9 @@ impl<'de> Deserialize<'de> for SseEvent {
         let is_known = v
             .get("type")
             .and_then(Value::as_str)
-            .map(|t| KNOWN_TAGS.contains(&t))
-            .unwrap_or(false);
+            .is_some_and(|t| KNOWN_TAGS.contains(&t));
         if !is_known {
-            return Ok(SseEvent::Other(v));
+            return Ok(Self::Other(v));
         }
         let known: Known = match serde_json::from_value(v.clone()) {
             Ok(known) => known,
@@ -138,26 +137,24 @@ impl<'de> Deserialize<'de> for SseEvent {
                     "anthropic SSE event: known tag failed typed deserialize; \
                      preserving raw Value as Other",
                 );
-                return Ok(SseEvent::Other(v));
+                return Ok(Self::Other(v));
             }
         };
         Ok(match known {
-            Known::MessageStart { message } => SseEvent::MessageStart { message },
+            Known::MessageStart { message } => Self::MessageStart { message },
             Known::ContentBlockStart {
                 index,
                 content_block,
-            } => SseEvent::ContentBlockStart {
+            } => Self::ContentBlockStart {
                 index,
                 content_block,
             },
-            Known::ContentBlockDelta { index, delta } => {
-                SseEvent::ContentBlockDelta { index, delta }
-            }
-            Known::ContentBlockStop { index } => SseEvent::ContentBlockStop { index },
-            Known::MessageDelta { delta, usage } => SseEvent::MessageDelta { delta, usage },
-            Known::MessageStop => SseEvent::MessageStop,
-            Known::Ping => SseEvent::Ping,
-            Known::Error { error } => SseEvent::Error { error },
+            Known::ContentBlockDelta { index, delta } => Self::ContentBlockDelta { index, delta },
+            Known::ContentBlockStop { index } => Self::ContentBlockStop { index },
+            Known::MessageDelta { delta, usage } => Self::MessageDelta { delta, usage },
+            Known::MessageStop => Self::MessageStop,
+            Known::Ping => Self::Ping,
+            Known::Error { error } => Self::Error { error },
         })
     }
 }
@@ -172,7 +169,7 @@ impl<'de> Deserialize<'de> for SseEvent {
 /// `type` tag so the state machine can map it to
 /// `OpenBlockKind::Unknown` and propagate as opaque-events.
 #[derive(Debug)]
-pub(crate) enum SseContentBlockStart {
+pub enum SseContentBlockStart {
     Text {
         // Field captured for forward-compat replay; the state machine
         // matches via `Text { .. }` and only reads the outer `index`.
@@ -220,10 +217,9 @@ impl<'de> Deserialize<'de> for SseContentBlockStart {
         let is_known = v
             .get("type")
             .and_then(Value::as_str)
-            .map(|t| KNOWN_TAGS.contains(&t))
-            .unwrap_or(false);
+            .is_some_and(|t| KNOWN_TAGS.contains(&t));
         if !is_known {
-            return Ok(SseContentBlockStart::Other(v));
+            return Ok(Self::Other(v));
         }
         let known: Known = match serde_json::from_value(v.clone()) {
             Ok(known) => known,
@@ -235,14 +231,14 @@ impl<'de> Deserialize<'de> for SseContentBlockStart {
                     "anthropic SSE content_block: known tag failed typed deserialize; \
                      preserving raw Value as Other",
                 );
-                return Ok(SseContentBlockStart::Other(v));
+                return Ok(Self::Other(v));
             }
         };
         Ok(match known {
-            Known::Text { text } => SseContentBlockStart::Text { text },
-            Known::Thinking { thinking } => SseContentBlockStart::Thinking { thinking },
-            Known::ToolUse { id, name } => SseContentBlockStart::ToolUse { id, name },
-            Known::RedactedThinking { data } => SseContentBlockStart::RedactedThinking { data },
+            Known::Text { text } => Self::Text { text },
+            Known::Thinking { thinking } => Self::Thinking { thinking },
+            Known::ToolUse { id, name } => Self::ToolUse { id, name },
+            Known::RedactedThinking { data } => Self::RedactedThinking { data },
         })
     }
 }
@@ -256,7 +252,7 @@ impl<'de> Deserialize<'de> for SseContentBlockStart {
 /// emitted inside `web_search_tool_result` blocks.
 #[derive(Debug)]
 #[allow(clippy::enum_variant_names)] // wire shape: Anthropic prefixes every delta with `*Delta`
-pub(crate) enum SseDelta {
+pub enum SseDelta {
     TextDelta {
         text: String,
     },
@@ -297,10 +293,9 @@ impl<'de> Deserialize<'de> for SseDelta {
         let is_known = v
             .get("type")
             .and_then(Value::as_str)
-            .map(|t| KNOWN_TAGS.contains(&t))
-            .unwrap_or(false);
+            .is_some_and(|t| KNOWN_TAGS.contains(&t));
         if !is_known {
-            return Ok(SseDelta::Other(v));
+            return Ok(Self::Other(v));
         }
         let known: Known = match serde_json::from_value(v.clone()) {
             Ok(known) => known,
@@ -312,14 +307,14 @@ impl<'de> Deserialize<'de> for SseDelta {
                     "anthropic SSE delta: known tag failed typed deserialize; \
                      preserving raw Value as Other",
                 );
-                return Ok(SseDelta::Other(v));
+                return Ok(Self::Other(v));
             }
         };
         Ok(match known {
-            Known::TextDelta { text } => SseDelta::TextDelta { text },
-            Known::ThinkingDelta { thinking } => SseDelta::ThinkingDelta { thinking },
-            Known::SignatureDelta { signature } => SseDelta::SignatureDelta { signature },
-            Known::InputJsonDelta { partial_json } => SseDelta::InputJsonDelta { partial_json },
+            Known::TextDelta { text } => Self::TextDelta { text },
+            Known::ThinkingDelta { thinking } => Self::ThinkingDelta { thinking },
+            Known::SignatureDelta { signature } => Self::SignatureDelta { signature },
+            Known::InputJsonDelta { partial_json } => Self::InputJsonDelta { partial_json },
         })
     }
 }
@@ -475,7 +470,7 @@ mod tests {
                 );
                 assert_eq!(v.get("tool_use_id").and_then(Value::as_str), Some("srv_01"),);
                 assert!(
-                    v.get("content").map(Value::is_array).unwrap_or(false),
+                    v.get("content").is_some_and(Value::is_array),
                     "content array must survive",
                 );
                 assert_eq!(v, raw);

@@ -82,14 +82,12 @@ fn rewrite_assistant_thinking(msg: &mut Map<String, Value>) {
     let starting_index: u32 = msg
         .get("reasoning_details")
         .and_then(|v| v.as_array())
-        .map(|arr| {
+        .map_or(0, |arr| {
             arr.iter()
-                .filter_map(|d| d.get("index").and_then(|v| v.as_u64()))
+                .filter_map(|d| d.get("index").and_then(serde_json::Value::as_u64))
                 .max()
-                .map(|m| (m as u32).saturating_add(1))
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
+                .map_or(0, |m| (m as u32).saturating_add(1))
+        });
     let mut surviving: Vec<Value> = Vec::with_capacity(parts.len());
     let mut details: Vec<Value> = Vec::new();
     let mut detail_index: u32 = starting_index;

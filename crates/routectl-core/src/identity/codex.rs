@@ -181,7 +181,7 @@ fn terminal_token() -> String {
 ///
 /// Authorization is intentionally absent: it is a per-request header
 /// injected by the auth dispatcher, not a client-level default.
-pub fn codex_default_headers() -> [(&'static str, &'static str); 2] {
+pub const fn codex_default_headers() -> [(&'static str, &'static str); 2] {
     [
         (ORIGINATOR_HEADER_NAME, CODEX_ORIGINATOR),
         (RESIDENCY_HEADER_NAME, RESIDENCY_HEADER_VALUE),
@@ -202,7 +202,7 @@ pub fn codex_default_headers() -> [(&'static str, &'static str); 2] {
 /// `version` tracks `PINNED_CODEX_VERSION`; bump that constant each
 /// release so the wire identity stays current (the chatgpt.com backend
 /// flags stale identities).
-pub fn default_identity_headers() -> [(&'static str, &'static str); 3] {
+pub const fn default_identity_headers() -> [(&'static str, &'static str); 3] {
     [
         (ORIGINATOR_HEADER_NAME, CODEX_ORIGINATOR),
         (RESIDENCY_HEADER_NAME, RESIDENCY_HEADER_VALUE),

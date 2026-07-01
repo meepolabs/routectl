@@ -525,7 +525,7 @@ async fn stream_eof_after_message_stop_without_metadata_emits_closing_chunk() {
     );
     // And no error chunk was yielded -- the EOF is graceful when
     // buffer is empty + no prelude pending.
-    let any_err = chunks.iter().any(|c| c.is_err());
+    let any_err = chunks.iter().any(std::result::Result::is_err);
     assert!(!any_err, "EOF after messageStop should not error");
 }
 

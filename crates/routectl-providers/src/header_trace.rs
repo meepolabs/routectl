@@ -40,7 +40,7 @@ fn should_trace_headers() -> bool {
 /// INCLUDING auth -- for the given provider. No-op, and no allocation,
 /// unless header tracing is on. Call AFTER the request is built so the
 /// resolved auth header is present on the `HeaderMap`.
-pub(crate) fn outgoing(provider_kind: &str, id: &str, headers: &HeaderMap) {
+pub fn outgoing(provider_kind: &str, id: &str, headers: &HeaderMap) {
     if !should_trace_headers() {
         return;
     }
@@ -56,7 +56,7 @@ pub(crate) fn outgoing(provider_kind: &str, id: &str, headers: &HeaderMap) {
 /// Call BEFORE the response body is consumed -- `resp.json()` /
 /// `resp.bytes_stream()` take ownership, after which `resp.headers()`
 /// is gone.
-pub(crate) fn upstream(provider_kind: &str, id: &str, headers: &HeaderMap) {
+pub fn upstream(provider_kind: &str, id: &str, headers: &HeaderMap) {
     if !should_trace_headers() {
         return;
     }

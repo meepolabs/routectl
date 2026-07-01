@@ -42,7 +42,7 @@ struct UsageLedgerReader {
 }
 
 impl UsageLedgerReader {
-    fn new(db_path: PathBuf) -> Self {
+    const fn new(db_path: PathBuf) -> Self {
         Self { db_path }
     }
 }

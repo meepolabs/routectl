@@ -1673,7 +1673,7 @@ async fn stream_empty_first_provider_falls_back() {
         .expect("router stream() must produce p2's stream after p1 falls back");
     let chunks: Vec<_> = stream.collect().await;
     assert!(
-        chunks.iter().any(|c| c.is_ok()),
+        chunks.iter().any(std::result::Result::is_ok),
         "expected at least one Ok chunk from the fallback provider"
     );
     assert_eq!(p1.calls(), 1, "p1 must have been tried exactly once");
@@ -2144,7 +2144,7 @@ impl Provider for UsageTailProvider {
         let text = ok_chunk(&id, &req.model, "hi");
         let tail = ChatChunk {
             id: format!("chunk-{id}-tail"),
-            model: req.model.clone(),
+            model: req.model,
             choices: Vec::new(),
             usage: Some(routectl_core::UsageDelta::default()),
             opaque_events: Vec::new(),

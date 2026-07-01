@@ -32,7 +32,7 @@ use routectl_core::{ChatChunk, Error, Result};
 /// small enough that a malicious or compromised upstream can't drive the
 /// buffer toward OOM by advertising a giant frame and never sending the
 /// bytes.
-pub(crate) const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Per-provider phrasing for the framing layer's log lines and error
 /// envelopes. The two decoders historically carried distinct strings
@@ -40,7 +40,7 @@ pub(crate) const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// keeping that wording stable avoids surprising operators or log
 /// dashboards keyed on the existing text.
 #[derive(Clone, Copy)]
-pub(crate) enum FrameLabel {
+pub enum FrameLabel {
     Invoke,
     Converse,
 }
@@ -48,62 +48,62 @@ pub(crate) enum FrameLabel {
 impl FrameLabel {
     fn cap_exceeded(self, advertised: usize) -> String {
         match self {
-            FrameLabel::Invoke => format!(
+            Self::Invoke => format!(
                 "bedrock eventstream frame advertised {advertised} bytes, exceeds cap {MAX_FRAME_BYTES}"
             ),
-            FrameLabel::Converse => format!(
+            Self::Converse => format!(
                 "bedrock converse-stream frame advertised {advertised} bytes, exceeds cap {MAX_FRAME_BYTES}"
             ),
         }
     }
 
-    fn consumed_overflow(self) -> &'static str {
+    const fn consumed_overflow(self) -> &'static str {
         match self {
-            FrameLabel::Invoke => "bedrock eventstream decoder consumed more than usize::MAX bytes",
-            FrameLabel::Converse => "bedrock converse-stream consumed more than usize::MAX bytes",
+            Self::Invoke => "bedrock eventstream decoder consumed more than usize::MAX bytes",
+            Self::Converse => "bedrock converse-stream consumed more than usize::MAX bytes",
         }
     }
 
     fn upstream_read(self, e: reqwest::Error) -> String {
         match self {
-            FrameLabel::Invoke => format!("bedrock upstream byte read failed: {e}"),
-            FrameLabel::Converse => format!("bedrock converse upstream byte read failed: {e}"),
+            Self::Invoke => format!("bedrock upstream byte read failed: {e}"),
+            Self::Converse => format!("bedrock converse upstream byte read failed: {e}"),
         }
     }
 
     fn eof_buffered(self, left: usize) -> String {
         match self {
-            FrameLabel::Invoke => {
+            Self::Invoke => {
                 format!("bedrock stream truncated: {left} buffered bytes left at EOF")
             }
-            FrameLabel::Converse => {
+            Self::Converse => {
                 format!("bedrock converse-stream truncated: {left} buffered bytes left at EOF")
             }
         }
     }
 
-    fn eof_prelude(self) -> &'static str {
+    const fn eof_prelude(self) -> &'static str {
         match self {
-            FrameLabel::Invoke => {
+            Self::Invoke => {
                 "bedrock stream truncated: prelude consumed but frame body never arrived before EOF"
             }
-            FrameLabel::Converse => {
+            Self::Converse => {
                 "bedrock converse-stream truncated: prelude consumed but frame body never arrived before EOF"
             }
         }
     }
 
-    fn warn_skip(self) -> &'static str {
+    const fn warn_skip(self) -> &'static str {
         match self {
-            FrameLabel::Invoke => "bedrock eventstream frame decode failed; skipping frame",
-            FrameLabel::Converse => "bedrock converse-stream frame decode failed; skipping frame",
+            Self::Invoke => "bedrock eventstream frame decode failed; skipping frame",
+            Self::Converse => "bedrock converse-stream frame decode failed; skipping frame",
         }
     }
 
-    fn trace_dump(self) -> &'static str {
+    const fn trace_dump(self) -> &'static str {
         match self {
-            FrameLabel::Invoke => "bedrock eventstream frame decode failed (full hex dump)",
-            FrameLabel::Converse => "bedrock converse-stream frame decode failed (full hex dump)",
+            Self::Invoke => "bedrock eventstream frame decode failed (full hex dump)",
+            Self::Converse => "bedrock converse-stream frame decode failed (full hex dump)",
         }
     }
 }
@@ -112,7 +112,7 @@ impl FrameLabel {
 /// for each decoded, validated `Message` and yields whatever chunks it
 /// returns; `on_eof` runs once at graceful end-of-stream so a handler can
 /// flush any state it held across frames.
-pub(crate) trait FrameHandler {
+pub trait FrameHandler {
     /// Interpret one decoded, validated frame. Returns zero-or-more
     /// chunks to yield. `Err` is stream-fatal.
     fn on_frame(&mut self, provider_id: &str, message: Message) -> Result<Vec<ChatChunk>>;
@@ -125,7 +125,7 @@ pub(crate) trait FrameHandler {
 }
 
 /// Look up a string-valued eventstream header by name.
-pub(crate) fn header_str<'a>(message: &'a Message, name: &str) -> Option<&'a str> {
+pub fn header_str<'a>(message: &'a Message, name: &str) -> Option<&'a str> {
     for header in message.headers() {
         if header.name().as_str() == name
             && let Ok(s) = header.value().as_string()
@@ -141,7 +141,7 @@ pub(crate) fn header_str<'a>(message: &'a Message, name: &str) -> Option<&'a str
 /// bytes arrive; the advertised-length DoS guard, prelude-tracking, and
 /// decode-error recovery all live here so both Bedrock egresses share one
 /// hardened implementation.
-pub(crate) fn decode_frames<S, H>(
+pub fn decode_frames<S, H>(
     provider_id: String,
     byte_stream: S,
     mut handler: H,

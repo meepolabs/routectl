@@ -26,7 +26,7 @@
 /// entirely. `context` is a stable discriminator field (provider
 /// family, sub-path) that distinguishes one call site's WARN from
 /// another without baking it into the message literal.
-pub(crate) fn warn_upstream_failure(
+pub fn warn_upstream_failure(
     provider_id: &str,
     status: u16,
     auth_kind: Option<&dyn std::fmt::Debug>,

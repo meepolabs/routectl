@@ -325,7 +325,7 @@ fn strip_thinking_when_tool_choice_forces_use(
 ) {
     let forces_use = matches!(
         tool_choice,
-        Some(ConverseToolChoice::Any { .. }) | Some(ConverseToolChoice::Tool { .. })
+        Some(ConverseToolChoice::Any { .. } | ConverseToolChoice::Tool { .. })
     );
     if !forces_use {
         return;
@@ -567,10 +567,7 @@ mod tests {
     fn bag_thinking_absent(bag: &Option<serde_json::Value>) -> bool {
         match bag {
             None => true,
-            Some(v) => v
-                .as_object()
-                .map(|o| o.get("thinking").is_none())
-                .unwrap_or(true),
+            Some(v) => v.as_object().is_none_or(|o| o.get("thinking").is_none()),
         }
     }
 

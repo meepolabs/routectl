@@ -50,7 +50,7 @@ const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 64_000;
 /// module's `normalize`). Other egresses (openai-compat,
 /// openai-responses, bedrock-converse) forward `req.max_tokens` cleanly
 /// when None per the good-translator principle.
-pub(super) fn resolve_max_tokens(req: &ChatRequest) -> u32 {
+pub(super) const fn resolve_max_tokens(req: &ChatRequest) -> u32 {
     if let Some(v) = req.max_tokens {
         return v;
     }
@@ -74,7 +74,7 @@ const ANTHROPIC_MIN_THINKING_BUDGET: u32 = 1024;
 /// probe-sized requests (title generation, topic summaries) instead
 /// of emitting a body that Anthropic would 400. The adaptive shape
 /// has no equivalent floor and is unaffected.
-fn legacy_thinking_fits(req: &ChatRequest) -> bool {
+const fn legacy_thinking_fits(req: &ChatRequest) -> bool {
     let max = resolve_max_tokens(req);
     max > ANTHROPIC_MIN_THINKING_BUDGET
 }
@@ -143,7 +143,7 @@ fn derive_effort(req: &ChatRequest) -> String {
 /// `reasoning.max_tokens` AND the model is adaptive, the budget is
 /// dropped (with a tracing::warn at the call site). The caller's
 /// effort string still travels to `output_config.effort`.
-pub(crate) fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
+pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
     if r.enabled == Some(false) {
@@ -323,7 +323,7 @@ pub(super) fn build_output_config(
 /// Otherwise, drop entries not in the list at DEBUG so operators
 /// triaging unexpected behavior can see WHICH flags got removed.
 /// Mirrors the Bedrock-egress `filter_bedrock_betas` shape.
-pub(crate) fn filter_anthropic_betas<'a>(
+pub fn filter_anthropic_betas<'a>(
     provider_id: &str,
     requested: &'a [String],
     allowed: &[String],

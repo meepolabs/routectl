@@ -141,10 +141,10 @@ fn format_duration(secs: u64) -> String {
 
 fn format_unix(secs: u64) -> String {
     use chrono::{TimeZone, Utc};
-    Utc.timestamp_opt(secs as i64, 0)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-        .unwrap_or_else(|| format!("unix {secs}"))
+    Utc.timestamp_opt(secs as i64, 0).single().map_or_else(
+        || format!("unix {secs}"),
+        |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    )
 }
 
 #[cfg(test)]

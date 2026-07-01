@@ -52,8 +52,7 @@ pub(crate) fn build_usage_draft(
         tool_count: req
             .tools
             .as_ref()
-            .map(|t| u32::try_from(t.len()).unwrap_or(u32::MAX))
-            .unwrap_or(0),
+            .map_or(0, |t| u32::try_from(t.len()).unwrap_or(u32::MAX)),
         thinking_req,
         thinking_req_kind,
         msg_count: u32::try_from(req.messages.len()).unwrap_or(u32::MAX),
@@ -132,7 +131,7 @@ fn ms_to_system_time(ms: i64) -> SystemTime {
 /// a status-0 upstream error with `attempt_count > 0`, so they fold into
 /// `upstream_error` here -- inc2 does NOT separately classify `timeout`
 /// (the router error carries no distinguishable timeout marker).
-pub(crate) fn outcome_for_dispatch_err(meta: &DispatchMeta) -> Outcome {
+pub(crate) const fn outcome_for_dispatch_err(meta: &DispatchMeta) -> Outcome {
     if meta.attempt_count == 0 {
         Outcome::GateBlocked
     } else {
@@ -165,7 +164,11 @@ pub(crate) fn is_cache_thrash(
 /// (`cache_creation_input_tokens`), never the per-TTL breakdown (which is
 /// often absent and would under-subtract). Saturating so a malformed
 /// upstream tally can never wrap.
-pub(crate) fn cache_exclusive_input(prompt: u32, cache_read: u32, cache_creation: u32) -> u32 {
+pub(crate) const fn cache_exclusive_input(
+    prompt: u32,
+    cache_read: u32,
+    cache_creation: u32,
+) -> u32 {
     prompt
         .saturating_sub(cache_read)
         .saturating_sub(cache_creation)
@@ -175,7 +178,7 @@ pub(crate) fn cache_exclusive_input(prompt: u32, cache_read: u32, cache_creation
 /// the cache-INCLUSIVE prompt total. Guards `prompt == 0` -> 0 (no
 /// divide-by-zero) and saturates the multiply so a malformed tally cannot
 /// wrap. Pure + total so it can be unit-tested without a live capture.
-pub(crate) fn cache_hit_pct(read: u64, prompt: u64) -> u64 {
+pub(crate) const fn cache_hit_pct(read: u64, prompt: u64) -> u64 {
     if prompt == 0 {
         return 0;
     }
@@ -185,7 +188,7 @@ pub(crate) fn cache_hit_pct(read: u64, prompt: u64) -> u64 {
 /// Short, stable error-class token for the `error_class` column. Never
 /// the Display string (which can embed provider names / upstream bodies);
 /// just the routectl error variant family.
-pub(crate) fn error_class_of(e: &Error) -> &'static str {
+pub(crate) const fn error_class_of(e: &Error) -> &'static str {
     match e {
         Error::Upstream { .. } => "upstream",
         Error::Streaming(_) => "streaming",
@@ -279,9 +282,13 @@ impl UsageCapture {
         self.record.provider_kind = meta.served_provider_kind.clone();
         self.record.model = meta.served_model.clone();
         self.record.upstream = meta.served_upstream.clone();
-        self.record.strategy = meta.cache_strategy.map(|s| s.to_string());
-        self.record.reduction_strategy = meta.reduction_strategy.map(|s| s.to_string());
-        self.record.selection_decision = meta.selection_decision.map(|s| s.to_string());
+        self.record.strategy = meta.cache_strategy.map(std::string::ToString::to_string);
+        self.record.reduction_strategy = meta
+            .reduction_strategy
+            .map(std::string::ToString::to_string);
+        self.record.selection_decision = meta
+            .selection_decision
+            .map(std::string::ToString::to_string);
         self.record.would_trim_tokens = meta.would_trim_tokens;
         self.record.would_trim_break_even_k = meta.would_trim_break_even_k;
         self.record.would_trim_k_floor = meta.would_trim_k_floor;

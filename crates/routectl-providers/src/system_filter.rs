@@ -23,7 +23,7 @@ const BILLING_PREFIX: &str = "x-anthropic-billing-header:";
 /// True when `text` is a Claude Code billing/attribution block: after
 /// trimming leading whitespace it starts with `x-anthropic-billing-header:`.
 /// A mid-string occurrence does NOT match -- only the leading position.
-pub(crate) fn is_billing_attribution_block(text: &str) -> bool {
+pub fn is_billing_attribution_block(text: &str) -> bool {
     text.trim_start().starts_with(BILLING_PREFIX)
 }
 
@@ -34,7 +34,7 @@ pub(crate) fn is_billing_attribution_block(text: &str) -> bool {
 /// filtered result carries no content. `dropped` is set to `true` when at
 /// least one block was removed, so callers can emit a single contents-free
 /// log line.
-pub(crate) fn strip_billing_attribution(
+pub fn strip_billing_attribution(
     system: &SystemContent,
     dropped: &mut bool,
 ) -> Option<SystemContent> {

@@ -657,7 +657,7 @@ pub(super) fn render_error_eos_internal(
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn alloc_output_index(state: &mut ResponsesStreamState) -> u64 {
+const fn alloc_output_index(state: &mut ResponsesStreamState) -> u64 {
     let idx = state.next_output_index;
     state.next_output_index += 1;
     idx
@@ -752,7 +752,7 @@ fn push_response_event(
     push_event(state, events, event_name, json!({"response": response}));
 }
 
-fn next_seq(state: &mut ResponsesStreamState) -> u64 {
+const fn next_seq(state: &mut ResponsesStreamState) -> u64 {
     let seq = state.sequence_number;
     state.sequence_number += 1;
     seq

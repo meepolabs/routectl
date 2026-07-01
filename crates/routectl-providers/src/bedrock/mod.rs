@@ -108,7 +108,7 @@ impl BedrockApiShape {
     /// independently. Single source of truth -- both `complete()` and
     /// `stream()` derive their kind via this method instead of
     /// duplicating the match arm.
-    pub fn provider_kind_str(self) -> &'static str {
+    pub const fn provider_kind_str(self) -> &'static str {
         match self {
             Self::Invoke => "bedrock-invoke",
             Self::Converse => "bedrock-converse",

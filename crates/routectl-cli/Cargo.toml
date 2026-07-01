@@ -100,3 +100,6 @@ assets = [
     ["../../CHANGELOG.md", "usr/share/doc/routectl/CHANGELOG.md", "644"],
     ["../../examples/config.toml", "usr/share/doc/routectl/examples/config.toml", "644"],
 ]
+
+[lints]
+workspace = true

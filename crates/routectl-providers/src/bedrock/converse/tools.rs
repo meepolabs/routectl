@@ -223,7 +223,7 @@ fn translate_typed_tool_choice(
         Some("auto") => Some(ConverseToolChoice::Auto {
             auto: EmptyObject {},
         }),
-        Some("any") | Some("required") => Some(ConverseToolChoice::Any {
+        Some("any" | "required") => Some(ConverseToolChoice::Any {
             any: EmptyObject {},
         }),
         Some("tool") => {

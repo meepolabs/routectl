@@ -29,7 +29,7 @@ use serde_json::Value;
 /// diffs when wiring up the live smoke test. Optionals skip when None
 /// so the emitted JSON omits absent fields rather than rendering null.
 #[derive(Debug, Serialize)]
-pub(crate) struct ResponsesRequest {
+pub struct ResponsesRequest {
     pub(crate) model: String,
 
     // Always serialized, even when empty. The chatgpt-oauth backend returns
@@ -91,7 +91,7 @@ pub(crate) struct ResponsesRequest {
 /// reasoning only when `encrypted_content` is non-empty.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ResponseInputItem {
+pub enum ResponseInputItem {
     Message {
         role: String,
         content: Vec<ResponsesContentItem>,
@@ -133,7 +133,7 @@ pub(crate) enum ResponseInputItem {
 /// a visual tool) the body becomes an array of typed content items.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub(crate) enum FunctionCallOutputBody {
+pub enum FunctionCallOutputBody {
     /// All parts were plain text; concatenated with newlines (most
     /// common case; avoids wrapping overhead for simple tool results).
     Text(String),
@@ -145,7 +145,7 @@ pub(crate) enum FunctionCallOutputBody {
 /// One item inside a `FunctionCallOutputBody::Items` array.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum FunctionCallOutputContentItem {
+pub enum FunctionCallOutputContentItem {
     InputText {
         text: String,
     },
@@ -162,7 +162,7 @@ pub(crate) enum FunctionCallOutputContentItem {
 /// external URL, forwarded verbatim in the `image_url` field).
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ResponsesContentItem {
+pub enum ResponsesContentItem {
     InputText {
         text: String,
     },
@@ -199,7 +199,7 @@ pub(crate) enum ResponsesContentItem {
 /// entries. Empty `text` is permitted for replay purposes.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ReasoningSummaryItem {
+pub enum ReasoningSummaryItem {
     SummaryText { text: String },
 }
 
@@ -210,7 +210,7 @@ pub(crate) enum ReasoningSummaryItem {
 /// codex itself sends and a few model variants strict-match on it.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ReasoningContentItem {
+pub enum ReasoningContentItem {
     ReasoningText { text: String },
     ReasoningEncrypted { encrypted_content: String },
 }
@@ -232,7 +232,7 @@ pub(crate) enum ReasoningContentItem {
 /// Smoke-confirmed 2026-05-12.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub(crate) enum ResponsesTool {
+pub enum ResponsesTool {
     /// Flat Responses-shape function tool. All fields are top-level
     /// (no nested `function` object). The chat-completions nested shape
     /// (`{type,function:{name,...}}`) 400s on the codex backend.
@@ -254,7 +254,7 @@ pub(crate) enum ResponsesTool {
 /// rename surfaces as a compile error.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ResponsesFunctionTag {
+pub enum ResponsesFunctionTag {
     Function,
 }
 
@@ -267,7 +267,7 @@ pub(crate) enum ResponsesFunctionTag {
 /// constant `"auto"` so the server emits summary deltas back to the
 /// client. routectl maps `req.reasoning.effort` directly into this.
 #[derive(Debug, Serialize)]
-pub(crate) struct ResponsesReasoning {
+pub struct ResponsesReasoning {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,7 +281,7 @@ pub(crate) struct ResponsesReasoning {
 /// verbatim.
 #[derive(Debug, Serialize)]
 #[serde(transparent)]
-pub(crate) struct TextControls {
+pub struct TextControls {
     pub(crate) inner: Value,
 }
 

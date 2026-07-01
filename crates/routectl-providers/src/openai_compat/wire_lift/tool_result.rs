@@ -77,12 +77,11 @@ fn rewrite_message(id: &str, msg: Value, strict: bool, out: &mut Vec<Value>) -> 
         return Ok(());
     }
     // A tool_result is present: take ownership of the parts now.
-    let parts = match msg.as_object().and_then(|o| o.get("content")) {
-        Some(Value::Array(parts)) => parts.clone(),
-        _ => {
-            out.push(msg);
-            return Ok(());
-        }
+    let parts = if let Some(Value::Array(parts)) = msg.as_object().and_then(|o| o.get("content")) {
+        parts.clone()
+    } else {
+        out.push(msg);
+        return Ok(());
     };
 
     // Split the user message into a sequence of (user-text-chunk, tool-msg)
@@ -115,7 +114,7 @@ fn flush_user_chunk(template: &Value, pending: &mut Vec<Value>, out: &mut Vec<Va
     };
     let mut new_msg = Map::new();
     if let Some(orig) = template.as_object() {
-        for (k, v) in orig.iter() {
+        for (k, v) in orig {
             if k == "content" {
                 continue;
             }
@@ -157,7 +156,7 @@ fn build_tool_message(id: &str, part: &Value, strict: bool) -> Result<Option<Val
     };
     let is_error = obj
         .get("is_error")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let content = obj
         .get("content")
@@ -279,9 +278,10 @@ fn lift_inner_block(id: &str, block: Value, strict: bool) -> Result<Option<Value
             let data = source.get("data").and_then(|v| v.as_str()).unwrap_or("");
             format!("data:{media_type};base64,{data}")
         }
-        Some("url") => match source.get("url").and_then(|v| v.as_str()) {
-            Some(u) => u.to_string(),
-            None => {
+        Some("url") => {
+            if let Some(u) = source.get("url").and_then(|v| v.as_str()) {
+                u.to_string()
+            } else {
                 reject_or_drop_unrepresentable(
                     id,
                     strict,
@@ -290,7 +290,7 @@ fn lift_inner_block(id: &str, block: Value, strict: bool) -> Result<Option<Value
                 )?;
                 return Ok(None);
             }
-        },
+        }
         _ => {
             reject_or_drop_unrepresentable(
                 id,
@@ -551,7 +551,7 @@ mod tests {
         ]);
 
         // Act
-        let obj = run(messages.clone());
+        let obj = run(messages);
 
         // Assert -- structure preserved
         let msgs = obj["messages"].as_array().unwrap();

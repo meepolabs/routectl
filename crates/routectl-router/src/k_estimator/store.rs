@@ -243,7 +243,7 @@ mod tests {
         store.put(k.clone(), w.clone());
 
         // Act + Assert: exact-key hit
-        assert_eq!(store.get(&k), Some(w.clone()));
+        assert_eq!(store.get(&k), Some(w));
 
         // Single-component mismatches each return None: the triple is
         // load-bearing, a session that switches provider or model must
@@ -336,7 +336,7 @@ mod tests {
                     ts: UNIX_EPOCH,
                     observed_reuse: true,
                 },
-            )
+            );
         };
         mk(key("s1", "anthropic-api", "opus"));
         mk(key("s1", "bedrock", "opus"));
@@ -484,8 +484,8 @@ mod tests {
         let b = key("B", "anthropic-api", "opus");
         let c = key("C", "anthropic-api", "opus");
         source.put(a.clone(), window_with(1));
-        source.put(b.clone(), window_with(2));
-        source.put(c.clone(), window_with(3));
+        source.put(b, window_with(2));
+        source.put(c, window_with(3));
         let _ = source.get(&a); // promote A to MRU
         let exported = source.export_entries();
 

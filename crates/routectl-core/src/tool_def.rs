@@ -81,7 +81,7 @@ impl CustomTool {
     /// representation. Direct callers that bypass an ingress can rely on
     /// the `anthropic-api` egress's belt-and-braces translation of the
     /// same shape.
-    pub fn from_openai_function(v: &Value) -> Option<CustomTool> {
+    pub fn from_openai_function(v: &Value) -> Option<Self> {
         let obj = v.as_object()?;
         let is_function = obj.get("type").and_then(|t| t.as_str()) == Some("function");
         if !is_function {
@@ -92,13 +92,13 @@ impl CustomTool {
         let description = func
             .get("description")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         let input_schema = func
             .get("parameters")
             .cloned()
             .unwrap_or_else(empty_object_schema);
-        let strict = func.get("strict").and_then(|v| v.as_bool());
-        Some(CustomTool {
+        let strict = func.get("strict").and_then(serde_json::Value::as_bool);
+        Some(Self {
             name,
             description,
             input_schema,
@@ -127,8 +127,8 @@ impl ToolDef {
     /// hard error.
     pub fn cache_control(&self) -> Option<CacheControl> {
         match self {
-            ToolDef::Custom(c) => c.cache_control.clone(),
-            ToolDef::Other(v) => {
+            Self::Custom(c) => c.cache_control.clone(),
+            Self::Other(v) => {
                 let raw = v.as_object().and_then(|o| o.get("cache_control"))?;
                 match serde_json::from_value::<CacheControl>(raw.clone()) {
                     Ok(cc) => Some(cc),
@@ -149,8 +149,8 @@ impl ToolDef {
 impl Serialize for ToolDef {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            ToolDef::Custom(c) => c.serialize(serializer),
-            ToolDef::Other(v) => v.serialize(serializer),
+            Self::Custom(c) => c.serialize(serializer),
+            Self::Other(v) => v.serialize(serializer),
         }
     }
 }
@@ -171,7 +171,7 @@ impl<'de> Deserialize<'de> for ToolDef {
                 .map(ToolDef::Custom)
                 .map_err(serde::de::Error::custom),
             // Builtin or unknown discriminator -> opaque passthrough.
-            Some(_) => Ok(ToolDef::Other(value)),
+            Some(_) => Ok(Self::Other(value)),
         }
     }
 }
