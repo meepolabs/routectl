@@ -1818,3 +1818,53 @@ account_id_ref = "literal:00000000-0000-0000-0000-000000000000"
 for routectl to derive the UUID from. `env://`, `file://`, and
 `literal:` refs all work for both fields. routectl never refreshes a
 static bearer; rotation is the operator's job.
+
+## xAI (Grok) provider
+
+routectl can route to xAI's OpenAI-compatible API (`https://api.x.ai/v1`) using
+an xAI OAuth bearer. The credential is managed the same way as the Codex flow --
+PKCE, local callback server, credentials persisted to
+`~/.config/routectl/credentials.json`.
+
+### routectl-managed OAuth (recommended)
+
+Run `routectl login xai` once. routectl spawns a local callback server on port
+**56121** -- the only redirect URI xAI registers for the public PKCE client
+(`http://127.0.0.1:56121/callback`, literal `127.0.0.1`, not `localhost`). The
+browser opens to xAI's consent flow; on return the authorization code is
+exchanged for an access + refresh token pair.
+
+**Port note.** 56121 is the sole registered port. Unlike the codex flow, there is
+no secondary fallback port. If 56121 is busy on your machine, the login will fail
+with a clear bind-error rather than silently binding an unregistered port and
+confusing xAI's redirect validation.
+
+Then in `~/.config/routectl/config.toml`:
+
+```toml
+[providers.xai]
+kind        = "openai-compat"
+base_url    = "https://api.x.ai/v1"
+auth_kind   = "oauth-bearer"
+api_key_ref = "oauth://xai"
+```
+
+The `oauth://xai` ref resolves at request time against the credentials store;
+rotation is picked up live without restarting routectl. When the upstream marks
+the refresh token dead (`invalid_grant` on 400/401), routectl surfaces a
+"re-run `routectl login xai`" error -- re-run the login and traffic resumes.
+
+**Lazy refresh rotation.** xAI's token endpoint commonly omits `refresh_token`
+on a successful refresh (it re-validates the prior token rather than issuing a
+new one). routectl preserves the prior refresh token when the response body
+omits it -- no operator action is needed.
+
+```toml
+[models.grok-3]
+provider = "xai"
+upstream = "grok-3"
+
+[models.grok-3-mini]
+provider = "xai"
+upstream = "grok-3-mini"
+```
