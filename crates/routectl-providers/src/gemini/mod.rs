@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use routectl_core::{
     debug_upstream_error_body, extract_upstream_message, is_json_error_envelope, sanitize_for_log,
-    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest,
-    ChatResponse, CloudProjectCache, Error, Provider, Result, StaticToken, TokenSource,
+    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse,
+    CloudProjectCache, Error, Provider, Result, StaticToken, TokenSource,
 };
 
 pub(crate) mod auth;

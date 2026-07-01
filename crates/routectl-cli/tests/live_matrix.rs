@@ -1778,7 +1778,6 @@ mod responses_ingress_live {
     }
 }
 
-
 // -- Cloud Code Gemini (oauth://antigravity bearer source) ------------------
 //
 // Mirrors `gemini_complete_matrix` / `gemini_stream_matrix` but proves the
