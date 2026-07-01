@@ -133,17 +133,20 @@ fn display_literal_empty_distinguishable() {
 
 #[tokio::test]
 async fn env_get_resolves_via_process_env() {
-    std::env::set_var("ROUTECTL_TEST_VAR_RESOLVE", "env-value");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("ROUTECTL_TEST_VAR_RESOLVE", "env-value") };
     let store = MemoryStore::new();
     let r = SecretRef::Env("ROUTECTL_TEST_VAR_RESOLVE".into());
     let got = store.get(&r).await.unwrap();
     assert_eq!(got, "env-value");
-    std::env::remove_var("ROUTECTL_TEST_VAR_RESOLVE");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("ROUTECTL_TEST_VAR_RESOLVE") };
 }
 
 #[tokio::test]
 async fn env_get_missing_is_error() {
-    std::env::remove_var("ROUTECTL_TEST_VAR_MISSING");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("ROUTECTL_TEST_VAR_MISSING") };
     let store = MemoryStore::new();
     let r = SecretRef::Env("ROUTECTL_TEST_VAR_MISSING".into());
     let err = store.get(&r).await.unwrap_err();

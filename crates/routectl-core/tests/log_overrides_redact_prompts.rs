@@ -20,7 +20,8 @@ fn redact_prompts_in_uses_override_when_env_unset() {
     // Arrange: env unset; seed config-side fallback Some(true). Pass
     // None for the other two knobs to prove they do not get seeded
     // by accident.
-    std::env::remove_var("ROUTECTL_LOG_REDACT_PROMPTS");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("ROUTECTL_LOG_REDACT_PROMPTS") };
     init_log_overrides(None, None, Some(true));
 
     // Act: redact_prompts_in is the public surface that reads

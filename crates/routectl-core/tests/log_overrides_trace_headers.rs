@@ -18,7 +18,8 @@ fn header_trace_enabled_returns_override_when_env_unset() {
     // None for the other two knobs to prove they do not get seeded
     // by accident -- only the matching argument lands on the
     // matching OVERRIDE OnceLock.
-    std::env::remove_var("ROUTECTL_TRACE_HEADERS");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("ROUTECTL_TRACE_HEADERS") };
     init_log_overrides(Some(true), None, None);
 
     // Act + Assert: the reader returns the override value.

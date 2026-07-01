@@ -25,7 +25,8 @@ fn outgoing_emit_redacts_authorization_and_x_api_key() {
     // bearer JWT (chatgpt-oauth / codex shape) and an x-api-key
     // (anthropic-api shape) plus a non-secret header that must
     // round-trip verbatim.
-    std::env::set_var("ROUTECTL_TRACE_HEADERS", "1");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("ROUTECTL_TRACE_HEADERS", "1") };
     assert!(
         header_trace_enabled(),
         "OnceLock must freeze to true after the env var is set first"
