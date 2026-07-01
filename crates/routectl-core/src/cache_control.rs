@@ -103,13 +103,13 @@ pub fn validate(breakpoints: &[Breakpoint<'_>]) -> Result<()> {
                 bp.control.kind, bp.position,
             )));
         }
-        if let Some(ttl) = bp.control.ttl.as_deref() {
-            if !ALLOWED_TTLS.contains(&ttl) {
-                return Err(Error::Validation(format!(
-                    "cache_control: unknown ttl `{}` at {:?}; allowed: {ALLOWED_TTLS:?}",
-                    ttl, bp.position,
-                )));
-            }
+        if let Some(ttl) = bp.control.ttl.as_deref()
+            && !ALLOWED_TTLS.contains(&ttl)
+        {
+            return Err(Error::Validation(format!(
+                "cache_control: unknown ttl `{}` at {:?}; allowed: {ALLOWED_TTLS:?}",
+                ttl, bp.position,
+            )));
         }
         let ttl = bp.control.effective_ttl();
         if last_ttl_was_5m && ttl == "1h" {

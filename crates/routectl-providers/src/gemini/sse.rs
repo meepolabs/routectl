@@ -15,16 +15,16 @@
 //!
 //! Reference: <https://ai.google.dev/api/generate-content>
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use routectl_core::{
-    schema::{ChunkChoice, ChunkDelta, UsageDelta},
     ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role,
+    schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
+use super::GEMINI_FORMAT;
 use super::response::map_finish_reason;
 use super::types::{GenerateContentResponse, ResponsePart, UsageMetadata};
-use super::GEMINI_FORMAT;
 
 /// Per-stream cap on the number of distinct functionCall blocks the
 /// state machine will assign an index to. A legitimate turn emits a
@@ -66,15 +66,15 @@ impl GeminiStreamState {
     ) -> Result<Vec<ChatChunk>> {
         let mut chunks = Vec::new();
 
-        if let Some(id) = event.response_id.as_deref() {
-            if !id.is_empty() {
-                self.response_id = id.to_string();
-            }
+        if let Some(id) = event.response_id.as_deref()
+            && !id.is_empty()
+        {
+            self.response_id = id.to_string();
         }
-        if let Some(model) = event.model_version.as_deref() {
-            if !model.is_empty() {
-                self.model = model.to_string();
-            }
+        if let Some(model) = event.model_version.as_deref()
+            && !model.is_empty()
+        {
+            self.model = model.to_string();
         }
 
         // Once the stream has terminated, ignore any trailing events

@@ -410,10 +410,10 @@ fn redact_value(v: &mut serde_json::Value) {
             // Anthropic-shape tool_use parts carry user-supplied tool
             // inputs; collapse the entire `input` object to an opaque
             // marker rather than walking it.
-            if map.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                if let Some(input) = map.get_mut("input") {
-                    *input = redacted_object();
-                }
+            if map.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                && let Some(input) = map.get_mut("input")
+            {
+                *input = redacted_object();
             }
             // Bedrock Converse uses a different wire shape -- the tool
             // call is `{"toolUse": {"toolUseId":..., "name":...,
@@ -421,33 +421,30 @@ fn redact_value(v: &mut serde_json::Value) {
             // Reach into the toolUse sub-object and redact `input`
             // there. Same for `toolResult.content[*].json` (a Value
             // returned from a tool that may carry user-derived data).
-            if let Some(tool_use) = map.get_mut("toolUse") {
-                if let Some(obj) = tool_use.as_object_mut() {
-                    if let Some(input) = obj.get_mut("input") {
-                        *input = redacted_object();
-                    }
-                }
+            if let Some(tool_use) = map.get_mut("toolUse")
+                && let Some(obj) = tool_use.as_object_mut()
+                && let Some(input) = obj.get_mut("input")
+            {
+                *input = redacted_object();
             }
-            if let Some(tool_result) = map.get_mut("toolResult") {
-                if let Some(obj) = tool_result.as_object_mut() {
-                    if let Some(content) = obj.get_mut("content") {
-                        if let Some(arr) = content.as_array_mut() {
-                            for part in arr {
-                                if let Some(part_obj) = part.as_object_mut() {
-                                    // `json` is opaque structured data
-                                    // returned by a tool; collapse it
-                                    // wholesale rather than walking it
-                                    // (no known content-bearing leaf
-                                    // shape beneath this key). The
-                                    // sibling `text` key is handled by
-                                    // the generic per-key sweep below
-                                    // when recursion reaches the part
-                                    // object via the `_` arm.
-                                    if let Some(json_val) = part_obj.get_mut("json") {
-                                        *json_val = redacted_object();
-                                    }
-                                }
-                            }
+            if let Some(tool_result) = map.get_mut("toolResult")
+                && let Some(obj) = tool_result.as_object_mut()
+                && let Some(content) = obj.get_mut("content")
+                && let Some(arr) = content.as_array_mut()
+            {
+                for part in arr {
+                    if let Some(part_obj) = part.as_object_mut() {
+                        // `json` is opaque structured data
+                        // returned by a tool; collapse it
+                        // wholesale rather than walking it
+                        // (no known content-bearing leaf
+                        // shape beneath this key). The
+                        // sibling `text` key is handled by
+                        // the generic per-key sweep below
+                        // when recursion reaches the part
+                        // object via the `_` arm.
+                        if let Some(json_val) = part_obj.get_mut("json") {
+                            *json_val = redacted_object();
                         }
                     }
                 }
@@ -460,12 +457,11 @@ fn redact_value(v: &mut serde_json::Value) {
             // base64). It is NOT user-supplied prompt content per se,
             // but it IS derived from the prompt and must not flow
             // verbatim into a routectl trace log. Replace wholesale.
-            if let Some(reasoning) = map.get_mut("reasoningContent") {
-                if let Some(obj) = reasoning.as_object_mut() {
-                    if let Some(rc) = obj.get_mut("redactedContent") {
-                        *rc = redacted_object();
-                    }
-                }
+            if let Some(reasoning) = map.get_mut("reasoningContent")
+                && let Some(obj) = reasoning.as_object_mut()
+                && let Some(rc) = obj.get_mut("redactedContent")
+            {
+                *rc = redacted_object();
             }
             // Bedrock Converse `promptVariables`: a bag of named
             // template variables substituted into a prompt template.
@@ -516,10 +512,10 @@ fn redact_value(v: &mut serde_json::Value) {
             // of length (titles are short, so the length-only `data`/`url`
             // threshold would let them through). The document `source` is
             // covered by the `data`/`url` arms on recursion.
-            if map.get("type").and_then(|t| t.as_str()) == Some("document") {
-                if let Some(title) = map.get_mut("title") {
-                    redact_long_string_leaf(title, 0);
-                }
+            if map.get("type").and_then(|t| t.as_str()) == Some("document")
+                && let Some(title) = map.get_mut("title")
+            {
+                redact_long_string_leaf(title, 0);
             }
             // Bedrock inline image / document source: the `source` object
             // carries the base64 payload under a `bytes` STRING leaf
@@ -529,10 +525,10 @@ fn redact_value(v: &mut serde_json::Value) {
             // must stay visible, so this is parent-gated rather than a
             // blind any-key arm. Long-string-only (same 256-byte
             // threshold as `data`) to avoid eating short metadata.
-            if let Some(source) = map.get_mut("source").and_then(|s| s.as_object_mut()) {
-                if let Some(bytes) = source.get_mut("bytes") {
-                    redact_long_string_leaf(bytes, 256);
-                }
+            if let Some(source) = map.get_mut("source").and_then(|s| s.as_object_mut())
+                && let Some(bytes) = source.get_mut("bytes")
+            {
+                redact_long_string_leaf(bytes, 256);
             }
 
             // Per-key sweep. Known user-content keys are redacted at
@@ -702,11 +698,11 @@ fn redacted_object() -> serde_json::Value {
 /// values. Base64 is ASCII so bytes == chars in practice for the
 /// payload case.
 fn redact_long_string_leaf(entry: &mut serde_json::Value, min_len: usize) {
-    if let serde_json::Value::String(s) = entry {
-        if s.len() >= min_len {
-            let n = s.chars().count();
-            *entry = serde_json::Value::String(format!("<redacted len={n}>"));
-        }
+    if let serde_json::Value::String(s) = entry
+        && s.len() >= min_len
+    {
+        let n = s.chars().count();
+        *entry = serde_json::Value::String(format!("<redacted len={n}>"));
     }
 }
 
@@ -1563,35 +1559,35 @@ pub fn init_log_overrides(
     trace_body_bytes: Option<usize>,
     redact_prompts: Option<bool>,
 ) {
-    if let Some(v) = trace_headers {
-        if let Err(existing) = OVERRIDE_TRACE_HEADERS.set(v) {
-            tracing::debug!(
-                knob = "trace_headers",
-                existing = existing,
-                new = v,
-                "init_log_overrides: knob already frozen; ignoring new value"
-            );
-        }
+    if let Some(v) = trace_headers
+        && let Err(existing) = OVERRIDE_TRACE_HEADERS.set(v)
+    {
+        tracing::debug!(
+            knob = "trace_headers",
+            existing = existing,
+            new = v,
+            "init_log_overrides: knob already frozen; ignoring new value"
+        );
     }
-    if let Some(v) = trace_body_bytes {
-        if let Err(existing) = OVERRIDE_TRACE_BODY_BYTES.set(v) {
-            tracing::debug!(
-                knob = "trace_body_bytes",
-                existing = existing,
-                new = v,
-                "init_log_overrides: knob already frozen; ignoring new value"
-            );
-        }
+    if let Some(v) = trace_body_bytes
+        && let Err(existing) = OVERRIDE_TRACE_BODY_BYTES.set(v)
+    {
+        tracing::debug!(
+            knob = "trace_body_bytes",
+            existing = existing,
+            new = v,
+            "init_log_overrides: knob already frozen; ignoring new value"
+        );
     }
-    if let Some(v) = redact_prompts {
-        if let Err(existing) = OVERRIDE_REDACT_PROMPTS.set(v) {
-            tracing::debug!(
-                knob = "redact_prompts",
-                existing = existing,
-                new = v,
-                "init_log_overrides: knob already frozen; ignoring new value"
-            );
-        }
+    if let Some(v) = redact_prompts
+        && let Err(existing) = OVERRIDE_REDACT_PROMPTS.set(v)
+    {
+        tracing::debug!(
+            knob = "redact_prompts",
+            existing = existing,
+            new = v,
+            "init_log_overrides: knob already frozen; ignoring new value"
+        );
     }
     // After seeding: emit the three status lines. Each call freezes
     // the matching reader's OnceLock to env-or-override-or-default

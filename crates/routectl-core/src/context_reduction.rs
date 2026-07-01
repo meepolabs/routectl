@@ -156,12 +156,12 @@ fn strip_insignificant_whitespace(s: &str) -> Option<String> {
 /// running counters on success. Non-string targets and minify failures are
 /// left untouched (fail-closed).
 fn minify_string_target(target: &mut Value, strings_minified: &mut usize, bytes_saved: &mut usize) {
-    if let Value::String(s) = target {
-        if let Some(minified) = minify_json_whitespace(s) {
-            *bytes_saved += s.len() - minified.len();
-            *strings_minified += 1;
-            *target = Value::String(minified);
-        }
+    if let Value::String(s) = target
+        && let Some(minified) = minify_json_whitespace(s)
+    {
+        *bytes_saved += s.len() - minified.len();
+        *strings_minified += 1;
+        *target = Value::String(minified);
     }
 }
 

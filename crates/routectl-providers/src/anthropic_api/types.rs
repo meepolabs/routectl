@@ -238,10 +238,10 @@ impl Serialize for ContentBlock {
 }
 
 fn merge_cc(mut v: Value, cc: &Option<CacheControl>) -> Value {
-    if let (Some(cc), Some(obj)) = (cc.as_ref(), v.as_object_mut()) {
-        if let Ok(cc_v) = serde_json::to_value(cc) {
-            obj.insert("cache_control".into(), cc_v);
-        }
+    if let (Some(cc), Some(obj)) = (cc.as_ref(), v.as_object_mut())
+        && let Ok(cc_v) = serde_json::to_value(cc)
+    {
+        obj.insert("cache_control".into(), cc_v);
     }
     v
 }
@@ -408,10 +408,10 @@ impl Serialize for AnthropicTool {
                     obj.insert("description".into(), Value::String(d.clone()));
                 }
                 obj.insert("input_schema".into(), input_schema.clone());
-                if let Some(cc) = cache_control {
-                    if let Ok(cc_v) = serde_json::to_value(cc) {
-                        obj.insert("cache_control".into(), cc_v);
-                    }
+                if let Some(cc) = cache_control
+                    && let Ok(cc_v) = serde_json::to_value(cc)
+                {
+                    obj.insert("cache_control".into(), cc_v);
                 }
                 if let Some(d) = defer_loading {
                     obj.insert("defer_loading".into(), Value::Bool(*d));

@@ -34,12 +34,12 @@ pub(crate) mod rate_limit;
 pub(crate) mod store;
 pub mod types;
 
-pub use login::{run as run_login, LoginOptions};
+pub use login::{LoginOptions, run as run_login};
 pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
 pub use store::OAuthStore;
 pub use types::{
-    seat_key, unix_now, AccountInfo, CredentialsFile, SecretToken, TokenRecord, SCHEMA_VERSION,
+    AccountInfo, CredentialsFile, SCHEMA_VERSION, SecretToken, TokenRecord, seat_key, unix_now,
 };
 
 /// Test-only entry points into the OAuth provider surface. Not part of
@@ -128,7 +128,7 @@ pub type OAuthResult<T> = std::result::Result<T, OAuthError>;
 
 #[cfg(test)]
 mod tests {
-    use super::{known_provider_ids, OAuthError};
+    use super::{OAuthError, known_provider_ids};
 
     /// The `UnknownProvider` operator message must enumerate the live
     /// registry, not a stale hardcoded literal. Pins that the newly

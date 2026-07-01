@@ -7,8 +7,8 @@
 //! record present) is not an error: the operator may have run `logout`
 //! before `login`, or be cleaning up a half-completed flow.
 
-use routectl_auth::oauth::types::seat_key;
 use routectl_auth::OAuthStore;
+use routectl_auth::oauth::types::seat_key;
 use routectl_core::{Error, Result};
 
 use crate::commands::seat::validate_label;

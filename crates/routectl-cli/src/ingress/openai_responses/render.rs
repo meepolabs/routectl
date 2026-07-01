@@ -47,7 +47,7 @@
 //! item-level `encrypted_content` signature, any further Encrypted
 //! details become inner `reasoning_encrypted` content blocks.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use routectl_core::{
     ChatResponse, ContentPart, KnownContentPart, Message, MessageContent, ReasoningDetail,

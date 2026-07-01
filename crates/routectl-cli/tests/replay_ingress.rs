@@ -35,8 +35,8 @@ mod common;
 
 use std::sync::Arc;
 
-use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::IngressAdapter;
+use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_core::{ChatRequest, Provider, StaticToken};
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
@@ -49,8 +49,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::replay::{
-    assert_json_equal_structural, captured_root, discover_fixtures, headers_from_pairs,
-    phase1_skip_reason, Fixture, FixtureOutcome,
+    Fixture, FixtureOutcome, assert_json_equal_structural, captured_root, discover_fixtures,
+    headers_from_pairs, phase1_skip_reason,
 };
 
 /// Description of which path + content-type the egress provider hits

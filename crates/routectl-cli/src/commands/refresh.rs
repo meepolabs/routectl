@@ -6,8 +6,8 @@
 //! (unlabeled) seat -- today's behavior. With `--label`, refreshes only
 //! that one seat.
 
-use routectl_auth::oauth::types::{seat_key, unix_now};
 use routectl_auth::OAuthStore;
+use routectl_auth::oauth::types::{seat_key, unix_now};
 use routectl_core::{Error, Result};
 
 use crate::commands::seat::validate_label;

@@ -11,14 +11,14 @@
 
 use serde_json::{Map, Value};
 
-use routectl_core::{is_canonical_request_key, ChatRequest};
+use routectl_core::{ChatRequest, is_canonical_request_key};
 
 use crate::anthropic_api::request::build_thinking;
 use crate::anthropic_api::types::ThinkingConfig;
 use crate::effort::clamp_effort_to_supported;
 
-use super::super::betas::filter_bedrock_betas;
 use super::super::BedrockConfig;
+use super::super::betas::filter_bedrock_betas;
 use super::types::ConverseToolChoice;
 
 /// Build the `additionalModelRequestFields` bag. Returns None when no
@@ -402,7 +402,7 @@ mod tests {
     /// flows through `insert_operator_extras`, which is NOT gated here.)
     #[test]
     fn client_metadata_fingerprint_skipped_from_converse_bag() {
-        use serde_json::{json, Map};
+        use serde_json::{Map, json};
         // Arrange: client supplies a metadata fingerprint via
         // provider_extras and sets req.user (the canonical mirror).
         let cfg = fake_cfg();
@@ -488,7 +488,7 @@ mod tests {
     /// provider_extras path, not `insert_operator_extras`.
     #[test]
     fn operator_metadata_survives_in_converse_bag() {
-        use serde_json::{json, Map};
+        use serde_json::{Map, json};
         let mut cfg = fake_cfg();
         cfg.additional_model_request_fields = Some(json!({
             "metadata": {"trace": "operator-set"}
@@ -695,7 +695,7 @@ mod tests {
         // effort; format is orthogonal and must survive -- parallel to
         // the anthropic_api request.rs test
         // `forced_tool_choice_strips_effort_but_preserves_sibling_format`.
-        use serde_json::{json, Map};
+        use serde_json::{Map, json};
 
         let cfg = fake_cfg();
         let mut bag: Map<String, serde_json::Value> = Map::new();

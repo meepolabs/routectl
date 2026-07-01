@@ -10,8 +10,8 @@
 use routectl_core::{Message, Result};
 
 use super::super::dialect::ReasoningDialect;
-use super::util::lift_think_tags;
 use super::Dialect;
+use super::util::lift_think_tags;
 
 pub struct RawThinkTagDialect;
 pub static RAW_THINK_TAG: RawThinkTagDialect = RawThinkTagDialect;

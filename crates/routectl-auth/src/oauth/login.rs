@@ -19,15 +19,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::Router;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::get;
-use axum::Router;
 use serde::Deserialize;
 use tokio::sync::oneshot;
 
-use crate::oauth::pkce::{constant_time_eq, Pkce};
+use crate::oauth::pkce::{Pkce, constant_time_eq};
 use crate::oauth::providers::{self, AuthParams, OAuthFlow};
 use crate::oauth::rate_limit::{Decision, RateLimitTracker};
 use crate::oauth::store::OAuthStore;

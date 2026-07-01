@@ -18,9 +18,8 @@ pub mod runtime_state;
 pub(crate) mod seat_pool;
 
 pub use cache_pricing::{
-    baked_table_rows, is_stale_today, lookup, lookup_with_overrides, stale_after_days,
-    validate_overrides, BakedPricingRow, CachePricingOverride, CachePricingRow,
-    CachePricingSelector,
+    BakedPricingRow, CachePricingOverride, CachePricingRow, CachePricingSelector, baked_table_rows,
+    is_stale_today, lookup, lookup_with_overrides, stale_after_days, validate_overrides,
 };
 pub use config::{
     AliasValue, CacheCapability, CacheConfig, Config, HistoryReasoning, LogConfig, ModelEntry,
@@ -30,24 +29,24 @@ pub use config::{
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
 pub use context_trim::{
-    apply_trim_plan, propose_steady_state_trim, trimmed_prefix_fingerprint, ElisionMark,
-    SteadyStateTrimParams, SteadyStateTrimPlan,
+    ElisionMark, SteadyStateTrimParams, SteadyStateTrimPlan, apply_trim_plan,
+    propose_steady_state_trim, trimmed_prefix_fingerprint,
 };
-pub use cost_gate::{break_even_k, evaluate, GateDecision, KeepReason, PrefixReductionCandidate};
+pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, evaluate};
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
-    build_provider, build_provider_with_options, build_resolved_models,
+    BuildOptions, build_provider, build_provider_with_options, build_resolved_models,
     validate_alias_chain_targets, validate_alias_patterns, validate_reasoning_defaults,
-    validate_registry_patterns, validate_retry_policy, BuildOptions,
+    validate_registry_patterns, validate_retry_policy,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{
-    rebuild_into, Confidence, EstimateSource, KEstimate, KEstimator, KQuery, KSessionKey,
+    Confidence, EstimateSource, K_SESSION_CAPACITY, KEstimate, KEstimator, KQuery, KSessionKey,
     KSessionStore, KSessionWindow, LedgerBackedK, LedgerReader, LedgerSampleRow, Sample,
-    ShadowOutcome, ShadowStore, K_SESSION_CAPACITY,
+    ShadowOutcome, ShadowStore, rebuild_into,
 };
 pub use resolved::ResolvedModel;
 pub use router::{
-    DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions, ALIAS_MAX_RECURSION_DEPTH,
+    ALIAS_MAX_RECURSION_DEPTH, DispatchMeta, Dispatched, DispatchedStream, Router, RouterOptions,
 };

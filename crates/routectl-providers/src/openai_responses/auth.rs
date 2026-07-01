@@ -30,8 +30,8 @@
 
 use reqwest::RequestBuilder;
 
-use routectl_core::identity::codex::codex_user_agent;
 use routectl_core::Result;
+use routectl_core::identity::codex::codex_user_agent;
 
 use super::{AuthKind, OpenAiResponsesConfig};
 

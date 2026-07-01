@@ -62,10 +62,10 @@ fn is_allowed_cloudflare_cookie_name(name: &str) -> bool {
 /// Returns `None` only when neither `ROUTECTL_COOKIE_FILE` nor `HOME`
 /// is set, in which case the provider runs without persistence.
 pub fn default_cookie_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("ROUTECTL_COOKIE_FILE") {
-        if !p.is_empty() {
-            return Some(PathBuf::from(p));
-        }
+    if let Ok(p) = std::env::var("ROUTECTL_COOKIE_FILE")
+        && !p.is_empty()
+    {
+        return Some(PathBuf::from(p));
     }
     let home = std::env::var_os("HOME")?;
     if home.is_empty() {

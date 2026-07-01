@@ -5,7 +5,7 @@
 use serde_json::Value;
 use thiserror::Error;
 
-use super::{assert_json_equal_structural, DiffMessage};
+use super::{DiffMessage, assert_json_equal_structural};
 
 /// Error returned by [`parse_sse_events`]. Identifies the offending
 /// event index so failures point at the bad frame.
@@ -202,7 +202,9 @@ mod tests {
 
     #[test]
     fn sse_parser_normalizes_crlf_to_lf() {
-        let crlf = sse("event: message_start\r\ndata: {\"x\":1}\r\n\r\nevent: message_stop\r\ndata: {\"y\":2}\r\n\r\n");
+        let crlf = sse(
+            "event: message_start\r\ndata: {\"x\":1}\r\n\r\nevent: message_stop\r\ndata: {\"y\":2}\r\n\r\n",
+        );
         let lf = sse(
             "event: message_start\ndata: {\"x\":1}\n\nevent: message_stop\ndata: {\"y\":2}\n\n",
         );

@@ -31,16 +31,16 @@ pub use dialect::ReasoningDialect;
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
-use futures::stream::BoxStream;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use futures::stream::BoxStream;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 use tracing::debug;
 
 use routectl_core::{
-    debug_upstream_error_body, extract_upstream_message, is_json_error_envelope, sanitize_for_log,
-    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
-    Provider, Result,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, debug_upstream_error_body,
+    extract_upstream_message, is_json_error_envelope, sanitize_for_log, trace_outgoing_body,
+    trace_upstream_success_body,
 };
 
 use sse::ThinkTagAccumulator;
@@ -404,11 +404,10 @@ impl Provider for OpenAiCompatProvider {
                     // providers (e.g. OpenCode-Go) emit cost-tracking
                     // trailer chunks after it, which we must not try to
                     // parse as ChatChunk.
-                    if dialect == ReasoningDialect::RawThinkTag {
-                        if let Some(pending) = think_acc.take_pending() {
+                    if dialect == ReasoningDialect::RawThinkTag
+                        && let Some(pending) = think_acc.take_pending() {
                             yield Ok(flush_pending_chunk(&pending));
                         }
-                    }
                     return;
                 }
                 if trimmed.is_empty() {
@@ -467,11 +466,10 @@ impl Provider for OpenAiCompatProvider {
             }
             // Normal stream exhaustion (upstream closed without [DONE]).
             // Same flush logic as the [DONE] path above.
-            if dialect == ReasoningDialect::RawThinkTag {
-                if let Some(pending) = think_acc.take_pending() {
+            if dialect == ReasoningDialect::RawThinkTag
+                && let Some(pending) = think_acc.take_pending() {
                     yield Ok(flush_pending_chunk(&pending));
                 }
-            }
         };
 
         Ok(routectl_core::wrap_stream_with_summary(
@@ -670,8 +668,8 @@ fn map_openai_compat_upstream_error(
 #[cfg(test)]
 mod helper_tests {
     use super::{
-        accumulate_choice_text, ensure_stream_options_include_usage,
-        map_openai_compat_upstream_error, parse_openai_error_classifier, MAX_STREAM_CHOICES,
+        MAX_STREAM_CHOICES, accumulate_choice_text, ensure_stream_options_include_usage,
+        map_openai_compat_upstream_error, parse_openai_error_classifier,
     };
     use reqwest::header::HeaderMap;
     use routectl_core::Error;

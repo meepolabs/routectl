@@ -13,7 +13,7 @@
 //!   tool_result blocks immediately after"; real claude-code drops it
 //!   before resending.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use routectl_core::{ContentPart, KnownContentPart};
 
@@ -71,42 +71,42 @@ pub(crate) fn parse_image_url_source(url: &str) -> Value {
         tracing::warn!("empty image_url.url -- upstream will reject");
         return json!({"type": "url", "url": ""});
     }
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((mt_with_params, b64)) = rest.split_once(";base64,") {
-            // RFC 2397 allows `;<param>` between media-type and the
-            // `;base64` flag (browser tooling sometimes emits
-            // `;charset=utf-8`). Take the bare media-type for the
-            // allowlist check + emission.
-            let raw_media_type = mt_with_params.split(';').next().unwrap_or(mt_with_params);
-            let media_type_lc = raw_media_type.to_ascii_lowercase();
-            if ALLOWED_IMAGE_MEDIA_TYPES.contains(&media_type_lc.as_str()) {
-                if b64.is_empty() {
-                    // Truncated upload / racey image picker on the
-                    // client side. Bedrock + Anthropic both 400 on
-                    // empty data with a vague "invalid base64"
-                    // message; surface the cause here so operators
-                    // see WHY their request died.
-                    tracing::warn!(
-                        media_type = %media_type_lc,
-                        "data: URI with empty base64 payload -- falling back to URL form (upstream will reject)",
-                    );
-                    return json!({"type": "url", "url": url});
-                }
-                // Emit the lowercased media type even if the caller
-                // sent a mixed-case form. Avoids forwarding a
-                // non-canonical string and keeps the wire body
-                // deterministic across casing variations.
-                return json!({
-                    "type": "base64",
-                    "media_type": media_type_lc,
-                    "data": b64,
-                });
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some((mt_with_params, b64)) = rest.split_once(";base64,")
+    {
+        // RFC 2397 allows `;<param>` between media-type and the
+        // `;base64` flag (browser tooling sometimes emits
+        // `;charset=utf-8`). Take the bare media-type for the
+        // allowlist check + emission.
+        let raw_media_type = mt_with_params.split(';').next().unwrap_or(mt_with_params);
+        let media_type_lc = raw_media_type.to_ascii_lowercase();
+        if ALLOWED_IMAGE_MEDIA_TYPES.contains(&media_type_lc.as_str()) {
+            if b64.is_empty() {
+                // Truncated upload / racey image picker on the
+                // client side. Bedrock + Anthropic both 400 on
+                // empty data with a vague "invalid base64"
+                // message; surface the cause here so operators
+                // see WHY their request died.
+                tracing::warn!(
+                    media_type = %media_type_lc,
+                    "data: URI with empty base64 payload -- falling back to URL form (upstream will reject)",
+                );
+                return json!({"type": "url", "url": url});
             }
-            tracing::warn!(
-                media_type = %media_type_lc,
-                "data: URI with non-allowlisted media_type -- falling back to URL form (upstream will reject)",
-            );
+            // Emit the lowercased media type even if the caller
+            // sent a mixed-case form. Avoids forwarding a
+            // non-canonical string and keeps the wire body
+            // deterministic across casing variations.
+            return json!({
+                "type": "base64",
+                "media_type": media_type_lc,
+                "data": b64,
+            });
         }
+        tracing::warn!(
+            media_type = %media_type_lc,
+            "data: URI with non-allowlisted media_type -- falling back to URL form (upstream will reject)",
+        );
     }
     json!({"type": "url", "url": url})
 }
@@ -196,14 +196,14 @@ pub(crate) fn strip_text_after_tool_use(parts: &[ContentPart]) -> Vec<ContentPar
     };
     let mut out: Vec<ContentPart> = Vec::with_capacity(parts.len());
     for (i, p) in parts.iter().enumerate() {
-        if i > last_idx {
-            if let ContentPart::Known(KnownContentPart::Text { text, .. }) = p {
-                tracing::warn!(
-                    dropped_text_len = text.len(),
-                    "stripped text block after tool_use in assistant content (Bedrock/Anthropic reject this shape on echo)",
-                );
-                continue;
-            }
+        if i > last_idx
+            && let ContentPart::Known(KnownContentPart::Text { text, .. }) = p
+        {
+            tracing::warn!(
+                dropped_text_len = text.len(),
+                "stripped text block after tool_use in assistant content (Bedrock/Anthropic reject this shape on echo)",
+            );
+            continue;
         }
         out.push(p.clone());
     }

@@ -10,13 +10,13 @@
 //! mid-conversation when a provider switch lands on a non-signing
 //! upstream.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::IngressAdapter;
+use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_providers::openai_compat::dialect::ReasoningDialect;
 use routectl_providers::openai_compat::response::{
-    normalize, OPENAI_COMPAT_ENVELOPE_KEYS, OPENAI_COMPAT_USAGE_SUBKEYS,
+    OPENAI_COMPAT_ENVELOPE_KEYS, OPENAI_COMPAT_USAGE_SUBKEYS, normalize,
 };
 
 /// Build a raw openai-compat response (DeepSeek shape) carrying every

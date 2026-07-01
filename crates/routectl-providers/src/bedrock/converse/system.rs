@@ -69,11 +69,7 @@ pub(super) fn build_system(req: &ChatRequest) -> Option<Vec<ConverseSystemBlock>
             }
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 #[cfg(test)]

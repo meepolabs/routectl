@@ -294,8 +294,8 @@ pub fn apply_header_extras(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_header_extras, insert_header, is_auth_header, is_managed_header, AUTH_HEADERS,
-        CONNECT_TIMEOUT, MANAGED_HEADERS, STREAM_READ_TIMEOUT,
+        AUTH_HEADERS, CONNECT_TIMEOUT, MANAGED_HEADERS, STREAM_READ_TIMEOUT, apply_header_extras,
+        insert_header, is_auth_header, is_managed_header,
     };
     use reqwest::header::HeaderMap;
 

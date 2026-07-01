@@ -617,7 +617,7 @@ fn strict_translation_off_warns_and_allows_request() {
     // (warn-only), and the request body still serializes. Pin that the
     // request reaches the upstream wire shape without erroring.
     use routectl_core::{
-        cache_control::CacheControl, content_part::ContentPart, ChatRequest, KnownContentPart,
+        ChatRequest, KnownContentPart, cache_control::CacheControl, content_part::ContentPart,
     };
     let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
         id: "openai-compat:test".into(),
@@ -663,7 +663,7 @@ fn strict_translation_on_rejects_canonical_only_fields() {
     // Strict mode: same lossy seam returns an Error::Validation that
     // names the offending fields. Wired through OpenAiCompatConfig from
     // [server] strict_translation at provider build time.
-    use routectl_core::{cache_control::CacheControl, ChatRequest};
+    use routectl_core::{ChatRequest, cache_control::CacheControl};
     let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
         id: "openai-compat:strict".into(),
         base_url: "http://localhost".into(),

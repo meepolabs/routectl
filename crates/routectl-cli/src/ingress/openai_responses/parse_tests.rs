@@ -5,8 +5,8 @@
 //! three statefulness branches and the graceful-degradation path.
 
 use super::*;
-use axum::http::header::HeaderName;
 use axum::http::HeaderMap;
+use axum::http::header::HeaderName;
 use routectl_core::{
     ContentPart, Error, KnownContentPart, MessageContent, ReasoningDetailKind, Role, SystemContent,
     ToolDef,
@@ -509,9 +509,11 @@ fn reasoning_item_preserves_encrypted_content_signature() {
 
     // Assert: text detail + encrypted-signature detail are both present.
     let details = &req.messages[0].reasoning_details;
-    assert!(details
-        .iter()
-        .any(|d| matches!(d.kind, ReasoningDetailKind::Text) && d.payload["text"] == "chain"));
+    assert!(
+        details
+            .iter()
+            .any(|d| matches!(d.kind, ReasoningDetailKind::Text) && d.payload["text"] == "chain")
+    );
     let enc = details
         .iter()
         .find(|d| matches!(d.kind, ReasoningDetailKind::Encrypted))

@@ -33,8 +33,8 @@ pub use routectl_core::test_utils::*;
 pub fn isolate_usage_db(
     config: std::sync::Arc<routectl_router::Config>,
 ) -> std::sync::Arc<routectl_router::Config> {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     static BASE: OnceLock<std::path::PathBuf> = OnceLock::new();
     static COUNTER: AtomicU64 = AtomicU64::new(0);

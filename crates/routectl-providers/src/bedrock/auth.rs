@@ -15,9 +15,9 @@
 
 use std::sync::Arc;
 
+use aws_credential_types::Credentials;
 use aws_credential_types::provider::future as creds_future;
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
-use aws_credential_types::Credentials;
 
 use routectl_core::{Error, Result};
 

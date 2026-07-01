@@ -376,7 +376,7 @@ mod scenario_5_cache_control_positions {
 mod forward_compat_pins {
     use super::*;
     use routectl_core::{ChatRequest, ContentPart, Message, MessageContent, Role};
-    use serde_json::{json, Map};
+    use serde_json::{Map, json};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

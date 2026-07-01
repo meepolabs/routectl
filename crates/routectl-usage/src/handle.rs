@@ -8,8 +8,8 @@
 //! and an atomic counter is bumped. Either way the caller returns
 //! immediately.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::mpsc::Sender;
 

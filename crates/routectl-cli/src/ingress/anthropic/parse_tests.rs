@@ -1,7 +1,7 @@
 use serde_json::json;
 
-use crate::ingress::anthropic::AnthropicIngress;
 use crate::ingress::IngressAdapter;
+use crate::ingress::anthropic::AnthropicIngress;
 
 use super::*;
 
@@ -334,10 +334,11 @@ fn merge_inbound_anthropic_beta_header_filters_crlf_in_values() {
     // the actual CR/LF-drop branch lives in
     // `is_safe_beta_value_rejects_crlf_strings` below, which drives
     // the helper with strings that no HeaderValue could ever carry.
-    assert!(req
-        .anthropic_beta
-        .iter()
-        .any(|b| b.contains("pre-existing")));
+    assert!(
+        req.anthropic_beta
+            .iter()
+            .any(|b| b.contains("pre-existing"))
+    );
 }
 
 /// Review follow-up: the CR/LF defense-in-depth filter lives in a

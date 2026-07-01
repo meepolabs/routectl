@@ -189,7 +189,7 @@ pub(crate) fn drop_orphaned_output_config_effort(
 mod tests {
     #[cfg(feature = "openai-responses")]
     use super::level_from_budget;
-    use super::{budget_from_level, clamp_effort_to_supported, RANK_ORDER, VALID_EFFORT_TOKENS};
+    use super::{RANK_ORDER, VALID_EFFORT_TOKENS, budget_from_level, clamp_effort_to_supported};
 
     // VALID_EFFORT_TOKENS and RANK_ORDER must stay in sync: same elements,
     // same order. If either is updated, the other must follow.
@@ -329,7 +329,7 @@ mod tests {
 #[cfg(any(feature = "anthropic-api", feature = "bedrock"))]
 mod orphan_effort_tests {
     use super::drop_orphaned_output_config_effort;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn as_map(v: &mut Value) -> &mut serde_json::Map<String, Value> {
         v.as_object_mut().expect("object")

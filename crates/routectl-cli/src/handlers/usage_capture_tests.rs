@@ -18,7 +18,7 @@ use routectl_core::{
     ChatChunk, ChatResponse, Choice, ChunkChoice, ChunkDelta, Message, MessageContent, Role, Usage,
     UsageDelta,
 };
-use routectl_usage::{UsageHandle, UsageWriter, CHANNEL_CAPACITY};
+use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 
 /// A throwaway usage handle for guard construction. The tests assert on
 /// the in-memory `record` before `finalize`, so the writer is never

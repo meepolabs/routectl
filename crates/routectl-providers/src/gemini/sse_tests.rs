@@ -83,9 +83,11 @@ fn role_emitted_only_once_across_events() {
         .parse_event(PID, event(vec![text_part("b")], None, None))
         .expect("parse second");
 
-    assert!(first
-        .iter()
-        .any(|c| matches!(c.choices[0].delta.role, Some(Role::Assistant))));
+    assert!(
+        first
+            .iter()
+            .any(|c| matches!(c.choices[0].delta.role, Some(Role::Assistant)))
+    );
     // The second event must NOT re-emit the role.
     assert!(second.iter().all(|c| c.choices[0].delta.role.is_none()));
     assert_eq!(second.len(), 1);

@@ -10,10 +10,10 @@
 //! All randomness is sourced from `OsRng` (the OS CSPRNG). The encoded
 //! values are URL-safe; no further escaping is needed in query strings.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use rand::rngs::OsRng;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::TryRngCore;
+use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;

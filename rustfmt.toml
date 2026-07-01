@@ -1,0 +1,22 @@
+# Edition. Must match Cargo.toml workspace.package.edition.
+edition = "2024"
+
+# Line width. 100 is the workspace baseline.
+max_width = 100
+
+# Use field initialization shorthand where possible.
+use_field_init_shorthand = true
+
+# Reorder import and extern crate statements alphabetically.
+reorder_imports = true
+
+# Reorder module statements alphabetically within a group.
+reorder_modules = true
+
+# --- nightly rustfmt only: commented out to avoid unstable-option warnings ---
+# On stable rustfmt these options are not recognized and would emit warnings.
+# group_imports = "StdExternalCrate"   # nightly rustfmt only
+# imports_granularity = "Crate"        # nightly rustfmt only
+# trailing_comma = "Vertical"          # nightly rustfmt only
+# struct_lit_single_line = true        # nightly rustfmt only
+# match_arm_blocks = true              # nightly rustfmt only

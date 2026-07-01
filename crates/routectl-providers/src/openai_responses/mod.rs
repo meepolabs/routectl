@@ -44,9 +44,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, StaticToken, TokenSource,
     debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
-    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
-    Provider, Result, StaticToken, TokenSource,
+    trace_outgoing_body, trace_upstream_success_body,
 };
 
 pub(crate) mod auth;
@@ -590,10 +590,8 @@ impl Provider for OpenAiResponsesProvider {
                 .and_then(Value::as_array)
                 .map(Vec::is_empty)
                 .unwrap_or(true);
-            if needs_backfill {
-                if let Some(obj) = raw_body.as_object_mut() {
-                    obj.insert("output".into(), Value::Array(accumulated_items));
-                }
+            if needs_backfill && let Some(obj) = raw_body.as_object_mut() {
+                obj.insert("output".into(), Value::Array(accumulated_items));
             }
         }
         // Trace upstream success body pre-normalize. The
@@ -1330,9 +1328,9 @@ mod e2e_tests {
 
 #[cfg(test)]
 mod excerpt_tests {
-    use super::{build_error_excerpt, map_responses_upstream_error, AuthKind};
+    use super::{AuthKind, build_error_excerpt, map_responses_upstream_error};
     use reqwest::header::HeaderMap;
-    use routectl_core::{sanitize_for_log, Error};
+    use routectl_core::{Error, sanitize_for_log};
 
     #[test]
     fn excerpt_sanitizes_crlf_and_ansi() {

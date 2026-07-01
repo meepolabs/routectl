@@ -15,8 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use routectl_router::{rebuild_into, KSessionStore, LedgerReader, LedgerSampleRow};
-use routectl_usage::{open_readonly, read_reuse_samples_since, OpenError};
+use routectl_router::{KSessionStore, LedgerReader, LedgerSampleRow, rebuild_into};
+use routectl_usage::{OpenError, open_readonly, read_reuse_samples_since};
 
 /// How far back the startup rebuild reads the ledger. A conservative
 /// bound: 8x the longest known cache prefix TTL (24h), so a session whose
@@ -247,13 +247,15 @@ mod tests {
             .expect("primary triple warmed");
         let reuse: Vec<bool> = primary.iter().map(|s| s.observed_reuse).collect();
         assert_eq!(reuse, vec![true, false]);
-        assert!(store
-            .get(&KSessionKey {
-                session_key: "s1".into(),
-                provider_kind: "bedrock".into(),
-                model: "opus".into(),
-            })
-            .is_some());
+        assert!(
+            store
+                .get(&KSessionKey {
+                    session_key: "s1".into(),
+                    provider_kind: "bedrock".into(),
+                    model: "opus".into(),
+                })
+                .is_some()
+        );
     }
 
     #[test]

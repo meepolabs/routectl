@@ -828,7 +828,7 @@ mod tests {
     fn candidate_feeds_evaluate_matching_gate_math() {
         // Arrange: a verified anthropic row + a real plan.
         use crate::cache_pricing::lookup;
-        use crate::cost_gate::{break_even_k, evaluate, GateDecision};
+        use crate::cost_gate::{GateDecision, break_even_k, evaluate};
         let req = long_conversation(8, 12_000);
         let params = SteadyStateTrimParams::default();
         let plan = propose_steady_state_trim(&req, &params).expect("plan");

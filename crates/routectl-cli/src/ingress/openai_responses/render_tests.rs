@@ -6,11 +6,11 @@
 //! tag values are asserted exactly against the deserialize-side wire
 //! types in `routectl-providers/.../response_types.rs`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use routectl_core::{
-    schema::Choice, ChatResponse, ContentPart, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Role, Usage,
+    ChatResponse, ContentPart, KnownContentPart, Message, MessageContent, ReasoningDetail,
+    ReasoningDetailKind, Role, Usage, schema::Choice,
 };
 
 use super::render_responses_response;

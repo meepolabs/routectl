@@ -18,9 +18,9 @@
 
 use std::borrow::Cow;
 
-use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine;
-use serde_json::{json, Value};
+use base64::engine::general_purpose::STANDARD as B64_STANDARD;
+use serde_json::{Value, json};
 
 use routectl_core::{
     ChatRequest, ContentPart, CoreHistoryReasoning, Error, KnownContentPart, Message,
@@ -722,8 +722,8 @@ pub(super) fn translate_messages(id: &str, messages: &[Message]) -> Result<Vec<A
 
 #[cfg(test)]
 mod translate_file_part_tests {
-    use super::translate_content_part;
     use super::ContentBlock;
+    use super::translate_content_part;
     use routectl_core::{ContentPart, KnownContentPart};
     use serde_json::json;
 
@@ -820,8 +820,8 @@ mod translate_file_part_tests {
 #[cfg(test)]
 mod thinking_signature_tests {
     use super::{
-        is_claude_shaped_signature, is_unsigned_thinking_part, normalize_replay_invariants,
-        B64_STANDARD,
+        B64_STANDARD, is_claude_shaped_signature, is_unsigned_thinking_part,
+        normalize_replay_invariants,
     };
     use base64::Engine;
     use routectl_core::{
@@ -1012,7 +1012,7 @@ mod thinking_signature_tests {
 
 #[cfg(test)]
 mod tool_id_correlation_tests {
-    use super::{translate_messages, ContentBlock};
+    use super::{ContentBlock, translate_messages};
     use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage};
     use routectl_core::{Message, MessageContent, Role};
     use serde_json::json;

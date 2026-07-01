@@ -14,7 +14,7 @@ use std::time::Duration;
 use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, ReasoningDialect, RetryPolicy, ServerConfig,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

@@ -9,7 +9,7 @@
 //!   anything else            -> "stop" (safe default)
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
@@ -17,8 +17,8 @@ use routectl_core::{
     Role, Usage,
 };
 
-use super::types::{GenerateContentResponse, ResponsePart, UsageMetadata};
 use super::GEMINI_FORMAT;
+use super::types::{GenerateContentResponse, ResponsePart, UsageMetadata};
 
 /// Translate a deserialized Gemini response into canonical `ChatResponse`.
 pub(crate) fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<ChatResponse> {

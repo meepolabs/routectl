@@ -1,12 +1,12 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use routectl_core::{ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result};
 
 use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
 
 use super::{
-    cache_fields_into, openai_finish_to_anthropic_stop, random_msg_id, AnthropicStreamState,
-    OpenBlockKind, ToolBlockState,
+    AnthropicStreamState, OpenBlockKind, ToolBlockState, cache_fields_into,
+    openai_finish_to_anthropic_stop, random_msg_id,
 };
 
 /// SSE `event:` field name for Anthropic's terminal error event. Per
@@ -323,11 +323,11 @@ fn emit_delta_events(
     events: &mut Vec<SseEvent>,
 ) -> Result<()> {
     // Text content -> text_delta on the current text block.
-    if let Some(text) = delta.content.as_deref() {
-        if !text.is_empty() {
-            let idx = ensure_block(state, OpenBlockKind::Text, events);
-            push_block_delta(events, idx, json!({"type": "text_delta", "text": text}));
-        }
+    if let Some(text) = delta.content.as_deref()
+        && !text.is_empty()
+    {
+        let idx = ensure_block(state, OpenBlockKind::Text, events);
+        push_block_delta(events, idx, json!({"type": "text_delta", "text": text}));
     }
 
     // Reasoning details -> thinking_delta / signature_delta /
@@ -352,14 +352,14 @@ fn emit_delta_events(
                 // content_block_start pair.
                 let detail_index = d.index.unwrap_or(0);
                 let idx = ensure_block(state, OpenBlockKind::Thinking { detail_index }, events);
-                if let Some(text) = d.payload.get("text").and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        push_block_delta(
-                            events,
-                            idx,
-                            json!({"type": "thinking_delta", "thinking": text}),
-                        );
-                    }
+                if let Some(text) = d.payload.get("text").and_then(|v| v.as_str())
+                    && !text.is_empty()
+                {
+                    push_block_delta(
+                        events,
+                        idx,
+                        json!({"type": "thinking_delta", "thinking": text}),
+                    );
                 }
                 if let Some(sig) = d.payload.get("signature").and_then(|v| v.as_str()) {
                     push_block_delta(
@@ -407,14 +407,14 @@ fn emit_delta_events(
                 // the round-trip history for any preserve-mode echo.
                 let detail_index = d.index.unwrap_or(0);
                 let idx = ensure_block(state, OpenBlockKind::Thinking { detail_index }, events);
-                if let Some(text) = d.payload.get("text").and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        push_block_delta(
-                            events,
-                            idx,
-                            json!({"type": "thinking_delta", "thinking": text}),
-                        );
-                    }
+                if let Some(text) = d.payload.get("text").and_then(|v| v.as_str())
+                    && !text.is_empty()
+                {
+                    push_block_delta(
+                        events,
+                        idx,
+                        json!({"type": "thinking_delta", "thinking": text}),
+                    );
                 }
             }
         }
@@ -466,10 +466,9 @@ fn apply_tool_call_delta(
         .get("function")
         .and_then(|f| f.get("arguments"))
         .and_then(|v| v.as_str())
+        && !args.is_empty()
     {
-        if !args.is_empty() {
-            block.partial_json.push_str(args);
-        }
+        block.partial_json.push_str(args);
     }
     Ok(())
 }
@@ -517,10 +516,10 @@ fn ensure_block(
     kind: OpenBlockKind,
     events: &mut Vec<SseEvent>,
 ) -> usize {
-    if let Some((idx, k)) = state.open {
-        if k == kind {
-            return idx;
-        }
+    if let Some((idx, k)) = state.open
+        && k == kind
+    {
+        return idx;
     }
     close_open_block(state, events);
     let idx = state.next_index;

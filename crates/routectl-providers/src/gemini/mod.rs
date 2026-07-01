@@ -17,9 +17,9 @@ use reqwest::Client;
 use serde_json::Value;
 
 use routectl_core::{
-    debug_upstream_error_body, extract_upstream_message, is_json_error_envelope, sanitize_for_log,
-    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse,
-    CloudProjectCache, Error, Provider, Result, StaticToken, TokenSource,
+    ChatChunk, ChatRequest, ChatResponse, CloudProjectCache, Error, Provider, Result, StaticToken,
+    TokenSource, debug_upstream_error_body, extract_upstream_message, is_json_error_envelope,
+    sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
 };
 
 pub(crate) mod auth;
@@ -844,7 +844,7 @@ mod e2e_tests {
     // -----------------------------------------------------------------
 
     use routectl_core::{CloudProjectCache, InMemoryProjectCache};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use wiremock::matchers::{body_partial_json, header, header_exists};
 
     const GENERATE_PATH: &str = "/v1internal:generateContent";

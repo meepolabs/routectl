@@ -22,7 +22,7 @@
 //!     (mirrors the Bedrock Converse unknown-stop-reason policy).
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -31,11 +31,11 @@ use routectl_core::{
     ReasoningDetail, ReasoningDetailKind, Result, Role, Usage,
 };
 
+use super::OPENAI_RESPONSES_FORMAT;
 use super::response_types::{
     IncompleteDetails, ReasoningContent, ReasoningSummary, ResponseOutputItem,
     ResponsesOutputContent, ResponsesResponse, ResponsesUsage,
 };
-use super::OPENAI_RESPONSES_FORMAT;
 
 /// Translate a deserialized Responses body into canonical `ChatResponse`.
 pub(crate) fn translate(provider_id: &str, body: ResponsesResponse) -> Result<ChatResponse> {
@@ -227,17 +227,17 @@ fn walk_output(
                 // rides on its own Encrypted detail so the multi-turn
                 // round-trip works -- codex's arc_monitor.rs:325-336
                 // re-injects this verbatim on the next turn.
-                if let Some(sig) = encrypted_content {
-                    if !sig.is_empty() {
-                        reasoning_details.push(ReasoningDetail {
-                            kind: ReasoningDetailKind::Encrypted,
-                            id: Some(canonical_id.clone()),
-                            format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
-                            index: Some(detail_index),
-                            payload: json!({"encrypted_content": sig}),
-                        });
-                        detail_index += 1;
-                    }
+                if let Some(sig) = encrypted_content
+                    && !sig.is_empty()
+                {
+                    reasoning_details.push(ReasoningDetail {
+                        kind: ReasoningDetailKind::Encrypted,
+                        id: Some(canonical_id.clone()),
+                        format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
+                        index: Some(detail_index),
+                        payload: json!({"encrypted_content": sig}),
+                    });
+                    detail_index += 1;
                 }
             }
             ResponseOutputItem::FunctionCall {

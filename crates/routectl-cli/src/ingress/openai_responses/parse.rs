@@ -116,17 +116,17 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
 
     // tool_choice -> canonical tool_choice (verbatim Value; egresses
     // translate per-upstream, mirroring the openai chat ingress).
-    if let Some(tc) = obj.remove("tool_choice") {
-        if !tc.is_null() {
-            req.tool_choice = Some(tc);
-        }
+    if let Some(tc) = obj.remove("tool_choice")
+        && !tc.is_null()
+    {
+        req.tool_choice = Some(tc);
     }
 
     // reasoning object -> ReasoningConfig.
-    if let Some(reasoning) = obj.remove("reasoning") {
-        if let Some(cfg) = build_reasoning(&reasoning) {
-            req.reasoning = Some(cfg);
-        }
+    if let Some(reasoning) = obj.remove("reasoning")
+        && let Some(cfg) = build_reasoning(&reasoning)
+    {
+        req.reasoning = Some(cfg);
     }
 
     // max_output_tokens -> max_tokens.
@@ -423,10 +423,10 @@ fn collapse_parts(parts: Vec<ContentPart>) -> MessageContent {
     if parts.is_empty() {
         return MessageContent::Null;
     }
-    if parts.len() == 1 {
-        if let ContentPart::Known(KnownContentPart::Text { text, .. }) = &parts[0] {
-            return MessageContent::Text(text.clone());
-        }
+    if parts.len() == 1
+        && let ContentPart::Known(KnownContentPart::Text { text, .. }) = &parts[0]
+    {
+        return MessageContent::Text(text.clone());
     }
     MessageContent::Parts(parts)
 }
@@ -479,11 +479,11 @@ fn attach_function_call(messages: &mut Vec<Message>, item: &Value) {
         "function": { "name": name, "arguments": arguments }
     });
 
-    if let Some(last) = messages.last_mut() {
-        if matches!(last.role, Role::Assistant) {
-            last.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
-            return;
-        }
+    if let Some(last) = messages.last_mut()
+        && matches!(last.role, Role::Assistant)
+    {
+        last.tool_calls.get_or_insert_with(Vec::new).push(tool_call);
+        return;
     }
     messages.push(Message {
         role: Role::Assistant,
@@ -586,11 +586,11 @@ fn attach_reasoning(messages: &mut Vec<Message>, item: &Value) {
         return;
     }
 
-    if let Some(last) = messages.last_mut() {
-        if matches!(last.role, Role::Assistant) {
-            last.reasoning_details.extend(details);
-            return;
-        }
+    if let Some(last) = messages.last_mut()
+        && matches!(last.role, Role::Assistant)
+    {
+        last.reasoning_details.extend(details);
+        return;
     }
     messages.push(Message {
         role: Role::Assistant,
@@ -667,11 +667,7 @@ fn build_tools(tools: Value) -> Option<Vec<ToolDef>> {
     for tool in arr {
         out.push(build_tool(tool));
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn build_tool(tool: &Value) -> ToolDef {
@@ -752,11 +748,7 @@ fn text_without_format(text: Value) -> Option<Map<String, Value>> {
         _ => return None,
     };
     obj.remove("format");
-    if obj.is_empty() {
-        None
-    } else {
-        Some(obj)
-    }
+    if obj.is_empty() { None } else { Some(obj) }
 }
 
 // ---------------------------------------------------------------------------

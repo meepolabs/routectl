@@ -6,7 +6,7 @@ use axum::Router as AxumRouter;
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{Config, Router};
-use routectl_usage::{UsageHandle, UsageWriter, CHANNEL_CAPACITY};
+use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
@@ -429,7 +429,7 @@ async fn drain_deadline_watcher(signal_rx: &mut watch::Receiver<bool>) {
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         // If a handler fails to install, fall back to a never-resolving
         // future for that arm rather than treating the failure as an
@@ -746,7 +746,7 @@ fn spawn_reload_pipeline(
 /// best-effort: a closed coordinator (post-shutdown) silently drops.
 #[cfg(unix)]
 async fn run_sighup_listener(tx: mpsc::Sender<ReloadRequest>, mut shutdown: watch::Receiver<()>) {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
 
     let mut sig = match signal(SignalKind::hangup()) {
         Ok(s) => s,
@@ -1403,7 +1403,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn sighup_listener_emits_paired_reload_requests_in_isolation() {
-        use nix::sys::signal::{kill, Signal};
+        use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
         use std::time::Duration;
 
@@ -1451,7 +1451,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn sigterm_triggers_graceful_shutdown_and_serve_returns() {
-        use nix::sys::signal::{kill, Signal};
+        use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
         use std::time::Duration;
 

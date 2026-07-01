@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use routectl_core::ChatRequest;
 
@@ -647,10 +647,10 @@ fn build_reminder_block(captured: &[CapturedSystemBlock]) -> Option<Value> {
     }
     let text = format!("{SYSTEM_REMINDER_OPEN}\n{joined}\n{SYSTEM_REMINDER_CLOSE}");
     let mut block = json!({"type": "text", "text": text});
-    if let Some(cache_control) = captured.iter().rev().find_map(|b| b.cache_control.clone()) {
-        if let Some(obj) = block.as_object_mut() {
-            obj.insert("cache_control".into(), cache_control);
-        }
+    if let Some(cache_control) = captured.iter().rev().find_map(|b| b.cache_control.clone())
+        && let Some(obj) = block.as_object_mut()
+    {
+        obj.insert("cache_control".into(), cache_control);
     }
     Some(block)
 }
@@ -831,11 +831,7 @@ impl SensitiveWordMatcher {
                 i += ch_len;
             }
         }
-        if hit {
-            Some(out)
-        } else {
-            None
-        }
+        if hit { Some(out) } else { None }
     }
 
     /// Slow path for haystacks whose lowercased byte length diverges from
@@ -873,11 +869,7 @@ impl SensitiveWordMatcher {
                 i += 1;
             }
         }
-        if hit {
-            Some(out)
-        } else {
-            None
-        }
+        if hit { Some(out) } else { None }
     }
 
     /// Return the byte length of the longest configured word that matches
@@ -985,10 +977,10 @@ fn obfuscate_text_block(block: &mut Value, matcher: &SensitiveWordMatcher) {
     let Some(text) = block.get("text").and_then(Value::as_str) else {
         return;
     };
-    if let Some(ob) = matcher.obfuscate(text) {
-        if let Some(obj) = block.as_object_mut() {
-            obj.insert("text".into(), Value::String(ob));
-        }
+    if let Some(ob) = matcher.obfuscate(text)
+        && let Some(obj) = block.as_object_mut()
+    {
+        obj.insert("text".into(), Value::String(ob));
     }
 }
 
@@ -1562,10 +1554,12 @@ mod tests {
         let arr = body["system"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["text"], INTERACTIVE_IDENTITY_LINE);
-        assert!(!arr.iter().any(|b| b["text"]
-            .as_str()
-            .map(|t| t.starts_with(BILLING_PREFIX))
-            .unwrap_or(false)));
+        assert!(!arr.iter().any(|b| {
+            b["text"]
+                .as_str()
+                .map(|t| t.starts_with(BILLING_PREFIX))
+                .unwrap_or(false)
+        }));
         let reminder = &body["messages"][0]["content"][0];
         assert_eq!(
             reminder["text"],
@@ -1625,10 +1619,11 @@ mod tests {
     fn mint_device_id_is_64_lowercase_hex() {
         let id = ClaudeCodeIdentity::mint(None);
         assert_eq!(id.device_id.len(), 64);
-        assert!(id
-            .device_id
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            id.device_id
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]

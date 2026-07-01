@@ -447,9 +447,11 @@ mod tests {
             None,
             "LRU entry must be evicted on overflow put",
         );
-        assert!(store
-            .get(&key("sess-overflow", "anthropic-api", "opus"))
-            .is_some());
+        assert!(
+            store
+                .get(&key("sess-overflow", "anthropic-api", "opus"))
+                .is_some()
+        );
     }
 
     #[test]

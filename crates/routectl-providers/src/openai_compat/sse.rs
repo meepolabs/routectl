@@ -512,17 +512,21 @@ mod tests {
 
     #[test]
     fn done_returns_none() {
-        assert!(parse_event("t", "[DONE]", ReasoningDialect::OpenAi, &mut 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            parse_event("t", "[DONE]", ReasoningDialect::OpenAi, &mut 0)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             parse_event("t", "  [DONE]  ", ReasoningDialect::OpenAi, &mut 0)
                 .unwrap()
                 .is_none()
         );
-        assert!(parse_event("t", "", ReasoningDialect::OpenAi, &mut 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            parse_event("t", "", ReasoningDialect::OpenAi, &mut 0)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

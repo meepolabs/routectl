@@ -218,10 +218,10 @@ pub(super) fn preserve_history_reasoning_content(
         // shape doesn't preempt the reasoning_details fallback.
         if let Some(reasoning) = m.get("reasoning") {
             if !reasoning.is_null() {
-                if let Some(s) = reasoning.as_str() {
-                    if !s.is_empty() {
-                        m.insert("reasoning_content".into(), Value::String(s.to_string()));
-                    }
+                if let Some(s) = reasoning.as_str()
+                    && !s.is_empty()
+                {
+                    m.insert("reasoning_content".into(), Value::String(s.to_string()));
                 }
                 m.remove("reasoning");
                 m.remove("reasoning_details");
@@ -277,18 +277,18 @@ pub(super) fn preserve_history_reasoning_details(
                 m.remove("reasoning_content")
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
             });
-        if let Some(text) = plaintext {
-            if !text.is_empty() {
-                m.insert(
-                    "reasoning_details".into(),
-                    serde_json::json!([{
-                        "type": "reasoning.text",
-                        "format": format_tag,
-                        "index": 0,
-                        "text": text,
-                    }]),
-                );
-            }
+        if let Some(text) = plaintext
+            && !text.is_empty()
+        {
+            m.insert(
+                "reasoning_details".into(),
+                serde_json::json!([{
+                    "type": "reasoning.text",
+                    "format": format_tag,
+                    "index": 0,
+                    "text": text,
+                }]),
+            );
         }
     }
     Ok(())

@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use routectl_router::{
-    baked_table_rows, is_stale_today, BakedPricingRow, CachePricingOverride, CachePricingSelector,
-    Config,
+    BakedPricingRow, CachePricingOverride, CachePricingSelector, Config, baked_table_rows,
+    is_stale_today,
 };
 
 // ---------------------------------------------------------------------------

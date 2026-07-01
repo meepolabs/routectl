@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use routectl_core::{sanitize_for_log, sanitize_upstream_body, Error, Result};
+use routectl_core::{Error, Result, sanitize_for_log, sanitize_upstream_body};
 
 // Wire constants. Kept private to this module: they are part of the
 // Cloud Code dialect, not configurable provider knobs.
@@ -42,8 +42,7 @@ pub(crate) const SHORT_USER_AGENT: &str =
     "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)";
 /// Node User-Agent sent only on onboardUser (the reference uses the
 /// google-api-nodejs-client UA there).
-const NODE_USER_AGENT: &str =
-    "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64) google-api-nodejs-client/10.3.0";
+const NODE_USER_AGENT: &str = "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64) google-api-nodejs-client/10.3.0";
 const GOOG_API_CLIENT: &str = "gl-node/22.21.1";
 
 const IDE_VERSION: &str = "1.0.13";

@@ -18,14 +18,14 @@ use std::any::Any;
 
 use axum::http::HeaderMap;
 use routectl_core::{
-    is_canonical_request_key, ChatChunk, ChatRequest, ChatResponse, ContentPart, Error,
-    KnownContentPart, MessageContent, Result,
+    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
+    Result, is_canonical_request_key,
 };
 use serde_json::{Map, Value};
 
 use super::{
-    read_alias_header, ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent,
-    StreamErrorClass,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
+    read_alias_header,
 };
 
 const DONE_SENTINEL: &str = "[DONE]";
@@ -338,10 +338,10 @@ fn normalize_max_completion_tokens(body: &mut Value) {
         return;
     }
     let mct_val = obj.remove("max_completion_tokens");
-    if !obj.contains_key("max_tokens") {
-        if let Some(v) = mct_val {
-            obj.insert("max_tokens".into(), v);
-        }
+    if !obj.contains_key("max_tokens")
+        && let Some(v) = mct_val
+    {
+        obj.insert("max_tokens".into(), v);
     }
     // If `max_tokens` was already present we just removed
     // `max_completion_tokens` above; `max_tokens` stays unchanged.
@@ -710,10 +710,12 @@ mod tests {
         );
         let payload: Value = serde_json::from_str(&events[0].data).unwrap();
         assert_eq!(payload["error"]["type"], STREAM_ERROR_TYPE);
-        assert!(payload["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("upstream stream error"));
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("upstream stream error")
+        );
         // Second: the universal `[DONE]` terminator.
         assert!(events[1].event.is_none());
         assert_eq!(events[1].data, "[DONE]");

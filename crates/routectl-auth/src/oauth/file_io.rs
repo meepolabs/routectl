@@ -22,10 +22,10 @@ use crate::oauth::{OAuthError, OAuthResult};
 /// neither `XDG_CONFIG_HOME` nor `HOME` is set (rare; unset HOME on
 /// Linux indicates a broken environment).
 pub fn default_path() -> OAuthResult<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Ok(PathBuf::from(xdg).join("routectl").join("credentials.json"));
-        }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Ok(PathBuf::from(xdg).join("routectl").join("credentials.json"));
     }
     let home = std::env::var("HOME")
         .map_err(|_| OAuthError::Internal("neither XDG_CONFIG_HOME nor HOME is set".into()))?;

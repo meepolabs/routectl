@@ -127,10 +127,10 @@ pub(crate) trait FrameHandler {
 /// Look up a string-valued eventstream header by name.
 pub(crate) fn header_str<'a>(message: &'a Message, name: &str) -> Option<&'a str> {
     for header in message.headers() {
-        if header.name().as_str() == name {
-            if let Ok(s) = header.value().as_string() {
-                return Some(s.as_str());
-            }
+        if header.name().as_str() == name
+            && let Ok(s) = header.value().as_string()
+        {
+            return Some(s.as_str());
         }
     }
     None

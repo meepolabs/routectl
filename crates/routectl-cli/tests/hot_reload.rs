@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use routectl_router::Config;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use wiremock::matchers::{header, method, path as wiremock_path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -82,10 +82,10 @@ async fn spawn_watched_server(initial_alias: &str) -> (String, PathBuf, tempfile
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if let Ok(resp) = client.get(format!("{base_url}/health")).send().await {
-            if resp.status().is_success() {
-                return (base_url, config_path, dir);
-            }
+        if let Ok(resp) = client.get(format!("{base_url}/health")).send().await
+            && resp.status().is_success()
+        {
+            return (base_url, config_path, dir);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -262,7 +262,7 @@ async fn sighup_combined_with_file_rewrite_surfaces_new_config() {
     );
 
     // Send SIGHUP to ourselves.
-    use nix::sys::signal::{kill, Signal};
+    use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     kill(Pid::from_raw(std::process::id() as i32), Signal::SIGHUP).expect("send SIGHUP");
 
@@ -375,10 +375,10 @@ async fn spawn_server_with_config_text(config_text: &str) -> (String, tempfile::
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if let Ok(resp) = client.get(format!("{base_url}/health")).send().await {
-            if resp.status().is_success() {
-                return (base_url, dir);
-            }
+        if let Ok(resp) = client.get(format!("{base_url}/health")).send().await
+            && resp.status().is_success()
+        {
+            return (base_url, dir);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

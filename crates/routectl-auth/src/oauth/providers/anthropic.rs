@@ -23,8 +23,8 @@
 use async_trait::async_trait;
 use url::Url;
 
-use crate::oauth::providers::{truncate, AuthParams, OAuthFlow};
-use crate::oauth::types::{unix_now, AccountInfo, SecretToken, TokenRecord};
+use crate::oauth::providers::{AuthParams, OAuthFlow, truncate};
+use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
 pub(crate) const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";

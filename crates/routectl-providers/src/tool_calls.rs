@@ -17,7 +17,7 @@
 //! string; callers that need an object (Anthropic input, Converse input)
 //! use the `Value` directly.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// One OpenAI-shape `tool_calls` entry, normalized for re-emission.
 ///

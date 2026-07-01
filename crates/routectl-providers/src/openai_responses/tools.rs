@@ -13,7 +13,7 @@
 //!     nested chat-completions shape is rejected with
 //!     "Unknown parameter: 'tool_choice.function'").
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use routectl_core::{ChatRequest, ToolDef};
 

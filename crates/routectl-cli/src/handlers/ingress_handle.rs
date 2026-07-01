@@ -8,22 +8,22 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use futures::StreamExt;
 use routectl_core::Error;
 use routectl_router::RouterOptions;
 use routectl_usage::{Outcome, UsageHandle, UsageRecord};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
-use crate::handlers::usage_capture::{build_usage_draft, outcome_for_dispatch_err, UsageCapture};
+use crate::handlers::usage_capture::{UsageCapture, build_usage_draft, outcome_for_dispatch_err};
 use crate::ingress::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
-use crate::server::request_id::RequestId;
 use crate::server::AppState;
+use crate::server::request_id::RequestId;
 
 const DISABLE_FALLBACKS_HEADER: &str = "x-routectl-disable-fallbacks";
 

@@ -28,14 +28,14 @@
 //! a separate slice. This file only owns token acquisition + refresh.
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use rand::rngs::OsRng;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::TryRngCore;
+use rand::rngs::OsRng;
 use url::Url;
 
-use crate::oauth::providers::{truncate, AuthParams, OAuthFlow};
-use crate::oauth::types::{unix_now, AccountInfo, SecretToken, TokenRecord};
+use crate::oauth::providers::{AuthParams, OAuthFlow, truncate};
+use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
 /// Public PKCE client id for the xAI (Grok) flow. No client_secret --
@@ -434,7 +434,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         (None, None) => {
             return Err(OAuthError::TokenEndpoint(
                 "token response missing refresh_token".into(),
-            ))
+            ));
         }
     };
 

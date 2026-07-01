@@ -11,7 +11,7 @@
 //! a `tracing::warn!` so the client sees what was lost.
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use tracing::warn;
 use uuid::Uuid;
@@ -278,10 +278,10 @@ fn reverse_tool_calls(tool_calls: &mut Option<Vec<Value>>, map: &HashMap<String,
         else {
             continue;
         };
-        if let Some(original) = lookup_reverse(&name, map) {
-            if let Some(func_name) = call.pointer_mut("/function/name") {
-                *func_name = Value::String(original);
-            }
+        if let Some(original) = lookup_reverse(&name, map)
+            && let Some(func_name) = call.pointer_mut("/function/name")
+        {
+            *func_name = Value::String(original);
         }
     }
 }
@@ -292,10 +292,10 @@ fn reverse_content_parts(content: &mut MessageContent, map: &HashMap<String, Str
         return;
     };
     for part in parts.iter_mut() {
-        if let ContentPart::Known(KnownContentPart::ToolUse { name, .. }) = part {
-            if let Some(original) = lookup_reverse(name, map) {
-                *name = original;
-            }
+        if let ContentPart::Known(KnownContentPart::ToolUse { name, .. }) = part
+            && let Some(original) = lookup_reverse(name, map)
+        {
+            *name = original;
         }
     }
 }
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn round_trip_forward_cloak_then_reverse_response() {
-        use super::super::cloak::{cloak_oauth_egress, ClaudeCodeIdentity, CloakConfig};
+        use super::super::cloak::{ClaudeCodeIdentity, CloakConfig, cloak_oauth_egress};
         use routectl_core::ChatRequest;
 
         // Arrange: an outgoing request with a single-underscore mcp_ tool
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn round_trip_bare_tool_name_forward_cloak_then_reverse_response() {
-        use super::super::cloak::{cloak_oauth_egress, ClaudeCodeIdentity, CloakConfig};
+        use super::super::cloak::{ClaudeCodeIdentity, CloakConfig, cloak_oauth_egress};
         use routectl_core::ChatRequest;
 
         // Arrange: an outgoing request with a BARE snake_case tool name (the

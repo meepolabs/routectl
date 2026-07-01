@@ -25,8 +25,8 @@
 //! module handles only the framing layer shared by both shapes.
 
 use aws_smithy_types::event_stream::Message;
-use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use bytes::Bytes;
 use futures::stream::{BoxStream, Stream};
 use serde_json::Value;
@@ -151,39 +151,39 @@ fn handle_invoke_frame(
             // The default SseState swallows these as `Ok(None)` -- we
             // need to surface them to the client so the stream doesn't
             // end silently in the middle of a generation.
-            if let Ok(parsed) = serde_json::from_str::<Value>(inner) {
-                if parsed.get("type").and_then(|v| v.as_str()) == Some("error") {
-                    let err_type = parsed
-                        .pointer("/error/type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("error");
-                    let err_msg = parsed
-                        .pointer("/error/message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("upstream signaled error event mid-stream");
-                    let status = match err_type {
-                        "overloaded_error" => 529,
-                        "rate_limit_error" => 429,
-                        "invalid_request_error" => 400,
-                        "authentication_error" => 401,
-                        "permission_error" => 403,
-                        "not_found_error" => 404,
-                        _ => 502,
-                    };
-                    if matches!(err_type, "authentication_error" | "permission_error") {
-                        tracing::warn!(
-                            provider = %provider_id,
-                            event_type = err_type,
-                            message = %routectl_core::sanitize_for_log(err_msg),
-                            "bedrock in-stream auth/permission exception",
-                        );
-                    }
-                    return Err(Error::upstream(
-                        provider_id,
-                        status,
-                        format!("{err_type}: {err_msg}"),
-                    ));
+            if let Ok(parsed) = serde_json::from_str::<Value>(inner)
+                && parsed.get("type").and_then(|v| v.as_str()) == Some("error")
+            {
+                let err_type = parsed
+                    .pointer("/error/type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("error");
+                let err_msg = parsed
+                    .pointer("/error/message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("upstream signaled error event mid-stream");
+                let status = match err_type {
+                    "overloaded_error" => 529,
+                    "rate_limit_error" => 429,
+                    "invalid_request_error" => 400,
+                    "authentication_error" => 401,
+                    "permission_error" => 403,
+                    "not_found_error" => 404,
+                    _ => 502,
+                };
+                if matches!(err_type, "authentication_error" | "permission_error") {
+                    tracing::warn!(
+                        provider = %provider_id,
+                        event_type = err_type,
+                        message = %routectl_core::sanitize_for_log(err_msg),
+                        "bedrock in-stream auth/permission exception",
+                    );
                 }
+                return Err(Error::upstream(
+                    provider_id,
+                    status,
+                    format!("{err_type}: {err_msg}"),
+                ));
             }
             sse_state.parse_event(provider_id, inner)
         }

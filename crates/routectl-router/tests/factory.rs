@@ -2,7 +2,7 @@
 
 use routectl_auth::{MemoryStore, SecretRef};
 use routectl_core::Error;
-use routectl_router::{build_provider, ProviderEntry, ReasoningDialect};
+use routectl_router::{ProviderEntry, ReasoningDialect, build_provider};
 
 #[tokio::test]
 async fn build_openai_compat_resolves_secret() {
@@ -198,7 +198,7 @@ user_agent = "claude-code/1.2.3"
 /// retained `auth_secret_ref`.
 #[tokio::test]
 async fn resolved_model_retains_oauth_secret_ref_for_anthropic() {
-    use routectl_router::{build_resolved_models, BuildOptions, Config, ModelEntry};
+    use routectl_router::{BuildOptions, Config, ModelEntry, build_resolved_models};
     use std::collections::BTreeMap;
 
     let store: std::sync::Arc<dyn routectl_auth::SecretStore> = std::sync::Arc::new(MemoryStore);
@@ -242,7 +242,7 @@ async fn resolved_model_retains_oauth_secret_ref_for_anthropic() {
 #[tokio::test]
 #[serial_test::serial]
 async fn resolved_model_retains_env_secret_ref_for_openai_compat() {
-    use routectl_router::{build_resolved_models, BuildOptions, Config, ModelEntry};
+    use routectl_router::{BuildOptions, Config, ModelEntry, build_resolved_models};
     use std::collections::BTreeMap;
 
     // Set the env var so MemoryStore's env:// arm can resolve at
@@ -286,7 +286,7 @@ async fn resolved_model_retains_env_secret_ref_for_openai_compat() {
 mod openai_responses_tests {
     use routectl_auth::MemoryStore;
     use routectl_core::Error;
-    use routectl_router::{build_provider, Config, ProviderEntry};
+    use routectl_router::{Config, ProviderEntry, build_provider};
 
     #[tokio::test]
     async fn factory_builds_openai_responses_chatgpt_oauth_provider() {

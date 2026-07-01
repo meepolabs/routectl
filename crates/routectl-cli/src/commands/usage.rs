@@ -19,9 +19,10 @@ use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, T
 
 use routectl_router::Config;
 use routectl_usage::{
-    aggregate, estimate_cost_tokens, k_calibration_summary, latest_quota, open_readonly,
-    shadow_misfire_summary, ttfbs, would_trim_summary, AggRow, GroupKey, KCalibration, OpenError,
-    QueryError, QuotaSnapshot, Rates, ShadowMisfireSummary, UsageDb, WouldTrimSummary,
+    AggRow, GroupKey, KCalibration, OpenError, QueryError, QuotaSnapshot, Rates,
+    ShadowMisfireSummary, UsageDb, WouldTrimSummary, aggregate, estimate_cost_tokens,
+    k_calibration_summary, latest_quota, open_readonly, shadow_misfire_summary, ttfbs,
+    would_trim_summary,
 };
 
 /// Parsed `routectl usage` arguments, already validated by clap.
@@ -1028,11 +1029,7 @@ const K_CALIBRATION_ACCURACY_PASS: f64 = 0.40;
 const K_CALIBRATION_SUFFICIENCY_PASS: usize = 200;
 
 fn gate_label(pass: bool) -> &'static str {
-    if pass {
-        "PASS"
-    } else {
-        "FAIL"
-    }
+    if pass { "PASS" } else { "FAIL" }
 }
 
 /// Render the k-calibration ASCII report. Consistent with the usage output

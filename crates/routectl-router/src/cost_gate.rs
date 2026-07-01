@@ -200,7 +200,7 @@ pub fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache_pricing::{lookup, CachePricingRow};
+    use crate::cache_pricing::{CachePricingRow, lookup};
 
     // The doc's worked-result scenario, reused as the K* oracle:
     // 200k cached prefix, drop 50k oldest-first, so c_after == c == 200k.
