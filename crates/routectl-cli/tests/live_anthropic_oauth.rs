@@ -81,7 +81,7 @@ async fn anthropic_oauth_complete_with_bearer_token() {
             _ => "<non-text>".into(),
         })
         .unwrap_or_default();
-    let tokens = resp.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+    let tokens = resp.usage.as_ref().map_or(0, |u| u.total_tokens);
     eprintln!("PASS anthropic-oauth complete model={MODEL} tokens={tokens} content={preview:?}");
     assert!(!preview.is_empty(), "expected non-empty completion text");
 }

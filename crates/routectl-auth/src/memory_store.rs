@@ -17,7 +17,7 @@ use crate::{SecretRef, SecretStore};
 pub struct MemoryStore;
 
 impl MemoryStore {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }

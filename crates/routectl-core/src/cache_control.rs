@@ -143,7 +143,7 @@ pub struct OwnedBreakpoint {
 
 impl OwnedBreakpoint {
     /// Construct an owned breakpoint at `position` carrying `control`.
-    pub fn new(position: BreakpointPosition, control: CacheControl) -> Self {
+    pub const fn new(position: BreakpointPosition, control: CacheControl) -> Self {
         Self { position, control }
     }
 }
@@ -263,7 +263,7 @@ pub struct FrozenFloor {
 
 impl FrozenFloor {
     /// How many cache_control breakpoints the caller already supplied.
-    pub fn caller_breakpoint_count(&self) -> usize {
+    pub const fn caller_breakpoint_count(&self) -> usize {
         self.positions.len()
     }
 
@@ -273,7 +273,7 @@ impl FrozenFloor {
     }
 
     /// Whether the caller supplied at least one breakpoint.
-    pub fn has_caller_breakpoints(&self) -> bool {
+    pub const fn has_caller_breakpoints(&self) -> bool {
         !self.positions.is_empty()
     }
 }

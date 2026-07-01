@@ -37,7 +37,7 @@ use serde_json::Value;
 /// the one-shot path on a single struct to match Anthropic/Bedrock
 /// patterns).
 #[derive(Debug, Deserialize)]
-pub(crate) struct ResponsesResponse {
+pub struct ResponsesResponse {
     #[serde(default)]
     pub(crate) id: String,
     /// Echo of `"response"` from upstream. Currently unused but kept on
@@ -67,7 +67,7 @@ pub(crate) struct ResponsesResponse {
 /// `incomplete_details: { reason: "..." }`. Reason values seen in the
 /// codex test fixtures: `"max_output_tokens"`, `"content_filter"`.
 #[derive(Debug, Deserialize)]
-pub(crate) struct IncompleteDetails {
+pub struct IncompleteDetails {
     #[serde(default)]
     pub(crate) reason: Option<String>,
 }
@@ -91,7 +91,7 @@ pub(crate) struct IncompleteDetails {
 /// the translator doesn't consume them today.
 #[derive(Debug)]
 #[allow(dead_code)]
-pub(crate) enum ResponseOutputItem {
+pub enum ResponseOutputItem {
     Message {
         id: String,
         role: String,
@@ -148,7 +148,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 // preserve their JSON.
                 let m: MessageItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Ok(ResponseOutputItem::Message {
+                Ok(Self::Message {
                     id: m.id,
                     role: m.role,
                     status: m.status,
@@ -158,7 +158,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
             "reasoning" => {
                 let r: ReasoningItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Ok(ResponseOutputItem::Reasoning {
+                Ok(Self::Reasoning {
                     id: r.id,
                     summary: r.summary,
                     content: r.content,
@@ -169,7 +169,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
             "function_call" => {
                 let f: FunctionCallItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                Ok(ResponseOutputItem::FunctionCall {
+                Ok(Self::FunctionCall {
                     id: f.id,
                     call_id: f.call_id,
                     name: f.name,
@@ -177,7 +177,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                     status: f.status,
                 })
             }
-            _ => Ok(ResponseOutputItem::Other(value)),
+            _ => Ok(Self::Other(value)),
         }
     }
 }
@@ -234,7 +234,7 @@ struct FunctionCallItemPayload {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
-pub(crate) enum ResponsesOutputContent {
+pub enum ResponsesOutputContent {
     OutputText {
         #[serde(default)]
         text: String,
@@ -257,7 +257,7 @@ pub(crate) enum ResponsesOutputContent {
 /// One summary block on a `Reasoning` output item.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ReasoningSummary {
+pub enum ReasoningSummary {
     SummaryText {
         #[serde(default)]
         text: String,
@@ -276,7 +276,7 @@ pub(crate) enum ReasoningSummary {
 /// - `reasoning_encrypted` -- safety-redacted reasoning
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ReasoningContent {
+pub enum ReasoningContent {
     ReasoningText {
         #[serde(default)]
         text: String,
@@ -300,7 +300,7 @@ pub(crate) enum ReasoningContent {
 /// minimal reply (e.g. an error envelope that still happens to include
 /// `usage: {}`) doesn't trip serde.
 #[derive(Debug, Deserialize)]
-pub(crate) struct ResponsesUsage {
+pub struct ResponsesUsage {
     #[serde(default)]
     pub(crate) input_tokens: u32,
     /// `{ cached_tokens: N, ... }`. Captured as a free-form Value so
@@ -334,7 +334,7 @@ pub(crate) struct ResponsesUsage {
 /// default arm and log at debug.
 #[derive(Debug, Default, Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct ResponsesStreamEvent {
+pub struct ResponsesStreamEvent {
     #[serde(rename = "type", default)]
     pub(crate) kind: String,
     #[serde(default)]

@@ -233,9 +233,7 @@ fn provider_extras_cannot_override_managed_keys_on_converse() {
         .and_then(|v| v.as_object());
     if let Some(b) = bag {
         assert!(
-            b.get("thinking")
-                .map(|v| v["type"] != "evil")
-                .unwrap_or(true),
+            b.get("thinking").is_none_or(|v| v["type"] != "evil"),
             "thinking override leaked: {body}"
         );
         // Long-tail extras DO land.
@@ -343,8 +341,7 @@ fn role_tool_with_image_parts_uses_image_variant_not_json_wrap() {
         .find(|m| {
             m["content"]
                 .as_array()
-                .map(|c| c.iter().any(|b| b.get("toolResult").is_some()))
-                .unwrap_or(false)
+                .is_some_and(|c| c.iter().any(|b| b.get("toolResult").is_some()))
         })
         .expect("expected synthesized tool_result message");
     let arr = tool_msg["content"][0]["toolResult"]["content"]
@@ -401,8 +398,7 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
         .find(|m| {
             m["content"]
                 .as_array()
-                .map(|c| c.iter().any(|b| b.get("toolResult").is_some()))
-                .unwrap_or(false)
+                .is_some_and(|c| c.iter().any(|b| b.get("toolResult").is_some()))
         })
         .expect("expected synthesized tool_result message");
     let arr = tool_msg["content"][0]["toolResult"]["content"]
@@ -650,7 +646,7 @@ fn thinking_block_with_empty_signature_returns_err() {
                 content: MessageContent::Parts(vec![ContentPart::Known(
                     KnownContentPart::Thinking {
                         thinking: "empty sig here".into(),
-                        signature: Some("".into()),
+                        signature: Some(String::new()),
                     },
                 )]),
                 reasoning: None,

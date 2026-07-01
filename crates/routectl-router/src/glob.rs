@@ -51,7 +51,7 @@ impl AliasPattern {
         }
         let asterisk_count = raw.chars().filter(|c| *c == '*').count();
         match asterisk_count {
-            0 => Ok(AliasPattern::Exact(raw.to_string())),
+            0 => Ok(Self::Exact(raw.to_string())),
             1 if raw.ends_with('*') => {
                 let prefix = &raw[..raw.len() - 1];
                 if prefix.is_empty() {
@@ -63,7 +63,7 @@ impl AliasPattern {
                             .into(),
                     )
                 } else {
-                    Ok(AliasPattern::Prefix(prefix.to_string()))
+                    Ok(Self::Prefix(prefix.to_string()))
                 }
             }
             _ => Err(format!(
@@ -76,17 +76,17 @@ impl AliasPattern {
     /// True when this pattern matches the given wire model.
     pub fn matches(&self, wire: &str) -> bool {
         match self {
-            AliasPattern::Exact(s) => s == wire,
-            AliasPattern::Prefix(p) => wire.starts_with(p),
+            Self::Exact(s) => s == wire,
+            Self::Prefix(p) => wire.starts_with(p),
         }
     }
 
     /// The prefix length used for longest-match ordering. Exact patterns
     /// are not consulted via this path (the caller does an O(1) lookup
     /// for those first), but the length is well-defined for them too.
-    pub fn prefix_len(&self) -> usize {
+    pub const fn prefix_len(&self) -> usize {
         match self {
-            AliasPattern::Exact(s) | AliasPattern::Prefix(s) => s.len(),
+            Self::Exact(s) | Self::Prefix(s) => s.len(),
         }
     }
 }
@@ -104,7 +104,7 @@ pub struct PrefixIndex<V: Clone> {
 }
 
 impl<V: Clone> PrefixIndex<V> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
         }
@@ -136,11 +136,11 @@ impl<V: Clone> PrefixIndex<V> {
 
     /// True when no prefix patterns are registered (most operators
     /// don't use globs).
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 }

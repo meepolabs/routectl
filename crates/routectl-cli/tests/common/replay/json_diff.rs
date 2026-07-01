@@ -64,7 +64,7 @@ fn json_eq_objects(
         let next = if current_path.is_empty() {
             key.to_string()
         } else {
-            format!("{}.{}", current_path, key)
+            format!("{current_path}.{key}")
         };
         !ignore_paths.contains(&next.as_str())
     };
@@ -84,7 +84,7 @@ fn json_eq_objects(
         let next = if current_path.is_empty() {
             k.clone()
         } else {
-            format!("{}.{}", current_path, k)
+            format!("{current_path}.{k}")
         };
         json_eq_inner(&a[k], &e[k], &next, ignore_paths)?;
     }
@@ -106,13 +106,13 @@ fn json_eq_arrays(
         )));
     }
     for (i, (av, ev)) in a.iter().zip(e.iter()).enumerate() {
-        let next = format!("{}[{}]", current_path, i);
+        let next = format!("{current_path}[{i}]");
         json_eq_inner(av, ev, &next, ignore_paths)?;
     }
     Ok(())
 }
 
-fn display_path(p: &str) -> &str {
+const fn display_path(p: &str) -> &str {
     if p.is_empty() { "<root>" } else { p }
 }
 
@@ -161,14 +161,12 @@ pub fn assert_headers_equal(
             }
             (Some(_), None) => {
                 return Err(DiffMessage(format!(
-                    "header {} present in actual, missing from expected",
-                    name
+                    "header {name} present in actual, missing from expected"
                 )));
             }
             (None, Some(_)) => {
                 return Err(DiffMessage(format!(
-                    "header {} present in expected, missing from actual",
-                    name
+                    "header {name} present in expected, missing from actual"
                 )));
             }
             (None, None) => unreachable!(),
@@ -219,7 +217,7 @@ mod tests {
         let e = json!({"b": 1});
         let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("key mismatch"), "got: {}", msg);
+        assert!(msg.contains("key mismatch"), "got: {msg}");
     }
 
     #[test]
@@ -228,8 +226,8 @@ mod tests {
         let e = json!({"a": 2});
         let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("value mismatch"), "got: {}", msg);
-        assert!(msg.contains("at a:"), "got: {}", msg);
+        assert!(msg.contains("value mismatch"), "got: {msg}");
+        assert!(msg.contains("at a:"), "got: {msg}");
     }
 
     #[test]
@@ -238,7 +236,7 @@ mod tests {
         let e = json!([3, 2, 1]);
         let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("value mismatch"), "got: {}", msg);
+        assert!(msg.contains("value mismatch"), "got: {msg}");
     }
 
     #[test]
@@ -278,7 +276,7 @@ mod tests {
         let e = json!({"outer": {"inner": [{"x": 1}, {"x": 99}]}});
         let err = assert_json_equal_structural(&a, &e, &[]).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("outer.inner[1].x"), "got: {}", msg);
+        assert!(msg.contains("outer.inner[1].x"), "got: {msg}");
     }
 
     // ---------- Headers ----------
@@ -321,17 +319,15 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("header value mismatch on x-custom"),
-            "got: {}",
-            msg
+            "got: {msg}"
         );
         // Redacted values must not leak the full mismatched value.
-        assert!(!msg.contains("secret-value-xyz"), "leaked actual: {}", msg);
+        assert!(!msg.contains("secret-value-xyz"), "leaked actual: {msg}");
         assert!(
             !msg.contains("different-secret-abc"),
-            "leaked expected: {}",
-            msg
+            "leaked expected: {msg}"
         );
-        assert!(msg.contains("(len="), "diff missing length tag: {}", msg);
+        assert!(msg.contains("(len="), "diff missing length tag: {msg}");
     }
 
     #[test]

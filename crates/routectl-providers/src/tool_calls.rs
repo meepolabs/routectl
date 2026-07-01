@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 /// wrapped under `{"_arguments": "<raw>"}` so the upstream returns a
 /// useful error instead of routectl silently shipping a malformed body --
 /// mirrors the Anthropic-API egress fallback.
-pub(crate) struct NormalizedToolCall {
+pub struct NormalizedToolCall {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) arguments: Value,
@@ -39,10 +39,7 @@ pub(crate) struct NormalizedToolCall {
 /// the upstream rejects the body, so an empty id is replaced with
 /// `call_<index>`. `provider` tags the WARN emitted when an entry's
 /// `arguments` string is not valid JSON.
-pub(crate) fn normalize_tool_calls(
-    provider: &str,
-    tool_calls: &[Value],
-) -> Vec<NormalizedToolCall> {
+pub fn normalize_tool_calls(provider: &str, tool_calls: &[Value]) -> Vec<NormalizedToolCall> {
     tool_calls
         .iter()
         .enumerate()

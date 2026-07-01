@@ -311,7 +311,7 @@ impl DispatchMeta {
     /// target is the terminal one.
     fn mark_target(&mut self, target: &DispatchTarget) {
         self.served_provider = Some(target.provider_name.clone());
-        self.served_provider_kind = target.provider_kind.map(|k| k.to_string());
+        self.served_provider_kind = target.provider_kind.map(std::string::ToString::to_string);
         self.served_model = target.nickname.clone();
         self.served_upstream = Some(target.upstream.clone());
         self.selection_decision = target.selection_decision;
@@ -358,10 +358,10 @@ enum FilterSource {
 
 impl FilterSource {
     /// Stable lowercase token for the skip-log `source` field.
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
-            FilterSource::ProviderStatic => "provider",
-            FilterSource::ModelStatic => "model",
+            Self::ProviderStatic => "provider",
+            Self::ModelStatic => "model",
         }
     }
 }
@@ -544,7 +544,7 @@ impl Router {
         // (keyed by provider name) so legacy lookups still work, and
         // populate the state map with one entry per nickname so
         // dispatch's gate check is per-model.
-        for (nickname, m) in self.resolved_models.iter() {
+        for (nickname, m) in &self.resolved_models {
             self.providers
                 .entry(m.provider_name.clone())
                 .or_insert_with(|| m.provider.clone());
@@ -596,7 +596,7 @@ impl Router {
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in, to
     /// avoid resetting gates that took time to build up across reloads.
-    pub fn carry_over_runtime_state_from(&mut self, previous: &Router) {
+    pub fn carry_over_runtime_state_from(&mut self, previous: &Self) {
         for (key, state) in &previous.state {
             if self.state.contains_key(key.as_str()) {
                 self.state.insert(key.clone(), state.clone());
@@ -622,7 +622,7 @@ impl Router {
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in,
     /// alongside `carry_over_runtime_state_from`.
-    pub fn carry_over_sticky_from(&mut self, previous: &Router) {
+    pub fn carry_over_sticky_from(&mut self, previous: &Self) {
         for (session_key, pin) in previous.sticky_pins.export_entries() {
             self.sticky_pins.put(&session_key, pin);
         }
@@ -644,7 +644,7 @@ impl Router {
     /// destination map preserves the source's recency ordering. A scattered
     /// (e.g. HashMap-iteration-order) carry-over would race the eviction
     /// frontier across the rebuild.
-    pub fn carry_over_k_store_from(&mut self, previous: &Router) {
+    pub fn carry_over_k_store_from(&mut self, previous: &Self) {
         self.k_session_store
             .import_entries(previous.k_session_store.export_entries());
     }
@@ -940,7 +940,7 @@ impl Router {
                 .config
                 .providers
                 .get(&target.provider_name)
-                .map(|e| e.kind_str());
+                .map(super::config::ProviderEntry::kind_str);
         }
         out
     }
@@ -1066,7 +1066,7 @@ impl Router {
         let (order, outcome) = crate::seat_pool::sticky_least_loaded_order(
             seats.len(),
             pin.map(|(i, _)| i),
-            pin.map(|(_, r)| r).unwrap_or(false),
+            pin.is_some_and(|(_, r)| r),
             &snapshots,
             tiebreak,
         );
@@ -1354,7 +1354,8 @@ impl Router {
             // Effective only when the global switch is on AND the provider
             // did not explicitly opt out (`None` inherits the global).
             let reduction_effective = self.config.reduction.enabled
-                && provider_cfg.and_then(|e| e.reduction_enabled()) != Some(false);
+                && provider_cfg.and_then(super::config::ProviderEntry::reduction_enabled)
+                    != Some(false);
             let reduction_outcome = if reduction_effective {
                 Some(apply_json_minify(&mut attempt_req))
             } else {
@@ -1382,9 +1383,9 @@ impl Router {
             let cache_injection = maybe_apply_auto_cache_control(
                 &mut attempt_req,
                 &auto_cache_plan,
-                provider_cfg.map(|e| e.cache_capability()),
+                provider_cfg.map(super::config::ProviderEntry::cache_capability),
                 provider_cfg
-                    .and_then(|e| e.auto_emit_top_level_breakpoint())
+                    .and_then(super::config::ProviderEntry::auto_emit_top_level_breakpoint)
                     .unwrap_or(true),
             );
             // T6 observability: stamp the per-request decision token so the
@@ -1752,19 +1753,18 @@ impl Router {
                 "provider skipped: kind cannot count_tokens",
             );
         }
-        let target = match target {
-            Some(t) => t,
-            None => {
-                tracing::warn!(
-                    alias = %req.model,
-                    "alias chain has no count_tokens-capable provider; \
-                     no target in chain overrides count_tokens",
-                );
-                return Err(Error::NotImplemented(
-                    req.model.clone(),
-                    "count_tokens: no count_tokens-capable provider in chain".into(),
-                ));
-            }
+        let target = if let Some(t) = target {
+            t
+        } else {
+            tracing::warn!(
+                alias = %req.model,
+                "alias chain has no count_tokens-capable provider; \
+                 no target in chain overrides count_tokens",
+            );
+            return Err(Error::NotImplemented(
+                req.model.clone(),
+                "count_tokens: no count_tokens-capable provider in chain".into(),
+            ));
         };
         let provider = target
             .provider
@@ -1985,7 +1985,8 @@ impl Router {
             // reduced bytes. Effective only when global on AND provider not
             // explicitly off. `apply_json_minify` fails closed.
             let reduction_effective = self.config.reduction.enabled
-                && provider_cfg.and_then(|e| e.reduction_enabled()) != Some(false);
+                && provider_cfg.and_then(super::config::ProviderEntry::reduction_enabled)
+                    != Some(false);
             let reduction_outcome = if reduction_effective {
                 Some(apply_json_minify(&mut attempt_req))
             } else {
@@ -2011,9 +2012,9 @@ impl Router {
             let cache_injection = maybe_apply_auto_cache_control(
                 &mut attempt_req,
                 &auto_cache_plan,
-                provider_cfg.map(|e| e.cache_capability()),
+                provider_cfg.map(super::config::ProviderEntry::cache_capability),
                 provider_cfg
-                    .and_then(|e| e.auto_emit_top_level_breakpoint())
+                    .and_then(super::config::ProviderEntry::auto_emit_top_level_breakpoint)
                     .unwrap_or(true),
             );
             // T6 observability: see `complete_inner`. Stamp the decision
@@ -2429,7 +2430,7 @@ impl Router {
             .config
             .providers
             .get(provider_name)
-            .map(|e| e.runtime());
+            .map(super::config::ProviderEntry::runtime);
         let mut out = base.clone();
         if out.request_timeout_ms.is_none() {
             out.request_timeout_ms = provider_runtime.and_then(|p| p.request_timeout_ms);
@@ -2651,16 +2652,16 @@ impl CacheInjection {
     /// | SkippedNoCapability      | `auto_skipped:no_capability`       |
     /// | SkippedBreakpointCap     | `auto_skipped:breakpoint_cap`      |
     /// | ValidationRolledBack     | `auto_skipped:validation_rolled_back` |
-    fn strategy_str(self) -> &'static str {
+    const fn strategy_str(self) -> &'static str {
         match self {
-            CacheInjection::Emitted => "auto_emitted",
-            CacheInjection::SkippedCallerSupplied => "caller_supplied",
-            CacheInjection::SkippedVolatileHigh => "volatile_vetoed",
-            CacheInjection::SkippedGlobalDisabled => "auto_skipped:global_disabled",
-            CacheInjection::SkippedProviderDisabled => "auto_skipped:provider_disabled",
-            CacheInjection::SkippedNoCapability => "auto_skipped:no_capability",
-            CacheInjection::SkippedBreakpointCap => "auto_skipped:breakpoint_cap",
-            CacheInjection::ValidationRolledBack => "auto_skipped:validation_rolled_back",
+            Self::Emitted => "auto_emitted",
+            Self::SkippedCallerSupplied => "caller_supplied",
+            Self::SkippedVolatileHigh => "volatile_vetoed",
+            Self::SkippedGlobalDisabled => "auto_skipped:global_disabled",
+            Self::SkippedProviderDisabled => "auto_skipped:provider_disabled",
+            Self::SkippedNoCapability => "auto_skipped:no_capability",
+            Self::SkippedBreakpointCap => "auto_skipped:breakpoint_cap",
+            Self::ValidationRolledBack => "auto_skipped:validation_rolled_back",
         }
     }
 }
@@ -2681,7 +2682,10 @@ impl CacheInjection {
 ///
 /// `effective == false` short-circuits to `skipped:disabled` WITHOUT calling
 /// `apply_json_minify`, so `outcome` is only consulted when reduction ran.
-fn reduction_strategy_token(effective: bool, outcome: Option<&ReductionOutcome>) -> &'static str {
+const fn reduction_strategy_token(
+    effective: bool,
+    outcome: Option<&ReductionOutcome>,
+) -> &'static str {
     if !effective {
         return "skipped:disabled";
     }
@@ -2773,7 +2777,7 @@ fn maybe_apply_auto_cache_control(
 /// configured them.
 fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut ChatRequest) {
     let provider_entry = config.providers.get(&target.provider_name);
-    let provider_headers = provider_entry.map(|e| e.header_extras());
+    let provider_headers = provider_entry.map(super::config::ProviderEntry::header_extras);
     let provider_payload = provider_entry.and_then(|e| e.payload_extras());
 
     merge_header_extras(
@@ -2819,8 +2823,8 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // must carry it across or it resets to `None` on the 2nd chain attempt.
     let captured_inbound_session_key = req.routectl_internal.inbound_session_key.take();
     let mut internal = RoutectlInternal::default();
-    internal.reasoning_dialect = target.reasoning_dialect.map(|d| d.into());
-    internal.history_reasoning = target.history_reasoning.map(|h| h.into());
+    internal.reasoning_dialect = target.reasoning_dialect.map(std::convert::Into::into);
+    internal.history_reasoning = target.history_reasoning.map(std::convert::Into::into);
     internal.claude_code_headers = captured_claude_code_headers;
     internal.provenance = captured_provenance;
     internal.header_extras = composed_header_extras;
@@ -2867,8 +2871,7 @@ fn operator_betas(
     let model_val = model_extras
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
-        .map(|(_, v)| v.as_str())
-        .unwrap_or("");
+        .map_or("", |(_, v)| v.as_str());
 
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut out: Vec<String> = Vec::new();
@@ -2956,8 +2959,7 @@ pub fn merge_header_extras(
         let model_val = model_extras
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(list_key))
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, v)| v.as_str());
 
         // Visit order: ingress (req.anthropic_beta) -> provider -> model.
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -3082,8 +3084,7 @@ pub fn merge_payload_extras(
     // an empty provider_extras on the request.
     let is_empty_object = accumulated
         .as_object()
-        .map(serde_json::Map::is_empty)
-        .unwrap_or(false);
+        .is_some_and(serde_json::Map::is_empty);
     if is_empty_object && req.provider_extras.is_none() {
         return;
     }
@@ -3257,7 +3258,7 @@ fn wrap_with_breaker_accounting(
     }
 
     impl BreakerAccounting {
-        fn new(state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>) -> Self {
+        const fn new(state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>) -> Self {
             Self {
                 state,
                 settled: false,
@@ -3276,7 +3277,7 @@ fn wrap_with_breaker_accounting(
                 return;
             }
             self.settled = true;
-            self.with_state(|state| state.record_success());
+            self.with_state(super::runtime_state::ProviderState::record_success);
         }
 
         fn record_failure(&mut self) {
@@ -3350,7 +3351,7 @@ impl ProbeSlotGuard {
     /// Arm a guard for a dispatch that claimed the half-open probe slot. Pass
     /// `None` for a dispatch that did not (closed breaker): the guard is then
     /// inert and its drop is a no-op.
-    fn new(state: Option<Arc<Mutex<ProviderState>>>) -> Self {
+    const fn new(state: Option<Arc<Mutex<ProviderState>>>) -> Self {
         Self { state }
     }
 
@@ -3443,7 +3444,7 @@ fn is_probe_request(req: &ChatRequest, policy: &RetryPolicy) -> bool {
 /// the probe's output is unread. A generic 5xx or a capability 4xx
 /// (e.g. Bedrock's `max_tokens=1` 400) returns `None` here so it keeps
 /// walking the chain -- a healthy sibling provider can still answer.
-fn probe_fast_fail_status(err: &Error) -> Option<u16> {
+const fn probe_fast_fail_status(err: &Error) -> Option<u16> {
     match err {
         Error::Upstream {
             status: s @ (429 | 529),
@@ -3740,12 +3741,11 @@ mod tests {
         old.state.insert("model-a".to_string(), old_arc.clone());
         // "model-x" exists only in the old router -- must NOT be injected.
         let old_only_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
-        old.state
-            .insert("model-x".to_string(), old_only_arc.clone());
+        old.state.insert("model-x".to_string(), old_only_arc);
 
-        let mut new = Router::new(config.clone());
+        let mut new = Router::new(config);
         let fresh_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
-        new.state.insert("model-a".to_string(), fresh_arc.clone());
+        new.state.insert("model-a".to_string(), fresh_arc);
         // "model-new" exists only in the new router -- must remain unchanged.
         let new_only_arc = Arc::new(Mutex::new(ProviderState::new(&policy)));
         new.state
@@ -3793,7 +3793,7 @@ mod tests {
             },
         );
 
-        let mut after = Router::new(config.clone());
+        let mut after = Router::new(config);
 
         // Act
         after.carry_over_sticky_from(&before);
@@ -3854,7 +3854,7 @@ mod tests {
         before.k_session_store.put(key("C"), win_c.clone());
         let _ = before.k_session_store.get(&key("A"));
 
-        let mut after = Router::new(config.clone());
+        let mut after = Router::new(config);
 
         // Act
         after.carry_over_k_store_from(&before);
@@ -3940,7 +3940,7 @@ mod tests {
 
         let config = Arc::new(Config::default());
         let before = Router::new(config.clone());
-        before.k_session_store.put(key.clone(), window);
+        before.k_session_store.put(key, window);
 
         // Act: a freshly-built router imports the source's entries, then its
         // OWN estimator (pointed at its own store at construction) is queried.
@@ -4205,7 +4205,7 @@ mod merge_header_extras_tests {
 
     #[async_trait::async_trait]
     impl Provider for StubProvider {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "stub"
         }
         fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
@@ -4785,7 +4785,7 @@ mod reasoning_passthrough_tests {
 
     #[async_trait]
     impl Provider for CapturingProvider {
-        fn id(&self) -> &str {
+        fn id(&self) -> &'static str {
             "capturing"
         }
         fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
@@ -5264,7 +5264,7 @@ mod resolved_models_tests {
             })
         }
         async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-            let model = req.model.clone();
+            let model = req.model;
             let id = self.id.clone();
             let text = ChatChunk {
                 id: format!("chunk-{id}"),

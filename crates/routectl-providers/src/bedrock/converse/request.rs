@@ -80,7 +80,10 @@ pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseReque
         tool_config,
         additional_model_request_fields,
         additional_model_response_field_paths: Some(
-            RESPONSE_FIELD_PATHS.iter().map(|s| s.to_string()).collect(),
+            RESPONSE_FIELD_PATHS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         ),
     })
 }

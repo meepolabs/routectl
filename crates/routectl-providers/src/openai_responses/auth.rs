@@ -40,7 +40,7 @@ use super::{AuthKind, OpenAiResponsesConfig};
 /// (`codex_cli_rs/<X.Y.Z> (<os_type> <os_version>; <arch>) <terminal>`).
 /// This is the client-level fallback until the operator sets
 /// `user_agent` in config.
-pub(crate) fn default_user_agent() -> String {
+pub fn default_user_agent() -> String {
     codex_user_agent().to_string()
 }
 
@@ -49,7 +49,7 @@ pub(crate) fn default_user_agent() -> String {
 /// upstream request via `cfg.auth.token().await`) and passed in here
 /// so a routectl-managed OAuth source can rotate without a daemon
 /// restart. Returns the modified builder.
-pub(crate) fn apply(
+pub fn apply(
     rb: RequestBuilder,
     cfg: &OpenAiResponsesConfig,
     bearer: &str,

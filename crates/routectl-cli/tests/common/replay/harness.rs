@@ -21,7 +21,7 @@ use super::loader::Fixture;
 /// `discover_fixtures` returns an empty vector when the directory is
 /// empty, which keeps the replay tests passing on a fresh checkout
 /// before any fixtures have been captured.
-pub(crate) fn captured_root() -> PathBuf {
+pub fn captured_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/captured")
 }
 
@@ -31,30 +31,26 @@ pub(crate) fn captured_root() -> PathBuf {
 /// this is a fixture-authoring bug we want to surface, but failing the
 /// whole test on it would mask the comparator output that pinpoints
 /// the real wire-shape issue.
-pub(crate) fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
+pub fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in pairs {
-        let parsed_name = match HeaderName::from_bytes(name.as_bytes()) {
-            Ok(n) => n,
-            Err(_) => {
-                eprintln!(
-                    "[replay] dropping malformed header name `{}` (header value not echoed; \
-                     fix the fixture's *.headers.json)",
-                    name,
-                );
-                continue;
-            }
+        let parsed_name = if let Ok(n) = HeaderName::from_bytes(name.as_bytes()) {
+            n
+        } else {
+            eprintln!(
+                "[replay] dropping malformed header name `{name}` (header value not echoed; \
+                 fix the fixture's *.headers.json)",
+            );
+            continue;
         };
-        let parsed_value = match HeaderValue::from_str(value) {
-            Ok(v) => v,
-            Err(_) => {
-                eprintln!(
-                    "[replay] dropping malformed header value on `{}` \
-                     (value not echoed; fix the fixture's *.headers.json)",
-                    name,
-                );
-                continue;
-            }
+        let parsed_value = if let Ok(v) = HeaderValue::from_str(value) {
+            v
+        } else {
+            eprintln!(
+                "[replay] dropping malformed header value on `{name}` \
+                 (value not echoed; fix the fixture's *.headers.json)",
+            );
+            continue;
         };
         out.insert(parsed_name, parsed_value);
     }
@@ -64,7 +60,7 @@ pub(crate) fn headers_from_pairs(pairs: &[(String, String)]) -> HeaderMap {
 /// Outcome of one fixture's run. `Skipped` carries a human-readable
 /// reason so the test driver can surface it as an info log rather than
 /// a failure. `Asserted` means the fixture was exercised end-to-end.
-pub(crate) enum FixtureOutcome {
+pub enum FixtureOutcome {
     Asserted,
     Skipped(String),
 }
@@ -75,13 +71,13 @@ pub(crate) enum FixtureOutcome {
 /// `docs/REPLAY-FIXTURES.md` "Phase 1 corpus scope". Matching is
 /// substring + case-insensitive so capture-rig variants
 /// (`claude-opus-4-7-...`, `deepseek-v4`, ...) all hit.
-pub(crate) const PHASE1_MODEL_DENYLIST: &[&str] = &["opus-4", "deepseek"];
+pub const PHASE1_MODEL_DENYLIST: &[&str] = &["opus-4", "deepseek"];
 
 /// Phase-one denylist filter: drop fixtures whose model requires the
 /// router-side enrichment (adaptive thinking, DeepSeek
 /// `history_reasoning`) that the bare ingress -> egress path does not
 /// yet replay.
-pub(crate) fn phase1_skip_reason(fixture: &Fixture) -> Option<String> {
+pub fn phase1_skip_reason(fixture: &Fixture) -> Option<String> {
     let model = fixture.meta.model.as_deref()?;
     let lc = model.to_ascii_lowercase();
     for needle in PHASE1_MODEL_DENYLIST {

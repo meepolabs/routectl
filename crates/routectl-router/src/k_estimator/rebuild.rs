@@ -44,7 +44,7 @@ impl LedgerSampleRow {
     /// different crate and cannot use a struct literal, so it builds rows
     /// through here. A later additive column gets a defaulted parameter or a
     /// dedicated setter without breaking this signature's callers.
-    pub fn new(
+    pub const fn new(
         session_key: String,
         provider_kind: String,
         model: String,

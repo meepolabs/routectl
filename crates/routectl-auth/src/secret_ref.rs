@@ -135,14 +135,14 @@ impl fmt::Debug for SecretRef {
     /// to `literal:[REDACTED]`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SecretRef::Env(v) => f.debug_tuple("Env").field(v).finish(),
-            SecretRef::File(p) => f.debug_tuple("File").field(p).finish(),
-            SecretRef::OAuth { provider, label } => f
+            Self::Env(v) => f.debug_tuple("Env").field(v).finish(),
+            Self::File(p) => f.debug_tuple("File").field(p).finish(),
+            Self::OAuth { provider, label } => f
                 .debug_struct("OAuth")
                 .field("provider", provider)
                 .field("label", label)
                 .finish(),
-            SecretRef::Literal(_) => write!(f, "{self}"),
+            Self::Literal(_) => write!(f, "{self}"),
         }
     }
 }
@@ -157,15 +157,15 @@ impl fmt::Display for SecretRef {
     /// Resolution still happens normally via `SecretStore::get`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SecretRef::Env(var) => write!(f, "env://{var}"),
-            SecretRef::File(path) => write!(f, "file://{}", path.display()),
-            SecretRef::Literal(val) if val.is_empty() => write!(f, "literal:"),
-            SecretRef::Literal(_) => write!(f, "literal:[REDACTED]"),
-            SecretRef::OAuth {
+            Self::Env(var) => write!(f, "env://{var}"),
+            Self::File(path) => write!(f, "file://{}", path.display()),
+            Self::Literal(val) if val.is_empty() => write!(f, "literal:"),
+            Self::Literal(_) => write!(f, "literal:[REDACTED]"),
+            Self::OAuth {
                 provider,
                 label: Some(label),
             } => write!(f, "oauth://{provider}#{label}"),
-            SecretRef::OAuth {
+            Self::OAuth {
                 provider,
                 label: None,
             } => write!(f, "oauth://{provider}"),

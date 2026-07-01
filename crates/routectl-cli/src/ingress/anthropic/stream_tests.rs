@@ -152,7 +152,7 @@ fn text_chunk(text: &str, finish: Option<&str>) -> ChatChunk {
                 content: Some(text.into()),
                 ..Default::default()
             },
-            finish_reason: finish.map(|s| s.into()),
+            finish_reason: finish.map(std::convert::Into::into),
             matched_stop_sequence: None,
         }],
         usage: None,
@@ -615,7 +615,7 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
                 .filter(|n| *n == "content_block_start")
                 .map(|_| ())
         })
-        .map(|_| 0_usize);
+        .map(|()| 0_usize);
     assert!(
         first_start_idx.is_some(),
         "first chunk must open a thinking block; got events: {:?}",
@@ -1200,7 +1200,7 @@ fn message_start_uses_req_model_when_chunk_carries_no_model() {
     let mut s = new_state_with_req_model(Some("claude-opus-4-7".to_string()));
     let chunk = ChatChunk {
         id: "msg_01".into(),
-        model: "".into(),
+        model: String::new(),
         choices: vec![ChunkChoice {
             index: 0,
             delta: ChunkDelta {

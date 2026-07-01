@@ -442,7 +442,7 @@ pub fn k_calibration_summary(db: &UsageDb) -> Result<KCalibration, QueryError> {
             }
         })
         .collect();
-    errors.sort_by(|a, b| a.total_cmp(b));
+    errors.sort_by(f64::total_cmp);
     let accuracy = median_f64(&errors);
 
     Ok(KCalibration {
@@ -460,7 +460,7 @@ fn median_f64(sorted: &[f64]) -> f64 {
     let n = sorted.len();
     let mid = n / 2;
     if n.is_multiple_of(2) {
-        (sorted[mid - 1] + sorted[mid]) / 2.0
+        f64::midpoint(sorted[mid - 1], sorted[mid])
     } else {
         sorted[mid]
     }

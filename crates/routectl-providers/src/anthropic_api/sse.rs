@@ -78,7 +78,7 @@ impl OpenBlockKind {
     /// Upstream `content_block` index this open block was opened at.
     /// Used to validate that subsequent delta and stop events
     /// attribute to the correct block.
-    pub fn upstream_index(&self) -> u32 {
+    pub const fn upstream_index(&self) -> u32 {
         match self {
             Self::Text { upstream_index }
             | Self::Thinking { upstream_index, .. }
@@ -576,8 +576,7 @@ impl SseState {
             // "..."}`); we serialize it raw to preserve detail for
             // operators reading logs.
             SseEvent::Error { error } => Err(Error::Streaming(format!(
-                "anthropic in-stream error: {}",
-                error,
+                "anthropic in-stream error: {error}",
             ))),
             // Forward-compat catchall for unknown top-level event tags.
             // Top-level Other events are not captured into opaque_events

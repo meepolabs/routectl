@@ -55,11 +55,11 @@ impl AppState {
     /// once the channel closes), which is all a non-usage handler test
     /// needs. Returns the `TempDir` guard; keep it alive for the test.
     #[cfg(test)]
-    pub fn for_test(router: Arc<ArcSwap<Router>>) -> (Arc<AppState>, tempfile::TempDir) {
+    pub fn for_test(router: Arc<ArcSwap<Router>>) -> (Arc<Self>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("usage tempdir");
         let (usage, _writer) =
             UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0, false);
-        let state = Arc::new(AppState { router, usage });
+        let state = Arc::new(Self { router, usage });
         (state, dir)
     }
 }
@@ -1098,14 +1098,12 @@ fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'stati
         .server
         .auth
         .as_ref()
-        .map(|a| a.tokens.as_slice())
-        .unwrap_or(&[]);
+        .map_or(&[], |a| a.tokens.as_slice());
     let next_tokens: &[String] = next
         .server
         .auth
         .as_ref()
-        .map(|a| a.tokens.as_slice())
-        .unwrap_or(&[]);
+        .map_or(&[], |a| a.tokens.as_slice());
     if prev_tokens != next_tokens {
         out.push("server.auth.tokens");
     }
@@ -1547,7 +1545,7 @@ mod tests {
         // pending on the (never-arriving) signal.
         let fired = tokio::select! {
             () = drain_deadline_watcher(&mut rx) => true,
-            _ = tokio::time::sleep(Duration::from_secs(3600)) => false,
+            () = tokio::time::sleep(Duration::from_secs(3600)) => false,
         };
 
         // Assert: the watcher stayed pending; the sleep won.

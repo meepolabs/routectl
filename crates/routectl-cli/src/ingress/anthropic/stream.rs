@@ -439,7 +439,10 @@ fn apply_tool_call_delta(
     _events: &mut Vec<SseEvent>,
 ) -> Result<()> {
     // OpenAI shape: {index, id?, type, function: {name?, arguments?}}.
-    let call_index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let call_index = tc
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
     if call_index > MAX_TOOL_CALL_INDEX {
         return Err(Error::Streaming(format!(
             "anthropic ingress: tool_call index {call_index} exceeds maximum of {MAX_TOOL_CALL_INDEX}"
@@ -585,9 +588,9 @@ pub(super) fn emit_message_delta(
         )
     } else {
         (
-            finish_reason
-                .map(|fr| Value::String(openai_finish_to_anthropic_stop(fr).into()))
-                .unwrap_or(Value::Null),
+            finish_reason.map_or(Value::Null, |fr| {
+                Value::String(openai_finish_to_anthropic_stop(fr).into())
+            }),
             Value::Null,
         )
     };

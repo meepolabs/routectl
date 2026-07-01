@@ -90,7 +90,7 @@ fn translate_tool_choice_object(map: &serde_json::Map<String, Value>) -> Option<
     // Anthropic-shape `{"type":"auto"|"any"}` -> string equivalents.
     match map.get("type").and_then(|v| v.as_str()) {
         Some("auto") => return Some(Value::String("auto".into())),
-        Some("any") | Some("required") => return Some(Value::String("required".into())),
+        Some("any" | "required") => return Some(Value::String("required".into())),
         Some("none") => return Some(Value::String("none".into())),
         _ => {}
     }

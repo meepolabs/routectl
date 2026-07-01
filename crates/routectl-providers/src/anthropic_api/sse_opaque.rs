@@ -55,7 +55,7 @@ pub(super) struct OpaqueCapture {
 }
 
 impl OpaqueCapture {
-    pub(super) fn new(upstream_index: u32, type_tag: String) -> Self {
+    pub(super) const fn new(upstream_index: u32, type_tag: String) -> Self {
         Self {
             upstream_index,
             type_tag,
@@ -174,7 +174,7 @@ impl OpaqueCapture {
         });
     }
 
-    fn would_overflow_bytes(&self, add: usize) -> bool {
+    const fn would_overflow_bytes(&self, add: usize) -> bool {
         self.bytes_so_far.saturating_add(add) > MAX_OPAQUE_BYTES_PER_BLOCK
     }
 
@@ -228,9 +228,8 @@ mod tests {
             let payload = format!(
                 r#"{{
                     "type":"content_block_delta","index":0,
-                    "delta":{{"type":"citations_delta","seq":{}}}
+                    "delta":{{"type":"citations_delta","seq":{i}}}
                 }}"#,
-                i,
             );
             let _ = state.parse_event("test", &payload).unwrap();
         }
@@ -447,9 +446,8 @@ mod tests {
             let payload = format!(
                 r#"{{
                     "type":"content_block_delta","index":0,
-                    "delta":{{"type":"citations_delta","blob":"{}"}}
+                    "delta":{{"type":"citations_delta","blob":"{big_text}"}}
                 }}"#,
-                big_text,
             );
             let _ = state.parse_event("test", &payload).unwrap();
         }

@@ -15,7 +15,7 @@ use serde_json::Value;
 /// Top-level request body for `POST models/{model}:generateContent`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GenerateContentRequest {
+pub struct GenerateContentRequest {
     pub(crate) contents: Vec<Content>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,7 +36,7 @@ pub(crate) struct GenerateContentRequest {
 /// Gemini's `systemInstruction` has no `role` field; use `SystemInstruction`
 /// for that. The `Content` type is only for `contents[]` entries.
 #[derive(Debug, Serialize)]
-pub(crate) struct Content {
+pub struct Content {
     pub(crate) role: String,
     pub(crate) parts: Vec<Part>,
 }
@@ -44,14 +44,14 @@ pub(crate) struct Content {
 /// System prompt carrier. Gemini separates this from `contents[]` and
 /// forbids a `role` field on it -- only `parts` is sent.
 #[derive(Debug, Serialize)]
-pub(crate) struct SystemInstruction {
+pub struct SystemInstruction {
     pub(crate) parts: Vec<Part>,
 }
 
 /// One part within a `Content`. Exactly one field is non-None per instance.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Part {
+pub struct Part {
     /// Plain text content. When `thought` is true the text is the
     /// model's reasoning summary, replayed back on a follow-up turn.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,14 +84,14 @@ pub(crate) struct Part {
 /// Binary payload embedded directly in the request.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InlineData {
+pub struct InlineData {
     pub(crate) mime_type: String,
     pub(crate) data: String,
 }
 
 /// A function invocation emitted by the model in an assistant turn.
 #[derive(Debug, Serialize)]
-pub(crate) struct FunctionCallPart {
+pub struct FunctionCallPart {
     pub(crate) name: String,
     pub(crate) args: Value,
 }
@@ -102,7 +102,7 @@ pub(crate) struct FunctionCallPart {
 /// `functionResponse` part (not a separate role). The `name` must match
 /// the `functionCall.name` from the preceding assistant turn.
 #[derive(Debug, Serialize)]
-pub(crate) struct FunctionResponsePart {
+pub struct FunctionResponsePart {
     pub(crate) name: String,
     pub(crate) response: Value,
 }
@@ -110,13 +110,13 @@ pub(crate) struct FunctionResponsePart {
 /// Tool definitions supplied to the model.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GeminiTool {
+pub struct GeminiTool {
     pub(crate) function_declarations: Vec<FunctionDeclaration>,
 }
 
 /// One function the model may call.
 #[derive(Debug, Serialize)]
-pub(crate) struct FunctionDeclaration {
+pub struct FunctionDeclaration {
     pub(crate) name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
@@ -127,14 +127,14 @@ pub(crate) struct FunctionDeclaration {
 /// Controls how the model invokes tools.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ToolConfig {
+pub struct ToolConfig {
     pub(crate) function_calling_config: FunctionCallingConfig,
 }
 
 /// Function-calling mode and optional name filter.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FunctionCallingConfig {
+pub struct FunctionCallingConfig {
     pub(crate) mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) allowed_function_names: Option<Vec<String>>,
@@ -143,7 +143,7 @@ pub(crate) struct FunctionCallingConfig {
 /// Sampling / output-shape parameters.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GenerationConfig {
+pub struct GenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) temperature: Option<f64>,
 
@@ -177,7 +177,7 @@ pub(crate) struct GenerationConfig {
 /// Thinking controls placed inside `generationConfig`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ThinkingConfig {
+pub struct ThinkingConfig {
     /// Token budget for the model's internal reasoning. `-1` requests a
     /// dynamic budget; `0` disables thinking on capable models.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,7 +196,7 @@ pub(crate) struct ThinkingConfig {
 /// Top-level response from `generateContent`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GenerateContentResponse {
+pub struct GenerateContentResponse {
     #[serde(default)]
     pub(crate) candidates: Vec<Candidate>,
 
@@ -216,7 +216,7 @@ pub(crate) struct GenerateContentResponse {
 /// One candidate in the response. Non-streaming responses have one.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Candidate {
+pub struct Candidate {
     pub(crate) content: Option<ResponseContent>,
     pub(crate) finish_reason: Option<String>,
     /// Candidate index. Consumed by the streaming path (slice 2); kept
@@ -228,7 +228,7 @@ pub(crate) struct Candidate {
 
 /// Content block inside a candidate.
 #[derive(Debug, Deserialize)]
-pub(crate) struct ResponseContent {
+pub struct ResponseContent {
     #[serde(default)]
     pub(crate) parts: Vec<ResponsePart>,
     /// Wire role ("model"). The canonical message is always emitted as
@@ -244,7 +244,7 @@ pub(crate) struct ResponseContent {
 /// `thought_signature` for multi-turn replay), not visible output.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ResponsePart {
+pub struct ResponsePart {
     pub(crate) text: Option<String>,
     pub(crate) function_call: Option<ResponseFunctionCall>,
     /// True when `text` is a thinking summary rather than assistant output.
@@ -257,7 +257,7 @@ pub(crate) struct ResponsePart {
 
 /// A function call emitted by the model in the response.
 #[derive(Debug, Deserialize)]
-pub(crate) struct ResponseFunctionCall {
+pub struct ResponseFunctionCall {
     pub(crate) name: String,
     /// JSON object of arguments. Gemini returns this as a raw JSON object,
     /// not a serialized string -- we serialize to string for the canonical
@@ -269,7 +269,7 @@ pub(crate) struct ResponseFunctionCall {
 /// Token count breakdown from the response.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UsageMetadata {
+pub struct UsageMetadata {
     #[serde(default)]
     pub(crate) prompt_token_count: u32,
 

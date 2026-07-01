@@ -20,7 +20,7 @@ pub enum ParseError {
 /// One parsed SSE event: an optional `event:` name and the JSON-decoded
 /// `data:` payload. `[DONE]` sentinels arrive with `event = None` and
 /// `data_parsed = Value::String("[DONE]")`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseEventCmp {
     pub event: Option<String>,
     pub data_parsed: Value,
@@ -97,9 +97,9 @@ fn parse_sse_block(block: &str, event_index: usize) -> Result<Option<SseEventCmp
 /// event index.
 pub fn assert_sse_equal(actual: &[u8], expected: &[u8]) -> Result<(), DiffMessage> {
     let a = parse_sse_events(actual)
-        .map_err(|e| DiffMessage(format!("actual stream parse error: {}", e)))?;
+        .map_err(|e| DiffMessage(format!("actual stream parse error: {e}")))?;
     let e = parse_sse_events(expected)
-        .map_err(|err| DiffMessage(format!("expected stream parse error: {}", err)))?;
+        .map_err(|err| DiffMessage(format!("expected stream parse error: {err}")))?;
     if a.len() != e.len() {
         return Err(DiffMessage(format!(
             "sse event count mismatch: actual={}, expected={}",
@@ -116,8 +116,7 @@ pub fn assert_sse_equal(actual: &[u8], expected: &[u8]) -> Result<(), DiffMessag
         }
         if let Err(diff) = assert_json_equal_structural(&av.data_parsed, &ev.data_parsed, &[]) {
             return Err(DiffMessage(format!(
-                "sse data mismatch at index {}: {}",
-                i, diff
+                "sse data mismatch at index {i}: {diff}"
             )));
         }
     }
@@ -147,7 +146,7 @@ mod tests {
         let e = sse("event: foo\ndata: {}\n\nevent: BAZ\ndata: {}\n\n");
         let err = assert_sse_equal(&a, &e).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("name mismatch at index 1"), "got: {}", msg);
+        assert!(msg.contains("name mismatch at index 1"), "got: {msg}");
     }
 
     #[test]
@@ -156,7 +155,7 @@ mod tests {
         let e = sse("data: {\"x\":1}\n\ndata: {\"x\":3}\n\n");
         let err = assert_sse_equal(&a, &e).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("data mismatch at index 1"), "got: {}", msg);
+        assert!(msg.contains("data mismatch at index 1"), "got: {msg}");
     }
 
     #[test]

@@ -663,7 +663,7 @@ fn translate_image_source(id: &str, source: &serde_json::Value) -> Option<Respon
                 return None;
             }
             Some(ResponsesContentItem::InputImage {
-                image_url: format!("data:{};base64,{}", media_type, data),
+                image_url: format!("data:{media_type};base64,{data}"),
                 detail: None,
             })
         }
@@ -795,7 +795,7 @@ fn translate_tool_image_source(
                 return None;
             }
             Some(FunctionCallOutputContentItem::InputImage {
-                image_url: format!("data:{};base64,{}", media_type, data),
+                image_url: format!("data:{media_type};base64,{data}"),
                 detail: None,
             })
         }

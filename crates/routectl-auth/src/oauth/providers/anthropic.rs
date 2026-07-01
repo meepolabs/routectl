@@ -27,11 +27,11 @@ use crate::oauth::providers::{AuthParams, OAuthFlow, truncate};
 use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
-pub(crate) const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-pub(crate) const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
-pub(crate) const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-pub(crate) const MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/callback";
-pub(crate) const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
+pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+pub const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+pub const MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/callback";
+pub const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 
 /// Maximum number of bytes routectl will read from the token endpoint
 /// response. Real responses are well under 4 KiB; a 64 KiB cap leaves
@@ -46,7 +46,7 @@ const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
 /// `api.anthropic.com/v1/messages`. The others are claude-code-specific
 /// but harmless to include (parity with claude-code's tokens, less
 /// suspicious to Anthropic's heuristics).
-pub(crate) const SCOPES: &[&str] = &[
+pub const SCOPES: &[&str] = &[
     "user:profile",
     "user:inference",
     "user:sessions:claude_code",
@@ -54,7 +54,7 @@ pub(crate) const SCOPES: &[&str] = &[
     "user:file_upload",
 ];
 
-pub(crate) struct Anthropic;
+pub struct Anthropic;
 
 /// Stamp the claude.ai identity onto a single token-endpoint request.
 /// The claude.ai OAuth flow needs ONLY the claude-cli User-Agent -- it
@@ -287,7 +287,7 @@ pub(super) async fn decode_token_response_traced(
 /// Used in the structured `error_kind` field on refresh-failure trace
 /// events so operators can grep for the failure mode without scraping
 /// the human-readable message.
-fn error_kind_label(e: &OAuthError) -> &'static str {
+const fn error_kind_label(e: &OAuthError) -> &'static str {
     match e {
         OAuthError::Network(_) => "network",
         OAuthError::TokenEndpoint(_) => "token_endpoint",

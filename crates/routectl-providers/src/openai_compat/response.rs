@@ -57,7 +57,7 @@ pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<Chat
     let mut resp: ChatResponse = serde_json::from_value(preprocessed)
         .map_err(|e| Error::normalize_response(id, e.to_string()))?;
 
-    for choice in resp.choices.iter_mut() {
+    for choice in &mut resp.choices {
         apply_dialect_to_message(id, &mut choice.message, dialect)?;
     }
 
@@ -113,20 +113,20 @@ pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) -> Vec<&'static str
             .extras
             .get("completion_tokens_details")
             .and_then(|v| v.get("reasoning_tokens"))
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|n| n as u32);
     }
     if usage.cache_read_input_tokens.is_none() {
         usage.cache_read_input_tokens = usage
             .extras
             .get("prompt_cache_hit_tokens")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .or_else(|| {
                 usage
                     .extras
                     .get("prompt_tokens_details")
                     .and_then(|v| v.get("cached_tokens"))
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
             })
             .map(|n| n as u32);
     }
@@ -184,7 +184,7 @@ pub fn apply_stop_sequence_heuristic(
         Some(s) if !s.is_empty() => s,
         _ => return,
     };
-    for choice in chat_resp.choices.iter_mut() {
+    for choice in &mut chat_resp.choices {
         if choice.matched_stop_sequence.is_some() {
             continue;
         }
@@ -224,7 +224,7 @@ pub fn detect_matched_stop_sequence(text: Option<&str>, stops: &[String]) -> Opt
     // shorter "<" when both are configured. Stable on equal length.
     let mut ordered: Vec<&String> = stops.iter().filter(|s| !s.is_empty()).collect();
     ordered.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    for s in ordered.iter() {
+    for s in &ordered {
         // ASCII-safe on UTF-8 because `str::ends_with(&str)` aligns
         // on char boundaries. Note we trim trailing whitespace from
         // content but NOT from `stops` -- mirror trimming the stop
@@ -296,7 +296,7 @@ pub(crate) fn coalesce_reasoning_content_in_response(mut raw: Value) -> Value {
 /// non-null string. Always strips `reasoning_content` after.
 pub(crate) fn merge_reasoning_keys(obj: &mut serde_json::Map<String, Value>) {
     let rc = obj.remove("reasoning_content");
-    let r_is_null = obj.get("reasoning").is_none_or(|v| v.is_null());
+    let r_is_null = obj.get("reasoning").is_none_or(serde_json::Value::is_null);
     if r_is_null {
         // Either no `reasoning` key, or it's null. Promote rc if non-null.
         match rc {

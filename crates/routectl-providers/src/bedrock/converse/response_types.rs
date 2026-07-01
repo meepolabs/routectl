@@ -32,7 +32,7 @@ use serde_json::Value;
 /// pulled in via `additionalModelResponseFieldPaths` here.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConverseResponse {
+pub struct ConverseResponse {
     pub(crate) output: ConverseOutput,
     /// `"end_turn" | "tool_use" | "max_tokens" | "stop_sequence" |
     /// "guardrail_intervened" | "content_filtered" |
@@ -54,12 +54,12 @@ pub(crate) struct ConverseResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ConverseOutput {
+pub struct ConverseOutput {
     pub(crate) message: ConverseResponseMessage,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ConverseResponseMessage {
+pub struct ConverseResponseMessage {
     pub(crate) role: String,
     pub(crate) content: Vec<ConverseResponseContentBlock>,
 }
@@ -70,7 +70,7 @@ pub(crate) struct ConverseResponseMessage {
 /// without a rebuild.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub(crate) enum ConverseResponseContentBlock {
+pub enum ConverseResponseContentBlock {
     Text {
         text: String,
     },
@@ -87,7 +87,7 @@ pub(crate) enum ConverseResponseContentBlock {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConverseResponseToolUse {
+pub struct ConverseResponseToolUse {
     pub(crate) tool_use_id: String,
     pub(crate) name: String,
     pub(crate) input: Value,
@@ -99,7 +99,7 @@ pub(crate) struct ConverseResponseToolUse {
 /// base64-encoded bytes.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConverseReasoningContent {
+pub struct ConverseReasoningContent {
     #[serde(default)]
     pub(crate) reasoning_text: Option<ConverseReasoningText>,
     #[serde(default)]
@@ -107,7 +107,7 @@ pub(crate) struct ConverseReasoningContent {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ConverseReasoningText {
+pub struct ConverseReasoningText {
     pub(crate) text: String,
     #[serde(default)]
     pub(crate) signature: Option<String>,
@@ -121,7 +121,7 @@ pub(crate) struct ConverseReasoningText {
 /// the canonical `cache_creation` per-TTL object.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConverseUsage {
+pub struct ConverseUsage {
     #[serde(default)]
     pub(crate) input_tokens: u32,
     #[serde(default)]
@@ -138,7 +138,7 @@ pub(crate) struct ConverseUsage {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConverseCacheDetail {
+pub struct ConverseCacheDetail {
     pub(crate) input_tokens: u32,
     /// `"5m"` | `"1h"` -- mirrors the request-side `CachePoint.ttl`.
     pub(crate) ttl: String,
@@ -146,7 +146,7 @@ pub(crate) struct ConverseCacheDetail {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConverseMetrics {
+pub struct ConverseMetrics {
     pub(crate) latency_ms: u64,
 }
 
@@ -161,14 +161,14 @@ pub(crate) struct ConverseMetrics {
 // shapes.
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct StreamMessageStart {
+pub struct StreamMessageStart {
     #[serde(default)]
     pub(crate) role: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StreamContentBlockStart {
+pub struct StreamContentBlockStart {
     pub(crate) content_block_index: u32,
     #[serde(default)]
     pub(crate) start: Option<StreamContentBlockStartPayload>,
@@ -179,7 +179,7 @@ pub(crate) struct StreamContentBlockStart {
 /// without a typed start payload.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub(crate) enum StreamContentBlockStartPayload {
+pub enum StreamContentBlockStartPayload {
     ToolUse {
         #[serde(rename = "toolUse")]
         tool_use: StreamToolUseStart,
@@ -189,14 +189,14 @@ pub(crate) enum StreamContentBlockStartPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StreamToolUseStart {
+pub struct StreamToolUseStart {
     pub(crate) tool_use_id: String,
     pub(crate) name: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StreamContentBlockDelta {
+pub struct StreamContentBlockDelta {
     pub(crate) content_block_index: u32,
     #[serde(default)]
     pub(crate) delta: Option<StreamDelta>,
@@ -207,7 +207,7 @@ pub(crate) struct StreamContentBlockDelta {
 /// citation, image, toolResult) is populated per frame.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub(crate) enum StreamDelta {
+pub enum StreamDelta {
     Text {
         text: String,
     },
@@ -225,7 +225,7 @@ pub(crate) enum StreamDelta {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct StreamToolUseDelta {
+pub struct StreamToolUseDelta {
     /// Partial JSON arguments accumulated by the AWS SDK; concatenate
     /// all deltas for a given block to assemble the full tool input.
     pub(crate) input: String,
@@ -237,7 +237,7 @@ pub(crate) struct StreamToolUseDelta {
 /// safety-redacted bytes.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StreamReasoningDelta {
+pub struct StreamReasoningDelta {
     #[serde(default)]
     pub(crate) text: Option<String>,
     #[serde(default)]
@@ -248,13 +248,13 @@ pub(crate) struct StreamReasoningDelta {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StreamContentBlockStop {
+pub struct StreamContentBlockStop {
     pub(crate) content_block_index: u32,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StreamMessageStop {
+pub struct StreamMessageStop {
     #[serde(default)]
     pub(crate) stop_reason: Option<String>,
     #[serde(default)]
@@ -263,7 +263,7 @@ pub(crate) struct StreamMessageStop {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StreamMetadata {
+pub struct StreamMetadata {
     #[serde(default)]
     pub(crate) usage: Option<ConverseUsage>,
     #[serde(default)]

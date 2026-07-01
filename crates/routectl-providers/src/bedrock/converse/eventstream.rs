@@ -622,8 +622,7 @@ fn parse_payload<T: serde::de::DeserializeOwned>(
 ) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|e| {
         Error::Streaming(format!(
-            "bedrock converse-stream {} payload parse failed (provider={provider_id}): {e}",
-            label
+            "bedrock converse-stream {label} payload parse failed (provider={provider_id}): {e}"
         ))
     })
 }

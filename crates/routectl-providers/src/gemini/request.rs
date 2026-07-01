@@ -25,7 +25,7 @@ use super::types::{
 /// Build a `GenerateContentRequest` from a canonical `ChatRequest`.
 ///
 /// The config's `id` is used only for error attribution.
-pub(crate) fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
+pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContentRequest> {
     let system_instruction = build_system_instruction(req);
     let contents = build_contents(provider_id, req)?;
     let (tools, tool_config) = build_tools_and_config(req);
@@ -330,15 +330,14 @@ fn extract_text_from_part(part: &ContentPart) -> Option<String> {
 /// The canonical `Message.tool_calls` field carries `Vec<Value>` in the
 /// OpenAI shape: `{id, type:"function", function:{name, arguments}}`.
 fn tool_call_to_function_call_part(provider_id: &str, tc: &Value) -> Result<Option<Part>> {
-    let func = match tc.get("function") {
-        Some(f) => f,
-        None => {
-            tracing::debug!(
-                provider = %provider_id,
-                "gemini: tool_call missing 'function' field; skipping"
-            );
-            return Ok(None);
-        }
+    let func = if let Some(f) = tc.get("function") {
+        f
+    } else {
+        tracing::debug!(
+            provider = %provider_id,
+            "gemini: tool_call missing 'function' field; skipping"
+        );
+        return Ok(None);
     };
     let name = func
         .get("name")
@@ -392,7 +391,7 @@ fn build_tools_and_config(req: &ChatRequest) -> (Option<Vec<GeminiTool>>, Option
                 let description = func
                     .get("description")
                     .and_then(Value::as_str)
-                    .map(|s| s.to_string());
+                    .map(std::string::ToString::to_string);
                 let parameters = func.get("parameters").cloned();
                 declarations.push(FunctionDeclaration {
                     name,
@@ -555,7 +554,7 @@ fn build_response_format(req: &ChatRequest) -> (Option<String>, Option<Value>) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn text_part(text: String) -> Part {
+const fn text_part(text: String) -> Part {
     Part {
         text: Some(text),
         inline_data: None,
@@ -569,7 +568,7 @@ fn text_part(text: String) -> Part {
 /// A thinking part replayed back to the model on a follow-up turn. The
 /// `signature` is the opaque `thoughtSignature` Gemini handed back on a
 /// prior turn; the text is the reasoning summary.
-fn thought_part(text: String, signature: Option<String>) -> Part {
+const fn thought_part(text: String, signature: Option<String>) -> Part {
     Part {
         text: Some(text),
         inline_data: None,
@@ -580,7 +579,7 @@ fn thought_part(text: String, signature: Option<String>) -> Part {
     }
 }
 
-fn inline_data_part(inline_data: InlineData) -> Part {
+const fn inline_data_part(inline_data: InlineData) -> Part {
     Part {
         text: None,
         inline_data: Some(inline_data),
@@ -591,7 +590,7 @@ fn inline_data_part(inline_data: InlineData) -> Part {
     }
 }
 
-fn function_call_part(call: FunctionCallPart) -> Part {
+const fn function_call_part(call: FunctionCallPart) -> Part {
     Part {
         text: None,
         inline_data: None,
@@ -602,7 +601,7 @@ fn function_call_part(call: FunctionCallPart) -> Part {
     }
 }
 
-fn function_response_part(response: FunctionResponsePart) -> Part {
+const fn function_response_part(response: FunctionResponsePart) -> Part {
     Part {
         text: None,
         inline_data: None,
@@ -630,7 +629,7 @@ fn reasoning_details_to_thought_parts(details: &[ReasoningDetail]) -> Vec<Part> 
                 .payload
                 .get("thought_signature")
                 .and_then(Value::as_str)
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
             Some(thought_part(text.to_string(), signature))
         })
         .collect()
@@ -660,7 +659,7 @@ fn is_gemini_managed_key(key: &str) -> bool {
 /// dropped with a WARN so neither an operator nor a client smuggling
 /// extras through an ingress can clobber the assembled `contents` /
 /// `generationConfig` / `tools` / etc.
-pub(crate) fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value) {
+pub fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: &Value) {
     let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) else {
         return;
     };
@@ -678,10 +677,7 @@ pub(crate) fn merge_payload_extras(provider_id: &str, body: &mut Value, extras: 
 }
 
 fn mime_from_filename(filename: &str) -> &'static str {
-    let ext = filename
-        .rfind('.')
-        .map(|i| &filename[i + 1..])
-        .unwrap_or("");
+    let ext = filename.rfind('.').map_or("", |i| &filename[i + 1..]);
     match ext.to_lowercase().as_str() {
         "pdf" => "application/pdf",
         "jpg" | "jpeg" => "image/jpeg",

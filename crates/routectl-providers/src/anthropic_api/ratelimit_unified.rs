@@ -28,11 +28,11 @@ const UNIFIED_PREFIX: &str = "anthropic-ratelimit-unified-";
 /// Non-UTF8 header values are skipped silently -- the family carries
 /// only ASCII quota strings, so a non-UTF8 value is upstream
 /// misbehavior, not data routectl should surface or fail on.
-pub(crate) fn parse_unified_quota(headers: &HeaderMap) -> Option<AnthropicUnifiedQuota> {
+pub fn parse_unified_quota(headers: &HeaderMap) -> Option<AnthropicUnifiedQuota> {
     let mut quota = AnthropicUnifiedQuota::default();
     let mut saw_any = false;
 
-    for (name, value) in headers.iter() {
+    for (name, value) in headers {
         // `HeaderName::as_str()` is documented to always return lowercase
         // (http 1.x), so a borrow suffices -- no per-header allocation.
         let Some(suffix) = name.as_str().strip_prefix(UNIFIED_PREFIX) else {
@@ -54,7 +54,7 @@ pub(crate) fn parse_unified_quota(headers: &HeaderMap) -> Option<AnthropicUnifie
 /// once-per-flip log: steady state is `None` (silent), a flip into
 /// overage warns, a flip back out informs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OverageTransition {
+pub enum OverageTransition {
     /// Billing attribution flipped INTO overage on this response.
     EnteredOverage,
     /// Billing attribution flipped back OUT of overage on this response.
@@ -70,7 +70,7 @@ pub(crate) enum OverageTransition {
 /// `prior == None` is the first observation for this provider instance;
 /// only an entry INTO overage is worth a log there (a first observation
 /// that is already non-overage is the silent normal case).
-pub(crate) fn classify_overage_transition(
+pub fn classify_overage_transition(
     prior: Option<&str>,
     current: Option<&str>,
 ) -> Option<OverageTransition> {

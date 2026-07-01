@@ -29,14 +29,14 @@ use reqwest::Client;
 /// Separate concern from any first-byte timeout: first-byte covers the
 /// initial response delay before the stream opens; this covers a hang
 /// once bytes have started flowing.
-pub(crate) const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+pub const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Connect (TCP + TLS handshake) timeout for every shared client.
 /// Caps only the initial connection (not per-read). A hung connect to
 /// an unreachable upstream would otherwise stall paths not wrapped by
 /// the router request-timeout. 10s is generous for a public handshake
 /// and short enough to fail a black-holed connect fast.
-pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Build a `reqwest::Client` with the given optional User-Agent.
 ///

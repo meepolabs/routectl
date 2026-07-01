@@ -57,16 +57,16 @@ pub enum WatchTarget {
 }
 
 impl WatchTarget {
-    fn path(&self) -> &PathBuf {
+    const fn path(&self) -> &PathBuf {
         match self {
-            WatchTarget::Config(p) | WatchTarget::Credentials(p) => p,
+            Self::Config(p) | Self::Credentials(p) => p,
         }
     }
 
-    fn to_request(&self) -> ReloadRequest {
+    const fn to_request(&self) -> ReloadRequest {
         match self {
-            WatchTarget::Config(_) => ReloadRequest::Config,
-            WatchTarget::Credentials(_) => ReloadRequest::Credentials,
+            Self::Config(_) => ReloadRequest::Config,
+            Self::Credentials(_) => ReloadRequest::Credentials,
         }
     }
 }
@@ -133,26 +133,24 @@ pub fn spawn_watcher(
         // canonicalize fails; fall back to the textual path and emit a
         // one-line WARN so operators know the watcher may miss symlinked
         // targets until the file appears.
-        let resolved = match std::fs::canonicalize(raw_path) {
-            Ok(p) => p,
-            Err(_) => {
-                tracing::warn!(
-                    target = %raw_path.display(),
-                    "watch target canonicalize failed (file may not exist yet); \
-                     using textual path to derive parent directory",
-                );
-                raw_path.clone()
-            }
+        let resolved = if let Ok(p) = std::fs::canonicalize(raw_path) {
+            p
+        } else {
+            tracing::warn!(
+                target = %raw_path.display(),
+                "watch target canonicalize failed (file may not exist yet); \
+                 using textual path to derive parent directory",
+            );
+            raw_path.clone()
         };
-        let parent = match resolved.parent() {
-            Some(p) => p.to_path_buf(),
-            None => {
-                tracing::warn!(
-                    target = %raw_path.display(),
-                    "watch target has no parent directory; skipping",
-                );
-                continue;
-            }
+        let parent = if let Some(p) = resolved.parent() {
+            p.to_path_buf()
+        } else {
+            tracing::warn!(
+                target = %raw_path.display(),
+                "watch target has no parent directory; skipping",
+            );
+            continue;
         };
         if !watched_parents.insert(parent.clone()) {
             continue;
@@ -302,9 +300,7 @@ fn is_atomic_rewrite_remove(remove_path: &std::path::Path, batch: &[DebouncedEve
     batch.iter().any(|ev| {
         matches!(
             ev.kind,
-            EventKind::Create(_)
-                | EventKind::Modify(ModifyKind::Data(_))
-                | EventKind::Modify(ModifyKind::Name(_))
+            EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_))
         ) && ev.paths.iter().any(|p| basenames_match(p, remove_path))
     })
 }
@@ -329,13 +325,12 @@ async fn send_reload(tx: &mpsc::Sender<ReloadRequest>, req: ReloadRequest) {
 /// `EventKind::Modify(Metadata(_))`) so a `cat credentials.json`
 /// or a `chmod`/`touch`/`utimes` from another shell does not fire
 /// a spurious reload.
-fn is_reload_kind(kind: &EventKind) -> bool {
+const fn is_reload_kind(kind: &EventKind) -> bool {
     use notify::event::ModifyKind;
     matches!(
         kind,
         EventKind::Create(_)
-            | EventKind::Modify(ModifyKind::Data(_))
-            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_))
             | EventKind::Remove(_)
     )
 }
@@ -753,7 +748,7 @@ mod tests {
             make_event(EventKind::Remove(notify::event::RemoveKind::File), &target),
             make_event(EventKind::Create(notify::event::CreateKind::File), &target),
         ];
-        let targets = vec![WatchTarget::Config(target.clone())];
+        let targets = vec![WatchTarget::Config(target)];
 
         // Act
         let events = drive_handle_event_batch(batch, targets);
@@ -795,7 +790,7 @@ mod tests {
             EventKind::Remove(notify::event::RemoveKind::File),
             &target,
         )];
-        let targets = vec![WatchTarget::Config(target.clone())];
+        let targets = vec![WatchTarget::Config(target)];
 
         // Act
         let events = drive_handle_event_batch(batch, targets);
@@ -889,7 +884,7 @@ mod tests {
             )),
             &target,
         )];
-        let targets = vec![WatchTarget::Config(target.clone())];
+        let targets = vec![WatchTarget::Config(target)];
 
         // Act
         let events = drive_handle_event_batch(batch, targets);

@@ -206,7 +206,11 @@ fn select_message_content(text: String, parts: Vec<ContentPart>) -> MessageConte
 /// cannot drift between the two Anthropic-vocabulary egresses (the
 /// field NAMES differ -- `cache_creation_input_tokens` vs
 /// `cache_write_input_tokens` -- but the arithmetic is identical).
-pub(crate) fn sum_prompt_tokens(input_tokens: u32, cache_creation: u32, cache_read: u32) -> u32 {
+pub(crate) const fn sum_prompt_tokens(
+    input_tokens: u32,
+    cache_creation: u32,
+    cache_read: u32,
+) -> u32 {
     input_tokens
         .saturating_add(cache_creation)
         .saturating_add(cache_read)
@@ -259,7 +263,7 @@ pub(crate) fn reverse_tool_names(resp: &mut ChatResponse, map: &HashMap<String, 
     if map.is_empty() {
         return;
     }
-    for choice in resp.choices.iter_mut() {
+    for choice in &mut resp.choices {
         reverse_tool_calls(&mut choice.message.tool_calls, map);
         reverse_content_parts(&mut choice.message.content, map);
     }

@@ -17,7 +17,7 @@ use std::borrow::Cow;
 
 /// True iff `c` is in Anthropic's allowed tool-id charset
 /// `[a-zA-Z0-9_-]`.
-fn is_allowed_tool_id_char(c: char) -> bool {
+const fn is_allowed_tool_id_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
@@ -27,7 +27,7 @@ fn is_allowed_tool_id_char(c: char) -> bool {
 /// is REQUIRED so a sanitized tool_use id and the tool_result that
 /// correlates to it remain equal. An already-valid id borrows through
 /// without allocating.
-pub(crate) fn sanitize_tool_id(id: &str) -> Cow<'_, str> {
+pub fn sanitize_tool_id(id: &str) -> Cow<'_, str> {
     if id.chars().all(is_allowed_tool_id_char) {
         return Cow::Borrowed(id);
     }

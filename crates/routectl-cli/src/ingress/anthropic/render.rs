@@ -39,8 +39,7 @@ pub(super) fn render_messages_response(resp: ChatResponse) -> Value {
             Some("stop_sequence".to_string()),
             c.matched_stop_sequence
                 .as_deref()
-                .map(|s| Value::String(s.to_string()))
-                .unwrap_or(Value::Null),
+                .map_or(Value::Null, |s| Value::String(s.to_string())),
         ),
         Some(c) => (
             c.finish_reason
@@ -52,7 +51,7 @@ pub(super) fn render_messages_response(resp: ChatResponse) -> Value {
     };
     body.insert(
         "stop_reason".into(),
-        stop_reason.map(Value::String).unwrap_or(Value::Null),
+        stop_reason.map_or(Value::Null, Value::String),
     );
     body.insert("stop_sequence".into(), stop_sequence_value);
 

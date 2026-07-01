@@ -41,7 +41,7 @@ pub struct InMemoryProjectCache {
 
 impl InMemoryProjectCache {
     /// Construct with no cached value.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             inner: std::sync::RwLock::new(None),
         }

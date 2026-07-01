@@ -26,7 +26,7 @@ use super::types::SseDelta;
 
 /// Stable wire-ish tag for an open block kind, used in index-mismatch
 /// WARN lines. Mirrors the Anthropic `content_block.type` vocabulary.
-pub(super) fn block_type_name(open: &OpenBlockKind) -> &'static str {
+pub(super) const fn block_type_name(open: &OpenBlockKind) -> &'static str {
     match open {
         OpenBlockKind::Text { .. } => "text",
         OpenBlockKind::Thinking { .. } => "thinking",
@@ -330,7 +330,10 @@ mod tests {
         // Assert -- dropped, open block untouched.
         assert!(dropped.is_none(), "mismatched delta dropped");
         assert_eq!(
-            state.open_block.as_ref().map(|b| b.upstream_index()),
+            state
+                .open_block
+                .as_ref()
+                .map(super::super::sse::OpenBlockKind::upstream_index),
             Some(0),
             "open block must remain at its original index",
         );
@@ -373,7 +376,10 @@ mod tests {
         // Assert
         assert!(r.is_none(), "mismatched stop dropped");
         assert_eq!(
-            state.open_block.as_ref().map(|b| b.upstream_index()),
+            state
+                .open_block
+                .as_ref()
+                .map(super::super::sse::OpenBlockKind::upstream_index),
             Some(0),
             "open block must remain open",
         );
@@ -409,7 +415,10 @@ mod tests {
         // Assert
         assert!(r.is_none(), "mismatched delta dropped on unknown block");
         assert_eq!(
-            state.open_block.as_ref().map(|b| b.upstream_index()),
+            state
+                .open_block
+                .as_ref()
+                .map(super::super::sse::OpenBlockKind::upstream_index),
             Some(0),
         );
     }

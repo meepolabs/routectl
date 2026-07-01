@@ -162,7 +162,7 @@ async fn run_complete(router: Arc<Router>, target: String) -> Row {
                 .and_then(|d| d.format.as_deref())
                 .unwrap_or("-");
             let has_reasoning = msg.and_then(|m| m.reasoning.as_deref()).is_some();
-            let tokens = resp.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+            let tokens = resp.usage.as_ref().map_or(0, |u| u.total_tokens);
             Row {
                 target,
                 ok: true,
@@ -374,7 +374,10 @@ async fn opencode_go_complete_matrix() {
         return;
     };
 
-    let targets: Vec<String> = OPENCODE_GO_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = OPENCODE_GO_MODELS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     let total = targets.len();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -413,7 +416,7 @@ async fn openrouter_complete_matrix() {
         return;
     };
 
-    let targets: Vec<String> = OPENROUTER_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = OPENROUTER_MODELS.iter().map(|s| (*s).to_string()).collect();
     let total = targets.len();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -446,7 +449,7 @@ async fn nim_complete_matrix() {
         return;
     };
 
-    let targets: Vec<String> = NIM_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = NIM_MODELS.iter().map(|s| (*s).to_string()).collect();
     let total = targets.len();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -696,7 +699,7 @@ async fn bedrock_complete_matrix() {
         return;
     };
 
-    let targets: Vec<String> = BEDROCK_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = BEDROCK_MODELS.iter().map(|s| (*s).to_string()).collect();
     let total = targets.len();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -825,11 +828,11 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
     assert!(!text1.trim().is_empty(), "non-empty text");
     let cache_creation_1 = wire1["usage"]
         .get("cache_creation_input_tokens")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let cache_read_1 = wire1["usage"]
         .get("cache_read_input_tokens")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     println!(
         "anthropic-ingress -> bedrock call#1: text={text1:?} cache_create={cache_creation_1} cache_read={cache_read_1}"
@@ -844,11 +847,11 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
 
     let cache_read_2 = wire2["usage"]
         .get("cache_read_input_tokens")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let cache_creation_2 = wire2["usage"]
         .get("cache_creation_input_tokens")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     println!(
         "anthropic-ingress -> bedrock call#2: cache_create={cache_creation_2} cache_read={cache_read_2}"
@@ -946,7 +949,7 @@ async fn bedrock_stream_subset() {
         return;
     };
 
-    let subset: Vec<String> = subset_static.iter().map(|s| s.to_string()).collect();
+    let subset: Vec<String> = subset_static.iter().map(|s| (*s).to_string()).collect();
     let r = router.clone();
     let rows = run_matrix(subset, move |t| {
         let r = r.clone();
@@ -1094,7 +1097,7 @@ async fn bedrock_converse_complete_matrix() {
 
     let targets: Vec<String> = BEDROCK_CONVERSE_MODELS
         .iter()
-        .map(|s| s.to_string())
+        .map(|s| (*s).to_string())
         .collect();
     let total = targets.len();
     let r = router.clone();
@@ -1121,7 +1124,7 @@ async fn bedrock_converse_stream_matrix() {
 
     let targets: Vec<String> = BEDROCK_CONVERSE_MODELS
         .iter()
-        .map(|s| s.to_string())
+        .map(|s| (*s).to_string())
         .collect();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -1225,7 +1228,7 @@ async fn openai_responses_complete_matrix() {
 
     let targets: Vec<String> = OPENAI_RESPONSES_MODELS
         .iter()
-        .map(|s| s.to_string())
+        .map(|s| (*s).to_string())
         .collect();
     let total = targets.len();
     let r = router.clone();
@@ -1252,7 +1255,7 @@ async fn openai_responses_stream_matrix() {
 
     let targets: Vec<String> = OPENAI_RESPONSES_MODELS
         .iter()
-        .map(|s| s.to_string())
+        .map(|s| (*s).to_string())
         .collect();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -1341,7 +1344,7 @@ async fn gemini_complete_matrix() {
         return;
     };
 
-    let targets: Vec<String> = GEMINI_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = GEMINI_MODELS.iter().map(|s| (*s).to_string()).collect();
     let total = targets.len();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
@@ -1365,7 +1368,7 @@ async fn gemini_stream_matrix() {
         return;
     };
 
-    let targets: Vec<String> = GEMINI_MODELS.iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = GEMINI_MODELS.iter().map(|s| (*s).to_string()).collect();
     let r = router.clone();
     let rows = run_matrix(targets, move |t| {
         let r = r.clone();
@@ -1603,7 +1606,7 @@ mod oauth_codex {
                 _ => "<non-text>".into(),
             })
             .unwrap_or_default();
-        let tokens = resp.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+        let tokens = resp.usage.as_ref().map_or(0, |u| u.total_tokens);
         eprintln!(
             "PASS oauth-codex complete model={MODEL} account_id={account_id} \
              tokens={tokens} content={preview:?}"
@@ -1967,7 +1970,7 @@ mod oauth_antigravity {
                 _ => "<non-text>".into(),
             })
             .unwrap_or_default();
-        let tokens = resp.usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+        let tokens = resp.usage.as_ref().map_or(0, |u| u.total_tokens);
         eprintln!(
             "PASS oauth-antigravity complete model={model} tokens={tokens} content={preview:?}"
         );

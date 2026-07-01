@@ -167,7 +167,7 @@ impl TokenRecord {
     /// or already in the past. Saturates at zero on past-expiry so a
     /// clock that jumps far backward does not produce a weird "valid"
     /// signal.
-    pub fn near_expiry(&self, lead_secs: u64, now_unix: u64) -> bool {
+    pub const fn near_expiry(&self, lead_secs: u64, now_unix: u64) -> bool {
         self.expires_at_unix.saturating_sub(now_unix) < lead_secs
     }
 }
@@ -212,7 +212,7 @@ impl Default for CredentialsFile {
 }
 
 impl CredentialsFile {
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             providers: BTreeMap::new(),

@@ -24,7 +24,7 @@ pub struct UsageDb {
 
 impl UsageDb {
     /// Borrow the underlying connection.
-    pub fn conn(&self) -> &Connection {
+    pub const fn conn(&self) -> &Connection {
         &self.conn
     }
 

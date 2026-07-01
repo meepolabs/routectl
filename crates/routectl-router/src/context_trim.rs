@@ -319,10 +319,9 @@ fn estimate_total_tokens(req: &ChatRequest) -> u64 {
 /// Rough token estimate for a message-index range: summed serialized byte
 /// length of those messages / 4.
 fn estimate_messages_tokens(req: &ChatRequest, range: Range<usize>) -> u64 {
-    req.messages
-        .get(range)
-        .map(|msgs| msgs.iter().map(serialized_len).sum::<u64>() / BYTES_PER_TOKEN_ESTIMATE)
-        .unwrap_or(0)
+    req.messages.get(range).map_or(0, |msgs| {
+        msgs.iter().map(serialized_len).sum::<u64>() / BYTES_PER_TOKEN_ESTIMATE
+    })
 }
 
 /// Rough token estimate of a single JSON value's serialized length / 4.
@@ -333,7 +332,7 @@ fn estimate_value_tokens(value: &Value) -> u64 {
 }
 
 /// Rough token estimate of a string's byte length / 4.
-fn estimate_str_tokens(s: &str) -> u64 {
+const fn estimate_str_tokens(s: &str) -> u64 {
     (s.len() as u64) / BYTES_PER_TOKEN_ESTIMATE
 }
 
@@ -717,7 +716,7 @@ mod tests {
         let fp_base = trimmed_prefix_fingerprint(&base, &plan);
 
         // Replace the first message (front head) content.
-        let mut perturbed = base.clone();
+        let mut perturbed = base;
         perturbed.messages[0] = user_msg("completely different first message XXXX");
         let plan_p = propose_steady_state_trim(&perturbed, &params).expect("plan perturbed");
         let fp_perturbed = trimmed_prefix_fingerprint(&perturbed, &plan_p);
@@ -756,7 +755,7 @@ mod tests {
         assert_eq!(o2, ShadowOutcome::Stable);
 
         // Different fingerprint (perturbed front): Misfire.
-        let mut perturbed = base.clone();
+        let mut perturbed = base;
         perturbed.messages[0] = user_msg("different first message for misfire test");
         let plan_p = propose_steady_state_trim(&perturbed, &params).expect("plan p");
         let fp_p = trimmed_prefix_fingerprint(&perturbed, &plan_p);

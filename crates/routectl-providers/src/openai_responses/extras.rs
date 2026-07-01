@@ -165,8 +165,7 @@ fn operator_set_include(req: &ChatRequest) -> bool {
         .as_ref()
         .and_then(|v| v.as_object())
         .and_then(|o| o.get("include"))
-        .map(|v| v.is_array())
-        .unwrap_or(false)
+        .is_some_and(serde_json::Value::is_array)
 }
 
 /// Apply an operator-supplied `store` override. For `ChatgptOauth`

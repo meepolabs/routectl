@@ -80,15 +80,15 @@ pub struct Fixture {
 }
 
 /// File names expected inside a fixture directory.
-pub(crate) const META_JSON: &str = "meta.json";
-pub(crate) const INGRESS_BODY: &str = "ingress_request.json";
-pub(crate) const INGRESS_HEADERS: &str = "ingress_request.headers.json";
-pub(crate) const OUTGOING_BODY: &str = "outgoing_request.json";
-pub(crate) const OUTGOING_HEADERS: &str = "outgoing_request.headers.json";
-pub(crate) const UPSTREAM_BODY: &str = "upstream_response.json";
-pub(crate) const UPSTREAM_HEADERS: &str = "upstream_response.headers.json";
-pub(crate) const EGRESS_BODY: &str = "egress_response.json";
-pub(crate) const EGRESS_HEADERS: &str = "egress_response.headers.json";
+pub const META_JSON: &str = "meta.json";
+pub const INGRESS_BODY: &str = "ingress_request.json";
+pub const INGRESS_HEADERS: &str = "ingress_request.headers.json";
+pub const OUTGOING_BODY: &str = "outgoing_request.json";
+pub const OUTGOING_HEADERS: &str = "outgoing_request.headers.json";
+pub const UPSTREAM_BODY: &str = "upstream_response.json";
+pub const UPSTREAM_HEADERS: &str = "upstream_response.headers.json";
+pub const EGRESS_BODY: &str = "egress_response.json";
+pub const EGRESS_HEADERS: &str = "egress_response.headers.json";
 
 /// Load one fixture directory. The directory's last path component
 /// becomes `Fixture.name`. Validation rules are documented in
@@ -407,11 +407,10 @@ mod tests {
             ReplayError::UnexpectedFilePresent { path } => {
                 assert!(
                     path.contains(UPSTREAM_BODY),
-                    "error did not name the stray file: {}",
-                    path
+                    "error did not name the stray file: {path}"
                 );
             }
-            other => panic!("expected UnexpectedFilePresent, got {:?}", other),
+            other => panic!("expected UnexpectedFilePresent, got {other:?}"),
         }
     }
 
@@ -433,11 +432,10 @@ mod tests {
             ReplayError::UnexpectedFilePresent { path } => {
                 assert!(
                     path.contains(EGRESS_HEADERS),
-                    "error did not name the stray file: {}",
-                    path
+                    "error did not name the stray file: {path}"
                 );
             }
-            other => panic!("expected UnexpectedFilePresent, got {:?}", other),
+            other => panic!("expected UnexpectedFilePresent, got {other:?}"),
         }
     }
 
@@ -453,8 +451,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains(OUTGOING_BODY),
-            "error did not name the missing file: {}",
-            msg
+            "error did not name the missing file: {msg}"
         );
     }
 
@@ -470,8 +467,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains(UPSTREAM_BODY),
-            "error did not name the missing file: {}",
-            msg
+            "error did not name the missing file: {msg}"
         );
     }
 

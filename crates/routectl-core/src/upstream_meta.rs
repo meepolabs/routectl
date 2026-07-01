@@ -44,7 +44,7 @@ impl UpstreamMeta {
     /// Construct an `UpstreamMeta` carrying only the Anthropic unified
     /// quota family. The common shape today; a thin ctor keeps call
     /// sites free of struct-update churn when new sub-structs land.
-    pub fn from_anthropic_unified(quota: AnthropicUnifiedQuota) -> Self {
+    pub const fn from_anthropic_unified(quota: AnthropicUnifiedQuota) -> Self {
         Self {
             anthropic_unified: Some(quota),
         }

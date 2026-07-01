@@ -19,7 +19,7 @@ use routectl_core::CacheControl;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
-pub(crate) struct AnthropicRequest {
+pub struct AnthropicRequest {
     pub(crate) model: String,
     pub(crate) messages: Vec<AnthropicMessage>,
     pub(crate) max_tokens: u32,
@@ -62,14 +62,14 @@ pub(crate) struct AnthropicRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct AnthropicMessage {
+pub struct AnthropicMessage {
     pub(crate) role: AnthropicRole,
     pub(crate) content: AnthropicContent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum AnthropicRole {
+pub enum AnthropicRole {
     User,
     Assistant,
 }
@@ -78,7 +78,7 @@ pub(crate) enum AnthropicRole {
 /// content blocks (assistant turns that may carry thinking blocks).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
-pub(crate) enum AnthropicContent {
+pub enum AnthropicContent {
     Text(String),
     Blocks(Vec<ContentBlock>),
 }
@@ -87,13 +87,13 @@ pub(crate) enum AnthropicContent {
 /// of typed text blocks with per-block cache_control.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
-pub(crate) enum AnthropicSystem {
+pub enum AnthropicSystem {
     Text(String),
     Blocks(Vec<AnthropicSystemBlock>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct AnthropicSystemBlock {
+pub struct AnthropicSystemBlock {
     #[serde(rename = "type")]
     pub(crate) kind: String,
     pub(crate) text: String,
@@ -110,7 +110,7 @@ pub(crate) struct AnthropicSystemBlock {
 /// Anthropic-in / Anthropic-out path keeps working when Anthropic
 /// ships a new block type before routectl knows about it.
 #[derive(Debug, Clone)]
-pub(crate) enum ContentBlock {
+pub enum ContentBlock {
     Text {
         text: String,
         cache_control: Option<CacheControl>,
@@ -159,15 +159,15 @@ impl Serialize for ContentBlock {
         // it. Easier than a manual SerializeStruct dance per variant.
         use serde_json::json;
         let v: Value = match self {
-            ContentBlock::Text {
+            Self::Text {
                 text,
                 cache_control,
             } => merge_cc(json!({"type": "text", "text": text}), cache_control),
-            ContentBlock::Image {
+            Self::Image {
                 source,
                 cache_control,
             } => merge_cc(json!({"type": "image", "source": source}), cache_control),
-            ContentBlock::Document {
+            Self::Document {
                 source,
                 cache_control,
                 title,
@@ -184,7 +184,7 @@ impl Serialize for ContentBlock {
                 }
                 merge_cc(Value::Object(obj), cache_control)
             }
-            ContentBlock::Thinking {
+            Self::Thinking {
                 thinking,
                 signature,
                 cache_control,
@@ -192,14 +192,14 @@ impl Serialize for ContentBlock {
                 json!({"type": "thinking", "thinking": thinking, "signature": signature}),
                 cache_control,
             ),
-            ContentBlock::RedactedThinking {
+            Self::RedactedThinking {
                 data,
                 cache_control,
             } => merge_cc(
                 json!({"type": "redacted_thinking", "data": data}),
                 cache_control,
             ),
-            ContentBlock::ToolUse {
+            Self::ToolUse {
                 id,
                 name,
                 input,
@@ -208,7 +208,7 @@ impl Serialize for ContentBlock {
                 json!({"type": "tool_use", "id": id, "name": name, "input": input}),
                 cache_control,
             ),
-            ContentBlock::ToolResult {
+            Self::ToolResult {
                 tool_use_id,
                 content,
                 cache_control,
@@ -223,7 +223,7 @@ impl Serialize for ContentBlock {
                 }
                 merge_cc(Value::Object(obj), cache_control)
             }
-            ContentBlock::Other {
+            Self::Other {
                 type_tag,
                 cache_control,
                 extras,
@@ -255,7 +255,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
 
         let type_tag = obj
             .remove("type")
-            .and_then(|t| t.as_str().map(|s| s.to_string()))
+            .and_then(|t| t.as_str().map(std::string::ToString::to_string))
             .ok_or_else(|| D::Error::custom("missing `type` field"))?;
         let cache_control = obj
             .remove("cache_control")
@@ -264,11 +264,11 @@ impl<'de> Deserialize<'de> for ContentBlock {
             .map_err(D::Error::custom)?;
 
         match type_tag.as_str() {
-            "text" => Ok(ContentBlock::Text {
+            "text" => Ok(Self::Text {
                 text: take_str(obj, "text").map_err(D::Error::custom)?,
                 cache_control,
             }),
-            "image" => Ok(ContentBlock::Image {
+            "image" => Ok(Self::Image {
                 source: obj
                     .remove("source")
                     .ok_or_else(|| D::Error::custom("image missing source"))?,
@@ -280,25 +280,25 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     .ok_or_else(|| D::Error::custom("document missing source"))?;
                 let title = obj
                     .remove("title")
-                    .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    .and_then(|v| v.as_str().map(std::string::ToString::to_string));
                 let citations = obj.remove("citations");
-                Ok(ContentBlock::Document {
+                Ok(Self::Document {
                     source,
                     cache_control,
                     title,
                     citations,
                 })
             }
-            "thinking" => Ok(ContentBlock::Thinking {
+            "thinking" => Ok(Self::Thinking {
                 thinking: take_str(obj, "thinking").map_err(D::Error::custom)?,
                 signature: take_str(obj, "signature").map_err(D::Error::custom)?,
                 cache_control,
             }),
-            "redacted_thinking" => Ok(ContentBlock::RedactedThinking {
+            "redacted_thinking" => Ok(Self::RedactedThinking {
                 data: take_str(obj, "data").map_err(D::Error::custom)?,
                 cache_control,
             }),
-            "tool_use" => Ok(ContentBlock::ToolUse {
+            "tool_use" => Ok(Self::ToolUse {
                 id: take_str(obj, "id").map_err(D::Error::custom)?,
                 name: take_str(obj, "name").map_err(D::Error::custom)?,
                 input: obj
@@ -310,14 +310,14 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 let tool_use_id = take_str(obj, "tool_use_id").map_err(D::Error::custom)?;
                 let content = obj.remove("content").unwrap_or(Value::Null);
                 let is_error = obj.remove("is_error").and_then(|v| v.as_bool());
-                Ok(ContentBlock::ToolResult {
+                Ok(Self::ToolResult {
                     tool_use_id,
                     content,
                     cache_control,
                     is_error,
                 })
             }
-            other => Ok(ContentBlock::Other {
+            other => Ok(Self::Other {
                 type_tag: other.to_string(),
                 cache_control,
                 // Anything left in obj is the forward-compat payload.
@@ -329,7 +329,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
 
 fn take_str(obj: &mut Map<String, Value>, key: &str) -> Result<String, String> {
     obj.remove(key)
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .and_then(|v| v.as_str().map(std::string::ToString::to_string))
         .ok_or_else(|| format!("missing string field `{key}`"))
 }
 
@@ -339,7 +339,7 @@ fn take_str(obj: &mut Map<String, Value>, key: &str) -> Result<String, String> {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ThinkingConfig {
+pub enum ThinkingConfig {
     Enabled {
         budget_tokens: u32,
     },
@@ -361,7 +361,7 @@ pub(crate) enum ThinkingConfig {
 /// `req.reasoning.effort` carries through verbatim ("low", "medium",
 /// "high", "xhigh", "max", or anything Anthropic adds later).
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct OutputConfig {
+pub struct OutputConfig {
     pub(crate) effort: String,
 }
 
@@ -374,7 +374,7 @@ pub(crate) struct OutputConfig {
 /// passes through arbitrary JSON for builtin and forward-compat tool
 /// shapes (`bash_*`, `code_execution_*`, `web_search_*`, ...).
 #[derive(Debug, Clone)]
-pub(crate) enum AnthropicTool {
+pub enum AnthropicTool {
     Custom {
         name: String,
         description: Option<String>,
@@ -390,7 +390,7 @@ pub(crate) enum AnthropicTool {
 impl Serialize for AnthropicTool {
     fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         match self {
-            AnthropicTool::Custom {
+            Self::Custom {
                 name,
                 description,
                 input_schema,
@@ -421,7 +421,7 @@ impl Serialize for AnthropicTool {
                 }
                 Value::Object(obj).serialize(ser)
             }
-            AnthropicTool::Builtin(v) => v.serialize(ser),
+            Self::Builtin(v) => v.serialize(ser),
         }
     }
 }
@@ -431,7 +431,7 @@ impl Serialize for AnthropicTool {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AnthropicResponse {
+pub struct AnthropicResponse {
     pub(crate) id: String,
     pub(crate) model: String,
     pub(crate) content: Vec<ContentBlock>,
@@ -458,7 +458,7 @@ pub(crate) struct AnthropicResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AnthropicUsage {
+pub struct AnthropicUsage {
     pub(crate) input_tokens: u32,
     pub(crate) output_tokens: u32,
     #[serde(default)]
@@ -484,7 +484,7 @@ pub(crate) struct AnthropicUsage {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AnthropicCacheCreation {
+pub struct AnthropicCacheCreation {
     #[serde(default)]
     pub(crate) ephemeral_5m_input_tokens: Option<u32>,
     #[serde(default)]
@@ -500,17 +500,17 @@ pub(crate) struct AnthropicCacheCreation {
 // live in the sibling `types_sse` module so this file stays under the
 // project's 800-LOC ceiling. They re-export from here so consumers
 // keep importing via `super::types::SseEvent`.
-pub(crate) use super::types_sse::{SseContentBlockStart, SseDelta, SseEvent};
+pub use super::types_sse::{SseContentBlockStart, SseDelta, SseEvent};
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct SseMessage {
+pub struct SseMessage {
     pub(crate) id: String,
     pub(crate) model: String,
     pub(crate) usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct SseMessageDelta {
+pub struct SseMessageDelta {
     pub(crate) stop_reason: Option<String>,
     /// Matched stop sequence on the `message_delta.delta` payload.
     /// Anthropic streaming emits this alongside `stop_reason` when
@@ -523,7 +523,7 @@ pub(crate) struct SseMessageDelta {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct SseDeltaUsage {
+pub struct SseDeltaUsage {
     /// Real Anthropic and routectl's own Anthropic ingress render
     /// `input_tokens` in `message_delta.usage` (mirroring the value
     /// from `message_start.usage` with the final post-cache count).

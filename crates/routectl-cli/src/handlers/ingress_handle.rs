@@ -115,8 +115,7 @@ fn header_truthy(headers: &HeaderMap, name: &str) -> bool {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
-        .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+        .is_some_and(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
 /// Render an `axum::extract::rejection::JsonRejection` into a properly
@@ -722,18 +721,18 @@ pub(crate) fn anthropic_error_type(
         return member;
     }
     match (err_type, status.as_u16()) {
-        ("unknown_alias", _) | ("unknown_provider", _) => "not_found_error",
-        ("bad_request", _)
-        | ("validation_error", _)
-        | ("payload_too_large", _)
-        | ("unsupported_media_type", _) => "invalid_request_error",
-        ("auth_error", _) | ("authentication_error", _) => "authentication_error",
+        ("unknown_alias" | "unknown_provider", _) => "not_found_error",
+        (
+            "bad_request" | "validation_error" | "payload_too_large" | "unsupported_media_type",
+            _,
+        ) => "invalid_request_error",
+        ("auth_error" | "authentication_error", _) => "authentication_error",
         ("upstream_error", 401) => "authentication_error",
         ("upstream_error", 403) => "permission_error",
         ("upstream_error", 413) => "request_too_large",
         ("upstream_error", 429) => "rate_limit_error",
-        ("upstream_error", 503) | ("upstream_error", 529) => "overloaded_error",
-        ("upstream_error", _) | ("streaming_error", _) | ("bad_gateway", _) => "api_error",
+        ("upstream_error", 503 | 529) => "overloaded_error",
+        ("upstream_error" | "streaming_error" | "bad_gateway", _) => "api_error",
         (_, _) => "api_error",
     }
 }

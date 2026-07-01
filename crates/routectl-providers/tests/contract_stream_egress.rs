@@ -164,7 +164,7 @@ mod scenario_7_basic_stream_sequence {
     /// content_block_delta frames, content_block_stop, message_delta
     /// (carrying stop_reason + usage), message_stop. Mirrors what
     /// real api.anthropic.com emits for a two-token completion.
-    fn anthropic_sse_body() -> &'static str {
+    const fn anthropic_sse_body() -> &'static str {
         concat!(
             "event: message_start\n",
             "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s7\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-opus\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
@@ -187,7 +187,7 @@ mod scenario_7_basic_stream_sequence {
     /// deltas + a terminal finish_reason chunk + `[DONE]` sentinel.
     /// Mirrors the openai.com / OpenRouter chat-completions stream
     /// shape used by all openai-compat hosts.
-    fn openai_sse_body() -> &'static str {
+    const fn openai_sse_body() -> &'static str {
         concat!(
             "data: {\"id\":\"chunk-s7\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
             "data: {\"id\":\"chunk-s7\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":\"stop\"}]}\n\n",
@@ -339,7 +339,7 @@ mod scenario_8_post_done_trailer {
     /// AFTER `[DONE]`. The chunk has an empty `choices` array (no
     /// content), which would normally still parse fine, but the
     /// parser must stop at `[DONE]` regardless and not look at it.
-    fn openai_sse_body_with_post_done_trailer() -> &'static str {
+    const fn openai_sse_body_with_post_done_trailer() -> &'static str {
         concat!(
             "data: {\"id\":\"chunk-s8\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
             "data: [DONE]\n\n",

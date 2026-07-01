@@ -174,7 +174,7 @@ impl IngressStreamState for ResponsesStreamState {
 // ---------------------------------------------------------------------------
 
 impl IngressAdapter for ResponsesIngress {
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "openai-responses"
     }
 

@@ -704,7 +704,7 @@ mod tests {
         // Text content
         match &msg.content {
             MessageContent::Text(t) => assert_eq!(t, "The answer is 42."),
-            other => panic!("expected Text content, got {:?}", other),
+            other => panic!("expected Text content, got {other:?}"),
         }
 
         // Reasoning details
@@ -1180,7 +1180,7 @@ mod tests {
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
         match &resp.choices[0].message.content {
             MessageContent::Text(t) => assert_eq!(t, "Integration test response."),
-            other => panic!("expected Text content, got {:?}", other),
+            other => panic!("expected Text content, got {other:?}"),
         }
         assert_eq!(resp.routectl_provider.as_deref(), Some("test-anthropic"));
     }
@@ -1262,13 +1262,11 @@ mod tests {
 
         assert!(
             text_chunks.contains(&"Hi!".to_string()),
-            "expected 'Hi!' in {:?}",
-            text_chunks
+            "expected 'Hi!' in {text_chunks:?}"
         );
         assert!(
             finish_reasons.contains(&"stop".to_string()),
-            "expected 'stop' in {:?}",
-            finish_reasons
+            "expected 'stop' in {finish_reasons:?}"
         );
     }
 
@@ -1342,18 +1340,15 @@ mod tests {
 
         assert!(
             errors.is_empty(),
-            "trailing [DONE] must not produce stream errors: {:?}",
-            errors
+            "trailing [DONE] must not produce stream errors: {errors:?}"
         );
         assert!(
             text_chunks.contains(&"Hi!".to_string()),
-            "expected 'Hi!' in {:?}",
-            text_chunks
+            "expected 'Hi!' in {text_chunks:?}"
         );
         assert!(
             finish_reasons.contains(&"stop".to_string()),
-            "expected 'stop' in {:?}",
-            finish_reasons
+            "expected 'stop' in {finish_reasons:?}"
         );
     }
 

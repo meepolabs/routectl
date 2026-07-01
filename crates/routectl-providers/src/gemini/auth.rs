@@ -15,14 +15,14 @@ use routectl_core::Result;
 /// Returns the modified builder. Infallible for a static key; the
 /// `Result` wrapper keeps the signature uniform with other provider
 /// auth modules that may return validation errors.
-pub(crate) fn apply(rb: RequestBuilder, key: &str) -> Result<RequestBuilder> {
+pub fn apply(rb: RequestBuilder, key: &str) -> Result<RequestBuilder> {
     Ok(rb.header("x-goog-api-key", key))
 }
 
 /// Apply `Authorization: Bearer <token>` to an in-flight `RequestBuilder`.
 /// Used by the Cloud Code egress, which authenticates with an OAuth bearer
 /// token rather than the public surface's `x-goog-api-key`.
-pub(crate) fn apply_bearer(rb: RequestBuilder, token: &str) -> Result<RequestBuilder> {
+pub fn apply_bearer(rb: RequestBuilder, token: &str) -> Result<RequestBuilder> {
     Ok(rb.header("authorization", format!("Bearer {token}")))
 }
 
@@ -35,7 +35,7 @@ mod tests {
         req.headers()
             .get(name)
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     }
 
     #[test]

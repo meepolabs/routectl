@@ -158,7 +158,7 @@ impl ResolvedModel {
         }
     }
 
-    pub fn with_supports_adaptive_thinking(mut self, val: bool) -> Self {
+    pub const fn with_supports_adaptive_thinking(mut self, val: bool) -> Self {
         self.supports_adaptive_thinking = val;
         self
     }
@@ -176,17 +176,17 @@ impl ResolvedModel {
         self
     }
 
-    pub fn with_max_thinking_budget(mut self, budget: u32) -> Self {
+    pub const fn with_max_thinking_budget(mut self, budget: u32) -> Self {
         self.max_thinking_budget = budget;
         self
     }
 
-    pub fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
+    pub const fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
         self.reasoning_dialect = Some(d);
         self
     }
 
-    pub fn with_history_reasoning(mut self, h: HistoryReasoning) -> Self {
+    pub const fn with_history_reasoning(mut self, h: HistoryReasoning) -> Self {
         self.history_reasoning = Some(h);
         self
     }
@@ -217,7 +217,7 @@ impl ResolvedModel {
     /// Set the per-model `max_output_tokens` ceiling. `0` is the
     /// sentinel for "no model override" -- the consuming Anthropic-
     /// shape egresses fall through to their hardcoded 64000 baseline.
-    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
+    pub const fn with_max_output_tokens(mut self, tokens: u32) -> Self {
         self.max_output_tokens = tokens;
         self
     }
@@ -232,7 +232,7 @@ impl ResolvedModel {
 
     /// Set whether the response `routectl_provider` field is exposed to
     /// the client for this model. Defaults to `true`.
-    pub fn with_visible_routectl_provider(mut self, b: bool) -> Self {
+    pub const fn with_visible_routectl_provider(mut self, b: bool) -> Self {
         self.visible_routectl_provider = b;
         self
     }
@@ -285,7 +285,10 @@ impl std::fmt::Debug for ResolvedModel {
             .field("visible_routectl_provider", &self.visible_routectl_provider)
             .field(
                 "auth_secret_ref",
-                &self.auth_secret_ref.as_ref().map(|sr| sr.to_string()),
+                &self
+                    .auth_secret_ref
+                    .as_ref()
+                    .map(std::string::ToString::to_string),
             )
             .field(
                 "seat_state_keys",

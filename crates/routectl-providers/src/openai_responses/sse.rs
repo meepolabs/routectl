@@ -91,18 +91,18 @@ enum BlockState {
 impl BlockState {
     /// Short tag for log context. Cheap (no allocation) and stable
     /// across the lifetime of the state machine.
-    fn tag(&self) -> &'static str {
+    const fn tag(&self) -> &'static str {
         match self {
-            BlockState::Text { .. } => BLOCK_TAG_TEXT,
-            BlockState::Reasoning { .. } => BLOCK_TAG_REASONING,
-            BlockState::ToolUse { .. } => BLOCK_TAG_TOOL_USE,
+            Self::Text { .. } => BLOCK_TAG_TEXT,
+            Self::Reasoning { .. } => BLOCK_TAG_REASONING,
+            Self::ToolUse { .. } => BLOCK_TAG_TOOL_USE,
         }
     }
 }
 
 /// Persistent state across all SSE events for one streaming response.
 #[derive(Debug, Default)]
-pub(crate) struct ResponsesStreamState {
+pub struct ResponsesStreamState {
     /// Set from `response.created.response.id` (or the first event
     /// that carries an id). Threaded onto every emitted chunk so
     /// OpenAI SSE clients can correlate.
@@ -275,7 +275,7 @@ impl ResponsesStreamState {
                     .get("encrypted_content")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string());
+                    .map(std::string::ToString::to_string);
                 self.blocks.insert(
                     idx,
                     BlockState::Reasoning {
@@ -447,7 +447,7 @@ impl ResponsesStreamState {
             .and_then(|v| v.get("encrypted_content"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         if let Some(BlockState::Reasoning {
             detail_index,
@@ -524,13 +524,13 @@ impl ResponsesStreamState {
                 .input_tokens_details
                 .as_ref()
                 .and_then(|v| v.get("cached_tokens"))
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .map(|n| n as u32);
             let reasoning_tokens = u
                 .output_tokens_details
                 .as_ref()
                 .and_then(|v| v.get("reasoning_tokens"))
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .map(|n| n as u32);
             UsageDelta {
                 prompt_tokens: Some(u.input_tokens),
@@ -644,7 +644,7 @@ impl ResponsesStreamState {
             id: Some(stable_or_minted_id(detail_id)),
             format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
             index: Some(detail_index),
-            payload: json!({"text": text.clone()}),
+            payload: json!({"text": text}),
         };
         ChatChunk {
             id: self.response_id.clone(),
@@ -671,7 +671,7 @@ impl ResponsesStreamState {
             id: Some(stable_or_minted_id(detail_id)),
             format: Some(OPENAI_RESPONSES_FORMAT.to_string()),
             index: Some(detail_index),
-            payload: json!({"text": text.clone()}),
+            payload: json!({"text": text}),
         };
         ChatChunk {
             id: self.response_id.clone(),
@@ -776,7 +776,7 @@ fn stable_or_minted_id(item_id: &str) -> String {
 /// malformed event on the Responses surface is not a recoverable
 /// condition (codex itself returns a Stream error in this case at
 /// `codex-rs/codex-api/src/sse/responses.rs:473-479`).
-pub(crate) fn parse_data_line(provider_id: &str, data: &str) -> Result<ResponsesStreamEvent> {
+pub fn parse_data_line(provider_id: &str, data: &str) -> Result<ResponsesStreamEvent> {
     serde_json::from_str(data).map_err(|e| {
         Error::Streaming(format!(
             "openai-responses provider `{provider_id}`: bad SSE json: {e}"

@@ -315,7 +315,7 @@ fn render_table(rows: &[Vec<String>]) -> String {
     if rows.is_empty() {
         return String::new();
     }
-    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let cols = rows.iter().map(std::vec::Vec::len).max().unwrap_or(0);
     let mut widths = vec![0usize; cols];
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
@@ -458,7 +458,7 @@ mod tests {
         };
         config
             .cache_pricing
-            .insert("openai-compat:grok-*".to_string(), existing.clone());
+            .insert("openai-compat:grok-*".to_string(), existing);
 
         let mut v = PricingVerifications::default();
         v.verified

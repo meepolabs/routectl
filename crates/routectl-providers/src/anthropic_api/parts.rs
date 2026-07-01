@@ -66,7 +66,7 @@ const ALLOWED_DOCUMENT_MEDIA_TYPES: &[&str] = &["application/pdf"];
 ///   would reject it but we don't rely on that).
 /// - Empty URL emits a `tracing::warn!` so misbehaving callers don't
 ///   produce silent Bedrock 400s.
-pub(crate) fn parse_image_url_source(url: &str) -> Value {
+pub fn parse_image_url_source(url: &str) -> Value {
     if url.is_empty() {
         tracing::warn!("empty image_url.url -- upstream will reject");
         return json!({"type": "url", "url": ""});
@@ -137,7 +137,7 @@ pub(crate) fn parse_image_url_source(url: &str) -> Value {
 /// media type is lowercased + allowlisted (so `Application/PDF` cannot
 /// bypass the filter), and an empty payload is rejected rather than
 /// shipped as a guaranteed-malformed base64 source.
-pub(crate) fn parse_file_document_source(file: &Value) -> Option<(Value, Option<String>)> {
+pub fn parse_file_document_source(file: &Value) -> Option<(Value, Option<String>)> {
     let file_data = file.get("file_data").and_then(|v| v.as_str())?;
     let rest = file_data.strip_prefix("data:")?;
     let (mt_with_params, b64) = rest.split_once(";base64,")?;
@@ -187,7 +187,7 @@ pub(crate) fn parse_file_document_source(file: &Value) -> Option<(Value, Option<
 /// - Emits a `tracing::warn!` per stripped block with
 ///   `dropped_text_len` so operators can correlate strip events to
 ///   model behavior. `request_id` is inherited from the parent span.
-pub(crate) fn strip_text_after_tool_use(parts: &[ContentPart]) -> Vec<ContentPart> {
+pub fn strip_text_after_tool_use(parts: &[ContentPart]) -> Vec<ContentPart> {
     let last_tool_use = parts
         .iter()
         .rposition(|p| matches!(p, ContentPart::Known(KnownContentPart::ToolUse { .. })));

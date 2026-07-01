@@ -8,19 +8,19 @@ use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 
 /// Beta flag that enables Anthropic's server-side context-management.
 /// Stripped from outgoing headers when emulation mode is active.
-pub(crate) const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
+pub const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
 
 /// Edit type tag for the thinking-strip edit in context_management edits arrays.
-pub(crate) const CLEAR_THINKING_EDIT_TYPE: &str = "clear_thinking_20251015";
+pub const CLEAR_THINKING_EDIT_TYPE: &str = "clear_thinking_20251015";
 
 /// Cache key: `(provider_id, tool_use_id)`.
 /// The provider_id scope ensures that two providers sharing the same
 /// tool_use_id (unlikely but possible under multi-provider configs) never
 /// cross-contaminate each other's thinking stores.
-pub(crate) type ThinkingCacheKey = (String, String);
+pub type ThinkingCacheKey = (String, String);
 
 /// A single cached thinking observation.
-pub(crate) struct ThinkingCacheEntry {
+pub struct ThinkingCacheEntry {
     /// The reasoning blocks captured from the upstream response that
     /// followed the tool_use block identified by the cache key.
     pub(crate) thinking: Vec<ReasoningDetail>,
@@ -40,7 +40,7 @@ pub(crate) struct ThinkingCacheEntry {
 /// LRU map from `(provider_id, tool_use_id)` to a thinking observation.
 /// Bounded at `THINKING_CACHE_CAP` (10000); oldest entries are evicted
 /// when the cap is reached (standard LRU semantics).
-pub(crate) type ThinkingCache = lru::LruCache<ThinkingCacheKey, ThinkingCacheEntry>;
+pub type ThinkingCache = lru::LruCache<ThinkingCacheKey, ThinkingCacheEntry>;
 
 /// Maximum number of `(provider_id, tool_use_id)` entries the
 /// thinking-cache LRU will hold before evicting the oldest entry on
@@ -48,13 +48,13 @@ pub(crate) type ThinkingCache = lru::LruCache<ThinkingCacheKey, ThinkingCacheEnt
 /// is the LRU's worst-case memory footprint (`10_000 * 1 MiB ~ 10 GiB`).
 /// Operators sizing memory on memory-constrained hosts should tune the
 /// per-provider `max_thinking_entry_bytes` knob down.
-pub(crate) const THINKING_CACHE_CAP: usize = 10_000;
+pub const THINKING_CACHE_CAP: usize = 10_000;
 
 /// TTL on entries in the thinking cache used by the `context_management`
 /// emulation path. Entries older than this duration are treated as
 /// stale and discarded on the next read. 60 minutes matches the typical
 /// maximum agentic session length before context rotation.
-pub(crate) const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+pub const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Default per-entry byte cap on the thinking cache. The cap is applied
 /// at write time -- entries whose serialized JSON byte length exceeds
@@ -73,7 +73,7 @@ pub(crate) const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::
 /// down via `[providers.X].max_thinking_entry_bytes`. The LRU's
 /// worst-case footprint is `THINKING_CACHE_CAP * cap` (10_000 * 1 MiB
 /// ~ 10 GiB at the default).
-pub(crate) const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize = 1024 * 1024;
 
 /// Store a thinking observation into the cache under `(provider_id, tool_use_id)`.
 /// Overwrites any existing entry for the same key.
@@ -86,7 +86,7 @@ pub(crate) const DEFAULT_MAX_THINKING_ENTRY_BYTES: usize = 1024 * 1024;
 /// inputs. `path` tags the call site ("complete" / "stream") in the
 /// log. `ttl` is the operator-configured TTL applied to this entry's
 /// `expires_at`.
-pub(crate) fn snapshot_to_cache(
+pub fn snapshot_to_cache(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     tool_use_id: &str,
@@ -146,7 +146,7 @@ pub(crate) fn snapshot_to_cache(
 /// local-machine target; revisit with `parking_lot::RwLock`
 /// upgradable-read or sharded storage if concurrent read pressure
 /// ever grows.
-pub(crate) fn lookup_thinking(
+pub fn lookup_thinking(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     tool_use_id: &str,
@@ -220,7 +220,7 @@ pub(super) fn make_redacted_thinking_detail(
 /// - A ToolUse with an empty id is silently skipped.
 ///
 /// Returns an empty vec when no qualifying ToolUse blocks are present.
-pub(crate) fn extract_tool_thinking(
+pub fn extract_tool_thinking(
     blocks: &[crate::anthropic_api::types::ContentBlock],
 ) -> Vec<(String, Vec<routectl_core::ReasoningDetail>)> {
     use crate::anthropic_api::types::ContentBlock;
@@ -272,7 +272,7 @@ pub(crate) fn extract_tool_thinking(
 // ---------------------------------------------------------------------------
 
 /// Result of calling `apply_clear_thinking_edit`.
-pub(crate) struct ApplyResult {
+pub struct ApplyResult {
     /// Tool-use ids whose thinking could not be found in the cache
     /// (cold-start or TTL eviction). Callers should soft-fail by
     /// stripping the `thinking` body key to avoid upstream 400s.
@@ -346,7 +346,7 @@ fn reasoning_detail_to_thinking_block(
 ///
 /// Returns an `ApplyResult` the caller uses to decide whether to
 /// soft-fail by stripping the `thinking` body key.
-pub(crate) fn apply_clear_thinking_edit(
+pub fn apply_clear_thinking_edit(
     messages: &mut [crate::anthropic_api::types::AnthropicMessage],
     extras: std::option::Option<&serde_json::Value>,
     cache: &std::sync::RwLock<ThinkingCache>,
@@ -564,37 +564,34 @@ fn try_inject_thinking_at(
 ) -> usize {
     use crate::anthropic_api::types::ContentBlock;
 
-    match lookup_thinking(cache, provider_id, &tool_use_id) {
-        std::option::Option::Some(details) => {
-            if details.is_empty() {
-                // Some([]) -- upstream produced this tool_use with no
-                // preceding thinking. Success with nothing to inject; not
-                // a miss.
-                return 0;
-            }
-            let new_blocks: Vec<ContentBlock> = details
-                .iter()
-                .filter_map(reasoning_detail_to_thinking_block)
-                .collect();
-            if new_blocks.is_empty() {
-                // All details were filtered (wrong format, empty
-                // signature, or Summary kind). Treat as a miss so the
-                // caller can soft-fail rather than silently injecting
-                // nothing.
-                missed_tool_ids.push(tool_use_id);
-                return 0;
-            }
-            let insert_count = new_blocks.len();
-            for (k, block) in new_blocks.into_iter().enumerate() {
-                blocks.insert(current_j + k, block);
-            }
-            insert_count
+    if let std::option::Option::Some(details) = lookup_thinking(cache, provider_id, &tool_use_id) {
+        if details.is_empty() {
+            // Some([]) -- upstream produced this tool_use with no
+            // preceding thinking. Success with nothing to inject; not
+            // a miss.
+            return 0;
         }
-        std::option::Option::None => {
-            // Real cache miss (cold-start or TTL eviction).
+        let new_blocks: Vec<ContentBlock> = details
+            .iter()
+            .filter_map(reasoning_detail_to_thinking_block)
+            .collect();
+        if new_blocks.is_empty() {
+            // All details were filtered (wrong format, empty
+            // signature, or Summary kind). Treat as a miss so the
+            // caller can soft-fail rather than silently injecting
+            // nothing.
             missed_tool_ids.push(tool_use_id);
-            0
+            return 0;
         }
+        let insert_count = new_blocks.len();
+        for (k, block) in new_blocks.into_iter().enumerate() {
+            blocks.insert(current_j + k, block);
+        }
+        insert_count
+    } else {
+        // Real cache miss (cold-start or TTL eviction).
+        missed_tool_ids.push(tool_use_id);
+        0
     }
 }
 

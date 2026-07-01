@@ -239,11 +239,10 @@ fn extract_other_tag_and_extras(v: &Value) -> (String, serde_json::Map<String, V
         Some(o) => o,
         None => return ("unknown".to_string(), serde_json::Map::new()),
     };
-    let (tag, inner) = obj
-        .iter()
-        .next()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .unwrap_or_else(|| ("unknown".to_string(), Value::Null));
+    let (tag, inner) = obj.iter().next().map_or_else(
+        || ("unknown".to_string(), Value::Null),
+        |(k, v)| (k.clone(), v.clone()),
+    );
     let extras = match inner {
         Value::Object(m) => m,
         _ => serde_json::Map::new(),
@@ -301,7 +300,7 @@ fn translate_usage(u: &ConverseUsage) -> Usage {
 /// the canonical per-TTL object. Multiple entries with the same `ttl`
 /// (shouldn't happen on the wire today but is theoretically possible)
 /// sum together so no token counts get silently lost.
-pub(crate) fn translate_cache_details(details: &[ConverseCacheDetail]) -> CacheCreation {
+pub fn translate_cache_details(details: &[ConverseCacheDetail]) -> CacheCreation {
     let mut five_min: Option<u32> = None;
     let mut one_hour: Option<u32> = None;
     for d in details {
@@ -514,7 +513,7 @@ mod tests {
                         type_tag, extras, ..
                     } => {
                         assert_eq!(type_tag, "futureBlock");
-                        assert_eq!(extras.get("x").and_then(|v| v.as_i64()), Some(1));
+                        assert_eq!(extras.get("x").and_then(serde_json::Value::as_i64), Some(1));
                     }
                     other => panic!("expected Other, got {other:?}"),
                 }

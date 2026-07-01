@@ -165,7 +165,7 @@ async fn literal_get_returns_inline_value() {
 #[tokio::test]
 async fn literal_empty_returns_empty_string() {
     let store = MemoryStore::new();
-    let r = SecretRef::Literal("".into());
+    let r = SecretRef::Literal(String::new());
     assert_eq!(store.get(&r).await.unwrap(), "");
 }
 

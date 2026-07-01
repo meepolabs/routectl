@@ -44,8 +44,8 @@ impl SystemContent {
     /// don't support structured system blocks (i.e. OpenAI-compat).
     pub fn flatten(&self) -> String {
         match self {
-            SystemContent::Text(s) => s.clone(),
-            SystemContent::Blocks(blocks) => blocks
+            Self::Text(s) => s.clone(),
+            Self::Blocks(blocks) => blocks
                 .iter()
                 .map(|b| b.text.as_str())
                 .collect::<Vec<_>>()
@@ -57,8 +57,8 @@ impl SystemContent {
     /// the system position of the cache prefix.
     pub fn cache_controls(&self) -> impl Iterator<Item = &CacheControl> {
         let blocks: &[SystemBlock] = match self {
-            SystemContent::Text(_) => &[],
-            SystemContent::Blocks(b) => b,
+            Self::Text(_) => &[],
+            Self::Blocks(b) => b,
         };
         blocks.iter().filter_map(|b| b.cache_control.as_ref())
     }

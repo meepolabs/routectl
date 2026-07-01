@@ -272,11 +272,10 @@ async fn ingress_replay_all() {
         failures.len(),
     );
 
-    if !failures.is_empty() {
-        panic!(
-            "{} ingress replay failure(s):\n  - {}",
-            failures.len(),
-            failures.join("\n  - "),
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "{} ingress replay failure(s):\n  - {}",
+        failures.len(),
+        failures.join("\n  - "),
+    )
 }

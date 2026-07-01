@@ -130,9 +130,7 @@ pub fn estimate_cost_tokens(
 /// aggregate-token entry point speaks. `None` -> 0; a count past
 /// `i64::MAX` (never happens for real token totals) saturates.
 fn opt_u64_to_i64(tokens: Option<u64>) -> i64 {
-    tokens
-        .map(|t| i64::try_from(t).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+    tokens.map_or(0, |t| i64::try_from(t).unwrap_or(i64::MAX))
 }
 
 /// One dimension's contribution: zero unless a rate is present and the

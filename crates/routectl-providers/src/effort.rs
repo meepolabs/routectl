@@ -129,7 +129,7 @@ pub(crate) fn budget_from_level(level: &str) -> Option<u32> {
 ///   24577..=32768 -> xhigh
 ///   32769..     -> max
 #[cfg(feature = "openai-responses")]
-pub(crate) fn level_from_budget(budget: u32) -> &'static str {
+pub(crate) const fn level_from_budget(budget: u32) -> &'static str {
     match budget {
         0 => "none",
         1..=512 => "minimal",
@@ -160,7 +160,7 @@ fn lowest_supported(supported: &[String]) -> &str {
                 .position(|&r| r == s.as_str())
                 .unwrap_or(usize::MAX)
         })
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .expect("supported is non-empty -- precondition violated")
 }
 
@@ -204,7 +204,7 @@ mod tests {
 
     // Helper to build a Vec<String> from a slice of &str.
     fn levels(ls: &[&str]) -> Vec<String> {
-        ls.iter().map(|s| s.to_string()).collect()
+        ls.iter().map(|s| (*s).to_string()).collect()
     }
 
     // Empty supported -> requested returned verbatim (passthrough).

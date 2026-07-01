@@ -31,12 +31,11 @@ pub fn lift(
     req: &ChatRequest,
     strict: bool,
 ) -> Result<()> {
-    let tc = match req.tool_choice.as_ref() {
-        Some(v) => v,
-        None => {
-            obj.remove("tool_choice");
-            return Ok(());
-        }
+    let tc = if let Some(v) = req.tool_choice.as_ref() {
+        v
+    } else {
+        obj.remove("tool_choice");
+        return Ok(());
     };
 
     let lifted = map_tool_choice(id, tc);
@@ -112,16 +111,15 @@ fn map_tool_choice(id: &str, tc: &Value) -> Option<Value> {
 
         // Anthropic specific-tool: rewrite to OpenAI function-name object.
         "tool" => {
-            let name = match obj.get("name").and_then(|n| n.as_str()) {
-                Some(n) => n,
-                None => {
-                    warn!(
-                        provider = id,
-                        shape_type = "tool",
-                        "openai-compat egress: tool_choice {{type:\"tool\"}} missing or invalid name; dropping field"
-                    );
-                    return None;
-                }
+            let name = if let Some(n) = obj.get("name").and_then(|n| n.as_str()) {
+                n
+            } else {
+                warn!(
+                    provider = id,
+                    shape_type = "tool",
+                    "openai-compat egress: tool_choice {{type:\"tool\"}} missing or invalid name; dropping field"
+                );
+                return None;
             };
             Some(serde_json::json!({
                 "type": "function",

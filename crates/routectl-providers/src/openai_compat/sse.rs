@@ -86,7 +86,7 @@ fn detect_error_envelope(id: &str, val: &Value) -> Option<Error> {
     val.get("error")?;
     let status = val
         .pointer("/error/code")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .and_then(|n| u16::try_from(n).ok())
         .unwrap_or(502);
     let message = val
@@ -144,7 +144,7 @@ fn lift_chunk_usage_subbags(val: &mut Value) {
     let reasoning_tokens = usage
         .get("completion_tokens_details")
         .and_then(|v| v.get("reasoning_tokens"))
-        .and_then(|v| v.as_u64());
+        .and_then(serde_json::Value::as_u64);
     if let Some(n) = reasoning_tokens {
         // Drop a present `null` sentinel before `or_insert`: a top-level
         // `reasoning_tokens: null` from the upstream would otherwise block
@@ -158,12 +158,12 @@ fn lift_chunk_usage_subbags(val: &mut Value) {
 
     let cache_read = usage
         .get("prompt_cache_hit_tokens")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .or_else(|| {
             usage
                 .get("prompt_tokens_details")
                 .and_then(|v| v.get("cached_tokens"))
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
         });
     if let Some(n) = cache_read {
         // Same null-sentinel guard as `reasoning_tokens` above.
@@ -310,7 +310,7 @@ impl ThinkTagAccumulator {
         for choice_val in &choices_raw {
             let index = choice_val
                 .get("index")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0) as u32;
             let finish_reason = choice_val
                 .get("finish_reason")

@@ -58,7 +58,7 @@ const SCOPES: &[&str] = &[
 /// a misbehaving or hostile upstream drive the loader toward OOM.
 const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
 
-pub(crate) struct Codex;
+pub struct Codex;
 
 /// Stamp the codex identity (User-Agent + originator + residency) onto a
 /// single token-endpoint request. The shared OAuth client is
@@ -367,7 +367,7 @@ pub(super) async fn decode_token_response_traced(
 /// Used in the structured `error_kind` field on refresh-failure trace
 /// events so operators can grep for the failure mode without scraping
 /// the human-readable message.
-fn error_kind_label(e: &OAuthError) -> &'static str {
+const fn error_kind_label(e: &OAuthError) -> &'static str {
     match e {
         OAuthError::Network(_) => "network",
         OAuthError::TokenEndpoint(_) => "token_endpoint",
@@ -435,9 +435,7 @@ fn check_status_error(
 fn is_refresh_token_dead(body: &str) -> bool {
     matches!(
         extract_error_code(body).as_deref(),
-        Some("refresh_token_expired")
-            | Some("refresh_token_reused")
-            | Some("refresh_token_invalidated")
+        Some("refresh_token_expired" | "refresh_token_reused" | "refresh_token_invalidated")
     )
 }
 

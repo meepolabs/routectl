@@ -37,14 +37,14 @@ pub enum Outcome {
 impl Outcome {
     /// The exact lowercase wire token for this outcome. These tokens are
     /// the DB `outcome` CHECK-constraint values; keep them in sync.
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            Outcome::Ok => "ok",
-            Outcome::UpstreamError => "upstream_error",
-            Outcome::ClientDisconnect => "client_disconnect",
-            Outcome::Timeout => "timeout",
-            Outcome::Cancelled => "cancelled",
-            Outcome::GateBlocked => "gate_blocked",
+            Self::Ok => "ok",
+            Self::UpstreamError => "upstream_error",
+            Self::ClientDisconnect => "client_disconnect",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::GateBlocked => "gate_blocked",
         }
     }
 }
@@ -59,12 +59,12 @@ impl std::str::FromStr for Outcome {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "ok" => Ok(Outcome::Ok),
-            "upstream_error" => Ok(Outcome::UpstreamError),
-            "client_disconnect" => Ok(Outcome::ClientDisconnect),
-            "timeout" => Ok(Outcome::Timeout),
-            "cancelled" => Ok(Outcome::Cancelled),
-            "gate_blocked" => Ok(Outcome::GateBlocked),
+            "ok" => Ok(Self::Ok),
+            "upstream_error" => Ok(Self::UpstreamError),
+            "client_disconnect" => Ok(Self::ClientDisconnect),
+            "timeout" => Ok(Self::Timeout),
+            "cancelled" => Ok(Self::Cancelled),
+            "gate_blocked" => Ok(Self::GateBlocked),
             other => Err(ParseOutcomeError(other.to_string())),
         }
     }

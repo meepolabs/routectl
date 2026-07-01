@@ -379,8 +379,7 @@ async fn web_search_round_trip_preserves_opaque_blocks_and_text() {
     assert!(
         res_data
             .pointer("/content_block/content")
-            .map(Value::is_array)
-            .unwrap_or(false),
+            .is_some_and(Value::is_array),
         "web_search_tool_result.content array must round-trip; data: {res_data}",
     );
 

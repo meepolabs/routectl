@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 
 /// Outcome of recording a rejected hit for a given port.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Decision {
+pub enum Decision {
     /// Below the threshold; the caller should respond 400 as usual.
     Admitted,
     /// At or above the threshold; the caller should respond 429.
@@ -87,7 +87,7 @@ const DEFAULT_CAPACITY: usize = 256;
 /// ephemeral source port, so no per-port bucket ever fills up; the
 /// global window catches that pattern by counting raw rejection volume
 /// regardless of source.
-pub(crate) struct RateLimitTracker {
+pub struct RateLimitTracker {
     entries: VecDeque<(u16, VecDeque<Instant>)>,
     global_window: VecDeque<Instant>,
     window: Duration,

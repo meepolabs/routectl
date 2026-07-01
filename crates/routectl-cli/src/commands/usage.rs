@@ -70,7 +70,7 @@ impl GroupDim {
         }
     }
 
-    fn header(self) -> &'static str {
+    const fn header(self) -> &'static str {
         match self {
             Self::Model => "model",
             Self::Provider => "provider",
@@ -365,13 +365,12 @@ fn is_subscription(config: &Config, provider: &str) -> bool {
         .providers
         .get(provider)
         .and_then(|p| p.api_key_ref())
-        .map(|r| r.starts_with("oauth://"))
-        .unwrap_or(false)
+        .is_some_and(|r| r.starts_with("oauth://"))
 }
 
 /// Convert the router's per-million-token pricing into the usage crate's
 /// leaf-safe `Rates`.
-fn rates_from_pricing(p: &routectl_router::PricingConfig) -> Rates {
+const fn rates_from_pricing(p: &routectl_router::PricingConfig) -> Rates {
     Rates {
         input_per_mtok: p.input_per_mtok,
         output_per_mtok: p.output_per_mtok,
@@ -771,7 +770,7 @@ fn normal_headers(key_header: &str) -> Vec<String> {
         "hit%",
     ]
     .iter()
-    .map(|s| s.to_string())
+    .map(|s| (*s).to_string())
     .collect()
 }
 
@@ -794,8 +793,7 @@ const DETAIL_HEADERS: [&str; 9] = [
 /// matching the footer's formatting so column and footer read identically.
 fn hit_pct_cell(row: &DisplayRow) -> String {
     row.cache_hit_rate
-        .map(|r| format!("{:.1}%", r * 100.0))
-        .unwrap_or_else(|| "-".to_string())
+        .map_or_else(|| "-".to_string(), |r| format!("{:.1}%", r * 100.0))
 }
 
 /// Displayed `input`: all prompt tokens NOT served from cache, i.e. fresh
@@ -803,7 +801,7 @@ fn hit_pct_cell(row: &DisplayRow) -> String {
 /// (write buckets are 0 for OpenAI-style rows, so they render unchanged). With
 /// `cache_read_billed`, this reconciles with the `cache_hit_pct` denominator.
 /// NOT the cost basis -- cost prices the disjoint stored buckets separately.
-fn display_input(row: &DisplayRow) -> i64 {
+const fn display_input(row: &DisplayRow) -> i64 {
     row.input_tokens + row.cache_write_5m + row.cache_write_1h
 }
 
@@ -831,14 +829,13 @@ fn detail_cells(row: &DisplayRow) -> Vec<String> {
         ttft_cell(row.ttft_p50_ms),
         ttft_cell(row.ttft_p95_ms),
         tok_per_s(row.gen_output_tokens, row.gen_window_ms)
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "-".to_string()),
+            .map_or_else(|| "-".to_string(), |v| v.to_string()),
         metric_cell(row.server_tool_present, row.server_tool_calls),
     ]
 }
 
 fn ttft_cell(ms: Option<i64>) -> String {
-    ms.map(human_ms).unwrap_or_else(|| "-".to_string())
+    ms.map_or_else(|| "-".to_string(), human_ms)
 }
 
 /// Render one window report as an aligned ASCII block to a string.
@@ -849,7 +846,7 @@ pub fn render_report(report: &WindowReport) -> String {
 
     let mut headers = normal_headers(report.by_header);
     if report.detail {
-        headers.extend(DETAIL_HEADERS.iter().map(|s| s.to_string()));
+        headers.extend(DETAIL_HEADERS.iter().map(|s| (*s).to_string()));
     }
 
     let mut table: Vec<Vec<String>> = vec![headers];
@@ -892,8 +889,7 @@ fn render_latency_summary(report: &WindowReport) -> String {
     let p50 = ttft_cell(total.ttft_p50_ms);
     let p95 = ttft_cell(total.ttft_p95_ms);
     let toks = tok_per_s(total.gen_output_tokens, total.gen_window_ms)
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "-".to_string());
+        .map_or_else(|| "-".to_string(), |v| v.to_string());
     let pct = if total.requests > 0 {
         (100.0 * total.stream_count as f64 / total.requests as f64).round() as i64
     } else {
@@ -953,7 +949,7 @@ fn render_table(rows: &[Vec<String>]) -> String {
     if rows.is_empty() {
         return String::new();
     }
-    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let cols = rows.iter().map(std::vec::Vec::len).max().unwrap_or(0);
     let mut widths = vec![0usize; cols];
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
@@ -983,10 +979,9 @@ fn render_quota(q: &QuotaSnapshot) -> String {
     let status = q.status.as_deref().unwrap_or("unknown");
     let util = q
         .utilization
-        .map(|u| format!("{:.0}%", u * 100.0))
-        .unwrap_or_else(|| "-".to_string());
+        .map_or_else(|| "-".to_string(), |u| format!("{:.0}%", u * 100.0));
     let overage = q.overage_status.as_deref().unwrap_or("-");
-    let reset = q.reset.map(format_reset).unwrap_or_else(|| "-".to_string());
+    let reset = q.reset.map_or_else(|| "-".to_string(), format_reset);
     format!("quota: status={status} utilization={util} overage={overage} reset={reset}\n")
 }
 
@@ -1000,10 +995,10 @@ fn format_reset(epoch_s: i64) -> String {
 }
 
 fn render_footer(report: &WindowReport) -> String {
-    let hit = report
-        .cache_hit_rate
-        .map(|r| format!("cache hit {:.1}%", r * 100.0))
-        .unwrap_or_else(|| "cache hit n/a".to_string());
+    let hit = report.cache_hit_rate.map_or_else(
+        || "cache hit n/a".to_string(),
+        |r| format!("cache hit {:.1}%", r * 100.0),
+    );
     format!("{hit}\n")
 }
 
@@ -1028,7 +1023,7 @@ const K_CALIBRATION_COVERAGE_PASS: f64 = 0.90;
 const K_CALIBRATION_ACCURACY_PASS: f64 = 0.40;
 const K_CALIBRATION_SUFFICIENCY_PASS: usize = 200;
 
-fn gate_label(pass: bool) -> &'static str {
+const fn gate_label(pass: bool) -> &'static str {
     if pass { "PASS" } else { "FAIL" }
 }
 

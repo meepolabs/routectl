@@ -799,7 +799,7 @@ fn tool_call_completed_body_includes_function_call_items() {
     let output = &completed["response"]["output"];
     // output[] must contain the function_call item (not be empty).
     assert!(
-        output.as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        output.as_array().is_some_and(|a| !a.is_empty()),
         "response.completed output[] must not be empty for a tool-call turn; got: {output}"
     );
     assert_eq!(output[0]["type"], "function_call");

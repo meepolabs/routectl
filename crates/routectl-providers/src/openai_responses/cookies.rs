@@ -152,8 +152,7 @@ fn filter_persisted_json(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
             |entry| match entry.get("raw_cookie").and_then(|r| r.as_str()) {
                 Some(raw) => raw
                     .split_once('=')
-                    .map(|(n, _)| is_allowed_cloudflare_cookie_name(n.trim()))
-                    .unwrap_or(false),
+                    .is_some_and(|(n, _)| is_allowed_cloudflare_cookie_name(n.trim())),
                 None => false,
             },
         )
@@ -350,7 +349,7 @@ mod tests {
         // `.chatgpt.tmp.` file in the persistence directory.
         let leftover: Vec<_> = std::fs::read_dir(dir.path())
             .expect("read_dir")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_name().to_string_lossy().contains(".chatgpt.tmp."))
             .collect();
         assert!(

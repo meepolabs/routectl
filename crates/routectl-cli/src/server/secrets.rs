@@ -64,7 +64,7 @@ impl CompositeStore {
 
     /// Build a CompositeStore from an already-constructed memory store
     /// + OAuth store. The common construction path.
-    fn with_oauth(fallback: MemoryStore, oauth: OAuthStore) -> Self {
+    const fn with_oauth(fallback: MemoryStore, oauth: OAuthStore) -> Self {
         Self {
             oauth: Some(oauth),
             fallback,
@@ -74,7 +74,7 @@ impl CompositeStore {
     /// Build a CompositeStore with only the MemoryStore arm. Used when
     /// the OAuth store cannot be opened (no HOME/XDG) but the operator's
     /// config might not need it.
-    fn without_oauth(fallback: MemoryStore) -> Self {
+    const fn without_oauth(fallback: MemoryStore) -> Self {
         Self {
             oauth: None,
             fallback,
@@ -86,7 +86,7 @@ impl CompositeStore {
     /// credentials file without going through the trait surface.
     /// Returns `None` when the OAuth arm was dropped at construction
     /// because neither `HOME` nor `XDG_CONFIG_HOME` was set.
-    pub fn oauth(&self) -> Option<&OAuthStore> {
+    pub const fn oauth(&self) -> Option<&OAuthStore> {
         self.oauth.as_ref()
     }
 

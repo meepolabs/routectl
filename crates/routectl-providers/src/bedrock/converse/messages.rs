@@ -385,16 +385,17 @@ fn translate_known_part(id: &str, k: &KnownContentPart) -> Result<Option<Convers
         // type) drop with a WARN -- the JSON Converse wire cannot carry a
         // raw OpenAI file block, so passthrough is not an option here
         // (mirrors how `translate_image_url` drops unsupported refs).
-        KnownContentPart::File { file, .. } => match file_data_to_document_source(file) {
-            Some((source, title)) => Ok(translate_document(id, &source, title.as_deref())),
-            None => {
+        KnownContentPart::File { file, .. } => {
+            if let Some((source, title)) = file_data_to_document_source(file) {
+                Ok(translate_document(id, &source, title.as_deref()))
+            } else {
                 tracing::warn!(
                     provider = id,
                     "dropping file part on Converse egress; only base64 PDF data URIs are supported"
                 );
                 Ok(None)
             }
-        },
+        }
         KnownContentPart::ToolUse {
             id: tu_id,
             name,

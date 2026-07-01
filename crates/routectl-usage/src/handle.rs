@@ -104,7 +104,7 @@ pub struct UsageHandle {
 }
 
 impl UsageHandle {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         sender: Sender<UsageRecord>,
         enabled: Arc<AtomicBool>,
         counters: Arc<UsageCounters>,
@@ -148,7 +148,7 @@ impl UsageHandle {
     }
 
     /// Read-only view of the shared health counters.
-    pub fn counters(&self) -> &Arc<UsageCounters> {
+    pub const fn counters(&self) -> &Arc<UsageCounters> {
         &self.counters
     }
 

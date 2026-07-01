@@ -36,7 +36,7 @@ pub(super) const MAX_OUTPUT_BLOCKS: u32 = 4096;
 
 /// Persistent state across all SSE events for one streaming response.
 #[derive(Debug, Default)]
-pub(crate) struct GeminiStreamState {
+pub struct GeminiStreamState {
     /// Response id (Gemini's `responseId`), threaded onto every chunk.
     response_id: String,
     /// Returned model id (`modelVersion`).
@@ -246,7 +246,7 @@ fn usage_delta(meta: &UsageMetadata) -> UsageDelta {
 /// Parse one raw `data:` SSE payload into a partial `GenerateContentResponse`.
 /// A parse error returns `Err(Error::Streaming)` so the stream terminates --
 /// a malformed event on the streaming surface is not recoverable.
-pub(crate) fn parse_data_line(provider_id: &str, data: &str) -> Result<GenerateContentResponse> {
+pub fn parse_data_line(provider_id: &str, data: &str) -> Result<GenerateContentResponse> {
     serde_json::from_str(data).map_err(|e| {
         Error::Streaming(format!(
             "gemini provider `{provider_id}`: bad SSE json: {e}"

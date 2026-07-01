@@ -88,20 +88,17 @@ impl ShadowStore {
         ts: SystemTime,
     ) -> ShadowOutcome {
         let mut guard = self.entries.lock();
-        match guard.get_mut(&key) {
-            Some(entry) => {
-                if entry.fingerprint == fingerprint {
-                    ShadowOutcome::Stable
-                } else {
-                    entry.fingerprint = fingerprint;
-                    entry.ts = ts;
-                    ShadowOutcome::Misfire
-                }
+        if let Some(entry) = guard.get_mut(&key) {
+            if entry.fingerprint == fingerprint {
+                ShadowOutcome::Stable
+            } else {
+                entry.fingerprint = fingerprint;
+                entry.ts = ts;
+                ShadowOutcome::Misfire
             }
-            None => {
-                guard.put(key, ShadowEntry { fingerprint, ts });
-                ShadowOutcome::FirstSeen
-            }
+        } else {
+            guard.put(key, ShadowEntry { fingerprint, ts });
+            ShadowOutcome::FirstSeen
         }
     }
 

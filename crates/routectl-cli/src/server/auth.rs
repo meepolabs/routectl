@@ -117,8 +117,7 @@ fn has_bearer_header(headers: &axum::http::HeaderMap) -> bool {
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.split_once(' '))
-        .map(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-        .unwrap_or(false)
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
 }
 
 /// Axum middleware. Mounted only when `TokenSet` is non-empty (the

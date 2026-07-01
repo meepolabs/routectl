@@ -172,7 +172,7 @@ fn builtin_tool_cache_control(t: &AnthropicTool) -> Option<routectl_core::CacheC
     }
 }
 
-fn content_block_cache_control(b: &ContentBlock) -> Option<&routectl_core::CacheControl> {
+const fn content_block_cache_control(b: &ContentBlock) -> Option<&routectl_core::CacheControl> {
     match b {
         ContentBlock::Text { cache_control, .. }
         | ContentBlock::Image { cache_control, .. }
@@ -185,7 +185,7 @@ fn content_block_cache_control(b: &ContentBlock) -> Option<&routectl_core::Cache
     }
 }
 
-fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::CacheControl> {
+const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_core::CacheControl> {
     match t {
         AnthropicTool::Custom { cache_control, .. } => cache_control.as_ref(),
         AnthropicTool::Builtin(_) => None,
@@ -320,7 +320,7 @@ pub(crate) fn normalize(
     // (legacy and adaptive both): no alternative-continuation sampling
     // while spending reasoning budget.
     let temperature = match &thinking {
-        Some(ThinkingConfig::Enabled { .. }) | Some(ThinkingConfig::Adaptive) => Some(1.0f64),
+        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive) => Some(1.0f64),
         _ => req.temperature,
     };
 
@@ -468,7 +468,7 @@ mod allowlist_tests {
         let body = normalize("p", &req, false, &allowed, false, None).unwrap();
         let got = &body["anthropic_beta"];
         assert!(
-            got.is_null() || got.as_array().map(|a| a.is_empty()).unwrap_or(false),
+            got.is_null() || got.as_array().is_some_and(std::vec::Vec::is_empty),
             "expected absent or empty array, got: {got}"
         );
     }
@@ -2453,7 +2453,7 @@ mod multi_turn_tool_use_tests {
                 }),
                 ContentPart::Known(KnownContentPart::Thinking {
                     thinking: "deepseek reasoning".into(),
-                    signature: signature.map(|s| s.to_string()),
+                    signature: signature.map(std::string::ToString::to_string),
                 }),
                 ContentPart::Known(KnownContentPart::ToolUse {
                     id: "toolu_1".into(),

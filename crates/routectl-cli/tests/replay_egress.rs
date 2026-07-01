@@ -217,11 +217,10 @@ fn egress_replay_all() {
         failures.len(),
     );
 
-    if !failures.is_empty() {
-        panic!(
-            "{} egress replay failure(s):\n  - {}",
-            failures.len(),
-            failures.join("\n  - "),
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "{} egress replay failure(s):\n  - {}",
+        failures.len(),
+        failures.join("\n  - "),
+    )
 }

@@ -203,7 +203,7 @@ fn ttl_expiry_returns_none() {
     let key = ("provider-b".to_string(), "tool-old".to_string());
     let entry = ThinkingCacheEntry {
         thinking: make_thinking("stale"),
-        expires_at: Instant::now() - Duration::from_secs(1),
+        expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         ttl: Duration::from_secs(3600),
     };
     cache.write().expect("lock").put(key, entry);
@@ -223,7 +223,7 @@ fn lookup_evicts_expired_entry() {
     let key = ("provider-c".to_string(), "tool-stale".to_string());
     let entry = ThinkingCacheEntry {
         thinking: make_thinking("stale"),
-        expires_at: Instant::now() - Duration::from_secs(1),
+        expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         ttl: Duration::from_secs(3600),
     };
     cache.write().expect("lock").put(key.clone(), entry);
@@ -285,8 +285,8 @@ fn idempotent_reinsert_replaces() {
     let cache = small_cache(4);
     let first = make_thinking("first-thinking");
     let second = make_thinking("second-thinking");
-    snap(&cache, "prov", "tool-x", first.clone());
-    snap(&cache, "prov", "tool-x", second.clone());
+    snap(&cache, "prov", "tool-x", first);
+    snap(&cache, "prov", "tool-x", second);
     let result =
         lookup_thinking(&cache, "prov", "tool-x").expect("entry should exist after second insert");
     assert_eq!(
@@ -530,7 +530,7 @@ fn make_detail(
     ReasoningDetail {
         kind,
         id: Some("test-rd".into()),
-        format: format.map(|s| s.to_string()),
+        format: format.map(std::string::ToString::to_string),
         index: Some(0),
         payload,
     }
