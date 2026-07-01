@@ -226,6 +226,7 @@ mod response_path {
                 .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "sha8 must be lowercase hex: {sha}"
         );
+        assert_eq!(success.field("expires_in"), Some("3600"));
         // No event field may carry the literal token value.
         for ev in &events {
             for (_, v) in &ev.fields {
