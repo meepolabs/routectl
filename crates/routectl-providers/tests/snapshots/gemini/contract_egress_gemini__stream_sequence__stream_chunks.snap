@@ -1,0 +1,80 @@
+---
+source: crates/routectl-providers/tests/contract_egress_gemini.rs
+expression: chunks
+---
+[
+  {
+    "id": "resp-stream-1",
+    "model": "gemini-2.5-pro-001",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "role": "assistant"
+        }
+      }
+    ]
+  },
+  {
+    "id": "resp-stream-1",
+    "model": "gemini-2.5-pro-001",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "reasoning": "let me think",
+          "reasoning_details": [
+            {
+              "type": "reasoning.text",
+              "format": "gemini-v1",
+              "index": 0,
+              "text": "let me think",
+              "thought_signature": "sig-42"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "resp-stream-1",
+    "model": "gemini-2.5-pro-001",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "content": "Hello"
+        }
+      }
+    ]
+  },
+  {
+    "id": "resp-stream-1",
+    "model": "gemini-2.5-pro-001",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {
+          "content": " world"
+        }
+      }
+    ]
+  },
+  {
+    "id": "resp-stream-1",
+    "model": "gemini-2.5-pro-001",
+    "choices": [
+      {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 5,
+      "completion_tokens": 2,
+      "total_tokens": 7,
+      "reasoning_tokens": 1
+    }
+  }
+]

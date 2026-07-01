@@ -16,7 +16,7 @@ use reqwest::Client;
 use serde_json::Value;
 
 use routectl_core::{
-    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
+    debug_upstream_error_body, extract_upstream_message, is_json_error_envelope, sanitize_for_log,
     trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
     Provider, Result, StaticToken, TokenSource,
 };
@@ -288,14 +288,28 @@ impl Provider for GeminiProvider {
     }
 }
 
-fn build_error_excerpt(body_text: &str) -> String {
-    serde_json::from_str::<Value>(body_text)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.pointer("/error/message"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| sanitize_upstream_body(body_text))
+/// Best-effort lift of the Gemini error classifier from a 4xx/5xx body.
+/// The Gemini error envelope is `{"error":{"code":<int>,"message":...,
+/// "status":"<UPPER_SNAKE>"}}`. `error.status` (e.g. `RESOURCE_EXHAUSTED`,
+/// `INVALID_ARGUMENT`, `PERMISSION_DENIED`) is the string an SDK branches
+/// on, so it lifts to `upstream_type`; the numeric `error.code` lifts to
+/// `upstream_code` (stringified). Either is `None` when absent or the body
+/// is not JSON. The Gemini envelope names its classifier `status`, unlike
+/// the OpenAI `error.type`, hence the dedicated parser.
+fn parse_gemini_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<Value>(body_text) else {
+        return (None, None);
+    };
+    let upstream_type = v
+        .pointer("/error/status")
+        .and_then(|s| s.as_str())
+        .map(str::to_string);
+    let upstream_code = v.pointer("/error/code").and_then(|c| match c {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    });
+    (upstream_type, upstream_code)
 }
 
 fn map_gemini_upstream_error(
@@ -310,7 +324,8 @@ fn map_gemini_upstream_error(
         None
     };
     debug_upstream_error_body(PROVIDER_KIND, provider_id, status, body_text);
-    let msg = build_error_excerpt(body_text);
+    let (upstream_type, upstream_code) = parse_gemini_error_classifier(body_text);
+    let msg = extract_upstream_message(body_text);
     let safe_excerpt = sanitize_for_log(&msg);
     crate::upstream_log::warn_upstream_failure(provider_id, status, None, &safe_excerpt, "gemini");
     let err_body = if is_json_error_envelope(body_text) {
@@ -318,7 +333,14 @@ fn map_gemini_upstream_error(
     } else {
         msg
     };
-    Error::upstream_with_retry_after(provider_id, status, err_body, header_hint)
+    Error::upstream_full(
+        provider_id,
+        status,
+        err_body,
+        header_hint,
+        upstream_type,
+        upstream_code,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +447,114 @@ mod e2e_tests {
             }
             other => panic!("expected Upstream, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_classifier_lifts_gemini_status_and_code() {
+        // Gemini error envelope: `status` is the string classifier,
+        // `code` is the numeric HTTP-status duplicate.
+        let body = r#"{"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED"}}"#;
+
+        let (upstream_type, upstream_code) = parse_gemini_error_classifier(body);
+
+        assert_eq!(upstream_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
+        assert_eq!(upstream_code.as_deref(), Some("429"));
+    }
+
+    #[test]
+    fn parse_classifier_returns_none_on_non_json_body() {
+        let (upstream_type, upstream_code) =
+            parse_gemini_error_classifier("503 Service Unavailable (plain text from a proxy)");
+
+        assert!(upstream_type.is_none());
+        assert!(upstream_code.is_none());
+    }
+
+    #[test]
+    fn map_error_lifts_classifier_and_preserves_retry_after() {
+        // A 429 carrying its own classifier AND a Retry-After header: the
+        // mapper must lift `status`/`code` onto upstream_type/upstream_code
+        // (previously dropped by the `upstream_with_retry_after` path) while
+        // still parking the provider via the reset hint.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+        let body =
+            r#"{"error":{"code":429,"message":"Quota exceeded","status":"RESOURCE_EXHAUSTED"}}"#;
+
+        let err = map_gemini_upstream_error("gemini:test", 429, &headers, body);
+
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                retry_after,
+                body,
+                ..
+            } => {
+                assert_eq!(status, 429);
+                assert_eq!(upstream_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
+                assert_eq!(upstream_code.as_deref(), Some("429"));
+                assert_eq!(retry_after, Some(std::time::Duration::from_secs(30)));
+                // Structured envelope is carried raw so the ingress can
+                // re-extract the upstream `error.message`.
+                assert!(body.contains("Quota exceeded"), "body: {body}");
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    fn gemini_stream_sse_body() -> &'static str {
+        // Two SSE events mirroring what :streamGenerateContent?alt=sse
+        // emits: a first partial carrying id/model + text, then a terminal
+        // partial carrying more text + finishReason + usageMetadata.
+        concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"pong\"}],\"role\":\"model\"},\"index\":0}],\"responseId\":\"resp-stream\",\"modelVersion\":\"gemini-2.5-pro-001\"}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" more\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n",
+        )
+    }
+
+    #[tokio::test]
+    async fn stream_returns_canonical_chunks_on_200() {
+        use futures::StreamExt;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-pro:streamGenerateContent"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(gemini_stream_sse_body()),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+
+        let mut req = base_req();
+        req.stream = Some(true);
+        let mut stream = provider.stream(req).await.expect("stream open");
+        let mut chunks = Vec::new();
+        while let Some(item) = stream.next().await {
+            chunks.push(item.expect("chunk decoded without error"));
+        }
+
+        // Text deltas reassemble in arrival order across both events.
+        let text: String = chunks
+            .iter()
+            .flat_map(|c| c.choices.iter())
+            .filter_map(|ch| ch.delta.content.clone())
+            .collect();
+        assert_eq!(text, "pong more");
+
+        // id / model threaded from the first event onto every chunk.
+        assert!(chunks.iter().all(|c| c.id == "resp-stream"));
+        assert!(chunks.iter().all(|c| c.model == "gemini-2.5-pro-001"));
+
+        // Terminal chunk carries finish_reason + usage.
+        let terminal = chunks.last().expect("at least one chunk");
+        assert_eq!(terminal.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = terminal.usage.as_ref().expect("terminal usage");
+        assert_eq!(usage.total_tokens, Some(7));
     }
 
     #[test]

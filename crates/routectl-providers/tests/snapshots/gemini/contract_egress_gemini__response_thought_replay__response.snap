@@ -1,0 +1,28 @@
+---
+source: crates/routectl-providers/tests/contract_egress_gemini.rs
+expression: resp
+---
+{
+  "id": "resp-contract-2",
+  "model": "gemini-2.5-pro-001",
+  "created": 0,
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "the answer",
+        "reasoning_details": [
+          {
+            "type": "reasoning.text",
+            "format": "gemini-v1",
+            "index": 0,
+            "text": "let me think",
+            "thought_signature": "sig-42"
+          }
+        ]
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}
