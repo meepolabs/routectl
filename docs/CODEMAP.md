@@ -256,6 +256,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 - `src/handlers/chat_completions.rs` -- `POST /v1/chat/completions` thin wrapper around `ingress_handle` with `OpenAiIngress`
 - `src/handlers/messages.rs` -- `POST /v1/messages` thin wrapper around `ingress_handle` with `AnthropicIngress`
 - `src/handlers/messages_count_tokens.rs` -- `POST /v1/messages/count_tokens` proxy through the FIRST provider in the dispatch chain only (no fallback walk; tokenizer-specific count must match the chosen model)
+- `src/handlers/responses.rs` -- `POST /v1/responses` thin wrapper around `ingress_handle` with `ResponsesIngress`
 - `src/handlers/ingress_handle.rs` -- generic ingress driver: parse + route + render; SSE streaming with cancellation. Constructs the `UsageCapture` guard (now defined in `usage_capture.rs`) at the boundary and drives its `observe_*` / `finalize` calls across the non-stream (`complete_response`) and stream (`stream_response` / `render_stream_task`) paths
 - `src/handlers/usage_capture.rs` -- `UsageCapture`, the unified RAII capture guard (replaces the former `EgressStreamSummary`) that records exactly ONE `UsageRecord` per request on both ingress paths: a draft is seeded from the request shape + `RequestId` (`build_usage_draft`), the dispatch/token/quota/outcome columns are stamped from `DispatchMeta` + `ChatResponse`/`ChatChunk` + `UpstreamMeta`, `finalize(outcome)` emits the row once (idempotent), and the Drop fallback stamps `client_disconnect` for a cancelled/disconnected request. Also subsumes the egress stream trace-summary line. Owns the outcome-mapping helpers (`outcome_for_dispatch_err`, `error_class_of`) and the auto-cache outcome signal (`is_cache_thrash` + `emit_cache_outcome`: `cache_auto_outcome` at DEBUG when an auto-emitted breakpoint is created-and-read, WARN when created-without-read this request)
 
@@ -267,6 +268,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 - `src/ingress/anthropic/parse.rs` -- Anthropic body -> canonical `ChatRequest`; forward-compat sweep into `provider_extras`. `resolve_inbound_session_key` captures the inbound per-conversation key (the `x-claude-code-session-id` request header, else body `metadata.session_id`) into `routectl_internal.inbound_session_key` for session-sticky seat selection; the `metadata` read is non-destructive so `metadata` still round-trips into `provider_extras`
 - `src/ingress/anthropic/render.rs` -- canonical `ChatResponse` -> Anthropic Messages response body shape
 - `src/ingress/anthropic/stream.rs` -- canonical `ChatChunk` -> Anthropic SSE events with monotonic terminal-state guard
+- `src/ingress/openai_responses/mod.rs` -- `ResponsesIngress` impl (`POST /v1/responses`, OpenAI Responses dialect / Codex client) + streaming state types (`ResponsesStreamState`, `OpenOutputItem`, `ToolCallBuffer`); inverse of the openai-responses egress
+- `src/ingress/openai_responses/parse.rs` -- Responses body -> canonical `ChatRequest`: flattens the tagged-union `input[]` (`message` / `function_call` / `function_call_output` / `reasoning`) into `messages[]`, lifts `instructions`->`system`, `max_output_tokens`->`max_tokens`, `text.format`->`response_format`; forward-compat sweep into `provider_extras`. Statefulness contract: `previous_response_id` -> 400; `store:true` (no prior id) accepted with WARN (persistence ignored)
+- `src/ingress/openai_responses/render.rs` -- canonical `ChatResponse` -> Responses response body (`object:"response"`, `status`, `output[]` of message / function_call / reasoning items)
+- `src/ingress/openai_responses/stream.rs` -- canonical `ChatChunk` -> Responses event-named SSE state machine (`response.created` ... `response.completed`) with monotonic `sequence_number`
 
 ### commands
 
@@ -289,6 +294,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a sin
 - `tests/hot_reload.rs` -- file-watch + SIGHUP hot-reload integration tests; boots `serve_on_listener` against a tempdir-rooted config.toml + credentials.json and polls for the live `Router` swap
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration tests
 - `tests/anthropic_ingress.rs` -- `/v1/messages` end-to-end (cache_control round-trip, forward-compat, listener auth)
+- `tests/responses_ingress.rs` -- `/v1/responses` end-to-end (Responses body -> openai-compat upstream -> Responses-shaped completion, `previous_response_id` -> 400, `store:true` accepted, listener auth)
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest` shape per ingress
 - `tests/contract_response_ingress.rs` -- canonical `ChatResponse` -> Anthropic wire body via `render_response`
 - `tests/contract_stream_ingress.rs` -- canonical chunk sequences -> Anthropic SSE events (asserts terminal-event ordering)
