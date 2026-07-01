@@ -189,21 +189,7 @@ fn clean_error_body(body: &str) -> String {
 /// quota / auth failure stays distinguishable from a generic 429 / 401
 /// downstream. Returns `(None, None)` for a non-JSON or non-enveloped body.
 fn parse_cloudcode_error_classifier(body: &str) -> (Option<String>, Option<String>) {
-    let parsed: Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(_) => return (None, None),
-    };
-    let err = parsed.get("error");
-    let upstream_type = err
-        .and_then(|e| e.get("status"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let upstream_code = err.and_then(|e| e.get("code")).and_then(|c| match c {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    });
-    (upstream_type, upstream_code)
+    super::parse_gemini_error_classifier(body)
 }
 
 /// Map an onboarding (`loadCodeAssist` / `onboardUser`) HTTP failure into a

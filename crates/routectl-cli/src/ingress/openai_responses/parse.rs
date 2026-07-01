@@ -38,7 +38,7 @@ use serde_json::{Map, Value};
 
 use routectl_core::{
     ChatRequest, ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningConfig,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, SystemBlock, SystemContent, ToolDef,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, SystemContent, ToolDef,
 };
 
 use super::OPENAI_RESPONSES_FORMAT;
@@ -105,11 +105,9 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         req.messages = build_messages(input);
     }
 
-    // Lift in-array system/developer messages into req.system. Mirrors
-    // openai.rs::lift_system_messages: these messages would otherwise
-    // remain as loose Role::System entries that mutual-exclusion egresses
-    // (anthropic-api, openai-compat) silently drop.
-    lift_system_messages(&mut req);
+    // Lift in-array system/developer messages into req.system so loose
+    // Role::System entries do not reach mutual-exclusion egresses.
+    crate::ingress::lift_system_messages(&mut req);
 
     // tools -> ToolDef[].
     if let Some(tools) = obj.remove("tools") {
@@ -223,103 +221,6 @@ fn warn_on_store(obj: &Map<String, Value>) {
              turn is answered from the full input, but the response is never persisted, so a \
              later retrieval by response id will not work)"
         );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// lift in-array system/developer messages -> req.system
-// ---------------------------------------------------------------------------
-
-/// Lift any `Role::System` messages from `req.messages` into `req.system`,
-/// removing them from the messages array. Mirrors `openai.rs::lift_system_messages`
-/// so canonical consistency is maintained: the Responses wire allows
-/// in-array `{role:"system"}` / `{role:"developer"}` items alongside the
-/// top-level `instructions` field; downstream egresses that enforce
-/// system-is-not-a-turn (anthropic-api, openai-compat) would silently drop
-/// a loose `Role::System` message.
-///
-/// Merge strategy: when the existing `req.system` is plain text and no lifted
-/// block carries `cache_control`, the texts are concatenated with `\n`. When
-/// any block carries `cache_control` the result is `SystemContent::Blocks`
-/// (same as the openai ingress).
-fn lift_system_messages(req: &mut ChatRequest) {
-    let mut lifted_blocks: Vec<SystemBlock> = Vec::new();
-    req.messages.retain(|m| {
-        if !matches!(m.role, Role::System) {
-            return true;
-        }
-        match &m.content {
-            MessageContent::Text(t) => {
-                lifted_blocks.push(SystemBlock {
-                    kind: "text".into(),
-                    text: t.clone(),
-                    cache_control: None,
-                    citations: None,
-                });
-            }
-            MessageContent::Parts(parts) => {
-                for p in parts {
-                    if let ContentPart::Known(KnownContentPart::Text {
-                        text,
-                        cache_control,
-                    }) = p
-                    {
-                        lifted_blocks.push(SystemBlock {
-                            kind: "text".into(),
-                            text: text.clone(),
-                            cache_control: cache_control.clone(),
-                            citations: None,
-                        });
-                    }
-                }
-            }
-            MessageContent::Null => {}
-        }
-        false
-    });
-
-    if lifted_blocks.is_empty() {
-        return;
-    }
-
-    let needs_blocks = lifted_blocks
-        .iter()
-        .any(|b| b.cache_control.is_some() || b.citations.is_some());
-
-    match req.system.take() {
-        Some(SystemContent::Text(existing)) if !needs_blocks => {
-            let lifted_text = lifted_blocks
-                .iter()
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            req.system = Some(SystemContent::Text(format!("{existing}\n{lifted_text}")));
-        }
-        Some(SystemContent::Text(existing)) => {
-            let mut blocks = vec![SystemBlock {
-                kind: "text".into(),
-                text: existing,
-                cache_control: None,
-                citations: None,
-            }];
-            blocks.extend(lifted_blocks);
-            req.system = Some(SystemContent::Blocks(blocks));
-        }
-        Some(SystemContent::Blocks(mut blocks)) => {
-            blocks.extend(lifted_blocks);
-            req.system = Some(SystemContent::Blocks(blocks));
-        }
-        None if !needs_blocks => {
-            let lifted_text = lifted_blocks
-                .iter()
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            req.system = Some(SystemContent::Text(lifted_text));
-        }
-        None => {
-            req.system = Some(SystemContent::Blocks(lifted_blocks));
-        }
     }
 }
 

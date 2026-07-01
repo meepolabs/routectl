@@ -515,7 +515,7 @@ impl GeminiProvider {
 /// `upstream_code` (stringified). Either is `None` when absent or the body
 /// is not JSON. The Gemini envelope names its classifier `status`, unlike
 /// the OpenAI `error.type`, hence the dedicated parser.
-fn parse_gemini_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
+pub(super) fn parse_gemini_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
     let Ok(v) = serde_json::from_str::<Value>(body_text) else {
         return (None, None);
     };
