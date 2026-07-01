@@ -19,7 +19,7 @@ use super::messages::build_input;
 use super::system::translate_system;
 use super::tools::{translate_tool_choice, translate_tools};
 use super::types::ResponsesRequest;
-use super::{extras, OpenAiResponsesConfig};
+use super::{OpenAiResponsesConfig, extras};
 
 /// Build a fully-populated `ResponsesRequest` from a routectl
 /// `ChatRequest`. The Provider's `complete()` toggles `stream` to

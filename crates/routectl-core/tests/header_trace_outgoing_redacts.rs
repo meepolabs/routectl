@@ -15,7 +15,7 @@ mod common;
 
 use common::capture_events;
 use routectl_core::{
-    header_trace_enabled, headers_to_json, trace_outgoing_headers, HDR_MSG_OUTGOING,
+    HDR_MSG_OUTGOING, header_trace_enabled, headers_to_json, trace_outgoing_headers,
 };
 
 #[test]

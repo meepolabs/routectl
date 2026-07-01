@@ -1,0 +1,11 @@
+# Clippy threshold tuning. Lint selection lives in Cargo.toml under
+# [lints.clippy] / [workspace.lints]; this file is only for knobs that
+# are not expressible as lint levels.
+#
+# Keep this minimal -- add a threshold here only when a real lint
+# demands it.
+
+# MSRV for clippy's version-gated lints. Must match
+# `rust-version` in Cargo.toml ([workspace.package]). With this set,
+# clippy will not suggest APIs newer than the pinned MSRV.
+msrv = "1.91"

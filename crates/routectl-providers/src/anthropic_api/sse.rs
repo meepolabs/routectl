@@ -7,16 +7,16 @@
 //! The stateful accumulation lives inside the stream() method in mod.rs which
 //! owns an SseState and drives parse_event() directly.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
     ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result,
+    schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
 };
 
 use super::response::map_stop_reason;
-use super::sse_opaque::{OpaqueCapture, MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK};
+use super::sse_opaque::{MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK, OpaqueCapture};
 use super::types::SseEvent;
 
 /// Which kind of content block is currently open. Every variant

@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::migrate::{migrate_to_current, MigrateError};
+use crate::migrate::{MigrateError, migrate_to_current};
 use crate::schema::SCHEMA_VERSION;
 
 /// Owns an open usage-DB connection. The later writer task takes

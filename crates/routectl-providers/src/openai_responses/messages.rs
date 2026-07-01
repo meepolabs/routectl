@@ -25,11 +25,11 @@ use serde_json::Value;
 
 use routectl_core::{ContentPart, Error, KnownContentPart, Message, MessageContent, Result, Role};
 
+use super::OPENAI_RESPONSES_FORMAT;
 use super::types::{
     FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningContentItem,
     ReasoningSummaryItem, ResponseInputItem, ResponsesContentItem,
 };
-use super::OPENAI_RESPONSES_FORMAT;
 use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 
 /// Walk the canonical `messages[]` and produce a flat `input[]` array
@@ -832,8 +832,8 @@ mod messages_tests {
 
     use routectl_core::{ReasoningDetail, ReasoningDetailKind};
 
-    use super::super::types::ResponseInputItem;
     use super::super::OPENAI_RESPONSES_FORMAT;
+    use super::super::types::ResponseInputItem;
     use super::{lift_reasoning_details, translate_thinking_part};
 
     fn make_detail(

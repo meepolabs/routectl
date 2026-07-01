@@ -17,9 +17,9 @@
 use std::time::SystemTime;
 
 use aws_credential_types::provider::ProvideCredentials;
-use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
+use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
 use aws_sigv4::sign::v4;
-use reqwest::header::{HeaderName, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use routectl_core::{Error, Result};
 
@@ -199,8 +199,8 @@ fn sigv4_sign(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bedrock::auth::resolve;
     use crate::bedrock::BedrockCreds;
+    use crate::bedrock::auth::resolve;
 
     #[tokio::test]
     async fn bearer_path_attaches_authorization_header() {

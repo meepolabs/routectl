@@ -141,11 +141,7 @@ fn uname_release() -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn macos_product_version() -> Option<String> {
@@ -157,26 +153,22 @@ fn macos_product_version() -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 /// Resolves the `<terminal_token>` segment. Mirrors codex's
 /// `codex_terminal_detection::user_agent`: prefer `$TERM_PROGRAM`,
 /// fall back to `$TERM`, default `"unknown"`.
 fn terminal_token() -> String {
-    if let Ok(v) = std::env::var("TERM_PROGRAM") {
-        if !v.is_empty() {
-            return v;
-        }
+    if let Ok(v) = std::env::var("TERM_PROGRAM")
+        && !v.is_empty()
+    {
+        return v;
     }
-    if let Ok(v) = std::env::var("TERM") {
-        if !v.is_empty() {
-            return v;
-        }
+    if let Ok(v) = std::env::var("TERM")
+        && !v.is_empty()
+    {
+        return v;
     }
     "unknown".to_string()
 }

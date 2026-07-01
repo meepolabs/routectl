@@ -1,0 +1,27 @@
+[toolchain]
+# Pin to an EXACT patch so the toolchain is reproducible across
+# contributors and CI -- a floating "1.91" would let a newer patch
+# slip in and silently change behavior.
+#
+# Two distinct freezes are in play; do not conflate them:
+#
+# (a) This exact toolchain pin freezes the CLIPPY LINT SET. New
+#     clippy releases add new pedantic / nursery / cargo-group
+#     lints regardless of MSRV, so a newer local stable could fire
+#     lints the gate has not been cleared against and silently
+#     block commits. Pinning the toolchain prevents that drift.
+#
+# (b) The `msrv` key in clippy.toml is a separate mechanism: it
+#     only gates version-aware lint SUGGESTIONS (e.g. "use this
+#     stdlib API added in 1.NN"). It does NOT change which lints
+#     exist in the installed clippy.
+channel = "1.91.1"
+
+# Components installed alongside the compiler.
+components = [
+    "rustfmt",
+    "clippy",
+    "rust-analyzer",
+]
+
+profile = "default"

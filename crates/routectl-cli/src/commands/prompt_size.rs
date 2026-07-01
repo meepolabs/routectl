@@ -15,16 +15,16 @@ use std::fs;
 use std::path::Path;
 
 use routectl_core::cache_control::compute_frozen_floor;
-use routectl_core::context_reduction::{apply_json_minify, ReductionOutcome};
+use routectl_core::context_reduction::{ReductionOutcome, apply_json_minify};
 use routectl_core::schema::Role;
-use routectl_core::{scan_volatile, ChatRequest, Error, Result};
+use routectl_core::{ChatRequest, Error, Result, scan_volatile};
 use routectl_router::{
+    ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CachePricingRow,
+    Config, GateDecision, KeepReason, PrefixReductionCandidate, SteadyStateTrimParams,
     break_even_k, evaluate, lookup_with_overrides, propose_steady_state_trim,
     validate_alias_chain_targets, validate_alias_patterns, validate_bedrock_global_config,
     validate_overrides, validate_reasoning_defaults, validate_registry_patterns,
-    validate_retry_policy, AliasPattern, AliasValue, CachePricingOverride, CachePricingRow, Config,
-    GateDecision, KeepReason, PrefixReductionCandidate, SteadyStateTrimParams,
-    ALIAS_MAX_RECURSION_DEPTH,
+    validate_retry_policy,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -696,10 +696,10 @@ mod tests {
     use super::*;
     use routectl_router::lookup;
 
+    use routectl_core::SystemContent;
     use routectl_core::cache_control::CacheControl;
     use routectl_core::content_part::{ContentPart, KnownContentPart};
     use routectl_core::schema::{Message, MessageContent};
-    use routectl_core::SystemContent;
     use serde_json::json;
 
     fn user_text(text: &str) -> Message {

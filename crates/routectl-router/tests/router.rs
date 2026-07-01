@@ -1,15 +1,15 @@
 //! Router behavior tests with mock Provider impls.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::{
-    schema::{ChunkChoice, ChunkDelta},
     ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, MessageContent, OpaqueSseEvent,
     Provider, Result, Role, Usage,
+    schema::{ChunkChoice, ChunkDelta},
 };
 use routectl_router::{
     AliasValue, Config, Dispatched, DispatchedStream, ProviderEntry, ProviderRuntimePolicy,

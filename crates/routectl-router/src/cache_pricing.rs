@@ -239,30 +239,31 @@ impl CachePricingOverride {
     /// Shared by the merge path ([`CachePricingRow::with_overrides`]) and the
     /// startup validate-only pass ([`validate_overrides`]).
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(wm) = self.wm {
-            if wm < CachePricingRow::sentinel().wm && !self.override_acknowledges_cost_risk {
-                return Err(format!(
-                    "cache-pricing override sets wm = {wm} below the conservative sentinel wm = \
+        if let Some(wm) = self.wm
+            && wm < CachePricingRow::sentinel().wm
+            && !self.override_acknowledges_cost_risk
+        {
+            return Err(format!(
+                "cache-pricing override sets wm = {wm} below the conservative sentinel wm = \
                      {}, which can make a cache break look falsely profitable; set \
                      override_acknowledges_cost_risk = true to accept this risk",
-                    CachePricingRow::sentinel().wm
-                ));
-            }
+                CachePricingRow::sentinel().wm
+            ));
         }
-        if let Some(rm) = self.rm {
-            if rm <= 0.0 {
-                return Err(format!(
-                    "cache_pricing override: rm must be > 0.0 (got {rm}); a zero or negative read \
+        if let Some(rm) = self.rm
+            && rm <= 0.0
+        {
+            return Err(format!(
+                "cache_pricing override: rm must be > 0.0 (got {rm}); a zero or negative read \
                      multiplier makes the break-even math degenerate"
-                ));
-            }
+            ));
         }
-        if let Some(s) = &self.verified_at {
-            if parse_epoch_day(s).is_none() {
-                return Err(format!(
-                    "cache-pricing override: verified_at = \"{s}\" is not a valid YYYY-MM-DD date"
-                ));
-            }
+        if let Some(s) = &self.verified_at
+            && parse_epoch_day(s).is_none()
+        {
+            return Err(format!(
+                "cache-pricing override: verified_at = \"{s}\" is not a valid YYYY-MM-DD date"
+            ));
         }
         Ok(())
     }

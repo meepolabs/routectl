@@ -11,16 +11,16 @@
 //!   max_tokens >= BUDGET_HIGH_THRESHOLD -> "high"
 //! Operator-supplied effort always wins over the derived value.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use routectl_core::{ChatRequest, Message, Result};
 
 use super::super::dialect::ReasoningDialect;
+use super::Dialect;
 use super::util::{
     derive_reasoning_effort, lift_delta_reasoning_content, lift_reasoning_content_field,
     preserve_history_reasoning_content,
 };
-use super::Dialect;
 use crate::effort::clamp_effort_to_supported;
 
 pub struct VllmDialect;
@@ -94,9 +94,9 @@ impl Dialect for VllmDialect {
 mod tests {
     use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
 
+    use super::super::super::HistoryReasoning;
     use super::super::super::dialect::ReasoningDialect;
     use super::super::super::request::normalize;
-    use super::super::super::HistoryReasoning;
 
     fn user_req(model: &str) -> ChatRequest {
         ChatRequest {

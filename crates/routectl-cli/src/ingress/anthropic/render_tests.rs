@@ -1,13 +1,13 @@
 use serde_json::json;
 
-use crate::ingress::anthropic::AnthropicIngress;
 use crate::ingress::IngressAdapter;
+use crate::ingress::anthropic::AnthropicIngress;
 
 use super::*;
 
 #[test]
 fn render_response_emits_messages_shape() {
-    use routectl_core::{schema::Choice, Message, Role, Usage};
+    use routectl_core::{Message, Role, Usage, schema::Choice};
     let resp = ChatResponse {
         id: "msg_01".into(),
         model: "claude-opus-4-7".into(),
@@ -59,7 +59,7 @@ fn render_response_emits_messages_shape() {
 /// coverage lives in tests/router.rs and src/router.rs.
 #[test]
 fn render_response_surfaces_router_model_label_verbatim() {
-    use routectl_core::{schema::Choice, Message, Role, Usage};
+    use routectl_core::{Message, Role, Usage, schema::Choice};
     // Arrange: a response stamped with a client-visible label.
     let resp = ChatResponse {
         id: "msg_01".into(),
@@ -105,7 +105,7 @@ fn render_response_surfaces_router_model_label_verbatim() {
 #[test]
 fn render_response_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
     use routectl_core::{
-        schema::Choice, ContentPart, KnownContentPart, Message, MessageContent, Role, Usage,
+        ContentPart, KnownContentPart, Message, MessageContent, Role, Usage, schema::Choice,
     };
     let resp = ChatResponse {
         id: "msg_dup".into(),
@@ -183,7 +183,7 @@ fn render_response_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() 
 /// when the dedup set is empty.
 #[test]
 fn render_response_emits_tool_use_from_tool_calls_when_parts_has_no_tool_use() {
-    use routectl_core::{schema::Choice, Message, MessageContent, Role, Usage};
+    use routectl_core::{Message, MessageContent, Role, Usage, schema::Choice};
     let resp = ChatResponse {
         id: "msg_oc".into(),
         model: "qwen-3-coder".into(),
@@ -240,7 +240,7 @@ fn render_response_emits_tool_use_from_tool_calls_when_parts_has_no_tool_use() {
 /// duplicate emit reappears on the all-Anthropic path.
 #[test]
 fn render_response_dedupes_tool_use_when_parts_carries_other_typed_tool_use() {
-    use routectl_core::{schema::Choice, ContentPart, Message, MessageContent, Role, Usage};
+    use routectl_core::{ContentPart, Message, MessageContent, Role, Usage, schema::Choice};
     let mut extras = serde_json::Map::new();
     extras.insert("id".into(), Value::String("call_future".into()));
     extras.insert("name".into(), Value::String("future_tool".into()));
@@ -306,7 +306,7 @@ fn render_response_dedupes_tool_use_when_parts_carries_other_typed_tool_use() {
 /// both rather than mis-dropping the tool_calls one.
 #[test]
 fn render_response_does_not_dedupe_other_tool_use_when_id_missing() {
-    use routectl_core::{schema::Choice, ContentPart, Message, MessageContent, Role, Usage};
+    use routectl_core::{ContentPart, Message, MessageContent, Role, Usage, schema::Choice};
     let mut extras = serde_json::Map::new();
     // No `id` field on the Other block.
     extras.insert("name".into(), Value::String("anon".into()));
@@ -368,7 +368,7 @@ fn render_response_does_not_dedupe_other_tool_use_when_id_missing() {
 #[test]
 fn render_response_omits_signature_key_when_payload_has_none() {
     use routectl_core::{
-        schema::Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage,
+        Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage, schema::Choice,
     };
     let resp = ChatResponse {
         id: "msg_no_sig".into(),
@@ -428,7 +428,7 @@ fn render_response_omits_signature_key_when_payload_has_none() {
 #[test]
 fn render_response_emits_signature_verbatim_when_payload_has_one() {
     use routectl_core::{
-        schema::Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage,
+        Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage, schema::Choice,
     };
     let resp = ChatResponse {
         id: "msg_signed".into(),
@@ -481,7 +481,7 @@ fn render_response_emits_signature_verbatim_when_payload_has_one() {
 #[test]
 fn render_response_summary_kind_omits_signature_key_when_absent() {
     use routectl_core::{
-        schema::Choice, Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage,
+        Message, MessageContent, ReasoningDetail, ReasoningDetailKind, Role, Usage, schema::Choice,
     };
     let resp = ChatResponse {
         id: "msg_summary".into(),
@@ -544,7 +544,7 @@ fn render_response_summary_kind_omits_signature_key_when_absent() {
 /// differently (e.g. token-counting dashboards that sum cache fields).
 #[test]
 fn render_response_omits_absent_cache_fields_from_usage() {
-    use routectl_core::{schema::Choice, Message, MessageContent, Role, Usage};
+    use routectl_core::{Message, MessageContent, Role, Usage, schema::Choice};
     let resp = ChatResponse {
         id: "msg_no_cache".into(),
         model: "claude-opus-4-7".into(),
@@ -606,8 +606,8 @@ fn render_response_omits_absent_cache_fields_from_usage() {
 #[test]
 fn render_response_emits_cache_fields_when_present() {
     use routectl_core::{
-        schema::{CacheCreation, Choice},
         Message, MessageContent, Role, Usage,
+        schema::{CacheCreation, Choice},
     };
     let resp = ChatResponse {
         id: "msg_cache".into(),
@@ -665,7 +665,7 @@ fn render_response_emits_cache_fields_when_present() {
 
 #[test]
 fn content_filter_finish_renders_refusal_stop_reason() {
-    use routectl_core::{schema::Choice, Message, Role, Usage};
+    use routectl_core::{Message, Role, Usage, schema::Choice};
     let resp = ChatResponse {
         id: "msg_cf".into(),
         model: "gpt-5".into(),
@@ -708,7 +708,7 @@ fn anthropic_native_pause_turn_finish_round_trips_unchanged() {
 }
 
 fn render_single_tool_call(arguments: &str) -> Value {
-    use routectl_core::{schema::Choice, Message, MessageContent, Role, Usage};
+    use routectl_core::{Message, MessageContent, Role, Usage, schema::Choice};
     let resp = ChatResponse {
         id: "msg_args".into(),
         model: "qwen-3-coder".into(),
@@ -800,7 +800,7 @@ fn valid_tool_call_arguments_render_input_unchanged() {
 /// Anthropic render drops the reserved name so it never reaches a client.
 #[test]
 fn render_response_drops_reserved_upstream_meta_key_from_extras() {
-    use routectl_core::{schema::Choice, Message, MessageContent, Role, Usage};
+    use routectl_core::{Message, MessageContent, Role, Usage, schema::Choice};
     let mut extras = serde_json::Map::new();
     extras.insert("upstream_meta".into(), json!({"leaked": "should not ship"}));
     let resp = ChatResponse {

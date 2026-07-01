@@ -3,9 +3,9 @@
 use routectl_auth::{SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{
-    validate_alias_chain_targets, validate_alias_patterns, validate_bedrock_global_config,
-    validate_overrides, validate_reasoning_defaults, validate_registry_patterns,
-    validate_retry_policy, Config, ProviderEntry,
+    Config, ProviderEntry, validate_alias_chain_targets, validate_alias_patterns,
+    validate_bedrock_global_config, validate_overrides, validate_reasoning_defaults,
+    validate_registry_patterns, validate_retry_policy,
 };
 
 use crate::server::CompositeStore;

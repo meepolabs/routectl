@@ -155,11 +155,11 @@ pub fn known_provider_ids() -> &'static [&'static str] {
 /// `#[doc(hidden)]` so this is not part of the supported public API.
 #[doc(hidden)]
 pub mod testing {
-    use super::codex::{decode_token_response_traced, Codex};
-    use super::xai::{decode_token_response_traced as xai_decode_token_response_traced, Xai};
     use super::OAuthFlow;
-    use crate::oauth::types::TokenRecord;
+    use super::codex::{Codex, decode_token_response_traced};
+    use super::xai::{Xai, decode_token_response_traced as xai_decode_token_response_traced};
     use crate::oauth::OAuthResult;
+    use crate::oauth::types::TokenRecord;
 
     /// Drive the codex provider's refresh-token leg. Wraps the
     /// `OAuthFlow::refresh_token` call so the integration test can

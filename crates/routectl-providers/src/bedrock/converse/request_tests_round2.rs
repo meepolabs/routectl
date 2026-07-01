@@ -724,9 +724,11 @@ fn redacted_thinking_translates_to_converse_redacted_content() {
         "AAECAwQF"
     );
     // No reasoningText sibling on the redacted variant.
-    assert!(content[0]["reasoningContent"]
-        .get("reasoningText")
-        .is_none());
+    assert!(
+        content[0]["reasoningContent"]
+            .get("reasoningText")
+            .is_none()
+    );
 }
 
 #[test]

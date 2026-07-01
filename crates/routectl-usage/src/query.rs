@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(r.cache_read_peak, 91_000);
         assert_eq!(r.cache_read_avg, 89_333); // (88000+89000+91000)/3 truncated
         assert_eq!(r.cache_read_billed, 268_000); // SUM, the per-turn cost basis
-                                                  // The display figures must NOT equal the billed sum.
+        // The display figures must NOT equal the billed sum.
         assert_ne!(r.cache_read_peak, r.cache_read_billed);
         assert_ne!(r.cache_read_avg, r.cache_read_billed);
         // cache_read_present still counts the reporting rows (all three).

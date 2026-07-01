@@ -24,12 +24,12 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    schema::{ChunkChoice, ChunkDelta, UsageDelta},
     ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role,
+    schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
 /// Discriminant returned by `BlockState::tag` for log-context strings.
@@ -45,9 +45,9 @@ const BLOCK_TAG_TOOL_USE: &str = "tool_use";
 /// legitimate breadth.
 pub(super) const MAX_OUTPUT_BLOCKS: usize = 4096;
 
+use super::OPENAI_RESPONSES_FORMAT;
 use super::response::{map_finish_reason, upstream_error_from_failed};
 use super::response_types::{ResponsesResponse, ResponsesStreamEvent};
-use super::OPENAI_RESPONSES_FORMAT;
 
 /// Per-output-item streaming state.
 #[derive(Debug, Clone)]
@@ -579,10 +579,10 @@ impl ResponsesStreamState {
         // path lifts a codex usage-limit reset hint via
         // `upstream_error_from_failed`; this bare fallback has no
         // structured error object, so retry_after stays None.
-        if let Some(resp_value) = event.response.clone() {
-            if let Ok(resp) = serde_json::from_value::<ResponsesResponse>(resp_value) {
-                return upstream_error_from_failed(provider_id, &resp);
-            }
+        if let Some(resp_value) = event.response.clone()
+            && let Ok(resp) = serde_json::from_value::<ResponsesResponse>(resp_value)
+        {
+            return upstream_error_from_failed(provider_id, &resp);
         }
         Error::upstream(
             provider_id,
@@ -598,10 +598,10 @@ impl ResponsesStreamState {
         // normal terminal chunk with finish_reason="error" -- that was
         // inconsistent with how complete() treats cancellation (Err),
         // and hid the event from callers who gate retries on Err.
-        if let Some(resp_value) = event.response.clone() {
-            if let Ok(resp) = serde_json::from_value::<ResponsesResponse>(resp_value) {
-                return upstream_error_from_failed(provider_id, &resp);
-            }
+        if let Some(resp_value) = event.response.clone()
+            && let Ok(resp) = serde_json::from_value::<ResponsesResponse>(resp_value)
+        {
+            return upstream_error_from_failed(provider_id, &resp);
         }
         Error::upstream(
             provider_id,

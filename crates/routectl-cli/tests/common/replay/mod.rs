@@ -27,15 +27,15 @@ pub mod loader;
 pub mod sse_diff;
 
 pub(crate) use harness::{
-    captured_root, headers_from_pairs, phase1_skip_reason, FixtureOutcome, PHASE1_MODEL_DENYLIST,
+    FixtureOutcome, PHASE1_MODEL_DENYLIST, captured_root, headers_from_pairs, phase1_skip_reason,
 };
 pub use json_diff::{
-    assert_headers_equal, assert_json_equal_structural, DEFAULT_HEADER_ALLOW_SKIP,
+    DEFAULT_HEADER_ALLOW_SKIP, assert_headers_equal, assert_json_equal_structural,
 };
 pub use loader::{
-    discover_fixtures, load_fixture, Fixture, FixtureMeta, LoadedCorpus, ReplayError,
+    Fixture, FixtureMeta, LoadedCorpus, ReplayError, discover_fixtures, load_fixture,
 };
-pub use sse_diff::{assert_sse_equal, parse_sse_events, ParseError, SseEventCmp};
+pub use sse_diff::{ParseError, SseEventCmp, assert_sse_equal, parse_sse_events};
 
 /// Wrapped error message returned by every structural comparator.
 /// Tests print it via `Display`; it is never re-parsed, so a bare

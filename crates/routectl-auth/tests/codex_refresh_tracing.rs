@@ -30,8 +30,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use tracing::field::{Field, Visit};
 

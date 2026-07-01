@@ -1109,29 +1109,29 @@ pub async fn build_resolved_models(
             resolved = resolved.with_reported_model(label.clone());
         }
         resolved = resolved.with_visible_routectl_provider(entry.visible_routectl_provider);
-        if let Some(uri) = primary_api_key_uri(provider_entry) {
-            if let Ok(sr) = SecretRef::parse(uri) {
-                resolved = resolved.with_auth_secret_ref(sr.clone());
-                // OAuth credential-pool expansion. A bare-pool
-                // `oauth://<provider>` ref backed by more than one stored
-                // seat expands into one seat-pinned provider per seat so
-                // the dispatch chain rotates + cools across seats. A
-                // single seat / labeled ref / non-oauth ref builds exactly
-                // one provider (the default `provider` already on
-                // `resolved`), so this is a no-op there -- back-compat.
-                if let Some(seats) = build_seat_targets(
-                    nickname,
-                    &entry.provider,
-                    provider_entry,
-                    &sr,
-                    &resolved.provider,
-                    secrets.clone(),
-                    opts.clone(),
-                )
-                .await
-                {
-                    resolved = resolved.with_seats(seats);
-                }
+        if let Some(uri) = primary_api_key_uri(provider_entry)
+            && let Ok(sr) = SecretRef::parse(uri)
+        {
+            resolved = resolved.with_auth_secret_ref(sr.clone());
+            // OAuth credential-pool expansion. A bare-pool
+            // `oauth://<provider>` ref backed by more than one stored
+            // seat expands into one seat-pinned provider per seat so
+            // the dispatch chain rotates + cools across seats. A
+            // single seat / labeled ref / non-oauth ref builds exactly
+            // one provider (the default `provider` already on
+            // `resolved`), so this is a no-op there -- back-compat.
+            if let Some(seats) = build_seat_targets(
+                nickname,
+                &entry.provider,
+                provider_entry,
+                &sr,
+                &resolved.provider,
+                secrets.clone(),
+                opts.clone(),
+            )
+            .await
+            {
+                resolved = resolved.with_seats(seats);
             }
         }
         models.insert(nickname.clone(), Arc::new(resolved));
@@ -3049,8 +3049,8 @@ mod managed_token_tests {
     use super::*;
     use async_trait::async_trait;
     use routectl_auth::{SecretRef, SecretStore};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingStore {
         calls: AtomicUsize,

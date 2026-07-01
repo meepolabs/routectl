@@ -21,7 +21,7 @@ use std::sync::Arc;
 use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerAuth, ServerConfig,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1923,10 +1923,10 @@ async fn cross_response_openai_tool_calls_become_anthropic_tool_use_blocks() {
 #[tokio::test]
 async fn bedrock_invoke_filters_unsupported_betas_through_anthropic_ingress() {
     use axum::http::HeaderMap;
-    use routectl_cli::ingress::anthropic::AnthropicIngress;
     use routectl_cli::ingress::IngressAdapter;
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
     use routectl_providers::bedrock::{
-        invoke as bedrock_invoke, BedrockApiShape, BedrockConfig, BedrockCreds,
+        BedrockApiShape, BedrockConfig, BedrockCreds, invoke as bedrock_invoke,
     };
 
     // Arrange: simulate the inbound HTTP shape claude-code sends.
@@ -2431,9 +2431,9 @@ async fn anthropic_egress_from_openai_compat_preserves_service_tier() {
 #[tokio::test]
 async fn converse_request_body_has_camel_case_inference_config() {
     use axum::http::HeaderMap;
-    use routectl_cli::ingress::anthropic::AnthropicIngress;
     use routectl_cli::ingress::IngressAdapter;
-    use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+    use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, converse};
 
     // Arrange: a simple Anthropic Messages body from the ingress.
     let ingress = AnthropicIngress;
@@ -2536,9 +2536,9 @@ async fn converse_request_body_has_camel_case_inference_config() {
 #[tokio::test]
 async fn converse_request_includes_tool_config_for_tool_defs() {
     use axum::http::HeaderMap;
-    use routectl_cli::ingress::anthropic::AnthropicIngress;
     use routectl_cli::ingress::IngressAdapter;
-    use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+    use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, converse};
 
     // Arrange: request with one tool definition.
     let ingress = AnthropicIngress;
@@ -2723,9 +2723,9 @@ async fn converse_response_tool_use_decodes_to_canonical() {
 #[tokio::test]
 async fn converse_request_system_with_cache_control_emits_cache_point_block() {
     use axum::http::HeaderMap;
-    use routectl_cli::ingress::anthropic::AnthropicIngress;
     use routectl_cli::ingress::IngressAdapter;
-    use routectl_providers::bedrock::{converse, BedrockApiShape, BedrockConfig, BedrockCreds};
+    use routectl_cli::ingress::anthropic::AnthropicIngress;
+    use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, converse};
 
     // Arrange: system block carrying cache_control.
     let ingress = AnthropicIngress;

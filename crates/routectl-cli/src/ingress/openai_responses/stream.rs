@@ -46,12 +46,12 @@
 //! same SLICE-2 helpers (`output_text_block`, `function_call_item`,
 //! `reasoning_item`).
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    schema::Choice, ChatChunk, ChatResponse, ChunkDelta, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Result, Role, Usage, UsageDelta,
+    ChatChunk, ChatResponse, ChunkDelta, Message, MessageContent, ReasoningDetail,
+    ReasoningDetailKind, Result, Role, Usage, UsageDelta, schema::Choice,
 };
 
 use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
@@ -59,7 +59,7 @@ use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
 use super::render::{
     function_call_item, output_text_block, render_responses_response, status_from_finish_reason,
 };
-use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer, OPENAI_RESPONSES_FORMAT};
+use super::{OPENAI_RESPONSES_FORMAT, OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 
 /// Per-stream cap on the number of buffered function-call indices. A
 /// legitimate turn emits a small handful of parallel tool calls; an
@@ -115,13 +115,13 @@ pub(super) fn render_chunk_internal(
             stash_finish(fr, chunk.usage.as_ref(), state);
         }
     }
-    if chunk.choices.is_empty() {
-        if let Some(usage) = chunk.usage.as_ref() {
-            // Trailing usage-only chunk (OpenAI-compat upstreams emit
-            // usage in a separate final chunk). Stash it for the
-            // completed body; render_eos flushes the terminal event.
-            state.pending_usage = Some(usage.clone());
-        }
+    if chunk.choices.is_empty()
+        && let Some(usage) = chunk.usage.as_ref()
+    {
+        // Trailing usage-only chunk (OpenAI-compat upstreams emit
+        // usage in a separate final chunk). Stash it for the
+        // completed body; render_eos flushes the terminal event.
+        state.pending_usage = Some(usage.clone());
     }
 
     Ok(events)
@@ -157,10 +157,10 @@ fn emit_delta_events(
     state: &mut ResponsesStreamState,
     events: &mut Vec<SseEvent>,
 ) {
-    if let Some(text) = delta.content.as_deref() {
-        if !text.is_empty() {
-            emit_text_delta(text, state, events);
-        }
+    if let Some(text) = delta.content.as_deref()
+        && !text.is_empty()
+    {
+        emit_text_delta(text, state, events);
     }
 
     for d in &delta.reasoning_details {
@@ -285,10 +285,9 @@ fn ensure_reasoning_item(
         output_index,
         detail_id: open_id,
     }) = &state.open
+        && open_id == &detail_id
     {
-        if open_id == &detail_id {
-            return *output_index;
-        }
+        return *output_index;
     }
     close_open_item(state, events);
     let output_index = alloc_output_index(state);
@@ -332,16 +331,16 @@ fn buffer_tool_call(tc: &Value, state: &mut ResponsesStreamState) {
         state.tool_buffers.push(ToolCallBuffer::default());
     }
     let buf = &mut state.tool_buffers[call_index];
-    if let Some(id) = tc.get("id").and_then(Value::as_str) {
-        if !id.is_empty() {
-            buf.id = id.to_string();
-        }
+    if let Some(id) = tc.get("id").and_then(Value::as_str)
+        && !id.is_empty()
+    {
+        buf.id = id.to_string();
     }
     let func = tc.get("function");
-    if let Some(name) = func.and_then(|f| f.get("name")).and_then(Value::as_str) {
-        if !name.is_empty() {
-            buf.name = name.to_string();
-        }
+    if let Some(name) = func.and_then(|f| f.get("name")).and_then(Value::as_str)
+        && !name.is_empty()
+    {
+        buf.name = name.to_string();
     }
     if let Some(args) = func
         .and_then(|f| f.get("arguments"))

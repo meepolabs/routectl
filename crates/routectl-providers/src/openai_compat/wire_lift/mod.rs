@@ -139,11 +139,11 @@ mod order_test {
     //! alone also changes runtime behavior and will be caught by
     //! behavioral tests in the sub-module test suites.
 
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     use routectl_core::{ChatRequest, Message, MessageContent, Role};
 
-    use super::{lift_all, DOCUMENTED_DISPATCH_ORDER, LIFT_STEPS};
+    use super::{DOCUMENTED_DISPATCH_ORDER, LIFT_STEPS, lift_all};
 
     fn minimal_req() -> ChatRequest {
         ChatRequest {

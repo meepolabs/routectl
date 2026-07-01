@@ -18,7 +18,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use routectl_core::{CacheCreation, ChatChunk, ChatRequest, ChatResponse, Result};
 

@@ -8,8 +8,8 @@ use serde_json::Value;
 use routectl_core::{ChatRequest, Result};
 
 use super::super::dialect::ReasoningDialect;
-use super::util::drop_sampling_params;
 use super::Dialect;
+use super::util::drop_sampling_params;
 use crate::effort::clamp_effort_to_supported;
 use crate::model_profile::profile_for;
 

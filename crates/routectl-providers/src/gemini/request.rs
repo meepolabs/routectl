@@ -15,12 +15,12 @@ use serde_json::Value;
 use routectl_core::{ChatRequest, ReasoningDetail, Result};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
+use super::GEMINI_FORMAT;
 use super::types::{
     Content, FunctionCallPart, FunctionCallingConfig, FunctionDeclaration, FunctionResponsePart,
     GeminiTool, GenerateContentRequest, GenerationConfig, InlineData, Part, SystemInstruction,
     ThinkingConfig, ToolConfig,
 };
-use super::GEMINI_FORMAT;
 
 /// Build a `GenerateContentRequest` from a canonical `ChatRequest`.
 ///
@@ -215,16 +215,16 @@ fn content_part_to_part(provider_id: &str, part: &ContentPart) -> Result<Option<
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 // If it's a data URI (data:mime/type;base64,...), extract.
-                if let Some(stripped) = url.strip_prefix("data:") {
-                    if let Some(semi) = stripped.find(';') {
-                        let mime = &stripped[..semi];
-                        let rest = &stripped[semi + 1..];
-                        if let Some(b64) = rest.strip_prefix("base64,") {
-                            return Ok(Some(inline_data_part(InlineData {
-                                mime_type: mime.to_string(),
-                                data: b64.to_string(),
-                            })));
-                        }
+                if let Some(stripped) = url.strip_prefix("data:")
+                    && let Some(semi) = stripped.find(';')
+                {
+                    let mime = &stripped[..semi];
+                    let rest = &stripped[semi + 1..];
+                    if let Some(b64) = rest.strip_prefix("base64,") {
+                        return Ok(Some(inline_data_part(InlineData {
+                            mime_type: mime.to_string(),
+                            data: b64.to_string(),
+                        })));
                     }
                 }
                 // Non-data URL: pass as text (best-effort).
@@ -977,10 +977,12 @@ mod tests {
             ..Default::default()
         });
         // No other generationConfig knobs set -> the whole block is None.
-        assert!(translate("gemini:test", &req)
-            .expect("translate")
-            .generation_config
-            .is_none());
+        assert!(
+            translate("gemini:test", &req)
+                .expect("translate")
+                .generation_config
+                .is_none()
+        );
     }
 
     #[test]

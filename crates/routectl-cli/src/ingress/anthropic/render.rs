@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use routectl_core::{ChatResponse, ContentPart, Message, MessageContent};
 
@@ -231,10 +231,10 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
     if let Some(tcs) = msg.tool_calls.as_ref() {
         for tc in tcs {
             let id_value = tc.get("id").cloned().unwrap_or(Value::Null);
-            if let Some(id_str) = id_value.as_str() {
-                if parts_tool_use_ids.contains(id_str) {
-                    continue;
-                }
+            if let Some(id_str) = id_value.as_str()
+                && parts_tool_use_ids.contains(id_str)
+            {
+                continue;
             }
             let func = tc.get("function").and_then(|v| v.as_object());
             let name = func
@@ -289,10 +289,10 @@ fn thinking_block_with_optional_signature(text: &str, signature: Option<&Value>)
     let mut obj = Map::with_capacity(3);
     obj.insert("type".into(), Value::String("thinking".into()));
     obj.insert("thinking".into(), Value::String(text.to_string()));
-    if let Some(sig) = signature {
-        if !sig.is_null() {
-            obj.insert("signature".into(), sig.clone());
-        }
+    if let Some(sig) = signature
+        && !sig.is_null()
+    {
+        obj.insert("signature".into(), sig.clone());
     }
     Value::Object(obj)
 }

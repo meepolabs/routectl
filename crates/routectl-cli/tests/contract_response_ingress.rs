@@ -18,8 +18,8 @@
 
 mod common;
 
-use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::IngressAdapter;
+use routectl_cli::ingress::anthropic::AnthropicIngress;
 
 use common::scenarios;
 

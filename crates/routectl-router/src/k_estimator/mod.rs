@@ -18,9 +18,9 @@ pub mod shadow;
 pub mod store;
 
 pub use default_impl::LedgerBackedK;
-pub use rebuild::{rebuild_into, LedgerReader, LedgerSampleRow};
+pub use rebuild::{LedgerReader, LedgerSampleRow, rebuild_into};
 pub use shadow::{ShadowOutcome, ShadowStore};
-pub use store::{KSessionKey, KSessionStore, KSessionWindow, Sample, K_SESSION_CAPACITY};
+pub use store::{K_SESSION_CAPACITY, KSessionKey, KSessionStore, KSessionWindow, Sample};
 
 use std::time::{Duration, SystemTime};
 

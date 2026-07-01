@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    debug_upstream_error_body, is_json_error_envelope, sanitize_for_log, sanitize_upstream_body,
-    trace_outgoing_body, trace_upstream_success_body, ChatChunk, ChatRequest, ChatResponse, Error,
-    Provider, Result, StaticToken, TokenCount, TokenSource,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, StaticToken, TokenCount,
+    TokenSource, debug_upstream_error_body, is_json_error_envelope, sanitize_for_log,
+    sanitize_upstream_body, trace_outgoing_body, trace_upstream_success_body,
 };
 
 mod cloak;
@@ -1279,10 +1279,10 @@ fn build_count_tokens_body(normalized: &Value) -> Value {
         return Value::Object(out);
     };
     for &k in ALLOWED {
-        if let Some(v) = src.get(k) {
-            if !v.is_null() {
-                out.insert(k.to_string(), v.clone());
-            }
+        if let Some(v) = src.get(k)
+            && !v.is_null()
+        {
+            out.insert(k.to_string(), v.clone());
         }
     }
     Value::Object(out)
@@ -1982,7 +1982,7 @@ mod tests {
         ));
         assert!(is_anthropic_api_host("https://api.anthropic.com:443/v1"));
         assert!(is_anthropic_api_host("https://API.Anthropic.Com")); // case-insensitive host
-                                                                     // Sibling-domain takeover and host-in-path must NOT match.
+        // Sibling-domain takeover and host-in-path must NOT match.
         assert!(!is_anthropic_api_host(
             "https://api.anthropic.com.evil.example"
         ));

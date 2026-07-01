@@ -11,10 +11,11 @@ use std::time::{Duration, Instant, SystemTime};
 use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
-    cache_control::{compute_frozen_floor, validate_source, MAX_BREAKPOINTS},
-    context_reduction::{apply_json_minify, ReductionOutcome},
-    sanitize_for_log, scan_volatile, CacheControl, ChatChunk, ChatRequest, ChatResponse, Error,
-    Provider, Result, RoutectlInternal, TokenCount,
+    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, RoutectlInternal,
+    TokenCount,
+    cache_control::{MAX_BREAKPOINTS, compute_frozen_floor, validate_source},
+    context_reduction::{ReductionOutcome, apply_json_minify},
+    sanitize_for_log, scan_volatile,
 };
 use serde_json::Value;
 
@@ -23,7 +24,7 @@ use crate::config::{
     AliasValue, CacheCapability, Config, HistoryReasoning, ReasoningDialect, RetryPolicy,
 };
 use crate::context_trim::{
-    propose_steady_state_trim, trimmed_prefix_fingerprint, SteadyStateTrimParams,
+    SteadyStateTrimParams, propose_steady_state_trim, trimmed_prefix_fingerprint,
 };
 use crate::cost_gate::break_even_k;
 use crate::glob::PrefixIndex;
@@ -1010,10 +1011,10 @@ impl Router {
         // model only -- never the fallback seats. The LIMITATION on
         // `DispatchMeta::selection_decision` applies: a serve past the home
         // records `None`.
-        if let Some(tok) = token {
-            if let Some(t) = out.get_mut(first) {
-                t.selection_decision = Some(tok);
-            }
+        if let Some(tok) = token
+            && let Some(t) = out.get_mut(first)
+        {
+            t.selection_decision = Some(tok);
         }
     }
 
@@ -1258,10 +1259,10 @@ impl Router {
             .get(&target.provider_name)
             .map(|e| &e.runtime().unsupported_features);
         for feature in features {
-            if let Some(list) = provider_unsupported {
-                if list.iter().any(|u| u == feature) {
-                    return Some((feature.clone(), FilterSource::ProviderStatic));
-                }
+            if let Some(list) = provider_unsupported
+                && list.iter().any(|u| u == feature)
+            {
+                return Some((feature.clone(), FilterSource::ProviderStatic));
             }
             if target
                 .model_unsupported_features
@@ -1636,10 +1637,11 @@ impl Router {
                             // in-loop cap (a larger reset parked the provider
                             // above instead of blocking this thread), and never
                             // for a probe (R7).
-                            if let Some(h) = reset_hint {
-                                if !is_probe && h <= INLOOP_RETRY_AFTER_CAP {
-                                    backoff = backoff.max(h);
-                                }
+                            if let Some(h) = reset_hint
+                                && !is_probe
+                                && h <= INLOOP_RETRY_AFTER_CAP
+                            {
+                                backoff = backoff.max(h);
                             }
                             // Free the half-open probe slot this attempt
                             // claimed before re-probing: the in-loop re-gate
@@ -2132,10 +2134,8 @@ impl Router {
                         // quarantine tradeoff of closing on the first chunk
                         // (see runtime_state.rs).
                         let state = self.state.get(state_key).cloned();
-                        if was_half_open_probe {
-                            if let Some(st) = state.as_ref() {
-                                st.lock().record_success();
-                            }
+                        if was_half_open_probe && let Some(st) = state.as_ref() {
+                            st.lock().record_success();
                         }
                         // The probe (if any) is settled; the wrapped stream's
                         // BreakerAccounting owns the tail. Disarm so a drop here
@@ -6485,14 +6485,16 @@ mod seat_pool_dispatch_tests {
             order[0]
         );
         // The re-pick repaired the pin to an in-pool seat.
-        assert!(valid.contains(
-            &router
-                .sticky_pins
-                .get("S")
-                .expect("re-pinned")
-                .state_key
-                .as_str()
-        ));
+        assert!(
+            valid.contains(
+                &router
+                    .sticky_pins
+                    .get("S")
+                    .expect("re-pinned")
+                    .state_key
+                    .as_str()
+            )
+        );
     }
 
     #[tokio::test]
@@ -7600,8 +7602,8 @@ mod auth_failure_recovery_tests {
     use async_trait::async_trait;
     use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, Provider};
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Mock provider that returns `Error::Upstream { status: 401, .. }`
     /// on its first `complete()` call and a 200-shaped success on
@@ -7870,8 +7872,8 @@ mod circuit_breaker_slot_release_tests {
     use async_trait::async_trait;
     use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider};
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Provider that counts `complete()` calls and always 429s, so the
     /// test can distinguish "gate granted a probe and reached the

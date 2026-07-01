@@ -29,12 +29,12 @@ use std::collections::HashMap;
 use aws_smithy_types::event_stream::Message;
 use bytes::Bytes;
 use futures::stream::{BoxStream, Stream};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    schema::{ChunkChoice, ChunkDelta, UsageDelta},
     ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result,
+    schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
 use super::super::frame::{self, FrameHandler, FrameLabel};
@@ -403,15 +403,14 @@ fn handle_block_delta(
                 }
                 chunks.push(reasoning_text_chunk(text));
             }
-            if let Some(sig) = reasoning_content.signature {
-                if let Some(BlockState::Reasoning { signature, .. }) =
+            if let Some(sig) = reasoning_content.signature
+                && let Some(BlockState::Reasoning { signature, .. }) =
                     state.blocks.get_mut(&ev.content_block_index)
-                {
-                    *signature = Some(sig);
-                }
-                // No per-event chunk for signature -- the terminal
-                // detail at contentBlockStop carries it.
+            {
+                *signature = Some(sig);
             }
+            // No per-event chunk for signature -- the terminal
+            // detail at contentBlockStop carries it.
             if let Some(redacted) = reasoning_content.redacted_content {
                 // Redacted reasoning has no text/signature pair; emit
                 // immediately. Allocate a fresh detail index from the

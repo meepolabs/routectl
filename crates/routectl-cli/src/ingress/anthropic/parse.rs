@@ -149,12 +149,12 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
 /// through. Returns `None` when neither is present. The `metadata`
 /// argument is borrowed, not consumed, so the object still round-trips.
 fn resolve_inbound_session_key(headers: &HeaderMap, metadata: Option<&Value>) -> Option<String> {
-    if let Some(h) = headers.get("x-claude-code-session-id") {
-        if let Ok(s) = h.to_str() {
-            let t = s.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
+    if let Some(h) = headers.get("x-claude-code-session-id")
+        && let Ok(s) = h.to_str()
+    {
+        let t = s.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
         }
     }
 

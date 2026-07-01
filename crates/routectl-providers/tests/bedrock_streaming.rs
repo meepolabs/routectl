@@ -30,8 +30,8 @@
 
 #![cfg(feature = "bedrock")]
 
-use routectl_providers::bedrock::auth::{resolve, ResolvedCreds};
 use routectl_providers::bedrock::BedrockCreds;
+use routectl_providers::bedrock::auth::{ResolvedCreds, resolve};
 
 // ---------------------------------------------------------------------------
 // auth::resolve -- credential variant mapping

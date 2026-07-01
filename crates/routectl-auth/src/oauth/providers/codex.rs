@@ -24,13 +24,13 @@
 //! upstream on every 401) and display-only identity fields.
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::de::DeserializeOwned;
 use url::Url;
 
-use crate::oauth::providers::{truncate, AuthParams, OAuthFlow};
-use crate::oauth::types::{unix_now, AccountInfo, SecretToken, TokenRecord};
+use crate::oauth::providers::{AuthParams, OAuthFlow, truncate};
+use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
 /// Public PKCE client id for the codex CLI. No client_secret -- this is
@@ -212,7 +212,7 @@ fn decode_jwt_payload<T: DeserializeOwned>(jwt: &str) -> Result<T, OAuthError> {
         _ => {
             return Err(OAuthError::TokenEndpoint(
                 "access_token is not a JWT".into(),
-            ))
+            ));
         }
     };
     let bytes = URL_SAFE_NO_PAD
@@ -495,7 +495,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         (None, None) => {
             return Err(OAuthError::TokenEndpoint(
                 "token response missing refresh_token".into(),
-            ))
+            ));
         }
     };
 
@@ -784,8 +784,8 @@ mod tests {
     #[test]
     fn codex_identity_stamps_user_agent_originator_and_residency() {
         use routectl_core::identity::codex::{
-            codex_user_agent, CODEX_ORIGINATOR, ORIGINATOR_HEADER_NAME, RESIDENCY_HEADER_NAME,
-            RESIDENCY_HEADER_VALUE,
+            CODEX_ORIGINATOR, ORIGINATOR_HEADER_NAME, RESIDENCY_HEADER_NAME,
+            RESIDENCY_HEADER_VALUE, codex_user_agent,
         };
 
         // Arrange: a fresh, identity-neutral client + bare POST builder.

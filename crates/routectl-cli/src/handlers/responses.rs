@@ -3,16 +3,16 @@
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
-use axum::Extension;
 use serde_json::Value;
 
 use crate::handlers::ingress_handle::ingress_handle;
 use crate::ingress::openai_responses::ResponsesIngress;
-use crate::server::request_id::RequestId;
 use crate::server::AppState;
+use crate::server::request_id::RequestId;
 
 #[tracing::instrument(skip_all, fields(ingress = "openai-responses"))]
 pub async fn responses(

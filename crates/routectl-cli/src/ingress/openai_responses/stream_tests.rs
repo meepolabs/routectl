@@ -6,13 +6,13 @@
 //! field shapes are asserted exactly against the egress wire fixtures
 //! in `routectl-providers/.../sse_tests.rs`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, ReasoningDetail, ReasoningDetailKind};
 
 use super::*;
-use crate::ingress::openai_responses::ResponsesStreamState;
 use crate::ingress::StreamErrorClass;
+use crate::ingress::openai_responses::ResponsesStreamState;
 
 // ---------------------------------------------------------------------------
 // Builders
@@ -368,9 +368,11 @@ fn tool_call_index_above_cap_is_dropped() {
     let events = render_eos_internal(&mut state);
 
     // Assert: no function_call item emitted for the over-cap index.
-    assert!(!all_data(&events)
-        .iter()
-        .any(|d| d["item"]["type"] == "function_call"));
+    assert!(
+        !all_data(&events)
+            .iter()
+            .any(|d| d["item"]["type"] == "function_call")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -440,9 +442,11 @@ fn reasoning_encrypted_rides_to_item_done_not_a_delta() {
     events.extend(render_eos_internal(&mut state));
 
     // Assert: no encrypted delta event; the signature is on item.done.
-    assert!(!names(&events)
-        .iter()
-        .any(|n| n.contains("reasoning") && n.contains("delta") && n.contains("encrypted")));
+    assert!(
+        !names(&events)
+            .iter()
+            .any(|n| n.contains("reasoning") && n.contains("delta") && n.contains("encrypted"))
+    );
     let item_done = data_of(&events, "response.output_item.done");
     assert_eq!(item_done["item"]["encrypted_content"], "SIG");
     assert_eq!(item_done["item"]["summary"][0]["text"], "s");
@@ -613,7 +617,7 @@ fn trailing_usage_only_chunk_is_captured_for_completed_body() {
 #[test]
 fn completed_body_output_matches_non_stream_render_for_text() {
     use crate::ingress::openai_responses::render::render_responses_response;
-    use routectl_core::{schema::Choice, ChatResponse, Message, MessageContent, Role};
+    use routectl_core::{ChatResponse, Message, MessageContent, Role, schema::Choice};
 
     // Arrange: stream "hello" then finish.
     let mut state = fresh();

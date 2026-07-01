@@ -10,9 +10,9 @@
 //! rows under a bounded deadline, and the thread is joined.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;

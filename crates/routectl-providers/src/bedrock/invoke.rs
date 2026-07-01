@@ -21,8 +21,8 @@ use serde_json::Value;
 
 use routectl_core::{ChatRequest, ChatResponse, Error, Result};
 
-use super::betas::filter_bedrock_betas;
 use super::BedrockConfig;
+use super::betas::filter_bedrock_betas;
 
 /// The Bedrock-required `anthropic_version` body field. Distinct from
 /// the Anthropic API's `anthropic-version: 2023-06-01` header.
@@ -107,20 +107,20 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // (rather than at config load) so the WARN line carries the
     // provider id at request time and matches the operator's
     // existing log workflow.
-    if let Some(extras) = cfg.additional_model_request_fields.as_ref() {
-        if let Some(extras_obj) = extras.as_object() {
-            for (k, v) in extras_obj {
-                if is_bedrock_invoke_managed_key(k) {
-                    tracing::warn!(
-                        provider = %cfg.id,
-                        key = %k,
-                        "additional_model_request_fields attempted to override \
-                         routectl-managed key; dropped"
-                    );
-                    continue;
-                }
-                obj.insert(k.clone(), v.clone());
+    if let Some(extras) = cfg.additional_model_request_fields.as_ref()
+        && let Some(extras_obj) = extras.as_object()
+    {
+        for (k, v) in extras_obj {
+            if is_bedrock_invoke_managed_key(k) {
+                tracing::warn!(
+                    provider = %cfg.id,
+                    key = %k,
+                    "additional_model_request_fields attempted to override \
+                     routectl-managed key; dropped"
+                );
+                continue;
             }
+            obj.insert(k.clone(), v.clone());
         }
     }
 
@@ -447,7 +447,7 @@ fn validate_lowered_breakpoints(
     obj: &serde_json::Map<String, Value>,
     candidate_messages: &[Value],
 ) -> Result<()> {
-    use routectl_core::cache_control::{validate, Breakpoint, BreakpointPosition, CacheControl};
+    use routectl_core::cache_control::{Breakpoint, BreakpointPosition, CacheControl, validate};
 
     fn parse_marker(v: &Value) -> Option<CacheControl> {
         serde_json::from_value::<CacheControl>(v.clone()).ok()
@@ -662,8 +662,8 @@ mod tests {
         // text block) are preserved byte-for-byte; the body must carry NO
         // top-level cache_control key after normalize.
         use routectl_core::{
-            cache_control::CacheControl, content_part::ContentPart, system_content::SystemContent,
-            KnownContentPart, SystemBlock,
+            KnownContentPart, SystemBlock, cache_control::CacheControl, content_part::ContentPart,
+            system_content::SystemContent,
         };
 
         let cfg = fake_cfg();
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn top_level_cache_control_lowers_to_last_unmarked_block() {
         use routectl_core::{
-            cache_control::CacheControl, content_part::ContentPart, KnownContentPart,
+            KnownContentPart, cache_control::CacheControl, content_part::ContentPart,
         };
 
         // Arrange
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn top_level_cache_control_does_not_override_existing_block_marker() {
         use routectl_core::{
-            cache_control::CacheControl, content_part::ContentPart, KnownContentPart,
+            KnownContentPart, cache_control::CacheControl, content_part::ContentPart,
         };
 
         // Arrange
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn no_top_level_cache_control_leaves_per_block_marker_untouched() {
         use routectl_core::{
-            cache_control::CacheControl, system_content::SystemContent, SystemBlock,
+            SystemBlock, cache_control::CacheControl, system_content::SystemContent,
         };
 
         // Arrange
@@ -835,8 +835,8 @@ mod tests {
     #[test]
     fn lowering_is_deterministic_across_identical_requests() {
         use routectl_core::{
-            cache_control::CacheControl, content_part::ContentPart, system_content::SystemContent,
-            KnownContentPart, SystemBlock,
+            KnownContentPart, SystemBlock, cache_control::CacheControl, content_part::ContentPart,
+            system_content::SystemContent,
         };
 
         // Arrange

@@ -17,16 +17,16 @@ mod retention;
 mod schema;
 mod writer;
 
-pub use cost::{estimate_cost, estimate_cost_tokens, CostBreakdown, Rates};
-pub use db::{open, open_readonly, OpenError, UsageDb};
+pub use cost::{CostBreakdown, Rates, estimate_cost, estimate_cost_tokens};
+pub use db::{OpenError, UsageDb, open, open_readonly};
 pub use handle::{UsageCounters, UsageHandle};
 pub use migrate::MigrateError;
 pub use query::{
-    aggregate, k_calibration_summary, latest_quota, read_reuse_samples_since,
-    shadow_misfire_summary, ttfbs, would_trim_summary, AggRow, GroupKey, KCalibration, QueryError,
-    QuotaSnapshot, ReuseSampleRow, ShadowMisfireSummary, WouldTrimSummary,
+    AggRow, GroupKey, KCalibration, QueryError, QuotaSnapshot, ReuseSampleRow,
+    ShadowMisfireSummary, WouldTrimSummary, aggregate, k_calibration_summary, latest_quota,
+    read_reuse_samples_since, shadow_misfire_summary, ttfbs, would_trim_summary,
 };
 pub use record::{Outcome, ParseOutcomeError, UsageRecord};
-pub use retention::{prune, PruneOutcome};
+pub use retention::{PruneOutcome, prune};
 pub use schema::{META_CREATED_AT_MS, META_SCHEMA_VERSION, SCHEMA_VERSION};
-pub use writer::{UsageWriter, CHANNEL_CAPACITY};
+pub use writer::{CHANNEL_CAPACITY, UsageWriter};

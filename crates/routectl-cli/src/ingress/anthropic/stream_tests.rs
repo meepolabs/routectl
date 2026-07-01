@@ -1,7 +1,7 @@
 use serde_json::json;
 
-use crate::ingress::anthropic::{AnthropicIngress, ANTHROPIC_FORMAT};
-use crate::ingress::{IngressAdapter, StreamErrorClass, STREAM_ERROR_TYPE};
+use crate::ingress::anthropic::{ANTHROPIC_FORMAT, AnthropicIngress};
+use crate::ingress::{IngressAdapter, STREAM_ERROR_TYPE, StreamErrorClass};
 
 use super::*;
 
@@ -507,7 +507,7 @@ fn stream_content_filter_finish_emits_refusal_stop_reason() {
 /// canonical prompt_tokens.
 #[test]
 fn message_delta_renders_raw_input_tokens_per_anthropic_spec() {
-    use routectl_core::{schema::CacheCreation, UsageDelta};
+    use routectl_core::{UsageDelta, schema::CacheCreation};
     let mut s = fresh_state();
     let _ = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
     let closing = ChatChunk {
@@ -553,8 +553,8 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
     // second detail forces a content_block_stop on the first
     // block and a content_block_start on the new block.
     use routectl_core::{
-        schema::{ChunkChoice, ChunkDelta},
         ReasoningDetail, ReasoningDetailKind,
+        schema::{ChunkChoice, ChunkDelta},
     };
     let first = ChatChunk {
         id: "msg_01".into(),
@@ -636,13 +636,13 @@ fn stream_distinct_thinking_indices_emit_separate_blocks() {
     let stop_pos = names.iter().position(|n| *n == "content_block_stop");
     let start_pos = names.iter().position(|n| *n == "content_block_start");
     assert!(
-            stop_pos.is_some(),
-            "second-chunk thinking with new detail_index must emit content_block_stop; events: {names:?}"
-        );
+        stop_pos.is_some(),
+        "second-chunk thinking with new detail_index must emit content_block_stop; events: {names:?}"
+    );
     assert!(
-            start_pos.is_some(),
-            "second-chunk thinking with new detail_index must emit content_block_start; events: {names:?}"
-        );
+        start_pos.is_some(),
+        "second-chunk thinking with new detail_index must emit content_block_start; events: {names:?}"
+    );
     assert!(
         stop_pos.unwrap() < start_pos.unwrap(),
         "content_block_stop must precede content_block_start; events: {names:?}"
@@ -1000,10 +1000,12 @@ fn render_error_eos_returns_anthropic_error_event() {
     let payload: Value = serde_json::from_str(&events[0].data).unwrap();
     assert_eq!(payload["type"], "error");
     assert_eq!(payload["error"]["type"], STREAM_ERROR_TYPE);
-    assert!(payload["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("upstream stream error"));
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("upstream stream error")
+    );
     // State is marked finished so any straggler chunks are dropped
     // by the `render_chunk_internal` post-stop guard.
     assert!(

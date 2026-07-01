@@ -19,7 +19,7 @@ mod common;
 
 use routectl_core::Provider;
 use routectl_providers::bedrock::{
-    auth::ResolvedCreds, BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider,
+    BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth::ResolvedCreds,
 };
 
 use common::scenarios;

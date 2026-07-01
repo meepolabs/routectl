@@ -19,7 +19,7 @@ use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::oauth::file_io;
 use crate::oauth::providers;
-use crate::oauth::types::{seat_key, unix_now, CredentialsFile, TokenRecord};
+use crate::oauth::types::{CredentialsFile, TokenRecord, seat_key, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 use crate::{SecretRef, SecretStore};
 

@@ -19,9 +19,9 @@ mod common;
 
 use common::capture_events;
 use routectl_core::{
-    header_trace_enabled, headers_to_json, trace_egress_headers, trace_ingress_headers,
-    trace_outgoing_headers, trace_upstream_response_headers, HDR_MSG_EGRESS, HDR_MSG_INGRESS,
-    HDR_MSG_OUTGOING, HDR_MSG_UPSTREAM,
+    HDR_MSG_EGRESS, HDR_MSG_INGRESS, HDR_MSG_OUTGOING, HDR_MSG_UPSTREAM, header_trace_enabled,
+    headers_to_json, trace_egress_headers, trace_ingress_headers, trace_outgoing_headers,
+    trace_upstream_response_headers,
 };
 
 #[test]

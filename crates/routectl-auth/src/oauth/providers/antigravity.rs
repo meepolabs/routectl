@@ -36,12 +36,12 @@
 //! a separate slice; this file only owns token acquisition + refresh.
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use url::Url;
 
-use crate::oauth::providers::{truncate, AuthParams, OAuthFlow};
-use crate::oauth::types::{unix_now, AccountInfo, SecretToken, TokenRecord};
+use crate::oauth::providers::{AuthParams, OAuthFlow, truncate};
+use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
 /// Public installed-app client credentials for the Antigravity surface.
@@ -409,7 +409,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         (None, None) => {
             return Err(OAuthError::TokenEndpoint(
                 "token response missing refresh_token".into(),
-            ))
+            ));
         }
     };
 

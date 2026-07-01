@@ -18,7 +18,7 @@
 //! open block untouched so the next in-order event still attributes
 //! correctly.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::sse::{OpenBlockKind, SseState};
 use super::sse_opaque::OpaqueCapture;

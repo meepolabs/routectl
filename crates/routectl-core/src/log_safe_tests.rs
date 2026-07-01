@@ -5,8 +5,8 @@
 //! this file is the body of `mod tests` declared inside `log_safe`.
 
 use super::{
-    is_json_error_envelope, redact_prompts_with_flag, sanitize_capped, sanitize_for_log,
-    sanitize_upstream_body, MAX, MAX_DEBUG_BODY_BYTES,
+    MAX, MAX_DEBUG_BODY_BYTES, is_json_error_envelope, redact_prompts_with_flag, sanitize_capped,
+    sanitize_for_log, sanitize_upstream_body,
 };
 use serde_json::json;
 
@@ -360,10 +360,12 @@ fn redact_image_data_long_string_is_replaced() {
     // Short MIME string preserved (under 256 chars).
     assert_eq!(part["source"]["media_type"], "image/png");
     // Long data string redacted.
-    assert!(part["source"]["data"]
-        .as_str()
-        .expect("redacted data string")
-        .starts_with("<redacted len="));
+    assert!(
+        part["source"]["data"]
+            .as_str()
+            .expect("redacted data string")
+            .starts_with("<redacted len=")
+    );
 }
 
 #[test]
@@ -389,10 +391,12 @@ fn redact_function_call_arguments_string_redacted() {
     assert_eq!(tc["type"], "function");
     assert_eq!(tc["function"]["name"], "foo");
     // arguments redacted.
-    assert!(tc["function"]["arguments"]
-        .as_str()
-        .expect("redacted arguments")
-        .starts_with("<redacted len="));
+    assert!(
+        tc["function"]["arguments"]
+            .as_str()
+            .expect("redacted arguments")
+            .starts_with("<redacted len=")
+    );
 }
 
 #[test]
@@ -422,19 +426,25 @@ fn redact_openai_responses_function_call_output_string_form_redacted() {
     assert_eq!(got["input"][2]["type"], "function_call_output");
     assert_eq!(got["input"][2]["call_id"], "call_1");
     // The tool-result string is redacted.
-    assert!(got["input"][2]["output"]
-        .as_str()
-        .expect("output string redacted")
-        .starts_with("<redacted len="));
+    assert!(
+        got["input"][2]["output"]
+            .as_str()
+            .expect("output string redacted")
+            .starts_with("<redacted len=")
+    );
     // Sanity: sibling redactions still fire.
-    assert!(got["input"][0]["content"][0]["text"]
-        .as_str()
-        .expect("input_text redacted")
-        .starts_with("<redacted len="));
-    assert!(got["input"][1]["arguments"]
-        .as_str()
-        .expect("function_call.arguments redacted")
-        .starts_with("<redacted len="));
+    assert!(
+        got["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("input_text redacted")
+            .starts_with("<redacted len=")
+    );
+    assert!(
+        got["input"][1]["arguments"]
+            .as_str()
+            .expect("function_call.arguments redacted")
+            .starts_with("<redacted len=")
+    );
 }
 
 #[test]
@@ -460,14 +470,18 @@ fn redact_openai_responses_function_call_output_items_form_recurses() {
         .expect("output stays an array, not redacted wholesale");
     assert_eq!(output_items.len(), 2);
     assert_eq!(output_items[0]["type"], "input_text");
-    assert!(output_items[0]["text"]
-        .as_str()
-        .expect("first item text redacted")
-        .starts_with("<redacted len="));
-    assert!(output_items[1]["text"]
-        .as_str()
-        .expect("second item text redacted")
-        .starts_with("<redacted len="));
+    assert!(
+        output_items[0]["text"]
+            .as_str()
+            .expect("first item text redacted")
+            .starts_with("<redacted len=")
+    );
+    assert!(
+        output_items[1]["text"]
+            .as_str()
+            .expect("second item text redacted")
+            .starts_with("<redacted len=")
+    );
 }
 
 #[test]
@@ -500,10 +514,12 @@ fn redact_openai_responses_response_body_output_array_recurses() {
     assert_eq!(output.len(), 2);
     // Inner redactions fire as before.
     assert_eq!(output[0]["content"][0]["text"], "<redacted len=6>");
-    assert!(output[1]["arguments"]
-        .as_str()
-        .expect("arguments redacted")
-        .starts_with("<redacted len="));
+    assert!(
+        output[1]["arguments"]
+            .as_str()
+            .expect("arguments redacted")
+            .starts_with("<redacted len=")
+    );
 }
 
 #[test]
@@ -666,14 +682,18 @@ fn redact_file_data_redacts_under_both_file_and_input_file_shapes() {
     );
 
     // Both file_data leaves collapsed to the placeholder.
-    assert!(got["messages"][0]["content"][0]["file"]["file_data"]
-        .as_str()
-        .expect("raw file_data redacted")
-        .starts_with("<redacted len="));
-    assert!(got["messages"][0]["content"][1]["file_data"]
-        .as_str()
-        .expect("input_file file_data redacted")
-        .starts_with("<redacted len="));
+    assert!(
+        got["messages"][0]["content"][0]["file"]["file_data"]
+            .as_str()
+            .expect("raw file_data redacted")
+            .starts_with("<redacted len=")
+    );
+    assert!(
+        got["messages"][0]["content"][1]["file_data"]
+            .as_str()
+            .expect("input_file file_data redacted")
+            .starts_with("<redacted len=")
+    );
 
     // Structural metadata stays visible on both shapes.
     assert_eq!(
@@ -761,10 +781,12 @@ fn redact_preserves_structural_identifiers_and_returns_input_when_disabled() {
     assert_eq!(tc["type"], "function");
     assert_eq!(tc["function"]["name"], "lookup");
     assert_eq!(on["choices"][0]["message"]["content"], "<redacted len=17>");
-    assert!(tc["function"]["arguments"]
-        .as_str()
-        .expect("arguments redacted")
-        .starts_with("<redacted len="));
+    assert!(
+        tc["function"]["arguments"]
+            .as_str()
+            .expect("arguments redacted")
+            .starts_with("<redacted len=")
+    );
 
     // OFF: input returned unchanged.
     let off = redact_prompts_with_flag(&body, false);
@@ -823,10 +845,12 @@ fn redact_openai_responses_refusal_replaced() {
     assert_eq!(got["output"][0]["content"][1]["type"], "refusal");
     // Redactions.
     assert_eq!(got["output"][0]["content"][0]["text"], "<redacted len=6>");
-    assert!(got["output"][0]["content"][1]["refusal"]
-        .as_str()
-        .expect("refusal redacted")
-        .starts_with("<redacted len="));
+    assert!(
+        got["output"][0]["content"][1]["refusal"]
+            .as_str()
+            .expect("refusal redacted")
+            .starts_with("<redacted len=")
+    );
 }
 
 #[test]
@@ -916,10 +940,12 @@ fn redact_openai_image_url_data_uri_replaced() {
     });
     let got = redact_prompts_with_flag(&body, true);
     let url_val = &got["messages"][0]["content"][0]["image_url"]["url"];
-    assert!(url_val
-        .as_str()
-        .expect("data URI redacted")
-        .starts_with("<redacted len="));
+    assert!(
+        url_val
+            .as_str()
+            .expect("data URI redacted")
+            .starts_with("<redacted len=")
+    );
 }
 
 #[test]
@@ -1167,10 +1193,12 @@ fn headers_to_json_preserves_order_duplicates_and_lossy_decodes() {
     // Non-UTF-8 bytes lossy-decoded to the replacement char rather
     // than dropping the header.
     assert_eq!(arr[3][0], "x-binary");
-    assert!(arr[3][1]
-        .as_str()
-        .expect("value string")
-        .contains('\u{FFFD}'));
+    assert!(
+        arr[3][1]
+            .as_str()
+            .expect("value string")
+            .contains('\u{FFFD}')
+    );
 }
 
 #[test]

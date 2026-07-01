@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use routectl_auth::oauth::types::{unix_now, TokenRecord};
 use routectl_auth::OAuthStore;
+use routectl_auth::oauth::types::{TokenRecord, unix_now};
 use routectl_core::{Error, Result};
 
 pub async fn run() -> Result<i32> {

@@ -267,11 +267,7 @@ fn message_text_for_match(msg: &Message) -> Option<String> {
                     buf.push_str(text);
                 }
             }
-            if buf.is_empty() {
-                None
-            } else {
-                Some(buf)
-            }
+            if buf.is_empty() { None } else { Some(buf) }
         }
         MessageContent::Null => None,
     }

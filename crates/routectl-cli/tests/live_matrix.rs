@@ -31,8 +31,8 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use routectl_auth::MemoryStore;
 use routectl_core::{ChatRequest, Message, MessageContent, Role};
 use routectl_router::{
-    build_resolved_models, AliasValue, BuildOptions, Config, ModelEntry, ProviderEntry,
-    ReasoningDialect, Router,
+    AliasValue, BuildOptions, Config, ModelEntry, ProviderEntry, ReasoningDialect, Router,
+    build_resolved_models,
 };
 
 const SHORT_PROMPT: &str = "Reply with just the word: pong";
@@ -229,7 +229,7 @@ async fn run_stream(router: Arc<Router>, target: String) -> Row {
                                 "stream-err after {total_chunks} chunks: {}",
                                 e.to_string().chars().take(140).collect::<String>()
                             ),
-                        }
+                        };
                     }
                 }
             }
@@ -556,7 +556,7 @@ const BEDROCK_MODELS: &[&str] = &[
 
 async fn build_bedrock_test_router(targets: &[&str]) -> Option<Arc<Router>> {
     use routectl_providers::bedrock::{
-        auth as bedrock_auth, BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider,
+        BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth as bedrock_auth,
     };
 
     let key = std::env::var("AWS_BEARER_TOKEN_BEDROCK").ok()?;
@@ -727,7 +727,7 @@ const BEDROCK_INGRESS_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openai_ingress_through_bedrock() {
     use axum::http::HeaderMap;
-    use routectl_cli::ingress::{openai::OpenAiIngress, IngressAdapter};
+    use routectl_cli::ingress::{IngressAdapter, openai::OpenAiIngress};
     use serde_json::json;
 
     let Some(router) = build_bedrock_test_router(&[BEDROCK_INGRESS_MODEL]).await else {
@@ -768,7 +768,7 @@ async fn openai_ingress_through_bedrock() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn anthropic_ingress_through_bedrock_cache_and_beta() {
     use axum::http::HeaderMap;
-    use routectl_cli::ingress::{anthropic::AnthropicIngress, IngressAdapter};
+    use routectl_cli::ingress::{IngressAdapter, anthropic::AnthropicIngress};
     use serde_json::json;
 
     // Use sonnet-4-5 here: its prompt-cache minimum is 1024 tokens,
@@ -872,7 +872,7 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
 async fn anthropic_ingress_streaming_through_bedrock() {
     use axum::http::HeaderMap;
     use futures::StreamExt;
-    use routectl_cli::ingress::{anthropic::AnthropicIngress, IngressAdapter};
+    use routectl_cli::ingress::{IngressAdapter, anthropic::AnthropicIngress};
     use serde_json::json;
 
     let Some(router) = build_bedrock_test_router(&[BEDROCK_INGRESS_MODEL]).await else {
@@ -977,7 +977,7 @@ const BEDROCK_CONVERSE_MODELS: &[&str] = &[
 
 async fn build_bedrock_converse_test_router(targets: &[&str]) -> Option<Arc<Router>> {
     use routectl_providers::bedrock::{
-        auth as bedrock_auth, BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider,
+        BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth as bedrock_auth,
     };
     use routectl_router::ResolvedModel;
     use std::sync::Arc as ArcAlias;
@@ -1403,8 +1403,8 @@ async fn gemini_stream_matrix() {
 //     --test live_matrix oauth_codex -- --nocapture --test-threads=1
 mod oauth_codex {
     use super::*;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use routectl_auth::OAuthStore;
     use routectl_cli::server::CompositeStore;
     use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
@@ -1421,11 +1421,7 @@ mod oauth_codex {
     fn read_bearer() -> Option<String> {
         let raw = std::env::var(ENV_BEARER).ok()?;
         let token = raw.trim().to_string();
-        if token.is_empty() {
-            None
-        } else {
-            Some(token)
-        }
+        if token.is_empty() { None } else { Some(token) }
     }
 
     /// Decode `chatgpt_account_id` out of an OpenAI access-token JWT.
@@ -1823,11 +1819,7 @@ mod oauth_antigravity {
     fn read_bearer() -> Option<String> {
         let raw = std::env::var(ENV_BEARER).ok()?;
         let token = raw.trim().to_string();
-        if token.is_empty() {
-            None
-        } else {
-            Some(token)
-        }
+        if token.is_empty() { None } else { Some(token) }
     }
 
     /// Write a minimal `credentials.json` containing one `antigravity`

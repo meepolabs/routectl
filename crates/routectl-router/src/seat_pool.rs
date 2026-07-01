@@ -16,8 +16,8 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lru::LruCache;
 use parking_lot::Mutex;

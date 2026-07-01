@@ -104,11 +104,7 @@ fn build_inference_config(req: &ChatRequest) -> Option<InferenceConfig> {
         || cfg.temperature.is_some()
         || cfg.top_p.is_some()
         || cfg.stop_sequences.is_some();
-    if any_set {
-        Some(cfg)
-    } else {
-        None
-    }
+    if any_set { Some(cfg) } else { None }
 }
 
 // ---------------------------------------------------------------------------

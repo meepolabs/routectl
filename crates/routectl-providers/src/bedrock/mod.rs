@@ -60,7 +60,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use routectl_core::{
-    sanitize_for_log, ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, sanitize_for_log,
 };
 
 pub mod auth;

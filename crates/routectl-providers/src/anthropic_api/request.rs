@@ -364,10 +364,8 @@ pub(crate) fn normalize(
     // When context_management emulation is active we have already applied
     // the edits above. Strip the `context_management` body key so it is
     // never forwarded to the upstream (non-Anthropic providers reject it).
-    if context_management {
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("context_management");
-        }
+    if context_management && let Some(obj) = body.as_object_mut() {
+        obj.remove("context_management");
     }
 
     // Soft-fail: if cache misses occurred (cold-start or TTL eviction) and
@@ -376,19 +374,18 @@ pub(crate) fn normalize(
     // injected into history. Non-Anthropic providers 400 on this shape.
     // Strip `thinking` defensively and emit a structured warning so
     // operators can diagnose the gap.
-    if !clear_thinking_misses.is_empty() {
-        if let Some(obj) = body.as_object_mut() {
-            if obj.contains_key("thinking") {
-                obj.remove("thinking");
-                tracing::warn!(
-                    provider = id,
-                    missed_tool_ids = ?clear_thinking_misses,
-                    "context_management: cache miss for tool_use ids; \
-                     stripped `thinking` from body to avoid upstream 400 \
-                     (cold-start or TTL eviction)"
-                );
-            }
-        }
+    if !clear_thinking_misses.is_empty()
+        && let Some(obj) = body.as_object_mut()
+        && obj.contains_key("thinking")
+    {
+        obj.remove("thinking");
+        tracing::warn!(
+            provider = id,
+            missed_tool_ids = ?clear_thinking_misses,
+            "context_management: cache miss for tool_use ids; \
+             stripped `thinking` from body to avoid upstream 400 \
+             (cold-start or TTL eviction)"
+        );
     }
     strip_thinking_when_tool_choice_forces_use(id, &mut body);
     // Late enforcer, runs LAST: output_config.effort is present IFF the
@@ -485,7 +482,7 @@ mod allowlist_tests {
 mod context_management_normalize_tests {
     use super::*;
     use crate::anthropic_api::context_management::{
-        snapshot_to_cache, ThinkingCache, CLEAR_THINKING_EDIT_TYPE,
+        CLEAR_THINKING_EDIT_TYPE, ThinkingCache, snapshot_to_cache,
     };
     use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
     use serde_json::json;
@@ -849,7 +846,7 @@ mod context_management_normalize_tests {
 #[cfg(test)]
 mod multi_turn_tool_use_tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD as B64_STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as B64_STANDARD};
     use routectl_core::{ChatRequest, CoreHistoryReasoning, Message, Role};
     use serde_json::json;
 
@@ -970,8 +967,8 @@ mod multi_turn_tool_use_tests {
             };
             let _guard = tracing::subscriber::set_default(subscriber);
             f();
-            let events = captured.lock().expect("capture lock poisoned").clone();
-            events
+
+            captured.lock().expect("capture lock poisoned").clone()
         }
     }
 

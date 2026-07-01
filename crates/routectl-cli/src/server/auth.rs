@@ -57,15 +57,15 @@ impl TokenSet {
         if self.tokens.is_empty() {
             return true;
         }
-        if let Some(t) = extract_x_api_key(headers) {
-            if self.contains(t.as_bytes()) {
-                return true;
-            }
+        if let Some(t) = extract_x_api_key(headers)
+            && self.contains(t.as_bytes())
+        {
+            return true;
         }
-        if let Some(t) = extract_bearer(headers) {
-            if self.contains(t.as_bytes()) {
-                return true;
-            }
+        if let Some(t) = extract_bearer(headers)
+            && self.contains(t.as_bytes())
+        {
+            return true;
         }
         false
     }

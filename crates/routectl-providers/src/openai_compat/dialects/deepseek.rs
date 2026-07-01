@@ -16,11 +16,11 @@ use serde_json::Value;
 use routectl_core::{ChatRequest, Message, Result};
 
 use super::super::dialect::ReasoningDialect;
+use super::Dialect;
 use super::util::{
     derive_reasoning_effort, drop_sampling_params, lift_delta_reasoning_content,
     lift_reasoning_content_field, preserve_history_reasoning_content,
 };
-use super::Dialect;
 use crate::effort::clamp_effort_to_supported;
 use crate::model_profile::profile_for;
 
@@ -90,9 +90,9 @@ impl Dialect for DeepSeekDialect {
 mod tests {
     use routectl_core::{ChatRequest, Message, MessageContent, ReasoningConfig, Role};
 
+    use super::super::super::HistoryReasoning;
     use super::super::super::dialect::ReasoningDialect;
     use super::super::super::request::normalize;
-    use super::super::super::HistoryReasoning;
 
     fn user_req(model: &str) -> ChatRequest {
         ChatRequest {

@@ -112,10 +112,10 @@ fn rewrite_assistant_thinking(msg: &mut Map<String, Value>) {
                 entry.insert("format".into(), Value::String(ANTHROPIC_FORMAT.into()));
                 entry.insert("index".into(), Value::from(detail_index));
                 entry.insert("text".into(), Value::String(text));
-                if let Some(sig) = obj.get("signature").cloned() {
-                    if !sig.is_null() {
-                        entry.insert("signature".into(), sig);
-                    }
+                if let Some(sig) = obj.get("signature").cloned()
+                    && !sig.is_null()
+                {
+                    entry.insert("signature".into(), sig);
                 }
                 details.push(Value::Object(entry));
                 detail_index += 1;

@@ -64,7 +64,7 @@ impl CloudProjectCache for OAuthStoreProjectCache {
 mod tests {
     use super::*;
     use crate::oauth::store::OAuthStore;
-    use crate::oauth::types::{unix_now, AccountInfo, SecretToken, TokenRecord};
+    use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 
     fn test_record() -> TokenRecord {
         TokenRecord {

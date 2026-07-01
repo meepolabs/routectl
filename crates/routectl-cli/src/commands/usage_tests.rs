@@ -5,7 +5,7 @@
 
 use super::*;
 use routectl_router::{Config, PricingConfig, ProviderEntry, RegistryEntry};
-use routectl_usage::{open, UsageDb};
+use routectl_usage::{UsageDb, open};
 use tempfile::TempDir;
 
 fn fixed_now() -> DateTime<Local> {

@@ -11,9 +11,9 @@
 //! body rather than a translation failure. Cache breakpoints survive as
 //! sibling `{cachePoint}` entries.
 
-use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine;
-use serde_json::{json, Value};
+use base64::engine::general_purpose::STANDARD as B64_STANDARD;
+use serde_json::{Value, json};
 
 use routectl_core::{
     ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningDetail,
@@ -513,19 +513,18 @@ fn translate_image_source(id: &str, source: &Value) -> Option<ConverseContentBlo
 /// JSON Converse wire; drop with a WARN.
 fn translate_image_url(id: &str, image_url: &Value) -> Option<ConverseContentBlock> {
     let url = image_url.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((mt, b64)) = rest.split_once(";base64,") {
-            if let Some(format) = media_type_to_image_format(mt) {
-                return Some(ConverseContentBlock::Image {
-                    image: ConverseImage {
-                        format,
-                        source: ConverseImageSource {
-                            bytes: b64.to_string(),
-                        },
-                    },
-                });
-            }
-        }
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some((mt, b64)) = rest.split_once(";base64,")
+        && let Some(format) = media_type_to_image_format(mt)
+    {
+        return Some(ConverseContentBlock::Image {
+            image: ConverseImage {
+                format,
+                source: ConverseImageSource {
+                    bytes: b64.to_string(),
+                },
+            },
+        });
     }
     tracing::warn!(
         provider = id,

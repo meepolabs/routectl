@@ -16,7 +16,7 @@
 //! upstream was Bedrock-Invoke or Bedrock-Converse.
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::debug;
 use uuid::Uuid;
 

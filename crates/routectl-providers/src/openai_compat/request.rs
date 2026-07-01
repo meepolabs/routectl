@@ -13,11 +13,11 @@
 use serde_json::Value;
 use tracing::warn;
 
-use routectl_core::{is_canonical_request_key, ChatRequest, Error, Result, ToolDef};
+use routectl_core::{ChatRequest, Error, Result, ToolDef, is_canonical_request_key};
 
+use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
-use super::HistoryReasoning;
 
 /// `source` value passed to [`merge_extras`] for operator-config-supplied
 /// extras (`[providers.X] payload_extras = {...}` -- renamed from the
@@ -320,15 +320,15 @@ fn check_dropped_anthropic_fields(id: &str, req: &ChatRequest, strict: bool) -> 
                 }
                 // wire_lift::tools::lift is the canonical write point for
                 // the Anthropic-builtin warn; no second warn here.
-            } else if let ToolDef::Custom(c) = t {
-                if c.cache_control.is_some() {
-                    warn!(
-                        provider = id,
-                        tool = %c.name,
-                        "openai-compat egress: tool cache_control dropped (Anthropic-only)",
-                    );
-                    record(format!("tool `{}` cache_control", c.name));
-                }
+            } else if let ToolDef::Custom(c) = t
+                && c.cache_control.is_some()
+            {
+                warn!(
+                    provider = id,
+                    tool = %c.name,
+                    "openai-compat egress: tool cache_control dropped (Anthropic-only)",
+                );
+                record(format!("tool `{}` cache_control", c.name));
             }
         }
     }

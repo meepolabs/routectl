@@ -23,7 +23,7 @@
 use super::*;
 use axum::body::to_bytes;
 use routectl_core::Error;
-use routectl_usage::{Outcome, UsageWriter, CHANNEL_CAPACITY};
+use routectl_usage::{CHANNEL_CAPACITY, Outcome, UsageWriter};
 
 /// A tempdir-backed usage writer + handle for capture tests. Holding the
 /// `TempDir` keeps the DB path alive; `flush_and_read` drains the writer
@@ -106,24 +106,23 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
              ORDER BY rowid",
         )
         .expect("prepare select");
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(PersistedRow {
-                request_id: r.get(0)?,
-                outcome: r.get(1)?,
-                ttfb_ms: r.get(2)?,
-                input_tokens: r.get(3)?,
-                output_tokens: r.get(4)?,
-                attempt_count: r.get(5)?,
-                fallback_count: r.get(6)?,
-                provider: r.get(7)?,
-                alias: r.get(8)?,
-            })
+
+    stmt.query_map([], |r| {
+        Ok(PersistedRow {
+            request_id: r.get(0)?,
+            outcome: r.get(1)?,
+            ttfb_ms: r.get(2)?,
+            input_tokens: r.get(3)?,
+            output_tokens: r.get(4)?,
+            attempt_count: r.get(5)?,
+            fallback_count: r.get(6)?,
+            provider: r.get(7)?,
+            alias: r.get(8)?,
         })
-        .expect("query rows")
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .expect("collect rows");
-    rows
+    })
+    .expect("query rows")
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .expect("collect rows")
 }
 
 /// Minimal canonical request for capture tests.
@@ -198,10 +197,12 @@ async fn anthropic_envelope_unknown_alias_emits_not_found_error() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], "not_found_error");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("nonesuch"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("nonesuch")
+    );
 }
 
 #[tokio::test]
@@ -218,10 +219,12 @@ async fn anthropic_envelope_validation_error_emits_invalid_request_error() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], "invalid_request_error");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("max_tokens"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("max_tokens")
+    );
 }
 
 #[tokio::test]
@@ -266,10 +269,12 @@ async fn openai_envelope_unchanged_regression_pin() {
     assert!(body.get("type").is_none(), "OpenAI envelope is flat");
     assert_eq!(body["error"]["type"], "unknown_alias");
     assert_eq!(body["error"]["code"], "unknown_alias");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("nonesuch"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("nonesuch")
+    );
 }
 
 // -------- map_error: non-streaming upstream message sanitization ----

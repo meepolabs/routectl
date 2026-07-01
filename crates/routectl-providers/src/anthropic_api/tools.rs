@@ -11,7 +11,7 @@
 //! onto the Anthropic `{type:auto|any|tool}` form. `translate_tool` is
 //! `pub(crate)` so the Bedrock Converse egress can reuse it.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use routectl_core::{CustomTool, ToolDef};
 

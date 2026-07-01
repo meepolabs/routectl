@@ -26,11 +26,7 @@ fn read_token_file() -> Option<String> {
     let path = std::env::var(ENV_TOKEN_FILE).ok()?;
     let raw = std::fs::read_to_string(&path).ok()?;
     let token = raw.trim().to_string();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token)
-    }
+    if token.is_empty() { None } else { Some(token) }
 }
 
 fn make_request(stream: bool) -> ChatRequest {
@@ -115,10 +111,10 @@ async fn anthropic_oauth_stream_with_bearer_token() {
     {
         let chunk = item.expect("oauth stream chunk error");
         chunks += 1;
-        if let Some(choice) = chunk.choices.first() {
-            if let Some(content) = choice.delta.content.as_ref() {
-                text.push_str(content);
-            }
+        if let Some(choice) = chunk.choices.first()
+            && let Some(content) = choice.delta.content.as_ref()
+        {
+            text.push_str(content);
         }
     }
 

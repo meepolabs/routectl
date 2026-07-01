@@ -7,8 +7,8 @@ use serde_json::Value;
 use routectl_core::Result;
 
 use super::super::dialect::ReasoningDialect;
-use super::util::preserve_history_reasoning_details;
 use super::Dialect;
+use super::util::preserve_history_reasoning_details;
 
 pub struct OpenRouterDialect;
 pub static OPENROUTER: OpenRouterDialect = OpenRouterDialect;

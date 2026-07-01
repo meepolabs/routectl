@@ -113,11 +113,7 @@ fn json_eq_arrays(
 }
 
 fn display_path(p: &str) -> &str {
-    if p.is_empty() {
-        "<root>"
-    } else {
-        p
-    }
+    if p.is_empty() { "<root>" } else { p }
 }
 
 // ---------------------------------------------------------------------

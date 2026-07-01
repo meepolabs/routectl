@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_router::{
-    build_resolved_models, BuildOptions, Config, HistoryReasoning, ModelEntry, ProviderEntry,
+    BuildOptions, Config, HistoryReasoning, ModelEntry, ProviderEntry, build_resolved_models,
 };
 use tracing::field::{Field, Visit};
 

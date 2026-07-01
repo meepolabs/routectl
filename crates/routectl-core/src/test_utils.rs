@@ -24,12 +24,12 @@
 #![allow(dead_code)]
 
 use crate::{
+    ChatRequest, ChatResponse, Choice, Message, MessageContent, ReasoningDetail,
+    ReasoningDetailKind, Role,
     cache_control::CacheControl,
     content_part::{ContentPart, KnownContentPart},
     system_content::{SystemBlock, SystemContent},
     tool_def::{CustomTool, ToolDef},
-    ChatRequest, ChatResponse, Choice, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Role,
 };
 use serde_json::json;
 

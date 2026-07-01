@@ -19,7 +19,7 @@ use std::borrow::Cow;
 
 use serde_json::Value;
 
-use routectl_core::{is_canonical_request_key, ChatRequest};
+use routectl_core::{ChatRequest, is_canonical_request_key};
 
 use crate::effort::{budget_from_level, clamp_effort_to_supported};
 
@@ -543,7 +543,7 @@ pub(super) fn strip_thinking_when_tool_choice_forces_use(provider_id: &str, body
 
 #[cfg(test)]
 mod tests {
-    use super::{build_thinking, ThinkingConfig};
+    use super::{ThinkingConfig, build_thinking};
     use routectl_core::{ChatRequest, ReasoningConfig};
 
     // Legacy-budget path with effort "high" must emit the exact table
