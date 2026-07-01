@@ -114,7 +114,7 @@ async fn run_browser(
 ) -> OAuthResult<String> {
     let pkce = Pkce::generate();
 
-    let bind = bind_callback_listener(requested_port, flow.preferred_callback_port()).await?;
+    let bind = bind_callback_listener(requested_port, flow.callback_port_candidates()).await?;
     // Bind on 127.0.0.1 (no DNS, no IPv6 races) but advertise the
     // redirect_uri using the provider's registered callback host. Most
     // public clients (claude.ai, codex) register their allowed redirect
@@ -176,29 +176,20 @@ struct BoundCallback {
     port: u16,
 }
 
-/// Registered fallback port for providers whose redirect URIs are pinned
-/// to fixed local ports. Tried after the provider's preferred port when
-/// that one is already in use. Kept in sync with the codex CLI's Hydra
-/// redirect URI allow-list (1455 preferred, 1457 fallback).
-const FALLBACK_PORT: u16 = 1457;
-
 /// Step 1: bind a TCP listener for the callback server.
 ///
 /// Port-selection precedence (highest first):
 /// 1. `requested_port` -- the operator's explicit `--callback-port`
 ///    override. Binds exactly that port; no fallback (the operator
 ///    asked for a specific one, so a clash is their signal to fix it).
-/// 2. `preferred_port` -- the provider's registered fixed port (codex:
-///    1455). Tried first, then `FALLBACK_PORT` (1457); if both are in
-///    use, a clear error tells the operator to free one.
-/// 3. Neither set -- bind `127.0.0.1:0` for a kernel-assigned ephemeral
-///    port. This is the Anthropic default and is unchanged: when both
-///    inputs are `None` the candidate list is exactly `[0]`.
+/// 2. `flow_candidates` -- the ordered list from the provider's
+///    `OAuthFlow::callback_port_candidates()`. Tried in order; the first
+///    available port is bound.
 async fn bind_callback_listener(
     requested_port: Option<u16>,
-    preferred_port: Option<u16>,
+    flow_candidates: Vec<u16>,
 ) -> OAuthResult<BoundCallback> {
-    let candidates = bind_port_candidates(requested_port, preferred_port);
+    let candidates = bind_port_candidates(requested_port, flow_candidates);
     let mut last_err = None;
     for bind_port in candidates {
         match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, bind_port)).await {
@@ -220,15 +211,13 @@ async fn bind_callback_listener(
 /// Ordered list of ports `bind_callback_listener` will try. Pure so the
 /// precedence rules are unit-testable without opening sockets. See
 /// `bind_callback_listener` for the precedence rationale.
-fn bind_port_candidates(requested_port: Option<u16>, preferred_port: Option<u16>) -> Vec<u16> {
-    match (requested_port, preferred_port) {
-        // Explicit operator override wins outright; no fallback.
-        (Some(p), _) => vec![p],
-        // Provider-pinned port: try it, then the registered fallback.
-        (None, Some(p)) => vec![p, FALLBACK_PORT],
-        // Default: kernel-assigned ephemeral port (Anthropic path).
-        (None, None) => vec![0],
+fn bind_port_candidates(requested_port: Option<u16>, flow_candidates: Vec<u16>) -> Vec<u16> {
+    // Explicit operator override wins outright; the flow's candidate list
+    // is ignored.
+    if let Some(p) = requested_port {
+        return vec![p];
     }
+    flow_candidates
 }
 
 /// Step 2: spawn the one-shot callback server on `listener`. Returns the
@@ -682,27 +671,30 @@ mod tests {
 
     #[test]
     fn bind_port_candidates_default_is_ephemeral_only() {
-        // The Anthropic path passes (None, None): the candidate list must
-        // be exactly [0] so binding stays byte-for-byte the old
-        // ephemeral-port behavior.
-        assert_eq!(bind_port_candidates(None, None), vec![0]);
+        // The Anthropic path: no explicit override, flow returns [0].
+        // The candidate list must be exactly [0] so binding stays
+        // byte-for-byte the old ephemeral-port behavior.
+        assert_eq!(bind_port_candidates(None, vec![0]), vec![0]);
     }
 
     #[test]
     fn bind_port_candidates_preferred_then_fallback() {
-        // Codex passes (None, Some(1455)): try 1455, then 1457.
+        // Codex flow returns [1455, 1457]: try 1455, then 1457.
         assert_eq!(
-            bind_port_candidates(None, Some(1455)),
-            vec![1455, FALLBACK_PORT]
+            bind_port_candidates(None, vec![1455, 1457]),
+            vec![1455, 1457]
         );
     }
 
     #[test]
     fn bind_port_candidates_operator_override_wins_with_no_fallback() {
-        // An explicit --callback-port beats the provider preference and
+        // An explicit --callback-port beats the flow's candidate list and
         // does not fall back.
-        assert_eq!(bind_port_candidates(Some(9000), Some(1455)), vec![9000]);
-        assert_eq!(bind_port_candidates(Some(9000), None), vec![9000]);
+        assert_eq!(
+            bind_port_candidates(Some(9000), vec![1455, 1457]),
+            vec![9000]
+        );
+        assert_eq!(bind_port_candidates(Some(9000), vec![0]), vec![9000]);
     }
 
     #[test]

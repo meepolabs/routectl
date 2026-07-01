@@ -116,6 +116,15 @@ impl OAuthFlow for Xai {
         Some(CALLBACK_PORT)
     }
 
+    fn callback_port_candidates(&self) -> Vec<u16> {
+        // xAI registered its redirect against exactly one fixed port.
+        // Port 1457 (the codex fallback) is NOT in xAI's allow-list, so
+        // the candidate list is intentionally single-entry: a port-busy
+        // failure is a clear signal for the operator rather than a silent
+        // mismatch on an unregistered redirect URI.
+        vec![CALLBACK_PORT]
+    }
+
     /// xAI has no headless "paste the code" landing page; the flow always
     /// runs through the local callback server. Returning the authorize URL
     /// here keeps `--print-url` from pointing at a dead endpoint, but
@@ -260,7 +269,9 @@ async fn decode_token_response(
 /// failure-side events deliberately do NOT echo the response body: a
 /// token-endpoint error envelope can carry the long-lived refresh token,
 /// and logging it verbatim would defeat the bearer-redaction contract.
-async fn decode_token_response_traced(
+/// `pub(super)` so the providers-module `testing` re-export can hand it
+/// to integration tests.
+pub(super) async fn decode_token_response_traced(
     resp: reqwest::Response,
     prior_refresh: Option<&str>,
     prior_refresh_sha8: &str,

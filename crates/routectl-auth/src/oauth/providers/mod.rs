@@ -67,6 +67,30 @@ pub(crate) trait OAuthFlow: Send + Sync {
         None
     }
 
+    /// Ordered list of candidate local ports the login driver tries when
+    /// binding the callback listener (browser-launch path only). The
+    /// first available port is bound; all candidates are exhausted before
+    /// returning an error. An explicit `--callback-port` operator override
+    /// bypasses this list entirely.
+    ///
+    /// The default covers two cases:
+    /// - preferred port present (e.g. codex: 1455) -> [preferred, 1457],
+    ///   so a single busy port does not abort the login.
+    /// - no preferred port (e.g. Anthropic) -> [0] for a kernel-assigned
+    ///   ephemeral port.
+    ///
+    /// A provider whose redirect URIs are registered against exactly one
+    /// fixed port and where 1457 is NOT in its allow-list MUST override
+    /// to return only [preferred_port], preventing the driver from falling
+    /// back to a codex-specific port and advertising an unregistered
+    /// redirect URI.
+    fn callback_port_candidates(&self) -> Vec<u16> {
+        match self.preferred_callback_port() {
+            Some(p) => vec![p, 1457],
+            None => vec![0],
+        }
+    }
+
     /// URL the upstream displays to operators using the headless
     /// `--print-url` flow. This is the value the operator's browser
     /// is redirected to after consent; routectl never serves it.
@@ -130,6 +154,7 @@ pub fn known_provider_ids() -> &'static [&'static str] {
 #[doc(hidden)]
 pub mod testing {
     use super::codex::{decode_token_response_traced, Codex};
+    use super::xai::{decode_token_response_traced as xai_decode_token_response_traced, Xai};
     use super::OAuthFlow;
     use crate::oauth::types::TokenRecord;
     use crate::oauth::OAuthResult;
@@ -155,6 +180,29 @@ pub mod testing {
         prior_refresh_sha8: &str,
     ) -> OAuthResult<TokenRecord> {
         decode_token_response_traced(resp, prior_refresh, prior_refresh_sha8).await
+    }
+
+    /// Drive the xai provider's refresh-token leg. Wraps the
+    /// `OAuthFlow::refresh_token` call so the integration test can
+    /// invoke it without taking a dep on the crate-private trait.
+    pub async fn xai_refresh(
+        http: &reqwest::Client,
+        refresh_token: &str,
+    ) -> OAuthResult<TokenRecord> {
+        Xai.refresh_token(http, refresh_token).await
+    }
+
+    /// Drive the response-side of an xai refresh-token call through the
+    /// tracing-instrumented decoder. The integration test passes a
+    /// synthetic `reqwest::Response`, asserts on the captured events,
+    /// and uses the `Result` shape to confirm the error mapping is
+    /// preserved alongside the trace emission.
+    pub async fn decode_xai_refresh_response_traced(
+        resp: reqwest::Response,
+        prior_refresh: Option<&str>,
+        prior_refresh_sha8: &str,
+    ) -> OAuthResult<TokenRecord> {
+        xai_decode_token_response_traced(resp, prior_refresh, prior_refresh_sha8).await
     }
 }
 
@@ -228,5 +276,28 @@ mod tests {
         assert_eq!(lookup("anthropic").unwrap().callback_host(), "localhost");
         assert_eq!(lookup("codex").unwrap().callback_host(), "localhost");
         assert_eq!(lookup("xai").unwrap().callback_host(), "127.0.0.1");
+    }
+
+    #[test]
+    fn xai_callback_port_candidates_is_single_registered_port_only() {
+        // xAI registered its redirect against exactly one fixed port (56121).
+        // Port 1457 (codex fallback) is NOT in xAI's allow-list, so the
+        // candidate list must never include it.
+        let candidates = lookup("xai").unwrap().callback_port_candidates();
+        assert_eq!(candidates, vec![56121u16]);
+        assert!(
+            !candidates.contains(&1457),
+            "xai must not fall back to codex port 1457; got {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn codex_callback_port_candidates_includes_fallback() {
+        // Codex registers both 1455 (preferred) and 1457 (fallback), so
+        // the candidate list must be exactly [1455, 1457] in that order.
+        assert_eq!(
+            lookup("codex").unwrap().callback_port_candidates(),
+            vec![1455u16, 1457u16]
+        );
     }
 }
