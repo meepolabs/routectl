@@ -98,6 +98,15 @@ impl OAuthFlow for Antigravity {
         Some(CALLBACK_PORT)
     }
 
+    fn callback_port_candidates(&self) -> Vec<u16> {
+        // Antigravity registered its redirect against exactly one fixed
+        // port. Port 1457 (the codex fallback) is NOT in antigravity's
+        // allow-list, so the candidate list is intentionally single-entry:
+        // a port-busy failure is a clear signal for the operator rather
+        // than a silent mismatch on an unregistered redirect URI.
+        vec![CALLBACK_PORT]
+    }
+
     /// Antigravity has no headless "paste the code" landing page; the
     /// flow always runs through the local callback server. Returning the
     /// authorize URL here keeps `--print-url` from pointing at a dead
@@ -492,6 +501,7 @@ mod tests {
     fn callback_port_and_path_match_registered_redirect() {
         assert_eq!(Antigravity.preferred_callback_port(), Some(51121));
         assert_eq!(Antigravity.callback_path(), "/oauth-callback");
+        assert_eq!(Antigravity.callback_port_candidates(), vec![51121]);
     }
 
     #[test]
