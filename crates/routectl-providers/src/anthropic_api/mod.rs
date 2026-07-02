@@ -540,7 +540,7 @@ impl AnthropicApiProvider {
         // Mode gate. `Never` skips ALL cloak transforms: the body goes
         // upstream untouched by the cloak. `Always` cloaks as a non-CC
         // client regardless of the session-id header. `Auto` keeps the
-        // Increment-1 heuristic (non-CC iff no captured session-id header).
+        // original heuristic (non-CC iff no captured session-id header).
         if self.cfg.cloak.mode == cloak::CloakMode::Never {
             return None;
         }
@@ -2368,7 +2368,7 @@ mod tests {
         assert!(!body_has_billing(&body), "billing block must be stripped");
     }
 
-    /// `mode = auto` (the default) keeps the Increment-1 heuristic: a request
+    /// `mode = auto` (the default) keeps the original heuristic: a request
     /// WITH a session-id capture is treated as genuine CC (no identity stamp,
     /// no metadata), billing still stripped.
     #[test]

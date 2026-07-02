@@ -38,8 +38,8 @@ use crate::schema::{ChatRequest, MessageContent};
 /// operator-facing "tokens saved" signal, not a billing figure.
 const BYTES_PER_TOKEN_ESTIMATE: usize = 4;
 
-/// How much a minify pass removed. Mirrors EPIC-A's `CacheInjection` style:
-/// a small owned outcome record the router maps to operator-facing strings.
+/// How much a minify pass removed. A small owned outcome record the router
+/// maps to operator-facing strings.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReductionDelta {

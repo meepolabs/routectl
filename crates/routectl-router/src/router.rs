@@ -10066,7 +10066,7 @@ mod auto_emit_cache_control_tests {
 
 #[cfg(test)]
 mod context_reduction_dispatch_tests {
-    //! EPIC-B context-reduction wiring on the dispatch path. Asserts the
+    //! Context-reduction wiring on the dispatch path. Asserts the
     //! ordering invariant (reduce AFTER overlays, BEFORE auto-cache), the
     //! effective-enablement resolution (global AND provider-not-off), and the
     //! stable `reduction_strategy` token stamped on `DispatchMeta`. Tests
