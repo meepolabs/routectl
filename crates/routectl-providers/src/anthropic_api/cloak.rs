@@ -38,14 +38,14 @@ const MIN_SENSITIVE_WORD_LEN: usize = 2;
 
 /// Operator-facing cloak mode. Selects how aggressively the OAuth-egress
 /// cloak rewrites the outgoing body. `Auto` (default) preserves the
-/// Increment-1 behavior exactly: the non-CC heuristic keys off the
+/// original heuristic behavior exactly: the non-CC heuristic keys off the
 /// presence of an `x-claude-code-session-id` capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CloakMode {
     /// Heuristic mode (default): cloak as a non-CC client only when the
     /// inbound request did NOT carry an `x-claude-code-session-id`
-    /// capture. Identical to Increment-1 behavior.
+    /// capture. Identical to the original heuristic behavior.
     #[default]
     Auto,
     /// Always cloak as a non-CC client: stamp the identity block and a
@@ -85,7 +85,7 @@ pub struct ToolRename {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CloakConfig {
-    /// Cloak mode. Default `Auto` (Increment-1 heuristic).
+    /// Cloak mode. Default `Auto` (original heuristic).
     pub mode: CloakMode,
     /// How the non-CC client's real `system` content is handled after the
     /// `system` field is reduced to the identity line only. Default false:
