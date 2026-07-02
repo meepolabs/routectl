@@ -2,6 +2,10 @@ version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
+    # Active integration branch. The default branch lags well behind
+    # develop, so bumps raised against it are stale on arrival; target
+    # develop where the code is built and tested.
+    target-branch: "develop"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -16,6 +20,7 @@ updates:
         patterns: ["serde*", "toml"]
   - package-ecosystem: github-actions
     directory: /
+    target-branch: "develop"
     schedule:
       interval: weekly
     commit-message:
