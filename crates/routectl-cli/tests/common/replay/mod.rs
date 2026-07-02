@@ -27,7 +27,8 @@ pub mod loader;
 pub mod sse_diff;
 
 pub use harness::{
-    FixtureOutcome, PHASE1_MODEL_DENYLIST, captured_root, headers_from_pairs, phase1_skip_reason,
+    ENRICHMENT_DEPENDENT_MODELS, FixtureOutcome, captured_root, enrichment_skip_reason,
+    headers_from_pairs,
 };
 pub use json_diff::{
     DEFAULT_HEADER_ALLOW_SKIP, assert_headers_equal, assert_json_equal_structural,

@@ -7,14 +7,14 @@
 //! render_response`, and asserts the rendered JSON body matches the
 //! captured `egress_response` structurally.
 //!
-//! Phase one scope: anthropic ingress only, non-stream fixtures only.
+//! Current scope: anthropic ingress only, non-stream fixtures only.
 //! Stream fixtures captured today have empty
 //! `egress_response`/`upstream_response` slots (the capture rig does
 //! not write stream bodies yet); this test skips them with an info
 //! log so the rest of the corpus still runs. Bedrock egress is also
 //! out of scope.
 //!
-//! Openai-responses ingress replay is deferred from phase one:
+//! Openai-responses ingress replay is deferred from the current scope:
 //! `OpenAiResponsesProvider::complete()` always sets `stream:true`
 //! and consumes SSE, so a wiremock returning a captured
 //! post-extraction JSON body breaks the eventsource parser. Replay
@@ -22,10 +22,10 @@
 //! variant (or the test driver wraps the JSON in a synthetic event
 //! stream).
 //!
-//! Phase one also bypasses fixtures whose model needs router-side
+//! This driver also bypasses fixtures whose model needs router-side
 //! enrichment (adaptive thinking, DeepSeek `history_reasoning`) that
 //! the bare ingress -> egress path does not yet replay -- see the
-//! "Phase 1 corpus scope" section in `docs/REPLAY-FIXTURES.md`.
+//! "Corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
 //! Zero exercisable fixtures is acceptable: the captured/ corpus is
 //! per-contributor and gitignored, so a fresh checkout (or one with
@@ -50,7 +50,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::replay::{
     Fixture, FixtureOutcome, assert_json_equal_structural, captured_root, discover_fixtures,
-    headers_from_pairs, phase1_skip_reason,
+    enrichment_skip_reason, headers_from_pairs,
 };
 
 /// Description of which path + content-type the egress provider hits
@@ -61,7 +61,7 @@ struct EgressMount {
 }
 
 /// Map a provider kind to its upstream wiremock route. Returns
-/// `Ok(None)` for kinds that are recognized but out of phase-one
+/// `Ok(None)` for kinds that are recognized but out of current
 /// scope (bedrock variants, openai-responses); an unknown kind is
 /// treated as a fixture authoring bug and surfaces as an `Err`.
 ///
@@ -79,10 +79,9 @@ fn mount_for_kind(kind: &str) -> Result<Option<EgressMount>, String> {
             method_str: "POST",
             path_str: "/chat/completions",
         })),
-        // openai-responses ingress replay is deferred from phase one;
-        // see the module doc for the SSE-shape rationale.
+        // openai-responses ingress replay is deferred; see the module doc for the SSE-shape rationale.
         "openai-responses" => Ok(None),
-        // Bedrock egress replay is out of scope for phase one.
+        // Bedrock egress replay is out of current scope.
         "bedrock-invoke" | "bedrock-converse" => Ok(None),
         other => Err(format!("unknown provider_kind `{other}`")),
     }
@@ -90,7 +89,7 @@ fn mount_for_kind(kind: &str) -> Result<Option<EgressMount>, String> {
 
 /// Build the egress provider for a given kind, pointed at the
 /// wiremock server. Returns `Ok(None)` for kinds that are recognized
-/// but out of phase-one scope; an unknown kind surfaces as an `Err`
+/// but out of current scope; an unknown kind surfaces as an `Err`
 /// and fails the test.
 ///
 /// NOTE: keep in lockstep with `mount_for_kind` and
@@ -155,7 +154,7 @@ async fn mount_upstream(mount: &EgressMount, body: Vec<u8>, content_type: &str) 
 }
 
 /// Build the canonical `ChatRequest` from the fixture's captured
-/// ingress request + headers. Phase-one ingress is anthropic-only.
+/// ingress request + headers. Current replay ingress is anthropic-only.
 fn parse_canonical(fixture: &Fixture) -> Result<ChatRequest, String> {
     let headers = headers_from_pairs(&fixture.ingress_request_headers);
     AnthropicIngress
@@ -179,7 +178,7 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
 
     let Some(mount) = mount_for_kind(&fixture.meta.provider_kind)? else {
         return Ok(FixtureOutcome::Skipped(format!(
-            "provider_kind `{}` out of phase-one scope",
+            "provider_kind `{}` out of current scope",
             fixture.meta.provider_kind,
         )));
     };
@@ -192,7 +191,7 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
     .await;
     let Some(provider) = build_provider_for_kind(&fixture.meta.provider_kind, server.uri())? else {
         return Ok(FixtureOutcome::Skipped(format!(
-            "provider_kind `{}` lacks a phase-one builder",
+            "provider_kind `{}` has no current-scope builder",
             fixture.meta.provider_kind,
         )));
     };
@@ -215,9 +214,9 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
 
 /// Drive one fixture, dispatching to the stream or non-stream path
 /// based on `meta.stream`. Stream fixtures are skipped pending the
-/// capture rig writing stream bodies (deferred from phase one).
+/// capture rig writing stream bodies.
 async fn run_fixture(fixture: &Fixture) -> Result<FixtureOutcome, String> {
-    if let Some(reason) = phase1_skip_reason(fixture) {
+    if let Some(reason) = enrichment_skip_reason(fixture) {
         return Ok(FixtureOutcome::Skipped(reason));
     }
     if fixture.meta.stream {
