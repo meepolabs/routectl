@@ -1,7 +1,7 @@
 //! Shared bits across the two replay test drivers (`replay_egress.rs`
 //! and `replay_ingress.rs`): the captured root locator, the
 //! loader-vector to `HeaderMap` bridge, the per-fixture outcome enum,
-//! and the Phase 1 model-denylist + skip-reason helper.
+//! and the enrichment-dependent model filter + skip-reason helper.
 //!
 //! These were duplicated verbatim across both test files until they
 //! grew in lockstep one too many times. Hoisting them removes the
@@ -68,22 +68,22 @@ pub enum FixtureOutcome {
 /// Substrings flagged as "needs router enrichment not yet wired into
 /// replay". A fixture whose `meta.model` contains any of these is
 /// skipped on both replay drivers; the constraint is documented in
-/// `docs/REPLAY-FIXTURES.md` "Phase 1 corpus scope". Matching is
+/// `docs/REPLAY-FIXTURES.md` "Corpus scope". Matching is
 /// substring + case-insensitive so capture-rig variants
 /// (`claude-opus-4-7-...`, `deepseek-v4`, ...) all hit.
-pub const PHASE1_MODEL_DENYLIST: &[&str] = &["opus-4", "deepseek"];
+pub const ENRICHMENT_DEPENDENT_MODELS: &[&str] = &["opus-4", "deepseek"];
 
-/// Phase-one denylist filter: drop fixtures whose model requires the
+/// Enrichment-dependent filter: drop fixtures whose model requires the
 /// router-side enrichment (adaptive thinking, DeepSeek
 /// `history_reasoning`) that the bare ingress -> egress path does not
 /// yet replay.
-pub fn phase1_skip_reason(fixture: &Fixture) -> Option<String> {
+pub fn enrichment_skip_reason(fixture: &Fixture) -> Option<String> {
     let model = fixture.meta.model.as_deref()?;
     let lc = model.to_ascii_lowercase();
-    for needle in PHASE1_MODEL_DENYLIST {
+    for needle in ENRICHMENT_DEPENDENT_MODELS {
         if lc.contains(needle) {
             return Some(format!(
-                "model `{model}` matches phase-one denylist substring `{needle}`; \
+                "model `{model}` matches enrichment-dependent model substring `{needle}`; \
                  needs router enrichment not yet wired into replay",
             ));
         }

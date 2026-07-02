@@ -5,7 +5,7 @@
 //! `normalize_request`, and asserts the upstream-bound JSON body
 //! matches the on-disk `outgoing_request.json` structurally.
 //!
-//! Phase one scope: anthropic ingress only. Egress providers covered
+//! Current scope: anthropic ingress only. Egress providers covered
 //! are `anthropic` (the api.anthropic.com client; the in-code
 //! `PROVIDER_KIND` constant is `"anthropic"`), `openai-compat`, and
 //! `openai-responses`. Bedrock is out of scope.
@@ -14,10 +14,10 @@
 //! logged and bypassed; an unrecognized or misspelled `provider_kind`
 //! is treated as a fixture authoring error and fails the test.
 //!
-//! Phase one also bypasses fixtures whose model needs router-side
+//! This driver also bypasses fixtures whose model needs router-side
 //! enrichment (adaptive thinking, DeepSeek `history_reasoning`) that
 //! the bare ingress -> egress path does not yet replay -- see the
-//! "Phase 1 corpus scope" section in `docs/REPLAY-FIXTURES.md`.
+//! "Corpus scope" section in `docs/REPLAY-FIXTURES.md`.
 //!
 //! Zero fixtures is acceptable: the captured/ corpus is per-contributor
 //! and gitignored, so a fresh checkout (or a checkout that has not yet
@@ -40,7 +40,7 @@ use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponse
 
 use common::replay::{
     Fixture, FixtureOutcome, assert_json_equal_structural, captured_root, discover_fixtures,
-    headers_from_pairs, phase1_skip_reason,
+    enrichment_skip_reason, headers_from_pairs,
 };
 
 fn anthropic_api_provider() -> AnthropicApiProvider {
@@ -79,7 +79,7 @@ fn openai_compat_provider() -> OpenAiCompatProvider {
 // NOTE: `OpenAiResponsesConfig::new` hard-codes
 // `auth_kind = AuthKind::ChatgptOauth` and `account_id = None`. Replay
 // fixtures captured from a non-OAuth Responses session may diverge on
-// store/account_id-gated body shape. The phase-one corpus is scoped
+// store/account_id-gated body shape. The current corpus is scoped
 // to ChatgptOauth-captured fixtures; if that ever changes, pin
 // `auth_kind` in `meta.json` and branch the builder here.
 fn openai_responses_provider() -> OpenAiResponsesProvider {
@@ -118,7 +118,7 @@ fn normalize_for_kind(
             .normalize_request(canonical)
             .map(Some)
             .map_err(|e| format!("openai-responses normalize_request failed: {e}")),
-        // Bedrock egress replay is out of scope for phase one.
+        // Bedrock egress replay is out of current scope.
         "bedrock-invoke" | "bedrock-converse" => Ok(None),
         other => Err(format!("unknown provider_kind `{other}`")),
     }
@@ -150,7 +150,7 @@ fn ignore_paths_for_kind(kind: &str, stream: bool) -> Vec<&'static str> {
 /// Run the egress assertion for one fixture. Skips return with a
 /// reason; a real diff returns an `Err`.
 fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
-    if let Some(reason) = phase1_skip_reason(fixture) {
+    if let Some(reason) = enrichment_skip_reason(fixture) {
         return Ok(FixtureOutcome::Skipped(reason));
     }
 
@@ -161,7 +161,7 @@ fn run_egress_assertion(fixture: &Fixture) -> Result<FixtureOutcome, String> {
 
     let Some(actual_body) = normalize_for_kind(&fixture.meta.provider_kind, &canonical)? else {
         return Ok(FixtureOutcome::Skipped(format!(
-            "provider_kind `{}` out of phase-one scope",
+            "provider_kind `{}` out of current scope",
             fixture.meta.provider_kind,
         )));
     };

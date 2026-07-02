@@ -191,7 +191,7 @@ fn translate_assistant_message(
     let mut message_content: Vec<ResponsesContentItem> = Vec::new();
     let mut tool_calls: Vec<ResponseInputItem> = Vec::new();
 
-    // Phase 1: lift reasoning_details into Reasoning input items.
+    // First, lift reasoning_details into Reasoning input items.
     // Only entries tagged with the Responses format participate; other
     // formats (e.g. Anthropic) ride a different replay shape that the
     // canonical hub doesn't translate here.

@@ -20,8 +20,8 @@ For the loader and structural comparators (`load_fixture`,
 `crates/routectl-cli/tests/common/replay/` -- the entry point is
 `mod.rs`, with `loader.rs`, `json_diff.rs`, `sse_diff.rs`, and
 `harness.rs` as sub-modules. `harness.rs` holds shared scaffolding
-(`captured_root`, `headers_from_pairs`, `phase1_skip_reason`,
-`PHASE1_MODEL_DENYLIST`) used by the `replay_egress.rs` and
+(`captured_root`, `headers_from_pairs`, `enrichment_skip_reason`,
+`ENRICHMENT_DEPENDENT_MODELS`) used by the `replay_egress.rs` and
 `replay_ingress.rs` drivers. For the day-to-day capture + replay flow see
 [DEVELOPMENT.md](DEVELOPMENT.md) "Adding a replay fixture".
 
@@ -115,11 +115,11 @@ Fields:
 - `ingress_kind` -- which ingress dialect parsed the inbound body.
   Recorded by the capture rig for forward use; the loader's
   `FixtureMeta` does not deserialize it and neither replay driver
-  reads it. Phase 1 replay is anthropic-ingress-only: both drivers
+  reads it. The current replay is anthropic-ingress-only: both drivers
   hardcode `AnthropicIngress::parse_request` regardless of this
   value. Common rig-written values: `"anthropic"` (`/v1/messages`),
   `"openai-chat-completions"` (`/chat/completions`). Multi-dialect
-  ingress selection arrives in a later phase.
+  ingress selection arrives in a later expansion.
 - `provider_kind` -- which egress provider produced the outgoing
   body. The replay test selects the matching translator. The string
   values match the in-code `PROVIDER_KIND` constants in
@@ -129,7 +129,7 @@ Fields:
   bodies. Stream fixtures are currently skipped by the replay
   drivers (stream-body replay is deferred -- the capture rig does
   not yet write stream bodies). `assert_sse_equal` exists as harness
-  scaffolding for that future phase and has no driver caller today;
+  scaffolding for future stream replay and has no driver caller today;
   the exercised non-stream path uses `assert_json_equal_structural`.
 - `has_upstream_response` / `has_egress_response` -- which response
   files are present. Useful for capture sets that did not record
@@ -144,13 +144,13 @@ Fields:
 - `model` -- post-alias provider model id from the trace. Optional
   in the schema (older captures load without it), but the capture
   rig always writes it. Used by the replay drivers to apply the
-  Phase 1 corpus scope below.
+  corpus scope filter described below.
 - `routectl_version` -- workspace package version stamped by
   `scripts/capture_fixtures.sh` at capture time. Optional in the
   schema for forward compat (older captures load without it). Lets
   contributors recognize stale captures after a routectl bump.
 
-## Phase 1 corpus scope
+## Corpus scope
 
 The replay drivers exercise the bare ingress -> egress path:
 `AnthropicIngress::parse_request` produces a canonical `ChatRequest`
@@ -158,7 +158,7 @@ with default `routectl_internal` (`supports_adaptive_thinking=false`,
 `history_reasoning=None`, `reasoning_dialect=None`,
 `max_thinking_budget=0`). In production the router overlays these
 fields from `model_profile.rs` and the dispatch-time merge BEFORE the
-egress sees the canonical. Phase 1 replay does not yet thread that
+egress sees the canonical. The current replay does not yet thread that
 enrichment, so any fixture whose model relies on it would diverge on
 the outgoing body.
 
@@ -177,19 +177,19 @@ The replay drivers enforce this by skipping any fixture whose
 `meta.model` contains a denylisted substring (`opus-4`, `deepseek`).
 Skipped fixtures land in the `skipped` count of the test summary, not
 `failed`. Adaptive-thinking and DeepSeek replay will arrive in a
-later phase that threads router enrichment through the test setup.
+later expansion that threads router enrichment through the test setup.
 
-Two further conventions hold for the Phase 1 corpus. These are
+Two further conventions hold for the current corpus. These are
 capture-rig conventions, NOT loader- or driver-enforced -- the
 loader stores no HTTP status and performs no model comparison, so
 nothing rejects a fixture that violates them:
 
-- Phase 1 fixtures reflect a 2xx upstream response. The capture rig
+- Current-scope fixtures reflect a 2xx upstream response. The capture rig
   only emits a fixture for a request whose trace carries an
   `upstream success body` (or `stream summary`) line, so non-2xx
   responses are not produced in the first place; the loader itself
   does not inspect or reject on status.
-- Phase 1 fixtures carry no client-side alias resolution
+- Current-scope fixtures carry no client-side alias resolution
   (`ingress_request.model` matches the post-alias `meta.model`).
   Aliased fixtures would need router enrichment that the replay
   drivers do not yet thread; the capture rig does not produce them,
