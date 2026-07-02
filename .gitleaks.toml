@@ -15,6 +15,20 @@ useDefault = true
 [allowlist]
 description = "Build outputs and lockfiles -- not source"
 
+# Value-scoped: exempts ONLY the exact Antigravity installed-app client
+# secret. It is a public value baked into the desktop client binary,
+# present in 30+ public repos. Google treats it as non-confidential
+# under the installed-app client type -- same rationale as the hardcoded
+# client_ids the Anthropic/codex flows carry. The global allowlist is
+# required here (not just a rule-scoped one) because the default
+# generic-api-key rule also matches the "client_secret = ..." context.
+# See crates/routectl-auth/src/oauth/providers/antigravity.rs for the
+# full rationale. Any other GOCSPX- value will still be caught.
+regexTarget = "secret"
+regexes = [
+  '''^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$''',
+]
+
 # Anchor patterns to repo root with `^` so a stray nested path
 # (e.g. submodule, backup dir) with the same name doesn't auto-bypass
 # scanning. EVERY directory pattern below MUST be anchored.
@@ -42,3 +56,18 @@ files = [
   '''^\.env\.example$''',
   '''^\.env\.test$''',
 ]
+
+# ---------------------------------------------------------------------------
+# Custom rules
+#
+# gitleaks 8.30.1's default ruleset does not flag GOCSPX- prefixed
+# secrets (GitHub's secret scanner does). Add the class explicitly so
+# the local pre-commit hook catches any future GOCSPX- value that has
+# no business being in the repo.
+# ---------------------------------------------------------------------------
+
+[[rules]]
+id          = "google-oauth-client-secret"
+description = "Google OAuth client secret (GOCSPX- prefix)"
+regex       = '''GOCSPX-[A-Za-z0-9_-]{20,}'''
+keywords    = ["GOCSPX-"]
