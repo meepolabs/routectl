@@ -15,6 +15,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Ingress provenance** -- the canonical request now records which ingress dialect produced it (`Library` / `AnthropicIngress` / `OpenaiIngress`).
 - **Per-request cache strategy in `routectl usage`** -- each row records the auto-cache decision token (`auto_emitted`, `caller_supplied`, `volatile_vetoed`, `auto_skipped:<reason>`) in a new `strategy` column (usage DB schema v2; migrate-on-open). A `cache_auto_outcome` log warns on cache thrash (an auto-emitted breakpoint that created a cache entry but got no read).
 
+### Fixed
+
+- **`count_tokens` no longer trips the shared circuit breaker on a capability error.** When the first count_tokens-capable seat is capable by kind (`anthropic-api`) but its upstream does not implement `count_tokens` (e.g. an `anthropic-api` base URL that forwards to a Bedrock Invoke egress), it returns a wire 501. That 501 was recorded as a health failure on the per-model breaker shared with completions, so a steady stream of count_tokens probes could flap the breaker open and force completions onto their fallback. `count_tokens` now treats a capability error (local `NotImplemented` or a wire 501) as capability, not health: it releases the probe slot without a breaker debit and walks to the next capable seat, returning a real count. Completion-path 501s are unchanged and still trip the breaker.
+  - The per-seat capability 501 now logs at `debug` (it is the steady-state path when a passthrough seat cannot count); other `count_tokens` upstream errors and all completion-path 501s stay at WARN.
+
 ## [0.9.0] - 2026-06-18
 
 ### Added
