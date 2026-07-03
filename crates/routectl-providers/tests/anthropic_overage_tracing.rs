@@ -1,12 +1,18 @@
-//! Tracing coverage for the anthropic-api overage-flip log. Drives the
-//! provider's `complete()` path under a captured `tracing` subscriber and
-//! asserts the once-per-flip contract:
+//! Tracing coverage for anthropic-api provider log-LEVEL contracts.
+//!
+//! Overage-flip log (drives `complete()` / `stream()`):
 //!
 //!   - A flip INTO overage emits exactly one WARN carrying the non-secret
 //!     quota strings (provider, representative_claim, overage_status,
 //!     utilization, overage_utilization, reset).
 //!   - Steady state (overage -> overage) is silent: no second WARN.
 //!   - A flip back OUT of overage emits exactly one INFO ("recovered").
+//!
+//! count_tokens capability-vs-health split (drives `count_tokens()`):
+//!
+//!   - A 501 (upstream does not implement count_tokens) logs at DEBUG as a
+//!     capability note; it must NOT emit the shared "upstream error" WARN.
+//!   - A non-501 error (e.g. 500) keeps the "upstream error" WARN.
 //!
 //! NEVER asserted / NEVER present: any token or credential value. The
 //! unified-quota family carries only non-secret quota strings, so the log
@@ -347,4 +353,78 @@ async fn stream_path_flip_into_overage_warns_once() {
     assert_eq!(flips[0].level, tracing::Level::WARN);
     assert_eq!(flips[0].field("provider"), Some("overage-test"));
     assert_eq!(flips[0].field("representative_claim"), Some("overage"));
+}
+
+/// Drive a count_tokens request whose upstream returns `status` with an
+/// Anthropic-shape error body, under the capture subscriber. Asserts the
+/// upstream status is still surfaced to the router and returns the
+/// captured events for log-level assertions.
+async fn count_tokens_error_events(status: u16, message: &str) -> Vec<CapturedEvent> {
+    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let _guard = tracing::subscriber::set_default(CaptureSubscriber {
+        captured: captured.clone(),
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+            "type": "error",
+            "error": { "type": "some_error", "message": message }
+        })))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    let err = provider.count_tokens(base_req()).await.unwrap_err();
+    assert!(
+        matches!(&err, routectl_core::Error::Upstream { status: got, .. } if *got == status),
+        "count_tokens must still surface the upstream {status} to the router; got {err:?}",
+    );
+    captured.lock().unwrap().clone()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn count_tokens_501_logs_capability_debug_not_health_warn() {
+    // A 501 on count_tokens means the upstream does not implement the
+    // endpoint -- a CAPABILITY signal the router handles by walking to the
+    // next capable seat, not a health failure. It must log at DEBUG as a
+    // capability note and must NOT emit the shared "upstream error" WARN
+    // (which would flood operator logs on every client poll). "upstream
+    // error" (WARN) is matched by EXACT message so it is not confused with
+    // the distinct "upstream error body" DEBUG line on the same path.
+    let events = count_tokens_error_events(501, "count_tokens not supported here").await;
+
+    assert!(
+        events.iter().any(|e| e.level == tracing::Level::DEBUG
+            && e.message
+                .contains("count_tokens unsupported by upstream (501)")),
+        "expected the capability DEBUG note; got: {events:#?}",
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.level == tracing::Level::WARN && e.message == "upstream error"),
+        "a capability 501 must NOT emit the health-failure WARN; got: {events:#?}",
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn count_tokens_500_still_logs_health_warn() {
+    // Scope guard: a 500 is a genuine upstream health failure and must
+    // keep the shared "upstream error" WARN. Only 501 is reclassified as a
+    // capability signal.
+    let events = count_tokens_error_events(500, "internal boom").await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| e.level == tracing::Level::WARN && e.message == "upstream error"),
+        "a 500 health failure must keep the WARN; got: {events:#?}",
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.message.contains("count_tokens unsupported by upstream")),
+        "the capability DEBUG note is 501-only; got: {events:#?}",
+    );
 }

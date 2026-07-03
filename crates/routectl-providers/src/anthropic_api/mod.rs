@@ -1140,13 +1140,30 @@ impl Provider for AnthropicApiProvider {
             // emit them verbatim into operator logs. Same posture as
             // the `complete()` and `stream()` paths above.
             let safe_excerpt = sanitize_for_log(&msg);
-            crate::upstream_log::warn_upstream_failure(
-                &self.cfg.id,
-                status,
-                Some(&self.cfg.auth_kind),
-                &safe_excerpt,
-                "anthropic count_tokens",
-            );
+            if status == 501 {
+                // A 501 on count_tokens is a CAPABILITY signal, not a
+                // health failure: the upstream (e.g. an anthropic-api
+                // base_url that back-hops to a Bedrock egress) does not
+                // implement count_tokens. The router already handles this
+                // by walking to the next capable seat, so logging it at
+                // WARN would flood operator logs on every client poll.
+                // DEBUG mirrors the router-layer treatment.
+                tracing::debug!(
+                    provider = %self.cfg.id,
+                    status,
+                    context = "anthropic count_tokens",
+                    body_excerpt = %safe_excerpt,
+                    "count_tokens unsupported by upstream (501); router walks to next capable seat",
+                );
+            } else {
+                crate::upstream_log::warn_upstream_failure(
+                    &self.cfg.id,
+                    status,
+                    Some(&self.cfg.auth_kind),
+                    &safe_excerpt,
+                    "anthropic count_tokens",
+                );
+            }
             return Err(err);
         }
 
