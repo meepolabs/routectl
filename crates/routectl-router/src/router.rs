@@ -366,6 +366,21 @@ impl FilterSource {
     }
 }
 
+/// Outcome of dispatching `count_tokens` to one capable seat, driving
+/// the walk in [`Router::count_tokens`].
+enum CountSeatOutcome {
+    /// The seat returned a token count; return it to the caller.
+    Count(TokenCount),
+    /// A definitive result for this request -- return the error verbatim.
+    /// Covers a settled health error (breaker already debited/parked), a
+    /// non-fallbackable 4xx, a gate block, or an auth-refresh failure.
+    Terminal(Error),
+    /// The seat is capable-by-kind but its upstream cannot count (local
+    /// `NotImplemented` or a wire 501). The probe slot was released
+    /// without a breaker debit; advance to the next capable seat.
+    Capability,
+}
+
 /// One hop in the resolved dispatch chain. Built from either a
 /// `Arc<ResolvedModel>` (v0.6.0 path) or a parsed `provider:model`
 /// literal (legacy path). The dispatch loop reads from this struct
@@ -1692,98 +1707,130 @@ impl Router {
         Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
     }
 
-    /// Probe call: route a request to the first count_tokens-CAPABLE
-    /// provider in the dispatch chain and call `Provider::count_tokens`.
-    /// Used by claude-code's context-budget display via the
+    /// Probe call: route a request to a count_tokens-CAPABLE provider in
+    /// the dispatch chain and call `Provider::count_tokens`. Used by
+    /// claude-code's context-budget display via the
     /// `/v1/messages/count_tokens` endpoint.
     ///
-    /// Capability walk (not a try-and-fallback): the chain is scanned
-    /// for the first target whose `provider_kind == "anthropic-api"` --
-    /// the only count_tokens-capable egress kind (it is the only kind
-    /// that overrides `Provider::count_tokens`; every other kind uses
-    /// the trait default that 501s). Incapable-by-kind targets are
-    /// skipped BEFORE dispatch (DEBUG log, no upstream call, no breaker
-    /// account); a kind-skip is operator-known, not upstream health, so
-    /// it must not touch the breaker. This mirrors
-    /// `filter_chain_by_features` discipline.
+    /// Capability walk (not a try-and-fallback over health): the chain is
+    /// scanned for targets whose `provider_kind == "anthropic-api"` -- the
+    /// only count_tokens-capable egress kind (it is the only kind that
+    /// overrides `Provider::count_tokens`; every other kind uses the trait
+    /// default that 501s). Incapable-by-kind targets are skipped BEFORE
+    /// dispatch (DEBUG log, no upstream call, no breaker account); a
+    /// kind-skip is operator-known config, not upstream health, so it must
+    /// not touch the breaker. This mirrors `filter_chain_by_features`
+    /// discipline.
     ///
-    /// Why walking is safe for tokenizer correctness: `anthropic-api`
-    /// is Claude-only, so every capable target the walk can select uses
-    /// the SAME Anthropic tokenizer family. Walking past incapable
-    /// kinds therefore does NOT reintroduce the wrong-tokenizer hazard
-    /// that motivated the original first-only rule -- it only steps over
-    /// kinds that cannot count at all.
+    /// Why walking is safe for tokenizer correctness: `anthropic-api` is
+    /// Claude-only, so every capable target the walk can select uses the
+    /// SAME Anthropic tokenizer family. Walking therefore never
+    /// reintroduces the wrong-tokenizer hazard -- it only steps over kinds
+    /// or seats that cannot count.
     ///
-    /// Once a CAPABLE target is selected, it does NOT walk further on a
-    /// real upstream error (4xx/5xx) or on `Error::NotImplemented` --
-    /// those propagate verbatim, exactly as before. Only a 401 triggers
-    /// the single-flight auth refresh + one retry of the SAME target.
-    /// Callers (the count_tokens handler) translate `NotImplemented` to
-    /// a 501 response per the gateway-doc contract. When NO target in
-    /// the chain is capable, this returns `Error::NotImplemented` naming
-    /// the alias so the genuinely-uncapable case still maps to 501.
+    /// Once a CAPABLE target is selected, the outcome decides the walk:
     ///
-    /// count_tokens calls consume the same RPM bucket and honor the
-    /// same circuit breaker as messages calls: the gate runs before
-    /// the upstream is touched, and a successful or failed probe
-    /// records into the breaker exactly like `complete()`. This
-    /// prevents probe-spam from bypassing operator rate limits.
+    /// - `Ok` -> return the count.
+    /// - A CAPABILITY error (`is_capability_error`: local
+    ///   `NotImplemented`, or a WIRE 501 from a capable-by-kind seat whose
+    ///   upstream cannot count) -> release the probe slot WITHOUT debiting
+    ///   the breaker, then advance to the NEXT capable seat in the
+    ///   already-resolved chain. This is the incident fix: a
+    ///   count_tokens-only capability signal must never be recorded as
+    ///   health on the per-seat breaker that completions gate on.
+    /// - A 401 -> single-flight `on_auth_failure` refresh + one retry of
+    ///   the SAME seat.
+    /// - Any OTHER fallbackable HEALTH error (429 / 5xx / status-0) ->
+    ///   debit-or-park and propagate (NO walk -- health fallback stays
+    ///   reserved for the messages path).
+    /// - A non-fallbackable 4xx -> release the probe slot and propagate.
+    ///
+    /// The walk is bounded and single-visit: each seat is dispatched to at
+    /// most once (plus at most one 401 auth-retry of that same seat), so
+    /// total upstream calls never exceed `2 * chain.len()`. When no
+    /// capable seat serves a count (none capable, or every capable seat
+    /// returned a capability error), this returns
+    /// `Error::NotImplemented` naming the alias -- the handler maps that to
+    /// a stable 501, and the last upstream's raw 501 body is never leaked
+    /// to the client.
+    ///
+    /// count_tokens calls consume the same RPM bucket and honor the same
+    /// circuit breaker as messages calls: the gate runs on EACH seat
+    /// before its upstream is touched, so a walk cannot fan across seats
+    /// to bypass an operator rate limit or an open breaker.
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
         let chain = self.dispatch_chain_for_request(&req)?;
-        // Capability walk: select the first count_tokens-capable target
-        // (provider_kind == "anthropic-api") and skip incapable kinds
-        // before dispatch. anthropic-api is the only kind that overrides
-        // the 501-ing trait default, and it is Claude-only -- so any
-        // target the walk selects shares the same Anthropic tokenizer
-        // family. That is why stepping past incapable kinds does NOT
-        // reintroduce the wrong-tokenizer hazard the first-only rule
-        // once guarded against. A kind-skip is operator-known config,
-        // not upstream health, so it never touches the breaker.
-        let mut target: Option<DispatchTarget> = None;
+        let mut saw_capable = false;
         for candidate in chain {
-            if candidate.provider_kind == Some(COUNT_TOKENS_CAPABLE_KIND) {
-                target = Some(candidate);
-                break;
+            if candidate.provider_kind != Some(COUNT_TOKENS_CAPABLE_KIND) {
+                tracing::debug!(
+                    provider = %candidate.provider_name,
+                    kind = candidate.provider_kind.unwrap_or("unknown"),
+                    model = %candidate.nickname.as_deref().unwrap_or(""),
+                    "provider skipped: kind cannot count_tokens",
+                );
+                continue;
             }
-            tracing::debug!(
-                provider = %candidate.provider_name,
-                kind = candidate.provider_kind.unwrap_or("unknown"),
-                model = %candidate.nickname.as_deref().unwrap_or(""),
-                "provider skipped: kind cannot count_tokens",
-            );
+            saw_capable = true;
+            match self.count_tokens_try_seat(&req, candidate).await {
+                CountSeatOutcome::Count(tc) => return Ok(tc),
+                CountSeatOutcome::Terminal(e) => return Err(e),
+                // Capability error: the seat is capable-by-kind but its
+                // upstream cannot count. The slot was already released
+                // without a breaker debit; advance to the next capable
+                // seat in the already-resolved chain (single-visit,
+                // never re-resolved or re-queued).
+                CountSeatOutcome::Capability => continue,
+            }
         }
-        let target = if let Some(t) = target {
-            t
+        // Two distinct terminal shapes, both mapping to a 501 at the
+        // handler: no capable-by-kind seat existed at all, versus capable
+        // seats existed but every one returned a capability error.
+        let detail = if saw_capable {
+            "count_tokens: all capable providers returned a capability error (cannot count)"
         } else {
             tracing::warn!(
                 alias = %req.model,
                 "alias chain has no count_tokens-capable provider; \
                  no target in chain overrides count_tokens",
             );
-            return Err(Error::NotImplemented(
-                req.model.clone(),
-                "count_tokens: no count_tokens-capable provider in chain".into(),
-            ));
+            "count_tokens: no count_tokens-capable provider in chain"
         };
-        let provider = target
-            .provider
-            .clone()
-            .ok_or_else(|| Error::UnknownProvider(target.provider_name.clone()))?;
-        // Bind locals up front so the 401-recovery debug log carries
-        // the same field shape (`provider`, `model`) as the sibling
-        // dispatch sites in `complete_with_options` and
-        // `stream_with_options`. Without these the count_tokens log
-        // line looks subtly different from the other two and an
-        // operator filtering by model loses count_tokens entries.
+        Err(Error::NotImplemented(req.model.clone(), detail.into()))
+    }
+
+    /// Dispatch `count_tokens` to ONE already-selected capable seat and
+    /// classify the outcome for the walk in [`Router::count_tokens`].
+    ///
+    /// PROBE-SLOT INVARIANT: on every exit the half-open slot this seat
+    /// claimed at the gate is settled exactly once, and `probe_guard`
+    /// is disarmed only AFTER that settle (never before, never instead).
+    /// A `Capability` return releases the slot BEFORE returning, so the
+    /// caller's next-seat gate can claim a fresh slot without contending
+    /// with this seat's. `auth_retry_attempted` is a fresh per-seat local,
+    /// so advancing to a new seat resets it -- safe because seats are
+    /// single-visit.
+    async fn count_tokens_try_seat(
+        &self,
+        req: &ChatRequest,
+        target: DispatchTarget,
+    ) -> CountSeatOutcome {
+        let provider = match target.provider.clone() {
+            Some(p) => p,
+            None => {
+                return CountSeatOutcome::Terminal(Error::UnknownProvider(
+                    target.provider_name.clone(),
+                ));
+            }
+        };
         let provider_name = target.provider_name.as_str();
         let model_label = target.nickname.as_deref().unwrap_or("");
 
-        // Apply the same per-attempt overlays the messages path does
-        // so header_extras / payload_extras are consistent. This matters
-        // for `anthropic-beta` flags -- count_tokens must observe the
-        // same beta surface as the messages endpoint or the upstream may
-        // reject a request that would have been accepted on /v1/messages.
+        // Apply the same per-attempt overlays the messages path does so
+        // header_extras / payload_extras are consistent -- notably the
+        // `anthropic-beta` surface count_tokens must observe or the
+        // upstream may reject a request /v1/messages would accept.
         let mut attempt_req = req.clone();
         attempt_req.model = target.upstream.clone();
         apply_layered_overlays(&self.config, &target, &mut attempt_req);
@@ -1791,36 +1838,26 @@ impl Router {
         let mut auth_retry_attempted = false;
         let mut attempts_made: u32 = 0;
         loop {
-            // Per-attempt gate: rate limit + circuit breaker. Lives
-            // INSIDE the loop (mirroring `complete_with_options`) so the
-            // auth-401 retry is gated + RPM-debited exactly like the
-            // first attempt -- per-attempt accounting is uniform across
-            // all three dispatch sites. The gate runs once per attempt,
-            // so the first attempt is debited exactly once.
-            //
-            // Unlike `complete_with_options`, count_tokens does NOT walk
-            // to a sibling on a gate block of the SELECTED capable
-            // target: the capability walk above already skipped
-            // incapable kinds, and every remaining capable target shares
-            // one tokenizer family, so a gate block here just propagates
-            // (no try-and-fallback over upstream/gate state).
+            // Per-attempt gate: rate limit + circuit breaker. Runs on THIS
+            // seat before its upstream is touched (and again on the 401
+            // retry), so a capability walk cannot fan across seats to
+            // bypass an operator rate limit or an open breaker.
             if let Some((gate_kind, gate_err)) =
                 self.gate_check(&target.state_key, &target.provider_name)
             {
                 tracing::warn!(
                     provider = %target.provider_name,
-                    model = %target.nickname.as_deref().unwrap_or(""),
+                    model = %model_label,
                     gate_kind,
                     error = ?gate_err,
                     "count_tokens gate blocked",
                 );
-                return Err(gate_err);
+                return CountSeatOutcome::Terminal(gate_err);
             }
 
-            // Cancellation backstop (see ProbeSlotGuard): free the half-open
-            // probe slot if this future is dropped before an outcome arm
-            // settles it. count_tokens fires constantly from the client, so a
-            // dropped probe here is the most likely latch trigger.
+            // Cancellation backstop (see ProbeSlotGuard): free the
+            // half-open probe slot if this future is dropped before an
+            // outcome arm settles it.
             let mut probe_guard = self.probe_slot_guard(&target.state_key);
 
             let result = provider.count_tokens(attempt_req.clone()).await;
@@ -1829,16 +1866,15 @@ impl Router {
                 Ok(tc) => {
                     self.record_success(&target.state_key);
                     probe_guard.disarm();
-                    return Ok(tc);
+                    return CountSeatOutcome::Count(tc);
                 }
                 Err(e) => {
-                    // Auth-401 single-flight refresh: if the upstream
-                    // rejected our token, ask the provider to rotate
-                    // (oauth:// refs land in the OAuth store's per-
-                    // provider mutex), then retry the same provider
-                    // exactly once. A failure to refresh propagates
-                    // immediately rather than masking a dead OAuth
-                    // identity by walking the fallback chain.
+                    // Auth-401 single-flight refresh: rotate the token and
+                    // retry the SAME seat exactly once. Release the slot
+                    // this attempt claimed BEFORE the `continue` re-enters
+                    // the loop and re-gates (or the re-gate sees
+                    // half_open_in_flight and returns CircuitOpen, locking
+                    // the breaker until restart).
                     if !auth_retry_attempted && matches!(&e, Error::Upstream { status: 401, .. }) {
                         auth_retry_attempted = true;
                         tracing::debug!(
@@ -1847,68 +1883,61 @@ impl Router {
                             attempt = attempts_made,
                             "count_tokens 401; refreshing auth and retrying once",
                         );
-                        // Release any half-open probe slot this attempt
-                        // claimed before surfacing a dead OAuth identity,
-                        // or the breaker stays locked open until restart.
                         if let Err(refresh_err) = provider.on_auth_failure().await {
                             self.release_probe_slot(&target.state_key);
                             probe_guard.disarm();
-                            return Err(refresh_err);
+                            return CountSeatOutcome::Terminal(refresh_err);
                         }
-                        // Refresh succeeded. Release the half-open probe slot
-                        // this attempt claimed at the gate BEFORE the
-                        // `continue` re-enters the loop and re-runs
-                        // `gate_check`. While this caller still holds the slot,
-                        // the in-loop re-gate's `try_dispatch` sees
-                        // `half_open_in_flight` and returns CircuitOpen, which
-                        // count_tokens propagates as the gate error -- leaving
-                        // the breaker locked open until restart. Releasing here
-                        // lets the re-gate claim a fresh slot.
                         self.release_probe_slot(&target.state_key);
                         probe_guard.disarm();
                         continue;
                     }
-                    // Mirror `complete_with_options::should_fallback`:
-                    // status-0 / 5xx-class errors record a breaker
-                    // failure; client-class errors (NotImplemented,
-                    // 4xx) do NOT count against the breaker. Use the
-                    // chain-resolved policy (same source as the
-                    // sibling dispatch sites) so a future per-model
-                    // retry surface stays aligned for count_tokens
-                    // when it lands.
-                    //
-                    // is_probe=false: count_tokens is NOT a generation
-                    // probe. Its token-count result IS consumed by the
-                    // caller (claude-code's context-budget display) and
-                    // it never falls over to a sibling on an upstream
-                    // error (the capability walk runs BEFORE dispatch;
-                    // a real upstream error from the selected capable
-                    // target propagates), so a 429 here keeps its
-                    // existing breaker-accounting behavior.
+
+                    // CAPABILITY error, checked BEFORE should_fallback so a
+                    // wire-501 can never reach record_failure: the seat is
+                    // capable-by-kind but its upstream cannot count. Release
+                    // the probe slot WITHOUT debiting the breaker, then let
+                    // the caller walk to the next capable seat.
+                    if is_capability_error(&e) {
+                        if let Error::Upstream { status: 501, .. } = &e {
+                            // DEBUG, not WARN: post-fix this is the
+                            // steady-state happy path (every count_tokens
+                            // for a passthrough alias 501s here and walks),
+                            // so at WARN it would flood the log on every
+                            // client poll and bury real warnings. The new
+                            // count_tokens tests guard the regression.
+                            tracing::debug!(
+                                provider = provider_name,
+                                state_key = %target.state_key,
+                                status = 501,
+                                "count_tokens got wire-501 from capable-by-kind target; \
+                                 treating as capability, not debiting breaker",
+                            );
+                        }
+                        self.release_probe_slot(&target.state_key);
+                        probe_guard.disarm();
+                        return CountSeatOutcome::Capability;
+                    }
+
+                    // Health error. Mirror `complete_with_options`:
+                    // status-0 / 5xx-class errors debit the breaker (an
+                    // honored reset hint parks instead); a non-fallbackable
+                    // 4xx releases the slot without a debit. Either way this
+                    // propagates -- health fallback stays reserved for the
+                    // messages path, so a 429 here does NOT walk.
                     let policy = self.policy_for(&req.model);
                     let reset_hint = rate_limit_reset_hint(&e, &policy);
                     if should_fallback(&e, &policy, false) {
-                        // A reset hint (any size) parks the provider for the
-                        // honored, clamped duration so the next count_tokens
-                        // skips this seat until it actually resets. No probe
-                        // split here: count_tokens is not the generation-probe
-                        // path (is_probe=false above) and takes no in-loop
-                        // sleep, so every honored reset parks. With no hint,
-                        // fall through to the threshold-gated debit as today.
                         match reset_hint {
                             Some(h) => self.park_provider(&target.state_key, h),
                             None => self.record_failure(&target.state_key),
                         }
                         probe_guard.disarm();
                     } else {
-                        // Non-fallbackable client error (NotImplemented,
-                        // 4xx): not counted against the breaker, but we
-                        // must release any half-open probe slot this
-                        // attempt claimed so the breaker is not locked.
                         self.release_probe_slot(&target.state_key);
                         probe_guard.disarm();
                     }
-                    return Err(e);
+                    return CountSeatOutcome::Terminal(e);
                 }
             }
         }
@@ -3490,6 +3519,31 @@ fn rate_limit_reset_hint(err: &Error, policy: &RetryPolicy) -> Option<Duration> 
         } => Some((*d).min(policy.max_honored_retry_after())).filter(|d| !d.is_zero()),
         _ => None,
     }
+}
+
+/// A count_tokens CAPABILITY signal -- the selected target is
+/// count_tokens-capable by kind (`anthropic-api`), but its concrete
+/// upstream cannot actually count. Two shapes carry this:
+///
+/// - `Error::NotImplemented` -- the local trait-default (a provider that
+///   never overrode `count_tokens`), and
+/// - `Error::Upstream { status: 501, .. }` -- a WIRE 501 from an
+///   upstream (e.g. an anthropic-api base_url that back-hops to a
+///   Bedrock egress with no count_tokens endpoint).
+///
+/// Both mean "this seat cannot count", NOT "this seat is unhealthy". The
+/// count_tokens walk treats them as capability signals: release the
+/// probe slot without debiting the breaker and advance to the next
+/// capable seat. It must NEVER reach `should_fallback` / `record_failure`
+/// -- a capability signal recorded as health would trip the per-seat
+/// breaker that completions gate on. Scoped to the count_tokens path
+/// ONLY: on the completion path a wire 501 is a genuine upstream fault
+/// and must still trip the breaker.
+const fn is_capability_error(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::NotImplemented(..) | Error::Upstream { status: 501, .. }
+    )
 }
 
 fn should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
@@ -6975,11 +7029,12 @@ mod count_tokens_tests {
     }
 
     #[tokio::test]
-    async fn capable_target_not_implemented_propagates_without_retry() {
-        // A capable (anthropic-api) target that itself returns
-        // NotImplemented propagates verbatim with no retry. (Real
-        // Anthropic does not do this; the test pins the no-retry
-        // contract for the selected capable target.)
+    async fn single_capable_seat_not_implemented_yields_terminal_not_implemented_once() {
+        // A single capable (anthropic-api) seat that returns a local
+        // NotImplemented is a capability error: it is dispatched exactly
+        // once (no same-seat retry), the walk exhausts, and the CLIENT
+        // sees the terminal walk-exhausted NotImplemented (named by the
+        // ALIAS), NOT the seat's verbatim error.
         let (router, counters) = build_router(vec![Leg {
             nickname: "anthropic-only",
             provider_name: "anthropic-prov",
@@ -6989,14 +7044,307 @@ mod count_tokens_tests {
 
         let err = router.count_tokens(count_req()).await.unwrap_err();
 
+        match err {
+            Error::NotImplemented(model, _) => assert_eq!(
+                model, "alias",
+                "must surface the terminal (alias-named) error, not the seat's verbatim one",
+            ),
+            other => panic!("expected Error::NotImplemented, got {other:?}"),
+        }
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            1,
+            "selected capable seat is dispatched once, no same-seat retry",
+        );
+    }
+
+    /// A count_tokens-capable entry (kind == "anthropic-api") whose
+    /// breaker is configured: `circuit_failures` trip it, and a tripped
+    /// breaker holds for `circuit_cooldown_ms`. Lets a test observe
+    /// whether an outcome DEBITED the breaker: a debit (`record_failure`)
+    /// re-trips with the baseline cooldown (-> Open), while a no-debit
+    /// release leaves the armed zero-cooldown state (-> HalfOpenReady) or
+    /// a closed breaker (-> Closed).
+    fn anthropic_api_entry_with_breaker(
+        circuit_failures: u32,
+        circuit_cooldown_ms: u64,
+    ) -> ProviderEntry {
+        let mut entry = anthropic_api_entry();
+        if let ProviderEntry::AnthropicApi { runtime, .. } = &mut entry {
+            runtime.circuit_failures = Some(circuit_failures);
+            runtime.circuit_cooldown_ms = Some(circuit_cooldown_ms);
+        }
+        entry
+    }
+
+    /// Whether the seat keyed by `state_key` currently holds the half-open
+    /// probe slot.
+    fn half_open_in_flight(router: &Router, state_key: &str) -> bool {
+        router
+            .state
+            .get(state_key)
+            .expect("seat state slot exists")
+            .lock()
+            .half_open_probe_in_flight()
+    }
+
+    /// Non-mutating breaker phase for the seat keyed by `state_key`.
+    fn circuit_phase(router: &Router, state_key: &str) -> crate::runtime_state::CircuitPhase {
+        router
+            .capacity_snapshot_for(state_key, Instant::now())
+            .expect("seat state slot exists")
+            .circuit
+    }
+
+    #[tokio::test]
+    async fn wire_501_on_half_open_probe_releases_slot_without_debiting_breaker() {
+        // The incident pin. A capable-by-kind seat whose upstream cannot
+        // count returns a WIRE 501. On a half-open count_tokens probe this
+        // must be treated as a capability signal: release the probe slot
+        // and leave the shared breaker un-debited. Recording it as a
+        // health failure would re-trip the breaker (baseline cooldown) and
+        // starve completions that gate on the same per-seat breaker.
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "anthropic-only",
+            provider_name: "anthropic-prov",
+            entry: anthropic_api_entry_with_breaker(1, 60_000),
+            behavior: CountBehavior::UpstreamError(501),
+        }]);
         assert!(
-            matches!(err, Error::NotImplemented(_, _)),
-            "expected Error::NotImplemented, got {err:?}",
+            router.force_open_breaker("anthropic-only", Duration::ZERO),
+            "seat breaker slot must exist to arm half-open",
+        );
+
+        let _ = router.count_tokens(count_req()).await;
+
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            1,
+            "the half-open probe must reach the upstream exactly once",
+        );
+        assert!(
+            !half_open_in_flight(&router, "anthropic-only"),
+            "a capability wire-501 must release the half-open probe slot",
+        );
+        assert_eq!(
+            circuit_phase(&router, "anthropic-only"),
+            crate::runtime_state::CircuitPhase::HalfOpenReady,
+            "a capability wire-501 must NOT debit the breaker: no record_failure, \
+             so the breaker keeps its armed zero-cooldown state (HalfOpenReady) \
+             rather than re-tripping Open with the 60s baseline",
+        );
+    }
+
+    #[tokio::test]
+    async fn local_not_implemented_on_half_open_probe_releases_slot_without_debiting() {
+        // Guards the already-exempt case: a local Error::NotImplemented
+        // from the selected capable seat is a capability signal and must
+        // behave exactly like the wire-501 -- release the half-open slot,
+        // no breaker debit.
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "anthropic-only",
+            provider_name: "anthropic-prov",
+            entry: anthropic_api_entry_with_breaker(1, 60_000),
+            behavior: CountBehavior::NotImplemented,
+        }]);
+        assert!(
+            router.force_open_breaker("anthropic-only", Duration::ZERO),
+            "seat breaker slot must exist to arm half-open",
+        );
+
+        let _ = router.count_tokens(count_req()).await;
+
+        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
+        assert!(
+            !half_open_in_flight(&router, "anthropic-only"),
+            "a capability NotImplemented must release the half-open probe slot",
+        );
+        assert_eq!(
+            circuit_phase(&router, "anthropic-only"),
+            crate::runtime_state::CircuitPhase::HalfOpenReady,
+            "a capability NotImplemented must NOT debit the breaker",
+        );
+    }
+
+    #[tokio::test]
+    async fn walks_to_next_capable_seat_on_wire_501_and_returns_its_count() {
+        // Chain [anthropic-api(501), anthropic-api(ok)]. The selected
+        // capable seat returns a capability wire-501; count_tokens must
+        // advance to the NEXT capable seat and return its count -- not
+        // surface the 501 to the client. The first seat's breaker must
+        // NOT be debited.
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "anthropic-first",
+                provider_name: "anthropic-prov-a",
+                entry: anthropic_api_entry_with_breaker(1, 60_000),
+                behavior: CountBehavior::UpstreamError(501),
+            },
+            Leg {
+                nickname: "anthropic-second",
+                provider_name: "anthropic-prov-b",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(42),
+            },
+        ]);
+
+        let tc = router
+            .count_tokens(count_req())
+            .await
+            .expect("walk must reach the second capable seat and return its count");
+
+        assert_eq!(
+            tc.input_tokens, 42,
+            "the second capable seat serves the count",
         );
         assert_eq!(
             counters[0].load(Ordering::SeqCst),
             1,
-            "selected capable target is dispatched once, no retry",
+            "first seat attempted once",
+        );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            1,
+            "walk advanced to the second seat",
+        );
+        assert_eq!(
+            circuit_phase(&router, "anthropic-first"),
+            crate::runtime_state::CircuitPhase::Closed,
+            "a capability 501 must not debit the first seat's breaker (stays Closed)",
+        );
+    }
+
+    #[tokio::test]
+    async fn walk_terminates_with_not_implemented_when_all_capable_seats_501() {
+        // Every capable seat returns a capability error. The walk must
+        // visit each seat at most once (bounded upstream calls) and
+        // terminate with the stable Error::NotImplemented rather than
+        // looping or leaking the last upstream's raw 501 to the client.
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "anthropic-first",
+                provider_name: "anthropic-prov-a",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::UpstreamError(501),
+            },
+            Leg {
+                nickname: "anthropic-second",
+                provider_name: "anthropic-prov-b",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::UpstreamError(501),
+            },
+        ]);
+
+        let err = router.count_tokens(count_req()).await.unwrap_err();
+
+        match err {
+            Error::NotImplemented(model, msg) => {
+                assert_eq!(model, "alias");
+                assert!(
+                    msg.contains("count_tokens"),
+                    "message must name the operation; got: {msg}",
+                );
+            }
+            other => panic!("expected a terminal Error::NotImplemented; got {other:?}"),
+        }
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            1,
+            "first seat visited exactly once",
+        );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            1,
+            "second seat visited exactly once (no re-visit, no loop)",
+        );
+    }
+
+    #[tokio::test]
+    async fn non_capability_429_debits_and_returns_without_walking() {
+        // Scope guard: a 429 is a HEALTH error, not a capability error. It
+        // must keep today's behavior -- debit the breaker and propagate --
+        // and must NOT walk to a later capable seat.
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "anthropic-first",
+                provider_name: "anthropic-prov-a",
+                entry: anthropic_api_entry_with_breaker(1, 60_000),
+                behavior: CountBehavior::UpstreamError(429),
+            },
+            Leg {
+                nickname: "anthropic-second",
+                provider_name: "anthropic-prov-b",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(42),
+            },
+        ]);
+
+        let err = router.count_tokens(count_req()).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::Upstream { status: 429, .. }),
+            "a 429 must propagate verbatim; got {err:?}",
+        );
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            1,
+            "first seat attempted once",
+        );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            0,
+            "a health error must NOT walk to a later capable seat",
+        );
+        assert_eq!(
+            circuit_phase(&router, "anthropic-first"),
+            crate::runtime_state::CircuitPhase::Open,
+            "a 429 must debit the breaker (threshold 1 -> Open)",
+        );
+    }
+
+    #[tokio::test]
+    async fn walk_reruns_gate_on_next_seat_and_respects_open_breaker() {
+        // Guardrail: the capability walk must re-run the gate on each new
+        // seat. If the next capable seat's breaker is open, the walk must
+        // NOT bypass it -- the gate blocks the dispatch and the
+        // circuit-open error surfaces (the seat is never called).
+        let (router, counters) = build_router(vec![
+            Leg {
+                nickname: "anthropic-first",
+                provider_name: "anthropic-prov-a",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::UpstreamError(501),
+            },
+            Leg {
+                nickname: "anthropic-second",
+                provider_name: "anthropic-prov-b",
+                entry: anthropic_api_entry(),
+                behavior: CountBehavior::Ok(42),
+            },
+        ]);
+        // Park the second seat's breaker open for a long, un-elapsed
+        // cooldown so its gate returns CircuitOpen (not a half-open probe
+        // admission).
+        assert!(
+            router.force_open_breaker("anthropic-second", Duration::from_secs(3600)),
+            "second seat breaker slot must exist",
+        );
+
+        let err = router.count_tokens(count_req()).await.unwrap_err();
+
+        assert!(
+            matches!(&err, Error::Upstream { status: 0, body, .. } if body.contains("circuit breaker")),
+            "the walk must re-gate the second seat and surface its open-breaker block; got {err:?}",
+        );
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            1,
+            "first seat attempted once (capability 501)",
+        );
+        assert_eq!(
+            counters[1].load(Ordering::SeqCst),
+            0,
+            "an open breaker on the walked-to seat must block the dispatch, not be bypassed",
         );
     }
 }

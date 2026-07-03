@@ -10,15 +10,17 @@
 //! model versions and is not published as a public library. The
 //! upstream's `/v1/messages/count_tokens` is the source of truth.
 //!
-//! Why walk to the first capable provider (not strictly first): only
+//! Why walk to a capable provider (not strictly the first target): only
 //! the anthropic-api egress kind implements count_tokens, and it is
 //! Claude-only, so every capable target shares the same Anthropic
 //! tokenizer family. `Router::count_tokens` skips count_tokens-incapable
-//! kinds (e.g. Bedrock, which has no count_tokens endpoint) before
-//! dispatch and 501s only when no target in the chain is capable.
-//! Walking past incapable kinds never crosses tokenizer families, so a
-//! count served by a fallback still reflects the caller's tokenizer. See
-//! `Router::count_tokens`.
+//! KINDS (e.g. Bedrock, which has no count_tokens endpoint) before
+//! dispatch, AND walks past a capable-by-kind seat that returns a
+//! capability error at runtime -- a local NotImplemented or a wire 501
+//! (e.g. an anthropic-api base_url that back-hops to a Bedrock egress).
+//! It 501s only when no capable seat yields a count. Walking never
+//! crosses tokenizer families, so a count served by a fallback still
+//! reflects the caller's tokenizer. See `Router::count_tokens`.
 
 use std::sync::Arc;
 
