@@ -338,6 +338,77 @@ pub fn shadow_misfire_summary(
     Ok(summary)
 }
 
+/// Windowed M1 near-lossless attribution: per-heuristic freed-token sums,
+/// the path-extractability count-pair, and the context-fraction count-pair,
+/// RESTRICTED to rows where `would_trim_recorder_version IS NOT NULL` (the
+/// M1 near-lossless pass ran). This filter is load-bearing: pre-M1 rows never
+/// carry these columns, so without it a mixed-history window would silently
+/// blend baseline and M1 semantics. Count-pairs (`path_units`/
+/// `path_extractable`, `context_fraction_present`/`context_fraction_sum`) are
+/// summed as raw counters here -- divide AFTER summing; never average a
+/// per-row rate. Plain data; the caller decides how to display it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct M1AttributionSummary {
+    /// Count of requests where the M1 recorder ran
+    /// (`would_trim_recorder_version IS NOT NULL`), regardless of whether it
+    /// found any marks. The M1-recorder candidate count.
+    pub recorder_requests: i64,
+    /// Summed dedup-heuristic freed-token count over `recorder_requests`.
+    pub dedup_tokens: i64,
+    /// Summed supersession-heuristic freed-token count over
+    /// `recorder_requests`.
+    pub supersession_tokens: i64,
+    /// Summed path units considered for supersession-key extraction.
+    pub path_units: i64,
+    /// Summed path units that were extractable. Paired with `path_units`:
+    /// the rate is `path_extractable as f64 / path_units as f64`.
+    pub path_extractable: i64,
+    /// Count of `recorder_requests` with a known `would_trim_context_fraction`
+    /// (fail-closed `NULL` when the model's context window was unknown).
+    pub context_fraction_present: i64,
+    /// Summed `would_trim_context_fraction` over `context_fraction_present`
+    /// rows. Paired with `context_fraction_present`: the mean is
+    /// `context_fraction_sum / context_fraction_present as f64`.
+    pub context_fraction_sum: f64,
+}
+
+const M1_ATTRIBUTION_SQL: &str = "\
+SELECT
+    COUNT(would_trim_recorder_version)                      AS recorder_requests,
+    COALESCE(SUM(would_trim_dedup_tokens), 0)                AS dedup_tokens,
+    COALESCE(SUM(would_trim_supersession_tokens), 0)         AS supersession_tokens,
+    COALESCE(SUM(would_trim_path_units), 0)                  AS path_units,
+    COALESCE(SUM(would_trim_path_extractable), 0)             AS path_extractable,
+    COUNT(would_trim_context_fraction)                        AS context_fraction_present,
+    COALESCE(SUM(would_trim_context_fraction), 0.0)           AS context_fraction_sum
+FROM requests
+WHERE ts_start >= ?1 AND ts_start < ?2
+  AND would_trim_recorder_version IS NOT NULL";
+
+/// The window's M1 near-lossless attribution. Restricted to
+/// `would_trim_recorder_version IS NOT NULL` so baseline (pre-M1) rows never
+/// mix into these totals. All fields are 0 when no row in the window carried
+/// an M1 recording.
+pub fn m1_attribution_summary(
+    db: &UsageDb,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<M1AttributionSummary, QueryError> {
+    let mut stmt = db.conn().prepare(M1_ATTRIBUTION_SQL)?;
+    let summary = stmt.query_row([from_ms, to_ms], |row| {
+        Ok(M1AttributionSummary {
+            recorder_requests: row.get(0)?,
+            dedup_tokens: row.get(1)?,
+            supersession_tokens: row.get(2)?,
+            path_units: row.get(3)?,
+            path_extractable: row.get(4)?,
+            context_fraction_present: row.get(5)?,
+            context_fraction_sum: row.get(6)?,
+        })
+    })?;
+    Ok(summary)
+}
+
 /// K-estimator calibration triple over all history. Populated by
 /// `k_calibration_summary`; zero-fields indicate no calibrated predictions.
 ///
@@ -1002,6 +1073,109 @@ mod tests {
         let s = would_trim_summary(&db, 0, 1000).expect("summary");
         assert_eq!(s.candidate_requests, 0);
         assert_eq!(s.would_trim_tokens, 0);
+    }
+
+    /// Insert a row carrying the M1 attribution columns, or a baseline
+    /// (pre-M1) row when `recorder_version` is `None` -- the latter must
+    /// never contribute to `m1_attribution_summary` totals even when it
+    /// carries a `would_trim_tokens` baseline candidate.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_m1_attribution_row(
+        db: &UsageDb,
+        request_id: &str,
+        ts_start: i64,
+        recorder_version: Option<i64>,
+        dedup_tokens: Option<i64>,
+        supersession_tokens: Option<i64>,
+        path_units: Option<i64>,
+        path_extractable: Option<i64>,
+        context_fraction: Option<f64>,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, would_trim_tokens, \
+                 would_trim_recorder_version, would_trim_dedup_tokens, \
+                 would_trim_supersession_tokens, would_trim_path_units, \
+                 would_trim_path_extractable, would_trim_context_fraction) \
+                 VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 0, 'ok', 0, 0, 0, 1, 0, 99999, \
+                 ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    ts_start,
+                    request_id,
+                    recorder_version,
+                    dedup_tokens,
+                    supersession_tokens,
+                    path_units,
+                    path_extractable,
+                    context_fraction,
+                ],
+            )
+            .expect("insert m1 attribution row");
+    }
+
+    #[test]
+    fn m1_attribution_summary_excludes_baseline_rows_without_recorder_version() {
+        // Arrange: two M1-recorded rows (recorder_version = 1) and one
+        // baseline row (recorder_version = NULL) that also carries a
+        // baseline would_trim_tokens candidate and would incorrectly inflate
+        // the M1 totals if the recorder-version filter were dropped.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_m1_attribution_row(
+            &db,
+            "m1",
+            100,
+            Some(1),
+            Some(500),
+            Some(300),
+            Some(4),
+            Some(3),
+            Some(0.10),
+        );
+        insert_m1_attribution_row(
+            &db,
+            "m2",
+            110,
+            Some(1),
+            Some(200),
+            Some(0),
+            Some(2),
+            Some(2),
+            Some(0.20),
+        );
+        insert_m1_attribution_row(&db, "baseline", 120, None, None, None, None, None, None);
+
+        // Act
+        let s = m1_attribution_summary(&db, 100, 1000).expect("summary");
+
+        // Assert: only the two recorder-version rows contribute.
+        assert_eq!(s.recorder_requests, 2);
+        assert_eq!(s.dedup_tokens, 700);
+        assert_eq!(s.supersession_tokens, 300);
+        assert_eq!(s.path_units, 6);
+        assert_eq!(s.path_extractable, 5);
+        assert_eq!(s.context_fraction_present, 2);
+        assert!((s.context_fraction_sum - 0.30).abs() < 1e-9);
+    }
+
+    #[test]
+    fn m1_attribution_summary_is_zero_when_no_recorder_rows() {
+        // Arrange: only a baseline row with no M1 recording.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_m1_attribution_row(&db, "baseline", 100, None, None, None, None, None, None);
+
+        // Act + Assert
+        let s = m1_attribution_summary(&db, 0, 1000).expect("summary");
+        assert_eq!(s.recorder_requests, 0);
+        assert_eq!(s.dedup_tokens, 0);
+        assert_eq!(s.supersession_tokens, 0);
+        assert_eq!(s.path_units, 0);
+        assert_eq!(s.path_extractable, 0);
+        assert_eq!(s.context_fraction_present, 0);
+        assert_eq!(s.context_fraction_sum, 0.0);
     }
 
     #[test]

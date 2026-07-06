@@ -1010,6 +1010,104 @@ fn would_trim_render_no_verdict_line_when_zero_candidates() {
     );
 }
 
+/// Insert a row carrying the M1 near-lossless attribution columns.
+/// `recorder_version = None` yields a baseline (pre-M1) row that must never
+/// surface in the M1 attribution render block.
+#[allow(clippy::too_many_arguments)]
+fn m1_attribution_row(
+    db: &UsageDb,
+    request_id: &str,
+    recorder_version: Option<i64>,
+    dedup_tokens: i64,
+    supersession_tokens: i64,
+    path_units: i64,
+    path_extractable: i64,
+) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             would_trim_recorder_version, would_trim_dedup_tokens, \
+             would_trim_supersession_tokens, would_trim_path_units, \
+             would_trim_path_extractable) \
+             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', 'm', 'paid', \
+             'up-paid', 0, 'ok', 5, 0, 0, 1, 0, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                request_id,
+                recorder_version,
+                dedup_tokens,
+                supersession_tokens,
+                path_units,
+                path_extractable
+            ],
+        )
+        .expect("insert m1 attribution row");
+}
+
+#[test]
+fn render_detail_shows_m1_attribution_line() {
+    // Arrange: two M1-recorded rows.
+    let (_dir, _path, db) = temp_db();
+    m1_attribution_row(&db, "m1", Some(1), 40_000, 10_000, 4, 3);
+    m1_attribution_row(&db, "m2", Some(1), 20_000, 20_000, 2, 2);
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: recorder count, per-heuristic freed-token breakdown (summed and
+    // humanized: 60_000 -> "60K", 30_000 -> "30K"), the extractability rate
+    // (5/6 -> 83%), and the advisory framing.
+    assert!(
+        out.contains("m1-attribution: 2 reqs recorded"),
+        "detail output must surface the M1 attribution block: {out}"
+    );
+    assert!(out.contains("dedup=60K"), "summed dedup tokens: {out}");
+    assert!(
+        out.contains("supersession=30K"),
+        "summed supersession tokens: {out}"
+    );
+    assert!(
+        out.contains("path-extractable 83%"),
+        "path-extractability rate divides summed counts: {out}"
+    );
+    assert!(out.contains("not applied"), "advisory framing: {out}");
+}
+
+#[test]
+fn render_non_detail_omits_m1_attribution_line() {
+    // Arrange: an M1 recording exists, but the default table must not
+    // surface it (only --detail does).
+    let (_dir, _path, db) = temp_db();
+    m1_attribution_row(&db, "m1", Some(1), 40_000, 10_000, 4, 3);
+    let report = report_all(&db, &cost_config(), None, false);
+
+    // Act + Assert
+    let out = render_report(&report);
+    assert!(
+        !out.contains("m1-attribution"),
+        "the default (non-detail) table must omit the M1 attribution line: {out}"
+    );
+}
+
+#[test]
+fn render_detail_omits_m1_attribution_line_when_no_recorder_rows() {
+    // Arrange: only a baseline (pre-M1) row -- would_trim_recorder_version is
+    // NULL, so it must not surface an M1 attribution block even under
+    // --detail.
+    let (_dir, _path, db) = temp_db();
+    m1_attribution_row(&db, "baseline", None, 0, 0, 0, 0);
+    let report = report_all(&db, &cost_config(), None, true);
+
+    // Act + Assert: no M1 recorder rows -> no attribution block.
+    let out = render_report(&report);
+    assert!(
+        !out.contains("m1-attribution"),
+        "no recorder rows -> no M1 attribution line: {out}"
+    );
+}
+
 // --- k-calibration render tests ------------------------------------------
 
 /// Insert a calibration row: a request with a k_floor and enough session

@@ -39,6 +39,12 @@ sections:
 [reduction]           # dispatch-time context-reduction policy
                       # (enabled). Optional; default off.
 
+[trim]                # steady-state advisory-trim knobs (trigger_tokens,
+                      # clear_at_least_tokens, head_keep_messages,
+                      # keep_recent_messages). Optional; default
+                      # 100000 / 20000 / 2 / 6. Advisory only -- never
+                      # mutates a dispatched request.
+
 [bedrock]             # global Bedrock allowlists (allowed_betas,
                       # allowed_body_fields). Optional.
 
@@ -193,6 +199,10 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `cache_capability`             | `[providers.X]`                 | `Option<{supports_top_level_cache_control, cache_hit_observable}>`, default None (-> conservative per-kind default) |
 | `enabled`                      | `[reduction]` global            | bool, default false; master switch for dispatch-path context reduction (see `[reduction]`)        |
 | `reduction_enabled`            | `[providers.X]`                 | `Option<bool>`, default None (inherits global); `false` disables reduction for this provider      |
+| `trigger_tokens`               | `[trim]` global                 | u64, default 100000; see `[trim]`                                                                 |
+| `clear_at_least_tokens`        | `[trim]` global                 | u64, default 20000; see `[trim]`                                                                  |
+| `head_keep_messages`           | `[trim]` global                 | usize, default 2; see `[trim]`                                                                    |
+| `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
 
 **`base_url` scheme requirement.** `base_url` must use `https://` (or
 `http://` for loopback addresses only). Link-local addresses
@@ -1455,6 +1465,33 @@ The per-request decision token is recorded in the usage DB
 `reduction_strategy` column and, when reduction actually strips bytes, a
 `context_reduction` line is logged at DEBUG (counts only -- no bodies).
 See [LOGGING.md](LOGGING.md).
+
+## Steady-state advisory trim (`[trim]`)
+
+routectl carries a deterministic, front-anchored steady-state context
+trimmer that is **advisory only** in this release: it computes what a
+cache-coherent prefix cut WOULD look like for a long-running
+conversation, but never mutates a dispatched request. The `[trim]`
+block tunes the four knobs the trimmer's proposal is a pure function
+of; it carries no `enabled` switch and no per-provider override, because
+an always-on advisory recorder that never mutates has no "off" state to
+represent.
+
+```toml
+[trim]
+# Estimated total tokens at or below which no trim is proposed.
+trigger_tokens = 100000
+# Minimum tokens the elided span must free for a trim to be proposed.
+clear_at_least_tokens = 20000
+# Leading messages kept fully intact (never elided).
+head_keep_messages = 2
+# Trailing messages protected from elision.
+keep_recent_messages = 6
+```
+
+A missing `[trim]` block keeps these same conservative defaults. All
+four fields are required to have sane values -- an unknown key inside
+the block fails config load rather than being silently ignored.
 
 ## Reading usage (`routectl usage`)
 

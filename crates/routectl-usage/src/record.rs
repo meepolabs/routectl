@@ -158,6 +158,43 @@ pub struct UsageRecord {
     /// differed (Misfire), `None` when no session key was present or this was
     /// the first observation for the triple (FirstSeen). Recording only.
     pub would_trim_shadow_misfire: Option<i64>,
+    /// Non-mutating near-lossless attribution: freed tokens attributed to
+    /// the dedup heuristic for this request's would-cut candidate. Plumbing
+    /// only -- this field is always `None` until lossy-trim.f1.06 computes
+    /// it. Recording only.
+    pub would_trim_dedup_tokens: Option<u64>,
+    /// Non-mutating near-lossless attribution: freed tokens attributed to
+    /// the supersession heuristic for this request's would-cut candidate.
+    /// Plumbing only -- this field is always `None` until lossy-trim.f1.06
+    /// computes it. Recording only.
+    pub would_trim_supersession_tokens: Option<u64>,
+    /// Non-mutating path-extractability count-pair: the denominator (total
+    /// path units considered). Paired with `would_trim_path_extractable` so
+    /// the extractability rate is reconstructable offline via SUM/SUM
+    /// rather than pre-averaged per row. Plumbing only -- always `None`
+    /// until lossy-trim.f1.06 computes it. Recording only.
+    pub would_trim_path_units: Option<u64>,
+    /// Non-mutating path-extractability count-pair: the numerator (path
+    /// units that were extractable). See `would_trim_path_units`. Plumbing
+    /// only -- always `None` until lossy-trim.f1.06 computes it. Recording
+    /// only.
+    pub would_trim_path_extractable: Option<u64>,
+    /// Recorder-version marker: `None` on pre-M1 rows and on rows where the
+    /// near-lossless pass did not run; stamped by the M1 recorder
+    /// (lossy-trim.f1.06) on every trigger-clearing row. Lets reporting
+    /// filter to non-NULL rows so aggregates never mix baseline vs M1
+    /// semantics. Plumbing only -- always `None` until f1.06 stamps it.
+    pub would_trim_recorder_version: Option<i64>,
+    /// Capped raw-marks JSON blob: per-mark ordering captured for a future
+    /// M3 sweep, bounded to a byte cap (see `writer::capped_raw_marks_text`)
+    /// so the stored JSON is always valid. Plumbing only -- always `None`
+    /// until lossy-trim.f1.06 computes it. Recording only.
+    pub would_trim_raw_marks: Option<Value>,
+    /// Non-mutating context-fraction advisory: `estimate_total_tokens /
+    /// max_context_tokens` from the resolved pricing row. `None` when the
+    /// context window is unknown (fail-closed). Plumbing only -- always
+    /// `None` until lossy-trim.f1.06 computes it. Recording only.
+    pub would_trim_context_fraction: Option<f64>,
 
     // TIMING
     pub latency_ms: i64,
@@ -294,6 +331,13 @@ mod tests {
             would_trim_break_even_k: Some(50.0),
             would_trim_k_floor: Some(60.0),
             would_trim_shadow_misfire: None,
+            would_trim_dedup_tokens: Some(1_200),
+            would_trim_supersession_tokens: Some(800),
+            would_trim_path_units: Some(10),
+            would_trim_path_extractable: Some(7),
+            would_trim_recorder_version: Some(1),
+            would_trim_raw_marks: Some(json!([{"kind": "dedup", "index": 0}])),
+            would_trim_context_fraction: Some(0.25),
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -354,6 +398,13 @@ mod tests {
             would_trim_break_even_k: None,
             would_trim_k_floor: None,
             would_trim_shadow_misfire: None,
+            would_trim_dedup_tokens: None,
+            would_trim_supersession_tokens: None,
+            would_trim_path_units: None,
+            would_trim_path_extractable: None,
+            would_trim_recorder_version: None,
+            would_trim_raw_marks: None,
+            would_trim_context_fraction: None,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

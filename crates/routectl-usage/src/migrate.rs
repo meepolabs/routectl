@@ -213,6 +213,54 @@ fn migrate_v6_to_v7(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// Apply the v7 -> v8 step atomically: add the near-lossless attribution
+/// columns (`would_trim_dedup_tokens`, `would_trim_supersession_tokens`, the
+/// path-extractability count-pair `would_trim_path_units` /
+/// `would_trim_path_extractable`, the recorder-version marker
+/// `would_trim_recorder_version`, the capped raw-marks blob
+/// `would_trim_raw_marks`, and `would_trim_context_fraction`), bump `PRAGMA
+/// user_version` to 8, and update the human-readable `meta.schema_version`
+/// row. All in one transaction so a crash mid-step rolls back rather than
+/// landing a column-without-version state. Existing rows survive with every
+/// new column NULL. This step only plumbs the columns -- lossy-trim.f1.06
+/// computes and stamps their values.
+///
+/// On a FRESH DB the v0 -> v1 step created `requests` from the current schema,
+/// which already carries every column. The loop still enters this arm
+/// (v0->v1 stamps user_version=1, not SCHEMA_VERSION), so guard each
+/// `ADD COLUMN` against a pre-existing column to keep the fresh path safe.
+fn migrate_v7_to_v8(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    if !column_exists(&tx, "requests", "would_trim_dedup_tokens")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_dedup_tokens INTEGER")?;
+    }
+    if !column_exists(&tx, "requests", "would_trim_supersession_tokens")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_supersession_tokens INTEGER")?;
+    }
+    if !column_exists(&tx, "requests", "would_trim_path_units")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_path_units INTEGER")?;
+    }
+    if !column_exists(&tx, "requests", "would_trim_path_extractable")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_path_extractable INTEGER")?;
+    }
+    if !column_exists(&tx, "requests", "would_trim_recorder_version")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_recorder_version INTEGER")?;
+    }
+    if !column_exists(&tx, "requests", "would_trim_raw_marks")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_raw_marks TEXT")?;
+    }
+    if !column_exists(&tx, "requests", "would_trim_context_fraction")? {
+        tx.execute_batch("ALTER TABLE requests ADD COLUMN would_trim_context_fraction REAL")?;
+    }
+    tx.execute_batch("PRAGMA user_version = 8")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "8"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -264,6 +312,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             4 => migrate_v4_to_v5(conn)?,
             5 => migrate_v5_to_v6(conn)?,
             6 => migrate_v6_to_v7(conn)?,
+            7 => migrate_v7_to_v8(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;

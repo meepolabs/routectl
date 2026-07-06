@@ -98,6 +98,15 @@ pub struct CachePricingRow {
     pub verified_at: &'static str,
     /// Free-form provenance string (vendor doc, `"sentinel"`, etc.).
     pub source: &'static str,
+    /// The model's total context window in tokens, when confirmed against a
+    /// primary vendor doc for this exact `(provider_kind, model_glob)` cell.
+    /// `None` (fail-closed, same posture as `verified = false`) when the
+    /// window could not be confirmed -- e.g. a bare `"*"` catch-all that can
+    /// match models with genuinely different windows, or a model/family
+    /// whose window is not stated as an exact figure in current vendor docs.
+    /// A `None` here is the correct, safe answer; a guessed window would be
+    /// a silent data error downstream (`context_fraction`, f1.06).
+    pub max_context_tokens: Option<u32>,
 }
 
 /// Intern a `verified_at` date string, leaking at most one allocation per
@@ -136,6 +145,7 @@ impl CachePricingRow {
             tier: None,
             verified_at: "1970-01-01",
             source: "sentinel",
+            max_context_tokens: None,
         }
     }
 
@@ -178,6 +188,7 @@ impl CachePricingRow {
             tier: self.tier,
             verified_at,
             source,
+            max_context_tokens: ov.max_context_tokens.or(self.max_context_tokens),
         })
     }
 }
@@ -223,6 +234,12 @@ pub struct CachePricingOverride {
     /// the merge is rejected.
     #[serde(default)]
     pub override_acknowledges_cost_risk: bool,
+    /// Operator-supplied context window in tokens. `Some` wins over the
+    /// baked window (or the baked `None`); `None` inherits the baked value
+    /// unchanged. Set this when the baked table's `None` for a cell is
+    /// wrong -- e.g. the operator has confirmed the vendor's real window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
 }
 
 impl CachePricingOverride {
@@ -265,6 +282,13 @@ impl CachePricingOverride {
                 "cache-pricing override: verified_at = \"{s}\" is not a valid YYYY-MM-DD date"
             ));
         }
+        if self.max_context_tokens == Some(0) {
+            return Err(
+                "cache-pricing override: max_context_tokens must not be Some(0); use None to \
+                 leave the window unconfirmed"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 
@@ -279,6 +303,7 @@ impl CachePricingOverride {
             && self.has_storage_rent.is_none()
             && self.storage_rent.is_none()
             && self.auto_cacher.is_none()
+            && self.max_context_tokens.is_none()
             && self.verified_at.is_some()
     }
 }
@@ -342,6 +367,7 @@ const fn row(
     tier: Option<&'static str>,
     verified_at: &'static str,
     source: &'static str,
+    max_context_tokens: Option<u32>,
 ) -> CachePricingRow {
     CachePricingRow {
         wm,
@@ -355,6 +381,7 @@ const fn row(
         tier,
         verified_at,
         source,
+        max_context_tokens,
     }
 }
 
@@ -390,6 +417,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "anthropic-5m",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -405,6 +433,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "anthropic-1h",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -420,6 +449,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "anthropic-5m",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -435,6 +465,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "anthropic-1h",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -450,6 +481,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "anthropic-5m",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -465,6 +497,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "anthropic-1h",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -480,6 +513,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "anthropic-5m",
+            None,
         ),
     },
     BakedCell {
@@ -495,6 +529,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "anthropic-1h",
+            None,
         ),
     },
     BakedCell {
@@ -510,6 +545,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "anthropic-5m",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -525,6 +561,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "anthropic-1h",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -540,6 +577,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "anthropic-5m",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -555,6 +593,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "anthropic-1h",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -570,6 +609,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "anthropic-5m",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -585,6 +625,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "anthropic-1h",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -600,6 +641,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "anthropic-5m",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -615,6 +657,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "anthropic-1h",
+            Some(200_000),
         ),
     },
     // Anthropic provider-level catch-all: tier-agnostic so it backstops a
@@ -633,6 +676,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "anthropic-5m-default",
+            None,
         ),
     },
     // -- Bedrock (Claude via cachePoint) ----------------------------------
@@ -654,6 +698,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "bedrock-probe-rm",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -669,6 +714,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "bedrock-probe-rm",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -684,6 +730,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "bedrock-probe-rm",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -699,6 +746,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "bedrock-probe-rm",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -714,6 +762,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "bedrock-probe-rm",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -729,6 +778,7 @@ const TABLE: &[BakedCell] = &[
             Some("5m"),
             VERIFIED_AT,
             "bedrock-probe-rm",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -744,6 +794,7 @@ const TABLE: &[BakedCell] = &[
             Some("1h"),
             VERIFIED_AT,
             "bedrock-probe-rm",
+            Some(200_000),
         ),
     },
     BakedCell {
@@ -759,6 +810,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "bedrock-probe-rm",
+            None,
         ),
     },
     // -- OpenAI Responses (automatic prefix, no write premium) ------------
@@ -776,6 +828,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "openai-24h",
+            None,
         ),
     },
     // -- openai-compat sub-providers (model_glob rows) --------------------
@@ -794,6 +847,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "deepseek-v4-pro",
+            Some(1_000_000),
         ),
     },
     BakedCell {
@@ -809,6 +863,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "deepseek-v4-flash",
+            None,
         ),
     },
     // Gemini implicit: automatic prefix, free writes, rm ~0.10. min-prefix
@@ -826,6 +881,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "gemini-implicit",
+            None,
         ),
     },
     // Mistral: explicit-keyed prefix; caller must supply prompt_cache_key,
@@ -844,6 +900,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "mistral-probe-ttl",
+            None,
         ),
     },
     // xAI Grok: automatic prefix, free writes, rm model-dependent
@@ -861,6 +918,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "grok-probe",
+            None,
         ),
     },
     // Moonshot Kimi: hybrid auto/explicit, free auto writes, rm ~0.16-0.20.
@@ -878,6 +936,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "kimi-probe",
+            None,
         ),
     },
     BakedCell {
@@ -893,6 +952,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "kimi-probe",
+            None,
         ),
     },
     // Qwen explicit: explicit cache_control ephemeral, Wm 1.25, rm 0.10,
@@ -910,6 +970,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "qwen-explicit",
+            None,
         ),
     },
     // MiniMax M3 (flagship): passive auto, FREE writes, rm 0.2, 512 prefix.
@@ -926,6 +987,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "minimax-m3",
+            Some(1_000_000),
         ),
     },
     // MiniMax 2.7 / 2.5 snapshots: passive + explicit, wm 1.25, rm 0.2, 512 prefix.
@@ -942,6 +1004,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "minimax-m2",
+            Some(204_800),
         ),
     },
     // openai-compat catch-all: unknown OpenAI-compatible upstream. The shape
@@ -961,6 +1024,7 @@ const TABLE: &[BakedCell] = &[
             None,
             VERIFIED_AT,
             "openai-compat-default",
+            None,
         ),
     },
 ];
@@ -2048,5 +2112,178 @@ mod tests {
             std::ptr::eq(r1.verified_at.as_ptr(), r2.verified_at.as_ptr()),
             "verified_at must be the same interned pointer for identical strings"
         );
+    }
+
+    // -- max_context_tokens tests --------------------------------------------
+
+    #[test]
+    fn known_anthropic_model_lookup_returns_confirmed_window() {
+        // Arrange / Act: Sonnet 4.6, a narrow version-pinned glob with a
+        // confirmed 1M window.
+        let r = lookup("anthropic-api", "claude-sonnet-4-6", None);
+
+        // Assert
+        assert_eq!(r.max_context_tokens, Some(1_000_000));
+    }
+
+    #[test]
+    fn unknown_provider_and_model_lookup_returns_none_via_sentinel() {
+        // Arrange / Act
+        let r = lookup("some-future-kind", "whatever-model", None);
+
+        // Assert: fail-closed sentinel carries no window.
+        assert_eq!(r.max_context_tokens, None);
+    }
+
+    #[test]
+    fn sentinel_max_context_tokens_is_none() {
+        assert_eq!(CachePricingRow::sentinel().max_context_tokens, None);
+    }
+
+    #[test]
+    fn broad_ambiguous_glob_bakes_none_despite_shorthand_figures() {
+        // grok-* also matches a differently-windowed code model, so the
+        // family-wide row must not bake a single number.
+        let r = lookup("openai-compat", "grok-4-3", None);
+        assert_eq!(r.max_context_tokens, None);
+    }
+
+    #[test]
+    fn with_overrides_some_wins_over_baked_some() {
+        // Arrange: baked Sonnet 4.6 row already carries Some(1_000_000).
+        let baked = lookup("anthropic-api", "claude-sonnet-4-6", None);
+        assert_eq!(baked.max_context_tokens, Some(1_000_000));
+        let ov = CachePricingOverride {
+            max_context_tokens: Some(500_000),
+            ..Default::default()
+        };
+
+        // Act
+        let merged = baked.with_overrides(&ov).expect("accepted");
+
+        // Assert: the override value wins.
+        assert_eq!(merged.max_context_tokens, Some(500_000));
+    }
+
+    #[test]
+    fn with_overrides_some_wins_over_baked_none() {
+        // Arrange: baked grok-* row carries None.
+        let baked = lookup("openai-compat", "grok-4-3", None);
+        assert_eq!(baked.max_context_tokens, None);
+        let ov = CachePricingOverride {
+            max_context_tokens: Some(256_000),
+            ..Default::default()
+        };
+
+        // Act
+        let merged = baked.with_overrides(&ov).expect("accepted");
+
+        // Assert
+        assert_eq!(merged.max_context_tokens, Some(256_000));
+    }
+
+    #[test]
+    fn with_overrides_none_inherits_baked_value_unchanged() {
+        // Arrange: an override touching an unrelated field only; the baked
+        // window (Some or None) must pass through unchanged either way.
+        let baked_some = lookup("anthropic-api", "claude-sonnet-4-6", None);
+        let ov = CachePricingOverride {
+            ttl_seconds: Some(3_600),
+            ..Default::default()
+        };
+        let merged_some = baked_some.with_overrides(&ov).expect("accepted");
+        assert_eq!(
+            merged_some.max_context_tokens,
+            baked_some.max_context_tokens
+        );
+
+        let baked_none = lookup("openai-compat", "grok-4-3", None);
+        let merged_none = baked_none.with_overrides(&ov).expect("accepted");
+        assert_eq!(
+            merged_none.max_context_tokens,
+            baked_none.max_context_tokens
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_context_tokens() {
+        // Arrange
+        let ov = CachePricingOverride {
+            max_context_tokens: Some(0),
+            ..Default::default()
+        };
+
+        // Act
+        let err = ov.validate().expect_err("Some(0) must be rejected");
+
+        // Assert
+        assert!(err.contains("max_context_tokens"), "msg: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_positive_max_context_tokens() {
+        let ov = CachePricingOverride {
+            max_context_tokens: Some(128_000),
+            ..Default::default()
+        };
+        assert!(ov.validate().is_ok());
+    }
+
+    #[test]
+    fn override_toml_deny_unknown_fields_rejects_typo() {
+        // Arrange: a plausible-looking typo on the new field name.
+        let toml_src = r"max_context_token = 128000";
+
+        // Act
+        let result = toml::from_str::<CachePricingOverride>(toml_src);
+
+        // Assert: deny_unknown_fields still catches the typo.
+        assert!(result.is_err(), "typo'd field must be rejected");
+    }
+
+    #[test]
+    fn override_toml_accepts_correctly_spelled_field() {
+        // Arrange
+        let toml_src = r"max_context_tokens = 128000";
+
+        // Act
+        let ov: CachePricingOverride = toml::from_str(toml_src).expect("parse");
+
+        // Assert
+        assert_eq!(ov.max_context_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn baked_table_pins_representative_max_context_tokens_cells() {
+        // Guards specific bake-vs-None classifications against silent drift.
+        // Distinct from `known_anthropic_model_lookup_returns_confirmed_window`
+        // and `broad_ambiguous_glob_bakes_none_despite_shorthand_figures`
+        // above -- this pins a different, non-overlapping slice: confirmed
+        // windows on other providers, an explicit (non-catch-all) None row,
+        // a broad-but-not-bare glob that fails closed, and each provider's
+        // bare `"*"` catch-all.
+        let cases: &[(&str, &str, Option<u32>)] = &[
+            // Confirmed windows.
+            ("anthropic-api", "claude-opus-4-8", Some(1_000_000)),
+            ("anthropic-api", "claude-haiku-4-5", Some(200_000)),
+            ("bedrock", "anthropic.claude-sonnet-4-5", Some(200_000)),
+            ("openai-compat", "deepseek-v4-pro", Some(1_000_000)),
+            // Explicit None row (not a catch-all -- haiku 3.5 has its own
+            // baked cell that carries no confirmed window).
+            ("anthropic-api", "claude-haiku-3-5", None),
+            // Broad glob, fails closed (unverified TTL), not a bare "*".
+            ("openai-compat", "mistral-large", None),
+            // Bare "*" provider catch-alls.
+            ("bedrock", "anthropic.claude-nonexistent-9", None),
+            ("openai-compat", "some-unrecognized-vendor-model", None),
+        ];
+
+        for (provider_kind, model, expected) in cases {
+            let actual = lookup(provider_kind, model, None).max_context_tokens;
+            assert_eq!(
+                actual, *expected,
+                "lookup({provider_kind:?}, {model:?}) max_context_tokens"
+            );
+        }
     }
 }

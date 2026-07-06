@@ -1074,6 +1074,205 @@ mod tests {
         assert_eq!(meta_version, SCHEMA_VERSION.to_string());
     }
 
+    /// A v7 DB (created before the near-lossless attribution columns
+    /// existed) must migrate to v8: every new column
+    /// (`would_trim_dedup_tokens`, `would_trim_supersession_tokens`,
+    /// `would_trim_path_units`, `would_trim_path_extractable`,
+    /// `would_trim_recorder_version`, `would_trim_raw_marks`,
+    /// `would_trim_context_fraction`) is added, `user_version` becomes 8,
+    /// and any pre-existing row survives with every new column NULL (and
+    /// its prior would-trim / shadow-misfire columns intact). Builds a
+    /// genuine v7 `requests` table so the ALTER path -- not the
+    /// fresh-schema path -- is exercised.
+    #[test]
+    fn old_v7_db_migrates_to_v8_preserving_rows() {
+        // Arrange: a v7-shaped DB carrying the shadow-misfire column.
+        let (_dir, path) = temp_db_path();
+        let conn = Connection::open(&path).expect("raw open");
+        conn.execute_batch(
+            "CREATE TABLE requests (
+                ts_start INTEGER NOT NULL,
+                ts_end INTEGER NOT NULL,
+                request_id TEXT NOT NULL UNIQUE,
+                ingress_dialect TEXT NOT NULL,
+                requested_model TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                stream INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                tool_count INTEGER NOT NULL,
+                msg_count INTEGER NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                fallback_count INTEGER NOT NULL,
+                strategy TEXT,
+                reduction_strategy TEXT,
+                selection_decision TEXT,
+                would_trim_tokens INTEGER,
+                would_trim_break_even_k REAL,
+                would_trim_k_floor REAL,
+                would_trim_shadow_misfire INTEGER
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '7');
+            INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                msg_count, attempt_count, fallback_count, strategy, reduction_strategy, \
+                selection_decision, would_trim_tokens, would_trim_break_even_k, \
+                would_trim_k_floor, would_trim_shadow_misfire) \
+                VALUES (1, 2, 'v7-row', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0, \
+                'auto_emitted', 'applied', 'sticky_stay', 40000, 50.0, 60.0, 0);
+            PRAGMA user_version = 7;",
+        )
+        .expect("build v7 db");
+        assert_eq!(user_version(&conn), 7);
+
+        // Act
+        let version = migrate_to_current(&conn, 0).expect("migrate v7->v8");
+
+        // Assert: landed at v8, every new column exists, the old row survived
+        // with its prior would-trim / shadow-misfire values intact, and meta
+        // tracks the new version.
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(user_version(&conn), SCHEMA_VERSION);
+        for col in [
+            "would_trim_dedup_tokens",
+            "would_trim_supersession_tokens",
+            "would_trim_path_units",
+            "would_trim_path_extractable",
+            "would_trim_recorder_version",
+            "would_trim_raw_marks",
+            "would_trim_context_fraction",
+        ] {
+            let present: bool = conn
+                .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name=?1")
+                .expect("prepare")
+                .exists([col])
+                .expect("query");
+            assert!(present, "v8 DB must carry the {col} column");
+        }
+        // The prior would-trim / shadow-misfire values survive intact.
+        let (wt_tokens, wt_k, k_floor, shadow_misfire): (
+            Option<i64>,
+            Option<f64>,
+            Option<f64>,
+            Option<i64>,
+        ) = conn
+            .query_row(
+                "SELECT would_trim_tokens, would_trim_break_even_k, would_trim_k_floor, \
+                 would_trim_shadow_misfire FROM requests WHERE request_id='v7-row'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("old row survives");
+        assert_eq!(wt_tokens, Some(40_000));
+        assert_eq!(wt_k, Some(50.0));
+        assert_eq!(k_floor, Some(60.0));
+        assert_eq!(shadow_misfire, Some(0));
+        // Every new column reads NULL on the migrated old row.
+        type NewAttributionCols = (
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<f64>,
+        );
+        let (
+            dedup,
+            supersession,
+            path_units,
+            path_extractable,
+            recorder_version,
+            raw_marks,
+            context_fraction,
+        ): NewAttributionCols = conn
+            .query_row(
+                "SELECT would_trim_dedup_tokens, would_trim_supersession_tokens, \
+                 would_trim_path_units, would_trim_path_extractable, \
+                 would_trim_recorder_version, would_trim_raw_marks, \
+                 would_trim_context_fraction FROM requests WHERE request_id='v7-row'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .expect("old row survives");
+        assert!(
+            dedup.is_none(),
+            "migrated v7 row must have NULL would_trim_dedup_tokens"
+        );
+        assert!(
+            supersession.is_none(),
+            "migrated v7 row must have NULL would_trim_supersession_tokens"
+        );
+        assert!(
+            path_units.is_none(),
+            "migrated v7 row must have NULL would_trim_path_units"
+        );
+        assert!(
+            path_extractable.is_none(),
+            "migrated v7 row must have NULL would_trim_path_extractable"
+        );
+        assert!(
+            recorder_version.is_none(),
+            "migrated v7 row must have NULL would_trim_recorder_version"
+        );
+        assert!(
+            raw_marks.is_none(),
+            "migrated v7 row must have NULL would_trim_raw_marks"
+        );
+        assert!(
+            context_fraction.is_none(),
+            "migrated v7 row must have NULL would_trim_context_fraction"
+        );
+        let meta_version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("meta schema_version");
+        assert_eq!(meta_version, SCHEMA_VERSION.to_string());
+    }
+
+    /// A fresh DB opens directly at the current version with the
+    /// near-lossless attribution columns (v8) present.
+    #[test]
+    fn fresh_db_opens_at_v8_with_attribution_columns() {
+        // Arrange + Act
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open fresh");
+
+        // Assert
+        assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+        for col in [
+            "would_trim_dedup_tokens",
+            "would_trim_supersession_tokens",
+            "would_trim_path_units",
+            "would_trim_path_extractable",
+            "would_trim_recorder_version",
+            "would_trim_raw_marks",
+            "would_trim_context_fraction",
+        ] {
+            let present: bool = db
+                .conn()
+                .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name=?1")
+                .expect("prepare")
+                .exists([col])
+                .expect("query");
+            assert!(present, "fresh v8 DB must carry the {col} column");
+        }
+    }
+
     /// A fresh DB opens directly at the current version with the
     /// `would_trim_k_floor` column present.
     #[test]
@@ -1233,6 +1432,13 @@ mod tests {
             ("would_trim_break_even_k", false),
             ("would_trim_k_floor", false),
             ("would_trim_shadow_misfire", false),
+            ("would_trim_dedup_tokens", false),
+            ("would_trim_supersession_tokens", false),
+            ("would_trim_path_units", false),
+            ("would_trim_path_extractable", false),
+            ("would_trim_recorder_version", false),
+            ("would_trim_raw_marks", false),
+            ("would_trim_context_fraction", false),
         ];
 
         let (_dir, path) = temp_db_path();

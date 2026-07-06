@@ -70,6 +70,13 @@ pub(crate) fn build_usage_draft(
         would_trim_break_even_k: None,
         would_trim_k_floor: None,
         would_trim_shadow_misfire: None,
+        would_trim_dedup_tokens: None,
+        would_trim_supersession_tokens: None,
+        would_trim_path_units: None,
+        would_trim_path_extractable: None,
+        would_trim_recorder_version: None,
+        would_trim_raw_marks: None,
+        would_trim_context_fraction: None,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,
@@ -293,6 +300,13 @@ impl UsageCapture {
         self.record.would_trim_break_even_k = meta.would_trim_break_even_k;
         self.record.would_trim_k_floor = meta.would_trim_k_floor;
         self.record.would_trim_shadow_misfire = meta.would_trim_shadow_misfire;
+        self.record.would_trim_dedup_tokens = meta.would_trim_dedup_tokens;
+        self.record.would_trim_supersession_tokens = meta.would_trim_supersession_tokens;
+        self.record.would_trim_path_units = meta.would_trim_path_units;
+        self.record.would_trim_path_extractable = meta.would_trim_path_extractable;
+        self.record.would_trim_recorder_version = meta.would_trim_recorder_version;
+        self.record.would_trim_raw_marks = meta.would_trim_raw_marks.clone();
+        self.record.would_trim_context_fraction = meta.would_trim_context_fraction;
     }
 
     /// Stamp the token / quota / finish columns from a non-streaming

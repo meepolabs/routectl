@@ -20,11 +20,10 @@ use routectl_core::schema::Role;
 use routectl_core::{ChatRequest, Error, Result, scan_volatile};
 use routectl_router::{
     ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CachePricingRow,
-    Config, GateDecision, KeepReason, PrefixReductionCandidate, SteadyStateTrimParams,
-    break_even_k, evaluate, lookup_with_overrides, propose_steady_state_trim,
-    validate_alias_chain_targets, validate_alias_patterns, validate_bedrock_global_config,
-    validate_overrides, validate_reasoning_defaults, validate_registry_patterns,
-    validate_retry_policy,
+    Config, GateDecision, KeepReason, PrefixReductionCandidate, TrimConfig, break_even_k, evaluate,
+    lookup_with_overrides, propose_steady_state_trim, validate_alias_chain_targets,
+    validate_alias_patterns, validate_bedrock_global_config, validate_overrides,
+    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -235,19 +234,23 @@ fn build_economics(
 /// Build the advisory economics projection for the REAL steady-state-trim
 /// candidate of `req`, instead of an operator-supplied `--hypothetical-d`.
 ///
-/// Runs the deterministic trimmer; when it produces a cut, the cut's own
-/// `(d, c_after, c)` candidate is priced and `steady_state_would_trim` is
-/// `Some(true)`. When the trimmer declines (request too short / below trigger /
-/// no safe elidable span), the projection reports `Some(false)` and a zero
-/// candidate that the gate reads as "nothing to remove" -- a KEEP. The
-/// operator's `--hypothetical-k` and `[cache_pricing]` overrides still apply.
+/// Runs the deterministic trimmer using `trim.to_params()` -- the SAME
+/// shared constructor `Router::record_would_trim` calls on the live dispatch
+/// path, so both resolve identical `SteadyStateTrimParams` from the same
+/// `Config`. When it produces a cut, the cut's own `(d, c_after, c)`
+/// candidate is priced and `steady_state_would_trim` is `Some(true)`. When
+/// the trimmer declines (request too short / below trigger / no safe
+/// elidable span), the projection reports `Some(false)` and a zero candidate
+/// that the gate reads as "nothing to remove" -- a KEEP. The operator's
+/// `--hypothetical-k` and `[cache_pricing]` overrides still apply.
 fn build_steady_state_economics(
     req: &ChatRequest,
     target: Option<(&'static str, String)>,
     overrides: &BTreeMap<String, CachePricingOverride>,
     args: &ProjectionArgs,
+    trim: &TrimConfig,
 ) -> EconomicsProjection {
-    let params = SteadyStateTrimParams::default();
+    let params = trim.to_params();
     if let Some(plan) = propose_steady_state_trim(req, &params) {
         price_candidate(plan.candidate, target, overrides, args, Some(true))
     } else {
@@ -505,6 +508,7 @@ pub fn run(
             target,
             &config.cache_pricing,
             &projection,
+            &config.trim,
         ));
     } else if projection.hypothetical_d.is_some() {
         let target = resolve_target(&config, alias);
@@ -1503,7 +1507,8 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_steady_state_economics(&req, target, &config.cache_pricing, &args);
+        let economics =
+            build_steady_state_economics(&req, target, &config.cache_pricing, &args, &config.trim);
 
         // Assert: a real cut was proposed, a live K* exists, and the rendered
         // projection surfaces the would-trim line + the candidate.
@@ -1544,7 +1549,8 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_steady_state_economics(&req, target, &config.cache_pricing, &args);
+        let economics =
+            build_steady_state_economics(&req, target, &config.cache_pricing, &args, &config.trim);
 
         // Assert: would-trim no, a zero candidate, and a KEEP verdict.
         assert_eq!(economics.steady_state_would_trim, Some(false));

@@ -9,7 +9,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -136,7 +136,33 @@ CREATE TABLE IF NOT EXISTS requests (
     -- key. Appended last so it lands in the same ordinal position whether the
     -- DB was created fresh at v7 or migrated from v6 via `ALTER TABLE ... ADD
     -- COLUMN` (which always appends). The live request is NEVER mutated.
-    would_trim_shadow_misfire INTEGER
+    would_trim_shadow_misfire INTEGER,
+
+    -- NEAR-LOSSLESS ATTRIBUTION (v8): plumbing only -- this task wires the
+    -- columns end-to-end (DispatchMeta -> observe_meta -> UsageRecord ->
+    -- SQLite); lossy-trim.f1.06 computes the values. `would_trim_dedup_tokens`
+    -- / `would_trim_supersession_tokens` are per-heuristic freed-token counts
+    -- (plain columns, not a bitmask). `would_trim_path_units` /
+    -- `would_trim_path_extractable` are a count-pair (NOT a pre-averaged
+    -- rate) so the extractability rate is reconstructable offline via
+    -- SUM/SUM. `would_trim_recorder_version` is NULL on pre-M1 rows and
+    -- stamped by the M1 recorder, so reporting can filter to non-NULL rows
+    -- and never mix baseline vs M1 semantics in an aggregate.
+    -- `would_trim_raw_marks` is a capped JSON blob (see
+    -- `writer::capped_raw_marks_text`) capturing per-mark ordering for the
+    -- future M3 sweep. `would_trim_context_fraction` is NULL when the
+    -- pricing row's context window is unknown. Appended last so these
+    -- columns land in the same ordinal position whether the DB was created
+    -- fresh at v8 or migrated from v7 via `ALTER TABLE ... ADD COLUMN`
+    -- (which always appends). The live request is NEVER mutated -- this is
+    -- recording only.
+    would_trim_dedup_tokens INTEGER,
+    would_trim_supersession_tokens INTEGER,
+    would_trim_path_units INTEGER,
+    would_trim_path_extractable INTEGER,
+    would_trim_recorder_version INTEGER,
+    would_trim_raw_marks TEXT,
+    would_trim_context_fraction REAL
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

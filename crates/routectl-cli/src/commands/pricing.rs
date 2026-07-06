@@ -203,13 +203,20 @@ fn names_baked_cell(sel: &CachePricingSelector) -> bool {
         .any(|cell| cell.provider_kind == sel.provider_kind && cell.model_glob == sel.model_glob)
 }
 
-/// Build the table rows and the count of config keys that do not
-/// exactly match any baked cell. Returns `(table_rows, unmatched_count)`.
+/// Build the table rows, the count of config keys that do not exactly match
+/// any baked cell, and the punch-list of configured models whose effective
+/// `max_context_tokens` is unknown (`None`). Returns
+/// `(table_rows, unmatched_count, punch_list)`.
 ///
 /// Each element of `table_rows` is a `Vec<String>` of column values in the
 /// order: provider_kind, model_glob, tier, wm, rm, ttl(s), min_prefix, auto,
-/// verified, source, verified_at, stale.
-pub fn build_list_data(config: &Config) -> (Vec<Vec<String>>, usize) {
+/// verified, source, verified_at, stale, max_ctx.
+///
+/// The punch-list checks the EFFECTIVE row (baked value merged with any
+/// operator override via `effective_row`), so an override that supplies a
+/// window removes that model from the punch-list even when the baked cell
+/// itself carries `None`.
+pub fn build_list_data(config: &Config) -> (Vec<Vec<String>>, usize, Vec<String>) {
     let header = vec![
         "provider_kind".to_string(),
         "model_glob".to_string(),
@@ -223,10 +230,12 @@ pub fn build_list_data(config: &Config) -> (Vec<Vec<String>>, usize) {
         "source".to_string(),
         "verified_at".to_string(),
         "stale".to_string(),
+        "max_ctx".to_string(),
     ];
 
     let baked = baked_table_rows();
     let mut rows = vec![header];
+    let mut punch_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for cell in &baked {
         let row = effective_row(cell, config);
         let stale = if row.verified && is_stale_today(row.verified_at) {
@@ -234,6 +243,12 @@ pub fn build_list_data(config: &Config) -> (Vec<Vec<String>>, usize) {
         } else {
             ""
         };
+        let max_ctx = row
+            .max_context_tokens
+            .map_or_else(|| "-".to_string(), |n| n.to_string());
+        if row.max_context_tokens.is_none() {
+            punch_set.insert(format!("{}:{}", cell.provider_kind, cell.model_glob));
+        }
         rows.push(vec![
             cell.provider_kind.to_string(),
             cell.model_glob.to_string(),
@@ -247,8 +262,13 @@ pub fn build_list_data(config: &Config) -> (Vec<Vec<String>>, usize) {
             row.source.to_string(),
             row.verified_at.to_string(),
             stale.to_string(),
+            max_ctx,
         ]);
     }
+    // Each model can carry multiple baked rows (one per cache tier), so the
+    // punch-list dedups through a set: a "None-window model" is reported
+    // once per model, not once per tier.
+    let punch_list: Vec<String> = punch_set.into_iter().collect();
 
     let baked_keys: std::collections::BTreeSet<String> = baked
         .iter()
@@ -260,7 +280,7 @@ pub fn build_list_data(config: &Config) -> (Vec<Vec<String>>, usize) {
         .filter(|k| !baked_keys.contains(*k))
         .count();
 
-    (rows, unmatched)
+    (rows, unmatched, punch_list)
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +289,7 @@ pub fn build_list_data(config: &Config) -> (Vec<Vec<String>>, usize) {
 
 /// `routectl pricing list` -- print the effective pricing manifest.
 pub fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let (table, unmatched) = build_list_data(config);
+    let (table, unmatched, punch_list) = build_list_data(config);
     print!("{}", render_table(&table));
     if unmatched > 0 {
         println!(
@@ -277,6 +297,16 @@ pub fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
              cell; they still apply by glob at request-lookup time but are not reflected in the \
              rows above."
         );
+    }
+    if !punch_list.is_empty() {
+        println!(
+            "\npunch-list: {} configured model(s) with an unknown max_context_tokens \
+             (context-fraction advisory falls back to absolute tokens only):",
+            punch_list.len()
+        );
+        for name in &punch_list {
+            println!("  {name}");
+        }
     }
     Ok(())
 }
@@ -611,7 +641,7 @@ mod tests {
         merge_verifications_into(&mut config, &v);
 
         // Act
-        let (rows, _) = build_list_data(&config);
+        let (rows, _, _) = build_list_data(&config);
 
         // Find the grok-* row (skip header at index 0)
         let grok_row = rows
@@ -646,7 +676,7 @@ mod tests {
         );
 
         // Act
-        let (rows, _) = build_list_data(&config);
+        let (rows, _, _) = build_list_data(&config);
         let grok_row = rows
             .iter()
             .skip(1)
@@ -665,7 +695,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (rows2, _) = build_list_data(&config2);
+        let (rows2, _, _) = build_list_data(&config2);
         let grok_row2 = rows2
             .iter()
             .skip(1)
@@ -688,12 +718,89 @@ mod tests {
         );
 
         // Act
-        let (_, unmatched) = build_list_data(&config);
+        let (_, unmatched, _) = build_list_data(&config);
 
         // Assert
         assert_eq!(
             unmatched, 1,
             "one override naming no baked cell -> unmatched == 1"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // max_context_tokens column + punch-list
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_list_data_max_ctx_column_reflects_baked_window() {
+        // Arrange: no overrides -- baked windows only. claude-opus-4-8* is
+        // baked with a known window; claude-haiku-3-5* is baked `None`.
+        let config = minimal_config();
+
+        // Act
+        let (rows, _, _) = build_list_data(&config);
+
+        // Assert: max_ctx is the last column.
+        let opus_row = rows
+            .iter()
+            .skip(1)
+            .find(|r| r[0] == "anthropic-api" && r[1] == "claude-opus-4-8*")
+            .expect("claude-opus-4-8* row should be present");
+        assert_eq!(opus_row.last().unwrap(), "1000000");
+
+        let haiku_row = rows
+            .iter()
+            .skip(1)
+            .find(|r| r[0] == "anthropic-api" && r[1] == "claude-haiku-3-5*")
+            .expect("claude-haiku-3-5* row should be present");
+        assert_eq!(haiku_row.last().unwrap(), "-");
+    }
+
+    #[test]
+    fn build_list_data_punch_list_names_none_window_model_and_omits_some_window_model() {
+        // Arrange: no overrides -- baked windows only.
+        let config = minimal_config();
+
+        // Act
+        let (_, _, punch_list) = build_list_data(&config);
+
+        // Assert: the None-window model is named exactly once (deduped
+        // across its 5m/1h tiers); the Some-window model does not appear.
+        let haiku_hits = punch_list
+            .iter()
+            .filter(|name| name.as_str() == "anthropic-api:claude-haiku-3-5*")
+            .count();
+        assert_eq!(
+            haiku_hits, 1,
+            "None-window model appears exactly once, not once per tier: {punch_list:?}"
+        );
+        assert!(
+            !punch_list.contains(&"anthropic-api:claude-opus-4-8*".to_string()),
+            "Some-window model must not appear in the punch-list: {punch_list:?}"
+        );
+    }
+
+    #[test]
+    fn build_list_data_punch_list_respects_override_supplied_window() {
+        // Arrange: an operator override supplies a window for the
+        // otherwise-None-window claude-haiku-3-5* baked cell.
+        let mut config = minimal_config();
+        config.cache_pricing.insert(
+            "anthropic-api:claude-haiku-3-5*".to_string(),
+            CachePricingOverride {
+                max_context_tokens: Some(200_000),
+                ..Default::default()
+            },
+        );
+
+        // Act
+        let (_, _, punch_list) = build_list_data(&config);
+
+        // Assert: the override resolves the gap, so the model drops off the
+        // punch-list even though the baked value itself is None.
+        assert!(
+            !punch_list.contains(&"anthropic-api:claude-haiku-3-5*".to_string()),
+            "an override supplying a window must clear the punch-list entry: {punch_list:?}"
         );
     }
 

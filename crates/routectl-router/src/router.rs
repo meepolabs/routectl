@@ -19,12 +19,13 @@ use routectl_core::{
 };
 use serde_json::Value;
 
-use crate::cache_pricing::lookup_with_overrides;
+use crate::cache_pricing::{CachePricingRow, lookup_with_overrides};
 use crate::config::{
     AliasValue, CacheCapability, Config, HistoryReasoning, ReasoningDialect, RetryPolicy,
 };
 use crate::context_trim::{
-    SteadyStateTrimParams, propose_steady_state_trim, trimmed_prefix_fingerprint,
+    SteadyStateTrimParams, collect_near_lossless_marks, estimate_total_tokens,
+    near_lossless_candidate, propose_steady_state_trim, trimmed_prefix_fingerprint,
 };
 use crate::cost_gate::break_even_k;
 use crate::glob::PrefixIndex;
@@ -279,6 +280,50 @@ pub struct DispatchMeta {
     /// when no session key was present, or when no would-cut candidate was
     /// proposed. Recording only -- the dispatched bytes are NEVER mutated.
     pub would_trim_shadow_misfire: Option<i64>,
+    /// Non-mutating near-lossless attribution: freed tokens attributed to
+    /// the dedup heuristic over the near-lossless scan window. `Some(0)` is
+    /// a measured zero (the pass ran, found no exact-byte duplicates);
+    /// `None` means the pass did not run (below the estimated-token
+    /// trigger). Independent of whether the shipped size-baseline plan
+    /// (`would_trim_tokens`) proposed a cut. Recording only.
+    pub would_trim_dedup_tokens: Option<u64>,
+    /// Non-mutating near-lossless attribution: freed tokens attributed to
+    /// the supersession heuristic over the near-lossless scan window.
+    /// `Some(0)` is a measured zero; `None` means the pass did not run
+    /// (below the estimated-token trigger). See `would_trim_dedup_tokens`.
+    /// Recording only.
+    pub would_trim_supersession_tokens: Option<u64>,
+    /// Non-mutating path-extractability count-pair: the denominator (total
+    /// path units considered). Paired with `would_trim_path_extractable` so
+    /// the extractability rate is reconstructable offline via SUM/SUM
+    /// rather than pre-averaged per row. `None` when the near-lossless pass
+    /// did not run (below trigger). Recording only.
+    pub would_trim_path_units: Option<u64>,
+    /// Non-mutating path-extractability count-pair: the numerator (path
+    /// units that were extractable). See `would_trim_path_units`. `None`
+    /// when the near-lossless pass did not run (below trigger). Recording
+    /// only.
+    pub would_trim_path_extractable: Option<u64>,
+    /// Recorder-version marker: `None` on pre-M1 rows and on rows where the
+    /// near-lossless pass did not run (below the estimated-token trigger);
+    /// stamped with [`NEAR_LOSSLESS_RECORDER_VERSION`] by the M1 recorder
+    /// (`Router::record_would_trim`) on every trigger-clearing row,
+    /// regardless of whether the pass found any marks. Lets reporting
+    /// filter to non-NULL rows so aggregates never mix baseline vs M1
+    /// semantics.
+    pub would_trim_recorder_version: Option<i64>,
+    /// Raw-marks JSON blob (uncapped at this layer): the near-lossless
+    /// pass's marks (dedup + supersession), captured for a future M3 sweep.
+    /// The byte cap is applied downstream by
+    /// `routectl_usage::writer::capped_raw_marks_text` so the stored JSON
+    /// is always valid. `None` when the near-lossless pass did not run
+    /// (below trigger). Recording only.
+    pub would_trim_raw_marks: Option<Value>,
+    /// Non-mutating context-fraction advisory: `estimate_total_tokens /
+    /// max_context_tokens` from the resolved pricing row. `None` when the
+    /// near-lossless pass did not run (below trigger) OR the resolved
+    /// row's context window is unknown (fail-closed). Recording only.
+    pub would_trim_context_fraction: Option<f64>,
 }
 
 impl DispatchMeta {
@@ -302,6 +347,13 @@ impl DispatchMeta {
             would_trim_break_even_k: None,
             would_trim_k_floor: None,
             would_trim_shadow_misfire: None,
+            would_trim_dedup_tokens: None,
+            would_trim_supersession_tokens: None,
+            would_trim_path_units: None,
+            would_trim_path_extractable: None,
+            would_trim_recorder_version: None,
+            would_trim_raw_marks: None,
+            would_trim_context_fraction: None,
         }
     }
 
@@ -2475,28 +2527,42 @@ impl Router {
         out
     }
 
-    /// NON-MUTATING steady-state would-trim advisory recording. Computes the
-    /// deterministic trimmer's would-cut candidate for the dispatched clone,
-    /// prices it against the already-resolved `(provider_kind, model)` cell,
-    /// and stamps the freed-token count `d` plus the break-even reuse count K*
-    /// onto `meta`. When the trimmer proposes no cut, records nothing (both
-    /// columns stay `None` / NULL).
+    /// NON-MUTATING would-trim advisory recording, gated by ONE independent
+    /// check: the request's estimated token count clears
+    /// `params.trigger_tokens`. Below the trigger, records nothing at all
+    /// (every `would_trim_*` field stays `None`) and returns early. At or
+    /// above it, runs TWO independent measurements against the same
+    /// resolved `(provider_kind, model)` pricing row:
     ///
-    /// CRITICAL: this NEVER mutates `attempt_req`. It only reads the request
-    /// (`propose_steady_state_trim` is pure) and never calls `apply_trim_plan`,
-    /// so the bytes sent upstream are identical with or without this call. It
-    /// is extracted into ONE helper -- invoked from both `complete_inner` and
-    /// `stream_inner` -- so the two byte-identical dispatch blocks cannot drift.
+    /// 1. The shipped size-baseline plan (`propose_steady_state_trim`):
+    ///    freed-token count `d`, break-even K*, `k_floor`, and the shadow
+    ///    misfire monitor. UNCHANGED by this task -- still driven entirely
+    ///    by the `propose` path, and still records nothing when `propose`
+    ///    finds no cut (its own columns stay `None`).
+    /// 2. The near-lossless pass (`record_near_lossless_marks`): dedup /
+    ///    supersession attribution, path-extractability counts, the
+    ///    recorder-version marker, the raw-marks blob, and the
+    ///    context-fraction advisory. Runs INDEPENDENTLY of whether (1)
+    ///    found a cut, so near-lossless opportunity is measured even where
+    ///    the size baseline declines.
+    ///
+    /// CRITICAL: this NEVER mutates `attempt_req`. Both measurements only
+    /// read the request and never call `apply_trim_plan`, so the bytes sent
+    /// upstream are identical with or without this call. It is extracted
+    /// into ONE helper -- invoked from both `complete_inner` and
+    /// `stream_inner` -- so the two byte-identical dispatch blocks cannot
+    /// drift.
     ///
     /// An unknown / unverified-provider target (e.g. `provider_kind` is `None`
     /// for a legacy / direct-construction target, or the cell is a sentinel /
-    /// unverified row) records the freed-token count but `K* = None`: an
-    /// unverified row carries no trusted multipliers, so a break-even number
-    /// would be misleading. This matches the offline prompt-size advisory
-    /// convention (compute `break_even_k` only when `row.verified`).
+    /// unverified row) records freed-token / attribution counts but no
+    /// break-even K*: an unverified row carries no trusted multipliers, so a
+    /// break-even number would be misleading. This matches the offline
+    /// prompt-size advisory convention (compute `break_even_k` only when
+    /// `row.verified`).
     ///
-    /// Additionally, when a candidate exists, consults the in-process
-    /// [`crate::k_estimator::KEstimator`] over the request's
+    /// Additionally, when the size-baseline plan exists, consults the
+    /// in-process [`crate::k_estimator::KEstimator`] over the request's
     /// `inbound_session_key` and the SAME pricing row's `ttl_seconds` (so
     /// the per-run TTL split matches the economics that produced K*). The
     /// estimate's `k_floor` is stamped onto `meta.would_trim_k_floor` only
@@ -2514,72 +2580,145 @@ impl Router {
         model: &str,
         meta: &mut DispatchMeta,
     ) {
-        let Some(plan) = propose_steady_state_trim(attempt_req, &SteadyStateTrimParams::default())
-        else {
+        let params = self.config.trim.to_params();
+        if estimate_total_tokens(attempt_req) <= params.trigger_tokens {
             return;
-        };
+        }
+
         // Tier defaults to the trimmer's auto-emit default (5m) via the lookup.
         // K* is recorded only for a VERIFIED row (no reuse count K is assumed
-        // here); an unverified / sentinel row records None.
+        // here); an unverified / sentinel row records None. Shared by both the
+        // size-baseline block below and the near-lossless pass, so the two
+        // measurements price against the identical resolved cell.
         let row = lookup_with_overrides(
             provider_kind.unwrap_or(""),
             model,
             None,
             &self.config.cache_pricing,
         );
-        meta.would_trim_tokens = Some(plan.candidate.d);
-        let break_even = row
-            .verified
-            .then(|| break_even_k(&row, &plan.candidate))
-            .flatten();
-        meta.would_trim_break_even_k = break_even;
 
-        // Consult the K estimator over the SAME row whose TTL priced K*: the
-        // estimator's per-run split uses `row.ttl_seconds` as the same TTL the
-        // economics did, so a `k_floor` is comparable to `break_even`. The
-        // current sample for THIS turn is recorded post-response in
-        // `record_k_sample`, so the estimator reads PRIOR-turn samples only.
-        let estimate = self.k_estimator.estimate(&crate::k_estimator::KQuery {
-            session_key: attempt_req.routectl_internal.inbound_session_key.as_deref(),
-            provider_kind: provider_kind.unwrap_or(""),
-            model,
-            ttl: Duration::from_secs(u64::from(row.ttl_seconds)),
-            now: SystemTime::now(),
-        });
+        if let Some(plan) = propose_steady_state_trim(attempt_req, &params) {
+            meta.would_trim_tokens = Some(plan.candidate.d);
+            let break_even = row
+                .verified
+                .then(|| break_even_k(&row, &plan.candidate))
+                .flatten();
+            meta.would_trim_break_even_k = break_even;
 
-        meta.would_trim_k_floor = would_trim_k_floor_for_meta(break_even, &estimate);
+            // Consult the K estimator over the SAME row whose TTL priced K*: the
+            // estimator's per-run split uses `row.ttl_seconds` as the same TTL the
+            // economics did, so a `k_floor` is comparable to `break_even`. The
+            // current sample for THIS turn is recorded post-response in
+            // `record_k_sample`, so the estimator reads PRIOR-turn samples only.
+            let estimate = self.k_estimator.estimate(&crate::k_estimator::KQuery {
+                session_key: attempt_req.routectl_internal.inbound_session_key.as_deref(),
+                provider_kind: provider_kind.unwrap_or(""),
+                model,
+                ttl: Duration::from_secs(u64::from(row.ttl_seconds)),
+                now: SystemTime::now(),
+            });
 
-        // Shadow misfire monitor: recording only, never mutates attempt_req.
-        // Compute a fingerprint of the trimmed cacheable prefix and compare it
-        // against the stored value for this (session, provider_kind, model) triple.
-        // A Misfire means the prefix shifted turn-to-turn -- the canary that a
-        // real cut would break the upstream cache.
-        if let Some(session_key) = attempt_req.routectl_internal.inbound_session_key.as_deref() {
-            let fp = trimmed_prefix_fingerprint(attempt_req, &plan);
-            let shadow_key = crate::k_estimator::KSessionKey {
-                session_key: session_key.to_string(),
-                provider_kind: provider_kind.unwrap_or("").to_string(),
-                model: model.to_string(),
-            };
-            let outcome = self
-                .shadow_store
-                .record_and_compare(shadow_key, fp, SystemTime::now());
-            match outcome {
-                crate::k_estimator::ShadowOutcome::Stable => {
-                    meta.would_trim_shadow_misfire = Some(0);
+            meta.would_trim_k_floor = would_trim_k_floor_for_meta(break_even, &estimate);
+
+            // Shadow misfire monitor: recording only, never mutates attempt_req.
+            // Compute a fingerprint of the trimmed cacheable prefix and compare it
+            // against the stored value for this (session, provider_kind, model) triple.
+            // A Misfire means the prefix shifted turn-to-turn -- the canary that a
+            // real cut would break the upstream cache.
+            if let Some(session_key) = attempt_req.routectl_internal.inbound_session_key.as_deref()
+            {
+                let fp = trimmed_prefix_fingerprint(attempt_req, &plan);
+                let shadow_key = crate::k_estimator::KSessionKey {
+                    session_key: session_key.to_string(),
+                    provider_kind: provider_kind.unwrap_or("").to_string(),
+                    model: model.to_string(),
+                };
+                let outcome =
+                    self.shadow_store
+                        .record_and_compare(shadow_key, fp, SystemTime::now());
+                match outcome {
+                    crate::k_estimator::ShadowOutcome::Stable => {
+                        meta.would_trim_shadow_misfire = Some(0);
+                    }
+                    crate::k_estimator::ShadowOutcome::Misfire => {
+                        meta.would_trim_shadow_misfire = Some(1);
+                        tracing::warn!(
+                            session_key = %session_key,
+                            provider_kind = provider_kind.unwrap_or(""),
+                            model = %model,
+                            "would_trim_shadow_misfire: trimmed cacheable prefix shifted turn-to-turn",
+                        );
+                    }
+                    crate::k_estimator::ShadowOutcome::FirstSeen => {}
                 }
-                crate::k_estimator::ShadowOutcome::Misfire => {
-                    meta.would_trim_shadow_misfire = Some(1);
-                    tracing::warn!(
-                        session_key = %session_key,
-                        provider_kind = provider_kind.unwrap_or(""),
-                        model = %model,
-                        "would_trim_shadow_misfire: trimmed cacheable prefix shifted turn-to-turn",
-                    );
-                }
-                crate::k_estimator::ShadowOutcome::FirstSeen => {}
             }
         }
+
+        record_near_lossless_marks(attempt_req, &params, &row, meta);
+    }
+}
+
+/// Recorder-version marker stamped onto `meta.would_trim_recorder_version`
+/// whenever the near-lossless pass runs (the estimated-token trigger
+/// cleared), regardless of whether it found any marks. Lets offline
+/// reporting filter M1-era rows from pre-M1 rows without confounding
+/// semantics across a deploy boundary.
+const NEAR_LOSSLESS_RECORDER_VERSION: i64 = 1;
+
+/// NON-MUTATING near-lossless attribution pass. Measures the dedup +
+/// supersession opportunity over the SAME `[head_keep, scan_end)` window the
+/// shipped trimmer scans, INDEPENDENT of whether the shipped size-baseline
+/// plan (`propose_steady_state_trim`) found a cut -- called unconditionally
+/// by `record_would_trim` once the estimated-token trigger clears. Stamps
+/// zero-or-more-marks results as `Some(0)` (a measured zero), distinct from
+/// the caller's `None` (pass did not run, below trigger).
+///
+/// `would_trim_context_fraction` is fail-closed: `None` whenever `row`'s
+/// context window is unknown, never a guessed value.
+///
+/// Prices the near-lossless candidate via the UNCHANGED `break_even_k` gate,
+/// verified-row-only, mirroring the `would_trim_break_even_k` convention --
+/// but only LOGS the result via `tracing::debug!`. There is no persisted
+/// column for it: unlike the shipped size-baseline plan, the near-lossless
+/// candidate has no DispatchMeta / UsageRecord economics field in this
+/// increment.
+///
+/// Single O(parts) walk: `collect_near_lossless_marks` performs one forward
+/// scan over the request's content parts; this function makes no second
+/// pass. It is a SIBLING scan to the one `propose_steady_state_trim` already
+/// ran above (by design -- the near-lossless heuristics are a distinct
+/// question from the size baseline), not a repeat of it.
+fn record_near_lossless_marks(
+    attempt_req: &ChatRequest,
+    params: &SteadyStateTrimParams,
+    row: &CachePricingRow,
+    meta: &mut DispatchMeta,
+) {
+    let n = attempt_req.messages.len();
+    let scan_end = n.saturating_sub(params.keep_recent_messages);
+    let marks = collect_near_lossless_marks(attempt_req, params.head_keep_messages, scan_end);
+
+    meta.would_trim_recorder_version = Some(NEAR_LOSSLESS_RECORDER_VERSION);
+    meta.would_trim_dedup_tokens = Some(marks.dedup_tokens);
+    meta.would_trim_supersession_tokens = Some(marks.supersession_tokens);
+    meta.would_trim_path_units = Some(marks.path_units);
+    meta.would_trim_path_extractable = Some(marks.path_extractable);
+    meta.would_trim_context_fraction = row
+        .max_context_tokens
+        .map(|window| estimate_total_tokens(attempt_req) as f64 / window as f64);
+    meta.would_trim_raw_marks = Some(serde_json::to_value(&marks.marks).unwrap_or(Value::Null));
+
+    if let Some(candidate) = near_lossless_candidate(attempt_req, &marks.marks) {
+        let break_even = row
+            .verified
+            .then(|| break_even_k(row, &candidate))
+            .flatten();
+        tracing::debug!(
+            dedup_tokens = marks.dedup_tokens,
+            supersession_tokens = marks.supersession_tokens,
+            break_even_k = ?break_even,
+            "near_lossless_candidate priced (log-only, not persisted)",
+        );
     }
 }
 
@@ -10109,6 +10248,262 @@ mod auto_emit_cache_control_tests {
         assert!(
             dispatched.meta.would_trim_tokens.is_some(),
             "the streaming dispatch path must also record the would-trim advisory",
+        );
+    }
+
+    // -- near-lossless would-trim advisory (dedup / supersession / path) ---
+
+    /// An assistant `tool_use` turn with the given id and JSON input, for
+    /// pairing with [`tool_result_of`] (Anthropic-shape tool linkage).
+    fn tool_use_of(id: &str, input: serde_json::Value) -> Message {
+        Message {
+            refusal: None,
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::ToolUse {
+                id: id.into(),
+                name: "Tool".into(),
+                input,
+                cache_control: None,
+            })]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// A user `tool_result` turn linked to `tool_use_id`, carrying JSON
+    /// `content`. Pairs with [`tool_use_of`] via the shared id.
+    fn tool_result_of(tool_use_id: &str, content: serde_json::Value) -> Message {
+        Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::Known(
+                KnownContentPart::ToolResult {
+                    tool_use_id: tool_use_id.into(),
+                    content,
+                    is_error: None,
+                    cache_control: None,
+                },
+            )]),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    /// A request built to exercise the near-lossless dedup + supersession
+    /// heuristics together: a protected head, an oversized filler TEXT turn
+    /// (clears the estimated-token trigger alone; plain text is never a
+    /// near-lossless scan unit -- only `ToolResult.content` / `ToolUse.input`
+    /// are -- so it cannot pollute the attribution counts), three tool
+    /// call/result pairs sharing path "/a" (t1/v1, t2/v2, t3/v1), and a
+    /// protected recent tail. Over path "/a" the LATEST result (t3, v1) is
+    /// the supersession survivor: t2 (v2) differs from it and is elided as
+    /// stale; t1 (v1) equals it and survives supersession, but is then the
+    /// FIRST of an exact-duplicate pair, so dedup elides the later copy (t3)
+    /// instead. Mirrors context_trim.rs's own
+    /// `supersession_takes_precedence_over_dedup_and_each_unit_marked_once`.
+    fn near_lossless_attribution_request() -> ChatRequest {
+        let v1 = serde_json::json!("V1".repeat(2_000));
+        let v2 = serde_json::json!("V2".repeat(2_000));
+        let mut messages = vec![
+            text_msg(Role::User, "system framing turn one"),
+            text_msg(Role::Assistant, "acknowledged"),
+            text_msg(Role::User, &"x".repeat(500_000)),
+            tool_use_of("t1", serde_json::json!({"file_path": "/a", "call": 1})),
+            tool_result_of("t1", v1.clone()),
+            tool_use_of("t2", serde_json::json!({"file_path": "/a", "call": 2})),
+            tool_result_of("t2", v2),
+            tool_use_of("t3", serde_json::json!({"file_path": "/a", "call": 3})),
+            tool_result_of("t3", v1),
+        ];
+        for i in 0..6 {
+            messages.push(text_msg(Role::User, &format!("recent turn {i}")));
+        }
+        ChatRequest {
+            model: "m".into(),
+            messages,
+            ..Default::default()
+        }
+    }
+
+    /// Variant of [`rig`] that also installs a `[cache_pricing]` override
+    /// table, for exercising `would_trim_context_fraction` against a known
+    /// (non-`None`) context window.
+    fn rig_with_cache_pricing_override(
+        entry: ProviderEntry,
+        cache_pricing: BTreeMap<String, crate::cache_pricing::CachePricingOverride>,
+    ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
+        let mut config = Config {
+            cache: CacheConfig {
+                auto_emit_top_level_breakpoint: true,
+            },
+            cache_pricing,
+            ..Config::default()
+        };
+        config.providers.insert("p".into(), entry);
+
+        let mut router = Router::new(Arc::new(config));
+        let captured: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "cap".into(),
+            captured: captured.clone(),
+            fail_first: 0,
+            seen: AtomicUsize::new(0),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        let resolved = ResolvedModel::new("m", "p", provider, "upstream-model");
+        models.insert("m".into(), Arc::new(resolved));
+        router.install_resolved_models(models);
+        (router, captured)
+    }
+
+    #[tokio::test]
+    async fn would_trim_near_lossless_attribution_records_dedup_and_supersession() {
+        // A known duplicate result (t3 is a later exact copy of t1) and a
+        // known supersession (t2 differs from the survivor t3) over path
+        // "/a" must be attributed to the correct heuristic, with the path
+        // count-pair reflecting all three results resolving to a path.
+        let (router, _captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(near_lossless_attribution_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+
+        assert!(
+            dispatched
+                .meta
+                .would_trim_dedup_tokens
+                .is_some_and(|t| t > 0),
+            "the exact-duplicate result must be attributed to dedup",
+        );
+        assert!(
+            dispatched
+                .meta
+                .would_trim_supersession_tokens
+                .is_some_and(|t| t > 0),
+            "the stale differing result must be attributed to supersession",
+        );
+        assert_eq!(
+            dispatched.meta.would_trim_path_units,
+            Some(3),
+            "all three tool_result units are path-attribution candidates",
+        );
+        assert_eq!(
+            dispatched.meta.would_trim_path_extractable,
+            Some(3),
+            "all three results resolve to path \"/a\" via their paired tool_use",
+        );
+        assert!(
+            dispatched.meta.would_trim_raw_marks.is_some(),
+            "a trigger-clearing request with marks must record the raw-marks blob",
+        );
+    }
+
+    #[tokio::test]
+    async fn near_lossless_pass_does_not_mutate_outbound_request() {
+        // CRITICAL non-mutation invariant, exercised against a request whose
+        // near-lossless pass definitely finds marks (unlike
+        // `would_trim_recording_does_not_mutate_outbound_request`, which only
+        // pins the size-baseline plan): outbound bytes must stay
+        // byte-identical to the un-elided input. The near-lossless pass is a
+        // pure read -- it never calls `apply_trim_plan`.
+        let (router, captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(near_lossless_attribution_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+        assert!(
+            dispatched
+                .meta
+                .would_trim_dedup_tokens
+                .is_some_and(|t| t > 0)
+                || dispatched
+                    .meta
+                    .would_trim_supersession_tokens
+                    .is_some_and(|t| t > 0),
+            "the near-lossless pass must have found marks for this request",
+        );
+
+        let captured = captured.lock();
+        let up = captured.first().expect("one dispatch");
+        let sent_messages = serde_json::to_value(&up.messages).expect("serialize sent");
+        let original_messages = serde_json::to_value(&near_lossless_attribution_request().messages)
+            .expect("serialize original");
+        assert_eq!(
+            sent_messages, original_messages,
+            "the near-lossless pass must not change the outbound message payloads",
+        );
+    }
+
+    #[tokio::test]
+    async fn would_trim_context_fraction_is_none_when_window_unknown() {
+        // The anthropic-api "*" catch-all row has no confirmed context
+        // window (`max_context_tokens: None`), so `context_fraction` must
+        // fail closed to `None` rather than guess.
+        let (router, _captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+        assert_eq!(dispatched.meta.would_trim_context_fraction, None);
+    }
+
+    #[tokio::test]
+    async fn would_trim_context_fraction_is_some_when_window_known() {
+        // An operator override on the context window turns
+        // `context_fraction` into a computed `Some(fraction)`.
+        let overrides = BTreeMap::from([(
+            "anthropic-api:*".to_string(),
+            crate::cache_pricing::CachePricingOverride {
+                max_context_tokens: Some(1_000_000),
+                ..Default::default()
+            },
+        )]);
+        let (router, captured) = rig_with_cache_pricing_override(anthropic_entry(), overrides);
+        let dispatched = router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+        // Compute the expected fraction against the ACTUAL dispatched clone
+        // (post overlay/reduction/auto-cache mutation), since those run
+        // before the advisory records and change the serialized byte count.
+        let up = captured.lock().first().cloned().expect("one dispatch");
+        let expected_fraction = estimate_total_tokens(&up) as f64 / 1_000_000.0;
+        assert_eq!(
+            dispatched.meta.would_trim_context_fraction,
+            Some(expected_fraction),
+        );
+    }
+
+    #[tokio::test]
+    async fn would_trim_recorder_version_stamped_when_trigger_clears() {
+        let (router, _captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+        assert_eq!(
+            dispatched.meta.would_trim_recorder_version,
+            Some(NEAR_LOSSLESS_RECORDER_VERSION),
+            "a trigger-clearing row must be stamped with the recorder version",
+        );
+    }
+
+    #[tokio::test]
+    async fn would_trim_recorder_version_is_none_below_trigger() {
+        let (router, _captured) = rig(anthropic_entry(), true, 0);
+        let dispatched = router
+            .complete_with_options(base_req(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+        assert_eq!(
+            dispatched.meta.would_trim_recorder_version, None,
+            "a below-trigger row must not be stamped (the pass never ran)",
         );
     }
 

@@ -24,13 +24,14 @@ pub use cache_pricing::{
 pub use config::{
     AliasValue, CacheCapability, CacheConfig, Config, HistoryReasoning, LogConfig, ModelEntry,
     PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
-    RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, UsageConfig,
+    RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
 pub use context_trim::{
-    ElisionMark, SteadyStateTrimParams, SteadyStateTrimPlan, apply_trim_plan,
-    propose_steady_state_trim, trimmed_prefix_fingerprint,
+    ElisionMark, NearLosslessMarks, SteadyStateTrimParams, SteadyStateTrimPlan, apply_trim_plan,
+    collect_near_lossless_marks, near_lossless_candidate, propose_steady_state_trim,
+    trimmed_prefix_fingerprint,
 };
 pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, evaluate};
 #[cfg(feature = "bedrock")]
