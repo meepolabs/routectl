@@ -454,6 +454,34 @@ Only `applied` emits a `context_reduction` log line; the `skipped:*`
 tokens are recorded in the usage DB but produce no log line (there is
 nothing to report).
 
+## First-activity mark (M4)
+
+`try_stream_with_first_chunk` (routectl-router) emits one DEBUG line the
+instant a streaming upstream's response headers arrive -- before the
+first content chunk is awaited. This is the first sign of upstream
+life, distinct from the existing first-CONTENT `ttfb_ms` mark
+(`mark_first_byte`), which additionally waits out any upstream
+`message_start`/`ping` events the SSE parser swallows. There is no
+automated regression test for this line (capturing a `tracing` event
+through a thread-local subscriber proved flaky under the parallel test
+harness); observe it manually instead:
+
+```bash
+ROUTECTL_LOG=routectl_router=debug ./routectl serve
+```
+
+Then issue a streaming request. Look for:
+
+```
+stream first-activity: upstream response headers received provider=... upstream=... elapsed_ms=...
+```
+
+`elapsed_ms` is measured from the per-attempt clock at dispatch. The
+gap between this mark and the request's existing first-content mark
+(`mark_first_byte`, recorded as `ttfb_ms` in the usage DB -- see
+`routectl usage`) is the first-activity-to-first-content delta -- the
+upstream prefill time M4 makes measurable.
+
 ## What's never logged
 
 - Resolved secret values (env contents, file contents, OAuth tokens,

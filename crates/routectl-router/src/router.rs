@@ -2182,6 +2182,7 @@ impl Router {
 
                 let r = try_stream_with_first_chunk(
                     provider_name,
+                    model,
                     provider.clone(),
                     attempt_req.clone(),
                     &attempt_policy,
@@ -3549,14 +3550,53 @@ impl Drop for ProbeSlotGuard {
 /// `policy.stream_first_byte_timeout_ms` (when set) caps the wait for the
 /// stream-open + first-chunk arrival; expiry surfaces as a status-0
 /// upstream error which is fallbackable per `should_fallback`.
+///
+/// Also emits a debug-level first-activity log the moment the upstream
+/// response headers arrive, ahead of the first-chunk wait below (M4:
+/// see the `attempt_start` comment inside).
 async fn try_stream_with_first_chunk(
     provider_name: &str,
+    upstream_model: &str,
     provider: Arc<dyn Provider>,
     req: ChatRequest,
     policy: &RetryPolicy,
 ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+    // Per-attempt clock for the first-activity mark below -- NOT the
+    // request-level clock `UsageCapture::start` uses for `ttfb_ms`
+    // (that lives in a higher crate this one cannot see). For the
+    // common case (no prior fallback hop on this request) the two are
+    // within noise of each other, so `elapsed_ms` here is directly
+    // comparable to the ledger's `ttfb_ms` to derive the first-activity
+    // -> first-content gap (M4). A request that fell back through one
+    // or more dead chain entries first will show extra unaccounted time
+    // on the ttfb side that this attempt's clock does not carry -- that
+    // is chain-walk overhead, a separate concern from the prefill gap
+    // this instrumentation targets.
+    let attempt_start = Instant::now();
     let open_and_first = async {
         let mut upstream = provider.stream(req).await?;
+        // First sign of upstream life: response headers arrived (every
+        // egress's `stream()` awaits `client.execute()` -- which
+        // resolves once the status line + headers are in -- BEFORE
+        // constructing the lazy body-byte stream below). Distinct from
+        // the first-CONTENT mark (`mark_first_byte` in
+        // `ingress_handle.rs`), which additionally waits out any
+        // upstream `message_start`/`ping` events the SSE parser
+        // swallows. One site here covers every provider (Anthropic,
+        // Bedrock, gemini, openai-compat, openai-responses) since they
+        // all share this `stream()` -> execute -> byte-stream shape.
+        // Debug-only; no bodies/prompts/PII, structured fields only.
+        // Manual capture recipe: docs/LOGGING.md, "First-activity mark
+        // (M4)" -- run with ROUTECTL_LOG=routectl_router=debug and issue
+        // a streaming request; this line's `elapsed_ms` is the gap
+        // between upstream headers and the existing first-content
+        // ttfb_ms mark.
+        tracing::debug!(
+            provider = provider_name,
+            upstream = upstream_model,
+            elapsed_ms = attempt_start.elapsed().as_millis() as u64,
+            "stream first-activity: upstream response headers received",
+        );
         match upstream.next().await {
             Some(Ok(first)) => {
                 let merged = futures::stream::once(async move { Ok(first) }).chain(upstream);

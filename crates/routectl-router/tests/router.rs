@@ -2245,3 +2245,13 @@ async fn stream_fallback_chain_carries_one_stable_alias_label() {
         assert_eq!(chunk.model, "fast", "one stable label across all chunks");
     }
 }
+
+// The M4 first-activity mark (see `try_stream_with_first_chunk` in
+// src/router.rs) is observed via a documented manual capture recipe
+// (docs/LOGGING.md, "First-activity mark (M4)") rather than an
+// automated test: capturing a `tracing` debug event through a
+// thread-local subscriber across the async runtime was flaky under
+// the parallel test harness (0 events captured intermittently under
+// load), while passing reliably in isolation. The production log
+// site is unchanged and covered structurally by the existing stream
+// tests above.
