@@ -520,6 +520,66 @@ fn render_footer_not_equal_to_old_peak_based_value() {
     );
 }
 
+/// Insert a `client_disconnect` row with an explicit raw `model` value (or
+/// `None` for a pre-dispatch hangup where dispatch never stamped a
+/// provider). Mirrors the shape a `Drop`-without-`finalize` fallback writes.
+fn client_disconnect_row(db: &UsageDb, request_id: &str, model: Option<&str>) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count) \
+             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', ?2, ?2, ?2, 0, \
+             'client_disconnect', 5, 0, 0, 0, 0)",
+            rusqlite::params![request_id, model],
+        )
+        .expect("insert client_disconnect row");
+}
+
+#[test]
+fn render_footer_shows_client_disconnect_line() {
+    // Arrange: one pre-dispatch disconnect (raw model NULL, never reached a
+    // provider) and one post-dispatch disconnect (model stamped, so dispatch
+    // had already resolved a provider before the client hung up).
+    let (_dir, _path, db) = temp_db();
+    client_disconnect_row(&db, "cd_pre", None);
+    client_disconnect_row(&db, "cd_post", Some("m"));
+    let report = report_all(&db, &cost_config(), None, false);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: both disconnects counted in the total; only the model-NULL one
+    // counts toward the pre-dispatch subset.
+    assert!(
+        out.contains("client disconnects: 2 (1 pre-dispatch)"),
+        "footer must report the disconnect total and pre-dispatch subset: {out:?}"
+    );
+}
+
+#[test]
+fn render_footer_client_disconnect_excluded_from_error_column() {
+    // Arrange: a client_disconnect row alongside an ok row in the same group.
+    // The disconnect must not inflate the `err` column (see AggRow::errors).
+    let (_dir, _path, db) = temp_db();
+    paid_model_row(&db, "ok1", "m", "ok", 10, 20);
+    client_disconnect_row(&db, "cd1", Some("m"));
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+    let row_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("m "))
+        .expect("model row present");
+
+    // Assert: header order is key|reqs|err|input|..., so err is field index 2.
+    // 2 requests total (1 ok + 1 disconnect), 0 errors.
+    let cells: Vec<&str> = row_line.split_whitespace().collect();
+    assert_eq!(cells.get(1).copied(), Some("2"), "reqs cell: {row_line:?}");
+    assert_eq!(cells.get(2).copied(), Some("0"), "err cell: {row_line:?}");
+}
+
 #[test]
 fn render_hit_pct_column_is_token_weighted_over_billed_not_peak() {
     // Arrange: one model group with two stream rows carrying a CLIMBING cache_read

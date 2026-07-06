@@ -347,6 +347,12 @@ pub struct WindowReport {
     pub quota: Option<QuotaSnapshot>,
     pub cache_hit_rate: Option<f64>,
     pub total_errors: i64,
+    /// Window-wide `client_disconnect` outcome count (excluded from
+    /// `total_errors`; see `AggRow::client_disconnect_total`).
+    pub client_disconnects: i64,
+    /// Subset of `client_disconnects` that never reached dispatch (raw
+    /// `model IS NULL`, i.e. disconnected before the first content chunk).
+    pub client_disconnects_pre_dispatch: i64,
     /// Steady-state would-trim opportunity over the window (advisory; only
     /// populated and surfaced under `--detail`).
     pub would_trim: WouldTrimSummary,
@@ -577,7 +583,8 @@ pub fn build_window_report(
         .collect();
     display_rows.push(finalize_row("total".to_string(), total, &ttft));
 
-    let (cache_hit_rate, total_errors) = footer(&rows);
+    let (cache_hit_rate, total_errors, client_disconnects, client_disconnects_pre_dispatch) =
+        footer(&rows);
     // The total row mirrors the authoritative footer (token-weighted over
     // cache-reporting rows) so the two never disagree in mixed-provider windows.
     if let Some(t) = display_rows.last_mut() {
@@ -592,6 +599,8 @@ pub fn build_window_report(
         quota: latest_quota(db)?,
         cache_hit_rate,
         total_errors,
+        client_disconnects,
+        client_disconnects_pre_dispatch,
         would_trim,
         shadow_misfire,
         m1_attribution,
@@ -675,7 +684,8 @@ fn cache_hit_pct(
     Some(cache_read_billed as f64 / den as f64)
 }
 
-/// Window-wide footer: cache-hit-rate and the total error count.
+/// Window-wide footer: cache-hit-rate, the total error count, and the
+/// client-disconnect breakdown.
 ///
 /// The rate is the token-weighted fraction of prompt tokens served from cache,
 /// computed over the rows that report cache reads (`cache_read_present > 0`):
@@ -685,13 +695,19 @@ fn cache_hit_pct(
 /// that one must never be summed). Rows whose provider does not report cache are
 /// excluded from both numerator and denominator. `None` when no qualifying row
 /// has a positive denominator. Errors ARE a flow, so the error count stays a
-/// cross-row sum.
-fn footer(rows: &[AggRow]) -> (Option<f64>, i64) {
+/// cross-row sum. `client_disconnect_total` / `client_disconnect_pre_dispatch`
+/// are likewise cross-row sums straight off `AggRow` -- see that struct's docs
+/// for why they are excluded from `errors`.
+fn footer(rows: &[AggRow]) -> (Option<f64>, i64, i64, i64) {
     let mut num = 0i64;
     let mut den = 0i64;
     let mut errors = 0i64;
+    let mut client_disconnects = 0i64;
+    let mut client_disconnects_pre_dispatch = 0i64;
     for r in rows {
         errors += r.errors;
+        client_disconnects += r.client_disconnect_total;
+        client_disconnects_pre_dispatch += r.client_disconnect_pre_dispatch;
         if r.cache_read_present > 0 {
             num += r.cache_read_billed;
             den += r.input_tokens + r.cache_read_billed + r.cache_write_5m + r.cache_write_1h;
@@ -702,7 +718,12 @@ fn footer(rows: &[AggRow]) -> (Option<f64>, i64) {
     } else {
         None
     };
-    (rate, errors)
+    (
+        rate,
+        errors,
+        client_disconnects,
+        client_disconnects_pre_dispatch,
+    )
 }
 
 /// Nearest-rank percentile of a sorted, non-empty slice. `q` is in `[0,1]`;
@@ -1048,7 +1069,10 @@ fn render_footer(report: &WindowReport) -> String {
         || "cache hit n/a".to_string(),
         |r| format!("cache hit {:.1}%", r * 100.0),
     );
-    format!("{hit}\n")
+    format!(
+        "{hit}\nclient disconnects: {} ({} pre-dispatch)\n",
+        report.client_disconnects, report.client_disconnects_pre_dispatch
+    )
 }
 
 /// End-of-report legend explaining the derived columns and markers, one entry

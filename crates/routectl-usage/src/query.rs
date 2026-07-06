@@ -48,6 +48,12 @@ pub struct GroupKey {
 /// streaming, successful rows with a usable time-to-first-byte
 /// (`stream=1 AND outcome='ok' AND ttfb_ms IS NOT NULL AND latency_ms >
 /// ttfb_ms`); they feed a robust generation-throughput estimate.
+///
+/// `errors` counts `outcome NOT IN ('ok', 'client_disconnect')` -- a client
+/// hangup before the first content chunk is not a routing failure, so it is
+/// excluded and reported separately via `client_disconnect_total` /
+/// `client_disconnect_pre_dispatch` instead. `gate_blocked` and
+/// `upstream_error` remain inside `errors`.
 #[derive(Debug, Clone)]
 pub struct AggRow {
     pub key: GroupKey,
@@ -87,6 +93,16 @@ pub struct AggRow {
     pub cache_write_1h_present: i64,
     pub server_tool_present: i64,
     pub stream_count: i64,
+    /// Rows in the group whose terminal outcome is `client_disconnect`
+    /// (client hung up before `finalize`, per the `Drop` fallback in
+    /// `usage_capture.rs`). Excluded from `errors` -- see that field's note.
+    pub client_disconnect_total: i64,
+    /// Subset of `client_disconnect_total` with a NULL raw `model` column,
+    /// i.e. the client disconnected before dispatch stamped a served
+    /// provider/model (pre-first-content-chunk). Computed on the raw
+    /// column, not the `COALESCE(model, requested_model)` group key, so it
+    /// reflects whether a provider was ever resolved for that row.
+    pub client_disconnect_pre_dispatch: i64,
 }
 
 /// The most recent quota-bearing snapshot in the DB. Mirrors the `quota_*`
@@ -107,7 +123,8 @@ SELECT
     COALESCE(model, requested_model) AS model, provider, upstream, alias,
     COUNT(*)                                            AS requests,
     SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
-    SUM(CASE WHEN outcome != 'ok' THEN 1 ELSE 0 END)    AS errors,
+    SUM(CASE WHEN outcome NOT IN ('ok', 'client_disconnect')
+        THEN 1 ELSE 0 END)                              AS errors,
     COALESCE(SUM(input_tokens), 0)                      AS input_tokens,
     COALESCE(SUM(output_tokens), 0)                     AS output_tokens,
     COALESCE(SUM(reasoning_tokens), 0)                  AS reasoning_tokens,
@@ -136,7 +153,11 @@ SELECT
     COUNT(cache_write_5m)                               AS cache_write_5m_present,
     COUNT(cache_write_1h)                               AS cache_write_1h_present,
     COUNT(server_tool_use)                              AS server_tool_present,
-    COALESCE(SUM(stream), 0)                            AS stream_count
+    COALESCE(SUM(stream), 0)                            AS stream_count,
+    SUM(CASE WHEN outcome = 'client_disconnect' THEN 1 ELSE 0 END)
+                                                         AS client_disconnect_total,
+    SUM(CASE WHEN outcome = 'client_disconnect' AND r.model IS NULL
+        THEN 1 ELSE 0 END)                              AS client_disconnect_pre_dispatch
 FROM requests AS r
 WHERE ts_start >= ?1 AND ts_start < ?2
 GROUP BY COALESCE(model, requested_model), provider, upstream, alias";
@@ -183,6 +204,8 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
         cache_write_1h_present: row.get(23)?,
         server_tool_present: row.get(24)?,
         stream_count: row.get(25)?,
+        client_disconnect_total: row.get(26)?,
+        client_disconnect_pre_dispatch: row.get(27)?,
     })
 }
 
@@ -1022,6 +1045,161 @@ mod tests {
             rows[0].key.model.is_some(),
             "must not be a NULL model bucket"
         );
+    }
+
+    #[test]
+    fn aggregate_errors_excludes_client_disconnect_rows() {
+        // Arrange: one ok row and one client_disconnect row in the same group.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_row(
+            &db,
+            "ok1",
+            100,
+            "m",
+            "p",
+            "u",
+            "a",
+            "ok",
+            Some(1),
+            Some(1),
+            5,
+            None,
+        );
+        insert_row(
+            &db,
+            "cd1",
+            110,
+            "m",
+            "p",
+            "u",
+            "a",
+            "client_disconnect",
+            None,
+            None,
+            5,
+            None,
+        );
+
+        // Act
+        let rows = aggregate(&db, 0, 1000).expect("aggregate");
+
+        // Assert: the disconnect row counts toward requests but not errors.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].requests, 2);
+        assert_eq!(rows[0].ok, 1);
+        assert_eq!(rows[0].errors, 0);
+    }
+
+    #[test]
+    fn aggregate_errors_still_counts_gate_blocked_and_upstream_error() {
+        // Arrange: a gate_blocked and an upstream_error row, plus one ok row.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_row(
+            &db,
+            "ok1",
+            100,
+            "m",
+            "p",
+            "u",
+            "a",
+            "ok",
+            Some(1),
+            Some(1),
+            5,
+            None,
+        );
+        insert_row(
+            &db,
+            "gb1",
+            110,
+            "m",
+            "p",
+            "u",
+            "a",
+            "gate_blocked",
+            None,
+            None,
+            5,
+            None,
+        );
+        insert_row(
+            &db,
+            "ue1",
+            120,
+            "m",
+            "p",
+            "u",
+            "a",
+            "upstream_error",
+            None,
+            None,
+            5,
+            None,
+        );
+
+        // Act
+        let rows = aggregate(&db, 0, 1000).expect("aggregate");
+
+        // Assert: both non-ok, non-disconnect outcomes count as errors.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].requests, 3);
+        assert_eq!(rows[0].errors, 2);
+    }
+
+    #[test]
+    fn aggregate_client_disconnect_pre_dispatch_counts_model_null_rows_only() {
+        // Arrange: two client_disconnect rows -- one pre-dispatch (raw model
+        // NULL, disconnected before a provider was ever stamped) and one
+        // post-first-content-chunk (model stamped, then the client hung up
+        // mid-stream) -- plus one ok row that must not be counted.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, stream, outcome, \
+                 latency_ms, tool_count, msg_count, attempt_count, fallback_count) \
+                 VALUES (100, 100, 'pre', 'anthropic', 'asked', 'a', NULL, NULL, NULL, \
+                 1, 'client_disconnect', 5, 0, 0, 0, 0)",
+                [],
+            )
+            .expect("insert pre-dispatch disconnect");
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, upstream, stream, outcome, \
+                 latency_ms, tool_count, msg_count, attempt_count, fallback_count) \
+                 VALUES (110, 110, 'post', 'anthropic', 'asked', 'a', 'm', 'p', 'u', \
+                 1, 'client_disconnect', 5, 0, 0, 0, 0)",
+                [],
+            )
+            .expect("insert post-dispatch disconnect");
+        insert_row(
+            &db,
+            "ok1",
+            120,
+            "m",
+            "p",
+            "u",
+            "a",
+            "ok",
+            Some(1),
+            Some(1),
+            5,
+            None,
+        );
+
+        // Act
+        let rows = aggregate(&db, 0, 1000).expect("aggregate");
+
+        // Assert: both disconnects count toward the total; only the
+        // NULL-raw-model one counts toward the pre-dispatch subset.
+        let total_cd: i64 = rows.iter().map(|r| r.client_disconnect_total).sum();
+        let total_pre: i64 = rows.iter().map(|r| r.client_disconnect_pre_dispatch).sum();
+        assert_eq!(total_cd, 2);
+        assert_eq!(total_pre, 1);
     }
 
     /// Insert a row with an optional `would_trim_tokens` value so the
