@@ -21,7 +21,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
 use crate::handlers::usage_capture::{UsageCapture, build_usage_draft, outcome_for_dispatch_err};
-use crate::ingress::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent};
+use crate::ingress::{
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamRequestContext,
+    token_estimate::estimate_input_tokens,
+};
 use crate::server::AppState;
 use crate::server::request_id::RequestId;
 
@@ -232,6 +235,14 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // into the router; it rides into the render task for POST-response
     // K-sample recording at natural end-of-stream.
     let session_key = req.routectl_internal.inbound_session_key.clone();
+    // Build the stream-state seed from `req` BEFORE dispatch moves it:
+    // the local input-token estimate (for a non-zero early
+    // `message_start.usage.input_tokens`) and the resolved model (for the
+    // early-frame model id). Adapters that need neither ignore it.
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: estimate_input_tokens(&req),
+        model: req.model.clone(),
+    };
     let dispatched = router.stream_with_options(req, opts).await;
     capture.observe_meta(&dispatched.meta);
 
@@ -269,8 +280,16 @@ async fn stream_response<A: IngressAdapter + 'static>(
     // the spawn; the dir-4 egress-headers trace uses the pre-spawn
     // `egress_id` clone.
     tokio::spawn(
-        render_stream_task(upstream, adapter, capture, tx, router, session_key)
-            .instrument(parent_span),
+        render_stream_task(
+            upstream,
+            adapter,
+            capture,
+            tx,
+            router,
+            session_key,
+            stream_ctx,
+        )
+        .instrument(parent_span),
     );
 
     let receiver_stream =
@@ -317,9 +336,10 @@ async fn render_stream_task<A: IngressAdapter>(
     tx: tokio::sync::mpsc::Sender<SseEvent>,
     router: Arc<routectl_router::Router>,
     session_key: Option<String>,
+    stream_ctx: StreamRequestContext,
 ) {
     let mut upstream = upstream;
-    let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state();
+    let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state(&stream_ctx);
     // The capture guard is the RAII summary + usage row for this
     // stream. It fires on EVERY exit path (clean close, render error,
     // upstream mid-stream error, client disconnect, runtime task

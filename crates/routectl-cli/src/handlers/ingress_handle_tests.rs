@@ -835,6 +835,7 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
         tx,
         k_test_router(),
         None,
+        StreamRequestContext::default(),
     )
     .await;
     let events = drain(rx).await;
@@ -902,7 +903,16 @@ async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("openai", &sample_request("m", true), "req-openai-err");
-    render_stream_task(upstream, OpenAiIngress, capture, tx, k_test_router(), None).await;
+    render_stream_task(
+        upstream,
+        OpenAiIngress,
+        capture,
+        tx,
+        k_test_router(),
+        None,
+        StreamRequestContext::default(),
+    )
+    .await;
     let events = drain(rx).await;
 
     // Assert: three events. OpenAI emits unnamed (bare data:)
@@ -948,7 +958,16 @@ async fn render_stream_task_natural_eos_emits_render_eos_not_error() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("openai", &sample_request("m", true), "req-openai-eos");
-    render_stream_task(upstream, OpenAiIngress, capture, tx, k_test_router(), None).await;
+    render_stream_task(
+        upstream,
+        OpenAiIngress,
+        capture,
+        tx,
+        k_test_router(),
+        None,
+        StreamRequestContext::default(),
+    )
+    .await;
     let events = drain(rx).await;
 
     // Assert: chunk + [DONE]. No error chunk.
@@ -998,8 +1017,8 @@ impl<A: IngressAdapter> IngressAdapter for RenderChunkFailsOnceAdapter<A> {
     fn render_response(&self, resp: routectl_core::ChatResponse) -> routectl_core::Result<Value> {
         self.inner.render_response(resp)
     }
-    fn new_stream_state(&self) -> Box<dyn IngressStreamState> {
-        self.inner.new_stream_state()
+    fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
+        self.inner.new_stream_state(ctx)
     }
     fn render_chunk(
         &self,
@@ -1054,7 +1073,16 @@ async fn render_stream_task_anthropic_render_chunk_failure_emits_terminal_error(
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("anthropic", &sample_request("m", true), "req-render-fail");
-    render_stream_task(upstream, adapter, capture, tx, k_test_router(), None).await;
+    render_stream_task(
+        upstream,
+        adapter,
+        capture,
+        tx,
+        k_test_router(),
+        None,
+        StreamRequestContext::default(),
+    )
+    .await;
     let events = drain(rx).await;
 
     // Assert: prefix chunk events from the first chunk, then the
@@ -1239,7 +1267,16 @@ async fn capture_stream_natural_eos_emits_single_ok_row() {
     let capture = rig.capture("openai", &sample_request("a", true), "req-stream-ok");
 
     // Act
-    render_stream_task(upstream, OpenAiIngress, capture, tx, k_test_router(), None).await;
+    render_stream_task(
+        upstream,
+        OpenAiIngress,
+        capture,
+        tx,
+        k_test_router(),
+        None,
+        StreamRequestContext::default(),
+    )
+    .await;
     let _ = drain(rx).await;
     let rows = rig.flush_and_read().await;
 
@@ -1269,7 +1306,16 @@ async fn capture_stream_mid_stream_error_emits_upstream_error_row() {
     let capture = rig.capture("openai", &sample_request("a", true), "req-stream-mid-err");
 
     // Act
-    render_stream_task(upstream, OpenAiIngress, capture, tx, k_test_router(), None).await;
+    render_stream_task(
+        upstream,
+        OpenAiIngress,
+        capture,
+        tx,
+        k_test_router(),
+        None,
+        StreamRequestContext::default(),
+    )
+    .await;
     let _ = drain(rx).await;
     let rows = rig.flush_and_read().await;
 
@@ -1585,6 +1631,7 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
         tx,
         Arc::clone(&router),
         Some("sess".to_string()),
+        StreamRequestContext::default(),
     )
     .await;
     let _ = drain(rx).await;
@@ -1625,6 +1672,7 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
         tx_err,
         Arc::clone(&router_err),
         Some("sess".to_string()),
+        StreamRequestContext::default(),
     )
     .await;
     let _ = drain(rx_err).await;

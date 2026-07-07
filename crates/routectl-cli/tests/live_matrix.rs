@@ -875,7 +875,9 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
 async fn anthropic_ingress_streaming_through_bedrock() {
     use axum::http::HeaderMap;
     use futures::StreamExt;
-    use routectl_cli::ingress::{IngressAdapter, anthropic::AnthropicIngress};
+    use routectl_cli::ingress::{
+        IngressAdapter, StreamRequestContext, anthropic::AnthropicIngress,
+    };
     use serde_json::json;
 
     let Some(router) = build_bedrock_test_router(&[BEDROCK_INGRESS_MODEL]).await else {
@@ -897,7 +899,7 @@ async fn anthropic_ingress_streaming_through_bedrock() {
         .parse_request(&HeaderMap::new(), body)
         .expect("parse anthropic body");
 
-    let mut state = ingress.new_stream_state();
+    let mut state = ingress.new_stream_state(&StreamRequestContext::default());
     let mut upstream = router.stream(req).await.expect("stream via bedrock");
     let mut events: Vec<(Option<String>, String)> = Vec::new();
     while let Some(item) = upstream.next().await {

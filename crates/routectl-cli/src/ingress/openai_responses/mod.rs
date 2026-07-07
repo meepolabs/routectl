@@ -31,7 +31,10 @@ use axum::http::HeaderMap;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 use serde_json::Value;
 
-use super::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass};
+use super::{
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
+    StreamRequestContext,
+};
 
 mod parse;
 #[cfg(test)]
@@ -199,7 +202,7 @@ impl IngressAdapter for ResponsesIngress {
         render::render_responses_response(resp)
     }
 
-    fn new_stream_state(&self) -> Box<dyn IngressStreamState> {
+    fn new_stream_state(&self, _ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
         Box::new(ResponsesStreamState::default())
     }
 

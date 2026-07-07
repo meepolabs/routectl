@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::ingress::anthropic::{ANTHROPIC_FORMAT, AnthropicIngress};
-use crate::ingress::{IngressAdapter, STREAM_ERROR_TYPE, StreamErrorClass};
+use crate::ingress::{IngressAdapter, STREAM_ERROR_TYPE, StreamErrorClass, StreamRequestContext};
 
 use super::*;
 
@@ -185,7 +185,7 @@ fn stream_emits_message_start_then_text_block() {
 /// arrives post-stop.
 #[test]
 fn stream_finish_without_usage_defers_until_eos() {
-    let mut state = ingress().new_stream_state();
+    let mut state = ingress().new_stream_state(&StreamRequestContext::default());
     let _ = ingress()
         .render_chunk(text_chunk("hello", None), state.as_mut())
         .unwrap();
@@ -288,7 +288,7 @@ fn stream_finish_then_separate_usage_chunk_emits_single_delta() {
 
 #[test]
 fn stream_eos_emits_message_stop_when_not_yet_finished() {
-    let mut state = ingress().new_stream_state();
+    let mut state = ingress().new_stream_state(&StreamRequestContext::default());
     // Drive at least one chunk so message_start fires.
     let _ = ingress()
         .render_chunk(text_chunk("hi", None), state.as_mut())
@@ -306,7 +306,7 @@ fn stream_eos_emits_message_stop_when_not_yet_finished() {
 fn stream_eos_on_empty_stream_emits_synthetic_message_start_then_stop() {
     // Arrange: fresh state, no chunks rendered (started=false,
     // finished=false).
-    let mut state = ingress().new_stream_state();
+    let mut state = ingress().new_stream_state(&StreamRequestContext::default());
 
     // Act
     let events = ingress().render_eos(state.as_mut());
@@ -932,7 +932,7 @@ fn opaque_event_delta_without_prior_start_warns_and_skips() {
 #[test]
 fn render_eos_closes_lingering_opaque_block_before_message_stop() {
     use routectl_core::OpaqueSseEvent;
-    let mut state = ingress().new_stream_state();
+    let mut state = ingress().new_stream_state(&StreamRequestContext::default());
     // Open an opaque block (start only, no stop). The egress would
     // attach a ContentBlockStop normally; here the stream ends first.
     let chunk = opaque_only_chunk(vec![OpaqueSseEvent::ContentBlockStart {
@@ -1185,19 +1185,19 @@ fn message_delta_all_none_usage_emits_input_tokens_not_empty_object() {
 }
 
 /// Finding #4 (bug): `message_start` must use the request's resolved model
-/// when upstream stream chunks carry no model string. The fix adds a
-/// `req_model` field to `AnthropicStreamState` (populated via
-/// `new_state_with_req_model`) and `emit_message_start` falls back to it
-/// when `msg_model` (from chunk caching) is also absent. The test
-/// constructs the state directly with `req_model` set to verify the
-/// fallback path. Populating `req_model` in production requires a future
-/// call-site change to `new_stream_state` (which currently lacks access to
-/// `req.model`); that plumbing is noted in the code comment on the field.
+/// when upstream stream chunks carry no model string. `AnthropicStreamState`
+/// carries a `req_model` field seeded from the `StreamRequestContext` at
+/// `new_state`; `emit_message_start` falls back to it when `msg_model`
+/// (from chunk caching) is also absent. The test builds the state through
+/// the real `new_state` seam with the model set to verify the fallback.
 #[test]
 fn message_start_uses_req_model_when_chunk_carries_no_model() {
     use routectl_core::{ChunkChoice, ChunkDelta};
-    // Arrange: state initialized with req_model, first chunk has no model.
-    let mut s = new_state_with_req_model(Some("claude-opus-4-7".to_string()));
+    // Arrange: state seeded with the request model, first chunk has no model.
+    let mut s = new_state(&StreamRequestContext {
+        model: "claude-opus-4-7".to_string(),
+        input_tokens_estimate: 0,
+    });
     let chunk = ChatChunk {
         id: "msg_01".into(),
         model: String::new(),
@@ -1230,7 +1230,60 @@ fn message_start_uses_req_model_when_chunk_carries_no_model() {
     );
 }
 
-/// The router rewrites `chunk.model` on every chunk to the client-visible
+/// The synthesized early `message_start` must carry the request's local
+/// input-token estimate on `usage.input_tokens` (Problem-C context-meter
+/// fix for the pre-inversion fast path), while `output_tokens` stays 0 --
+/// no output has streamed yet, and the terminal `message_delta` remains
+/// the authoritative source for both. Builds state via the real
+/// `new_state` seam with a known estimate, renders one chunk, and asserts
+/// the rendered frame.
+#[test]
+fn message_start_carries_input_token_estimate_with_zero_output() {
+    // Arrange: state seeded with a known estimate through the real seam.
+    let mut s = new_state(&StreamRequestContext {
+        model: "claude-opus-4-7".to_string(),
+        input_tokens_estimate: 137,
+    });
+
+    // Act: render the first chunk, which triggers message_start.
+    let events = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
+
+    // Assert: the message_start usage reflects the estimate; output is 0.
+    let start = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_start"))
+        .expect("message_start emitted");
+    let payload: Value = serde_json::from_str(&start.data).unwrap();
+    assert_eq!(
+        payload["message"]["usage"]["input_tokens"], 137,
+        "message_start.usage.input_tokens must carry the state estimate"
+    );
+    assert_eq!(
+        payload["message"]["usage"]["output_tokens"], 0,
+        "message_start.usage.output_tokens must stay 0 before any output streams"
+    );
+}
+
+/// Default state (no request context) keeps the pre-estimate behavior:
+/// a zero `input_tokens` on `message_start`. Guards the `Default` /
+/// library-consumer path that seeds no estimate.
+#[test]
+fn message_start_defaults_input_tokens_to_zero_without_estimate() {
+    // Arrange: fresh default state carries no estimate.
+    let mut s = fresh_state();
+
+    // Act
+    let events = render_chunk_internal(text_chunk("hi", None), &mut s).unwrap();
+
+    // Assert
+    let start = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_start"))
+        .expect("message_start emitted");
+    let payload: Value = serde_json::from_str(&start.data).unwrap();
+    assert_eq!(payload["message"]["usage"]["input_tokens"], 0);
+    assert_eq!(payload["message"]["usage"]["output_tokens"], 0);
+}
 /// label (requested alias by default, or a `reported_model` override).
 /// The Anthropic stream ingress caches the first chunk's model into
 /// `msg_model` and surfaces it on `message_start`, so the rendered SSE

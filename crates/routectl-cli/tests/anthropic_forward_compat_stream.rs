@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
-use routectl_cli::ingress::{IngressAdapter, SseEvent};
+use routectl_cli::ingress::{IngressAdapter, SseEvent, StreamRequestContext};
 use routectl_core::{ChatRequest, Message, MessageContent, Provider, Role};
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
@@ -104,7 +104,7 @@ async fn drive_pipeline(server_uri: &str, model: &str) -> Vec<SseEvent> {
         .await
         .expect("egress stream open");
     let ingress = AnthropicIngress;
-    let mut state = ingress.new_stream_state();
+    let mut state = ingress.new_stream_state(&StreamRequestContext::default());
     let mut out: Vec<SseEvent> = Vec::new();
     while let Some(item) = upstream.next().await {
         let chunk = item.expect("upstream chunk decoded without error");
@@ -473,7 +473,7 @@ async fn no_opaque_blocks_regression_unchanged() {
         .await
         .expect("egress stream open");
     let ingress = AnthropicIngress;
-    let mut state = ingress.new_stream_state();
+    let mut state = ingress.new_stream_state(&StreamRequestContext::default());
     let mut sse: Vec<SseEvent> = Vec::new();
 
     // Act -- drain canonical chunks; pin opaque_events.is_empty() on

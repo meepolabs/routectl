@@ -22,7 +22,10 @@ use serde_json::{Map, Value, json};
 
 use routectl_core::{CacheCreation, ChatChunk, ChatRequest, ChatResponse, Result};
 
-use super::{ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass};
+use super::{
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
+    StreamRequestContext,
+};
 
 /// The format tag the canonical layer uses for Anthropic-shape
 /// reasoning details (from the Anthropic-API egress on the upstream
@@ -99,13 +102,18 @@ pub struct AnthropicStreamState {
     opaque_index_map: BTreeMap<u32, usize>,
     /// Resolved model from the originating request. Used as fallback
     /// in `message_start` when upstream chunks carry no model string.
-    /// Populated when the state is constructed via
-    /// `stream::new_state_with_req_model`; defaults to None on the
-    /// `Default` path (the `new_stream_state` trait method cannot yet
-    /// receive the canonical model -- the full plumbing would require
-    /// the `IngressAdapter::new_stream_state` signature to accept a
-    /// `&ChatRequest`).
+    /// Populated from the `StreamRequestContext` when the state is built
+    /// via `IngressAdapter::new_stream_state`; `None` on the `Default`
+    /// path (tests, library consumers with no request context).
     pub(super) req_model: Option<String>,
+    /// Local input-token estimate for the originating request (see
+    /// `ingress::token_estimate`). Emitted as `usage.input_tokens` on the
+    /// synthesized `message_start` so the pre-inversion fast path reports
+    /// a live context meter instead of zero. The terminal
+    /// `message_delta` carries the authoritative upstream count and
+    /// overwrites this within seconds. Defaults to 0 on the `Default`
+    /// path.
+    pub(super) input_tokens_estimate: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -157,7 +165,8 @@ use parse::translate_request;
 use render::render_messages_response;
 use stream::{
     anthropic_state_mut, close_open_block, emit_message_delta, emit_message_start,
-    emit_message_stop, flush_tool_blocks, render_chunk_internal, render_error_eos_internal,
+    emit_message_stop, flush_tool_blocks, new_state, render_chunk_internal,
+    render_error_eos_internal,
 };
 
 /// Reverse of `routectl_providers::anthropic_api::response::map_stop_reason`.
@@ -269,8 +278,8 @@ impl IngressAdapter for AnthropicIngress {
         Ok(render_messages_response(resp))
     }
 
-    fn new_stream_state(&self) -> Box<dyn IngressStreamState> {
-        Box::new(AnthropicStreamState::default())
+    fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
+        Box::new(new_state(ctx))
     }
 
     fn render_chunk(

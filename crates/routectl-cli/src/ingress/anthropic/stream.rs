@@ -2,7 +2,7 @@ use serde_json::{Map, Value, json};
 
 use routectl_core::{ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, Result};
 
-use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass};
+use crate::ingress::{IngressStreamState, SseEvent, StreamErrorClass, StreamRequestContext};
 
 use super::{
     AnthropicStreamState, OpenBlockKind, ToolBlockState, cache_fields_into,
@@ -308,7 +308,7 @@ pub(super) fn emit_message_start(state: &AnthropicStreamState, events: &mut Vec<
                 .unwrap_or_default(),
             "stop_reason": Value::Null,
             "stop_sequence": Value::Null,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "usage": {"input_tokens": state.input_tokens_estimate, "output_tokens": 0},
         }
     });
     events.push(SseEvent::named(
@@ -706,18 +706,18 @@ pub(super) fn render_error_eos_internal(
 // IngressAdapter impl
 // ---------------------------------------------------------------------------
 
-/// Construct an `AnthropicStreamState` pre-populated with the resolved
-/// request model. When `req.model` is available at the call site (e.g.
-/// a future variant of `new_stream_state` that accepts a `&ChatRequest`),
-/// use this constructor so `message_start` can emit the correct model id
+/// Construct an `AnthropicStreamState` seeded from the request context:
+/// the resolved model (so `message_start` can emit the correct model id
 /// even when the upstream stream's first chunk carries an empty model
-/// field. The current `IngressAdapter::new_stream_state` has no `req`
-/// parameter; this constructor is wired up for that future path and for
-/// tests that verify the fallback behavior.
-#[cfg(test)]
-pub(super) fn new_state_with_req_model(req_model: Option<String>) -> AnthropicStreamState {
+/// field) and the local input-token estimate (so the synthesized
+/// `message_start` reports a non-zero `usage.input_tokens`). An empty
+/// model string is stored as `None` so the `message_start` fallback
+/// chain falls through to the synthesized-default branch. Everything
+/// else defaults.
+pub(super) fn new_state(ctx: &StreamRequestContext) -> AnthropicStreamState {
     AnthropicStreamState {
-        req_model,
+        req_model: (!ctx.model.is_empty()).then(|| ctx.model.clone()),
+        input_tokens_estimate: ctx.input_tokens_estimate,
         ..Default::default()
     }
 }

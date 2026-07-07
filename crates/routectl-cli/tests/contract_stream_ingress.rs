@@ -27,7 +27,7 @@
 //! `render_eos_emits_done_sentinel` in `openai.rs` for that coverage.
 
 use routectl_cli::ingress::anthropic::AnthropicIngress;
-use routectl_cli::ingress::{IngressAdapter, SseEvent};
+use routectl_cli::ingress::{IngressAdapter, SseEvent, StreamRequestContext};
 use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, UsageDelta};
 use serde_json::Value;
 
@@ -105,7 +105,7 @@ fn usage_only_chunk(prompt: u32, completion: u32) -> ChatChunk {
 /// `render_eos` events. Returns the flat SSE event list in wire order.
 fn render_all(chunks: Vec<ChatChunk>) -> Vec<SseEvent> {
     let ingress = AnthropicIngress;
-    let mut state = ingress.new_stream_state();
+    let mut state = ingress.new_stream_state(&StreamRequestContext::default());
     let mut events: Vec<SseEvent> = Vec::new();
     for c in chunks {
         events.extend(

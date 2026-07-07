@@ -23,6 +23,7 @@ use serde_json::Value;
 pub mod anthropic;
 pub mod openai;
 pub mod openai_responses;
+pub mod token_estimate;
 
 /// Header used by harnesses that can override the canonical `model`
 /// field directly to pin routing to a specific configured alias.
@@ -355,6 +356,28 @@ pub enum ErrorEnvelopeShape {
     Anthropic,
 }
 
+/// Request-derived context handed to `IngressAdapter::new_stream_state`
+/// so a dialect's initial stream state can carry request-scoped values
+/// the upstream chunk stream does not surface early enough. The handler
+/// builds this from the `ChatRequest` before dispatch moves the request
+/// into the router.
+///
+/// Today it carries:
+/// - `input_tokens_estimate`: a local heuristic count (see
+///   `token_estimate`) so the synthesized early `message_start` frame
+///   can report a non-zero `usage.input_tokens` on the pre-inversion
+///   fast path instead of a stuck-at-zero context meter.
+/// - `model`: the resolved request model, used as the early-frame model
+///   id when the upstream stream's first chunk carries no model string.
+///
+/// The Anthropic adapter reads both; the OpenAI and Responses adapters
+/// ignore the context entirely (their state carries neither field).
+#[derive(Debug, Clone, Default)]
+pub struct StreamRequestContext {
+    pub input_tokens_estimate: u64,
+    pub model: String,
+}
+
 /// Translation surface for one ingress dialect. See module docs.
 pub trait IngressAdapter: Send + Sync {
     fn id(&self) -> &str;
@@ -375,8 +398,11 @@ pub trait IngressAdapter: Send + Sync {
     /// Render a canonical `ChatResponse` into wire JSON for the client.
     fn render_response(&self, resp: ChatResponse) -> Result<Value>;
 
-    /// Initial state for a new streaming response.
-    fn new_stream_state(&self) -> Box<dyn IngressStreamState>;
+    /// Initial state for a new streaming response. `ctx` carries
+    /// request-scoped values (local input-token estimate, resolved
+    /// model) the dialect state may need before the upstream stream
+    /// surfaces them; adapters that need neither ignore it.
+    fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState>;
 
     /// Render one canonical chunk into zero or more SSE events. Adapters
     /// own per-stream state via `state` (block-index counter for

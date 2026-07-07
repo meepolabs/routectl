@@ -1080,7 +1080,7 @@ fn render_chunk_emits_response_created_on_first_chunk() {
     // lifecycle coverage lives in stream_tests.rs.
     // Arrange
     let chunk = ChatChunk::default();
-    let mut state = ResponsesIngress.new_stream_state();
+    let mut state = ResponsesIngress.new_stream_state(&StreamRequestContext::default());
 
     // Act
     let events = ResponsesIngress

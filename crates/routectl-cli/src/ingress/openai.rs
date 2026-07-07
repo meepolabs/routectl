@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 
 use super::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamErrorClass,
-    read_alias_header,
+    StreamRequestContext, read_alias_header,
 };
 
 const DONE_SENTINEL: &str = "[DONE]";
@@ -178,7 +178,7 @@ impl IngressAdapter for OpenAiIngress {
         Ok(value)
     }
 
-    fn new_stream_state(&self) -> Box<dyn IngressStreamState> {
+    fn new_stream_state(&self, _ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
         Box::new(OpenAiStreamState)
     }
 
@@ -625,7 +625,7 @@ mod tests {
             opaque_events: Vec::new(),
             upstream_meta: None,
         };
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
         let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
         assert_eq!(events.len(), 1);
         assert!(events[0].event.is_none());
@@ -659,7 +659,7 @@ mod tests {
             opaque_events: Vec::new(),
             upstream_meta: None,
         };
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
 
         // Act
         let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn render_eos_emits_done_sentinel() {
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
         let events = OpenAiIngress.render_eos(state.as_mut());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "[DONE]");
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn render_error_eos_returns_openai_error_chunk_then_done() {
         // Arrange
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
         let error_msg = "upstream stream error (HTTP 529)";
         let class =
             StreamErrorClass::from_error(&routectl_core::Error::Streaming("render failure".into()));
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn render_error_eos_openai_emits_overloaded_for_529() {
         // Arrange
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
         let err = routectl_core::Error::upstream("p", 529, "overloaded");
         let class = StreamErrorClass::from_error(&err);
 
@@ -742,7 +742,7 @@ mod tests {
     #[test]
     fn render_error_eos_openai_prefers_upstream_type_and_code() {
         // Arrange
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
         let err = routectl_core::Error::upstream_full(
             "p",
             429,
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn render_error_eos_filters_control_chars_via_sanitize_for_log() {
         // Arrange: a message containing CR, LF, and an ANSI escape.
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
         let dirty = "upstream stream error\r\n\x1b[31mexploit\x1b[0m";
         let class =
             StreamErrorClass::from_error(&routectl_core::Error::Streaming("render failure".into()));
@@ -1230,7 +1230,7 @@ mod tests {
             opaque_events: Vec::new(),
             upstream_meta: None,
         };
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
 
         // Act
         let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
@@ -1574,7 +1574,7 @@ mod tests {
             opaque_events: Vec::new(),
             upstream_meta: None,
         };
-        let mut state = OpenAiIngress.new_stream_state();
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
         let events = OpenAiIngress.render_chunk(chunk, state.as_mut()).unwrap();
         assert_eq!(events.len(), 1);
         assert!(
