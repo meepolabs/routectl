@@ -6,7 +6,10 @@
 //! handlers delegate here. The only difference between the two is the
 //! adapter passed in.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
@@ -14,13 +17,15 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use routectl_core::Error;
-use routectl_router::RouterOptions;
+use routectl_router::{DispatchedStream, RouterOptions};
 use routectl_usage::{Outcome, UsageHandle, UsageRecord};
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
-use crate::handlers::usage_capture::{UsageCapture, build_usage_draft, outcome_for_dispatch_err};
+use crate::handlers::usage_capture::{
+    StreamStage, UsageCapture, build_usage_draft, outcome_for_dispatch_err,
+};
 use crate::ingress::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamRequestContext,
     token_estimate::estimate_input_tokens,
@@ -34,6 +39,24 @@ const DISABLE_FALLBACKS_HEADER: &str = "x-routectl-disable-fallbacks";
 /// Captured best-effort for the usage row's `session_id`; absent or
 /// non-UTF-8 values yield `None`.
 const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
+
+/// Grace window the streaming handler holds a dispatch un-flushed before it
+/// commits the SSE `Response` and goes warm-hold. This is a flush-timing
+/// backstop, NOT a failover threshold: on expiry the handler flushes the
+/// synthetic early frame as the first body byte and KEEPS waiting on the
+/// SAME dispatch (flush-and-continue), it never aborts or fails the request
+/// over. Sized well above typical fast-error latency (sub-second, so a fast
+/// chain-exhaustion still resolves inside grace and keeps its real HTTP
+/// status + the SDK's pre-stream 529 retry) and far below the client-side
+/// ~300s headers wall. Note p50 first-token is several seconds, so most
+/// HEALTHY streams hit grace and go warm-hold -- the intended common path.
+const STREAM_EARLY_FLUSH_GRACE: Duration = Duration::from_millis(2500);
+
+/// The dispatch future held un-awaited across the early-flush grace window.
+/// Boxed as a `'static` trait object (rather than borrowing the router) so
+/// the grace-expiry branch can MOVE the still-pending future into the
+/// spawned warm render task.
+type DispatchFut = Pin<Box<dyn Future<Output = DispatchedStream> + Send>>;
 
 pub async fn ingress_handle<A: IngressAdapter + 'static>(
     state: Arc<AppState>,
@@ -229,8 +252,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
     usage: UsageHandle,
     draft: UsageRecord,
 ) -> Response {
-    let envelope = adapter.error_envelope_shape();
-    let mut capture = UsageCapture::new(draft, usage, adapter.id().to_string());
+    let capture = UsageCapture::new(draft, usage, adapter.id().to_string());
     // Extract the canonical live session key BEFORE dispatch moves `req`
     // into the router; it rides into the render task for POST-response
     // K-sample recording at natural end-of-stream.
@@ -243,94 +265,155 @@ async fn stream_response<A: IngressAdapter + 'static>(
         input_tokens_estimate: estimate_input_tokens(&req),
         model: req.model.clone(),
     };
-    let dispatched = router.stream_with_options(req, opts).await;
-    capture.observe_meta(&dispatched.meta);
+    // Hold the dispatch UN-AWAITED. `stream_with_options` borrows `&self`
+    // for the returned future's life, so an `Arc` clone is MOVED into the
+    // async block to make the future `'static` -- required because the
+    // grace-expiry branch moves it into the spawned warm render task. The
+    // original `router` Arc stays available for the render task's K-sample
+    // recording.
+    let router_for_dispatch = Arc::clone(&router);
+    let fut: DispatchFut =
+        Box::pin(async move { router_for_dispatch.stream_with_options(req, opts).await });
+    stream_dispatch_gated(fut, adapter, capture, router, session_key, stream_ctx).await
+}
 
-    let upstream = match dispatched.result {
-        Ok(s) => s,
-        Err(e) => {
-            // Stream never started: classify off the meta + error and
-            // emit the row here (no chunk task to carry the guard).
-            capture.observe_error(&e);
-            capture.finalize(outcome_for_dispatch_err(&dispatched.meta));
-            return map_error(envelope, e);
-        }
+/// Grace-gated commit (option (b')): hold the dispatch future for a bounded
+/// grace window (`STREAM_EARLY_FLUSH_GRACE`) via `tokio::select!`, then
+/// branch WITHOUT ever awaiting the dispatch to completion up front.
+///
+/// FAST (dispatch resolves within grace) -- today's behavior verbatim:
+/// - `Ok(stream)` spawns the render task on the resolved stream (the
+///   synthetic `message_start` still emits on the first content chunk,
+///   carrying the estimate; no early frame).
+/// - `Err(e)` returns a REAL HTTP error status via `map_error` -- NOT an
+///   in-stream frame -- so the SDK's pre-stream 529/5xx retry still fires.
+///
+/// GRACE-EXPIRY (dispatch still pending) -- commit the SSE `Response` now
+/// and hand the still-pending future to a WARM render task, which flushes
+/// the dialect early frame as the first body byte BEFORE awaiting the
+/// dispatch (`warm_render_task`). Grace never aborts or fails over; it only
+/// decides WHEN to flush.
+async fn stream_dispatch_gated<A: IngressAdapter + 'static>(
+    mut fut: DispatchFut,
+    adapter: A,
+    mut capture: UsageCapture,
+    router: Arc<routectl_router::Router>,
+    session_key: Option<String>,
+    stream_ctx: StreamRequestContext,
+) -> Response {
+    let envelope = adapter.error_envelope_shape();
+    let egress_id = adapter.id().to_string();
+
+    // Inner channel carries our `SseEvent` type so the rendering loop is
+    // straightforward to unit-test (drain a `mpsc::Receiver<SseEvent>` and
+    // assert on event names + payload bytes). Conversion to
+    // `axum::response::sse::Event` happens only on the production path in
+    // `build_sse_response`.
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    // Capture the current tracing span (carrying request_id from the
+    // request_id middleware + ingress / router / provider span hierarchy)
+    // and attach it to whichever render task is spawned, so any
+    // tracing::error! from the task keeps its request_id correlation.
+    let parent_span = tracing::Span::current();
+
+    // `biased` polls the dispatch future FIRST: a dispatch that is already
+    // ready takes the fast path deterministically; grace only matters when
+    // the dispatch is genuinely still pending.
+    let fast = tokio::select! {
+        biased;
+        dispatched = &mut fut => Some(dispatched),
+        () = tokio::time::sleep(STREAM_EARLY_FLUSH_GRACE) => None,
     };
 
-    // Inner channel carries our `SseEvent` type so the rendering loop
-    // is straightforward to unit-test (drain a `mpsc::Receiver<SseEvent>`
-    // and assert on event names + payload bytes). The conversion to
-    // `axum::response::sse::Event` is a one-liner `.map()` on the
-    // ReceiverStream and happens only on the production path below.
-    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    match fast {
+        Some(dispatched) => {
+            capture.observe_meta(&dispatched.meta);
+            match dispatched.result {
+                Ok(upstream) => {
+                    // `adapter` + `capture` move INTO the render task, which
+                    // finalizes on every stream exit (see `drive_stream`).
+                    tokio::spawn(
+                        render_stream_task(
+                            upstream,
+                            adapter,
+                            capture,
+                            tx,
+                            router,
+                            session_key,
+                            stream_ctx,
+                        )
+                        .instrument(parent_span),
+                    );
+                    build_sse_response(rx, &egress_id)
+                }
+                Err(e) => {
+                    // Stream never started AND grace has not elapsed: classify
+                    // off the meta + error and return a REAL HTTP error status
+                    // (preserves the SDK 529 retry). No SSE response is
+                    // committed -- this is NOT an in-stream frame.
+                    capture.observe_error(&e);
+                    capture.finalize(outcome_for_dispatch_err(&dispatched.meta));
+                    map_error(envelope, e)
+                }
+            }
+        }
+        None => {
+            // Grace expired with the dispatch still pending. Commit the SSE
+            // response now; the warm task owns the still-pending future and
+            // flushes the early frame before awaiting it.
+            tokio::spawn(
+                warm_render_task(fut, adapter, capture, tx, router, session_key, stream_ctx)
+                    .instrument(parent_span),
+            );
+            build_sse_response(rx, &egress_id)
+        }
+    }
+}
 
-    // Capture the current tracing span (which carries request_id from
-    // the request_id middleware + ingress / router / provider span
-    // hierarchy) and attach it to the spawned task. Without this,
-    // `tokio::spawn` creates a fresh task with no parent span, so any
-    // tracing::error! emitted from chunk-render / upstream-stream
-    // failures lands without correlation context. Operators grepping
-    // `request_id=<id>` would lose the streaming-error trail.
-    let parent_span = tracing::Span::current();
-    let egress_id = adapter.id().to_string();
-    // The capture guard moves INTO the render task so it finalizes on
-    // every stream exit (natural EOS, mid-stream error, client
-    // disconnect, task cancellation -- the last two via the Drop
-    // fallback). `adapter` moves in too, so neither is reachable after
-    // the spawn; the dir-4 egress-headers trace uses the pre-spawn
-    // `egress_id` clone.
-    tokio::spawn(
-        render_stream_task(
-            upstream,
-            adapter,
-            capture,
-            tx,
-            router,
-            session_key,
-            stream_ctx,
-        )
-        .instrument(parent_span),
-    );
-
+/// Wrap the render task's `SseEvent` channel into the axum SSE `Response`.
+/// The conversion to `axum::response::sse::Event` is a one-liner `.map()`
+/// on the `ReceiverStream`; `KeepAlive` emits the comment heartbeat that
+/// keeps a warm-hold connection alive while the upstream prefill runs.
+fn build_sse_response(rx: tokio::sync::mpsc::Receiver<SseEvent>, egress_id: &str) -> Response {
     let receiver_stream =
         ReceiverStream::new(rx).map(|ev| Ok::<Event, std::convert::Infallible>(sse_to_axum(ev)));
     let resp = Sse::new(receiver_stream)
         .keep_alive(axum::response::sse::KeepAlive::default())
         .into_response();
     // Dir 4 (streaming egress): capture the SSE response headers
-    // (content-type: text/event-stream, keep-alive, ...) before
-    // returning. Uses the pre-spawn `egress_id` clone.
-    trace_egress_headers_of(&egress_id, &resp);
+    // (content-type: text/event-stream, keep-alive, ...) before returning.
+    trace_egress_headers_of(egress_id, &resp);
     resp
 }
 
-/// Drive the upstream chunk stream through the ingress adapter,
-/// emitting one `SseEvent` per produced wire event. Exit paths:
+/// Warm-hold render task (grace expired with the dispatch still pending).
 ///
-/// 1. Upstream finishes naturally -> emit `render_eos` events,
-///    mark the egress summary `clean_close=true` so the Drop summary
-///    reports the observed `finish_reason`.
-/// 2. Upstream errors mid-stream -> emit `render_error_eos` events
-///    (the dialect-specific terminal ERROR event), then return.
-///    The summary Drop synthesizes `finish_reason="truncated"`
-///    via the inverse-flag pattern -- the upstream stream WAS
-///    truncated even though we now signal it cleanly to the
-///    client.
-/// 3. Render failure (canonical chunk that the adapter cannot turn
-///    into wire events) -> log + return. No EOS emission; the client
-///    sees an unclean disconnect because we don't have a
-///    well-formed wire event to send.
-/// 4. Client disconnects (channel send returns Err) -> return.
-///    Drop emits truncated.
+/// For a dialect that OVERRIDES `early_frame` (Anthropic: emits
+/// `message_start`), emit-then-dispatch is a hard invariant -- that frame
+/// MUST flush as the FIRST body byte BEFORE awaiting the dispatch: the spike
+/// proved a first body-stream poll that blocks on the dispatch never flushes
+/// the response head, so the client headers wall is not defeated. A dialect
+/// that keeps the default no-op `early_frame` (OpenAI) flushes nothing here;
+/// it instead relies on axum's `KeepAlive` comment frame as its flush
+/// trigger once the SSE response is polled.
 ///
-/// Extracted from the spawn closure body so the streaming-error path
-/// is unit-testable without spinning up the axum layer: a test can
-/// build a synthesized `BoxStream<Result<ChatChunk>>` (e.g. one Ok
-/// chunk followed by one Err) and drain the resulting
-/// `mpsc::Receiver<SseEvent>` to assert on the wire shape of the
-/// terminal error event.
-async fn render_stream_task<A: IngressAdapter>(
-    upstream: futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+/// After the (possibly empty) flush it awaits the SAME still-pending dispatch
+/// future:
+/// - `Ok(stream)`: drive it through the shared `drive_stream` loop. The
+///   early Anthropic `message_start` already set `state.started`, so the
+///   first content chunk dedups it (no duplicate `message_start`).
+/// - `Err(e)`: the SSE head is already committed, so the HTTP status is
+///   gone -- surface exactly ONE terminal in-stream error via
+///   `render_error_eos`, tagged with the pre-content stage marker so the
+///   ledger does not collapse it with a mid-stream cut.
+///
+/// `observe_meta` + the dispatch-error finalize live HERE (not in the
+/// handler) because the future resolves inside this task. The Drop
+/// `client_disconnect` fallback is reserved for a genuine hangup -- the only
+/// un-finalized exit is a `tx.send` failure before the dispatch resolved
+/// (the client vanished before we could flush the head).
+async fn warm_render_task<A: IngressAdapter>(
+    fut: DispatchFut,
     adapter: A,
     mut capture: UsageCapture,
     tx: tokio::sync::mpsc::Sender<SseEvent>,
@@ -338,8 +421,99 @@ async fn render_stream_task<A: IngressAdapter>(
     session_key: Option<String>,
     stream_ctx: StreamRequestContext,
 ) {
-    let mut upstream = upstream;
     let mut state: Box<dyn IngressStreamState> = adapter.new_stream_state(&stream_ctx);
+    // Emit-then-dispatch invariant: flush the early frame FIRST, before the
+    // dispatch await, so the response head actually flushes.
+    for ev in adapter.early_frame(state.as_mut()) {
+        if tx.send(ev).await.is_err() {
+            // Client vanished before the head flushed -- a genuine
+            // disconnect. Leave the guard un-finalized so Drop stamps
+            // `client_disconnect`.
+            return;
+        }
+    }
+    // Now await the SAME dispatch that outran the grace window.
+    let dispatched = fut.await;
+    capture.observe_meta(&dispatched.meta);
+    match dispatched.result {
+        Ok(upstream) => {
+            drive_stream(upstream, adapter, capture, tx, router, session_key, state).await;
+        }
+        Err(e) => {
+            // Pre-content dispatch failure AFTER the SSE head committed: the
+            // HTTP status is gone, so surface exactly ONE terminal in-stream
+            // error. Finalize the row as `UpstreamError` with the pre-content
+            // stage marker so the ledger keeps it distinct from a mid-stream
+            // cut; reserve the Drop `client_disconnect` for real cancellation.
+            capture.observe_error(&e);
+            capture.mark_stream_stage(StreamStage::PreContentDispatch);
+            capture.finalize(Outcome::UpstreamError);
+            let safe_msg = sanitize_stream_error_for_client(&e);
+            let class = crate::ingress::StreamErrorClass::from_error(&e);
+            for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
+                if tx.send(ev).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Fast-path render task: build the initial stream state and drive the
+/// resolved upstream through the shared `drive_stream` loop. Used when the
+/// dispatch resolved WITHIN the early-flush grace window (no early frame --
+/// the synthetic `message_start` emits on the first content chunk as
+/// before). The warm-hold path (`warm_render_task`) shares `drive_stream`
+/// but pre-flushes the early frame and owns the still-pending future.
+async fn render_stream_task<A: IngressAdapter>(
+    upstream: futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+    adapter: A,
+    capture: UsageCapture,
+    tx: tokio::sync::mpsc::Sender<SseEvent>,
+    router: Arc<routectl_router::Router>,
+    session_key: Option<String>,
+    stream_ctx: StreamRequestContext,
+) {
+    let state: Box<dyn IngressStreamState> = adapter.new_stream_state(&stream_ctx);
+    drive_stream(upstream, adapter, capture, tx, router, session_key, state).await;
+}
+
+/// Drive the upstream chunk stream through the ingress adapter, emitting
+/// one `SseEvent` per produced wire event. `state` is pre-built by the
+/// caller so the warm-hold path can seed it with an already-emitted early
+/// frame (dedup) before handing it here. Exit paths:
+///
+/// 1. Upstream finishes naturally -> emit `render_eos` events,
+///    mark the egress summary `clean_close=true` so the Drop summary
+///    reports the observed `finish_reason`.
+/// 2. Upstream errors mid-stream -> emit `render_error_eos` events
+///    (the dialect-specific terminal ERROR event), tag the row with the
+///    `MidStream` stage marker, then return. The summary Drop synthesizes
+///    `finish_reason="truncated"` via the inverse-flag pattern -- the
+///    upstream stream WAS truncated even though we now signal it cleanly
+///    to the client.
+/// 3. Render failure (canonical chunk that the adapter cannot turn
+///    into wire events) -> log + emit the terminal error event + return.
+/// 4. Client disconnects (channel send returns Err) -> return.
+///    Drop emits truncated.
+///
+/// Extracted so the streaming-error path is unit-testable without spinning
+/// up the axum layer: a test can build a synthesized
+/// `BoxStream<Result<ChatChunk>>` (e.g. one Ok chunk followed by one Err)
+/// and drain the resulting `mpsc::Receiver<SseEvent>` to assert on the wire
+/// shape of the terminal error event.
+async fn drive_stream<A: IngressAdapter>(
+    mut upstream: futures::stream::BoxStream<
+        'static,
+        routectl_core::Result<routectl_core::ChatChunk>,
+    >,
+    adapter: A,
+    mut capture: UsageCapture,
+    tx: tokio::sync::mpsc::Sender<SseEvent>,
+    router: Arc<routectl_router::Router>,
+    session_key: Option<String>,
+    mut state: Box<dyn IngressStreamState>,
+) {
     // The capture guard is the RAII summary + usage row for this
     // stream. It fires on EVERY exit path (clean close, render error,
     // upstream mid-stream error, client disconnect, runtime task
@@ -420,6 +594,7 @@ async fn render_stream_task<A: IngressAdapter>(
                     "upstream stream error -- emitting terminal error event"
                 );
                 capture.observe_error(&e);
+                capture.mark_stream_stage(StreamStage::MidStream);
                 capture.finalize(Outcome::UpstreamError);
                 for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                     if tx.send(ev).await.is_err() {

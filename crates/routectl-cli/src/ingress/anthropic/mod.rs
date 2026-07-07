@@ -282,6 +282,20 @@ impl IngressAdapter for AnthropicIngress {
         Box::new(new_state(ctx))
     }
 
+    fn early_frame(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
+        // Warm-hold first body byte: flush the synthesized message_start
+        // (carrying the local input-token estimate seeded on the state) and
+        // mark the state started so the real first-content chunk dedups it
+        // via the `!state.started` guard in `render_chunk_internal`.
+        let s = anthropic_state_mut(state);
+        let mut events = Vec::new();
+        if !s.started {
+            emit_message_start(s, &mut events);
+            s.started = true;
+        }
+        events
+    }
+
     fn render_chunk(
         &self,
         chunk: ChatChunk,

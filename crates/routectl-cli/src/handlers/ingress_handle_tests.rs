@@ -95,6 +95,11 @@ struct PersistedRow {
     fallback_count: i64,
     provider: Option<String>,
     alias: String,
+    /// `extra.stream_stage`, parsed from the JSON `extra` column. `None`
+    /// when no stage marker was stamped (fast HTTP-status failures, clean
+    /// completions). Distinguishes a warm-hold pre-content dispatch failure
+    /// (`pre_content_dispatch`) from a mid-stream cut (`mid_stream`).
+    stream_stage: Option<String>,
 }
 
 fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
@@ -102,12 +107,21 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
         .conn()
         .prepare(
             "SELECT request_id, outcome, ttfb_ms, input_tokens, output_tokens, \
-             attempt_count, fallback_count, provider, alias FROM requests \
+             attempt_count, fallback_count, provider, alias, extra FROM requests \
              ORDER BY rowid",
         )
         .expect("prepare select");
 
     stmt.query_map([], |r| {
+        let extra: Option<String> = r.get(9)?;
+        let stream_stage = extra
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| {
+                v.get("stream_stage")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
         Ok(PersistedRow {
             request_id: r.get(0)?,
             outcome: r.get(1)?,
@@ -118,6 +132,7 @@ fn read_rows(db: &routectl_usage::UsageDb) -> Vec<PersistedRow> {
             fallback_count: r.get(6)?,
             provider: r.get(7)?,
             alias: r.get(8)?,
+            stream_stage,
         })
     })
     .expect("query rows")
@@ -1323,6 +1338,11 @@ async fn capture_stream_mid_stream_error_emits_upstream_error_row() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].outcome, "upstream_error");
     assert_eq!(rows[0].request_id, "req-stream-mid-err");
+    assert_eq!(
+        rows[0].stream_stage.as_deref(),
+        Some("mid_stream"),
+        "a genuine mid-stream cut must not collapse into the pre_content_dispatch stage"
+    );
 }
 
 /// `outcome_for_dispatch_err` over a real router-built `DispatchMeta`:
@@ -1721,4 +1741,514 @@ async fn bootstrap_rejects_degenerate_cache_pricing_override() {
     };
     assert!(msg.contains("openai-compat:grok-*"), "msg: {msg}");
     assert!(msg.contains("rm must be > 0.0"), "msg: {msg}");
+}
+
+// ============ stream_response inversion: grace-gated commit (b') =======
+//
+// The four branches of the inverted `stream_response`
+// (`stream_dispatch_gated` + `warm_render_task`):
+//   1. FAST-Ok         -- dispatch resolves within grace -> render normally
+//   2. FAST-Err-HTTP   -- dispatch resolves Err within grace -> real HTTP status
+//   3. GRACE-warm-byte -- grace expired -> early frame is the FIRST body byte
+//   4. GRACE-Err       -- grace expired then dispatch Err -> one in-stream error
+// plus a grace-expiry SELECTION test proving a pending dispatch commits the
+// SSE response instead of blocking.
+//
+// The FAST tests drive the real grace-gate seam (`stream_dispatch_gated`)
+// with an immediately-ready dispatch so the biased `select!` takes the fast
+// branch deterministically. The WARM render behavior (early-frame-first,
+// dedup, stage marker, single row) is asserted against `warm_render_task`
+// directly by draining the `mpsc::Receiver<SseEvent>` -- no axum/KeepAlive
+// layer to add spurious comment frames.
+
+/// A `DispatchFut` that resolves IMMEDIATELY with the given result, carrying
+/// a real (cloned) `DispatchMeta`. Immediate readiness makes the biased
+/// `select!` in `stream_dispatch_gated` take the FAST branch.
+fn ready_dispatch(
+    meta: routectl_router::DispatchMeta,
+    result: routectl_core::Result<
+        futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
+    >,
+) -> DispatchFut {
+    Box::pin(async move { routectl_router::DispatchedStream { meta, result } })
+}
+
+/// A `DispatchFut` that never resolves -- forces the grace timer to elapse.
+fn pending_dispatch() -> DispatchFut {
+    Box::pin(std::future::pending())
+}
+
+/// Collect the body of an SSE `Response` and parse it into `SseEvent`s.
+/// Keep-alive comment frames (no `data:` line) are skipped so the parsed
+/// list is exactly the render task's real event sequence.
+async fn drain_sse_body(resp: Response) -> Vec<SseEvent> {
+    let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let mut out = Vec::new();
+    for block in text.split("\n\n") {
+        let mut event: Option<String> = None;
+        let mut data: Option<String> = None;
+        for line in block.lines() {
+            if let Some(v) = line.strip_prefix("event:") {
+                event = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("data:") {
+                data = Some(v.trim().to_string());
+            }
+        }
+        if let Some(d) = data {
+            out.push(SseEvent { event, data: d });
+        }
+    }
+    out
+}
+
+/// Branch 1 (FAST-Ok): a dispatch resolving WITHIN the grace window with
+/// content renders exactly as before -- `message_start` on the first content
+/// chunk carrying the local input-token estimate, and NO early frame ahead
+/// of it (the fast path never flushes one).
+#[tokio::test]
+async fn stream_gate_fast_ok_renders_message_start_with_estimate_no_early_frame() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: dispatch ready immediately (inside grace) with one content
+    // chunk; stream_ctx carries a non-zero estimate.
+    let (router, meta) = k_recording_router_and_meta().await;
+    let stream: futures::stream::BoxStream<'static, routectl_core::Result<_>> = Box::pin(
+        futures::stream::iter(vec![Ok(streaming_text_chunk("hello"))]),
+    );
+    let fut = ready_dispatch(meta, Ok(stream));
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-fast-ok");
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 42,
+        model: "m".into(),
+    };
+
+    // Act
+    let resp =
+        stream_dispatch_gated(fut, AnthropicIngress, capture, router, None, stream_ctx).await;
+
+    // Assert: a 200 SSE response whose FIRST event is message_start.
+    assert_eq!(resp.status(), StatusCode::OK);
+    let events = drain_sse_body(resp).await;
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| e.event.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        names.first().copied(),
+        Some("message_start"),
+        "fast-Ok renders message_start first (no early frame ahead of it): {names:?}"
+    );
+    // Exactly one message_start: no early frame + no dedup miss.
+    assert_eq!(
+        names.iter().filter(|n| **n == "message_start").count(),
+        1,
+        "exactly one message_start on the fast path: {names:?}"
+    );
+    // The synthesized message_start carries the local estimate.
+    let ms = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("message_start"))
+        .expect("message_start present");
+    let payload: Value = serde_json::from_str(&ms.data).unwrap();
+    assert_eq!(
+        payload["message"]["usage"]["input_tokens"], 42,
+        "message_start carries the input-token estimate"
+    );
+}
+
+/// Branch 2 (FAST-Err-HTTP): a dispatch resolving `Err` WITHIN grace returns
+/// a REAL HTTP error status via `map_error` (preserving the SDK's pre-stream
+/// 529 retry), NOT a 200 SSE stream carrying an in-stream error frame.
+#[tokio::test]
+async fn stream_gate_fast_err_returns_http_status_not_in_stream_frame() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: dispatch ready immediately (inside grace) with a 529 chain
+    // exhaustion.
+    let (router, meta) = k_recording_router_and_meta().await;
+    let fut = ready_dispatch(meta, Err(Error::upstream("p", 529, "overloaded")));
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-fast-err");
+
+    // Act
+    let resp = stream_dispatch_gated(
+        fut,
+        AnthropicIngress,
+        capture,
+        router,
+        None,
+        StreamRequestContext::default(),
+    )
+    .await;
+
+    // Assert: a real HTTP 529 with the Anthropic error envelope -- NOT a 200
+    // SSE stream. This is what keeps the SDK's pre-stream retry alive.
+    assert_eq!(
+        resp.status().as_u16(),
+        529,
+        "fast dispatch Err must return a real HTTP status, not an in-stream frame"
+    );
+    let body = body_to_value(resp).await;
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "overloaded_error");
+
+    // Exactly one usage row, finalized upstream_error (attempt-charged),
+    // WITHOUT any stream stage marker (it never became an in-stream failure).
+    let rows = rig.flush_and_read().await;
+    assert_eq!(rows.len(), 1, "exactly one row on the fast-Err path");
+    assert_eq!(rows[0].outcome, "upstream_error");
+    assert_eq!(rows[0].request_id, "req-fast-err");
+    assert_eq!(
+        rows[0].stream_stage, None,
+        "an HTTP-status failure carries no stream stage marker"
+    );
+}
+
+/// Branch 3 (GRACE-warm-byte): on warm-hold the FIRST body byte is the
+/// synthesized Anthropic `message_start` (carrying the estimate), flushed
+/// BEFORE the dispatch is awaited; when the real content chunk later renders,
+/// there is NO duplicate `message_start` (the early frame set `state.started`).
+#[tokio::test]
+async fn warm_render_first_byte_is_message_start_with_estimate_no_duplicate() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: warm-hold path. Once the dispatch resolves Ok, one content
+    // chunk arrives.
+    let (router, meta) = k_recording_router_and_meta().await;
+    let stream: futures::stream::BoxStream<'static, routectl_core::Result<_>> = Box::pin(
+        futures::stream::iter(vec![Ok(streaming_text_chunk("hello"))]),
+    );
+    let fut = ready_dispatch(meta, Ok(stream));
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-warm-ok");
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 77,
+        model: "m".into(),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+
+    // Act: drive the warm render task; it flushes the early frame before
+    // awaiting the (here-immediate) dispatch, then renders content.
+    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    let events = drain(rx).await;
+
+    // Assert: the FIRST event is the early message_start with the estimate.
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| e.event.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        names.first().copied(),
+        Some("message_start"),
+        "warm path flushes message_start first, before the dispatch content: {names:?}"
+    );
+    let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+    assert_eq!(
+        payload["message"]["usage"]["input_tokens"], 77,
+        "early message_start carries the input-token estimate"
+    );
+    // No duplicate message_start when the content chunk renders (dedup).
+    assert_eq!(
+        names.iter().filter(|n| **n == "message_start").count(),
+        1,
+        "the first content chunk must NOT re-emit message_start: {names:?}"
+    );
+    // Content was rendered after the early frame.
+    assert!(
+        names.contains(&"content_block_delta"),
+        "content rendered after the early frame: {names:?}"
+    );
+}
+
+/// Branch 4 (GRACE-Err): warm-hold, then the dispatch resolves `Err`. The
+/// SSE head is already committed, so the failure surfaces as EXACTLY ONE
+/// terminal in-stream error via `render_error_eos`, and finalizes a single
+/// `upstream_error` row bearing the pre-content stage marker (distinct from a
+/// mid-stream cut). `observe_meta` ran inside the render task; the Drop
+/// `client_disconnect` fallback did NOT fire.
+#[tokio::test]
+async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: warm-hold, then a slow all-lanes-down 529.
+    let (router, meta) = k_recording_router_and_meta().await;
+    let fut = ready_dispatch(meta, Err(Error::upstream("p", 529, "overloaded")));
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-warm-err");
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 10,
+        model: "m".into(),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+
+    // Act
+    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    let events = drain(rx).await;
+
+    // Assert: the early frame, then exactly ONE terminal error event.
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| e.event.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["message_start", "error"],
+        "warm dispatch Err: early frame + exactly one terminal error: {names:?}"
+    );
+    let err_ev = events
+        .iter()
+        .find(|e| e.event.as_deref() == Some("error"))
+        .expect("terminal error event present");
+    let payload: Value = serde_json::from_str(&err_ev.data).unwrap();
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "overloaded_error");
+
+    // Exactly one usage row: upstream_error, pre-content stage marker,
+    // observe_meta fields stamped, NOT client_disconnect, ttfb None.
+    let rows = rig.flush_and_read().await;
+    assert_eq!(rows.len(), 1, "exactly one row on the warm-Err path");
+    let row = &rows[0];
+    assert_eq!(
+        row.outcome, "upstream_error",
+        "warm dispatch Err finalizes upstream_error, not the client_disconnect Drop fallback"
+    );
+    assert_eq!(row.request_id, "req-warm-err");
+    assert_eq!(
+        row.stream_stage.as_deref(),
+        Some("pre_content_dispatch"),
+        "the pre-content stage marker keeps it distinct from a mid-stream cut"
+    );
+    assert_eq!(
+        row.provider.as_deref(),
+        Some("p"),
+        "observe_meta ran INSIDE the render task (served_provider stamped)"
+    );
+    assert_eq!(
+        row.alias, "a",
+        "observe_meta stamped the resolved alias in the render task"
+    );
+    assert!(row.ttfb_ms.is_none(), "no content ever flowed -> ttfb None");
+}
+
+/// Grace-expiry SELECTION: a dispatch that never resolves must make the grace
+/// timer elapse and COMMIT the SSE `Response` (warm-hold), rather than block
+/// the handler. Uses paused time so the grace deadline auto-advances.
+#[tokio::test(start_paused = true)]
+async fn stream_gate_grace_expiry_commits_sse_response() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: a dispatch that never resolves; an empty router (no I/O).
+    let router = k_test_router();
+    let fut = pending_dispatch();
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-grace");
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 5,
+        model: "m".into(),
+    };
+
+    // Act: with paused time + a pending dispatch, the runtime auto-advances to
+    // the grace deadline; the grace arm fires and commits the SSE Response
+    // (flush-and-continue), it does NOT abort the request.
+    let resp =
+        stream_dispatch_gated(fut, AnthropicIngress, capture, router, None, stream_ctx).await;
+
+    // Assert: a committed 200 SSE stream.
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("text/event-stream"),
+        "grace expiry must commit an SSE stream, got content-type {content_type:?}"
+    );
+}
+
+/// Warm-hold, dispatch resolves `Ok`, then the content stream itself yields a
+/// mid-stream error (one chunk, then Err). This must land the `mid_stream`
+/// stage marker, NOT `pre_content_dispatch` -- the latter is reserved for a
+/// dispatch future that resolves `Err` before any content ever rendered.
+#[tokio::test]
+async fn warm_render_ok_then_mid_stream_error_marks_mid_stream_stage() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: warm-hold, dispatch resolves Ok with a stream that renders one
+    // chunk then dies mid-stream.
+    let (router, meta) = k_recording_router_and_meta().await;
+    let stream: futures::stream::BoxStream<'static, routectl_core::Result<_>> =
+        Box::pin(futures::stream::iter(vec![
+            Ok(streaming_text_chunk("partial")),
+            Err(Error::upstream("p", 503, "boom")),
+        ]));
+    let fut = ready_dispatch(meta, Ok(stream));
+    let rig = CaptureRig::new();
+    let capture = rig.capture("anthropic", &sample_request("m", true), "req-warm-mid-err");
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 10,
+        model: "m".into(),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+
+    // Act
+    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+    let events = drain(rx).await;
+
+    // Assert: the early frame, the rendered chunk, then EXACTLY ONE terminal
+    // in-stream error.
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| e.event.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        names.iter().filter(|n| **n == "error").count(),
+        1,
+        "exactly one terminal in-stream error: {names:?}"
+    );
+    assert_eq!(
+        names.last().copied(),
+        Some("error"),
+        "the terminal error is the last event: {names:?}"
+    );
+
+    // Exactly one usage row, finalized once, tagged mid_stream (NOT
+    // pre_content_dispatch -- content DID render before the cut).
+    let rows = rig.flush_and_read().await;
+    assert_eq!(rows.len(), 1, "finalized exactly once");
+    assert_eq!(rows[0].outcome, "upstream_error");
+    assert_eq!(rows[0].request_id, "req-warm-mid-err");
+    assert_eq!(
+        rows[0].stream_stage.as_deref(),
+        Some("mid_stream"),
+        "content rendered before the cut, so this is a mid-stream error, not pre-content"
+    );
+}
+
+/// Client disconnects before the warm-hold render task can flush its early
+/// frame (the receiver is already gone). Pins Q4's Drop reservation: the
+/// finalize path never runs (the early-frame send fails and the task returns
+/// immediately), so the `UsageCapture` guard's `Drop` fallback stamps
+/// `client_disconnect` -- NOT `upstream_error` -- and no stage marker is set.
+#[tokio::test]
+async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: a dispatch that would resolve fine, but the receiver is
+    // dropped before the render task gets a chance to send anything.
+    let (router, meta) = k_recording_router_and_meta().await;
+    let stream: futures::stream::BoxStream<'static, routectl_core::Result<_>> = Box::pin(
+        futures::stream::iter(vec![Ok(streaming_text_chunk("hello"))]),
+    );
+    let fut = ready_dispatch(meta, Ok(stream));
+    let rig = CaptureRig::new();
+    let capture = rig.capture(
+        "anthropic",
+        &sample_request("m", true),
+        "req-warm-disconnect",
+    );
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 10,
+        model: "m".into(),
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    drop(rx);
+
+    // Act: the early-frame send fails immediately (no receiver); the task
+    // returns without ever finalizing, leaving the Drop fallback to stamp
+    // the row.
+    warm_render_task(fut, AnthropicIngress, capture, tx, router, None, stream_ctx).await;
+
+    // Assert: exactly one row, client_disconnect, no stage marker -- a
+    // genuine cancellation, not an upstream failure.
+    let rows = rig.flush_and_read().await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the Drop fallback still emits exactly one row"
+    );
+    assert_eq!(
+        rows[0].outcome, "client_disconnect",
+        "a pre-flush disconnect must not be misreported as an upstream error"
+    );
+    assert_eq!(rows[0].request_id, "req-warm-disconnect");
+    assert_eq!(
+        rows[0].stream_stage, None,
+        "the Drop fallback path never calls mark_stream_stage"
+    );
+}
+
+/// OpenAI dialect keeps the default no-op `early_frame` (Q5: both dialects
+/// share the handler unforked). On warm-hold there is therefore nothing to
+/// flush ahead of content -- the SSE response still commits on grace expiry,
+/// and (checked directly against the render task, since a `pending_dispatch`
+/// never reaches EOS so the body cannot be drained to completion) the FIRST
+/// event the warm task ever sends is real content, NOT a synthetic
+/// `message_start` (that framing is Anthropic-only).
+#[tokio::test(start_paused = true)]
+async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
+    use crate::ingress::openai::OpenAiIngress;
+
+    // Arrange (commit check): a dispatch that never resolves, forcing grace
+    // expiry and the warm-hold commit path, with the OpenAI dialect.
+    let router = k_test_router();
+    let fut = pending_dispatch();
+    let rig = CaptureRig::new();
+    let capture = rig.capture("openai", &sample_request("m", true), "req-warm-openai");
+    let stream_ctx = StreamRequestContext {
+        input_tokens_estimate: 5,
+        model: "m".into(),
+    };
+
+    // Act
+    let resp = stream_dispatch_gated(fut, OpenAiIngress, capture, router, None, stream_ctx).await;
+
+    // Assert: the SSE response still commits (OpenAI has no early frame to
+    // flush, but the warm-hold path must still commit the response head).
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("text/event-stream"),
+        "grace expiry must commit an SSE stream, got content-type {content_type:?}"
+    );
+
+    // Arrange + Act (leading-frame check): drive the warm render task
+    // directly with a resolvable dispatch so the mpsc channel can be drained
+    // to completion -- a `pending_dispatch`'s body never reaches EOS, so this
+    // part cannot be checked at the HTTP body level.
+    let (router2, meta2) = k_recording_router_and_meta().await;
+    let stream: futures::stream::BoxStream<'static, routectl_core::Result<_>> = Box::pin(
+        futures::stream::iter(vec![Ok(streaming_text_chunk("hello"))]),
+    );
+    let fut2 = ready_dispatch(meta2, Ok(stream));
+    let rig2 = CaptureRig::new();
+    let capture2 = rig2.capture("openai", &sample_request("m", true), "req-warm-openai-2");
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    warm_render_task(
+        fut2,
+        OpenAiIngress,
+        capture2,
+        tx,
+        router2,
+        None,
+        StreamRequestContext {
+            input_tokens_estimate: 5,
+            model: "m".into(),
+        },
+    )
+    .await;
+    let events = drain(rx).await;
+
+    // Assert: no leading synthetic message_start -- the default no-op
+    // early_frame means the first event the task ever sends is real content.
+    assert!(
+        events.first().and_then(|e| e.event.as_deref()) != Some("message_start"),
+        "OpenAI dialect must not emit a leading synthetic message_start: {events:?}"
+    );
 }

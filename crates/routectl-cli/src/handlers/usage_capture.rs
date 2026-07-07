@@ -212,6 +212,34 @@ pub(crate) const fn error_class_of(e: &Error) -> &'static str {
     }
 }
 
+/// Which stage of a COMMITTED stream a terminal upstream failure happened
+/// at, recorded under `extra.stream_stage` so the ledger can distinguish a
+/// warm-hold pre-content dispatch failure (the early-flush grace expired,
+/// the SSE head was committed, THEN the dispatch resolved `Err` before any
+/// content flowed) from a genuine mid-stream cut (content was delivered,
+/// then the upstream died). Both finalize as `Outcome::UpstreamError`, so
+/// without this marker they would collapse into one ledger bucket. It does
+/// NOT apply to a fast pre-stream dispatch `Err` -- that returns a real HTTP
+/// status via `map_error` and never becomes an in-stream failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamStage {
+    /// Grace expired, SSE head committed, dispatch then resolved `Err`
+    /// before any content -- surfaced as a single terminal in-stream error.
+    PreContentDispatch,
+    /// Content was delivered, then the upstream stream errored mid-flight.
+    MidStream,
+}
+
+impl StreamStage {
+    /// Stable lowercase token stored under `extra.stream_stage`.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreContentDispatch => "pre_content_dispatch",
+            Self::MidStream => "mid_stream",
+        }
+    }
+}
+
 /// Unified RAII capture guard: holds the in-progress `UsageRecord` draft
 /// and emits EXACTLY ONE row per request on every visible exit path.
 ///
@@ -442,6 +470,27 @@ impl UsageCapture {
             }
         }
         self.record.error_class = Some(error_class_of(e).to_string());
+    }
+
+    /// Stamp a stream-lifecycle stage marker into the record's `extra` JSON
+    /// (`extra.stream_stage`). Lets the ledger tell a warm-hold pre-content
+    /// dispatch failure apart from a mid-stream cut -- both are
+    /// `Outcome::UpstreamError`, so the outcome column alone collapses them.
+    /// Additive: preserves any existing `extra` object keys.
+    pub(crate) fn mark_stream_stage(&mut self, stage: StreamStage) {
+        let obj = self
+            .record
+            .extra
+            .get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !obj.is_object() {
+            *obj = Value::Object(serde_json::Map::new());
+        }
+        if let Value::Object(map) = obj {
+            map.insert(
+                "stream_stage".to_string(),
+                Value::String(stage.as_str().to_string()),
+            );
+        }
     }
 
     /// Record one live cache-reuse observation into the router's per-session

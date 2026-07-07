@@ -404,6 +404,25 @@ pub trait IngressAdapter: Send + Sync {
     /// surfaces them; adapters that need neither ignore it.
     fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState>;
 
+    /// SSE events to flush as the FIRST body bytes when the handler goes
+    /// warm-hold (the dispatch outran the early-flush grace window).
+    /// Emitting these BEFORE awaiting the still-pending dispatch is what
+    /// forces the response head out and defeats the client-side headers
+    /// wall: a first body-stream poll that blocks on the dispatch never
+    /// flushes the head. Emit-then-dispatch is the invariant the warm
+    /// render task relies on.
+    ///
+    /// The Anthropic adapter emits a synthesized `message_start` carrying
+    /// the local input-token estimate from `state` and marks the state
+    /// started, so the real first-content chunk dedups it (no duplicate
+    /// `message_start`). The OpenAI and Responses dialects emit nothing
+    /// here -- their axum `KeepAlive` comment frame is the flush trigger.
+    /// Default: no-op, so a dialect with no synthetic head compiles
+    /// against the trait unchanged.
+    fn early_frame(&self, _state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
+        Vec::new()
+    }
+
     /// Render one canonical chunk into zero or more SSE events. Adapters
     /// own per-stream state via `state` (block-index counter for
     /// Anthropic, no-op for OpenAI).
