@@ -126,6 +126,14 @@ pub struct Config {
     /// unmatched selector is simply inert).
     #[serde(default)]
     pub cache_pricing: BTreeMap<String, crate::cache_pricing::CachePricingOverride>,
+
+    /// Optional `[mitm]` block for the MITM front-proxy (TLS-terminating
+    /// local listener that fronts a first-party upstream, e.g. Claude
+    /// Code talking to `api.anthropic.com`). Presence gates the feature
+    /// on, matching the `[server.auth]` convention -- `None` (the block
+    /// omitted) keeps today's behavior with zero MITM proxy startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mitm: Option<MitmConfig>,
 }
 
 /// Operator-facing `[cache]` config block. Global policy for the
@@ -348,12 +356,12 @@ const fn default_retention_days() -> u32 {
     90
 }
 
-/// Resolve the default usage-db path the same way the codebase
+/// Resolve routectl's own config dir the same way the codebase
 /// resolves `credentials.json` / `config.toml`: `XDG_CONFIG_HOME` when
-/// set, else `$HOME/.config`, else a relative `.config` fallback.
-/// Returns an absolute, `~`-free path so callers can hand it straight
-/// to SQLite.
-fn default_usage_db_path() -> PathBuf {
+/// set, else `$HOME/.config`, else a relative `.config` fallback,
+/// joined with `routectl`. Returns an absolute, `~`-free path so
+/// callers can hand a child path straight to SQLite or a file writer.
+fn routectl_config_dir() -> PathBuf {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
         _ => match std::env::var_os("HOME") {
@@ -361,7 +369,86 @@ fn default_usage_db_path() -> PathBuf {
             _ => PathBuf::from(".config"),
         },
     };
-    base.join("routectl").join("usage.db")
+    base.join("routectl")
+}
+
+/// Resolve the default usage-db path under `routectl_config_dir()`.
+fn default_usage_db_path() -> PathBuf {
+    routectl_config_dir().join("usage.db")
+}
+
+/// Operator-facing `[mitm]` config block for the MITM front-proxy: a
+/// local TLS-terminating listener that fronts a first-party upstream
+/// (e.g. Claude Code talking to `api.anthropic.com`) so routectl can
+/// observe and translate the decrypted traffic. Presence of the
+/// `[mitm]` block gates the feature on, matching the `[server.auth]`
+/// convention -- `Config::mitm == None` keeps zero proxy startup and
+/// zero behavior change.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MitmConfig {
+    /// Upstream origin the proxy forwards decrypted requests to. Must
+    /// be EXACTLY `https://api.anthropic.com` -- no userinfo, path,
+    /// query, fragment, explicit non-default port, or other host
+    /// (enforced by `validate_mitm_config`). Pinned rather than
+    /// pattern-matched: the MITM proxy forwards the client's full-scope
+    /// claude.ai token, which must never reach a non-Anthropic egress.
+    #[serde(default = "default_mitm_upstream_origin")]
+    pub upstream_origin: String,
+    /// Local TCP port the MITM listener binds. Must differ from
+    /// `[server] port` -- the listener and the routectl HTTP server
+    /// are separate bound sockets on the same host (enforced by
+    /// `validate_mitm_config`).
+    #[serde(default = "default_mitm_listen_port")]
+    pub listen_port: u16,
+    /// Directory holding the locally-generated MITM CA + leaf
+    /// certificates. Defaults under `routectl_config_dir()`, alongside
+    /// the usage db and `config.toml`.
+    #[serde(default = "default_mitm_cert_dir")]
+    pub cert_dir: PathBuf,
+    /// TLS SNI / `Host` header the proxy expects from the client and
+    /// presents to the upstream when dialing out. Must be EXACTLY
+    /// `api.anthropic.com` -- a subdomain like `evil.api.anthropic.com`
+    /// is rejected, not matched as a suffix (enforced by
+    /// `validate_mitm_config`).
+    #[serde(default = "default_mitm_host")]
+    pub mitm_host: String,
+    /// Free-form Claude Code version this `[mitm]` config was last
+    /// verified against. Consulted at runtime by the MITM proxy: when
+    /// the version actually observed on a decrypted request's
+    /// `User-Agent` differs from this, it logs a WARNING (once per
+    /// distinct observed version) but never refuses the request --
+    /// `None` (the default) disables the check entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tested_cc_version: Option<String>,
+}
+
+impl Default for MitmConfig {
+    fn default() -> Self {
+        Self {
+            upstream_origin: default_mitm_upstream_origin(),
+            listen_port: default_mitm_listen_port(),
+            cert_dir: default_mitm_cert_dir(),
+            mitm_host: default_mitm_host(),
+            tested_cc_version: None,
+        }
+    }
+}
+
+fn default_mitm_upstream_origin() -> String {
+    "https://api.anthropic.com".into()
+}
+
+const fn default_mitm_listen_port() -> u16 {
+    8443
+}
+
+fn default_mitm_cert_dir() -> PathBuf {
+    routectl_config_dir().join("mitm-certs")
+}
+
+fn default_mitm_host() -> String {
+    "api.anthropic.com".into()
 }
 
 /// Per-million-token pricing for one `[registry.*]` entry. All fields
@@ -4317,6 +4404,76 @@ tokens = ["literal:abc", "env://TOK"]
         let cfg: Config = toml::from_str(toml_text).expect("valid auth block parses");
         let auth = cfg.server.auth.expect("auth present");
         assert_eq!(auth.tokens, vec!["literal:abc", "env://TOK"]);
+    }
+}
+
+#[cfg(test)]
+mod mitm_config_tests {
+    //! `[mitm]` schema round-trip: absence leaves the feature off,
+    //! presence fills in every documented default, explicit values
+    //! survive serde untouched, and an unknown key rejects at parse
+    //! time (same `deny_unknown_fields` footgun-closing convention as
+    //! `[server.auth]`).
+
+    use crate::config::Config;
+
+    #[test]
+    fn mitm_absent_leaves_config_none() {
+        let cfg: Config = toml::from_str("").expect("parse empty config");
+        assert!(cfg.mitm.is_none(), "mitm must default to None when absent");
+    }
+
+    #[test]
+    fn mitm_present_with_all_fields_omitted_uses_defaults() {
+        let toml_text = "[mitm]\n";
+        let cfg: Config = toml::from_str(toml_text).expect("parse bare [mitm] block");
+        let mitm = cfg.mitm.expect("mitm present once the block is declared");
+        assert_eq!(mitm.upstream_origin, "https://api.anthropic.com");
+        assert_eq!(mitm.listen_port, 8443);
+        assert_eq!(mitm.mitm_host, "api.anthropic.com");
+        assert!(mitm.tested_cc_version.is_none());
+        assert!(
+            mitm.cert_dir.ends_with("routectl/mitm-certs"),
+            "cert_dir: {:?}",
+            mitm.cert_dir
+        );
+    }
+
+    #[test]
+    fn mitm_explicit_values_round_trip() {
+        let toml_text = r#"
+[mitm]
+upstream_origin = "https://api.example.com"
+listen_port = 9443
+cert_dir = "/tmp/routectl-mitm-certs"
+mitm_host = "api.example.com"
+tested_cc_version = "2.1.143"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse explicit [mitm]");
+        let mitm = cfg.mitm.expect("mitm present");
+        assert_eq!(mitm.upstream_origin, "https://api.example.com");
+        assert_eq!(mitm.listen_port, 9443);
+        assert_eq!(
+            mitm.cert_dir,
+            std::path::PathBuf::from("/tmp/routectl-mitm-certs")
+        );
+        assert_eq!(mitm.mitm_host, "api.example.com");
+        assert_eq!(mitm.tested_cc_version, Some("2.1.143".to_string()));
+    }
+
+    #[test]
+    fn mitm_rejects_unknown_field() {
+        let toml_text = r#"
+[mitm]
+upstream_origin = "https://api.anthropic.com"
+listen_prot = 9443
+"#;
+        let err = toml::from_str::<Config>(toml_text).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("listen_prot") || msg.contains("unknown field"),
+            "expected unknown-field error naming the typo; got: {msg}"
+        );
     }
 }
 

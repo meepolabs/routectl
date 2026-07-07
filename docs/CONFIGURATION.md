@@ -63,6 +63,11 @@ sections:
 [cache_pricing."<sel>"] # field-level overrides for the baked
                       # prompt-cache economics table. Optional; a
                       # verified table ships baked-in.
+
+[mitm]                # MITM front-proxy: local TLS-terminating
+                      # listener fronting a first-party upstream.
+                      # Optional; presence gates the feature on
+                      # (absence = zero proxy startup).
 ```
 
 [`examples/config.toml`](../examples/config.toml) is a working
@@ -107,6 +112,15 @@ the bind address: `"refusing to serve on public bind '<addr>' without
 [server.auth].tokens"`. Loopback binds (127.x.x.x, ::1,
 ::ffff:127.0.0.1) are exempt so the default local-dev workflow
 requires no auth.
+
+**Incompatible with the `[mitm]` Remote Control feature:** enabling
+`[server.auth].tokens` alongside `[mitm]` breaks Remote Control. The
+MITM proxy re-injects the Anthropic inference request into routectl's
+own listener carrying the client's claude.ai session token, verbatim,
+as `Authorization` -- listener auth would reject that token since it
+is not one of the configured `[server.auth]` tokens. See
+[REMOTE-CONTROL.md](REMOTE-CONTROL.md) "Limitation: Remote Control
+requires listener auth OFF".
 
 ### Request routes
 
@@ -975,7 +989,9 @@ else (including empty string) is treated as false.
 What each knob does:
 
 - `trace_headers` -- opt-in for the four `trace_*_headers`
-  directions (raw, no redaction). Default off. See
+  directions. Directions 1 (ingress), 2 (outgoing), and 3 (upstream
+  response) redact secret-bearing header values before emission;
+  direction 4 (egress response) stays raw. Default off. See
   [LOGGING.md](LOGGING.md) for the per-direction emit contract.
 - `trace_body_bytes` -- cap on the serialized body emitted at
   TRACE level by the four body-trace helpers (ingress, outgoing,
@@ -1036,6 +1052,60 @@ retention_days = 90                     # prune rows older than this; default 90
 - `retention_days` -- on daemon startup, rows older than this many days
   are pruned from the database. Hot-reloads; the new value applies at
   the next startup-time prune.
+
+## MITM front-proxy (`[mitm]`)
+
+The optional `[mitm]` block gates on a local TLS-terminating listener
+that fronts a first-party upstream (e.g. Claude Code talking to
+`api.anthropic.com`), the same presence-gates-the-feature convention as
+`[server.auth]`. A missing block keeps every default below AND zero
+proxy startup -- routectl's behavior is unchanged until an operator
+declares `[mitm]`.
+
+```toml
+[mitm]
+upstream_origin   = "https://api.anthropic.com"
+listen_port       = 8443
+cert_dir          = "/home/you/.config/routectl/mitm-certs"
+mitm_host         = "api.anthropic.com"
+tested_cc_version = "2.1.143"
+```
+
+| Knob                | Default                                | Reload  |
+|---------------------|-----------------------------------------|---------|
+| `upstream_origin`   | `https://api.anthropic.com`             | restart |
+| `listen_port`       | `8443`                                  | restart |
+| `cert_dir`          | `<config-dir>/routectl/mitm-certs`      | restart |
+| `mitm_host`         | `api.anthropic.com`                     | restart |
+| `tested_cc_version` | unset                                   | restart |
+
+- `upstream_origin` -- the first-party origin the proxy forwards
+  decrypted requests to. Must be EXACTLY `https://api.anthropic.com`
+  (no userinfo, path, query, fragment, or explicit non-default port,
+  and no other host); startup validation rejects anything else. This
+  pins the MITM egress to first-party Anthropic so the client's
+  full-scope claude.ai token can never be forwarded to a non-Anthropic
+  origin.
+- `listen_port` -- the local TCP port the MITM listener binds. Must
+  differ from `[server] port` -- the two are separate bound sockets on
+  the same host; startup validation rejects a collision.
+- `cert_dir` -- directory holding the locally-generated MITM CA + leaf
+  certificates. Defaults under the same user config dir as `usage.db`
+  and `config.toml` (`XDG_CONFIG_HOME` else `$HOME/.config`).
+- `mitm_host` -- the TLS SNI / `Host` header the proxy expects from the
+  client and presents to the upstream. Must be EXACTLY
+  `api.anthropic.com` (a subdomain like `evil.api.anthropic.com` is
+  rejected, not matched as a suffix); startup validation rejects any
+  other value.
+- `tested_cc_version` -- the Claude Code version this `[mitm]` config
+  was last verified against. Consulted by the proxy at runtime: on a
+  decrypted request whose `User-Agent` reports a different Claude Code
+  version, the proxy logs a WARNING once per distinct observed version
+  but never refuses the request. Unset (the default) disables the
+  check entirely. The whole `[mitm]` block, including this field, is
+  read once at startup -- editing it takes effect only on the next
+  restart, since there is no reload path that respawns the proxy
+  listener.
 
 ## Inspecting a request offline (`routectl prompt-size`)
 

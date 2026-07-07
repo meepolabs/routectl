@@ -22,9 +22,9 @@ pub use cache_pricing::{
     is_stale_today, lookup, lookup_with_overrides, stale_after_days, validate_overrides,
 };
 pub use config::{
-    AliasValue, CacheCapability, CacheConfig, Config, HistoryReasoning, LogConfig, ModelEntry,
-    PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig,
-    RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
+    AliasValue, CacheCapability, CacheConfig, Config, HistoryReasoning, LogConfig, MitmConfig,
+    ModelEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
+    ReductionConfig, RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
@@ -38,8 +38,8 @@ pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_ev
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
     BuildOptions, build_provider, build_provider_with_options, build_resolved_models,
-    validate_alias_chain_targets, validate_alias_patterns, validate_reasoning_defaults,
-    validate_registry_patterns, validate_retry_policy,
+    validate_alias_chain_targets, validate_alias_patterns, validate_mitm_config,
+    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{

@@ -98,6 +98,38 @@ rand = "0.9"
 subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
 
+# MITM front-proxy (TLS termination + local CA/leaf cert generation).
+# rustls / tokio-rustls / rustls-pki-types / hyper / hyper-util /
+# aws-lc-rs are already transitive (via reqwest's rustls-tls feature
+# and the Bedrock AWS SDK deps) -- promoted here to direct deps of
+# routectl-cli so the proxy module can use them without a version
+# bump. `rcgen` is the one genuinely new dependency; its default
+# crypto backend is `ring`, so `default-features = false` + the
+# explicit `aws_lc_rs` feature aligns it with the aws-lc-rs backend
+# hyper-rustls's default feature set already activates for rustls in
+# this tree. `rustls-pemfile` is deliberately NOT added: rcgen emits
+# PEM directly (its own `pem` feature) and `rustls-pki-types` parses
+# PEM back into `rustls` types, so there is no gap for it to fill.
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+rustls = { version = "0.23" }
+rustls-pki-types = { version = "1" }
+tokio-rustls = { version = "0.26" }
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "tokio"] }
+# Framework-agnostic streaming-body plumbing (`StreamBody`,
+# `UnsyncBoxBody`) shared by the forward-leg transport primitive
+# (`proxy::forward`) so its return type stays bridgeable into hyper 1.x
+# without pulling a hyper-specific type into its own signature.
+http-body-util = { version = "0.1" }
+# Named directly by `proxy::split::handle_request`'s generic bound
+# (`B: http_body::Body<...>`) so the split/classify layer can be
+# exercised in tests against a synthetic body (e.g.
+# `http_body_util::Full`) instead of only `hyper::body::Incoming`.
+# Already resolved transitively (1.0.1, alongside hyper/http-body-util);
+# promoted to a direct dep since routectl's own code now names the
+# trait.
+http-body = { version = "1" }
+
 # Test deps (used in dev-dependencies of individual crates)
 wiremock = "0.6"
 insta = { version = "1", features = ["yaml", "json"] }

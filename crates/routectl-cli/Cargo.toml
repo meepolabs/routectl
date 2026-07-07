@@ -19,7 +19,10 @@ routectl-router.workspace = true
 routectl-auth.workspace = true
 routectl-usage = { path = "../routectl-usage" }
 async-trait.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
+# `io-util` adds `AsyncReadExt`/`AsyncWriteExt` and `copy_bidirectional`,
+# needed by the MITM front-proxy's CONNECT listener (proxy::listener) to
+# parse the CONNECT request line and blind-tunnel non-MITM-host traffic.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net", "sync", "io-util"] }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -41,6 +44,28 @@ subtle = "2"
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 arc-swap = { workspace = true }
+# MITM front-proxy: reqwest talks to the upstream (promoted from
+# dev-only), the rest terminate/generate the local TLS listener.
+reqwest.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http-body.workspace = true
+
+# O_NOFOLLOW for the MITM CA/leaf secret-file creation path
+# (proxy::ca) -- belt-and-suspenders on top of the std `create_new`
+# O_EXCL semantics (which already refuse to follow a pre-existing
+# symlink per POSIX) when staging secret material on disk. libc's
+# platform-correct constant is preferred over hardcoding the raw flag
+# value, which differs between Linux and macOS. Already resolved
+# transitively across the dependency graph; promoted to a direct dep
+# here since routectl's own code now names it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 # Enable live integration tests that hit real providers using API keys
@@ -57,9 +82,10 @@ live-integration = []
 # only for test/bench builds, never for the release binary.
 routectl-core = { workspace = true, features = ["test-utils"] }
 wiremock.workspace = true
-reqwest = { workspace = true }
 futures = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+# `io-util` adds `AsyncReadExt`/`AsyncWriteExt` (`read_exact`/`write_all`),
+# needed by the MITM proxy's TLS-handshake tests (`proxy::ca`).
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util", "io-util"] }
 insta.workspace = true
 tempfile = "3"
 serial_test = "3"

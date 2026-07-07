@@ -294,3 +294,20 @@ stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 # upstream          = "deepseek-reasoner"
 # history_reasoning = "preserve"
 
+# ---- MITM front-proxy (optional, default off) ----
+# Presence of [mitm] gates the feature on -- a local TLS-terminating
+# listener that fronts a first-party upstream (e.g. Claude Code
+# talking to api.anthropic.com) so routectl can observe and translate
+# decrypted traffic. Every field below carries the shown default;
+# uncomment [mitm] alone to enable with defaults, or override any
+# field. listen_port must differ from [server] port.
+
+# [mitm]
+# upstream_origin   = "https://api.anthropic.com"
+# listen_port       = 8443
+# cert_dir          = "/home/you/.config/routectl/mitm-certs"  # CA/leaf certs
+# mitm_host         = "api.anthropic.com"
+# tested_cc_version = "2.1.143"
+# ^ last-verified CC version; triggers a once-per-version runtime mismatch
+#   WARNING (advisory in that it never refuses)
+

@@ -1831,6 +1831,78 @@ fn detect_alias_cycles_dfs(
     globally_visited.insert(current.to_string());
 }
 
+/// The only host the MITM front is ever allowed to terminate or egress
+/// to. The milestone constraint is a HARD "the forwarded full-scope
+/// claude.ai token must NEVER be sent to a non-Anthropic egress"; both
+/// checks below pin to this exact string (never a suffix/subdomain
+/// match) so a mistyped or poisoned config cannot widen the blast
+/// radius of that token.
+const MITM_REQUIRED_HOST: &str = "api.anthropic.com";
+
+/// Validate the optional `[mitm]` block: `Ok` when the block is
+/// absent (feature off, matching the `[server.auth]` presence-gates
+/// convention). When present, reject:
+/// - an `upstream_origin` that is not EXACTLY `https://api.anthropic.com`
+///   (any other scheme, host, explicit port, userinfo, path, query, or
+///   fragment is rejected -- see [`MITM_REQUIRED_HOST`] for why this is
+///   pinned rather than pattern-matched);
+/// - a `listen_port` that collides with `[server] port` (the two are
+///   separate bound sockets on the same host);
+/// - a `mitm_host` that is not EXACTLY `api.anthropic.com`.
+///
+/// Call once per process startup alongside the other validators. This
+/// function only validates the config schema -- building and spawning
+/// the proxy listener itself lives in `routectl_cli::proxy` /
+/// `routectl_cli::server::serve_on_listener`, not here.
+pub fn validate_mitm_config(config: &crate::config::Config) -> Result<()> {
+    use routectl_core::Error;
+
+    let Some(mitm) = &config.mitm else {
+        return Ok(());
+    };
+
+    let is_pinned_origin = url::Url::parse(&mitm.upstream_origin).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some(MITM_REQUIRED_HOST)
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && matches!(url.path(), "" | "/")
+            && url.query().is_none()
+            && url.fragment().is_none()
+    });
+    if !is_pinned_origin {
+        return Err(Error::Config(format!(
+            "[mitm] upstream_origin {:?} must be exactly \
+             https://{MITM_REQUIRED_HOST} -- no userinfo, path, query, or fragment, and no \
+             other host. This is a hard containment guarantee: the MITM proxy forwards the \
+             client's full-scope claude.ai token, which must never be sent to a \
+             non-Anthropic egress",
+            mitm.upstream_origin
+        )));
+    }
+
+    if mitm.listen_port == config.server.port {
+        return Err(Error::Config(format!(
+            "[mitm] listen_port {} collides with [server] port {}; the MITM \
+             listener and the routectl HTTP server must bind different ports",
+            mitm.listen_port, config.server.port
+        )));
+    }
+
+    if mitm.mitm_host != MITM_REQUIRED_HOST {
+        return Err(Error::Config(format!(
+            "[mitm] mitm_host {:?} must be exactly {MITM_REQUIRED_HOST:?} -- no other host \
+             (including a subdomain) is accepted. This is a hard containment guarantee: the \
+             MITM proxy forwards the client's full-scope claude.ai token, which must never be \
+             presented to a non-Anthropic host",
+            mitm.mitm_host
+        )));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod base_url_validation_tests {
     use super::validate_base_url_scheme;
@@ -3595,6 +3667,189 @@ mod validate_alias_patterns_tests {
     fn accepts_exact_and_trailing_star_keys() {
         let cfg = config_with_alias_keys(&["claude-opus-4-7-20251022", "claude-opus-*"]);
         validate_alias_patterns(&cfg).expect("clean alias keys must validate");
+    }
+}
+
+#[cfg(test)]
+mod validate_mitm_config_tests {
+    //! Tests for the `[mitm]` field-coherence validator: absence is
+    //! always `Ok`; presence pins `upstream_origin` and `mitm_host` to
+    //! EXACTLY first-party `api.anthropic.com` (containment guarantee:
+    //! the client's full-scope claude.ai token must never reach a
+    //! non-Anthropic egress) and still rejects a `listen_port` that
+    //! collides with `[server] port`.
+
+    use super::validate_mitm_config;
+    use crate::config::{Config, MitmConfig};
+
+    fn config_with_mitm(mitm: MitmConfig) -> Config {
+        Config {
+            mitm: Some(mitm),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn absent_mitm_block_is_ok() {
+        let cfg = Config::default();
+        validate_mitm_config(&cfg).expect("None must always validate");
+    }
+
+    #[test]
+    fn default_mitm_block_validates_clean() {
+        let cfg = config_with_mitm(MitmConfig::default());
+        validate_mitm_config(&cfg).expect("default [mitm] must validate against default [server]");
+    }
+
+    #[test]
+    fn rejects_non_anthropic_https_origin() {
+        let cfg = config_with_mitm(MitmConfig {
+            upstream_origin: "https://evil.example.com".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("upstream_origin"), "msg: {msg}");
+        assert!(msg.contains("api.anthropic.com"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_non_https_upstream_origin() {
+        let cfg = config_with_mitm(MitmConfig {
+            upstream_origin: "http://api.anthropic.com".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("upstream_origin"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_malformed_upstream_origin() {
+        let cfg = config_with_mitm(MitmConfig {
+            upstream_origin: "not a url".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("upstream_origin"), "msg: {msg}");
+    }
+
+    /// Userinfo (`user:pass@`) in the origin must be rejected even
+    /// though the host itself is the pinned first-party host -- a
+    /// stray userinfo component is never legitimate here and could mask
+    /// operator error.
+    #[test]
+    fn rejects_upstream_origin_with_userinfo() {
+        let cfg = config_with_mitm(MitmConfig {
+            upstream_origin: "https://x@api.anthropic.com".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("upstream_origin"), "msg: {msg}");
+    }
+
+    /// An explicit non-default port must be rejected even with the
+    /// otherwise-correct host: `https://api.anthropic.com:9999` is a
+    /// different egress target from the pinned
+    /// `https://api.anthropic.com` (implicit default 443), and a typo'd
+    /// or attacker-controlled port is exactly the kind of drift this
+    /// containment check exists to catch.
+    #[test]
+    fn rejects_upstream_origin_with_a_non_default_port() {
+        let cfg = config_with_mitm(MitmConfig {
+            upstream_origin: "https://api.anthropic.com:9999".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("upstream_origin"), "msg: {msg}");
+    }
+
+    /// An explicit but redundant default port (`:443`) is normalized
+    /// away by URL parsing and must still validate clean -- this pins
+    /// the intent that only a genuinely DIFFERENT port is rejected, not
+    /// the spelling of the default one.
+    #[test]
+    fn accepts_upstream_origin_with_explicit_default_port() {
+        let cfg = config_with_mitm(MitmConfig {
+            upstream_origin: "https://api.anthropic.com:443".into(),
+            ..MitmConfig::default()
+        });
+        validate_mitm_config(&cfg).expect("an explicit default port must still validate clean");
+    }
+
+    #[test]
+    fn rejects_upstream_origin_with_a_path() {
+        let cfg = config_with_mitm(MitmConfig {
+            upstream_origin: "https://api.anthropic.com/v1".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("upstream_origin"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_upstream_origin_with_a_query() {
+        let cfg = config_with_mitm(MitmConfig {
+            upstream_origin: "https://api.anthropic.com/?x=1".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("upstream_origin"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_listen_port_colliding_with_server_port() {
+        let default_server_port = Config::default().server.port;
+        let cfg = config_with_mitm(MitmConfig {
+            listen_port: default_server_port,
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("listen_port"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_empty_mitm_host() {
+        let cfg = config_with_mitm(MitmConfig {
+            mitm_host: String::new(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mitm_host"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_non_anthropic_mitm_host() {
+        let cfg = config_with_mitm(MitmConfig {
+            mitm_host: "example.com".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mitm_host"), "msg: {msg}");
+        assert!(msg.contains("api.anthropic.com"), "msg: {msg}");
+    }
+
+    /// A subdomain of the first-party host must be rejected -- this is
+    /// an EXACT host match, not a suffix match, so
+    /// `evil.api.anthropic.com` never slips through as if it were
+    /// `api.anthropic.com`.
+    #[test]
+    fn rejects_mitm_host_subdomain() {
+        let cfg = config_with_mitm(MitmConfig {
+            mitm_host: "evil.api.anthropic.com".into(),
+            ..MitmConfig::default()
+        });
+        let err = validate_mitm_config(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mitm_host"), "msg: {msg}");
     }
 }
 
