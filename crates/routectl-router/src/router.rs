@@ -3825,7 +3825,10 @@ mod tests {
         // Provider config sets both timeouts.
         // Expected: provider's values land in the per-attempt policy.
         let router = build_router_with_provider_timeouts(Some(180_000), Some(60_000));
-        let base = RetryPolicy::default(); // both timeout fields None
+        let base = RetryPolicy {
+            stream_first_byte_timeout_ms: None, // alias left this unset
+            ..RetryPolicy::default()
+        };
         let composed = router.compose_attempt_policy(&base, "p1", None);
         assert_eq!(composed.request_timeout_ms, Some(180_000));
         assert_eq!(composed.stream_first_byte_timeout_ms, Some(60_000));
@@ -3854,6 +3857,7 @@ mod tests {
         let router = build_router_with_provider_timeouts(None, Some(120_000));
         let base = RetryPolicy {
             request_timeout_ms: Some(45_000),
+            stream_first_byte_timeout_ms: None, // alias left this unset
             ..RetryPolicy::default()
         };
         let composed = router.compose_attempt_policy(&base, "p1", None);
@@ -3870,6 +3874,7 @@ mod tests {
         let router = build_router_with_provider_timeouts(Some(99_999), Some(99_999));
         let base = RetryPolicy {
             request_timeout_ms: Some(7_000),
+            stream_first_byte_timeout_ms: None, // alias left this unset
             ..RetryPolicy::default()
         };
         let composed = router.compose_attempt_policy(&base, "missing-provider", None);
@@ -3883,7 +3888,10 @@ mod tests {
         // policy = None. composed.request_timeout_ms stays None
         // (router falls through to reqwest's default).
         let router = build_router_with_provider_timeouts(None, None);
-        let base = RetryPolicy::default();
+        let base = RetryPolicy {
+            stream_first_byte_timeout_ms: None, // alias left this unset
+            ..RetryPolicy::default()
+        };
         let composed = router.compose_attempt_policy(&base, "p1", None);
         assert!(composed.request_timeout_ms.is_none());
         assert!(composed.stream_first_byte_timeout_ms.is_none());
@@ -3907,7 +3915,10 @@ mod tests {
         // No per-model override -> provider + global path resolves
         // exactly as before. With base unset, the provider's value wins.
         let router = build_router_with_provider_timeouts(None, Some(60_000));
-        let base = RetryPolicy::default();
+        let base = RetryPolicy {
+            stream_first_byte_timeout_ms: None, // alias left this unset
+            ..RetryPolicy::default()
+        };
         let composed = router.compose_attempt_policy(&base, "p1", None);
         assert_eq!(composed.stream_first_byte_timeout_ms, Some(60_000));
     }

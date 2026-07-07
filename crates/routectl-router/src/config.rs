@@ -2183,7 +2183,10 @@ pub struct RetryPolicy {
     /// hasn't emitted any bytes in this window, the stream is
     /// abandoned and (if no chunk has been delivered yet) the next
     /// provider in the chain is tried.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_stream_first_byte_timeout_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stream_first_byte_timeout_ms: Option<u64>,
 
     /// Requests with `max_tokens` <= this are treated as availability
@@ -2220,7 +2223,15 @@ impl Default for RetryPolicy {
             retry_on_5xx: None,
             retry_on_network: None,
             request_timeout_ms: None,
-            stream_first_byte_timeout_ms: None,
+            // F1's early-response inversion holds the client warm, so a
+            // pinging-but-contentless upstream would otherwise be
+            // unbounded (the client no longer bails at ~300s). 600000ms
+            // mirrors the live deployment and sits well above the 300s
+            // read_timeout as a total-silence backstop. Shares
+            // `default_stream_first_byte_timeout_ms` with the serde
+            // field default so a `[retry]` block that omits this key
+            // gets the same backstop, not `None`.
+            stream_first_byte_timeout_ms: default_stream_first_byte_timeout_ms(),
             probe_max_tokens: default_probe_max_tokens(),
             max_honored_retry_after_ms: None,
         }
@@ -3792,6 +3803,17 @@ const fn default_probe_max_tokens() -> u32 {
     1
 }
 
+/// Backstop for `RetryPolicy::stream_first_byte_timeout_ms` when a
+/// `[retry]` block is present but omits this key. Serde's bare
+/// `#[serde(default)]` would otherwise fill `Option::<u64>::default()`
+/// (`None`), reintroducing the unbounded pinging-but-contentless hang
+/// this field's `Some(600000)` default exists to prevent -- the struct
+/// `Default` impl only applies when the whole `[retry]` table is
+/// absent, not when individual keys within it are.
+const fn default_stream_first_byte_timeout_ms() -> Option<u64> {
+    Some(600_000)
+}
+
 const fn default_backoff_ms() -> u64 {
     250
 }
@@ -3998,6 +4020,52 @@ probe_max_tokens = 0
     fn default_retry_policy_has_probe_max_tokens_one() {
         // The Default impl (no `[retry]` block at all) also yields 1.
         assert_eq!(RetryPolicy::default().probe_max_tokens, 1);
+    }
+
+    /// The code default for `stream_first_byte_timeout_ms` is `Some`,
+    /// not `None` -- a pinging-but-contentless upstream must have a
+    /// bound even when the operator sets no `[retry]` block at all.
+    #[test]
+    fn default_retry_policy_has_stream_first_byte_timeout_backstop() {
+        assert_eq!(
+            RetryPolicy::default().stream_first_byte_timeout_ms,
+            Some(600_000),
+            "default must be Some(600000) as a total-silence backstop"
+        );
+    }
+
+    /// An operator that sets `stream_first_byte_timeout_ms` explicitly
+    /// must get exactly that value back, unaffected by the new default.
+    #[test]
+    fn stream_first_byte_timeout_ms_explicit_override_round_trips_unchanged() {
+        use crate::config::Config;
+        let toml_text = r"
+[retry]
+stream_first_byte_timeout_ms = 120000
+";
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(cfg.retry.stream_first_byte_timeout_ms, Some(120_000));
+    }
+
+    /// A `[retry]` block that sets some OTHER field but omits
+    /// `stream_first_byte_timeout_ms` must still get the `Some(600000)`
+    /// backstop, not `None`. This is the case the struct-level
+    /// `Default` impl does NOT cover, since that only applies when the
+    /// whole `[retry]` table is absent.
+    #[test]
+    fn stream_first_byte_timeout_ms_defaults_to_backstop_when_omitted() {
+        use crate::config::Config;
+        let toml_text = r"
+[retry]
+max_attempts = 5
+";
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        assert_eq!(
+            cfg.retry.stream_first_byte_timeout_ms,
+            Some(600_000),
+            "omitting the key inside a present [retry] block must not lose the backstop"
+        );
+        assert_eq!(cfg.retry.max_attempts, 5, "other fields unaffected");
     }
 
     /// A `[retry]` block omitting `max_honored_retry_after_ms` resolves
