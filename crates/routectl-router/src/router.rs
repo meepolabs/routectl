@@ -2564,9 +2564,10 @@ impl Router {
     ///
     /// Additionally, when the size-baseline plan exists, consults the
     /// in-process [`crate::k_estimator::KEstimator`] over the request's
-    /// `inbound_session_key` and the SAME pricing row's `ttl_seconds` (so
-    /// the per-run TTL split matches the economics that produced K*). The
-    /// estimate's `k_floor` is stamped onto `meta.would_trim_k_floor` only
+    /// `inbound_session_key` and the SAME pricing row's `ttl_seconds`
+    /// (threaded through for provenance / reserved for future
+    /// age-conditioning; the per-turn hazard model does not split on it).
+    /// The estimate's `k_floor` is stamped onto `meta.would_trim_k_floor` only
     /// for a `Calibrated` confidence (the only bound the cost gate may
     /// consult to authorize a cut). The met/unmet/cold/unpriced verdict is
     /// DERIVED downstream from the numeric advisory columns
@@ -2607,10 +2608,11 @@ impl Router {
             meta.would_trim_break_even_k = break_even;
 
             // Consult the K estimator over the SAME row whose TTL priced K*: the
-            // estimator's per-run split uses `row.ttl_seconds` as the same TTL the
-            // economics did, so a `k_floor` is comparable to `break_even`. The
-            // current sample for THIS turn is recorded post-response in
-            // `record_k_sample`, so the estimator reads PRIOR-turn samples only.
+            // TTL is threaded through for provenance only -- the per-turn
+            // hazard model does not split on it -- so a `k_floor` is
+            // comparable to `break_even`. The current sample for THIS turn
+            // is recorded post-response in `record_k_sample`, so the
+            // estimator reads PRIOR-turn samples only.
             let estimate = self.k_estimator.estimate(&crate::k_estimator::KQuery {
                 session_key: attempt_req.routectl_internal.inbound_session_key.as_deref(),
                 provider_kind: provider_kind.unwrap_or(""),

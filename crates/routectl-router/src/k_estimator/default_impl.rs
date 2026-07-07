@@ -5,31 +5,49 @@
 //! path; a query that names an unknown triple gets a `Cold` default rather
 //! than failing.
 //!
-//! The percentile/confidence math is isolated in [`estimate_from_runs`], a
-//! pure free function with its own tests, because it is the swappable,
-//! validation-gated part of the design: a later increment tunes its
-//! thresholds against real ledger data via a calibration harness. The
-//! threshold constants below are PROVISIONAL v1 values, not a public
-//! contract.
+//! The reuse math is a PER-TURN HAZARD (geometric) model, not the earlier
+//! TTL-gap-run percentile model. Each retained sample is one Bernoulli trial:
+//! did that turn observe cache reuse? Over the window's `n` trials with
+//! `successes` reuses the per-turn continuation probability `p_hat =
+//! successes / n` drives the geometric horizon `E[K] = p / (1 - p)`. The
+//! floor comes from the Wilson one-sided LOWER bound on `p` (so a thin or
+//! all-success window widens rather than over-promising), the ceiling from
+//! the Wilson UPPER bound. Framing evidence as the TURN (not the run) means a
+//! single long contiguous session is `n` observations, not one -- which is
+//! what fixes v1's starvation of few-long-contiguous sessions.
+//!
+//! [`wilson_bound`] is the isolated, swappable, validation-gated core (D15):
+//! a pure free function with its own tests, tuned against real ledger data by
+//! the calibration harness. `Z_WILSON`, `P_CLAMP`, and `CALIBRATED_MIN_TRIALS`
+//! are PROVISIONAL, harness-tunable values, not a public contract.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::store::{KSessionKey, KSessionStore};
 use super::{Confidence, EstimateSource, KEstimate, KEstimator, KQuery};
 
-/// Floor percentile -- the conservative lower bound the cost gate may consult
-/// to authorize a cut. PROVISIONAL; tuned by the calibration harness later.
-const P_FLOOR: u32 = 10;
-/// Point percentile -- the advisory-display best estimate. PROVISIONAL.
-const P_POINT: u32 = 50;
-/// Ceiling percentile -- reserved for the misfire-envelope headroom check.
-/// PROVISIONAL.
-const P_CEILING: u32 = 80;
-/// Minimum number of observed runs before an estimate is `Calibrated` (the
-/// floor may then gate a cut). Below this the estimate stays advisory-only.
-/// PROVISIONAL; tuned later against real ledger data.
-const CALIBRATED_MIN_RUNS: usize = 8;
+/// One-sided normal quantile for the Wilson bound. `~1.645` is the ~95%
+/// one-sided level. HARNESS-TUNABLE: this is the single dial the calibration
+/// harness turns to trade authorized cuts against the coverage safety gate;
+/// raising it widens the interval (fewer, safer cuts), lowering it narrows it.
+const Z_WILSON: f64 = 1.645;
+
+/// Upper clamp on the per-turn continuation probability fed to `E[K]`. A
+/// window of all-success turns yields `p_hat = 1.0`, and `1 / (1 - 1)` is
+/// infinite; clamping `p` just below 1 keeps `E[K]` finite and non-NaN. At
+/// `0.99` the maximum expressible horizon is `0.99 / 0.01 = 99` reuses --
+/// far above any realistic break-even K while staying finite. PROVISIONAL.
+const P_CLAMP: f64 = 0.99;
+
+/// Minimum number of observed TRIALS (samples) before an estimate is
+/// `Calibrated` (the floor may then gate a cut). Below this the estimate
+/// stays advisory-only and the floor is forced to 0.
+///
+/// PROVISIONAL: carried at 8 from v1's `CALIBRATED_MIN_RUNS`, to be re-picked
+/// from the first per-turn calibration run against real ledger data. 8
+/// Bernoulli trials is few, but the Wilson lower bound self-widens at low `n`,
+/// so it self-protects until the harness sets a data-driven value.
+const CALIBRATED_MIN_TRIALS: u32 = 8;
 
 /// Ledger-backed [`KEstimator`]. Reads from a shared [`KSessionStore`].
 ///
@@ -48,6 +66,9 @@ impl LedgerBackedK {
 
 impl KEstimator for LedgerBackedK {
     fn estimate(&self, q: &KQuery<'_>) -> KEstimate {
+        // q.ttl and q.now are accepted by the KQuery contract but unused by
+        // this constant-hazard model; reserved for a future additive
+        // age-conditioning refinement.
         let Some(session_key) = q.session_key else {
             return cold_default();
         };
@@ -65,9 +86,9 @@ impl KEstimator for LedgerBackedK {
             return cold_default();
         }
 
-        let samples = window.len() as u32;
-        let run_reuse_counts = split_runs(&window, q.ttl);
-        let (k_floor, k_point, k_ceiling, confidence) = estimate_from_runs(&run_reuse_counts);
+        let n = window.len() as u32;
+        let successes = window.iter().filter(|s| s.observed_reuse).count() as u32;
+        let (k_floor, k_point, k_ceiling, confidence) = hazard_estimate(successes, n);
 
         let source = match confidence {
             Confidence::Cold => EstimateSource::ColdDefault,
@@ -78,7 +99,7 @@ impl KEstimator for LedgerBackedK {
             k_floor,
             k_point,
             k_ceiling,
-            samples,
+            samples: n,
             confidence,
             source,
         }
@@ -98,73 +119,36 @@ const fn cold_default() -> KEstimate {
     }
 }
 
-/// Split a window's samples (oldest->newest) into runs and return each run's
-/// directly-measured reuse count.
+/// Pure per-turn-hazard reducer over a window's Bernoulli reuse outcomes.
 ///
-/// A new run begins when the gap between consecutive samples exceeds `ttl`
-/// (the prior cache prefix would have aged out, so a new prefix was written).
-/// A run's observation is the count of its samples that observed reuse --
-/// the measured re-read count, not the run length.
-fn split_runs(window: &super::store::KSessionWindow, ttl: Duration) -> Vec<u32> {
-    let mut runs: Vec<u32> = Vec::new();
-    let mut current: u32 = 0;
-    let mut started = false;
-    let mut prev_ts: Option<std::time::SystemTime> = None;
-
-    for sample in window.iter() {
-        let is_new_run = match prev_ts {
-            None => true,
-            Some(prev) => sample
-                .ts
-                .duration_since(prev)
-                .map(|gap| gap > ttl)
-                .unwrap_or(false),
-        };
-
-        if is_new_run && started {
-            runs.push(current);
-            current = 0;
-        }
-        started = true;
-
-        if sample.observed_reuse {
-            current += 1;
-        }
-        prev_ts = Some(sample.ts);
-    }
-
-    if started {
-        runs.push(current);
-    }
-    runs
-}
-
-/// Pure percentile/confidence reducer over per-run reuse counts.
-///
-/// Returns `(k_floor, k_point, k_ceiling, confidence)`. This is the
-/// explicitly swappable, validation-gated core of the estimator; keep it
-/// simple and auditable. Percentiles use the nearest-rank method on the
-/// ascending-sorted counts.
-///
-/// Confidence by run count `n`:
+/// `successes` = samples that observed reuse, `n` = total samples. Returns
+/// `(k_floor, k_point, k_ceiling, confidence)`:
 /// - `n == 0` -> `Cold`, all bounds 0.
-/// - `1 <= n < CALIBRATED_MIN_RUNS` -> `Low`, and `k_floor` is clamped to 0
-///   (a thin sample must not authorize a future cut).
-/// - `n >= CALIBRATED_MIN_RUNS` -> `Calibrated`.
-fn estimate_from_runs(run_reuse_counts: &[u32]) -> (f64, f64, f64, Confidence) {
-    let n = run_reuse_counts.len();
+/// - `k_point = E[K]` from the observed continuation rate `successes / n`.
+/// - `k_floor = E[K]` from the Wilson LOWER bound on `p`; `k_ceiling` from
+///   the Wilson UPPER bound. Because `p_lcb <= p_hat <= p_ucb` and
+///   [`expected_k`] is monotone non-decreasing, `k_floor <= k_point <=
+///   k_ceiling` always holds.
+/// - `successes == 0` collapses `p_lcb` to 0, so the floor is 0 (fail-closed
+///   KEEP: an all-miss window never authorizes a cut).
+/// - `n < CALIBRATED_MIN_TRIALS` -> `Low`, and `k_floor` is force-clamped to
+///   0 (a thin sample must never gate a cut). `n >= CALIBRATED_MIN_TRIALS` ->
+///   `Calibrated`.
+fn hazard_estimate(successes: u32, n: u32) -> (f64, f64, f64, Confidence) {
     if n == 0 {
         return (0.0, 0.0, 0.0, Confidence::Cold);
     }
 
-    let mut sorted: Vec<u32> = run_reuse_counts.to_vec();
-    sorted.sort_unstable();
+    let p_hat = f64::from(successes) / f64::from(n);
+    let k_point = expected_k(p_hat);
 
-    let mut k_floor = percentile(&sorted, P_FLOOR);
-    let k_point = percentile(&sorted, P_POINT);
-    let k_ceiling = percentile(&sorted, P_CEILING);
+    let p_lcb = wilson_bound(successes, n, Z_WILSON, false);
+    let mut k_floor = expected_k(p_lcb);
 
-    let confidence = if n >= CALIBRATED_MIN_RUNS {
+    let p_ucb = wilson_bound(successes, n, Z_WILSON, true);
+    let k_ceiling = expected_k(p_ucb);
+
+    let confidence = if n >= CALIBRATED_MIN_TRIALS {
         Confidence::Calibrated
     } else {
         k_floor = 0.0;
@@ -174,25 +158,59 @@ fn estimate_from_runs(run_reuse_counts: &[u32]) -> (f64, f64, f64, Confidence) {
     (k_floor, k_point, k_ceiling, confidence)
 }
 
-/// Nearest-rank percentile over an ascending-sorted, non-empty slice.
+/// One-sided Wilson score bound on a Bernoulli success probability.
 ///
-/// The rank is `ceil(p/100 * n)` clamped to `[1, n]`, indexed as `rank - 1`.
-/// `p == 0` maps to the first element. Never indexes out of bounds for any
-/// non-empty input.
-fn percentile(sorted: &[u32], p: u32) -> f64 {
-    debug_assert!(!sorted.is_empty());
-    let n = sorted.len();
-    // ceil(p * n / 100) without floating point, then clamp into [1, n].
-    let rank = (p as usize * n).div_ceil(100);
-    let rank = rank.clamp(1, n);
-    sorted[rank - 1] as f64
+/// This is the swappable, validation-gated core (D15): closed-form, no
+/// dependency, and -- unlike the Wald interval -- its LOWER bound is strictly
+/// below 1.0 at any finite `n` even when `successes == trials`, so `E[K]`
+/// built on it never goes infinite.
+///
+/// With `n = trials` and `phat = successes / n`:
+/// ```text
+/// denom  = 1 + z^2 / n
+/// center = (phat + z^2 / 2n) / denom
+/// margin = (z / denom) * sqrt( phat(1 - phat)/n + z^2 / 4n^2 )
+/// bound  = center + margin  (upper)  |  center - margin  (lower)
+/// ```
+/// The result is clamped to `[0.0, 1.0]`. `trials == 0` returns `0.0`
+/// (fail-closed: no evidence authorizes nothing, never NaN).
+fn wilson_bound(successes: u32, trials: u32, z: f64, upper: bool) -> f64 {
+    if trials == 0 {
+        return 0.0;
+    }
+    let n = f64::from(trials);
+    let phat = f64::from(successes) / n;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let center = (phat + z2 / (2.0 * n)) / denom;
+    let margin = (z / denom) * (phat * (1.0 - phat) / n + z2 / (4.0 * n * n)).sqrt();
+    let bound = if upper {
+        center + margin
+    } else {
+        center - margin
+    };
+    bound.clamp(0.0, 1.0)
+}
+
+/// Geometric reuse horizon `E[K] = p / (1 - p)` for a per-turn continuation
+/// probability `p`, made finite and non-negative.
+///
+/// `p <= 0` -> `0.0`; `p` is clamped to [`P_CLAMP`] just below 1.0 so an
+/// all-success window can never produce `Inf`/`NaN`. Monotonic
+/// non-decreasing in `p`.
+fn expected_k(p: f64) -> f64 {
+    if p <= 0.0 {
+        return 0.0;
+    }
+    let p = p.min(P_CLAMP);
+    p / (1.0 - p)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::k_estimator::store::{KSessionWindow, Sample};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn window_from(samples: &[(u64, bool)]) -> KSessionWindow {
         let mut w = KSessionWindow::new();
@@ -223,85 +241,127 @@ mod tests {
         }
     }
 
-    #[test]
-    fn estimate_from_runs_empty_is_cold() {
-        // Arrange + Act
-        let (floor, point, ceiling, conf) = estimate_from_runs(&[]);
+    // --- wilson_bound ---
 
-        // Assert
-        assert_eq!((floor, point, ceiling), (0.0, 0.0, 0.0));
-        assert_eq!(conf, Confidence::Cold);
+    #[test]
+    fn wilson_bound_zero_trials_returns_zero() {
+        // Arrange + Act + Assert: no evidence -> 0 for both directions, never
+        // NaN from a divide-by-zero.
+        assert_eq!(wilson_bound(0, 0, Z_WILSON, false), 0.0);
+        assert_eq!(wilson_bound(0, 0, Z_WILSON, true), 0.0);
     }
 
     #[test]
-    fn estimate_from_runs_thin_sample_is_low_with_clamped_floor() {
-        // Arrange: n=1 and n=2 are both below the calibration threshold, so
-        // they are Low and the floor is clamped to 0 even though the sole
-        // observation is non-zero.
-        for counts in [vec![5u32], vec![5u32, 9u32]] {
-            // Act
-            let (floor, _point, _ceiling, conf) = estimate_from_runs(&counts);
-
-            // Assert
-            assert_eq!(conf, Confidence::Low, "n={} must be Low", counts.len());
-            assert_eq!(floor, 0.0, "thin-sample floor must clamp to 0");
+    fn wilson_bound_zero_successes_lower_is_zero() {
+        // Arrange: an all-miss window over several trials.
+        // Act + Assert: the lower bound collapses to exactly 0 (fail-closed).
+        for trials in [1u32, 4, 8, 32] {
+            assert_eq!(
+                wilson_bound(0, trials, Z_WILSON, false),
+                0.0,
+                "lower bound at 0 successes / {trials} trials must be 0",
+            );
         }
     }
 
     #[test]
-    fn estimate_from_runs_calibrated_at_threshold() {
-        // Arrange: exactly CALIBRATED_MIN_RUNS runs.
-        let counts: Vec<u32> = (1..=CALIBRATED_MIN_RUNS as u32).collect();
-
-        // Act
-        let (floor, point, ceiling, conf) = estimate_from_runs(&counts);
-
-        // Assert: calibrated, and the floor is no longer force-clamped.
-        assert_eq!(conf, Confidence::Calibrated);
-        assert!(floor >= 0.0);
-        assert!(floor <= point);
-        assert!(point <= ceiling);
-    }
-
-    #[test]
-    fn estimate_from_runs_percentiles_on_known_vector() {
-        // Arrange: 1..=10. Nearest-rank ceil(p*n/100):
-        //   p10 -> rank 1 -> 1; p50 -> rank 5 -> 5; p80 -> rank 8 -> 8.
-        let counts: Vec<u32> = (1..=10).collect();
-
-        // Act
-        let (floor, point, ceiling, conf) = estimate_from_runs(&counts);
-
-        // Assert
-        assert_eq!(floor, 1.0);
-        assert_eq!(point, 5.0);
-        assert_eq!(ceiling, 8.0);
-        assert_eq!(conf, Confidence::Calibrated);
-    }
-
-    #[test]
-    fn estimate_from_runs_floor_le_point_le_ceiling() {
-        // Arrange: an unsorted, calibrated-size sample.
-        let counts = vec![9u32, 1, 4, 7, 2, 8, 3, 6, 5, 0];
-
-        // Act
-        let (floor, point, ceiling, _conf) = estimate_from_runs(&counts);
-
-        // Assert: monotonic bounds.
-        assert!(floor <= point, "floor {floor} <= point {point}");
-        assert!(point <= ceiling, "point {point} <= ceiling {ceiling}");
-    }
-
-    #[test]
-    fn percentile_does_not_panic_on_tiny_samples() {
-        // n=1 and n=2 must be in-bounds for every percentile we use.
-        for sorted in [vec![3u32], vec![3u32, 9u32]] {
-            for p in [P_FLOOR, P_POINT, P_CEILING] {
-                let v = percentile(&sorted, p);
-                assert!(v >= 0.0, "percentile {p} on {sorted:?} = {v}");
-            }
+    fn wilson_bound_lower_below_one_at_full_success() {
+        // Arrange: successes == trials for every window size we can hold.
+        // Act + Assert: the lower bound is strictly < 1, so E[K] stays finite
+        // -- the whole reason Wilson is chosen over Wald.
+        for trials in 1u32..=32 {
+            let lower = wilson_bound(trials, trials, Z_WILSON, false);
+            assert!(
+                lower < 1.0,
+                "lower bound at {trials}/{trials} must be < 1, got {lower}",
+            );
         }
     }
+
+    #[test]
+    fn wilson_bound_matches_hand_computed_value() {
+        // Arrange: successes=1, trials=1, z=1.0. By hand:
+        //   denom  = 1 + 1/1 = 2
+        //   center = (1 + 1/2) / 2 = 0.75
+        //   margin = (1/2) * sqrt(0 + 1/4) = 0.5 * 0.5 = 0.25
+        //   lower  = 0.75 - 0.25 = 0.50 ; upper = 1.00 (clamped from 1.00)
+        // Act
+        let lower = wilson_bound(1, 1, 1.0, false);
+        let upper = wilson_bound(1, 1, 1.0, true);
+
+        // Assert
+        assert!((lower - 0.5).abs() < 1e-12, "lower {lower} != 0.5");
+        assert!((upper - 1.0).abs() < 1e-12, "upper {upper} != 1.0");
+    }
+
+    #[test]
+    fn wilson_bound_brackets_the_observed_rate() {
+        // Arrange: a spread of (successes, trials) pairs.
+        // Act + Assert: lower <= phat <= upper for every pair (the score
+        // interval always contains the point estimate).
+        for (s, t) in [
+            (0u32, 4u32),
+            (1, 4),
+            (2, 4),
+            (3, 4),
+            (4, 4),
+            (5, 10),
+            (8, 10),
+        ] {
+            let phat = f64::from(s) / f64::from(t);
+            let lower = wilson_bound(s, t, Z_WILSON, false);
+            let upper = wilson_bound(s, t, Z_WILSON, true);
+            assert!(
+                lower <= phat && phat <= upper,
+                "({s}/{t}) phat={phat} not in [{lower}, {upper}]",
+            );
+        }
+    }
+
+    // --- expected_k ---
+
+    #[test]
+    fn expected_k_zero_and_negative_are_zero() {
+        // Arrange + Act + Assert
+        assert_eq!(expected_k(0.0), 0.0);
+        assert_eq!(expected_k(-0.5), 0.0);
+    }
+
+    #[test]
+    fn expected_k_half_is_one() {
+        // Arrange + Act + Assert: p=0.5 -> 0.5 / 0.5 = 1.
+        assert!((expected_k(0.5) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn expected_k_is_monotonic_non_decreasing() {
+        // Arrange: an ascending sweep of probabilities.
+        let ps = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99, 1.0];
+
+        // Act + Assert: each E[K] is >= the previous.
+        let mut prev = expected_k(ps[0]);
+        for &p in &ps[1..] {
+            let cur = expected_k(p);
+            assert!(cur >= prev, "E[K] dropped from {prev} to {cur} at p={p}");
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn expected_k_at_full_success_is_finite_and_clamped() {
+        // Arrange + Act: p=1.0 would be infinite without the clamp.
+        let k = expected_k(1.0);
+
+        // Assert: finite, and equal to the clamped horizon P_CLAMP/(1-P_CLAMP).
+        assert!(k.is_finite(), "E[K] at p=1 must be finite, got {k}");
+        let expected = P_CLAMP / (1.0 - P_CLAMP);
+        assert!(
+            (k - expected).abs() < 1e-9,
+            "E[K] {k} != clamped {expected}"
+        );
+    }
+
+    // --- estimate() ---
 
     #[test]
     fn estimate_keyless_query_is_cold() {
@@ -335,77 +395,119 @@ mod tests {
     }
 
     #[test]
-    fn estimate_single_contiguous_run_counts_measured_reuses() {
-        // Arrange: 10 samples within one TTL window, every other one a hit.
-        // No TTL gap -> a single run; reuse count is the number of hits (5),
-        // not the run length.
-        let samples: Vec<(u64, bool)> = (0..10).map(|i| (i, i % 2 == 0)).collect();
-        let store = Arc::new(KSessionStore::new());
-        store.put(key("s1"), window_from(&samples));
-        let est = LedgerBackedK::new(store);
-
-        // Act: TTL large enough that no gap splits the run.
-        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
-
-        // Assert: one run -> Low (below calibration), floor clamped, and the
-        // point reflects the single measured reuse count of 5.
-        assert_eq!(out.confidence, Confidence::Low);
-        assert_eq!(out.k_floor, 0.0);
-        assert_eq!(out.k_point, 5.0);
-        assert_eq!(out.samples, 10);
-        assert_eq!(out.source, EstimateSource::LiveLedger);
-    }
-
-    #[test]
-    fn estimate_splits_runs_on_ttl_gap() {
-        // Arrange: two clusters separated by a gap larger than the TTL. Each
-        // cluster is a run; within each, count the measured reuses.
-        // Run A at ts 0,1,2 (3 hits), run B at ts 1000,1001 (2 hits).
-        let samples = vec![
-            (0u64, true),
-            (1, true),
-            (2, true),
-            (1_000, true),
-            (1_001, true),
-        ];
-        let store = Arc::new(KSessionStore::new());
-        store.put(key("s1"), window_from(&samples));
-        let est = LedgerBackedK::new(store);
-
-        // Act: TTL of 60s splits at the 1000s gap into two runs.
-        let store_clone = est.store.clone();
-        let window = store_clone.get(&key("s1")).expect("present");
-        let runs = split_runs(&window, Duration::from_secs(60));
-
-        // Assert: two runs with reuse counts 3 and 2.
-        assert_eq!(runs.len(), 2);
-        assert!(runs.contains(&3));
-        assert!(runs.contains(&2));
-
-        // And the estimate is LiveLedger (samples fed it), Low (two runs).
-        let out = est.estimate(&query(Some("s1"), Duration::from_secs(60)));
-        assert_eq!(out.source, EstimateSource::LiveLedger);
-        assert_eq!(out.confidence, Confidence::Low);
-        assert_eq!(out.samples, 5);
-    }
-
-    #[test]
-    fn estimate_misses_on_zero_gap_uses_now_irrelevant() {
-        // Arrange: a window whose samples are all misses (no reuse). The run
-        // split still yields runs, but each measured reuse count is 0.
-        let samples = vec![(0u64, false), (1, false), (2, false)];
+    fn estimate_thin_sample_is_low_with_forced_zero_floor() {
+        // Arrange: fewer than CALIBRATED_MIN_TRIALS samples, all hits.
+        let n = (CALIBRATED_MIN_TRIALS - 1) as u64;
+        let samples: Vec<(u64, bool)> = (0..n).map(|i| (i, true)).collect();
         let store = Arc::new(KSessionStore::new());
         store.put(key("s1"), window_from(&samples));
         let est = LedgerBackedK::new(store);
 
         // Act
-        let _: SystemTime = UNIX_EPOCH; // documents that `now` does not gate this path
         let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
 
-        // Assert: one run with reuse count 0 -> Low, all-zero bounds, but the
-        // source is LiveLedger because real samples were consulted.
+        // Assert: Low, and the floor is force-clamped to 0 even though every
+        // observed turn reused (a thin sample must never authorize a cut).
         assert_eq!(out.confidence, Confidence::Low);
+        assert_eq!(out.k_floor, 0.0, "thin-sample floor must clamp to 0");
+        assert!(out.k_point > 0.0, "point should reflect the observed reuse");
+        assert_eq!(out.source, EstimateSource::LiveLedger);
+    }
+
+    #[test]
+    fn estimate_at_threshold_is_calibrated_with_monotonic_bounds() {
+        // Arrange: exactly CALIBRATED_MIN_TRIALS samples, a mix of hits/misses
+        // so p_hat is strictly interior and the floor is non-trivial.
+        let n = CALIBRATED_MIN_TRIALS as u64;
+        let samples: Vec<(u64, bool)> = (0..n).map(|i| (i, i % 2 == 0)).collect();
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act
+        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+
+        // Assert: Calibrated, floor no longer force-clamped, bounds ordered.
+        assert_eq!(out.confidence, Confidence::Calibrated);
+        assert!(out.k_floor >= 0.0);
+        assert!(
+            out.k_floor <= out.k_point,
+            "floor {} <= point {}",
+            out.k_floor,
+            out.k_point
+        );
+        assert!(
+            out.k_point <= out.k_ceiling,
+            "point {} <= ceiling {}",
+            out.k_point,
+            out.k_ceiling
+        );
+        assert_eq!(out.samples, CALIBRATED_MIN_TRIALS);
+    }
+
+    #[test]
+    fn estimate_all_miss_window_has_zero_floor_from_live_ledger() {
+        // Arrange: a calibrated-size window where no turn observed reuse.
+        let n = CALIBRATED_MIN_TRIALS as u64;
+        let samples: Vec<(u64, bool)> = (0..n).map(|i| (i, false)).collect();
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act
+        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+
+        // Assert: fail-closed -- the floor and point are 0, and the source is
+        // LiveLedger because real samples were consulted.
+        assert_eq!(out.confidence, Confidence::Calibrated);
+        assert_eq!(out.k_floor, 0.0);
         assert_eq!(out.k_point, 0.0);
+        assert_eq!(out.source, EstimateSource::LiveLedger);
+    }
+
+    #[test]
+    fn estimate_all_hit_window_point_is_finite() {
+        // Arrange: a full window of all-reuse turns -- p_hat = 1.0, which
+        // would be an infinite horizon without the P_CLAMP guard.
+        let samples: Vec<(u64, bool)> = (0..16u64).map(|i| (i, true)).collect();
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act
+        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+
+        // Assert: Calibrated, and every bound is finite (clamped).
+        assert_eq!(out.confidence, Confidence::Calibrated);
+        assert!(out.k_point.is_finite() && out.k_point > 0.0);
+        assert!(out.k_ceiling.is_finite());
+        assert!(out.k_floor.is_finite());
+        assert!(out.k_floor <= out.k_point && out.k_point <= out.k_ceiling);
+    }
+
+    #[test]
+    fn estimate_single_contiguous_window_is_calibrated_starvation_fix() {
+        // Arrange: one CONTIGUOUS run of >= CALIBRATED_MIN_TRIALS turns with
+        // no TTL gaps. The v1 run-splitter would have scored this a SINGLE run
+        // (n_runs = 1 < 8) and returned Low; the per-turn model counts each
+        // turn as a trial, so n = 12 >= 8 and the estimate is Calibrated.
+        // This is the starvation fix for few-long-contiguous sessions.
+        let samples: Vec<(u64, bool)> = (0..12u64).map(|i| (i, i % 3 != 0)).collect();
+        let store = Arc::new(KSessionStore::new());
+        store.put(key("s1"), window_from(&samples));
+        let est = LedgerBackedK::new(store);
+
+        // Act: a large TTL -- the model no longer splits on gaps at all.
+        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+
+        // Assert: the contiguous run is now Calibrated with a usable floor.
+        assert_eq!(
+            out.confidence,
+            Confidence::Calibrated,
+            "a single contiguous >= threshold window must now be Calibrated"
+        );
+        assert_eq!(out.samples, 12);
+        assert!(out.k_floor >= 0.0 && out.k_floor <= out.k_point);
         assert_eq!(out.source, EstimateSource::LiveLedger);
     }
 }

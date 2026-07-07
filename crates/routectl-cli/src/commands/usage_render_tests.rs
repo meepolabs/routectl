@@ -1170,17 +1170,21 @@ fn render_detail_omits_m1_attribution_line_when_no_recorder_rows() {
 
 // --- k-calibration render tests ------------------------------------------
 
-/// Insert a calibration row: a request with a k_floor and enough session
-/// context to drive the whole-session realized-reuse count. `session_id`,
+/// Insert a calibration row: a request with an optional `would_trim_k_floor`
+/// (None -> uncalibrated, still counts as future reuse) and enough session
+/// context to drive the remaining-future realized-reuse count. `session_id`,
 /// `provider_kind`, and `model` must be non-NULL so the calibration SQL
-/// includes it. `cache_read > 0` rows count as a reuse event.
+/// includes it; `ts_start` drives the remaining-future ordering; a
+/// `cache_read > 0` row counts as a reuse event.
+#[allow(clippy::too_many_arguments)]
 fn insert_calib_row(
     db: &UsageDb,
     request_id: &str,
+    ts_start: i64,
     session_id: &str,
     provider_kind: &str,
     model: &str,
-    k_floor: f64,
+    k_floor: Option<f64>,
     cache_read: i64,
 ) {
     db.conn()
@@ -1190,10 +1194,10 @@ fn insert_calib_row(
              session_id, stream, outcome, latency_ms, tool_count, msg_count, \
              attempt_count, fallback_count, would_trim_tokens, \
              would_trim_break_even_k, would_trim_k_floor, cache_read) \
-             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', ?4, 'paid', \
+             VALUES (?7, ?7, ?1, 'openai', 'req-model', 'al', ?4, 'paid', \
              'up-paid', ?3, ?2, 0, 'ok', 5, 0, 0, 1, 0, 10, 1.0, ?5, ?6)",
             rusqlite::params![
-                request_id, session_id, provider_kind, model, k_floor, cache_read
+                request_id, session_id, provider_kind, model, k_floor, cache_read, ts_start
             ],
         )
         .expect("insert calibration row");
@@ -1217,37 +1221,38 @@ fn k_calibration_zero_n_returns_friendly_no_data() {
 }
 
 #[test]
-fn k_calibration_known_population_matches_hand_computed_values() {
-    // Arrange: 3 rows in distinct sessions, all with a k_floor.
-    // Per-row session realized reuse = COUNT WHERE cache_read > 0 in
-    // that (session, provider_kind, model) group:
-    //   s1: r1 cache_read=2 > 0 -> realized=1; floor=1.0 -> covered (1>=1)
-    //   s2: r2 cache_read=1 > 0 -> realized=1; floor=2.0 -> NOT covered (1<2)
-    //   s3: r3 cache_read=0     -> realized=0; floor=0.5 -> NOT covered (0<0.5)
-    // max_realized = 1
-    // coverage = 1/3
-    // errors: |1.0-1|/1=0.0, |2.0-1|/1=1.0, |0.5-0|/1=0.5
-    // sorted: [0.0, 0.5, 1.0]  median = 0.5
+fn k_calibration_known_population_matches_remaining_future_values() {
+    // Arrange: ONE session with reuse concentrated EARLY, so whole-session
+    // realized reuse and REMAINING-FUTURE realized reuse diverge. The v2
+    // calibration compares each floor against reuse that remains AFTER that
+    // row -- a late over-prediction is now a miss, not a bogus success.
+    //   r1 ts=100 hit,  floor=1.0  -> 1 future hit (r2) -> covered (1>=1)
+    //   r2 ts=200 hit,  UNCALIBRATED (feeds future reuse, not population)
+    //   r3 ts=300 miss, floor=2.0  -> 0 future hits      -> MISS (0<2)
+    //   r4 ts=400 miss, floor=0.5  -> 0 future hits      -> MISS (0<0.5)
+    // Whole-session (v1) would have blessed all three (group total = 2 hits).
+    // Per-row errors: |1-1|/2=0, |2-0|/1=2, |0.5-0|/1=0.5 -> median 0.5.
     let (_dir, _path, db) = temp_db();
-    insert_calib_row(&db, "r1", "s1", "anth", "m1", 1.0, 2);
-    insert_calib_row(&db, "r2", "s2", "anth", "m1", 2.0, 1);
-    insert_calib_row(&db, "r3", "s3", "anth", "m1", 0.5, 0);
+    insert_calib_row(&db, "r1", 100, "s1", "anth", "m1", Some(1.0), 5);
+    insert_calib_row(&db, "r2", 200, "s1", "anth", "m1", None, 5);
+    insert_calib_row(&db, "r3", 300, "s1", "anth", "m1", Some(2.0), 0);
+    insert_calib_row(&db, "r4", 400, "s1", "anth", "m1", Some(0.5), 0);
 
     // Act
     let cal = k_calibration_summary(&db).unwrap();
 
-    // Assert hand-computed values.
-    assert_eq!(cal.n, 3, "population must be 3");
+    // Assert hand-computed remaining-future values.
+    assert_eq!(cal.n, 3, "only the 3 calibrated rows form the population");
     let coverage_expected = 1.0_f64 / 3.0;
     assert!(
         (cal.coverage - coverage_expected).abs() < 1e-9,
-        "coverage mismatch: got {}, expected {}",
+        "remaining-future coverage mismatch: got {}, expected {}",
         cal.coverage,
         coverage_expected
     );
     assert!(
         (cal.accuracy - 0.5).abs() < 1e-9,
-        "accuracy (median error) mismatch: got {}",
+        "per-row-normalized median accuracy mismatch: got {}",
         cal.accuracy
     );
 }
@@ -1256,9 +1261,9 @@ fn k_calibration_known_population_matches_hand_computed_values() {
 fn k_calibration_sufficiency_below_200_fails() {
     // Arrange: 3 rows -> n=3 < 200.
     let (_dir, _path, db) = temp_db();
-    insert_calib_row(&db, "x1", "s1", "a", "m", 1.0, 1);
-    insert_calib_row(&db, "x2", "s2", "a", "m", 1.0, 1);
-    insert_calib_row(&db, "x3", "s3", "a", "m", 1.0, 1);
+    insert_calib_row(&db, "x1", 100, "s1", "a", "m", Some(1.0), 1);
+    insert_calib_row(&db, "x2", 200, "s2", "a", "m", Some(1.0), 1);
+    insert_calib_row(&db, "x3", 300, "s3", "a", "m", Some(1.0), 1);
 
     let cal = k_calibration_summary(&db).unwrap();
     let out = render_k_calibration(&cal);
@@ -1267,19 +1272,19 @@ fn k_calibration_sufficiency_below_200_fails() {
         out.contains("sufficiency") && out.contains("FAIL"),
         "sufficiency must FAIL when n < 200: {out}"
     );
-    assert!(
-        out.contains("overall: FAIL"),
-        "overall must FAIL: {out}"
-    );
+    assert!(out.contains("overall: FAIL"), "overall must FAIL: {out}");
 }
 
 #[test]
 fn k_calibration_render_all_pass_when_thresholds_met() {
-    // Arrange: craft a KCalibration that passes all three gates.
+    // Arrange: craft a KCalibration that passes both gates (coverage +
+    // sufficiency). hazard_decay and accuracy are diagnostics and never
+    // affect the pass/fail verdict.
     let cal = KCalibration {
         n: 250,
         coverage: 0.92,
         accuracy: 0.30,
+        hazard_decay: -0.05,
     };
 
     let out = render_k_calibration(&cal);
@@ -1289,34 +1294,84 @@ fn k_calibration_render_all_pass_when_thresholds_met() {
 }
 
 #[test]
-fn k_calibration_multi_row_per_session_both_see_group_realized() {
-    // Arrange: two rows sharing the same (session_id, provider_kind, model).
-    // One row has cache_read > 0 (a reuse event), the other cache_read = 0.
-    // The GROUP-BY join must assign realized = 1 to BOTH rows (the whole-session
-    // aggregate for their group has exactly one cache-read hit). The population
-    // is n=2; coverage = 1 (both rows have realized=1 >= their floor of 0.5);
-    // errors: both |0.5 - 1| / 1 = 0.5, so median accuracy = 0.5.
+fn k_calibration_render_accuracy_is_diagnostic_not_a_gate() {
+    // Arrange: accuracy fails its reference threshold (0.80 > 0.40) but
+    // coverage and sufficiency both pass. Accuracy is a diagnostic, not a
+    // safety gate -- overall must still be PASS.
+    let cal = KCalibration {
+        n: 250,
+        coverage: 0.92,
+        accuracy: 0.80,
+        hazard_decay: 0.0,
+    };
+
+    let out = render_k_calibration(&cal);
+
+    assert!(
+        out.contains("overall: PASS"),
+        "failing accuracy must not flip the gate: {out}"
+    );
+    assert!(!out.contains("FAIL"), "no FAIL in output: {out}");
+}
+
+#[test]
+fn k_calibration_render_surfaces_hazard_decay_diagnostic_line() {
+    // Arrange: a decaying hazard should render on its own signed diagnostic
+    // line, clearly labelled as NOT a gate.
+    let cal = KCalibration {
+        n: 250,
+        coverage: 0.95,
+        accuracy: 0.20,
+        hazard_decay: -0.12,
+    };
+
+    // Act
+    let out = render_k_calibration(&cal);
+
+    // Assert: the line shows the signed value and marks itself a diagnostic.
+    assert!(
+        out.contains("hazard_decay"),
+        "hazard_decay line must be present: {out}"
+    );
+    assert!(
+        out.contains("-0.120"),
+        "hazard_decay value must render signed: {out}"
+    );
+    assert!(
+        out.contains("diagnostic") && out.contains("not a gate"),
+        "hazard_decay must be labelled a non-gate diagnostic: {out}"
+    );
+    // It must not flip the overall verdict (a diagnostic, not a gate).
+    assert!(out.contains("overall: PASS"), "gates still pass: {out}");
+}
+
+#[test]
+fn k_calibration_remaining_future_counts_only_later_group_reuse() {
+    // Arrange: two rows sharing one (session, provider_kind, model). An early
+    // calibrated row sees the LATER row's reuse; the later calibrated row sees
+    // none. The v1 whole-session join gave BOTH rows the group total (1); v2
+    // gives each row only the reuse that remains after it.
+    //   mc1 ts=100 hit,  floor=0.5 -> 0 future hits (mc2 is a miss) -> MISS
+    //   mc2 ts=200 miss, floor=0.5 -> 0 future hits                 -> MISS
     let (_dir, _path, db) = temp_db();
-    // Row A: has cache_read=5 (reuse event)
-    insert_calib_row(&db, "mc1", "shared-sess", "anth", "opus", 0.5, 5);
-    // Row B: same (session, provider_kind, model), no cache hit
-    insert_calib_row(&db, "mc2", "shared-sess", "anth", "opus", 0.5, 0);
+    insert_calib_row(&db, "mc1", 100, "shared-sess", "anth", "opus", Some(0.5), 5);
+    insert_calib_row(&db, "mc2", 200, "shared-sess", "anth", "opus", Some(0.5), 0);
 
     // Act
     let cal = k_calibration_summary(&db).unwrap();
 
-    // Assert: BOTH rows see realized=1 (the group's aggregate reuse count).
+    // Assert: both calibrated rows counted; neither has remaining reuse >=
+    // 0.5, so coverage is 0 (v1 whole-session would have covered both).
     assert_eq!(cal.n, 2, "both calibrated rows are counted");
-    // coverage: realized(1) >= floor(0.5) for both rows -> 2/2 = 1.0
-    assert!(
-        (cal.coverage - 1.0).abs() < 1e-9,
-        "both rows should be covered (realized=1 >= floor=0.5): coverage={}",
+    assert_eq!(
+        cal.coverage, 0.0,
+        "no reuse remains after either row: coverage must be 0, got {}",
         cal.coverage
     );
-    // accuracy: median of [|0.5-1|/1, |0.5-1|/1] = median([0.5, 0.5]) = 0.5
+    // errors: mc1 |0.5-0|/1=0.5, mc2 |0.5-0|/1=0.5 -> median 0.5.
     assert!(
         (cal.accuracy - 0.5).abs() < 1e-9,
-        "accuracy (median error) should be 0.5: got {}",
+        "per-row-normalized median accuracy should be 0.5: got {}",
         cal.accuracy
     );
 }

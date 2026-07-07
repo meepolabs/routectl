@@ -435,75 +435,117 @@ pub fn m1_attribution_summary(
 /// K-estimator calibration triple over all history. Populated by
 /// `k_calibration_summary`; zero-fields indicate no calibrated predictions.
 ///
-/// The calibration measures the FLOOR (p10 of the K distribution), which is
-/// the persisted gate-authorizing column. The spec's "p50" label refers to
-/// the predicted typical reuse; only the floor is persisted, so v1 calibrates
-/// the floor. The whole-session realized-reuse metric (`a`) is an optimistic
-/// upper bound: it counts all cache-read hits within the session regardless of
-/// TTL alignment. TTL-windowed refinement is a v2 concern; this v1 uses the
-/// whole-session count as a conservative-on-the-denominator measure that
-/// remains auditable without sub-second replay.
+/// The calibration measures the persisted FLOOR (`would_trim_k_floor`, the
+/// only gate-authorizing bound) against REMAINING-FUTURE realized reuse from
+/// each row's point in time -- the count of later same-triple rows that
+/// actually observed a cache read. This is deliberately NOT whole-session
+/// realized reuse: a whole-session comparison counts reuse that happened
+/// BEFORE the prediction as if it validated the prediction, which
+/// systematically blesses late-session over-predictions (the money-losing
+/// direction). Remaining-future is the honest question the floor is asked to
+/// answer -- "will the prefix be re-read enough MORE times to justify cutting
+/// it now?".
 #[derive(Debug, Clone, PartialEq)]
 pub struct KCalibration {
     /// Population size: rows with `would_trim_k_floor IS NOT NULL`.
     pub n: usize,
-    /// Fraction of population where realized reuse >= predicted floor.
-    /// PASS threshold: >= 0.90.
+    /// Fraction of population where remaining-future reuse >= predicted
+    /// floor. PRIMARY safety metric. PASS threshold: >= 0.90.
     pub coverage: f64,
-    /// Median of |floor - realized| / max_realized_reuse over the population.
-    /// PASS threshold: <= 0.40.
+    /// Median of `|floor - realized_remaining| / (realized_remaining + 1)`
+    /// over the population -- per-row normalized so one high-reuse row can no
+    /// longer compress everyone else's error toward zero. DIAGNOSTIC only,
+    /// not a safety gate.
     pub accuracy: f64,
+    /// Mean first-half -> second-half per-turn continuation-rate delta across
+    /// qualifying (session, provider_kind, model) groups. A material NEGATIVE
+    /// value means reuse decays late in a session; read before the live-cut
+    /// go/no-go decision, it is
+    /// the trigger to open the age-conditioned-hazard design (a constant
+    /// pooled hazard would over-predict E[K] late). DIAGNOSTIC, never a gate.
+    /// 0.0 when no group has enough rows to split into meaningful halves.
+    pub hazard_decay: f64,
 }
 
 /// Per-row data pulled from the DB for the calibration computation.
 struct CalibRow {
     floor: f64,
-    /// Whole-session realized K: COUNT of rows in the same
-    /// (session_id, provider_kind, model) group with cache_read > 0.
-    realized: i64,
+    /// Remaining-future realized K: COUNT of rows in the same
+    /// (session_id, provider_kind, model) group with cache_read > 0 that
+    /// occur STRICTLY AFTER this row, ordered by (ts_start, rowid).
+    realized_remaining: i64,
 }
 
-/// A single read-only GROUP-BY join pulls each calibrated row's floor plus
-/// its whole-session realized reuse; coverage, sufficiency, and the median
-/// accuracy are thin Rust reductions because SQLite lacks a native MEDIAN.
+/// A single read-only pass computes each row's REMAINING-FUTURE realized
+/// reuse via a windowed running count over the same-triple rows that follow
+/// it, then filters to the calibrated rows. Coverage, sufficiency, and the
+/// median accuracy are thin Rust reductions because SQLite lacks a native
+/// MEDIAN.
 ///
-/// `session_reuse` computes whole-session realized K once per
-/// (session_id, provider_kind, model) group. The JOIN then attaches each
-/// calibrated row's floor to its group's realized count. NULL-session rows
-/// and rows without provider_kind or model are excluded by the WHERE guards
-/// in both the CTE and the outer query.
+/// The window frame `ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING`
+/// counts, per row, cache_read>0 rows strictly after it within its
+/// (session_id, provider_kind, model) partition, ordered by (ts_start,
+/// rowid). The COALESCE turns the empty frame of a group's last row (a NULL
+/// SUM) into 0. The subquery runs the window over ALL valid-triple rows so
+/// future reuse is counted even from uncalibrated rows; the outer WHERE then
+/// restricts the population to calibrated rows.
 const K_CALIBRATION_SQL: &str = "\
-WITH session_reuse AS (
-    SELECT session_id, provider_kind, model,
-           SUM(CASE WHEN cache_read > 0 THEN 1 ELSE 0 END) AS realized
-    FROM requests
+SELECT floor, realized_remaining FROM (
+    SELECT r.would_trim_k_floor AS floor,
+           COALESCE(SUM(CASE WHEN cache_read > 0 THEN 1 ELSE 0 END) OVER (
+               PARTITION BY session_id, provider_kind, model
+               ORDER BY ts_start, rowid
+               ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING
+           ), 0) AS realized_remaining
+    FROM requests r
     WHERE session_id IS NOT NULL AND provider_kind IS NOT NULL AND model IS NOT NULL
-    GROUP BY session_id, provider_kind, model
 )
-SELECT r.would_trim_k_floor AS floor, sr.realized AS realized
-FROM requests r
-JOIN session_reuse sr
-  ON sr.session_id = r.session_id AND sr.provider_kind = r.provider_kind AND sr.model = r.model
-WHERE r.would_trim_k_floor IS NOT NULL
-  AND r.would_trim_k_floor >= 0.0
-  AND r.session_id IS NOT NULL AND r.provider_kind IS NOT NULL AND r.model IS NOT NULL";
+WHERE floor IS NOT NULL AND floor >= 0.0";
+
+/// Minimum rows in a (session, provider_kind, model) group before its
+/// first-half/second-half continuation-rate delta is meaningful enough to
+/// fold into `hazard_decay`. Below this a split is one-vs-one or one-vs-two,
+/// too noisy to inform the age-conditioning decision.
+const HAZARD_DECAY_MIN_GROUP_ROWS: usize = 4;
+
+/// Ordered per-turn reuse outcomes for the hazard-decay reduction. Delivered
+/// grouped by the triple and oldest-first WITHIN each group, so consecutive
+/// rows sharing a triple form one session's turn sequence.
+const K_HAZARD_DECAY_SQL: &str = "\
+SELECT session_id, provider_kind, model,
+       CASE WHEN cache_read > 0 THEN 1 ELSE 0 END AS hit
+FROM requests
+WHERE session_id IS NOT NULL AND provider_kind IS NOT NULL AND model IS NOT NULL
+ORDER BY session_id, provider_kind, model, ts_start, rowid";
+
+/// One ordered per-turn reuse outcome for the hazard-decay reduction.
+struct HitRow {
+    session_id: String,
+    provider_kind: String,
+    model: String,
+    /// True when the turn observed a cache read.
+    hit: bool,
+}
 
 /// K-estimator calibration over all history. Measures how well the recorded
-/// floor predictions track whole-session realized reuse. Returns a
-/// `KCalibration` with n=0 when there are no calibrated predictions.
+/// floor predictions track REMAINING-FUTURE realized reuse (see
+/// [`KCalibration`]). Returns a `KCalibration` with n=0 when there are no
+/// calibrated predictions.
 ///
 /// The median is computed in Rust over the pulled per-row error values for
-/// auditability; SQLite's median extension is non-standard.
+/// auditability; SQLite's median extension is non-standard. `hazard_decay`
+/// is a second small reduction over the ordered per-turn reuse outcomes.
 pub fn k_calibration_summary(db: &UsageDb) -> Result<KCalibration, QueryError> {
-    let mut stmt = db.conn().prepare(K_CALIBRATION_SQL)?;
-    let rows = stmt
-        .query_map([], |row| {
+    let rows = {
+        let mut stmt = db.conn().prepare(K_CALIBRATION_SQL)?;
+        stmt.query_map([], |row| {
             Ok(CalibRow {
                 floor: row.get(0)?,
-                realized: row.get(1)?,
+                realized_remaining: row.get(1)?,
             })
         })?
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     let n = rows.len();
     if n == 0 {
@@ -511,39 +553,90 @@ pub fn k_calibration_summary(db: &UsageDb) -> Result<KCalibration, QueryError> {
             n: 0,
             coverage: 0.0,
             accuracy: 0.0,
+            hazard_decay: 0.0,
         });
     }
 
-    let max_realized = rows
+    let coverage = rows
         .iter()
-        .map(|r| r.realized)
-        .max()
-        .expect("non-empty: n==0 is guarded above");
+        .filter(|r| r.realized_remaining as f64 >= r.floor)
+        .count() as f64
+        / n as f64;
 
-    let coverage = rows.iter().filter(|r| r.realized as f64 >= r.floor).count() as f64 / n as f64;
-
-    // Global-max normalizer: median(|floor - actual| / max_realized). A
-    // high-reuse outlier session compresses other rows' relative error;
-    // per-row normalization is a v2 consideration.
+    // Per-row normalize the error (guard +1 so a 0-remaining row is finite).
+    // Replaces the global-max normalizer, under which one high-reuse row
+    // compressed every other row's relative error toward zero.
     let mut errors: Vec<f64> = rows
         .iter()
         .map(|r| {
-            let diff = (r.floor - r.realized as f64).abs();
-            if max_realized > 0 {
-                diff / max_realized as f64
-            } else {
-                0.0
-            }
+            let realized = r.realized_remaining as f64;
+            (r.floor - realized).abs() / (realized + 1.0)
         })
         .collect();
     errors.sort_by(f64::total_cmp);
     let accuracy = median_f64(&errors);
 
+    let hazard_decay = {
+        let mut stmt = db.conn().prepare(K_HAZARD_DECAY_SQL)?;
+        let hit_rows = stmt
+            .query_map([], |row| {
+                Ok(HitRow {
+                    session_id: row.get(0)?,
+                    provider_kind: row.get(1)?,
+                    model: row.get(2)?,
+                    hit: row.get::<_, bool>(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        compute_hazard_decay(&hit_rows)
+    };
+
     Ok(KCalibration {
         n,
         coverage,
         accuracy,
+        hazard_decay,
     })
+}
+
+/// Mean first-half -> second-half per-turn continuation-rate delta across
+/// (session, provider_kind, model) groups with at least
+/// [`HAZARD_DECAY_MIN_GROUP_ROWS`] rows. For each qualifying group the rows
+/// (already ordered oldest-first within the group) split at the midpoint;
+/// `delta = second_half_rate - first_half_rate`, where each rate is the
+/// fraction of that half's rows that observed a cache read. `hazard_decay` is
+/// the mean delta across qualifying groups, or 0.0 when none qualify. A
+/// material NEGATIVE mean means reuse decays late in a session.
+///
+/// `rows` MUST arrive grouped by the triple and oldest-first within each
+/// group (as `K_HAZARD_DECAY_SQL` orders them), so consecutive equal-triple
+/// rows form one session's turn sequence.
+fn compute_hazard_decay(rows: &[HitRow]) -> f64 {
+    let mut deltas: Vec<f64> = Vec::new();
+    for group in rows.chunk_by(same_group) {
+        if group.len() >= HAZARD_DECAY_MIN_GROUP_ROWS {
+            let mid = group.len() / 2;
+            deltas.push(hit_rate(&group[mid..]) - hit_rate(&group[..mid]));
+        }
+    }
+
+    if deltas.is_empty() {
+        0.0
+    } else {
+        deltas.iter().sum::<f64>() / deltas.len() as f64
+    }
+}
+
+/// True when two hit rows belong to the same (session, provider_kind, model)
+/// group.
+fn same_group(a: &HitRow, b: &HitRow) -> bool {
+    a.session_id == b.session_id && a.provider_kind == b.provider_kind && a.model == b.model
+}
+
+/// Fraction of a non-empty slice of turns that observed a cache read.
+fn hit_rate(rows: &[HitRow]) -> f64 {
+    let hits = rows.iter().filter(|r| r.hit).count();
+    hits as f64 / rows.len() as f64
 }
 
 /// Nearest-rank median of a non-empty sorted slice.
@@ -1759,5 +1852,154 @@ mod tests {
         // Assert: the three OLDEST (ascending order, then LIMIT).
         let ids: Vec<i64> = rows.iter().map(|r| r.ts_start_ms).collect();
         assert_eq!(ids, vec![100, 101, 102]);
+    }
+
+    /// Insert a calibration row: an optional `would_trim_k_floor` (None ->
+    /// uncalibrated, still counts as future reuse) plus the (session_id,
+    /// provider_kind, model) triple and a `cache_read` snapshot. `ts_start`
+    /// drives the remaining-future ordering.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_calib_row(
+        db: &UsageDb,
+        request_id: &str,
+        ts_start: i64,
+        session_id: &str,
+        provider_kind: &str,
+        model: &str,
+        k_floor: Option<f64>,
+        cache_read: i64,
+    ) {
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, model, provider, provider_kind, session_id, \
+                 stream, outcome, latency_ms, tool_count, msg_count, attempt_count, \
+                 fallback_count, would_trim_k_floor, cache_read) \
+                 VALUES (?1, ?1, ?2, 'anthropic', 'req-model', 'al', ?3, 'paid', ?4, ?5, \
+                 1, 'ok', 5, 0, 0, 1, 0, ?6, ?7)",
+                rusqlite::params![
+                    ts_start,
+                    request_id,
+                    model,
+                    provider_kind,
+                    session_id,
+                    k_floor,
+                    cache_read,
+                ],
+            )
+            .expect("insert calib row");
+    }
+
+    #[test]
+    fn k_calibration_coverage_uses_remaining_future_not_whole_session() {
+        // Arrange: ONE session whose reuse is concentrated EARLY. Under the
+        // old whole-session comparison every calibrated row would see the
+        // group's total of 2 hits and all three would be "covered". Under the
+        // remaining-future comparison a LATE over-prediction is correctly a
+        // miss, because no reuse remains after it.
+        //   r1 ts=100 hit,  floor=1.0  -> 1 future hit (r2)  -> covered (1>=1)
+        //   r2 ts=200 hit,  UNCALIBRATED (feeds future reuse, not population)
+        //   r3 ts=300 miss, floor=2.0  -> 0 future hits      -> MISS (0<2)
+        //   r4 ts=400 miss, floor=0.5  -> 0 future hits      -> MISS (0<0.5)
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_calib_row(&db, "r1", 100, "s1", "anth", "m1", Some(1.0), 5);
+        insert_calib_row(&db, "r2", 200, "s1", "anth", "m1", None, 5);
+        insert_calib_row(&db, "r3", 300, "s1", "anth", "m1", Some(2.0), 0);
+        insert_calib_row(&db, "r4", 400, "s1", "anth", "m1", Some(0.5), 0);
+
+        // Act
+        let cal = k_calibration_summary(&db).expect("summary");
+
+        // Assert: population is the 3 calibrated rows; remaining-future
+        // coverage is 1/3 (whole-session would have been 3/3).
+        assert_eq!(cal.n, 3, "only the calibrated rows form the population");
+        assert!(
+            (cal.coverage - 1.0 / 3.0).abs() < 1e-9,
+            "remaining-future coverage must be 1/3, got {}",
+            cal.coverage
+        );
+        // Per-row normalized errors: |1-1|/2=0, |2-0|/1=2, |0.5-0|/1=0.5;
+        // sorted [0, 0.5, 2] -> median 0.5.
+        assert!(
+            (cal.accuracy - 0.5).abs() < 1e-9,
+            "per-row-normalized median accuracy must be 0.5, got {}",
+            cal.accuracy
+        );
+    }
+
+    #[test]
+    fn k_calibration_hazard_decay_is_negative_for_decaying_session() {
+        // Arrange: a 4-turn session whose reuse decays -- both first-half
+        // turns reused, neither second-half turn did. first_rate=1.0,
+        // second_rate=0.0 -> delta = -1.0. All rows calibrated so n>0 and the
+        // main path computes hazard_decay.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_calib_row(&db, "d0", 100, "sd", "anth", "m1", Some(1.0), 5);
+        insert_calib_row(&db, "d1", 200, "sd", "anth", "m1", Some(1.0), 5);
+        insert_calib_row(&db, "d2", 300, "sd", "anth", "m1", Some(1.0), 0);
+        insert_calib_row(&db, "d3", 400, "sd", "anth", "m1", Some(1.0), 0);
+
+        // Act
+        let cal = k_calibration_summary(&db).expect("summary");
+
+        // Assert: a material negative decay -- the age-conditioning trigger.
+        assert!(
+            (cal.hazard_decay + 1.0).abs() < 1e-9,
+            "decaying session must yield hazard_decay = -1.0, got {}",
+            cal.hazard_decay
+        );
+    }
+
+    #[test]
+    fn k_calibration_hazard_decay_is_zero_for_flat_session() {
+        // Arrange: a 4-turn session with a CONSTANT (flat) reuse rate -- every
+        // turn reused. Both halves rate 1.0 -> delta 0.0.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        for (i, ts) in [100, 200, 300, 400].into_iter().enumerate() {
+            insert_calib_row(&db, &format!("f{i}"), ts, "sf", "anth", "m1", Some(1.0), 5);
+        }
+
+        // Act
+        let cal = k_calibration_summary(&db).expect("summary");
+
+        // Assert
+        assert_eq!(cal.hazard_decay, 0.0, "flat reuse -> zero decay");
+    }
+
+    #[test]
+    fn k_calibration_hazard_decay_is_zero_when_no_group_has_enough_rows() {
+        // Arrange: a session with fewer than HAZARD_DECAY_MIN_GROUP_ROWS rows
+        // -- no group qualifies, so the halves would be too noisy to inform
+        // the age-conditioning decision.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+        insert_calib_row(&db, "g0", 100, "sg", "anth", "m1", Some(1.0), 5);
+        insert_calib_row(&db, "g1", 200, "sg", "anth", "m1", Some(1.0), 0);
+        insert_calib_row(&db, "g2", 300, "sg", "anth", "m1", Some(1.0), 5);
+
+        // Act
+        let cal = k_calibration_summary(&db).expect("summary");
+
+        // Assert: no qualifying group -> hazard_decay defaults to 0.0.
+        assert_eq!(cal.hazard_decay, 0.0);
+    }
+
+    #[test]
+    fn k_calibration_empty_db_is_all_zero_including_hazard_decay() {
+        // Arrange: no rows at all.
+        let (_dir, path) = temp_db_path();
+        let db = open(&path).expect("open");
+
+        // Act
+        let cal = k_calibration_summary(&db).expect("summary");
+
+        // Assert: the n==0 early return zeroes every field.
+        assert_eq!(cal.n, 0);
+        assert_eq!(cal.coverage, 0.0);
+        assert_eq!(cal.accuracy, 0.0);
+        assert_eq!(cal.hazard_decay, 0.0);
     }
 }

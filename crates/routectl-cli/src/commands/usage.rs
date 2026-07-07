@@ -1107,20 +1107,19 @@ pub fn render_k_calibration(cal: &KCalibration) -> String {
         return "no calibrated predictions recorded yet\n".to_string();
     }
     let cov_pass = cal.coverage >= K_CALIBRATION_COVERAGE_PASS;
-    let acc_pass = cal.accuracy <= K_CALIBRATION_ACCURACY_PASS;
     let suf_pass = cal.n >= K_CALIBRATION_SUFFICIENCY_PASS;
-    let overall = cov_pass && acc_pass && suf_pass;
+    let overall = cov_pass && suf_pass;
     format!(
-        "== k-calibration (all history) ==\ncoverage     {:.2}   (>= {:.2})  {}\naccuracy     {:.2}   (<= {:.2})  {}\nsufficiency  {}    (>= {})   {}\noverall: {}\n",
+        "== k-calibration (all history) ==\ncoverage     {:.2}   (>= {:.2})  {}\naccuracy     {:.2}   (<= {:.2})  (diagnostic, not a gate)\nsufficiency  {}    (>= {})   {}\nhazard_decay {:+.3}         (diagnostic; age-conditioning trigger, not a gate)\noverall: {}\n",
         cal.coverage,
         K_CALIBRATION_COVERAGE_PASS,
         gate_label(cov_pass),
         cal.accuracy,
         K_CALIBRATION_ACCURACY_PASS,
-        gate_label(acc_pass),
         cal.n,
         K_CALIBRATION_SUFFICIENCY_PASS,
         gate_label(suf_pass),
+        cal.hazard_decay,
         gate_label(overall),
     )
 }
