@@ -5,4 +5,5 @@
 pub mod commands;
 pub mod handlers;
 pub mod ingress;
+pub mod proxy;
 pub mod server;

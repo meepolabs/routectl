@@ -13,6 +13,7 @@
 //!   test     One-shot completion against an alias or model nickname.
 //!   config   Validate or print the resolved config.
 //!   pricing  Inspect or stamp the cache-economics pricing manifest.
+//!   rc       Print MITM-proxy env vars, or force a CA rotation.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -209,6 +210,12 @@ enum Cmd {
         #[command(subcommand)]
         action: PricingCmd,
     },
+    /// Print MITM front-proxy env vars, or force a CA rotation.
+    /// Requires a `[mitm]` config block.
+    Rc {
+        #[command(subcommand)]
+        action: RcCmd,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -228,6 +235,16 @@ enum PricingCmd {
     /// Stamp a baked pricing row verified as of today.
     /// `selector` is `"provider_kind:model_glob"` (e.g. `openai-compat:grok-*`).
     Verify { selector: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum RcCmd {
+    /// Print `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` for the configured
+    /// MITM listener. Non-zero exit if `[mitm]` is not configured.
+    Env,
+    /// Re-mint the MITM CA + leaf certificate pair and print the new CA
+    /// path. Non-zero exit if `[mitm]` is not configured.
+    RegenCa,
 }
 
 #[tokio::main]
@@ -406,6 +423,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Cmd::Rc { action } => {
+            let config = load_config(cli.config.as_deref())?;
+            let result = match action {
+                RcCmd::Env => commands::rc::env(&config),
+                RcCmd::RegenCa => commands::rc::regen_ca(&config),
+            };
+            match result {
+                Ok(code) => std::process::exit(code),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())

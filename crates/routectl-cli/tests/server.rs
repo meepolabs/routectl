@@ -787,3 +787,51 @@ async fn x_routectl_alias_header_overrides_model_on_chat_completions() {
         body["model"],
     );
 }
+
+// ---------------------------------------------------------------------------
+// MITM anti-drift guard: `proxy::split::ANTHROPIC_INFERENCE_PATHS` is the
+// single source of truth for which routes the MITM front-proxy classifies
+// as Anthropic-dialect inference traffic. These two tests pin (a) every
+// path in the const is actually served by `build_axum_router` (no 404s),
+// and (b) the const equals its exact expected literal set -- so a change to
+// either side is a deliberate, reviewed edit rather than silent drift.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn anthropic_inference_paths_matches_expected_literal_set() {
+    let expected: &[&str] = &["/v1/messages", "/v1/messages/count_tokens", "/v1/models"];
+    assert_eq!(
+        routectl_cli::proxy::split::anthropic_inference_paths(),
+        expected,
+        "ANTHROPIC_INFERENCE_PATHS changed -- this must be a deliberate, reviewed edit \
+         (the MITM split classifier depends on this exact set)"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_inference_paths_are_all_served_by_build_axum_router() {
+    let config = openai_compat_config("http://127.0.0.1:1", "provider1", "any-alias");
+    let base = helpers::spawn_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    for inference_path in routectl_cli::proxy::split::anthropic_inference_paths() {
+        let url = format!("{base}{inference_path}");
+        let resp = if *inference_path == "/v1/models" {
+            client.get(&url).send().await.unwrap()
+        } else {
+            client
+                .post(&url)
+                .header("content-type", "application/json")
+                .body("{}")
+                .send()
+                .await
+                .unwrap()
+        };
+        assert_ne!(
+            resp.status(),
+            404,
+            "path {inference_path} must be served by build_axum_router -- a 404 here means \
+             ANTHROPIC_INFERENCE_PATHS has drifted from the routes routectl actually serves"
+        );
+    }
+}

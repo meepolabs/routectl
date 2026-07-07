@@ -211,6 +211,23 @@ pub async fn serve_on_listener(
 
     let token_set = resolve_listener_tokens(&config).await?;
 
+    // HARD REFUSE, independent of --unsafe-public and independent of
+    // listener auth tokens: a non-loopback bind with [mitm] enabled
+    // would make the MITM front-proxy an open relay forwarding
+    // arbitrary reachable callers' full-scope upstream credentials
+    // (e.g. a pooled Anthropic OAuth token) to the real upstream
+    // origin. That is a strictly higher stake than the "expose the
+    // ingress API without auth" case the check below guards, so this
+    // has no override -- unlike --unsafe-public, there is no flag that
+    // makes running an MITM open relay a supported configuration.
+    if config.mitm.is_some() && !bound.ip().is_loopback() {
+        return Err(Error::Config(format!(
+            "refusing to start with [mitm] enabled while bound to non-loopback address \
+             `{bound}`; the MITM front-proxy would relay arbitrary reachable callers' \
+             upstream credentials -- this refusal cannot be overridden with --unsafe-public"
+        )));
+    }
+
     // Cross-check: a public bind (post-`--unsafe-public`) without
     // any configured listener tokens is a configuration mistake --
     // the operator's intent to "expose this address" only makes
@@ -249,7 +266,33 @@ pub async fn serve_on_listener(
     // coordinator task; they all observe the same `watch::Sender`
     // closing when `axum::serve` returns.
     let (shutdown_tx, shutdown_rx) = watch::channel(());
-    let reload_handles = spawn_reload_pipeline(
+
+    // The MITM front-proxy listener (when `[mitm]` is configured) joins
+    // the SAME shutdown channel as the reload pipeline below, and its
+    // `JoinHandle` is folded into `reload_handles` so
+    // `await_reload_tasks` waits on it too during graceful shutdown. A
+    // startup failure here (cert/CA generation, or the proxy's own port
+    // already in use) is logged loudly and does NOT fail `serve_on_listener`
+    // -- routectl's own HTTP listener still starts and serves normally,
+    // just without the MITM front (a degraded, not down, RC). The
+    // earlier non-loopback hard-refuse above is the one MITM startup
+    // condition that DOES fail the whole server, because it is a
+    // security invariant rather than a resource-availability one.
+    let mitm_proxy_handle = match config.mitm.as_ref() {
+        Some(mitm) => match start_mitm_proxy(mitm, bound.port(), shutdown_rx.clone()).await {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "MITM proxy failed to start; routectl continues to serve without it",
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    let mut reload_handles = spawn_reload_pipeline(
         config.clone(),
         config_path.clone(),
         oauth_store,
@@ -258,6 +301,9 @@ pub async fn serve_on_listener(
         usage_handle,
         shutdown_rx,
     );
+    if let Some(handle) = mitm_proxy_handle {
+        reload_handles.push(handle);
+    }
 
     let app = build_axum_router(state, token_set, max_body_bytes);
 
@@ -317,6 +363,46 @@ async fn await_reload_tasks(handles: Vec<tokio::task::JoinHandle<()>>) {
             }
         }
     }
+}
+
+/// Build and spawn the MITM front-proxy listener from the operator's
+/// `[mitm]` config block. `reinject_port` is the routectl HTTP
+/// listener's OWN bound port (resolved from `bound.port()` in the
+/// caller, never a config value) -- the proxy's re-inject leg targets
+/// it. Returns the spawned task's `JoinHandle` on success; every
+/// failure mode is a [`crate::proxy::listener::ProxyStartError`] the
+/// caller logs and treats as non-fatal (see the call site's comment for
+/// why a degraded MITM proxy never crashes the main server).
+async fn start_mitm_proxy(
+    mitm: &routectl_router::MitmConfig,
+    reinject_port: u16,
+    shutdown: watch::Receiver<()>,
+) -> std::result::Result<tokio::task::JoinHandle<()>, crate::proxy::listener::ProxyStartError> {
+    let proxy_config = crate::proxy::listener::ProxyListenerConfig {
+        listen_port: mitm.listen_port,
+        cert_dir: mitm.cert_dir.clone(),
+        mitm_host: mitm.mitm_host.clone(),
+        upstream_origin: mitm.upstream_origin.clone(),
+        reinject_port,
+        tested_cc_version: mitm.tested_cc_version.clone(),
+    };
+    let (listener, acceptor, ctx) = crate::proxy::listener::build_and_bind(proxy_config).await?;
+    let listen_addr = listener
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_default();
+    tracing::info!(
+        addr = %listen_addr,
+        mitm_host = %mitm.mitm_host,
+        "MITM front-proxy listening",
+    );
+    Ok(crate::proxy::listener::spawn(
+        listener,
+        acceptor,
+        ctx,
+        mitm.mitm_host.clone(),
+        shutdown,
+    ))
 }
 
 /// Construct the usage writer from `config.usage`. Always starts the
@@ -553,6 +639,15 @@ pub(crate) async fn build_router_from_config(
     // cost resolution never silently skips a key it cannot parse.
     routectl_router::validate_registry_patterns(&config)?;
 
+    // Reject an incoherent `[mitm]` block (bad upstream_origin, a
+    // listen_port colliding with [server] port, an empty mitm_host) at
+    // startup. A no-op (`Ok(())`) when `[mitm]` is absent -- gated here
+    // on `mitm.is_some()` purely for readability at the call site, since
+    // the validator itself already treats absence as trivially valid.
+    if config.mitm.is_some() {
+        routectl_router::validate_mitm_config(&config)?;
+    }
+
     // Reject a degenerate `[cache_pricing]` override (unparseable selector
     // key or a multiplier that makes the break-even math degenerate) at
     // startup. Without this, a bad override silently goes inert at lookup
@@ -627,6 +722,19 @@ const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// `max_body_bytes` MUST already be the resolved effective value
 /// (zero -> default mapped by `compute_max_body_bytes`). Private to
 /// this module; the only call site is `serve_on_listener`.
+///
+/// `proxy::split::ANTHROPIC_INFERENCE_PATHS` is the source of truth for
+/// which of these routes the MITM front-proxy classifies as
+/// Anthropic-dialect inference traffic (re-injected here over loopback
+/// rather than forwarded to the real Anthropic origin). Adding a NEW
+/// Anthropic-dialect inference route below must also add its path to
+/// that const. An integration test in `tests/server.rs` pins the const
+/// itself: a change to `ANTHROPIC_INFERENCE_PATHS`'s literal set, or a
+/// const path that stops being served here, shows up as a failing test.
+/// It does NOT catch the reverse -- a new inference route added below
+/// that forgets to also update the const -- so that direction of drift
+/// relies on review, not CI; this is an accepted tradeoff from the
+/// decision doc, not an oversight.
 fn build_axum_router(
     state: Arc<AppState>,
     token_set: Arc<TokenSet>,
