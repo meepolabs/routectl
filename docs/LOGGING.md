@@ -189,20 +189,26 @@ emitters apply DIFFERENT redaction per direction by design:
 
 | Direction | Headers emitted | Redaction |
 |-----------|-----------------|-----------|
-| 1 -- ingress request (client -> routectl) | RAW, no redaction | None -- fixture captures need the real auth/beta/version headers the client sent |
+| 1 -- ingress request (client -> routectl) | Redacted | `authorization` Bearer values are replaced with `Bearer [REDACTED]` (scheme kept); `x-api-key`, non-Bearer `authorization`, and `proxy-authorization` collapse to `[REDACTED]` so a live client session token never lands in log archives |
 | 2 -- outgoing request (routectl -> upstream) | Redacted | `authorization` Bearer values are replaced with `Bearer [REDACTED]` (scheme kept); `x-api-key`, non-Bearer `authorization`, and `proxy-authorization` collapse to `[REDACTED]` so live tokens never land in log archives |
-| 3 -- upstream response (upstream -> routectl) | RAW, no redaction | None -- response headers carry no outgoing secrets |
+| 3 -- upstream response (upstream -> routectl) | Redacted | `set-cookie` session credentials, an `authorization` echo, and the `x-amz-security-token` STS credential collapse to `[REDACTED]` (or `Bearer [REDACTED]`); rate-limit metadata, `x-amz-date`, and other non-secret headers round-trip verbatim |
 | 4 -- egress response (routectl -> client) | RAW, no redaction | None -- egress headers carry no secrets |
 
-This is intentional. Direction 2 is the only direction that carries
-outgoing auth material (Bearer JWTs, api keys). The remaining three
-directions are raw so fixture-capture and triage workflows see the
-exact wire values without workarounds.
+This is intentional. Directions 1, 2, and 3 are the only directions
+that carry auth or session material (a client session token inbound,
+Bearer JWTs / api keys outbound, and an occasional session-cookie /
+STS echo on the upstream response). Direction 4 is raw so
+fixture-capture and triage workflows see the exact wire values
+without workarounds; the fixture-capture rig parses the same TRACE
+lines these emitters produce, so a direction-1 fixture's
+`ingress_request.headers.json` carries the redacted value too --
+consistent with the already-redacted `outgoing_request.headers.json`
+and `upstream_response.headers.json` on directions 2 and 3.
 
-**Treat TRACE logs as sensitive.** Even with direction-2 redaction,
-directions 1, 3, and 4 emit header values verbatim. Any listener
-auth tokens the caller sends (direction 1) or beta flags that double
-as capability indicators appear in the trace log. Restrict log-archive
+**Treat TRACE logs as sensitive.** Even with direction-1, -2, and -3
+redaction, direction 4 emits header values verbatim. Beta flags that
+double as capability indicators still appear in the trace log on
+every direction. Restrict log-archive
 access accordingly and avoid leaving `ROUTECTL_TRACE_HEADERS=1` on in
 long-running production processes.
 

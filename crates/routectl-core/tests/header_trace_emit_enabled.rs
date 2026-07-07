@@ -85,3 +85,46 @@ fn header_emitters_fire_trace_events_when_tracing_enabled() {
         );
     }
 }
+
+#[test]
+fn ingress_header_trace_redacts_authorization_bearer_token() {
+    // Arrange: dir-1 (client -> routectl) now redacts secret-bearing
+    // headers the same way dir-2/dir-3 already do -- a full-scope
+    // client session token must never reach `journalctl` / log
+    // archives via the ingress trace. Same OnceLock-freeze pattern as
+    // the sibling test above; this binary gets its own process so
+    // setting the toggle here does not disturb any other test.
+    unsafe { std::env::set_var("ROUTECTL_TRACE_HEADERS", "1") };
+    assert!(
+        header_trace_enabled(),
+        "OnceLock must freeze to true after the env var is set first"
+    );
+    let raw_token = "eyJhbGciOiJSUzI1NiJ9.super-secret-session-claims.sig";
+    let headers = headers_to_json([("authorization", format!("Bearer {raw_token}").as_bytes())]);
+
+    // Act
+    let events = capture_events(|| {
+        trace_ingress_headers("anthropic", &headers);
+    });
+
+    // Assert: the raw token never appears anywhere in the emitted
+    // event, and the authorization value collapses to the redacted
+    // Bearer placeholder.
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one event; got {events:#?}"
+    );
+    let event = &events[0];
+    let headers_field = event
+        .field("headers")
+        .unwrap_or_else(|| panic!("event missing `headers` field; got {event:#?}"));
+    assert!(
+        !headers_field.contains(raw_token),
+        "raw bearer token must never appear in the ingress header trace; got {headers_field:?}"
+    );
+    assert!(
+        headers_field.contains("Bearer [REDACTED]"),
+        "authorization header must redact to \"Bearer [REDACTED]\"; got {headers_field:?}"
+    );
+}

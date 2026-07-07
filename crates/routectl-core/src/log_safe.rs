@@ -971,11 +971,16 @@ pub(crate) fn redact_header_values(headers: &mut serde_json::Value) {
 /// Emit a `tracing::trace!` line carrying the ingress request headers
 /// (direction 1: client -> routectl). Opt-in via
 /// `ROUTECTL_TRACE_HEADERS=1` and gated on TRACE so the default `info`
-/// level pays nothing. RAW -- names and values are emitted verbatim
-/// (no redaction) so fixture captures see the real auth / beta /
-/// version headers. The JSON is emitted as a single compact string
-/// (`serde_json` escapes `\n`/`\r`, so the value stays single-line and
-/// cannot forge log lines) and is the LAST field on the line.
+/// level pays nothing. Bearer JWTs and api keys in `authorization` /
+/// `x-api-key` / `proxy-authorization` (and the other names
+/// [`redact_header_values`] covers) are redacted before emission so
+/// `journalctl` / log archives -- and the fixture-capture rig, which
+/// parses this same trace line -- never carry a live client session
+/// token. Other headers (anthropic-beta, anthropic-version, the
+/// session-id header, ...) emit verbatim since they are not secrets.
+/// The JSON is emitted as a single compact string (`serde_json`
+/// escapes `\n`/`\r`, so the value stays single-line and cannot forge
+/// log lines) and is the LAST field on the line.
 pub fn trace_ingress_headers(ingress: &str, headers: &serde_json::Value) {
     if !header_trace_should_emit(
         header_trace_enabled(),
@@ -983,10 +988,12 @@ pub fn trace_ingress_headers(ingress: &str, headers: &serde_json::Value) {
     ) {
         return;
     }
+    let mut redacted = headers.clone();
+    redact_header_values(&mut redacted);
     tracing::trace!(
         message = HDR_MSG_INGRESS,
         ingress,
-        headers = %serde_json::to_string(headers).unwrap_or_default(),
+        headers = %serde_json::to_string(&redacted).unwrap_or_default(),
     );
 }
 
@@ -1046,9 +1053,11 @@ pub fn trace_upstream_response_headers(provider_kind: &str, id: &str, headers: &
 
 /// Emit a `tracing::trace!` line carrying the egress response headers
 /// (direction 4: routectl -> client). Opt-in via
-/// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. See
-/// [`trace_ingress_headers`] for the single-line / no-redaction
-/// rationale. `headers` is the LAST field on the line.
+/// `ROUTECTL_TRACE_HEADERS=1`; gated on TRACE. RAW -- these are
+/// routectl's own outbound response headers and carry no upstream
+/// secret, so no redaction runs. See [`trace_outgoing_headers`] for
+/// the single-line JSON rationale shared by all four emitters.
+/// `headers` is the LAST field on the line.
 pub fn trace_egress_headers(ingress: &str, headers: &serde_json::Value) {
     if !header_trace_should_emit(
         header_trace_enabled(),
