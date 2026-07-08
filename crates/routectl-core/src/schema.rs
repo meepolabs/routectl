@@ -217,6 +217,26 @@ pub struct RoutectlInternal {
     /// are sent in inbound order. Empty when no matching headers were
     /// supplied; non-Anthropic ingresses (openai-compat) leave it empty.
     pub claude_code_headers: Vec<(String, String)>,
+
+    /// Inbound `x-stainless-*` SDK fingerprint headers captured on the
+    /// forwarded (pure-proxy) leg ONLY -- gated identically to
+    /// [`Self::forwarded_bearer`] (the MITM seam header is present AND
+    /// the resolved `[mitm] credential_source` is `Forwarded`). On that
+    /// leg the Anthropic-API egress presents the CLIENT's real identity,
+    /// so these client-supplied Stainless headers OVERRIDE routectl's
+    /// minted cloak fingerprint (`default_claude_code_identity_headers`)
+    /// on the outbound request.
+    ///
+    /// Deliberately a SEPARATE carrier from [`Self::claude_code_headers`]:
+    /// that field is contractually `x-claude-code-*`-only (the egress
+    /// iterates it as claude-code headers and the cloak `is_non_cc`
+    /// heuristic scans it for `x-claude-code-session-id`), so overloading
+    /// it would break those consumers. These are NON-secret SDK
+    /// fingerprint values, so a plain `Vec` (no redacting wrapper) is
+    /// correct. Order-preserving. Empty in own mode and for every
+    /// non-forwarded path, keeping the carrier byte-identical to the
+    /// pre-passthrough behavior.
+    pub stainless_headers: Vec<(String, String)>,
     /// Whether the dispatched model supports adaptive (extended)
     /// thinking. Threaded through from `[models.X]
     /// supports_adaptive_thinking` via `ResolvedModel` ->
@@ -986,6 +1006,38 @@ mod tests {
     #[test]
     fn forwarded_bearer_defaults_to_none() {
         assert!(RoutectlInternal::default().forwarded_bearer.is_none());
+    }
+
+    /// A freshly-defaulted carrier has no forwarded Stainless headers, so
+    /// own mode and every non-forwarded path stay byte-identical to the
+    /// pre-passthrough carrier state.
+    #[test]
+    fn stainless_headers_default_to_empty() {
+        assert!(RoutectlInternal::default().stainless_headers.is_empty());
+    }
+
+    /// The Stainless carrier rides on `routectl_internal` (`#[serde(skip)]`),
+    /// so even a populated set leaves no trace on the serialized wire.
+    #[test]
+    fn stainless_headers_never_serialized_to_wire() {
+        let mut req: ChatRequest = serde_json::from_value(json!({
+            "model": "gpt-4o",
+            "messages": []
+        }))
+        .unwrap();
+        req.routectl_internal.stainless_headers =
+            vec![("x-stainless-package-version".into(), "9.9.9-canary".into())];
+
+        let wire = serde_json::to_string(&req).unwrap();
+
+        assert!(
+            !wire.contains("9.9.9-canary"),
+            "stainless header value leaked to the wire: {wire}"
+        );
+        assert!(
+            !wire.contains("stainless_headers"),
+            "carrier field name leaked to the wire: {wire}"
+        );
     }
 
     /// Debug of the newtype alone prints a fixed placeholder and never

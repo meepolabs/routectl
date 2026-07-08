@@ -3197,6 +3197,13 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // knob, so the per-attempt rebuild from `Default::default()` must
     // carry it across or it resets to `None` on the 2nd chain attempt.
     let captured_forwarded_bearer = req.routectl_internal.forwarded_bearer.take();
+    // Preserve the ingress-captured forwarded `x-stainless-*` headers:
+    // like `forwarded_bearer`, they are inbound-request data (the client's
+    // SDK fingerprint captured on the forwarded leg), not a per-model knob,
+    // so the per-attempt rebuild from `Default::default()` must carry them
+    // across or they reset to empty on the 2nd chain attempt -- which would
+    // let routectl's minted fingerprint win on a retry.
+    let captured_stainless_headers = std::mem::take(&mut req.routectl_internal.stainless_headers);
     let mut internal = RoutectlInternal::default();
     internal.reasoning_dialect = target.reasoning_dialect.map(std::convert::Into::into);
     internal.history_reasoning = target.history_reasoning.map(std::convert::Into::into);
@@ -3205,6 +3212,7 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     internal.header_extras = composed_header_extras;
     internal.inbound_session_key = captured_inbound_session_key;
     internal.forwarded_bearer = captured_forwarded_bearer;
+    internal.stainless_headers = captured_stainless_headers;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
@@ -5036,6 +5044,47 @@ mod merge_header_extras_tests {
                     .map(routectl_core::schema::ForwardedBearer::expose),
                 Some("sk-forwarded"),
                 "forwarded bearer must survive the per-attempt overlay rebuild (attempt {attempt})",
+            );
+        }
+    }
+
+    /// Regression guard for the same per-attempt overlay rebuild hazard:
+    /// the ingress-captured forwarded `x-stainless-*` headers must survive
+    /// the rebuild rather than reset to empty, so the egress can present
+    /// the client's real fingerprint on every chain attempt, not just the
+    /// first.
+    #[test]
+    fn apply_layered_overlays_preserves_stainless_headers() {
+        let config = Config::default();
+        let model: Arc<ResolvedModel> = Arc::new(ResolvedModel::new(
+            "nick",
+            "test-prov",
+            Arc::new(StubProvider),
+            "claude-x",
+        ));
+        let target = into_one_dispatch_target(model);
+
+        let mut req = req_with_betas(vec![]);
+        req.routectl_internal.stainless_headers = vec![
+            ("x-stainless-lang".to_string(), "js".to_string()),
+            (
+                "x-stainless-package-version".to_string(),
+                "0.94.0-client".to_string(),
+            ),
+        ];
+
+        for attempt in 1..=2 {
+            apply_layered_overlays(&config, &target, &mut req);
+            assert_eq!(
+                req.routectl_internal.stainless_headers,
+                vec![
+                    ("x-stainless-lang".to_string(), "js".to_string()),
+                    (
+                        "x-stainless-package-version".to_string(),
+                        "0.94.0-client".to_string()
+                    ),
+                ],
+                "stainless headers must survive the per-attempt overlay rebuild (attempt {attempt})",
             );
         }
     }

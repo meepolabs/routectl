@@ -346,6 +346,20 @@ impl AnthropicApiProvider {
             AuthKind::OauthBearer => rb.header("authorization", format!("Bearer {token}")),
         };
 
+        // Forwarded (pure-proxy) leg: this request arrived carrying the
+        // client's first-party bearer bound for api.anthropic.com. On this
+        // leg the egress is a TRANSPARENT forwarder -- Claude Code's REAL
+        // inbound identity (`x-stainless-*`, `x-claude-code-*`, and its own
+        // `anthropic-beta` set) must reach Anthropic and OVERRIDE routectl's
+        // minted cloak fingerprint. Gated EXACTLY on the pure-proxy pin
+        // (`resolve_effective_token`): a forwarded bearer is present AND the
+        // base is exactly api.anthropic.com. `forwarded_bearer` is read only
+        // as a gate here -- never as a header value. Own mode
+        // (`forwarded_bearer` None) never enters this branch, so its minted
+        // fingerprint is byte-for-byte unchanged.
+        let forwarded_leg = req.routectl_internal.forwarded_bearer.is_some()
+            && is_anthropic_api_host(&self.cfg.base_url);
+
         // anthropic-beta composition. The router's dispatch-layer
         // (`Router::merge_header_extras`) is the canonical source: it
         // unions ingress `req.anthropic_beta` + provider
@@ -410,7 +424,14 @@ impl AnthropicApiProvider {
         // hand-declaring it. Composed BEFORE the context_management strip
         // below so the emulation path can still remove
         // `context-management-2025-06-27` when active.
-        if self.cfg.auth_kind == AuthKind::OauthBearer && is_anthropic_api_host(&self.cfg.base_url)
+        //
+        // SUPPRESSED on the forwarded leg: there the client supplies its
+        // own real beta set (on `req.anthropic_beta`), which must reach
+        // Anthropic verbatim rather than being widened by routectl's minted
+        // floor -- that would be a fingerprint the client never sent.
+        if !forwarded_leg
+            && self.cfg.auth_kind == AuthKind::OauthBearer
+            && is_anthropic_api_host(&self.cfg.base_url)
         {
             for t in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
                 if beta_seen.insert((*t).to_string()) {
@@ -535,6 +556,30 @@ impl AnthropicApiProvider {
                         val.as_str(),
                     );
                 }
+            }
+        }
+
+        // Forwarded (pure-proxy) leg: present the CLIENT's real identity so
+        // Anthropic sees the genuine Claude Code fingerprint. Inserted LAST
+        // so it OVERRIDES the minted defaults, the minted session id, and
+        // any `header_extras` stamped above (HeaderMap::insert replaces).
+        //
+        //   - `x-stainless-*`: the client's captured Stainless fingerprint
+        //     (dedicated `stainless_headers` carrier) replaces the minted
+        //     `default_claude_code_identity_headers` values.
+        //   - `x-claude-code-*`: forwarded TRANSPARENTLY (the whole captured
+        //     set, allowlist-free) -- the client IS Claude Code on this leg,
+        //     so its real session id replaces the minted one.
+        //
+        // Own mode never reaches here (`forwarded_leg` is false), so its
+        // minted fingerprint + `forward_client_headers` allowlist behavior
+        // is byte-for-byte unchanged.
+        if forwarded_leg {
+            for (name, val) in &req.routectl_internal.stainless_headers {
+                crate::http_client::insert_header(&mut header_map, &self.cfg.id, name, val);
+            }
+            for (name, val) in &req.routectl_internal.claude_code_headers {
+                crate::http_client::insert_header(&mut header_map, &self.cfg.id, name, val);
             }
         }
 
@@ -2135,8 +2180,280 @@ mod tests {
         );
     }
 
-    // -- cloak_body gate + body rewrite ------------------------------------
+    // -- forwarded (pure-proxy) leg: client identity overrides mint --------
+    //
+    // On the forwarded leg (`forwarded_bearer` Some AND the base is exactly
+    // api.anthropic.com) the egress is a TRANSPARENT forwarder: Claude
+    // Code's REAL inbound identity headers must reach Anthropic and
+    // OVERRIDE routectl's minted cloak fingerprint. Own mode
+    // (`forwarded_bearer` None) is byte-for-byte unchanged -- proven by the
+    // minted-fingerprint tests above plus the explicit own-mode guard here.
 
+    /// The distinctive forwarded-bearer secret used in the leg tests. It is
+    /// only ever read as a GATE (is_some) by build_headers, never emitted,
+    /// so the no-leak test can assert it appears in no outbound header.
+    const FORWARDED_TOKEN_CANARY: &str = "sk-ant-oat01-FWD-DO-NOT-LEAK-xyz";
+
+    /// Build a forwarded-leg request: a captured first-party bearer plus the
+    /// client's inbound identity (`x-stainless-*` on `stainless_headers`,
+    /// `x-claude-code-*` on `claude_code_headers`, betas on `anthropic_beta`).
+    fn forwarded_req(
+        stainless: &[(&str, &str)],
+        claude_code: &[(&str, &str)],
+        betas: &[&str],
+    ) -> ChatRequest {
+        let mut req = ChatRequest::default();
+        req.routectl_internal.forwarded_bearer = Some(routectl_core::ForwardedBearer::new(
+            FORWARDED_TOKEN_CANARY.into(),
+        ));
+        req.routectl_internal.stainless_headers = stainless
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        req.routectl_internal.claude_code_headers = claude_code
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        req.anthropic_beta = betas.iter().map(|s| (*s).to_string()).collect();
+        req
+    }
+
+    /// Every outbound `(name, value)` pair on the assembled request. Lets a
+    /// test scan all header values (e.g. for a leaked token).
+    fn outbound_header_pairs(
+        provider: &AnthropicApiProvider,
+        req: &ChatRequest,
+    ) -> Vec<(String, String)> {
+        let client = reqwest::Client::new();
+        let rb = client.post("http://127.0.0.1/test");
+        let rb = provider.build_headers(rb, req, "test-token");
+        let request = rb.build().expect("build outbound request");
+        request
+            .headers()
+            .iter()
+            .map(|(n, v)| {
+                (
+                    n.as_str().to_ascii_lowercase(),
+                    v.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The minted `x-stainless-package-version` default, looked up from the
+    /// shared identity source so the test does not hardcode the version.
+    fn minted_stainless_package_version() -> String {
+        routectl_core::identity::anthropic::default_claude_code_identity_headers()
+            .into_iter()
+            .find_map(|(n, v)| (n == "x-stainless-package-version").then(|| v.to_string()))
+            .expect("minted default carries x-stainless-package-version")
+    }
+
+    /// Forwarded leg: the client's `x-stainless-*` headers OVERRIDE the
+    /// minted Stainless fingerprint on the outbound request, so Anthropic
+    /// sees the genuine client SDK identity rather than routectl's mint.
+    #[test]
+    fn forwarded_leg_client_stainless_overrides_minted_fingerprint() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("minted-sid-known".into()),
+            Vec::new(),
+        ));
+        // Sanity: without a client value the minted default would win.
+        let minted = minted_stainless_package_version();
+        let req = forwarded_req(
+            &[
+                ("x-stainless-package-version", "1.2.3-client"),
+                ("x-stainless-os", "ClientOS"),
+                ("x-stainless-lang", "client-lang"),
+            ],
+            &[],
+            &[],
+        );
+
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-stainless-package-version").as_deref(),
+            Some("1.2.3-client"),
+            "client x-stainless-package-version must override the minted default",
+        );
+        assert_ne!(
+            outbound_header_value(&provider, &req, "x-stainless-package-version").as_deref(),
+            Some(minted.as_str()),
+            "the minted Stainless version must NOT win on the forwarded leg",
+        );
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-stainless-os").as_deref(),
+            Some("ClientOS"),
+            "client x-stainless-os must override the minted default",
+        );
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-stainless-lang").as_deref(),
+            Some("client-lang"),
+            "client x-stainless-lang must override the minted default",
+        );
+    }
+
+    /// Forwarded leg: the client's inbound `x-claude-code-session-id`
+    /// OVERRIDES routectl's minted per-credential session id, so the
+    /// forwarded request carries the client's real conversation identity.
+    #[test]
+    fn forwarded_leg_client_session_id_overrides_minted() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("minted-sid-known".into()),
+            Vec::new(),
+        ));
+        let req = forwarded_req(&[], &[("x-claude-code-session-id", "client-sid-abc")], &[]);
+
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-claude-code-session-id").as_deref(),
+            Some("client-sid-abc"),
+            "client session id must override the minted session id on the forwarded leg",
+        );
+    }
+
+    /// Forwarded leg: the client's captured `x-claude-code-*` headers are
+    /// forwarded TRANSPARENTLY -- not gated by `forward_client_headers`
+    /// (empty here, the secure-by-default posture that own mode honors).
+    #[test]
+    fn forwarded_leg_forwards_all_client_claude_code_headers_transparently() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("minted-sid-known".into()),
+            Vec::new(),
+        ));
+        let req = forwarded_req(
+            &[],
+            &[
+                ("x-claude-code-session-id", "client-sid-abc"),
+                ("x-claude-code-agent-id", "client-agent-9"),
+            ],
+            &[],
+        );
+
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-claude-code-agent-id").as_deref(),
+            Some("client-agent-9"),
+            "a forwarded leg forwards every captured x-claude-code-* header, allowlist-free",
+        );
+    }
+
+    /// Forwarded leg: the client's `anthropic-beta` set is emitted verbatim
+    /// and the minted 14-flag Claude Code floor is SUPPRESSED, so Anthropic
+    /// sees exactly the client's betas.
+    #[test]
+    fn forwarded_leg_client_anthropic_beta_wins_and_floor_suppressed() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("minted-sid-known".into()),
+            Vec::new(),
+        ));
+        let req = forwarded_req(&[], &[], &["client-only-beta"]);
+
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present with client betas");
+        let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+        assert!(
+            betas.contains(&"client-only-beta"),
+            "the client's beta must reach the header; got {value}",
+        );
+        assert!(
+            !betas.contains(&"claude-code-20250219"),
+            "the minted CC beta floor must be suppressed on the forwarded leg; got {value}",
+        );
+        assert!(
+            !betas.contains(&"oauth-2025-04-20"),
+            "no minted floor beta may leak on the forwarded leg; got {value}",
+        );
+    }
+
+    /// Forwarded leg: the standard Anthropic protocol version reaches the
+    /// upstream (Claude Code and routectl both use 2023-06-01), so the
+    /// client's version flows through unchanged.
+    #[test]
+    fn forwarded_leg_emits_client_anthropic_version() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("minted-sid-known".into()),
+            Vec::new(),
+        ));
+        let req = forwarded_req(&[], &[], &[]);
+
+        assert_eq!(
+            outbound_header_value(&provider, &req, "anthropic-version").as_deref(),
+            Some("2023-06-01"),
+            "the Anthropic protocol version must reach the upstream on the forwarded leg",
+        );
+    }
+
+    /// Security: the forwarded bearer is read only as a GATE by
+    /// build_headers, never emitted as a header value. No outbound header
+    /// (identity or otherwise) may carry the raw token.
+    #[test]
+    fn forwarded_leg_never_leaks_forwarded_token_in_any_header() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("minted-sid-known".into()),
+            Vec::new(),
+        ));
+        let req = forwarded_req(
+            &[("x-stainless-package-version", "1.2.3-client")],
+            &[("x-claude-code-session-id", "client-sid-abc")],
+            &["client-only-beta"],
+        );
+
+        let pairs = outbound_header_pairs(&provider, &req);
+        for (name, value) in &pairs {
+            assert!(
+                !value.contains(FORWARDED_TOKEN_CANARY),
+                "the forwarded token must never appear in any header value; leaked in {name}: {value}",
+            );
+        }
+    }
+
+    /// Own-mode-unchanged guard: with `forwarded_bearer` None, even when the
+    /// carrier happens to hold `stainless_headers` + `claude_code_headers`,
+    /// the minted fingerprint STILL wins -- the override is gated strictly
+    /// on the forwarded bearer, not on the mere presence of captured
+    /// headers. `forward_client_headers` is empty (own-mode secure default),
+    /// so no captured header reaches the wire.
+    #[test]
+    fn own_mode_keeps_minted_fingerprint_even_with_captured_headers() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://api.anthropic.com",
+            Some("minted-sid-known".into()),
+            Vec::new(),
+        ));
+        // No forwarded bearer -> own mode, but the carrier is populated as
+        // if it had been captured, to prove the gate ignores it.
+        let mut req = ChatRequest::default();
+        req.routectl_internal.stainless_headers =
+            vec![("x-stainless-package-version".into(), "1.2.3-client".into())];
+        req.routectl_internal.claude_code_headers =
+            vec![("x-claude-code-session-id".into(), "client-sid-abc".into())];
+
+        // Minted Stainless fingerprint wins (client value ignored).
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-stainless-package-version").as_deref(),
+            Some(minted_stainless_package_version().as_str()),
+            "own mode must keep the minted Stainless fingerprint",
+        );
+        // Minted session id wins (client value ignored, allowlist empty).
+        assert_eq!(
+            outbound_header_value(&provider, &req, "x-claude-code-session-id").as_deref(),
+            Some("minted-sid-known"),
+            "own mode must keep the minted session id",
+        );
+        // Minted CC beta floor is present in own mode.
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("own-mode anthropic-beta floor must be present");
+        assert!(
+            value.split(',').any(|b| b.trim() == "claude-code-20250219"),
+            "own mode must keep the minted CC beta floor; got {value}",
+        );
+    }
+
+    // -- cloak_body gate + body rewrite ------------------------------------
     /// Body carrying a Claude Code billing block + a client system block,
     /// used by the cloak_body tests so both the billing strip and the
     /// (non-)identity-stamp are observable in one body.

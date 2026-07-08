@@ -2477,8 +2477,161 @@ fn captured_bearer_is_redacted_in_carrier_debug() {
     );
 }
 
-// ---- extract_authorization_bearer (pure) ----
+// ============ forwarded-mode ingress x-stainless-* capture gate ====
+//
+// `capture_stainless_headers` stashes the inbound `x-stainless-*` SDK
+// fingerprint headers on `req.routectl_internal.stainless_headers` under
+// the SAME two-key gate as the bearer capture (seam header present AND
+// `[mitm] credential_source == Forwarded`). Every own-mode / non-forwarded
+// path MUST leave the carrier byte-identical: `stainless_headers` empty.
+// These are NON-secret SDK fingerprint values, so no redaction applies --
+// the security contract here is only that own mode is untouched.
 
+/// Build an inbound `HeaderMap`: optionally the `x-routectl-mitm-proxied`
+/// seam header plus an arbitrary set of `(name, value)` header entries.
+/// Used to exercise the stainless-capture namespace filter.
+fn ingress_headers_with(seam: bool, entries: &[(&str, &str)]) -> HeaderMap {
+    use axum::http::{HeaderName, HeaderValue};
+    let mut h = HeaderMap::new();
+    if seam {
+        h.insert(
+            HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
+            HeaderValue::from_static("1"),
+        );
+    }
+    for (name, value) in entries {
+        h.insert(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
+    }
+    h
+}
+
+/// Both gates turned (Forwarded capability + seam hint): every inbound
+/// `x-stainless-*` header lands on `stainless_headers`, order preserved,
+/// so the egress can present the client's real SDK fingerprint on the leg.
+#[test]
+fn stainless_headers_captured_when_forwarded_and_seam_present() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = ingress_headers_with(
+        true,
+        &[
+            ("x-stainless-lang", "js"),
+            ("x-stainless-package-version", "0.94.0-client"),
+            ("x-stainless-os", "Linux"),
+        ],
+    );
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_stainless_headers(&headers, &router, &mut req);
+
+    // Assert
+    assert_eq!(
+        req.routectl_internal.stainless_headers,
+        vec![
+            ("x-stainless-lang".to_string(), "js".to_string()),
+            (
+                "x-stainless-package-version".to_string(),
+                "0.94.0-client".to_string()
+            ),
+            ("x-stainless-os".to_string(), "Linux".to_string()),
+        ],
+        "all inbound x-stainless-* headers must be captured in inbound order"
+    );
+}
+
+/// Own mode is the default capability: even with the seam hint AND
+/// inbound `x-stainless-*` headers present, the config gate is closed, so
+/// nothing is captured (carrier byte-identical to pre-passthrough).
+#[test]
+fn stainless_headers_stays_empty_in_own_mode_even_with_seam() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Own));
+    let headers = ingress_headers_with(true, &[("x-stainless-lang", "js")]);
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_stainless_headers(&headers, &router, &mut req);
+
+    // Assert
+    assert!(
+        req.routectl_internal.stainless_headers.is_empty(),
+        "own mode must never capture x-stainless-* headers"
+    );
+}
+
+/// Forwarded capability armed but the seam hint absent: this request did
+/// not arrive via the MITM inference leg, so nothing is captured.
+#[test]
+fn stainless_headers_stays_empty_without_seam_header() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = ingress_headers_with(false, &[("x-stainless-lang", "js")]);
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_stainless_headers(&headers, &router, &mut req);
+
+    // Assert
+    assert!(
+        req.routectl_internal.stainless_headers.is_empty(),
+        "no seam header -> not the MITM inference leg -> no capture"
+    );
+}
+
+/// No `[mitm]` block resolves to `credential_source == None`, which is not
+/// `Forwarded`, so the gate stays closed even with the seam header and
+/// stainless headers present.
+#[test]
+fn stainless_headers_stays_empty_when_no_mitm_config() {
+    // Arrange
+    let router = router_with_mitm(None);
+    let headers = ingress_headers_with(true, &[("x-stainless-lang", "js")]);
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_stainless_headers(&headers, &router, &mut req);
+
+    // Assert
+    assert!(
+        req.routectl_internal.stainless_headers.is_empty(),
+        "absent [mitm] block must never capture x-stainless-* headers"
+    );
+}
+
+/// The capture is namespace-bounded to `x-stainless-*` (case-insensitive):
+/// unrelated headers -- including `x-claude-code-*`, which rides its own
+/// dedicated carrier -- are never folded into `stainless_headers`.
+#[test]
+fn stainless_capture_ignores_non_stainless_headers() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = ingress_headers_with(
+        true,
+        &[
+            ("X-Stainless-Arch", "x64"),
+            ("x-claude-code-session-id", "sid-9"),
+            ("anthropic-version", "2023-06-01"),
+            ("content-type", "application/json"),
+        ],
+    );
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_stainless_headers(&headers, &router, &mut req);
+
+    // Assert: only the (lowercased) x-stainless entry is captured.
+    assert_eq!(
+        req.routectl_internal.stainless_headers,
+        vec![("x-stainless-arch".to_string(), "x64".to_string())],
+        "only x-stainless-* names (case-insensitive) belong on this carrier"
+    );
+}
+
+// ---- extract_authorization_bearer (pure) ----
 #[test]
 fn extract_bearer_returns_token_after_scheme() {
     let h = ingress_headers(false, Some("Bearer abc123"));

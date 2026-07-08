@@ -105,6 +105,12 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // the carrier state is byte-identical to the pre-passthrough path.
     capture_forwarded_bearer(&headers, &router, &mut req);
 
+    // Same forwarded-mode gate: capture the client's inbound `x-stainless-*`
+    // SDK fingerprint headers so the Anthropic-API egress can present the
+    // client's real identity on the forwarded leg (overriding the minted
+    // cloak fingerprint). Own mode leaves `stainless_headers` empty.
+    capture_stainless_headers(&headers, &router, &mut req);
+
     let mut opts = RouterOptions::new();
     // Gate `x-routectl-disable-fallbacks` behind the server-side
     // `[server] allow_disable_fallbacks` knob (default true). When the
@@ -180,21 +186,76 @@ fn capture_forwarded_bearer(
     router: &routectl_router::Router,
     req: &mut routectl_core::ChatRequest,
 ) {
-    // (a) header-is-a-hint.
-    if !headers.contains_key(crate::ingress::MITM_PROXIED_HEADER) {
-        return;
-    }
-    // (b) config-is-the-capability.
-    let forwarded = matches!(
-        router.config.mitm.as_ref().map(|m| m.credential_source),
-        Some(CredentialSource::Forwarded)
-    );
-    if !forwarded {
+    if !forwarded_capture_armed(headers, router) {
         return;
     }
     if let Some(token) = extract_authorization_bearer(headers) {
         req.routectl_internal.forwarded_bearer = Some(ForwardedBearer::new(token));
     }
+}
+
+/// Header-name prefix (case-insensitive) of the Stainless SDK fingerprint
+/// headers captured on the forwarded leg. Owns its own namespace,
+/// disjoint from the `x-claude-code-*` set on `claude_code_headers`.
+const STAINLESS_HEADER_PREFIX: &str = "x-stainless-";
+
+/// Populate `req.routectl_internal.stainless_headers` with the inbound
+/// `x-stainless-*` SDK fingerprint headers, under the SAME two-key gate
+/// as [`capture_forwarded_bearer`] (seam header present AND resolved
+/// `[mitm] credential_source == Forwarded`). On the forwarded (pure-proxy)
+/// leg the Anthropic-API egress presents the client's real identity, so
+/// these client-supplied Stainless headers override routectl's minted
+/// cloak fingerprint downstream.
+///
+/// A SEPARATE carrier from `claude_code_headers` on purpose: that field is
+/// contractually `x-claude-code-*`-only. These are NON-secret fingerprint
+/// values (no redaction). When either gate key is missing -- own mode, no
+/// `[mitm]` block, or no seam header -- `stainless_headers` stays empty and
+/// the carrier is byte-identical to the non-passthrough path. Non-UTF-8
+/// values are skipped; capture order mirrors inbound order.
+fn capture_stainless_headers(
+    headers: &HeaderMap,
+    router: &routectl_router::Router,
+    req: &mut routectl_core::ChatRequest,
+) {
+    if !forwarded_capture_armed(headers, router) {
+        return;
+    }
+    for (name, val) in headers {
+        if !name
+            .as_str()
+            .to_ascii_lowercase()
+            .starts_with(STAINLESS_HEADER_PREFIX)
+        {
+            continue;
+        }
+        let Ok(v) = val.to_str() else { continue };
+        req.routectl_internal
+            .stainless_headers
+            .push((name.as_str().to_string(), v.to_string()));
+    }
+}
+
+/// The two-key forwarded-capture gate shared by `capture_forwarded_bearer`
+/// and `capture_stainless_headers`:
+///
+/// - (a) header-is-a-hint: the `x-routectl-mitm-proxied` seam header is
+///   present (the MITM front-proxy stamps it only on the re-injected
+///   api.anthropic.com inference leg); AND
+/// - (b) config-is-the-capability: the resolved `[mitm] credential_source`
+///   is `Forwarded` (an absent `[mitm]` block resolves to `None`, which is
+///   never `Forwarded`).
+///
+/// `false` in own mode and on every non-forwarded path, so both capture
+/// sites leave their carriers byte-identical to the pre-passthrough state.
+fn forwarded_capture_armed(headers: &HeaderMap, router: &routectl_router::Router) -> bool {
+    if !headers.contains_key(crate::ingress::MITM_PROXIED_HEADER) {
+        return false;
+    }
+    matches!(
+        router.config.mitm.as_ref().map(|m| m.credential_source),
+        Some(CredentialSource::Forwarded)
+    )
 }
 
 /// Extract the token from an inbound `Authorization: Bearer <token>`
