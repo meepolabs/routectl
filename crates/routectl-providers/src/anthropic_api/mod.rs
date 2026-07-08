@@ -225,6 +225,22 @@ impl AnthropicApiConfig {
     }
 }
 
+/// Beta-decision context computed by `build_headers` on the OauthBearer +
+/// api.anthropic.com own-token lane. Carries just enough of the beta-gating
+/// decision to diagnose a beta-caused 4xx (e.g. a floor-widened beta the
+/// upstream rejects) without enabling full header tracing. Cheap to build
+/// (six bools/copies) -- returned unconditionally from `build_headers` so
+/// the 2xx hot path pays no extra allocation, only this small struct.
+#[derive(Debug, Clone, Copy)]
+struct BetaDecision {
+    is_non_cc: bool,
+    forwarded_leg: bool,
+    cloak_mode: cloak::CloakMode,
+    oauth_added: bool,
+    has_context_1m_beta: bool,
+    has_context_management_beta: bool,
+}
+
 pub struct AnthropicApiProvider {
     cfg: AnthropicApiConfig,
     client: Client,
@@ -339,7 +355,7 @@ impl AnthropicApiProvider {
         rb: reqwest::RequestBuilder,
         req: &ChatRequest,
         token: &str,
-    ) -> reqwest::RequestBuilder {
+    ) -> (reqwest::RequestBuilder, BetaDecision) {
         let mut rb = rb.header("anthropic-version", &self.cfg.anthropic_version);
         rb = match self.cfg.auth_kind {
             AuthKind::ApiKey => rb.header("x-api-key", token),
@@ -359,6 +375,11 @@ impl AnthropicApiProvider {
         // fingerprint is byte-for-byte unchanged.
         let forwarded_leg = req.routectl_internal.forwarded_bearer.is_some()
             && is_anthropic_api_host(&self.cfg.base_url);
+
+        // Computed once here (rather than re-derived at each 4xx log site)
+        // so `BetaDecision` and the floor-gating decision below always
+        // agree on the same classification for this request.
+        let is_non_cc = self.is_non_cc(req);
 
         // anthropic-beta composition. The router's dispatch-layer
         // (`Router::merge_header_extras`) is the canonical source: it
@@ -414,28 +435,45 @@ impl AnthropicApiProvider {
             }
         }
 
-        // Pinned Claude Code beta floor for the OauthBearer +
-        // api.anthropic.com surface. These are operator-equivalent pins
-        // (not client-requested), so they bypass the `allowed_betas`
-        // allowlist by construction -- they never pass through
-        // `filter_anthropic_betas`. Notably `oauth-2025-04-20` is
-        // REQUIRED for OAuth to function on api.anthropic.com, so a
-        // zero-config oauth-bearer provider works without the operator
-        // hand-declaring it. Composed BEFORE the context_management strip
-        // below so the emulation path can still remove
-        // `context-management-2025-06-27` when active.
+        // OAuth gate for the OauthBearer + api.anthropic.com surface.
+        // `oauth-2025-04-20` is REQUIRED for OAuth to function on
+        // api.anthropic.com, so a zero-config oauth-bearer provider works
+        // without the operator hand-declaring it. Unioned UNCONDITIONALLY
+        // (independent of `is_non_cc`) so both a genuine-CC request and a
+        // non-CC request stay authenticated -- unlike the floor below,
+        // this single flag is not a fingerprint-widening pin. Composed
+        // BEFORE the context_management strip below so the emulation path
+        // can still remove `context-management-2025-06-27` when active.
         //
         // SUPPRESSED on the forwarded leg: there the client supplies its
         // own real beta set (on `req.anthropic_beta`), which must reach
         // Anthropic verbatim rather than being widened by routectl's minted
         // floor -- that would be a fingerprint the client never sent.
+        let mut oauth_added = false;
         if !forwarded_leg
             && self.cfg.auth_kind == AuthKind::OauthBearer
             && is_anthropic_api_host(&self.cfg.base_url)
         {
-            for t in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
-                if beta_seen.insert((*t).to_string()) {
-                    merged_betas.push((*t).to_string());
+            let oauth_beta = routectl_core::identity::anthropic::OAUTH_ANTHROPIC_BETA;
+            if beta_seen.insert(oauth_beta.to_string()) {
+                merged_betas.push(oauth_beta.to_string());
+                oauth_added = true;
+            }
+
+            // Pinned Claude Code beta floor. These are operator-equivalent
+            // pins (not client-requested), so they bypass the
+            // `allowed_betas` allowlist by construction -- they never pass
+            // through `filter_anthropic_betas`. GATED on `is_non_cc`: a
+            // genuine Claude Code client already sent its own real beta
+            // set above, and force-widening it with capability betas CC
+            // never asked for (e.g. `context-1m` on a haiku request) makes
+            // Anthropic 400 the request. Only a non-CC client -- one
+            // routectl is cloaking as Claude Code -- gets the full floor.
+            if is_non_cc {
+                for t in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
+                    if beta_seen.insert((*t).to_string()) {
+                        merged_betas.push((*t).to_string());
+                    }
                 }
             }
         }
@@ -448,6 +486,16 @@ impl AnthropicApiProvider {
         if self.cfg.context_management {
             merged_betas.retain(|b| b != context_management::CONTEXT_MANAGEMENT_BETA);
         }
+
+        // Snapshot the FINAL composed beta set (post context_management
+        // strip) so the decision context reflects what actually egresses,
+        // not an intermediate union.
+        let has_context_1m_beta = merged_betas
+            .iter()
+            .any(|b| b == routectl_core::identity::anthropic::CONTEXT_1M_BETA);
+        let has_context_management_beta = merged_betas
+            .iter()
+            .any(|b| b == context_management::CONTEXT_MANAGEMENT_BETA);
 
         if !merged_betas.is_empty() {
             rb = rb.header("anthropic-beta", merged_betas.join(","));
@@ -586,7 +634,70 @@ impl AnthropicApiProvider {
         if !header_map.is_empty() {
             rb = rb.headers(header_map);
         }
-        rb
+        let decision = BetaDecision {
+            is_non_cc,
+            forwarded_leg,
+            cloak_mode: self.cfg.cloak.mode,
+            oauth_added,
+            has_context_1m_beta,
+            has_context_management_beta,
+        };
+        (rb, decision)
+    }
+
+    /// Single source of truth for the beta-decision 4xx log lane gate,
+    /// shared by `complete()`, `stream()`, and `count_tokens()` so the
+    /// three call sites can never drift into logging on different lanes.
+    /// True only on an own-token (never forwarded) OauthBearer request to
+    /// api.anthropic.com that failed with a 4xx (never 5xx, since a
+    /// beta-gating decision cannot cause one).
+    fn should_log_beta_4xx(&self, status: u16, forwarded_leg: bool) -> bool {
+        (400..500).contains(&status)
+            && self.cfg.auth_kind == AuthKind::OauthBearer
+            && is_anthropic_api_host(&self.cfg.base_url)
+            && !forwarded_leg
+    }
+
+    /// Anthropic-only structured WARN emitted on a 4xx from the own-token
+    /// OauthBearer + api.anthropic.com lane, adjacent to (never replacing)
+    /// the shared `upstream_log::warn_upstream_failure` call. Carries just
+    /// the beta-decision context plus the already-sanitized body excerpt --
+    /// no tokens, credentials, or request/response content -- so a
+    /// beta-caused 400 recurrence is diagnosable without enabling header
+    /// tracing. Callers gate this to the own-token OAuth-anthropic lane
+    /// before calling; the message literal is stable so subscribers can
+    /// filter on it independent of `context`.
+    fn log_beta_decision_on_4xx(&self, status: u16, dec: &BetaDecision, excerpt: &str) {
+        tracing::warn!(
+            provider = %self.cfg.id,
+            status,
+            is_non_cc = dec.is_non_cc,
+            forwarded_leg = dec.forwarded_leg,
+            cloak_mode = ?dec.cloak_mode,
+            oauth_added = dec.oauth_added,
+            has_context_1m_beta = dec.has_context_1m_beta,
+            has_context_management_beta = dec.has_context_management_beta,
+            body_excerpt = %excerpt,
+            "anthropic-api oauth 4xx beta decision context",
+        );
+    }
+
+    /// Classify a request as non-CC (true) or genuine-CC (false) under the
+    /// configured `CloakMode`: `Always` forces non-CC, `Never` forces
+    /// genuine-CC, and `Auto` applies the heuristic (non-CC iff no captured
+    /// `x-claude-code-session-id` header -- a genuine Claude Code client
+    /// always sends one). Single source of truth for `cloak_body` and,
+    /// later, `build_headers` and 4xx logging.
+    fn is_non_cc(&self, req: &ChatRequest) -> bool {
+        match self.cfg.cloak.mode {
+            cloak::CloakMode::Always => true,
+            cloak::CloakMode::Never => false,
+            cloak::CloakMode::Auto => !req
+                .routectl_internal
+                .claude_code_headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("x-claude-code-session-id")),
+        }
     }
 
     /// Apply the Claude Code identity cloak to the outgoing body on the
@@ -612,10 +723,10 @@ impl AnthropicApiProvider {
         {
             return None;
         }
-        // Mode gate. `Never` skips ALL cloak transforms: the body goes
-        // upstream untouched by the cloak. `Always` cloaks as a non-CC
-        // client regardless of the session-id header. `Auto` keeps the
-        // original heuristic (non-CC iff no captured session-id header).
+        // `Never` must short-circuit BEFORE `is_non_cc` is consulted: it
+        // skips ALL cloak transforms, so the classification is irrelevant
+        // here (it exists only for `is_non_cc`'s other callers, which do
+        // not early-return on `Never`).
         if self.cfg.cloak.mode == cloak::CloakMode::Never {
             return None;
         }
@@ -625,15 +736,7 @@ impl AnthropicApiProvider {
         // a misclassification cannot cause a silent billing leak -- a wrong
         // call yields an upstream rejection, not a paid overage applied
         // quietly.
-        let is_non_cc = match self.cfg.cloak.mode {
-            cloak::CloakMode::Always => true,
-            // `Never` handled above; `Auto` falls through to the heuristic.
-            _ => !req
-                .routectl_internal
-                .claude_code_headers
-                .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case("x-claude-code-session-id")),
-        };
+        let is_non_cc = self.is_non_cc(req);
         let result = cloak::cloak_oauth_egress(body, req, identity, is_non_cc, &self.cfg.cloak);
         // Decision log: provider + non-CC gate + how many tool names were
         // normalized. NEVER logs tool names or message content.
@@ -812,8 +915,9 @@ impl Provider for AnthropicApiProvider {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
 
-        let request = self
-            .build_headers(self.client.post(self.messages_url()), &req, &token)
+        let (rb, beta_decision) =
+            self.build_headers(self.client.post(self.messages_url()), &req, &token);
+        let request = rb
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
@@ -854,6 +958,15 @@ impl Provider for AnthropicApiProvider {
                 &safe_excerpt,
                 "anthropic",
             );
+            // Beta-decision context: own-token OauthBearer +
+            // api.anthropic.com lane only -- the BetaDecision only carries
+            // meaning there. Fires on ANY 4xx on that lane (no error-text
+            // matching), so a beta-caused 400 recurrence is diagnosable
+            // without enabling header tracing. Gate is `should_log_beta_4xx`
+            // (shared with stream() and count_tokens()).
+            if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
+                self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
+            }
             return Err(err);
         }
 
@@ -951,8 +1064,9 @@ impl Provider for AnthropicApiProvider {
             crate::claude_signing::resign_cch_in_place(&mut body_bytes);
         }
 
-        let request = self
-            .build_headers(self.client.post(self.messages_url()), &req, &token)
+        let (rb, beta_decision) =
+            self.build_headers(self.client.post(self.messages_url()), &req, &token);
+        let request = rb
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
@@ -981,6 +1095,11 @@ impl Provider for AnthropicApiProvider {
                 &safe_excerpt,
                 "anthropic",
             );
+            // See complete(): own-token OauthBearer + api.anthropic.com
+            // lane, 4xx only, via the shared `should_log_beta_4xx` gate.
+            if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
+                self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
+            }
             return Err(err);
         }
 
@@ -1154,8 +1273,9 @@ impl Provider for AnthropicApiProvider {
         let token = self.resolve_effective_token(&req).await?;
 
         // count_tokens is deliberately unsigned (matches upstream).
-        let request = self
-            .build_headers(self.client.post(self.count_tokens_url()), &req, &token)
+        let (rb, beta_decision) =
+            self.build_headers(self.client.post(self.count_tokens_url()), &req, &token);
+        let request = rb
             .header("content-type", "application/json")
             .json(&body)
             .build()
@@ -1205,6 +1325,13 @@ impl Provider for AnthropicApiProvider {
                     &safe_excerpt,
                     "anthropic count_tokens",
                 );
+            }
+            // See complete(): own-token OauthBearer + api.anthropic.com
+            // lane, 4xx only (naturally excludes the 501 capability signal
+            // above, which is a 5xx), via the shared `should_log_beta_4xx`
+            // gate.
+            if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
+                self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
             }
             return Err(err);
         }
@@ -1443,7 +1570,7 @@ mod tests {
     fn outbound_header_names(provider: &AnthropicApiProvider, req: &ChatRequest) -> Vec<String> {
         let client = reqwest::Client::new();
         let rb = client.post("http://127.0.0.1/test");
-        let rb = provider.build_headers(rb, req, "test-token");
+        let (rb, _decision) = provider.build_headers(rb, req, "test-token");
         let request = rb.build().expect("build outbound request");
         request
             .headers()
@@ -1548,7 +1675,7 @@ mod tests {
     ) -> Option<String> {
         let client = reqwest::Client::new();
         let rb = client.post("http://127.0.0.1/test");
-        let rb = provider.build_headers(rb, req, "test-token");
+        let (rb, _decision) = provider.build_headers(rb, req, "test-token");
         let request = rb.build().expect("build outbound request");
         request
             .headers()
@@ -2180,6 +2307,86 @@ mod tests {
         );
     }
 
+    /// Genuine-CC (own-mode, `is_non_cc() == false`) requests must NOT get
+    /// the fingerprint-widening beta floor: real Claude Code never asked
+    /// for capability betas like `context-1m` on e.g. a haiku/WebFetch
+    /// call, and force-widening its own beta set makes Anthropic 400 it.
+    #[test]
+    fn genuine_cc_request_omits_floor_only_betas() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present (oauth gate flag)");
+        let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+        for floor_only in ["context-1m-2025-08-07", "interleaved-thinking-2025-05-14"] {
+            assert!(
+                !betas.contains(&floor_only),
+                "genuine-CC request must not carry floor-only beta {floor_only}; got: {value}"
+            );
+        }
+    }
+
+    /// Non-CC (routectl is cloaking the request as Claude Code) requests
+    /// still get the FULL pinned floor, unchanged from pre-gate behavior.
+    #[test]
+    fn non_cc_request_gets_full_floor() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        let req = req_with_claude_code_headers(Vec::new());
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        let betas: Vec<&str> = value.split(',').map(str::trim).collect();
+        for expected in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
+            assert!(
+                betas.contains(expected),
+                "non-CC request must carry full floor beta {expected}; got: {value}"
+            );
+        }
+    }
+
+    /// `oauth-2025-04-20` is required for OAuth to function on
+    /// api.anthropic.com, so it is unioned unconditionally -- present on
+    /// BOTH the genuine-CC and the non-CC path, independent of the floor
+    /// gate.
+    #[test]
+    fn oauth_beta_present_for_both_genuine_cc_and_non_cc() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+
+        let genuine_cc = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid")]);
+        let value = outbound_header_value(&provider, &genuine_cc, "anthropic-beta")
+            .expect("anthropic-beta header must be present for genuine-CC");
+        assert!(
+            value.split(',').any(|b| b.trim() == "oauth-2025-04-20"),
+            "oauth gate flag must be present for genuine-CC; got: {value}"
+        );
+
+        let non_cc = req_with_claude_code_headers(Vec::new());
+        let value = outbound_header_value(&provider, &non_cc, "anthropic-beta")
+            .expect("anthropic-beta header must be present for non-CC");
+        assert!(
+            value.split(',').any(|b| b.trim() == "oauth-2025-04-20"),
+            "oauth gate flag must be present for non-CC; got: {value}"
+        );
+    }
+
+    /// The gate never strips a genuine-CC client's OWN requested betas --
+    /// only the routectl-minted floor is suppressed. A real Claude Code
+    /// request that itself asked for `context-1m` still gets it.
+    #[test]
+    fn genuine_cc_own_requested_beta_survives_the_gate() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        let mut req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+        req.anthropic_beta = vec!["context-1m-2025-08-07".into()];
+
+        let value = outbound_header_value(&provider, &req, "anthropic-beta")
+            .expect("anthropic-beta header must be present");
+        assert!(
+            value
+                .split(',')
+                .any(|b| b.trim() == "context-1m-2025-08-07"),
+            "the client's own requested beta must never be stripped by the gate; got: {value}"
+        );
+    }
+
     // -- forwarded (pure-proxy) leg: client identity overrides mint --------
     //
     // On the forwarded leg (`forwarded_bearer` Some AND the base is exactly
@@ -2226,7 +2433,7 @@ mod tests {
     ) -> Vec<(String, String)> {
         let client = reqwest::Client::new();
         let rb = client.post("http://127.0.0.1/test");
-        let rb = provider.build_headers(rb, req, "test-token");
+        let (rb, _decision) = provider.build_headers(rb, req, "test-token");
         let request = rb.build().expect("build outbound request");
         request
             .headers()
@@ -2417,6 +2624,11 @@ mod tests {
     /// on the forwarded bearer, not on the mere presence of captured
     /// headers. `forward_client_headers` is empty (own-mode secure default),
     /// so no captured header reaches the wire.
+    ///
+    /// The captured `x-claude-code-session-id` also makes this request
+    /// `is_non_cc() == false` (genuine CC) under the default Auto cloak
+    /// mode, so the fingerprint-widening beta floor is correctly SUPPRESSED
+    /// here -- only the unconditional `oauth-2025-04-20` gate flag survives.
     #[test]
     fn own_mode_keeps_minted_fingerprint_even_with_captured_headers() {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_session(
@@ -2444,12 +2656,17 @@ mod tests {
             Some("minted-sid-known"),
             "own mode must keep the minted session id",
         );
-        // Minted CC beta floor is present in own mode.
+        // Genuine-CC (is_non_cc == false): the fingerprint-widening floor
+        // is suppressed, but the OAuth gate flag still reaches the wire.
         let value = outbound_header_value(&provider, &req, "anthropic-beta")
-            .expect("own-mode anthropic-beta floor must be present");
+            .expect("anthropic-beta header must be present (oauth gate flag)");
         assert!(
-            value.split(',').any(|b| b.trim() == "claude-code-20250219"),
-            "own mode must keep the minted CC beta floor; got {value}",
+            !value.split(',').any(|b| b.trim() == "claude-code-20250219"),
+            "genuine-CC request must NOT get the widening CC beta floor; got {value}",
+        );
+        assert!(
+            value.split(',').any(|b| b.trim() == "oauth-2025-04-20"),
+            "the unconditional oauth gate flag must still be present; got {value}",
         );
     }
 
@@ -2618,6 +2835,51 @@ mod tests {
             cloak,
         };
         AnthropicApiProvider::new(cfg)
+    }
+
+    /// `is_non_cc` under `CloakMode::Always` is unconditionally true,
+    /// regardless of whether a session-id header is present.
+    #[test]
+    fn is_non_cc_always_is_true() {
+        let provider = oauth_provider_with_cloak(CloakConfig {
+            mode: CloakMode::Always,
+            ..CloakConfig::default()
+        });
+        let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+        assert!(provider.is_non_cc(&req));
+    }
+
+    /// `is_non_cc` under `CloakMode::Never` is unconditionally false,
+    /// regardless of whether a session-id header is present. This arm has
+    /// no inline equivalent today -- it exists for `build_headers`, which
+    /// (unlike `cloak_body`) does not early-return on `Never`.
+    #[test]
+    fn is_non_cc_never_is_false() {
+        let provider = oauth_provider_with_cloak(CloakConfig {
+            mode: CloakMode::Never,
+            ..CloakConfig::default()
+        });
+        let req = req_with_claude_code_headers(Vec::new());
+        assert!(!provider.is_non_cc(&req));
+    }
+
+    /// `is_non_cc` under `CloakMode::Auto` is false when a captured
+    /// `x-claude-code-session-id` header is present, matched
+    /// case-insensitively.
+    #[test]
+    fn is_non_cc_auto_is_false_when_session_header_present() {
+        let provider = oauth_provider_with_cloak(CloakConfig::default());
+        let req = req_with_claude_code_headers(vec![("X-Claude-Code-Session-Id", "sid-42")]);
+        assert!(!provider.is_non_cc(&req));
+    }
+
+    /// `is_non_cc` under `CloakMode::Auto` is true when no session-id
+    /// header was captured.
+    #[test]
+    fn is_non_cc_auto_is_true_when_session_header_absent() {
+        let provider = oauth_provider_with_cloak(CloakConfig::default());
+        let req = req_with_claude_code_headers(Vec::new());
+        assert!(provider.is_non_cc(&req));
     }
 
     /// `mode = never` skips ALL cloak transforms: billing block NOT stripped,
@@ -2855,6 +3117,7 @@ mod tests {
         let rb = client.post("http://127.0.0.1/test");
         provider
             .build_headers(rb, req, &token)
+            .0
             .build()
             .expect("build outbound request")
     }
@@ -3050,5 +3313,138 @@ mod tests {
             !logs_contain(secret),
             "the forwarded token must never be logged by the resolver"
         );
+    }
+
+    // -- beta-decision observability ----------------------------------------
+
+    /// A genuine Claude Code request (a captured `x-claude-code-session-id`
+    /// header) classifies as NOT non-CC, but the mandatory OAuth gate still
+    /// fires independent of that classification. The non-CC-only floor
+    /// (and therefore `context-1m-2025-08-07`) must NOT widen the beta set
+    /// for a genuine CC client.
+    #[test]
+    fn beta_decision_reflects_genuine_cc_request() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
+        let client = reqwest::Client::new();
+        let rb = client.post("http://127.0.0.1/test");
+        let (_rb, decision) = provider.build_headers(rb, &req, "test-token");
+
+        assert!(
+            !decision.is_non_cc,
+            "a captured session-id header must classify as genuine-CC"
+        );
+        assert!(
+            decision.oauth_added,
+            "the mandatory oauth gate must fire independent of is_non_cc"
+        );
+        assert!(
+            !decision.has_context_1m_beta,
+            "a genuine-CC request must not be floor-widened with context-1m"
+        );
+    }
+
+    /// The mirror case: no captured session-id header classifies as
+    /// non-CC, and the pinned Claude Code beta floor (including
+    /// `context-1m-2025-08-07`) widens the outgoing beta set.
+    #[test]
+    fn beta_decision_reflects_non_cc_request() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        let req = req_with_claude_code_headers(Vec::new());
+        let client = reqwest::Client::new();
+        let rb = client.post("http://127.0.0.1/test");
+        let (_rb, decision) = provider.build_headers(rb, &req, "test-token");
+
+        assert!(
+            decision.is_non_cc,
+            "no captured session-id header must classify as non-CC"
+        );
+        assert!(
+            decision.oauth_added,
+            "the mandatory oauth gate must fire for non-CC too"
+        );
+        assert!(
+            decision.has_context_1m_beta,
+            "a non-CC request must be floor-widened with context-1m"
+        );
+    }
+
+    /// Drive `log_beta_decision_on_4xx` directly (bypassing a full HTTP
+    /// round-trip) and assert the beta-context fields land on the emitted
+    /// event, so a beta-caused 400 recurrence is diagnosable without
+    /// enabling header tracing.
+    #[traced_test]
+    #[test]
+    fn log_beta_decision_on_4xx_emits_beta_context_fields() {
+        let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        let decision = BetaDecision {
+            is_non_cc: true,
+            forwarded_leg: false,
+            cloak_mode: CloakMode::Auto,
+            oauth_added: true,
+            has_context_1m_beta: true,
+            has_context_management_beta: false,
+        };
+
+        provider.log_beta_decision_on_4xx(400, &decision, "invalid_request_error: bad beta");
+
+        assert!(logs_contain(
+            "anthropic-api oauth 4xx beta decision context"
+        ));
+        assert!(logs_contain("status=400"));
+        assert!(logs_contain("is_non_cc=true"));
+        assert!(logs_contain("oauth_added=true"));
+        assert!(logs_contain("has_context_1m_beta=true"));
+        assert!(logs_contain("has_context_management_beta=false"));
+    }
+
+    /// `should_log_beta_4xx` is the single gate shared by `complete()`,
+    /// `stream()`, and `count_tokens()` -- exercise the full matrix here
+    /// instead of trusting three copy-pasted conditions to stay in sync.
+    /// Baseline: TRUE only for a 4xx, OauthBearer, api.anthropic.com,
+    /// non-forwarded request. Each deviation below flips exactly one
+    /// dimension of that baseline and must land on false.
+    #[test]
+    fn should_log_beta_4xx_gate_matrix() {
+        let oauth_provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
+        assert!(
+            oauth_provider.should_log_beta_4xx(400, false),
+            "baseline: 4xx + OauthBearer + api.anthropic.com + own leg must fire"
+        );
+
+        for status in [500, 502] {
+            assert!(
+                !oauth_provider.should_log_beta_4xx(status, false),
+                "5xx status {status} must not fire (beta gating cannot cause a 5xx)"
+            );
+        }
+
+        let api_key_provider = AnthropicApiProvider::new(cfg_with_allowlist(Vec::new()));
+        assert!(
+            !api_key_provider.should_log_beta_4xx(400, false),
+            "ApiKey auth must not fire even on api.anthropic.com"
+        );
+
+        let non_anthropic_provider = AnthropicApiProvider::new(oauth_cfg_with_session(
+            "https://example.invalid",
+            None,
+            Vec::new(),
+        ));
+        assert!(
+            !non_anthropic_provider.should_log_beta_4xx(400, false),
+            "a non-anthropic base_url must not fire even with OauthBearer"
+        );
+
+        assert!(
+            !oauth_provider.should_log_beta_4xx(400, true),
+            "forwarded_leg must suppress the log (own-token lane only)"
+        );
+
+        for status in [200, 204, 301] {
+            assert!(
+                !oauth_provider.should_log_beta_4xx(status, false),
+                "2xx/3xx status {status} must not fire"
+            );
+        }
     }
 }

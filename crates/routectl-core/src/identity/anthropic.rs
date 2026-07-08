@@ -29,6 +29,20 @@ const STAINLESS_PACKAGE_VERSION: &str = "0.94.0";
 /// Stainless JS runtime version stamped in `x-stainless-runtime-version`.
 const STAINLESS_RUNTIME_VERSION: &str = "v24.3.0";
 
+/// The `anthropic-beta` flag required for OAuth to function on
+/// api.anthropic.com. Egress unions this unconditionally on the
+/// OauthBearer + api.anthropic.com surface, independent of whether the
+/// request is genuine Claude Code or cloaked -- single source of truth so
+/// the literal is never duplicated between this floor list and the
+/// unconditional union in `build_headers`.
+pub const OAUTH_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
+
+/// The `anthropic-beta` flag gating the 1M-token context window. Single
+/// source of truth shared by the floor list below and the provider's
+/// `has_context_1m_beta` observability check, so a version bump here can
+/// never drift out of sync with the sibling literal.
+pub const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
+
 /// Default `User-Agent` for the OauthBearer surface. Used as the
 /// client-level fallback in `AnthropicApiProvider::new()` when the
 /// operator leaves `user_agent` unset on an oauth-bearer provider.
@@ -93,7 +107,7 @@ pub fn default_claude_code_identity_headers() -> Vec<(&'static str, &'static str
 pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
     &[
         "claude-code-20250219",
-        "oauth-2025-04-20",
+        OAUTH_ANTHROPIC_BETA,
         "interleaved-thinking-2025-05-14",
         "context-management-2025-06-27",
         "prompt-caching-scope-2026-01-05",
@@ -101,7 +115,7 @@ pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
         "fast-mode-2026-02-01",
         "redact-thinking-2026-02-12",
         "token-efficient-tools-2026-03-28",
-        "context-1m-2025-08-07",
+        CONTEXT_1M_BETA,
         "thinking-token-count-2026-05-13",
         "mid-conversation-system-2026-04-07",
         "advisor-tool-2026-03-01",
