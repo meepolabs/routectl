@@ -29,6 +29,14 @@ pub mod token_estimate;
 /// field directly to pin routing to a specific configured alias.
 pub const ALIAS_HEADER: &str = "x-routectl-alias";
 
+/// Seam header the MITM front-proxy (`proxy::split`) stamps on the
+/// re-injected api.anthropic.com inference leg, and ONLY that leg. It is a
+/// HINT consumed by the forwarded-mode capture gate in
+/// `handlers::ingress_handle`; the config-side `[mitm] credential_source`
+/// capability is the real authority. Shared between the proxy set site and
+/// the ingress read site so the two cannot drift on the literal.
+pub(crate) const MITM_PROXIED_HEADER: &str = "x-routectl-mitm-proxied";
+
 /// Fallback wire `error.type` for a non-status error -- a render or
 /// transport failure that carries no HTTP status to classify. Status-
 /// bearing upstream errors instead map through `anthropic_error_type`.

@@ -17,6 +17,8 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use routectl_core::Error;
+use routectl_core::ForwardedBearer;
+use routectl_router::config::CredentialSource;
 use routectl_router::{DispatchedStream, RouterOptions};
 use routectl_usage::{Outcome, UsageHandle, UsageRecord};
 use serde_json::{Value, json};
@@ -71,7 +73,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
         Err(e) => return render_json_rejection(envelope, e),
     };
 
-    let req = match adapter.parse_request(&headers, raw_body) {
+    let mut req = match adapter.parse_request(&headers, raw_body) {
         Ok(r) => r,
         Err(e) => return map_error(envelope, e),
     };
@@ -80,6 +82,14 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // request does not mix old + new routing state. Every read after
     // this point goes through `router`, not `state.router.load*`.
     let router = state.router.load_full();
+
+    // Forwarded-mode capture gate (first-party passthrough): stash the
+    // inbound bearer for opt-in relay to the upstream ONLY when the MITM
+    // seam header is present (header-is-a-hint) AND the resolved
+    // credential_source is Forwarded (config-is-the-capability). Every
+    // own-mode and non-forwarded path leaves `forwarded_bearer` None, so
+    // the carrier state is byte-identical to the pre-passthrough path.
+    capture_forwarded_bearer(&headers, &router, &mut req);
 
     let mut opts = RouterOptions::new();
     // Gate `x-routectl-disable-fallbacks` behind the server-side
@@ -133,6 +143,67 @@ fn session_id_of(headers: &HeaderMap) -> Option<String> {
         .get(SESSION_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
+}
+
+/// Populate `req.routectl_internal.forwarded_bearer` with the inbound
+/// `Authorization` bearer ONLY when BOTH keys of the two-key gate turn:
+///
+/// - (a) header-is-a-hint: the `x-routectl-mitm-proxied` seam header is
+///   present. The MITM front-proxy (`proxy::split`) stamps it exclusively
+///   on the re-injected api.anthropic.com inference leg, so its presence
+///   marks a request that arrived through that channel; and
+/// - (b) config-is-the-capability: the resolved `[mitm] credential_source`
+///   is `Forwarded`. An absent `[mitm]` block resolves to `None`, which is
+///   never `Forwarded`.
+///
+/// When either key is missing -- own mode, no `[mitm]` block, no seam
+/// header, or no inbound bearer -- `forwarded_bearer` stays `None` and the
+/// carrier is byte-identical to the non-passthrough path. The raw token is
+/// wrapped in `ForwardedBearer` (redact-on-Debug) the instant it is
+/// captured, and this path emits no tracing, so the token is never logged.
+fn capture_forwarded_bearer(
+    headers: &HeaderMap,
+    router: &routectl_router::Router,
+    req: &mut routectl_core::ChatRequest,
+) {
+    // (a) header-is-a-hint.
+    if !headers.contains_key(crate::ingress::MITM_PROXIED_HEADER) {
+        return;
+    }
+    // (b) config-is-the-capability.
+    let forwarded = matches!(
+        router.config.mitm.as_ref().map(|m| m.credential_source),
+        Some(CredentialSource::Forwarded)
+    );
+    if !forwarded {
+        return;
+    }
+    if let Some(token) = extract_authorization_bearer(headers) {
+        req.routectl_internal.forwarded_bearer = Some(ForwardedBearer::new(token));
+    }
+}
+
+/// Extract the token from an inbound `Authorization: Bearer <token>`
+/// header. Returns the trimmed token (scheme stripped) when the header is
+/// present, valid UTF-8, and carries a non-empty `Bearer` credential;
+/// `None` for an absent / non-UTF-8 header, a non-`Bearer` scheme, or an
+/// empty token. The scheme match is ASCII-case-insensitive per RFC 7235.
+/// Pure -- no config access, no logging; the caller gates on config before
+/// wrapping the result in a redacting newtype.
+fn extract_authorization_bearer(headers: &HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())?
+        .trim();
+    let (scheme, token) = raw.split_once(char::is_whitespace)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token.to_string())
 }
 
 /// Treat a header value as truthy when set to "1", "true", or "yes"

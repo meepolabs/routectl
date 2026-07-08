@@ -2252,3 +2252,272 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
         "OpenAI dialect must not emit a leading synthetic message_start: {events:?}"
     );
 }
+
+// ============ forwarded-mode ingress bearer capture gate ========
+//
+// `capture_forwarded_bearer` stashes the inbound Authorization bearer on
+// `req.routectl_internal.forwarded_bearer` ONLY when BOTH:
+//   (a) the `x-routectl-mitm-proxied` seam header is present (the MITM
+//       proxy stamps it exclusively on the re-injected inference leg), AND
+//   (b) the resolved `[mitm] credential_source` is `Forwarded`.
+// Every other path (own mode, no `[mitm]` block, no seam header, no
+// inbound bearer) MUST leave the carrier byte-identical to pre-passthrough
+// behavior: `forwarded_bearer == None`. The token, when captured, is the
+// scheme-stripped bearer value (what the egress dispatch path reads) and is
+// never rendered raw by the carrier's `Debug`.
+
+/// Build an `Arc<Router>` whose `[mitm]` config carries `cs`. `None`
+/// models "no `[mitm]` block at all"; `Some(cs)` models a present block
+/// with that credential_source. `Router::new` does no I/O, so this is a
+/// pure carrier for the `router.config.mitm` read the gate performs.
+fn router_with_mitm(cs: Option<CredentialSource>) -> std::sync::Arc<routectl_router::Router> {
+    use routectl_router::{Config, MitmConfig, Router};
+    use std::sync::Arc;
+    let mitm = cs.map(|credential_source| MitmConfig {
+        credential_source,
+        ..Default::default()
+    });
+    Arc::new(Router::new(Arc::new(Config {
+        mitm,
+        ..Default::default()
+    })))
+}
+
+/// Build an inbound `HeaderMap` for the gate tests: optionally the
+/// `x-routectl-mitm-proxied` seam header (value is irrelevant -- the gate
+/// checks presence only) and optionally a raw `Authorization` value.
+fn ingress_headers(seam: bool, authorization: Option<&str>) -> HeaderMap {
+    use axum::http::{HeaderName, HeaderValue, header::AUTHORIZATION};
+    let mut h = HeaderMap::new();
+    if seam {
+        h.insert(
+            HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
+            HeaderValue::from_static("1"),
+        );
+    }
+    if let Some(a) = authorization {
+        h.insert(AUTHORIZATION, HeaderValue::from_str(a).unwrap());
+    }
+    h
+}
+
+// ---- capture matrix (the security-critical contract) ----
+
+/// Own mode is the default capability: even with the seam-header hint AND
+/// an inbound bearer present, the config gate is closed, so nothing is
+/// captured.
+#[test]
+fn forwarded_bearer_stays_none_in_own_mode_even_with_seam_and_bearer() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Own));
+    let headers = ingress_headers(true, Some("Bearer sk-own-mode-tok"));
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_forwarded_bearer(&headers, &router, &mut req);
+
+    // Assert
+    assert!(
+        req.routectl_internal.forwarded_bearer.is_none(),
+        "own mode must never capture the inbound bearer"
+    );
+}
+
+/// Forwarded capability is armed, but the seam-header hint is absent: this
+/// request did not arrive via the MITM inference leg, so the bearer is not
+/// captured (header-is-a-hint half of the two-key gate).
+#[test]
+fn forwarded_bearer_stays_none_in_forwarded_mode_without_seam_header() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = ingress_headers(false, Some("Bearer sk-no-seam-tok"));
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_forwarded_bearer(&headers, &router, &mut req);
+
+    // Assert
+    assert!(
+        req.routectl_internal.forwarded_bearer.is_none(),
+        "no seam header -> not the MITM inference leg -> no capture"
+    );
+}
+
+/// Both keys turned: forwarded capability AND the seam-header hint AND an
+/// inbound bearer -> the scheme-stripped token lands on the carrier. This
+/// pins the captured-state contract the egress dispatch path reads
+/// (`expose()` yields the token, not the full `Bearer ...` header value).
+#[test]
+fn forwarded_bearer_captured_when_forwarded_and_seam_and_bearer_present() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = ingress_headers(true, Some("Bearer sk-ant-oat01-passthrough"));
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_forwarded_bearer(&headers, &router, &mut req);
+
+    // Assert
+    let captured = req
+        .routectl_internal
+        .forwarded_bearer
+        .as_ref()
+        .expect("both gates open -> bearer captured");
+    assert_eq!(
+        captured.expose(),
+        "sk-ant-oat01-passthrough",
+        "the captured value is the scheme-stripped token"
+    );
+}
+
+/// No `[mitm]` block at all resolves to `credential_source == None`, which
+/// is not `Forwarded`, so the gate stays closed even with the seam header
+/// and a bearer present.
+#[test]
+fn forwarded_bearer_stays_none_when_no_mitm_config_at_all() {
+    // Arrange
+    let router = router_with_mitm(None);
+    let headers = ingress_headers(true, Some("Bearer sk-no-mitm-tok"));
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_forwarded_bearer(&headers, &router, &mut req);
+
+    // Assert
+    assert!(
+        req.routectl_internal.forwarded_bearer.is_none(),
+        "absent [mitm] block must never capture the inbound bearer"
+    );
+}
+
+/// Both gates open, but the inbound request carries no `Authorization`
+/// header: there is nothing to capture, so the carrier stays `None`.
+#[test]
+fn forwarded_bearer_stays_none_when_gates_open_but_no_authorization_header() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = ingress_headers(true, None);
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_forwarded_bearer(&headers, &router, &mut req);
+
+    // Assert
+    assert!(req.routectl_internal.forwarded_bearer.is_none());
+}
+
+/// Both gates open, but the `Authorization` header uses a non-`Bearer`
+/// scheme: routectl forwards only bearer credentials, so a `Basic` (or any
+/// other) scheme is not captured.
+#[test]
+fn forwarded_bearer_stays_none_for_non_bearer_authorization_scheme() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = ingress_headers(true, Some("Basic dXNlcjpwYXNz"));
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_forwarded_bearer(&headers, &router, &mut req);
+
+    // Assert
+    assert!(req.routectl_internal.forwarded_bearer.is_none());
+}
+
+/// Security guard against the realistic leak vector: something logging the
+/// whole carrier via `{:?}` / `?req`. A captured bearer must render as the
+/// redaction placeholder, never the raw token.
+#[test]
+fn captured_bearer_is_redacted_in_carrier_debug() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = ingress_headers(true, Some("Bearer sk-leak-canary-42"));
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_forwarded_bearer(&headers, &router, &mut req);
+    let rendered = format!("{:?}", req.routectl_internal);
+
+    // Assert
+    assert!(
+        !rendered.contains("sk-leak-canary-42"),
+        "carrier Debug must never render the raw bearer: {rendered}"
+    );
+    assert!(
+        rendered.contains("<redacted>"),
+        "redaction placeholder present on the captured bearer: {rendered}"
+    );
+}
+
+// ---- extract_authorization_bearer (pure) ----
+
+#[test]
+fn extract_bearer_returns_token_after_scheme() {
+    let h = ingress_headers(false, Some("Bearer abc123"));
+    assert_eq!(extract_authorization_bearer(&h).as_deref(), Some("abc123"));
+}
+
+#[test]
+fn extract_bearer_scheme_match_is_case_insensitive() {
+    for scheme in ["bearer", "BEARER", "BeArEr"] {
+        let h = ingress_headers(false, Some(&format!("{scheme} tok-9")));
+        assert_eq!(
+            extract_authorization_bearer(&h).as_deref(),
+            Some("tok-9"),
+            "scheme {scheme} must match case-insensitively"
+        );
+    }
+}
+
+#[test]
+fn extract_bearer_trims_surrounding_whitespace_around_token() {
+    let h = ingress_headers(false, Some("Bearer    padded-tok  "));
+    assert_eq!(
+        extract_authorization_bearer(&h).as_deref(),
+        Some("padded-tok")
+    );
+}
+
+#[test]
+fn extract_bearer_none_when_header_absent() {
+    let h = ingress_headers(false, None);
+    assert_eq!(extract_authorization_bearer(&h), None);
+}
+
+#[test]
+fn extract_bearer_none_for_non_bearer_scheme() {
+    let h = ingress_headers(false, Some("Basic dXNlcjpwYXNz"));
+    assert_eq!(extract_authorization_bearer(&h), None);
+}
+
+#[test]
+fn extract_bearer_none_for_empty_token() {
+    for val in ["Bearer", "Bearer ", "Bearer     "] {
+        let h = ingress_headers(false, Some(val));
+        assert_eq!(
+            extract_authorization_bearer(&h),
+            None,
+            "value {val:?} carries no token"
+        );
+    }
+}
+
+#[test]
+fn extract_bearer_none_for_non_utf8_header_value() {
+    use axum::http::{HeaderValue, header::AUTHORIZATION};
+    let mut h = HeaderMap::new();
+    // obs-text bytes form a valid HeaderValue whose `to_str()` fails.
+    h.insert(
+        AUTHORIZATION,
+        HeaderValue::from_bytes(&[0xC0, 0xFF]).unwrap(),
+    );
+    assert_eq!(extract_authorization_bearer(&h), None);
+}
+
+#[test]
+fn extract_bearer_preserves_token_internal_structure() {
+    let h = ingress_headers(false, Some("Bearer sk-ant-oat01-AbC_-.123"));
+    assert_eq!(
+        extract_authorization_bearer(&h).as_deref(),
+        Some("sk-ant-oat01-AbC_-.123")
+    );
+}

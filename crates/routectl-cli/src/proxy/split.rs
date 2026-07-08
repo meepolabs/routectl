@@ -83,9 +83,13 @@ const KNOWN_CONTROL_PLANE_PREFIXES: &[&str] = &["/v1/code/", "/api/", "/v1/mcp_s
 const KNOWN_CONTROL_PLANE_EXACT_PATHS: &[&str] = &["/v1/mcp_servers"];
 
 /// Set on the re-injected request only (never on the catch-all forward
-/// to Anthropic): a later feature's seam marking "this request arrived
-/// via the MITM re-inject path." f1 sets it and otherwise ignores it.
-const MITM_PROXIED_HEADER_NAME: HeaderName = HeaderName::from_static("x-routectl-mitm-proxied");
+/// to Anthropic): the seam marking "this request arrived via the MITM
+/// re-inject path." The forwarded-mode ingress capture gate reads it as a
+/// hint. Sourced from the single shared string in `crate::ingress` so the
+/// set site here and the read site in `handlers::ingress_handle` cannot
+/// drift on the literal.
+const MITM_PROXIED_HEADER_NAME: HeaderName =
+    HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER);
 
 fn is_anthropic_inference_path(path: &str) -> bool {
     ANTHROPIC_INFERENCE_PATHS.contains(&path)
