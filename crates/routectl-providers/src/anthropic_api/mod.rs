@@ -19,6 +19,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use routectl_core::identity::anthropic::is_anthropic_api_host;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, StaticToken, TokenCount,
     TokenSource, debug_upstream_error_body, is_json_error_envelope, sanitize_for_log,
@@ -302,6 +303,35 @@ impl AnthropicApiProvider {
             "{}/v1/messages/count_tokens",
             self.cfg.base_url.trim_end_matches('/')
         )
+    }
+
+    /// Resolve the token to stamp as the outbound Anthropic credential,
+    /// host-pinned to the forwarded-passthrough invariant.
+    ///
+    /// In forwarded (pure-proxy) mode the ingress captures the client's
+    /// first-party claude.ai bearer onto
+    /// `req.routectl_internal.forwarded_bearer`. That token is a
+    /// full-scope credential and MUST reach ONLY `api.anthropic.com` --
+    /// never any other host. So the forwarded token becomes the effective
+    /// credential EXACTLY when both hold: `base_url`'s host is exactly
+    /// `api.anthropic.com` (`is_anthropic_api_host`) AND `forwarded_bearer`
+    /// is `Some` (ingress ran in forwarded mode for this request). On that
+    /// path `self.cfg.auth.token()` is NOT called: the synthetic pure-proxy
+    /// provider carries no live routectl credential, so resolving it would
+    /// error.
+    ///
+    /// On every other path -- own-mode (no forwarded bearer), OR a
+    /// non-anthropic base even when a forwarded bearer is present -- the
+    /// forwarded token is IGNORED (never even read) and the provider
+    /// resolves its own token exactly as before. The raw token is never
+    /// logged.
+    async fn resolve_effective_token(&self, req: &ChatRequest) -> Result<String> {
+        if is_anthropic_api_host(&self.cfg.base_url)
+            && let Some(forwarded) = req.routectl_internal.forwarded_bearer.as_ref()
+        {
+            return Ok(forwarded.expose().to_string());
+        }
+        self.cfg.auth.token().await
     }
 
     fn build_headers(
@@ -638,42 +668,6 @@ impl AnthropicApiProvider {
     }
 }
 
-/// True when `base_url`'s host is exactly `api.anthropic.com` -- the only
-/// surface that should receive the Claude-Code session identity headers.
-///
-/// A precise host match, NOT a substring test: `base_url.contains(
-/// "api.anthropic.com")` would also match an operator-misconfigured
-/// `https://api.anthropic.com.example.com` (a sibling-domain takeover) or
-/// `https://proxy.example/api.anthropic.com` (host in the path). An exact
-/// host match avoids sending the session-id headers to an unintended host
-/// when `base_url` is misconfigured. `base_url` is trusted operator config,
-/// so this is defense in depth on a ban-risk identity surface rather than a
-/// fix for attacker input.
-///
-/// The host is the authority between the scheme and the first `/?#`, minus
-/// any `user@` credentials and `:port`. Kept dependency-free (no `url`
-/// crate) since the shape is fixed and validated upstream by
-/// `validate_base_url_scheme`.
-fn is_anthropic_api_host(base_url: &str) -> bool {
-    let after_scheme = base_url
-        .strip_prefix("https://")
-        .or_else(|| base_url.strip_prefix("http://"))
-        .unwrap_or(base_url);
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    // Drop optional `user:pass@` credentials, then the optional `:port`.
-    let host = authority
-        .rsplit('@')
-        .next()
-        .unwrap_or(authority)
-        .split(':')
-        .next()
-        .unwrap_or(authority);
-    host.eq_ignore_ascii_case("api.anthropic.com")
-}
-
 /// Resolve the client-level `User-Agent` for an anthropic-api provider.
 /// An operator override always wins. With no override, the OauthBearer
 /// surface falls back to the Claude Code SDK UA so a zero-config
@@ -751,11 +745,14 @@ impl Provider for AnthropicApiProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        // Per-request token resolution: for static refs this hits
-        // the in-memory `StaticToken` cache; for `oauth://<provider>`
-        // refs this dives into `OAuthStore` and resolves the current
-        // value (including the v0.7+ refresh path).
-        let token = self.cfg.auth.token().await?;
+        // Host-pinned per-request token resolution. On the
+        // api.anthropic.com surface a forwarded first-party bearer
+        // (forwarded / pure-proxy mode) is used verbatim; otherwise the
+        // provider resolves its own token -- for static refs the in-memory
+        // `StaticToken` cache, for `oauth://<provider>` refs the `OAuthStore`
+        // current value (including the v0.7+ refresh path). See
+        // `resolve_effective_token` for the host pin.
+        let token = self.resolve_effective_token(&req).await?;
 
         // Serialize first so the billing-header checksum can be re-signed
         // over the exact bytes transmitted. routectl mutates the canonical
@@ -897,7 +894,7 @@ impl Provider for AnthropicApiProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let token = self.cfg.auth.token().await?;
+        let token = self.resolve_effective_token(&req).await?;
 
         // See the complete() path: re-sign the billing-header checksum
         // over the exact transmitted bytes on the Claude-Code OauthBearer
@@ -1109,7 +1106,7 @@ impl Provider for AnthropicApiProvider {
         trace_outgoing_body(PROVIDER_KIND, &self.cfg.id, &body);
         routectl_core::trace_structural_summary("outgoing", PROVIDER_KIND, &self.cfg.id, &body);
 
-        let token = self.cfg.auth.token().await?;
+        let token = self.resolve_effective_token(&req).await?;
 
         // count_tokens is deliberately unsigned (matches upstream).
         let request = self
@@ -1309,6 +1306,7 @@ fn build_count_tokens_body(normalized: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     /// Body fields routectl forwards to Anthropic's
     /// `/v1/messages/count_tokens` endpoint. This is the forwarding
@@ -1993,32 +1991,14 @@ mod tests {
 
     #[test]
     fn is_anthropic_api_host_matches_only_the_exact_host() {
-        // Exact host, with and without a path / port, matches.
+        // Exhaustive host-matching cases live with the shared predicate in
+        // `routectl_core::identity::anthropic`. This thin delegation test
+        // pins that the WIRE gate still routes through that single source
+        // of truth: an exact host matches, a sibling-domain lookalike does
+        // not.
         assert!(is_anthropic_api_host("https://api.anthropic.com"));
-        assert!(is_anthropic_api_host(
-            "https://api.anthropic.com/v1/messages"
-        ));
-        assert!(is_anthropic_api_host("https://api.anthropic.com:443/v1"));
-        assert!(is_anthropic_api_host("https://API.Anthropic.Com")); // case-insensitive host
-        // Sibling-domain takeover and host-in-path must NOT match.
         assert!(!is_anthropic_api_host(
             "https://api.anthropic.com.evil.example"
-        ));
-        assert!(!is_anthropic_api_host(
-            "https://proxy.example/api.anthropic.com"
-        ));
-        assert!(!is_anthropic_api_host(
-            "https://evil.example#api.anthropic.com"
-        ));
-        assert!(!is_anthropic_api_host(
-            "https://evil.example?h=api.anthropic.com"
-        ));
-        assert!(!is_anthropic_api_host("https://anthropic.com"));
-        // A credentials prefix on the authority is stripped before the host
-        // check, so it cannot be used to smuggle a different real host.
-        assert!(is_anthropic_api_host("https://user:pass@api.anthropic.com"));
-        assert!(!is_anthropic_api_host(
-            "https://api.anthropic.com@evil.example"
         ));
     }
 
@@ -2489,5 +2469,269 @@ mod tests {
             }
             other => panic!("expected Error::Upstream, got {other:?}"),
         }
+    }
+
+    // -- forwarded-bearer host-pinned token resolution --------------------
+
+    /// A `TokenSource` whose `token()` ALWAYS errors. Used to PROVE that
+    /// the forwarded-passthrough path never calls `self.cfg.auth.token()`:
+    /// if the resolver touched this source, resolution would fail and the
+    /// test would observe an `Err` instead of the forwarded token. The
+    /// synthetic pure-proxy provider has no live routectl credential, so
+    /// this models "calling cfg.auth.token() here would error".
+    #[derive(Debug)]
+    struct FailingTokenSource;
+
+    #[async_trait]
+    impl TokenSource for FailingTokenSource {
+        async fn token(&self) -> Result<String> {
+            Err(Error::Auth(
+                "FailingTokenSource: token() must not be called on the forwarded path".into(),
+            ))
+        }
+    }
+
+    /// Build an OauthBearer provider with a chosen `base_url` and token
+    /// source, mirroring the synthetic pure-proxy Anthropic egress
+    /// (OauthBearer, `api.anthropic.com` by default).
+    fn oauth_cfg_with_auth(base_url: &str, auth: Arc<dyn TokenSource>) -> AnthropicApiConfig {
+        AnthropicApiConfig {
+            id: "test".into(),
+            auth,
+            base_url: base_url.into(),
+            anthropic_version: "2023-06-01".into(),
+            auth_kind: AuthKind::OauthBearer,
+            header_extras: Vec::new(),
+            user_agent: None,
+            allowed_betas: Vec::new(),
+            forward_client_headers: Vec::new(),
+            context_management: false,
+            max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
+            session_id: None,
+            cloak: CloakConfig::default(),
+        }
+    }
+
+    /// A default request carrying a forwarded first-party bearer, as the
+    /// ingress populates it in forwarded (pure-proxy) mode on the MITM
+    /// Anthropic leg. `RoutectlInternal` is `#[non_exhaustive]`, so mutate
+    /// the single field on the default value.
+    fn req_with_forwarded_bearer(token: &str) -> ChatRequest {
+        let mut req = ChatRequest::default();
+        req.routectl_internal.forwarded_bearer =
+            Some(routectl_core::ForwardedBearer::new(token.to_string()));
+        req
+    }
+
+    /// Resolve the effective token through the host-pinned resolver, stamp
+    /// it via `build_headers`, and return the built outbound request so a
+    /// test can inspect the exact headers that would go on the wire.
+    async fn build_wire_request(
+        provider: &AnthropicApiProvider,
+        req: &ChatRequest,
+    ) -> reqwest::Request {
+        let token = provider
+            .resolve_effective_token(req)
+            .await
+            .expect("effective token must resolve");
+        let client = reqwest::Client::new();
+        let rb = client.post("http://127.0.0.1/test");
+        provider
+            .build_headers(rb, req, &token)
+            .build()
+            .expect("build outbound request")
+    }
+
+    /// True when `needle` appears in ANY header value on the built request.
+    fn any_header_value_contains(request: &reqwest::Request, needle: &str) -> bool {
+        request
+            .headers()
+            .iter()
+            .filter_map(|(_, v)| v.to_str().ok())
+            .any(|v| v.contains(needle))
+    }
+
+    /// forwarded_bearer Some + base_url host == api.anthropic.com: the
+    /// resolver returns the FORWARDED token and NEVER calls
+    /// `self.cfg.auth.token()`. Proof: the auth source ERRORS on every
+    /// call, yet resolution succeeds -- so the resolver could not have
+    /// touched it. This is the errors-if-cfg.auth.token()-called proof.
+    #[tokio::test]
+    async fn resolve_forwarded_bearer_on_anthropic_host_skips_cfg_auth() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+            "https://api.anthropic.com",
+            Arc::new(FailingTokenSource),
+        ));
+        let req = req_with_forwarded_bearer("forwarded-full-scope-token");
+
+        let token = provider
+            .resolve_effective_token(&req)
+            .await
+            .expect("forwarded path must not call cfg.auth.token()");
+
+        assert_eq!(
+            token, "forwarded-full-scope-token",
+            "forwarded token must be used verbatim as the effective token"
+        );
+    }
+
+    /// WIRE: on the anthropic host, the forwarded token is stamped as the
+    /// outbound `Authorization: Bearer <forwarded>` (the synthetic
+    /// pure-proxy provider is OauthBearer). End-to-end through
+    /// `build_headers`, with a failing auth source that is never consulted.
+    #[tokio::test]
+    async fn forwarded_bearer_stamped_as_bearer_on_anthropic_host() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+            "https://api.anthropic.com",
+            Arc::new(FailingTokenSource),
+        ));
+        let req = req_with_forwarded_bearer("forwarded-full-scope-token");
+
+        let request = build_wire_request(&provider, &req).await;
+
+        let auth = request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(
+            auth,
+            Some("Bearer forwarded-full-scope-token"),
+            "forwarded token must be stamped as the outbound Bearer on the anthropic host"
+        );
+    }
+
+    /// base_url host != api.anthropic.com (a proxy / self-host) +
+    /// forwarded_bearer Some: the forwarded token is IGNORED. The resolver
+    /// returns the provider's OWN token and the forwarded token never
+    /// appears on any outbound header for that host.
+    #[tokio::test]
+    async fn forwarded_bearer_ignored_on_non_anthropic_host() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+            "https://proxy.example.com",
+            Arc::new(StaticToken::new("provider-own-token")),
+        ));
+        let req = req_with_forwarded_bearer("forwarded-should-be-ignored");
+
+        let token = provider
+            .resolve_effective_token(&req)
+            .await
+            .expect("non-anthropic host resolves the provider's own token");
+        assert_eq!(
+            token, "provider-own-token",
+            "non-anthropic host must resolve the provider's own token, not the forwarded one"
+        );
+
+        let request = build_wire_request(&provider, &req).await;
+        assert!(
+            !any_header_value_contains(&request, "forwarded-should-be-ignored"),
+            "the forwarded token must never reach the wire on a non-anthropic host"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer provider-own-token"),
+            "the provider's own resolved token is what gets stamped on a non-anthropic host"
+        );
+    }
+
+    /// A sibling-domain look-alike base (`api.anthropic.com.evil.example`)
+    /// is NOT the anthropic host: the forwarded full-scope token must NOT
+    /// be sent there. Defends the exact-host pin end-to-end through the
+    /// resolver (guards against a substring host check leaking the token to
+    /// a takeover domain).
+    #[tokio::test]
+    async fn forwarded_bearer_ignored_on_lookalike_anthropic_host() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+            "https://api.anthropic.com.evil.example",
+            Arc::new(StaticToken::new("provider-own-token")),
+        ));
+        let req = req_with_forwarded_bearer("forwarded-full-scope-token");
+
+        let token = provider
+            .resolve_effective_token(&req)
+            .await
+            .expect("look-alike host resolves the provider's own token");
+        assert_eq!(
+            token, "provider-own-token",
+            "a look-alike host must not receive the forwarded token"
+        );
+
+        let request = build_wire_request(&provider, &req).await;
+        assert!(
+            !any_header_value_contains(&request, "forwarded-full-scope-token"),
+            "the forwarded token must never reach a look-alike anthropic host"
+        );
+    }
+
+    /// forwarded_bearer None on the anthropic host: identical to today --
+    /// the resolver returns the provider's own token via cfg.auth.token().
+    #[tokio::test]
+    async fn forwarded_bearer_none_resolves_provider_token() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+            "https://api.anthropic.com",
+            Arc::new(StaticToken::new("provider-token")),
+        ));
+        // ChatRequest::default() leaves forwarded_bearer None.
+        let req = ChatRequest::default();
+
+        let token = provider
+            .resolve_effective_token(&req)
+            .await
+            .expect("token resolves");
+        assert_eq!(
+            token, "provider-token",
+            "the None path must resolve the provider's own token"
+        );
+    }
+
+    /// forwarded_bearer None on the anthropic host STILL calls
+    /// cfg.auth.token() -- the None path is behaviorally identical to the
+    /// pre-passthrough egress. Proof: with a failing auth source and no
+    /// forwarded token, resolution errors (it can only error by calling
+    /// cfg.auth.token()).
+    #[tokio::test]
+    async fn forwarded_bearer_none_still_calls_cfg_auth() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+            "https://api.anthropic.com",
+            Arc::new(FailingTokenSource),
+        ));
+        let req = ChatRequest::default();
+
+        let result = provider.resolve_effective_token(&req).await;
+        assert!(
+            result.is_err(),
+            "the None path must resolve through cfg.auth.token(), which errors here"
+        );
+    }
+
+    /// The resolver must never log the forwarded token. Drive the forwarded
+    /// path under a log capture and assert the token string is absent from
+    /// every emitted event -- a regression guard against a future debug log
+    /// in the resolver. Uses a current-thread runtime so the test stays on
+    /// the crate's established `#[traced_test] #[test]` shape.
+    #[traced_test]
+    #[test]
+    fn resolve_forwarded_bearer_does_not_log_token() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+            "https://api.anthropic.com",
+            Arc::new(FailingTokenSource),
+        ));
+        let secret = "forwarded-full-scope-SECRET-abc123";
+        let req = req_with_forwarded_bearer(secret);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let token = rt
+            .block_on(provider.resolve_effective_token(&req))
+            .expect("forwarded token resolves");
+        assert_eq!(token, secret);
+
+        assert!(
+            !logs_contain(secret),
+            "the forwarded token must never be logged by the resolver"
+        );
     }
 }
