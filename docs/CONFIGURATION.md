@@ -1107,6 +1107,48 @@ tested_cc_version = "2.1.143"
   restart, since there is no reload path that respawns the proxy
   listener.
 
+### `credential_source` -- who authenticates the Anthropic egress
+
+`credential_source` (string, default `"own"`) picks which credential
+the MITM-fronted Anthropic inference call authenticates with:
+
+- `"own"` (the default) -- existing behavior, byte-for-byte. The MITM
+  proxy authenticates the Anthropic inference egress through routectl's
+  own configured aliases/providers/credentials, exactly as every other
+  route does. A forwarded client bearer (the claude.ai session token the
+  MITM proxy re-injects into routectl's own listener for Remote
+  Control) is accepted onto the control plane but never used to
+  authenticate the egress call.
+- `"forwarded"` -- pure-proxy mode. The client's forwarded claude.ai
+  bearer authenticates the Anthropic-dialect inference egress directly:
+  routectl relays it to `api.anthropic.com` untouched instead of
+  resolving its own credential for that request. See
+  [REMOTE-CONTROL.md](REMOTE-CONTROL.md) "Pure-proxy mode" for the full
+  operator guide (enablement, transparent-identity behavior, the
+  admission/failure matrix, and known limitations).
+
+```toml
+[mitm]
+credential_source = "forwarded"
+```
+
+**Zero-config bootstrap.** Setting `credential_source = "forwarded"`
+with an EMPTY `[providers]` table (no `[providers.X]` entries anywhere
+in config) auto-injects, at startup, a synthetic Anthropic egress
+(`base_url = "https://api.anthropic.com"`, OAuth-bearer auth) plus a
+`default` catch-all alias pointing at it. This is logged once at INFO
+so an operator can run Claude Code through routectl with no
+`[providers]` configured and no `routectl login anthropic` run --
+credentials are held only by Claude Code itself. See
+[REMOTE-CONTROL.md](REMOTE-CONTROL.md) "Pure-proxy mode" for the
+model-fidelity limitation this bootstrap carries.
+
+**Security note.** The forwarded credential is presented ONLY to the
+pinned host `api.anthropic.com`; it is never sent to any other egress,
+never logged, and never persisted. It is captured off the inbound
+`Authorization` header, wrapped in a redact-on-Debug carrier the
+instant it is read, and used for exactly one outbound request.
+
 ## Inspecting a request offline (`routectl prompt-size`)
 
 `routectl prompt-size` prints an OFFLINE report of a request fixture's
