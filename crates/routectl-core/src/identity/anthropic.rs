@@ -109,9 +109,83 @@ pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
     ]
 }
 
+/// True when `base_url`'s host is EXACTLY `api.anthropic.com`
+/// (case-insensitive), independent of scheme, port, path, query,
+/// fragment, or `user:pass@` credentials.
+///
+/// The single source of truth for "is this the Anthropic host" shared by
+/// the WIRE gate (which decides whether to stamp the Claude-Code session
+/// identity headers) and the ROUTER pure-passthrough gate (which decides
+/// whether a forwarded request may egress at all). Both MUST agree, so
+/// the predicate lives here rather than being reimplemented per crate.
+///
+/// A precise host match, NOT a substring / suffix test:
+/// `base_url.contains("api.anthropic.com")` would also match a
+/// misconfigured `https://api.anthropic.com.evil.example` (sibling-domain
+/// takeover), `https://proxy.example/api.anthropic.com` (host in the
+/// path), or a credentials-suffix smuggle such as
+/// `https://api.anthropic.com@evil.example`. An exact host match rejects
+/// all of those.
+///
+/// The host is the authority between the scheme and the first `/?#`, minus
+/// any `user@` credentials and `:port`. Kept dependency-free (no `url`
+/// crate) since the shape is fixed and validated upstream by base-url
+/// scheme validation.
+pub fn is_anthropic_api_host(base_url: &str) -> bool {
+    let after_scheme = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+        .unwrap_or(base_url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop optional `user:pass@` credentials, then the optional `:port`.
+    let host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or(authority)
+        .split(':')
+        .next()
+        .unwrap_or(authority);
+    host.eq_ignore_ascii_case("api.anthropic.com")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_anthropic_api_host_matches_only_the_exact_host() {
+        // Exact host, with and without a path / port, and any case, matches.
+        assert!(is_anthropic_api_host("https://api.anthropic.com"));
+        assert!(is_anthropic_api_host(
+            "https://api.anthropic.com/v1/messages"
+        ));
+        assert!(is_anthropic_api_host("https://api.anthropic.com:443/v1"));
+        assert!(is_anthropic_api_host("https://API.Anthropic.Com"));
+        // A credentials prefix on the authority is stripped before the host
+        // check, so it cannot be used to smuggle a different real host.
+        assert!(is_anthropic_api_host("https://user:pass@api.anthropic.com"));
+        // Sibling-domain takeover, host-in-path/query/fragment, and a
+        // credentials-suffix smuggle must NOT match.
+        assert!(!is_anthropic_api_host(
+            "https://api.anthropic.com.evil.example"
+        ));
+        assert!(!is_anthropic_api_host(
+            "https://proxy.example/api.anthropic.com"
+        ));
+        assert!(!is_anthropic_api_host(
+            "https://evil.example#api.anthropic.com"
+        ));
+        assert!(!is_anthropic_api_host(
+            "https://evil.example?h=api.anthropic.com"
+        ));
+        assert!(!is_anthropic_api_host("https://anthropic.com"));
+        assert!(!is_anthropic_api_host(
+            "https://api.anthropic.com@evil.example"
+        ));
+    }
 
     #[test]
     fn user_agent_pins_claude_cli_version() {
