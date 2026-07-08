@@ -2993,6 +2993,11 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     // per-model knob, so the per-attempt rebuild from `Default::default()`
     // must carry it across or it resets to `None` on the 2nd chain attempt.
     let captured_inbound_session_key = req.routectl_internal.inbound_session_key.take();
+    // Preserve the ingress-forwarded bearer token: like
+    // `inbound_session_key`, it is inbound-request data, not a per-model
+    // knob, so the per-attempt rebuild from `Default::default()` must
+    // carry it across or it resets to `None` on the 2nd chain attempt.
+    let captured_forwarded_bearer = req.routectl_internal.forwarded_bearer.take();
     let mut internal = RoutectlInternal::default();
     internal.reasoning_dialect = target.reasoning_dialect.map(std::convert::Into::into);
     internal.history_reasoning = target.history_reasoning.map(std::convert::Into::into);
@@ -3000,6 +3005,7 @@ fn apply_layered_overlays(config: &Config, target: &DispatchTarget, req: &mut Ch
     internal.provenance = captured_provenance;
     internal.header_extras = composed_header_extras;
     internal.inbound_session_key = captured_inbound_session_key;
+    internal.forwarded_bearer = captured_forwarded_bearer;
     internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
     internal.effort_levels = target.effort_levels.clone();
     internal.max_thinking_budget = target.max_thinking_budget;
@@ -4756,6 +4762,39 @@ mod merge_header_extras_tests {
             Some("sid-abc"),
             "inbound session key must survive the per-attempt overlay rebuild",
         );
+    }
+
+    /// Regression guard for the same per-attempt overlay rebuild hazard:
+    /// the ingress-forwarded bearer token must survive the rebuild rather
+    /// than reset to `None`, on the first attempt AND every subsequent
+    /// chain attempt (the rebuild runs once per dispatch attempt).
+    #[test]
+    fn apply_layered_overlays_preserves_forwarded_bearer() {
+        let config = Config::default();
+        let model: Arc<ResolvedModel> = Arc::new(ResolvedModel::new(
+            "nick",
+            "test-prov",
+            Arc::new(StubProvider),
+            "claude-x",
+        ));
+        let target = into_one_dispatch_target(model);
+
+        let mut req = req_with_betas(vec![]);
+        req.routectl_internal.forwarded_bearer = Some(routectl_core::schema::ForwardedBearer::new(
+            "sk-forwarded".into(),
+        ));
+
+        for attempt in 1..=2 {
+            apply_layered_overlays(&config, &target, &mut req);
+            assert_eq!(
+                req.routectl_internal
+                    .forwarded_bearer
+                    .as_ref()
+                    .map(routectl_core::schema::ForwardedBearer::expose),
+                Some("sk-forwarded"),
+                "forwarded bearer must survive the per-attempt overlay rebuild (attempt {attempt})",
+            );
+        }
     }
 }
 
