@@ -295,6 +295,58 @@ pub struct RoutectlInternal {
     /// serialized to any upstream (it rides on `routectl_internal`, which
     /// is `#[serde(skip)]`). Must not be logged raw.
     pub inbound_session_key: Option<String>,
+
+    /// INBOUND first-party bearer token captured for opt-in passthrough
+    /// to the upstream. Wrapped in [`ForwardedBearer`] so the token is
+    /// never printed by this struct's derived `Debug`.
+    ///
+    /// `None` when no first-party bearer was captured (non-passthrough
+    /// paths and library consumers). Never serialized upstream (it rides
+    /// on `routectl_internal`, which is `#[serde(skip)]`), never logged
+    /// raw -- read it only via [`ForwardedBearer::expose`].
+    pub forwarded_bearer: Option<ForwardedBearer>,
+}
+
+/// Fixed redaction placeholder shared by `ForwardedBearer`'s `Debug` and
+/// `Display` impls. The wrapped token is never rendered.
+const FORWARDED_BEARER_REDACTED: &str = "<redacted>";
+
+/// A first-party inbound bearer token captured for opt-in passthrough to
+/// the upstream.
+///
+/// The workspace has no `secrecy`/`Secret` type, and `RoutectlInternal`
+/// derives `Debug`, so a bare `String` here would be printed verbatim by
+/// `{:?}`. This newtype's hand-written `Debug` and `Display` impls print
+/// a FIXED placeholder (`FORWARDED_BEARER_REDACTED`) and NEVER the token;
+/// the raw value is reachable only through [`ForwardedBearer::expose`]. It
+/// deliberately does not derive `Serialize`/`Deserialize` (the carrier
+/// field is `#[serde(skip)]` anyway) so the token can never reach a wire.
+#[derive(Clone)]
+pub struct ForwardedBearer(String);
+
+impl ForwardedBearer {
+    /// Wrap a raw inbound bearer token.
+    pub const fn new(token: String) -> Self {
+        Self(token)
+    }
+
+    /// Read the raw token. This is the ONLY path to the wrapped value;
+    /// callers must not log or serialize what it returns.
+    pub const fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for ForwardedBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ForwardedBearer({FORWARDED_BEARER_REDACTED})")
+    }
+}
+
+impl std::fmt::Display for ForwardedBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(FORWARDED_BEARER_REDACTED)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -924,5 +976,109 @@ mod tests {
         assert!(matches!(msgs[0].content, MessageContent::Text(_)));
         assert!(matches!(msgs[1].content, MessageContent::Null));
         assert!(matches!(msgs[2].content, MessageContent::Text(_)));
+    }
+
+    /// A distinctive sentinel that must never appear in any Debug,
+    /// Display, or serialized output of a `ForwardedBearer`.
+    const SECRET_TOKEN: &str = "sk-live-DO-NOT-LEAK-abc123XYZ";
+
+    /// A freshly-defaulted carrier has no forwarded bearer.
+    #[test]
+    fn forwarded_bearer_defaults_to_none() {
+        assert!(RoutectlInternal::default().forwarded_bearer.is_none());
+    }
+
+    /// Debug of the newtype alone prints a fixed placeholder and never
+    /// the wrapped token -- the redaction contract is security-critical.
+    #[test]
+    fn forwarded_bearer_debug_redacts_token() {
+        let bearer = ForwardedBearer::new(SECRET_TOKEN.to_string());
+
+        let rendered = format!("{bearer:?}");
+
+        assert!(
+            !rendered.contains(SECRET_TOKEN),
+            "Debug leaked the raw token: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "Debug missing the redaction placeholder: {rendered}"
+        );
+    }
+
+    /// Display of the newtype alone prints a fixed placeholder and never
+    /// the wrapped token (logs that use `{}` must stay safe too).
+    #[test]
+    fn forwarded_bearer_display_redacts_token() {
+        let bearer = ForwardedBearer::new(SECRET_TOKEN.to_string());
+
+        let rendered = format!("{bearer}");
+
+        assert!(
+            !rendered.contains(SECRET_TOKEN),
+            "Display leaked the raw token: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "Display missing the redaction placeholder: {rendered}"
+        );
+    }
+
+    /// Debug of a `RoutectlInternal` carrying `Some(ForwardedBearer(..))`
+    /// must not leak the token via the derived struct Debug either.
+    #[test]
+    fn routectl_internal_debug_redacts_forwarded_bearer() {
+        let internal = RoutectlInternal {
+            forwarded_bearer: Some(ForwardedBearer::new(SECRET_TOKEN.to_string())),
+            ..Default::default()
+        };
+
+        let rendered = format!("{internal:?}");
+
+        assert!(
+            !rendered.contains(SECRET_TOKEN),
+            "carrier Debug leaked the raw token: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "carrier Debug missing the redaction placeholder: {rendered}"
+        );
+    }
+
+    /// The raw token is reachable only through the explicit accessor.
+    #[test]
+    fn forwarded_bearer_expose_returns_raw_token() {
+        let bearer = ForwardedBearer::new(SECRET_TOKEN.to_string());
+
+        assert_eq!(bearer.expose(), SECRET_TOKEN);
+    }
+
+    /// The carrier field rides on `routectl_internal`, which is
+    /// `#[serde(skip)]`, so a request carrying a bearer serializes with
+    /// no trace of the token, the field, or the carrier on the wire.
+    #[test]
+    fn forwarded_bearer_never_serialized_to_wire() {
+        let mut req: ChatRequest = serde_json::from_value(json!({
+            "model": "gpt-4o",
+            "messages": []
+        }))
+        .unwrap();
+        req.routectl_internal.forwarded_bearer =
+            Some(ForwardedBearer::new(SECRET_TOKEN.to_string()));
+
+        let wire = serde_json::to_string(&req).unwrap();
+
+        assert!(
+            !wire.contains(SECRET_TOKEN),
+            "token leaked to the wire: {wire}"
+        );
+        assert!(
+            !wire.contains("forwarded_bearer"),
+            "carrier field name leaked to the wire: {wire}"
+        );
+        assert!(
+            !wire.contains("routectl_internal"),
+            "skipped carrier leaked to the wire: {wire}"
+        );
     }
 }
