@@ -243,6 +243,35 @@ async fn anthropic_envelope_validation_error_emits_invalid_request_error() {
 }
 
 #[tokio::test]
+async fn anthropic_envelope_forwarded_non_anthropic_refuse_maps_to_400_invalid_request() {
+    // The ROUTER-side forwarded-passthrough gate refuses a non-Anthropic
+    // target with `Error::Validation` carrying `reason=non_anthropic_target`.
+    // Pin the client-facing contract: HTTP 400, Anthropic
+    // invalid_request_error envelope, and the reason survives into the
+    // message (never a 5xx).
+    let err = Error::Validation(
+        "forwarded request cannot be routed to a non-Anthropic target \
+         (reason=non_anthropic_target)"
+            .to_string(),
+    );
+
+    let resp = map_error(ErrorEnvelopeShape::Anthropic, err);
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("non_anthropic_target"),
+        "the refuse reason must survive into the client envelope message",
+    );
+}
+
+#[tokio::test]
 async fn anthropic_envelope_5xx_emits_api_error_or_overloaded() {
     // 503 -> overloaded_error
     let err503 = Error::upstream("p", 503, "service unavailable");
@@ -2519,5 +2548,539 @@ fn extract_bearer_preserves_token_internal_structure() {
     assert_eq!(
         extract_authorization_bearer(&h).as_deref(),
         Some("sk-ant-oat01-AbC_-.123")
+    );
+}
+
+// ============ forwarded-mode ingress admission rejections (f2.06) ======
+//
+// The decision-doc Section 6 matrix, enforced at the shared ingress driver
+// BEFORE parse/dispatch, firing ONLY when `credential_source == Forwarded`.
+// Three layers of coverage, all deterministic (no log capture -- that ONE
+// assertion lives in the isolated integration binary
+// `tests/pure_proxy_admission_log.rs`, matching the router-side convention,
+// because a thread-local capture subscriber over a shared `warn!` callsite
+// is unreliable inside this 600+-test lib binary):
+//
+//   1. `classify_pure_proxy_rejection`  -- the pure decision core: every
+//      case + the precedence rules + own-mode admits-all.
+//   2. `render_pure_proxy_rejection`    -- status + dialect envelope +
+//      safe reason tag per case; never a token.
+//   3. `enforce_pure_proxy_admission`   -- the real header/router/envelope
+//      wiring the driver calls, plus one end-to-end pass through
+//      `ingress_handle`.
+
+use crate::handlers::pure_proxy_metrics::PureProxyRejectionReason;
+
+/// Header builder for the admission tests: optionally the MITM seam header,
+/// an `Authorization` value, and the `x-claude-code-session-id` identity
+/// header.
+fn admission_headers(
+    seam: bool,
+    authorization: Option<&str>,
+    session_id: Option<&str>,
+) -> HeaderMap {
+    use axum::http::{HeaderName, HeaderValue, header::AUTHORIZATION};
+    let mut h = HeaderMap::new();
+    if seam {
+        h.insert(
+            HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
+            HeaderValue::from_static("1"),
+        );
+    }
+    if let Some(a) = authorization {
+        h.insert(AUTHORIZATION, HeaderValue::from_str(a).unwrap());
+    }
+    if let Some(s) = session_id {
+        h.insert(
+            HeaderName::from_static("x-claude-code-session-id"),
+            HeaderValue::from_str(s).unwrap(),
+        );
+    }
+    h
+}
+
+// ---- Layer 1: classify_pure_proxy_rejection (the pure decision core) ----
+
+/// Own mode (`forwarded == false`) ADMITS every request, even one carrying
+/// each case's trip conditions: a non-Anthropic dialect, no seam header, no
+/// bearer, and no session id all pass. This is the "byte-identical to
+/// pre-f2" guarantee at the decision level.
+#[test]
+fn classify_own_mode_admits_every_would_be_rejection() {
+    // Non-Anthropic dialect, no seam, no bearer, no session id -- every trip
+    // condition at once, but own mode admits.
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: false,
+            is_anthropic_dialect: false,
+            seam_present: false,
+            has_bearer: false,
+            has_session_id: false,
+        }),
+        None
+    );
+    // Anthropic dialect variants that WOULD trip a case in forwarded mode.
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: false,
+            is_anthropic_dialect: true,
+            seam_present: false,
+            has_bearer: false,
+            has_session_id: false,
+        }),
+        None,
+        "own mode admits a would-be not_mitm"
+    );
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: false,
+            is_anthropic_dialect: true,
+            seam_present: true,
+            has_bearer: false,
+            has_session_id: false,
+        }),
+        None,
+        "own mode admits a would-be token_missing"
+    );
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: false,
+            is_anthropic_dialect: true,
+            seam_present: true,
+            has_bearer: true,
+            has_session_id: false,
+        }),
+        None,
+        "own mode admits a would-be identity_missing"
+    );
+}
+
+/// Forwarded + non-Anthropic dialect -> `NonAnthropicDialect`, independent of
+/// the seam header, bearer, or session id (the dialect itself disqualifies).
+#[test]
+fn classify_forwarded_non_anthropic_dialect_rejected() {
+    for seam_present in [false, true] {
+        for has_bearer in [false, true] {
+            for has_session_id in [false, true] {
+                assert_eq!(
+                    classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+                        forwarded: true,
+                        is_anthropic_dialect: false,
+                        seam_present,
+                        has_bearer,
+                        has_session_id,
+                    }),
+                    Some(PureProxyRejectionReason::NonAnthropicDialect),
+                    "non-Anthropic dialect under forwarded mode always rejects \
+                     (seam={seam_present}, bearer={has_bearer}, session={has_session_id})"
+                );
+            }
+        }
+    }
+}
+
+/// Forwarded Anthropic dialect WITHOUT the seam header -> `NotMitm` (a direct
+/// :9100 loopback client, not a valid pure-proxy path).
+#[test]
+fn classify_forwarded_anthropic_no_seam_is_not_mitm() {
+    // Even with a bearer + session id present, the missing seam header is
+    // disqualifying.
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: true,
+            is_anthropic_dialect: true,
+            seam_present: false,
+            has_bearer: true,
+            has_session_id: true,
+        }),
+        Some(PureProxyRejectionReason::NotMitm)
+    );
+}
+
+/// Forwarded Anthropic dialect WITH the seam header but no bearer ->
+/// `TokenMissing` (CC not logged into claude.ai).
+#[test]
+fn classify_forwarded_anthropic_seam_no_bearer_is_token_missing() {
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: true,
+            is_anthropic_dialect: true,
+            seam_present: true,
+            has_bearer: false,
+            has_session_id: true,
+        }),
+        Some(PureProxyRejectionReason::TokenMissing)
+    );
+}
+
+/// Precedence: a seam-marked forwarded request missing BOTH the bearer and
+/// the session id surfaces `TokenMissing` (401), not `IdentityMissing` -- the
+/// more fundamental missing credential wins.
+#[test]
+fn classify_token_missing_takes_precedence_over_identity_missing() {
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: true,
+            is_anthropic_dialect: true,
+            seam_present: true,
+            has_bearer: false,
+            has_session_id: false,
+        }),
+        Some(PureProxyRejectionReason::TokenMissing),
+        "no bearer AND no session id -> token_missing, not identity_missing"
+    );
+}
+
+/// Forwarded Anthropic dialect, seam + bearer present, but no session id ->
+/// `IdentityMissing` (fail before minting identity).
+#[test]
+fn classify_forwarded_anthropic_seam_bearer_no_session_is_identity_missing() {
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: true,
+            is_anthropic_dialect: true,
+            seam_present: true,
+            has_bearer: true,
+            has_session_id: false,
+        }),
+        Some(PureProxyRejectionReason::IdentityMissing)
+    );
+}
+
+/// A fully-formed forwarded request (Anthropic dialect, seam + bearer +
+/// session id) is ADMITTED -- the gate returns `None` and the request
+/// proceeds to parse + dispatch.
+#[test]
+fn classify_forwarded_fully_valid_admits() {
+    assert_eq!(
+        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+            forwarded: true,
+            is_anthropic_dialect: true,
+            seam_present: true,
+            has_bearer: true,
+            has_session_id: true,
+        }),
+        None
+    );
+}
+
+// ---- Layer 2: render_pure_proxy_rejection (status + envelope + reason) ---
+
+#[tokio::test]
+async fn render_token_missing_is_401_anthropic_authentication_error() {
+    // Act
+    let resp = render_pure_proxy_rejection(
+        ErrorEnvelopeShape::Anthropic,
+        PureProxyRejectionReason::TokenMissing,
+    );
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    // Assert
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["type"], "error", "Anthropic error envelope");
+    assert_eq!(body["error"]["type"], "authentication_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=token_missing"),
+        "the safe reason tag survives into the client message: {body}"
+    );
+}
+
+#[tokio::test]
+async fn render_not_mitm_is_400_anthropic_invalid_request_error() {
+    let resp = render_pure_proxy_rejection(
+        ErrorEnvelopeShape::Anthropic,
+        PureProxyRejectionReason::NotMitm,
+    );
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=not_mitm")
+    );
+}
+
+#[tokio::test]
+async fn render_identity_missing_is_400_anthropic_invalid_request_error() {
+    let resp = render_pure_proxy_rejection(
+        ErrorEnvelopeShape::Anthropic,
+        PureProxyRejectionReason::IdentityMissing,
+    );
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=identity_missing")
+    );
+}
+
+#[tokio::test]
+async fn render_non_anthropic_dialect_is_400_openai_envelope() {
+    // The non-Anthropic path renders the flat OpenAI envelope (Codex / the
+    // OpenAI SDK parse `{"error":{...}}` with no top-level `type`).
+    let resp = render_pure_proxy_rejection(
+        ErrorEnvelopeShape::OpenAi,
+        PureProxyRejectionReason::NonAnthropicDialect,
+    );
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.get("type").is_none(),
+        "OpenAI envelope is flat (no top-level type): {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=non_anthropic_dialect")
+    );
+}
+
+/// A rejection message is token-free by construction: it never embeds a
+/// bearer-shaped credential value, in any dialect envelope. (The word
+/// "bearer" itself may appear as operator guidance -- it is the credential
+/// TYPE, not a token; only an actual token value would be a leak.)
+#[tokio::test]
+async fn render_rejection_message_is_token_free() {
+    for reason in PureProxyRejectionReason::ALL {
+        for shape in [ErrorEnvelopeShape::Anthropic, ErrorEnvelopeShape::OpenAi] {
+            let resp = render_pure_proxy_rejection(shape, reason);
+            let body = body_to_value(resp).await;
+            let msg = body["error"]["message"].as_str().unwrap_or("");
+            assert!(
+                !msg.contains("sk-"),
+                "rejection message must not embed a token-shaped value: {msg:?}"
+            );
+        }
+    }
+}
+
+// ---- Layer 3: enforce_pure_proxy_admission (real header/router wiring) ---
+
+/// Case 1: MITM-marked forwarded request with no `Authorization` -> Some(401
+/// token_missing), read off real headers + a forwarded-mode router.
+#[tokio::test]
+async fn enforce_case1_token_missing() {
+    // Arrange
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = admission_headers(true, None, Some("sess-1"));
+
+    // Act
+    let resp = enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::Anthropic)
+        .expect("forwarded + seam + no bearer must reject");
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    // Assert
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["type"], "authentication_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=token_missing")
+    );
+}
+
+/// Case 2: forwarded Anthropic request without the seam header (direct :9100
+/// client) -> Some(400 not_mitm).
+#[tokio::test]
+async fn enforce_case2_not_mitm() {
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    // A bearer + session id present, but no seam header.
+    let headers = admission_headers(false, Some("Bearer sk-direct"), Some("sess-2"));
+
+    let resp = enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::Anthropic)
+        .expect("forwarded Anthropic without seam must reject");
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=not_mitm")
+    );
+}
+
+/// Case 3: MITM-marked forwarded request with a bearer but missing
+/// `x-claude-code-session-id` -> Some(400 identity_missing). The distinctive
+/// bearer in the header must NOT surface in the client response.
+#[tokio::test]
+async fn enforce_case3_identity_missing_and_never_leaks_bearer() {
+    const TOKEN: &str = "sk-ant-oat01-LEAK-CANARY-identity";
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = admission_headers(true, Some(&format!("Bearer {TOKEN}")), None);
+
+    let resp = enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::Anthropic)
+        .expect("forwarded + seam + bearer + no session id must reject");
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=identity_missing")
+    );
+    assert!(
+        !body.to_string().contains(TOKEN),
+        "the inbound bearer must never appear in the rejection response: {body}"
+    );
+}
+
+/// Case 4: a non-Anthropic dialect (OpenAI chat completions / Responses,
+/// both `ErrorEnvelopeShape::OpenAi`) under forwarded mode -> Some(400
+/// non_anthropic_dialect). Proves the check reaches the OpenAI + Responses
+/// adapters via the shared driver, not only the Anthropic one.
+#[tokio::test]
+async fn enforce_case4_non_anthropic_dialect() {
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    // Even a fully-populated header set cannot rescue a non-Anthropic dialect.
+    let headers = admission_headers(true, Some("Bearer sk-x"), Some("sess-4"));
+
+    let resp = enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::OpenAi)
+        .expect("non-Anthropic dialect under forwarded mode must reject");
+    let status = resp.status();
+    let body = body_to_value(resp).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.get("type").is_none(),
+        "OpenAI envelope is flat: {body}"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=non_anthropic_dialect")
+    );
+}
+
+/// Reachability proof: the two non-Anthropic ingress adapters both declare
+/// the OpenAI envelope shape, which is exactly the `is_anthropic_dialect ==
+/// false` signal the admission gate keys on. The Anthropic adapter declares
+/// the Anthropic shape. Ties the classifier's dialect discriminator to the
+/// real adapters.
+#[test]
+fn adapter_envelope_shapes_drive_the_dialect_discriminator() {
+    use crate::ingress::IngressAdapter;
+    use crate::ingress::anthropic::AnthropicIngress;
+    use crate::ingress::openai::OpenAiIngress;
+    use crate::ingress::openai_responses::ResponsesIngress;
+
+    assert_eq!(
+        OpenAiIngress.error_envelope_shape(),
+        ErrorEnvelopeShape::OpenAi,
+        "OpenAI chat-completions ingress is a non-Anthropic dialect"
+    );
+    assert_eq!(
+        ResponsesIngress.error_envelope_shape(),
+        ErrorEnvelopeShape::OpenAi,
+        "OpenAI Responses ingress is a non-Anthropic dialect"
+    );
+    assert_eq!(
+        AnthropicIngress.error_envelope_shape(),
+        ErrorEnvelopeShape::Anthropic,
+        "the Anthropic ingress is the only Anthropic dialect"
+    );
+}
+
+/// Own mode is UNAFFECTED: a request carrying each case's trip conditions is
+/// ADMITTED (the gate returns `None`), so `ingress_handle` behaves exactly as
+/// it did pre-f2. Covers both a present `[mitm] credential_source = own`
+/// block and no `[mitm]` block at all.
+#[test]
+fn enforce_own_mode_admits_every_would_be_case() {
+    // A would-be token_missing (seam, no bearer) under own mode.
+    let own = router_with_mitm(Some(CredentialSource::Own));
+    let h = admission_headers(true, None, None);
+    assert!(
+        enforce_pure_proxy_admission(&h, &own, ErrorEnvelopeShape::Anthropic).is_none(),
+        "own mode must not reject a would-be token_missing"
+    );
+
+    // A would-be not_mitm (no seam) under own mode.
+    let h = admission_headers(false, Some("Bearer sk-o"), Some("s"));
+    assert!(
+        enforce_pure_proxy_admission(&h, &own, ErrorEnvelopeShape::Anthropic).is_none(),
+        "own mode must not reject a would-be not_mitm"
+    );
+
+    // A would-be non_anthropic_dialect (OpenAI shape) with NO [mitm] block.
+    let no_mitm = router_with_mitm(None);
+    let h = admission_headers(false, None, None);
+    assert!(
+        enforce_pure_proxy_admission(&h, &no_mitm, ErrorEnvelopeShape::OpenAi).is_none(),
+        "absent [mitm] block must not reject a non-Anthropic dialect"
+    );
+}
+
+/// A fully-formed forwarded request (seam + bearer + session id, Anthropic
+/// dialect) is ADMITTED through the real wiring -- the gate returns `None`
+/// and the request proceeds to parse + dispatch.
+#[test]
+fn enforce_forwarded_fully_valid_is_admitted() {
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let headers = admission_headers(true, Some("Bearer sk-valid"), Some("sess-ok"));
+    assert!(
+        enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::Anthropic).is_none(),
+        "a well-formed forwarded request must be admitted"
+    );
+}
+
+/// End-to-end through `ingress_handle`: a MITM-marked forwarded request with
+/// no `Authorization` is rejected at admission BEFORE parse/dispatch, so the
+/// client receives the 401 Anthropic envelope directly from the driver.
+#[tokio::test]
+async fn ingress_handle_rejects_forwarded_token_missing_end_to_end() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    // Arrange: a forwarded-mode AppState + a seam-marked, bearer-less request.
+    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let swap = Arc::new(arc_swap::ArcSwap::from(router));
+    let (state, _dir) = AppState::for_test(swap);
+    let headers = admission_headers(true, None, Some("sess-e2e"));
+    // Admission runs before body parse, so the body is never inspected on the
+    // rejection path.
+    let body: std::result::Result<Json<Value>, axum::extract::rejection::JsonRejection> =
+        Ok(Json(json!({})));
+
+    // Act
+    let resp = ingress_handle(state, headers, None, body, AnthropicIngress).await;
+    let status = resp.status();
+    let out = body_to_value(resp).await;
+
+    // Assert: the driver returned the admission rejection, not a parse or
+    // dispatch error.
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(out["type"], "error");
+    assert_eq!(out["error"]["type"], "authentication_error");
+    assert!(
+        out["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reason=token_missing")
     );
 }
