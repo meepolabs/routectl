@@ -377,6 +377,22 @@ fn default_usage_db_path() -> PathBuf {
     routectl_config_dir().join("usage.db")
 }
 
+/// Which credential the MITM proxy presents to the pinned first-party
+/// upstream. `own` (the default) preserves f1 behavior byte-for-byte:
+/// the proxy authenticates with routectl's own managed credential.
+/// `forwarded` instead relays the client's inbound credential straight
+/// through to the upstream untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialSource {
+    /// Authenticate to the upstream with routectl's own managed
+    /// credential (f1 behavior).
+    #[default]
+    Own,
+    /// Relay the client's inbound credential to the upstream untouched.
+    Forwarded,
+}
+
 /// Operator-facing `[mitm]` config block for the MITM front-proxy: a
 /// local TLS-terminating listener that fronts a first-party upstream
 /// (e.g. Claude Code talking to `api.anthropic.com`) so routectl can
@@ -421,6 +437,11 @@ pub struct MitmConfig {
     /// `None` (the default) disables the check entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tested_cc_version: Option<String>,
+    /// Which credential the proxy presents to the upstream. Defaults to
+    /// `own` (f1 behavior); `forwarded` relays the client's inbound
+    /// credential untouched.
+    #[serde(default)]
+    pub credential_source: CredentialSource,
 }
 
 impl Default for MitmConfig {
@@ -431,6 +452,7 @@ impl Default for MitmConfig {
             cert_dir: default_mitm_cert_dir(),
             mitm_host: default_mitm_host(),
             tested_cc_version: None,
+            credential_source: CredentialSource::Own,
         }
     }
 }
@@ -4415,7 +4437,51 @@ mod mitm_config_tests {
     //! time (same `deny_unknown_fields` footgun-closing convention as
     //! `[server.auth]`).
 
-    use crate::config::Config;
+    use crate::config::{Config, CredentialSource, MitmConfig};
+
+    #[test]
+    fn mitm_credential_source_defaults_to_own_when_omitted() {
+        let toml_text = "[mitm]\n";
+        let cfg: Config = toml::from_str(toml_text).expect("parse bare [mitm] block");
+        let mitm = cfg.mitm.expect("mitm present once the block is declared");
+        assert_eq!(mitm.credential_source, CredentialSource::Own);
+    }
+
+    #[test]
+    fn mitm_default_impl_sets_credential_source_own() {
+        assert_eq!(
+            MitmConfig::default().credential_source,
+            CredentialSource::Own
+        );
+    }
+
+    #[test]
+    fn mitm_credential_source_forwarded_parses() {
+        let toml_text = "[mitm]\ncredential_source = \"forwarded\"\n";
+        let cfg: Config = toml::from_str(toml_text).expect("parse [mitm] with forwarded");
+        let mitm = cfg.mitm.expect("mitm present");
+        assert_eq!(mitm.credential_source, CredentialSource::Forwarded);
+    }
+
+    #[test]
+    fn mitm_credential_source_own_parses() {
+        let toml_text = "[mitm]\ncredential_source = \"own\"\n";
+        let cfg: Config = toml::from_str(toml_text).expect("parse [mitm] with own");
+        let mitm = cfg.mitm.expect("mitm present");
+        assert_eq!(mitm.credential_source, CredentialSource::Own);
+    }
+
+    #[test]
+    fn mitm_credential_source_rejects_unknown_value() {
+        let toml_text = "[mitm]\ncredential_source = \"borrowed\"\n";
+        let err = toml::from_str::<Config>(toml_text)
+            .expect_err("unknown credential_source value must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("borrowed") || msg.contains("unknown variant") || msg.contains("expected"),
+            "expected an unknown-variant parse error; got: {msg}"
+        );
+    }
 
     #[test]
     fn mitm_absent_leaves_config_none() {
