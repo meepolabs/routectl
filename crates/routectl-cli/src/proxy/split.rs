@@ -606,6 +606,22 @@ mod tests {
         let subscriber = CaptureSubscriber {
             lines: lines.clone(),
         };
+        // `tracing-core`'s callsite-interest cache has a fast path
+        // ("has_just_one") that, while exactly one `Dispatch` is alive
+        // process-wide, resolves a callsite's first-ever registration
+        // through the CALLING THREAD's own ambient dispatch rather than
+        // the real registry. Sibling tests in this module call
+        // `handle_request` on other threads without any subscriber
+        // installed, so if one of them is the first to hit this
+        // module's `error!`/`warn!` callsites while we are the only
+        // live `Dispatch`, that thread's ambient (none) gets cached as
+        // `Interest::never()` for the callsite process-wide -- even
+        // though our capturing subscriber is live. Keeping a second
+        // `Dispatch` alive for the duration of this test forces the
+        // registry to have more than one entry, which routes every
+        // callsite registration through the real (thread-agnostic)
+        // dispatcher list instead of that single-dispatch shortcut.
+        let _second_dispatch_keepalive = tracing::Dispatch::new(CaptureSubscriber::default());
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let drift_req = Request::builder()
