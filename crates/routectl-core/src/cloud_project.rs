@@ -66,7 +66,7 @@ impl std::fmt::Debug for InMemoryProjectCache {
         // Project id is not a secret, but include only whether one is
         // cached rather than the value itself -- keeps Debug output
         // stable regardless of the id string.
-        let has_value = self.inner.read().map(|g| g.is_some()).unwrap_or(false);
+        let has_value = self.inner.read().is_ok_and(|g| g.is_some());
         f.debug_struct("InMemoryProjectCache")
             .field("cached", &has_value)
             .finish()

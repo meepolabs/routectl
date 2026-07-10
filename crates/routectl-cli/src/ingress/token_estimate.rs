@@ -76,9 +76,7 @@ fn message_tool_call_chars(msg: &Message) -> usize {
 /// Serialized-JSON character length of `value`, or zero if serialization
 /// fails. Keeps the estimate total, never panicking on any input.
 fn json_chars<T: Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|s| s.chars().count())
-        .unwrap_or(0)
+    serde_json::to_string(value).map_or(0, |s| s.chars().count())
 }
 
 fn system_text_chars(system: &SystemContent) -> usize {

@@ -156,7 +156,7 @@ async fn run_complete(router: Arc<Router>, target: String) -> Row {
                 },
                 None => "<no choice>".into(),
             };
-            let rd_count = msg.map(|m| m.reasoning_details.len()).unwrap_or(0);
+            let rd_count = msg.map_or(0, |m| m.reasoning_details.len());
             let rd_format = msg
                 .and_then(|m| m.reasoning_details.first())
                 .and_then(|d| d.format.as_deref())
@@ -788,7 +788,7 @@ async fn anthropic_ingress_through_bedrock_cache_and_beta() {
     // System prompt above the 1024-token cache minimum. Repetition
     // is fine -- we only need the byte count to clear the threshold.
     let big_filler = "You are a careful assistant. ".repeat(400);
-    let system_text = format!("{big_filler}\n\nRespond to every user message with a single word.",);
+    let system_text = format!("{big_filler}\n\nRespond to every user message with a single word.");
 
     let body = json!({
         "model": cache_model,
@@ -1464,8 +1464,7 @@ mod oauth_codex {
     ) -> std::io::Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         let expires_at = now + 3600;
         // Hand-rolled JSON literal: TokenRecord is `#[non_exhaustive]`
         // so it cannot be built with a struct literal from this crate.
@@ -1840,8 +1839,7 @@ mod oauth_antigravity {
     fn seed_credentials_file(path: &std::path::Path, bearer: &str) -> std::io::Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         // Far in the future so no refresh fires during the test.
         let expires_at = now + 365 * 24 * 3600;
         // Hand-rolled JSON literal: TokenRecord is `#[non_exhaustive]`

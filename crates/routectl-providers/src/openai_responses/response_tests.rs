@@ -441,7 +441,7 @@ fn codex_resets_in_seconds_lifted() {
     let hint = codex_reset_hint(&body);
 
     // Assert: the relative count is taken verbatim.
-    assert_eq!(hint, Some(Duration::from_secs(1800)));
+    assert_eq!(hint, Some(Duration::from_mins(30)));
 }
 
 #[test]

@@ -22,7 +22,7 @@ tokio = { workspace = true, features = ["sync"] }
 # `bundled` compiles SQLite from vendored source, so there is no
 # system libsqlite dependency. This dep lives only in routectl-usage;
 # the lean provider build does not pull it in.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 
 [dev-dependencies]
 tempfile = "3"

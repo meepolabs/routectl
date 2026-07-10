@@ -2922,7 +2922,7 @@ mod multi_turn_tool_use_tests {
                 )
             })
             .unwrap_or_else(|| {
-                panic!("expected non-anthropic-format WARN; got events: {captured:?}",)
+                panic!("expected non-anthropic-format WARN; got events: {captured:?}")
             });
         assert_eq!(warn_event.level, tracing::Level::WARN);
 

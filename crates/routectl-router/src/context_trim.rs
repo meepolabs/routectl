@@ -356,9 +356,7 @@ const fn estimate_str_tokens(s: &str) -> u64 {
 /// Serialized JSON byte length of any serializable value. A serialize failure
 /// (not expected for canonical types) contributes 0 rather than panicking.
 fn serialized_len<T: serde::Serialize>(value: &T) -> u64 {
-    serde_json::to_string(value)
-        .map(|s| s.len() as u64)
-        .unwrap_or(0)
+    serde_json::to_string(value).map_or(0, |s| s.len() as u64)
 }
 
 /// Conservative constant key-set used to extract a file path from a
@@ -1102,7 +1100,7 @@ mod tests {
             }
             let plan_g = propose_steady_state_trim(&grown, &params).expect("plan grown");
             let fp_g = trimmed_prefix_fingerprint(&grown, &plan_g);
-            assert_eq!(fp_base, fp_g, "fingerprint drifted at growth step {growth}",);
+            assert_eq!(fp_base, fp_g, "fingerprint drifted at growth step {growth}");
         }
     }
 

@@ -4195,7 +4195,7 @@ max_attempts = 3
         );
         assert_eq!(
             cfg.retry.max_honored_retry_after(),
-            Duration::from_millis(3_600_000),
+            Duration::from_hours(1),
             "None must resolve to the 1h ceiling"
         );
     }
@@ -4215,7 +4215,7 @@ max_honored_retry_after_ms = 90000
         assert_eq!(cfg.retry.max_honored_retry_after_ms, Some(90_000));
         assert_eq!(
             cfg.retry.max_honored_retry_after(),
-            Duration::from_millis(90_000),
+            Duration::from_secs(90),
             "Some(90000) must resolve to 90s"
         );
     }

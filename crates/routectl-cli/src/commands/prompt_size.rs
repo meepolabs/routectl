@@ -370,7 +370,7 @@ fn messages_tier_bytes(req: &ChatRequest) -> usize {
 /// Serialized JSON byte length of any serializable value. A serialize failure
 /// (not expected for canonical types) contributes 0 rather than panicking.
 fn serialized_len<T: serde::Serialize>(value: &T) -> usize {
-    serde_json::to_string(value).map(|s| s.len()).unwrap_or(0)
+    serde_json::to_string(value).map_or(0, |s| s.len())
 }
 
 /// Resolve `--alias` to its target provider's top-level cache capability using

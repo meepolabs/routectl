@@ -370,7 +370,7 @@ mod tests {
         let est = LedgerBackedK::new(store);
 
         // Act
-        let out = est.estimate(&query(None, Duration::from_secs(300)));
+        let out = est.estimate(&query(None, Duration::from_mins(5)));
 
         // Assert
         assert_eq!(out.confidence, Confidence::Cold);
@@ -387,7 +387,7 @@ mod tests {
         let est = LedgerBackedK::new(store);
 
         // Act
-        let out = est.estimate(&query(Some("unknown"), Duration::from_secs(300)));
+        let out = est.estimate(&query(Some("unknown"), Duration::from_mins(5)));
 
         // Assert
         assert_eq!(out.confidence, Confidence::Cold);
@@ -404,7 +404,7 @@ mod tests {
         let est = LedgerBackedK::new(store);
 
         // Act
-        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+        let out = est.estimate(&query(Some("s1"), Duration::from_mins(5)));
 
         // Assert: Low, and the floor is force-clamped to 0 even though every
         // observed turn reused (a thin sample must never authorize a cut).
@@ -425,7 +425,7 @@ mod tests {
         let est = LedgerBackedK::new(store);
 
         // Act
-        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+        let out = est.estimate(&query(Some("s1"), Duration::from_mins(5)));
 
         // Assert: Calibrated, floor no longer force-clamped, bounds ordered.
         assert_eq!(out.confidence, Confidence::Calibrated);
@@ -455,7 +455,7 @@ mod tests {
         let est = LedgerBackedK::new(store);
 
         // Act
-        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+        let out = est.estimate(&query(Some("s1"), Duration::from_mins(5)));
 
         // Assert: fail-closed -- the floor and point are 0, and the source is
         // LiveLedger because real samples were consulted.
@@ -475,7 +475,7 @@ mod tests {
         let est = LedgerBackedK::new(store);
 
         // Act
-        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+        let out = est.estimate(&query(Some("s1"), Duration::from_mins(5)));
 
         // Assert: Calibrated, and every bound is finite (clamped).
         assert_eq!(out.confidence, Confidence::Calibrated);
@@ -498,7 +498,7 @@ mod tests {
         let est = LedgerBackedK::new(store);
 
         // Act: a large TTL -- the model no longer splits on gaps at all.
-        let out = est.estimate(&query(Some("s1"), Duration::from_secs(300)));
+        let out = est.estimate(&query(Some("s1"), Duration::from_mins(5)));
 
         // Assert: the contiguous run is now Calibrated with a usable floor.
         assert_eq!(

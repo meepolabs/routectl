@@ -227,7 +227,7 @@ mod tests {
             vec![
                 UNIX_EPOCH + Duration::from_secs(100),
                 UNIX_EPOCH + Duration::from_secs(200),
-                UNIX_EPOCH + Duration::from_secs(300),
+                UNIX_EPOCH + Duration::from_mins(5),
             ]
         );
     }

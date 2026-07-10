@@ -29,7 +29,7 @@ use reqwest::Client;
 /// Separate concern from any first-byte timeout: first-byte covers the
 /// initial response delay before the stream opens; this covers a hang
 /// once bytes have started flowing.
-pub const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+pub const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// Connect (TCP + TLS handshake) timeout for every shared client.
 /// Caps only the initial connection (not per-read). A hung connect to
@@ -303,7 +303,7 @@ mod tests {
     fn stream_read_timeout_is_generous_idle_cap() {
         assert_eq!(
             STREAM_READ_TIMEOUT,
-            std::time::Duration::from_secs(300),
+            std::time::Duration::from_mins(5),
             "streaming idle read timeout must be 300s",
         );
     }

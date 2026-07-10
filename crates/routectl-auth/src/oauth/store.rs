@@ -1994,7 +1994,7 @@ mod tests {
             "distinct seats must refresh concurrently: a shared per-provider \
              lock would serialize them to max-in-flight 1"
         );
-        assert_eq!(flow.call_count(), 2, "one refresh per seat",);
+        assert_eq!(flow.call_count(), 2, "one refresh per seat");
     }
 
     #[tokio::test]

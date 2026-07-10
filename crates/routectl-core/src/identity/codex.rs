@@ -83,7 +83,7 @@ fn build_codex_user_agent() -> String {
     let os_ver = os_version();
     let arch = std::env::consts::ARCH;
     let term = terminal_token();
-    format!("{CODEX_ORIGINATOR}/{PINNED_CODEX_VERSION} ({os_type} {os_ver}; {arch}) {term}",)
+    format!("{CODEX_ORIGINATOR}/{PINNED_CODEX_VERSION} ({os_type} {os_ver}; {arch}) {term}")
 }
 
 /// Display-name mapping that mirrors `os_info::OsType` for the three

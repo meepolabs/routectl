@@ -204,7 +204,7 @@ fn ttl_expiry_returns_none() {
     let entry = ThinkingCacheEntry {
         thinking: make_thinking("stale"),
         expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
-        ttl: Duration::from_secs(3600),
+        ttl: Duration::from_hours(1),
     };
     cache.write().expect("lock").put(key, entry);
     let result = lookup_thinking(&cache, "provider-b", "tool-old");
@@ -224,7 +224,7 @@ fn lookup_evicts_expired_entry() {
     let entry = ThinkingCacheEntry {
         thinking: make_thinking("stale"),
         expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
-        ttl: Duration::from_secs(3600),
+        ttl: Duration::from_hours(1),
     };
     cache.write().expect("lock").put(key.clone(), entry);
     assert_eq!(

@@ -8,4 +8,4 @@
 # MSRV for clippy's version-gated lints. Must match
 # `rust-version` in Cargo.toml ([workspace.package]). With this set,
 # clippy will not suggest APIs newer than the pinned MSRV.
-msrv = "1.91"
+msrv = "1.95"

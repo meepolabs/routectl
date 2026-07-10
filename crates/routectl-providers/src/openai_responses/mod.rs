@@ -1397,7 +1397,7 @@ mod excerpt_tests {
             Error::Upstream { retry_after, .. } => {
                 assert_eq!(
                     retry_after,
-                    Some(std::time::Duration::from_secs(7200)),
+                    Some(std::time::Duration::from_hours(2)),
                     "codex body hint must override the header Retry-After"
                 );
             }

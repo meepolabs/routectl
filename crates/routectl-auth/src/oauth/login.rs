@@ -139,7 +139,7 @@ async fn run_browser(
     });
     launch_browser_or_print_url(flow, &auth_url);
 
-    let cb = match tokio::time::timeout(Duration::from_secs(120), code_rx).await {
+    let cb = match tokio::time::timeout(Duration::from_mins(2), code_rx).await {
         Ok(Ok(cb)) => cb,
         Ok(Err(_)) => return Err(OAuthError::Internal("callback channel closed".into())),
         Err(_) => {

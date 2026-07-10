@@ -4039,8 +4039,7 @@ fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {
     use std::time::SystemTime;
     let nanos = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos() as u64);
     base.saturating_add(Duration::from_millis(nanos % jitter_ms))
 }
 
@@ -4427,7 +4426,7 @@ mod tests {
         // Arrange: enough TTL-separated runs in the source store that the
         // estimator classifies the triple as `Calibrated` (>= 8 runs). Each
         // run is one reuse hit separated from the next by more than the TTL.
-        let ttl = Duration::from_secs(300);
+        let ttl = Duration::from_mins(5);
         let mut window = KSessionWindow::new();
         for i in 0..12u64 {
             window.push(Sample {
@@ -6513,7 +6512,7 @@ mod gate_error_does_not_mask_real_error_tests {
         router.install_resolved_models(models);
         // Force entry2's breaker open so its gate refuses on dispatch.
         assert!(
-            router.force_open_breaker("entry2", std::time::Duration::from_secs(3600)),
+            router.force_open_breaker("entry2", std::time::Duration::from_hours(1)),
             "entry2 breaker must be force-open-able",
         );
         router
@@ -6811,7 +6810,7 @@ mod seat_pool_dispatch_tests {
 
         // Force the pinned home seat's breaker open.
         assert!(
-            router.force_open_breaker(&home, Duration::from_secs(3600)),
+            router.force_open_breaker(&home, Duration::from_hours(1)),
             "home seat must own a state slot to trip"
         );
 
@@ -6844,7 +6843,7 @@ mod seat_pool_dispatch_tests {
         let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
         for key in ["opus", "opus#seat-b", "opus#seat-c"] {
             assert!(
-                router.force_open_breaker(key, Duration::from_secs(3600)),
+                router.force_open_breaker(key, Duration::from_hours(1)),
                 "seat {key} must own a state slot to trip"
             );
         }
@@ -6879,7 +6878,7 @@ mod seat_pool_dispatch_tests {
         assert!(router.state.contains_key("opus#seat-c"));
 
         // Park the default seat for a long cooldown.
-        router.park_provider("opus", Duration::from_secs(3600));
+        router.park_provider("opus", Duration::from_hours(1));
 
         // The default seat's breaker is open; siblings are untouched.
         assert!(
@@ -6935,7 +6934,7 @@ mod seat_pool_dispatch_tests {
         // Full dispatch: park the default seat, then a request must fall
         // to the next seat (seat-b) and that seat's provider serves.
         let (router, counters) = pooled_router(SeatSelection::FillFirst);
-        router.park_provider("opus", Duration::from_secs(3600));
+        router.park_provider("opus", Duration::from_hours(1));
 
         let resp = router.complete(req()).await.expect("sibling serves");
         assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic"));
@@ -6980,7 +6979,7 @@ mod seat_pool_dispatch_tests {
             pooled_router_with_labels(SeatSelection::FillFirst, &[None, Some("seat-b".into())]);
         // Trip the default seat's breaker for a long cooldown.
         assert!(
-            before.force_open_breaker("opus", Duration::from_secs(3600)),
+            before.force_open_breaker("opus", Duration::from_hours(1)),
             "default seat must own a state slot to trip"
         );
         assert_eq!(
@@ -7094,7 +7093,7 @@ mod seat_pool_dispatch_tests {
 
         // Force the home seat's breaker open for a long cooldown.
         assert!(
-            router.force_open_breaker(&home, Duration::from_secs(3600)),
+            router.force_open_breaker(&home, Duration::from_hours(1)),
             "home seat must own a state slot to trip"
         );
 
@@ -7127,7 +7126,7 @@ mod seat_pool_dispatch_tests {
         // Park the NEW home (the sibling). An already-repinned session must
         // STAY rather than chase a third seat (one-time cap).
         assert!(
-            router.force_open_breaker(&sibling, Duration::from_secs(3600)),
+            router.force_open_breaker(&sibling, Duration::from_hours(1)),
             "sibling seat must own a state slot to trip"
         );
         let capped = chain_state_keys_for(&router, Some("S"));
@@ -7849,7 +7848,7 @@ mod count_tokens_tests {
         // cooldown so its gate returns CircuitOpen (not a half-open probe
         // admission).
         assert!(
-            router.force_open_breaker("anthropic-second", Duration::from_secs(3600)),
+            router.force_open_breaker("anthropic-second", Duration::from_hours(1)),
             "second seat breaker slot must exist",
         );
 
@@ -9966,7 +9965,7 @@ mod circuit_breaker_slot_release_tests {
         let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
             id: "p".into(),
             status: 429,
-            retry_after: Some(Duration::from_secs(60)),
+            retry_after: Some(Duration::from_mins(1)),
             calls: calls.clone(),
         });
         // High threshold + a non-zero default cooldown (1s) so a stray
@@ -10040,7 +10039,7 @@ mod circuit_breaker_slot_release_tests {
         let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
             id: "p".into(),
             status: 429,
-            retry_after: Some(Duration::from_secs(3_600)),
+            retry_after: Some(Duration::from_hours(1)),
             calls: calls.clone(),
         });
         let retry = RetryPolicy {
@@ -10075,7 +10074,7 @@ mod circuit_breaker_slot_release_tests {
         let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
             id: "p".into(),
             status: 429,
-            retry_after: Some(Duration::from_secs(60)),
+            retry_after: Some(Duration::from_mins(1)),
             calls: calls.clone(),
         });
         let router = build_router_with_breaker(provider, RetryPolicy::default(), 5, 1_000);
@@ -10108,7 +10107,7 @@ mod circuit_breaker_slot_release_tests {
         let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
             id: "p".into(),
             status: 400,
-            retry_after: Some(Duration::from_secs(60)),
+            retry_after: Some(Duration::from_mins(1)),
             calls: calls.clone(),
         });
         let retry = RetryPolicy {
@@ -10217,7 +10216,7 @@ mod circuit_breaker_slot_release_tests {
             if self.hang.load(Ordering::SeqCst) {
                 // Far longer than any test timeout: the dispatch future is
                 // dropped while parked here, exercising the cancellation path.
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                tokio::time::sleep(Duration::from_hours(1)).await;
             }
         }
     }

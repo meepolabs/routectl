@@ -1103,9 +1103,7 @@ fn selector_glob_matches(model_glob: &str, model: &str) -> bool {
     if model_glob == "*" {
         return true;
     }
-    AliasPattern::parse(model_glob)
-        .map(|pat| pat.matches(model))
-        .unwrap_or(false)
+    AliasPattern::parse(model_glob).is_ok_and(|pat| pat.matches(model))
 }
 
 /// The glob specificity used to rank competing overrides: a `"*"` glob is
@@ -1116,9 +1114,7 @@ fn selector_glob_specificity(model_glob: &str) -> usize {
     if model_glob == "*" {
         return 0;
     }
-    AliasPattern::parse(model_glob)
-        .map(|pat| pat.prefix_len())
-        .unwrap_or(0)
+    AliasPattern::parse(model_glob).map_or(0, |pat| pat.prefix_len())
 }
 
 /// Pick the most-specific matching override for `(provider_kind, model)`,
@@ -1227,10 +1223,9 @@ pub fn validate_overrides(
 /// 1970-01-01), derived from the system clock. Pure arithmetic, no date
 /// library. Returns `0` if the clock is somehow before the epoch.
 fn today_epoch_day() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(0) / SECONDS_PER_DAY)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
+        i64::try_from(d.as_secs()).unwrap_or(0) / SECONDS_PER_DAY
+    })
 }
 
 /// Parse a `"YYYY-MM-DD"` string into a proleptic-Gregorian epoch-day

@@ -1,6 +1,6 @@
 [toolchain]
 # Pin to an EXACT patch so the toolchain is reproducible across
-# contributors and CI -- a floating "1.91" would let a newer patch
+# contributors and CI -- a floating "1.95" would let a newer patch
 # slip in and silently change behavior.
 #
 # Two distinct freezes are in play; do not conflate them:
@@ -15,7 +15,7 @@
 #     only gates version-aware lint SUGGESTIONS (e.g. "use this
 #     stdlib API added in 1.NN"). It does NOT change which lints
 #     exist in the installed clippy.
-channel = "1.91.1"
+channel = "1.95.0"
 
 # Components installed alongside the compiler.
 components = [

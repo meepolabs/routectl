@@ -33,8 +33,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Newtype wrapping a sensitive `String` so that:

@@ -54,7 +54,7 @@ pub const THINKING_CACHE_CAP: usize = 10_000;
 /// emulation path. Entries older than this duration are treated as
 /// stale and discarded on the next read. 60 minutes matches the typical
 /// maximum agentic session length before context rotation.
-pub const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+pub const THINKING_CACHE_TTL: std::time::Duration = std::time::Duration::from_hours(1);
 
 /// Default per-entry byte cap on the thinking cache. The cap is applied
 /// at write time -- entries whose serialized JSON byte length exceeds
@@ -103,7 +103,7 @@ pub fn snapshot_to_cache(
     // disable the cap for affected entries; if that becomes a concern,
     // a fallback measurement path (e.g. summing payload byte lengths)
     // can be added.
-    let observed_bytes = serde_json::to_vec(&thinking).map(|v| v.len()).unwrap_or(0);
+    let observed_bytes = serde_json::to_vec(&thinking).map_or(0, |v| v.len());
     if observed_bytes > max_entry_bytes {
         tracing::warn!(
             provider = %provider_id,

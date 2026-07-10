@@ -23,7 +23,7 @@ use routectl_usage::{OpenError, open_readonly, read_reuse_samples_since};
 /// prefix could still be warm is always covered. The per-estimate TTL-gap
 /// split uses the actual per-request TTL, so this only bounds how much
 /// history to load, not how samples are aged.
-const REBUILD_WINDOW: Duration = Duration::from_secs(8 * 24 * 60 * 60);
+const REBUILD_WINDOW: Duration = Duration::from_hours(192);
 
 /// Upper bound on the number of ledger rows the startup rebuild reads. A
 /// plain compile-time cap (never derived from runtime input) on the boot
@@ -51,8 +51,7 @@ impl LedgerReader for UsageLedgerReader {
     fn read_reuse_samples(&self, window_start: SystemTime, limit: usize) -> Vec<LedgerSampleRow> {
         let window_start_ms = window_start
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as i64);
 
         let db = match open_readonly(&self.db_path) {
             Ok(db) => db,

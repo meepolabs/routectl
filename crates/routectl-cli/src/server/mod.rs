@@ -2001,7 +2001,7 @@ mod tests {
         // pending on the (never-arriving) signal.
         let fired = tokio::select! {
             () = drain_deadline_watcher(&mut rx) => true,
-            () = tokio::time::sleep(Duration::from_secs(3600)) => false,
+            () = tokio::time::sleep(Duration::from_hours(1)) => false,
         };
 
         // Assert: the watcher stayed pending; the sleep won.

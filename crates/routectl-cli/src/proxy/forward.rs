@@ -48,7 +48,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// is purely a leak safety net for a truly wedged upstream, not a
 /// tuning knob for latency -- a healthy stream, inference or
 /// control-plane, never approaches it.
-pub const STREAM_IDLE_WINDOW: Duration = Duration::from_secs(600);
+pub const STREAM_IDLE_WINDOW: Duration = Duration::from_mins(10);
 
 /// Default cap on concurrently forwarded streams (both split legs
 /// share one bound). Conservative and overridable per-deployment via

@@ -23,7 +23,7 @@ fn rpm_bucket_drains_and_refills() {
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
     s.record_success();
     assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
-    let t1 = t0 + Duration::from_secs(60);
+    let t1 = t0 + Duration::from_mins(1);
     assert_eq!(s.try_dispatch(t1), GateDecision::Allow);
 }
 
@@ -183,7 +183,7 @@ fn half_open_slot_released_when_rpm_refuses_the_probe() {
     assert_eq!(decision, GateDecision::RateLimited);
     // The half-open slot is still free; bumping the clock past
     // a refill window lets the next dispatch claim it.
-    let t_refill = t_probe + Duration::from_secs(60);
+    let t_refill = t_probe + Duration::from_mins(1);
     assert_eq!(s.try_dispatch(t_refill), GateDecision::Allow);
 }
 
@@ -239,7 +239,7 @@ fn force_open_cooldown_outlasts_default() {
     let t0 = Instant::now();
 
     // Act: park for 60s, far longer than the 1s default.
-    s.force_open(t0, Duration::from_secs(60));
+    s.force_open(t0, Duration::from_mins(1));
 
     // Assert: still open at t0+5s (default would already be elapsed),
     // probe only after the custom 60s window.
@@ -292,7 +292,7 @@ fn force_open_then_probe_success_resets_to_default() {
     };
     let mut s = ProviderState::new(&policy);
     let t0 = Instant::now();
-    s.force_open(t0, Duration::from_secs(60));
+    s.force_open(t0, Duration::from_mins(1));
 
     // Act: the custom park elapses, the single probe succeeds.
     let t_probe = t0 + Duration::from_secs(61);

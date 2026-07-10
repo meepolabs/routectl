@@ -84,7 +84,7 @@ mod tests {
         let got = parse_retry_after(&headers);
 
         // Assert
-        assert_eq!(got, Some(Duration::from_secs(120)));
+        assert_eq!(got, Some(Duration::from_mins(2)));
     }
 
     #[test]
