@@ -2722,6 +2722,10 @@ fn extract_bearer_preserves_token_internal_structure() {
 //      wiring the driver calls, plus one end-to-end pass through
 //      `ingress_handle`.
 
+use crate::handlers::pure_proxy_admission::{
+    PureProxyAdmissionInputs, classify_pure_proxy_rejection, enforce_pure_proxy_admission,
+    render_pure_proxy_rejection,
+};
 use crate::handlers::pure_proxy_metrics::PureProxyRejectionReason;
 
 /// Header builder for the admission tests: optionally the MITM seam header,
