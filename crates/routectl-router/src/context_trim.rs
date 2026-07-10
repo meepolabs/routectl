@@ -586,7 +586,9 @@ fn collect_scan_units(
             };
             let serialized = serde_json::to_string(target).unwrap_or_default();
             let hash = fnv1a_hash(serialized.as_bytes());
-            let tokens = estimate_value_tokens(target);
+            // Reuse the byte length already computed for the hash: this is
+            // identical to estimate_value_tokens(target) but serializes once.
+            let tokens = estimate_str_tokens(&serialized);
             // First path-bearing call for an id wins (ids are unique in a valid
             // transcript; first-wins keeps the index deterministic regardless).
             if let ScanUnitKind::ToolUse { id, path: Some(p) } = kind {
