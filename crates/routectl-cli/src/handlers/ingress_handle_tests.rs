@@ -58,7 +58,7 @@ impl CaptureRig {
         req: &routectl_core::ChatRequest,
         request_id: &str,
     ) -> UsageCapture {
-        let draft = build_usage_draft(dialect, req, request_id.to_string(), None);
+        let draft = build_usage_draft(dialect, req, request_id.to_string());
         let handle = self.handle.clone().expect("rig handle present");
         UsageCapture::new(draft, handle, dialect.to_string())
     }

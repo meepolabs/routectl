@@ -24,12 +24,19 @@ use serde_json::Value;
 /// dispatch. The dispatch / token / outcome / timing columns are stamped
 /// later by `UsageCapture`. `ts_start` is the wall-clock epoch-ms when the
 /// row is born; identity + shape columns come straight off `req`.
+///
+/// `session_id` reads `req.routectl_internal.inbound_session_key` --
+/// the SAME canonical value the K-estimator keys on (see
+/// `complete_response` / `stream_response`'s `session_key` extraction) --
+/// rather than a separately-derived header-only value. A single source
+/// means a metadata-derived (header-absent) session id persists on the
+/// ledger row instead of silently recording `NULL`.
 pub(crate) fn build_usage_draft(
     ingress_dialect: &str,
     req: &routectl_core::ChatRequest,
     request_id: String,
-    session_id: Option<String>,
 ) -> UsageRecord {
+    let session_id = req.routectl_internal.inbound_session_key.clone();
     let (thinking_req, thinking_req_kind) = thinking_of(req);
     UsageRecord {
         ts_start: epoch_ms_now(),

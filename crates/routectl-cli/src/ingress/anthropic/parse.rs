@@ -148,23 +148,36 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
 /// is trimmed; an empty-after-trim value is treated as absent and falls
 /// through. Returns `None` when neither is present. The `metadata`
 /// argument is borrowed, not consumed, so the object still round-trips.
+///
+/// When BOTH candidates are present and differ after trim, emits one
+/// `warn`-level `session_key_source_conflict` log carrying only the
+/// boolean fact of the mismatch -- never the raw header or metadata
+/// values (never logged raw, per the capture note above). This
+/// otherwise-silent split would key the header-derived request into a
+/// different K-estimator / ledger session than the metadata-derived one.
 fn resolve_inbound_session_key(headers: &HeaderMap, metadata: Option<&Value>) -> Option<String> {
-    if let Some(h) = headers.get("x-claude-code-session-id")
-        && let Ok(s) = h.to_str()
-    {
-        let t = s.trim();
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-
-    metadata
+    let header_key = headers
+        .get("x-claude-code-session-id")
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let metadata_key = metadata
         .and_then(|m| m.as_object())
         .and_then(|o| o.get("session_id"))
         .and_then(|v| v.as_str())
         .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
+        .filter(|t| !t.is_empty());
+
+    if let (Some(h), Some(m)) = (header_key, metadata_key)
+        && h != m
+    {
+        tracing::warn!(
+            session_key_source_conflict = true,
+            "inbound session key mismatch between header and metadata.session_id"
+        );
+    }
+
+    header_key.or(metadata_key).map(str::to_string)
 }
 
 /// Field names the canonical `ChatRequest` deserializes directly from

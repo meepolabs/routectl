@@ -97,6 +97,13 @@ pub struct UsageRecord {
     pub provider: Option<String>,
     pub provider_kind: Option<String>,
     pub seat: Option<String>,
+    /// Populated from the Anthropic ingress's `inbound_session_key`
+    /// (header `x-claude-code-session-id`, falling back to body
+    /// `metadata.session_id`) -- see
+    /// `routectl_core::ChatRequest::routectl_internal.inbound_session_key`.
+    /// `None` for the OpenAI chat-completions and Responses dialects,
+    /// which do not set `inbound_session_key` (no session-identity
+    /// concept on those wire protocols).
     pub session_id: Option<String>,
 
     // SHAPE

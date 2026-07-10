@@ -268,4 +268,81 @@ mod tests {
         warm_k_store_from_ledger(&path, &store);
         assert!(store.is_empty());
     }
+
+    /// A session identified ONLY via the body `metadata.session_id`
+    /// fallback (no `x-claude-code-session-id` header) must still warm
+    /// the K store on rebuild -- the restart-survival gap this task
+    /// closes. `build_usage_draft` derives `session_id` from the SAME
+    /// `inbound_session_key` the K-estimator keys on, so the ledger row
+    /// this test writes through the REAL `UsageWriter` path carries a
+    /// non-NULL `session_id` even though the header was never sent.
+    #[test]
+    fn warm_reidentifies_metadata_derived_session_after_restart() {
+        // Arrange: parse a header-absent, metadata-only Anthropic request
+        // through the real ingress so `inbound_session_key` is genuinely
+        // metadata-derived, then seed a draft from it exactly as the
+        // production boundary does.
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1024,
+            "metadata": {"session_id": "meta-sid"}
+        });
+        let req = {
+            use crate::ingress::IngressAdapter;
+            use crate::ingress::anthropic::AnthropicIngress;
+            AnthropicIngress
+                .parse_request(&axum::http::HeaderMap::new(), body)
+                .expect("parse anthropic request")
+        };
+        let mut draft = crate::handlers::usage_capture::build_usage_draft(
+            "anthropic",
+            &req,
+            "req-meta-rebuild".to_string(),
+        );
+        assert_eq!(
+            draft.session_id.as_deref(),
+            Some("meta-sid"),
+            "draft session_id must come from the metadata-derived inbound_session_key"
+        );
+        // Stamp the dispatch-derived columns the real `observe_meta` /
+        // `observe_response` calls would set, so the row clears the
+        // reuse-sample query's NOT NULL filters.
+        draft.provider_kind = Some("anthropic-api".to_string());
+        draft.model = Some("opus".to_string());
+        draft.cache_read = Some(42);
+        draft.outcome = routectl_usage::Outcome::Ok;
+
+        let (_dir, path) = temp_db_path();
+        let (handle, writer) = routectl_usage::UsageWriter::start(
+            path.clone(),
+            routectl_usage::CHANNEL_CAPACITY,
+            0,
+            true,
+        );
+        handle.try_send(draft);
+        // Drop the producer handle BEFORE shutdown: `UsageWriter::shutdown`
+        // waits for the channel to CLOSE (all senders dropped) to detect
+        // drain completion; a live handle clone would starve that signal
+        // and shutdown would sit out the full drain deadline.
+        drop(handle);
+        writer.shutdown();
+
+        // Act
+        let store = KSessionStore::new();
+        warm_k_store_from_ledger(&path, &store);
+
+        // Assert: the metadata-derived session is warmed under its
+        // resolved session key, not dropped as a NULL-session row.
+        assert!(
+            store
+                .get(&KSessionKey {
+                    session_key: "meta-sid".into(),
+                    provider_kind: "anthropic-api".into(),
+                    model: "opus".into(),
+                })
+                .is_some(),
+            "a session identified only via metadata.session_id must survive rebuild"
+        );
+    }
 }

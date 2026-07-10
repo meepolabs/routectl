@@ -163,6 +163,74 @@ fn parse_request_empty_header_session_key_falls_through_to_metadata() {
 }
 
 #[test]
+fn parse_request_header_metadata_conflict_emits_mismatch_warning_without_raw_ids() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "metadata": {"session_id": "sid-from-metadata"}
+    });
+
+    let events = routectl_testkit::capture_events(|| {
+        let req = AnthropicIngress
+            .parse_request(&headers_with_session("sid-from-header"), body.clone())
+            .unwrap();
+        // Header still wins for the resolved key; the guardrail only logs
+        // the conflict, it never changes the resolution outcome.
+        assert_eq!(
+            req.routectl_internal.inbound_session_key.as_deref(),
+            Some("sid-from-header"),
+        );
+    });
+
+    let conflict_event = events
+        .iter()
+        .find(|e| e.field("session_key_source_conflict").is_some())
+        .unwrap_or_else(|| panic!("expected mismatch WARN, got events: {events:?}"));
+    assert_eq!(conflict_event.level, tracing::Level::WARN);
+    assert_eq!(
+        conflict_event.field("session_key_source_conflict"),
+        Some("true"),
+    );
+    for event in &events {
+        assert!(
+            !event.message.contains("sid-from-header")
+                && !event.message.contains("sid-from-metadata"),
+            "raw session id must never be logged: {event:?}",
+        );
+        for (_, v) in &event.fields {
+            assert!(
+                v != "sid-from-header" && v != "sid-from-metadata",
+                "raw session id must never appear in a structured field: {event:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn parse_request_header_metadata_agreement_emits_no_mismatch_warning() {
+    let body = json!({
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "metadata": {"session_id": "sid-same"}
+    });
+
+    let events = routectl_testkit::capture_events(|| {
+        let _ = AnthropicIngress
+            .parse_request(&headers_with_session("sid-same"), body)
+            .unwrap();
+    });
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.field("session_key_source_conflict").is_some()),
+        "agreeing header and metadata must not fire the mismatch guardrail: {events:?}",
+    );
+}
+
+#[test]
 fn parse_request_preserves_metadata_session_id_in_provider_extras() {
     let body = json!({
         "model": "claude-opus-4-7",

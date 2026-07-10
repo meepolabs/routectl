@@ -48,7 +48,7 @@ fn capture() -> (UsageCapture, UsageWriter, tempfile::TempDir) {
         }],
         ..Default::default()
     };
-    let draft = build_usage_draft("anthropic", &req, "req-1".to_string(), None);
+    let draft = build_usage_draft("anthropic", &req, "req-1".to_string());
     let (handle, writer, dir) = dummy_handle();
     (
         UsageCapture::new(draft, handle, "ingress-1".to_string()),
@@ -234,7 +234,7 @@ fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, tempfile::T
         }],
         ..Default::default()
     };
-    let draft = build_usage_draft("anthropic", &req, "req-take".to_string(), None);
+    let draft = build_usage_draft("anthropic", &req, "req-take".to_string());
     let (handle, writer, dir) = dummy_handle();
     let cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
     (cap, handle, writer, dir)
@@ -330,4 +330,87 @@ fn cache_hit_pct_zero_prompt_guards_divide() {
     // Arrange / Act / Assert: prompt == 0 yields 0%, never a panic.
     assert_eq!(cache_hit_pct(0, 0), 0);
     assert_eq!(cache_hit_pct(500, 0), 0);
+}
+
+// -------- build_usage_draft: session_id sourced from inbound_session_key ----
+//
+// `build_usage_draft` no longer takes a separately-derived `session_id`
+// parameter; it reads `req.routectl_internal.inbound_session_key` --
+// the SAME canonical value the Anthropic ingress resolves (header THEN
+// `metadata.session_id` fallback) and the K-estimator keys on. These
+// tests drive the real ingress parse so the request carries a genuine
+// `inbound_session_key`, then assert the draft's `session_id` column
+// matches it exactly.
+
+fn anthropic_request(
+    headers: &axum::http::HeaderMap,
+    body: serde_json::Value,
+) -> routectl_core::ChatRequest {
+    use crate::ingress::IngressAdapter;
+    use crate::ingress::anthropic::AnthropicIngress;
+    AnthropicIngress.parse_request(headers, body).unwrap()
+}
+
+#[test]
+fn build_usage_draft_metadata_only_session_key_lands_in_session_id() {
+    // Arrange: header absent, session identity only in body metadata.
+    let body = serde_json::json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "metadata": {"session_id": "sid-from-metadata"}
+    });
+    let req = anthropic_request(&axum::http::HeaderMap::new(), body);
+
+    // Act
+    let draft = build_usage_draft("anthropic", &req, "req-meta".to_string());
+
+    // Assert: the ledger row still gets a session identity even though
+    // the header was never sent.
+    assert_eq!(draft.session_id.as_deref(), Some("sid-from-metadata"));
+}
+
+#[test]
+fn build_usage_draft_trims_header_derived_session_id() {
+    // Arrange: the header carries leading/trailing whitespace.
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-claude-code-session-id",
+        axum::http::HeaderValue::from_str("  sid-from-header  ").unwrap(),
+    );
+    let body = serde_json::json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024
+    });
+    let req = anthropic_request(&headers, body);
+
+    // Act
+    let draft = build_usage_draft("anthropic", &req, "req-trim".to_string());
+
+    // Assert: the untrimmed raw header value never reaches the ledger row.
+    assert_eq!(draft.session_id.as_deref(), Some("sid-from-header"));
+}
+
+#[test]
+fn build_usage_draft_header_wins_over_metadata_in_session_id() {
+    // Arrange: both the header and body metadata carry a session id.
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-claude-code-session-id",
+        axum::http::HeaderValue::from_str("sid-from-header").unwrap(),
+    );
+    let body = serde_json::json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1024,
+        "metadata": {"session_id": "sid-from-metadata"}
+    });
+    let req = anthropic_request(&headers, body);
+
+    // Act
+    let draft = build_usage_draft("anthropic", &req, "req-both".to_string());
+
+    // Assert
+    assert_eq!(draft.session_id.as_deref(), Some("sid-from-header"));
 }

@@ -39,8 +39,11 @@ use crate::server::request_id::RequestId;
 const DISABLE_FALLBACKS_HEADER: &str = "x-routectl-disable-fallbacks";
 
 /// Inbound header that claude-code stamps with its logical session id.
-/// Captured best-effort for the usage row's `session_id`; absent or
-/// non-UTF-8 values yield `None`.
+/// Read ONLY for the pure-proxy admission gate's header-presence check
+/// (`session_id_of` below, consumed by `enforce_pure_proxy_admission`).
+/// The usage ledger's `session_id` column no longer reads this header
+/// directly -- it reads the canonical `inbound_session_key` (header THEN
+/// `metadata.session_id` fallback) via `build_usage_draft`.
 const SESSION_ID_HEADER: &str = "x-claude-code-session-id";
 
 /// Grace window the streaming handler holds a dispatch un-flushed before it
@@ -136,8 +139,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // fields exist yet). The dispatch + token + outcome fields are
     // stamped later by the capture guard.
     let request_id = request_id.map(|r| r.0).unwrap_or_default();
-    let session_id = session_id_of(&headers);
-    let draft = build_usage_draft(adapter.id(), &req, request_id, session_id);
+    let draft = build_usage_draft(adapter.id(), &req, request_id);
 
     let streaming = req.stream == Some(true);
     if streaming {
@@ -339,7 +341,8 @@ async fn complete_response<A: IngressAdapter>(
     let mut capture = UsageCapture::new(draft, usage, adapter.id().to_string());
     // Extract the canonical live session key BEFORE dispatch moves `req`
     // into the router. POST-response K-sample recording (below) keys on
-    // this value, NOT the header-only usage `session_id`.
+    // this same value the usage ledger's `session_id` column was seeded
+    // from (`build_usage_draft`) -- one derivation, read twice.
     let session_key = req.routectl_internal.inbound_session_key.clone();
     let dispatched = router.complete_with_options(req, opts).await;
     capture.observe_meta(&dispatched.meta);

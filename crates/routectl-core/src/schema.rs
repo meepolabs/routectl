@@ -304,6 +304,15 @@ pub struct RoutectlInternal {
     /// to the body `metadata.session_id`. This is the REAL per-conversation
     /// key -- it differs per conversation.
     ///
+    /// This is the CANONICAL inbound session identity: both the usage
+    /// ledger's `UsageRecord.session_id` column (`build_usage_draft` reads
+    /// this field directly) and the K-estimator's per-session sample store
+    /// (`record_k_sample`) key on this SAME value. A session identified
+    /// only via the `metadata.session_id` fallback (no header) therefore
+    /// still gets a durable ledger row and survives a K-store rebuild
+    /// after a restart -- there is no separate, header-only derivation to
+    /// drift out of sync with this one.
+    ///
     /// Do NOT confuse this with the OUTBOUND per-credential
     /// `ClaudeCodeIdentity::session_id` value minted in
     /// `crates/routectl-providers/src/anthropic_api/cloak.rs` and stamped
@@ -311,9 +320,10 @@ pub struct RoutectlInternal {
     /// (identical across every conversation on a seat) and is NOT a usable
     /// per-conversation key.
     ///
-    /// `None` for non-Anthropic ingresses and library consumers. Never
-    /// serialized to any upstream (it rides on `routectl_internal`, which
-    /// is `#[serde(skip)]`). Must not be logged raw.
+    /// `None` when the ingress dialect has no session-identity concept
+    /// (OpenAI chat-completions, Responses) and for library consumers.
+    /// Never serialized to any upstream (it rides on `routectl_internal`,
+    /// which is `#[serde(skip)]`). Must not be logged raw.
     pub inbound_session_key: Option<String>,
 
     /// INBOUND first-party bearer token captured for opt-in passthrough
