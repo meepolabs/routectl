@@ -2529,6 +2529,7 @@ dependencies = [
  "rand",
  "reqwest",
  "routectl-core",
+ "routectl-testkit",
  "serde",
  "serde_json",
  "serial_test",
@@ -2574,6 +2575,7 @@ dependencies = [
  "routectl-core",
  "routectl-providers",
  "routectl-router",
+ "routectl-testkit",
  "routectl-usage",
  "rusqlite",
  "rustls",
@@ -2602,6 +2604,7 @@ version = "0.9.0"
 dependencies = [
  "async-trait",
  "futures",
+ "routectl-testkit",
  "serde",
  "serde_json",
  "thiserror",
@@ -2637,6 +2640,7 @@ dependencies = [
  "reqwest",
  "reqwest_cookie_store",
  "routectl-core",
+ "routectl-testkit",
  "serde",
  "serde_json",
  "tempfile",
@@ -2662,6 +2666,7 @@ dependencies = [
  "routectl-auth",
  "routectl-core",
  "routectl-providers",
+ "routectl-testkit",
  "serde",
  "serde_json",
  "serial_test",
@@ -2672,6 +2677,13 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "routectl-testkit"
+version = "0.9.0"
+dependencies = [
+ "tracing",
 ]
 
 [[package]]

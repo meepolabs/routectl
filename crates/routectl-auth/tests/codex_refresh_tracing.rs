@@ -28,103 +28,10 @@
 //! and the suite uses `current_thread` runtimes to keep that guard
 //! active. Other auth tests are oblivious to this subscriber.
 
-use std::sync::{Arc, Mutex};
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
-use tracing::field::{Field, Visit};
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // `target` is captured for diagnostic Debug output on test failure
-struct CapturedEvent {
-    level: tracing::Level,
-    target: String,
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl CapturedEvent {
-    fn field(&self, name: &str) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
-    }
-}
-
-#[derive(Default)]
-struct FieldCollector {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl Visit for FieldCollector {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else {
-            self.fields.push((field.name().into(), value.into()));
-        }
-    }
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let s = format!("{value:?}");
-        if field.name() == "message" {
-            self.message = s.trim_matches('"').to_string();
-        } else {
-            self.fields.push((field.name().into(), s));
-        }
-    }
-}
-
-#[derive(Default)]
-struct CaptureSubscriber {
-    captured: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-impl tracing::Subscriber for CaptureSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-        Some(tracing::level_filters::LevelFilter::TRACE)
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        let meta = event.metadata();
-        let mut visitor = FieldCollector::default();
-        event.record(&mut visitor);
-        let captured = CapturedEvent {
-            level: *meta.level(),
-            target: meta.target().to_string(),
-            message: visitor.message,
-            fields: visitor.fields,
-        };
-        if let Ok(mut guard) = self.captured.lock() {
-            guard.push(captured);
-        }
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-async fn with_capture<F, T>(fut: F) -> (T, Vec<CapturedEvent>)
-where
-    F: std::future::Future<Output = T>,
-{
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = CaptureSubscriber {
-        captured: captured.clone(),
-    };
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let out = fut.await;
-    let events = captured.lock().expect("capture lock poisoned").clone();
-    (out, events)
-}
+use routectl_testkit::with_capture;
 
 /// Build a synthetic JWT (`header.payload.sig`) whose payload is the
 /// given JSON value. The signature is non-empty filler -- routectl

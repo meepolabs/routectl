@@ -30,7 +30,7 @@
 //! `routectl-router/tests/router.rs` -- it pins router-circuit
 //! behavior on opaque-event chunks.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
@@ -39,8 +39,8 @@ use routectl_core::{ChatRequest, Message, MessageContent, Provider, Role};
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
 };
+use routectl_testkit::with_capture;
 use serde_json::Value;
-use tracing::field::{Field, Visit};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -169,111 +169,6 @@ fn count_named(events: &[SseEvent], name: &str) -> usize {
         .iter()
         .filter(|e| e.event.as_deref() == Some(name))
         .count()
-}
-
-// ---------------------------------------------------------------------
-// Tracing capture for the overflow test
-// ---------------------------------------------------------------------
-//
-// Minimal in-process subscriber that captures every event into a
-// `Vec<CapturedEvent>` with its level, target, message, and string-
-// shaped fields. Scoped via `tracing::subscriber::with_default` so
-// concurrent tests do not leak captured state.
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // target/message read via {captured:?} Debug output on test failure
-struct CapturedEvent {
-    level: tracing::Level,
-    target: String,
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-#[derive(Default)]
-struct FieldCollector {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl Visit for FieldCollector {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else {
-            self.fields.push((field.name().into(), value.into()));
-        }
-    }
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let s = format!("{value:?}");
-        if field.name() == "message" {
-            self.message = s.trim_matches('"').to_string();
-        } else {
-            self.fields.push((field.name().into(), s));
-        }
-    }
-    fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields.push((field.name().into(), value.to_string()));
-    }
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.push((field.name().into(), value.to_string()));
-    }
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields.push((field.name().into(), value.to_string()));
-    }
-}
-
-#[derive(Default)]
-struct CaptureSubscriber {
-    captured: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-impl tracing::Subscriber for CaptureSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        let meta = event.metadata();
-        let mut visitor = FieldCollector::default();
-        event.record(&mut visitor);
-        let captured = CapturedEvent {
-            level: *meta.level(),
-            target: meta.target().to_string(),
-            message: visitor.message,
-            fields: visitor.fields,
-        };
-        if let Ok(mut guard) = self.captured.lock() {
-            guard.push(captured);
-        }
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-/// Run `fut` with the capture subscriber installed as the thread-local
-/// default. Returns the captured events alongside the future's output.
-/// `#[tokio::test]` defaults to a current_thread runtime so the
-/// subscriber guard remains active for the whole future.
-async fn with_capture<F, T>(fut: F) -> (T, Vec<CapturedEvent>)
-where
-    F: std::future::Future<Output = T>,
-{
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = CaptureSubscriber {
-        captured: captured.clone(),
-    };
-    // NOTE: set_default installs a thread-local subscriber. Correct only
-    // because #[tokio::test] defaults to current_thread; worker threads
-    // in a multi_thread runtime would not see this subscriber. Do NOT
-    // add flavor = "multi_thread" to tests that call with_capture.
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let out = fut.await;
-    let events = captured.lock().expect("capture lock poisoned").clone();
-    (out, events)
 }
 
 // =====================================================================

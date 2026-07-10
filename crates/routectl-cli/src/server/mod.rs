@@ -1638,70 +1638,23 @@ mod tests {
 
     #[tokio::test]
     async fn forwarded_bootstrap_logs_implicit_config_exactly_once() {
-        struct LineVisitor<'a>(&'a mut String);
-        impl tracing::field::Visit for LineVisitor<'_> {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                use std::fmt::Write;
-                let _ = write!(self.0, " {}={value:?}", field.name());
-            }
-        }
-
-        #[derive(Clone, Default)]
-        struct CaptureSubscriber {
-            lines: Arc<std::sync::Mutex<Vec<String>>>,
-        }
-
-        impl tracing::Subscriber for CaptureSubscriber {
-            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-                true
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-                tracing::span::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                let mut line = String::new();
-                let mut visitor = LineVisitor(&mut line);
-                event.record(&mut visitor);
-                if let Ok(mut lines) = self.lines.lock() {
-                    lines.push(line);
-                }
-            }
-            fn enter(&self, _: &tracing::span::Id) {}
-            fn exit(&self, _: &tracing::span::Id) {}
-        }
-
         let config = forwarded_config(BTreeMap::new());
         let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
 
-        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = CaptureSubscriber {
-            lines: lines.clone(),
-        };
-        // See `authorization_token_never_appears_in_any_log_line` (proxy/split.rs)
-        // for why a second live `Dispatch` must be kept around: it forces
-        // tracing-core's callsite-interest cache off the single-dispatch
-        // fast path, so this call site's `Interest` is resolved against
-        // OUR subscriber rather than whatever (possibly none) ambient
-        // dispatch a sibling test on another thread cached first.
-        let _second_dispatch_keepalive = tracing::Dispatch::new(CaptureSubscriber::default());
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let ((), lines) = routectl_testkit::capture_lines(async {
+            build_router_from_config(config, secrets)
+                .await
+                .expect("forwarded zero-config bootstrap must build");
+        })
+        .await;
 
-        build_router_from_config(config, secrets)
-            .await
-            .expect("forwarded zero-config bootstrap must build");
-
-        drop(_guard);
-
-        let captured = lines.lock().expect("capture lock");
-        let matches = captured
+        let matches = lines
             .iter()
             .filter(|line| line.contains("synthetic Anthropic egress"))
             .count();
         assert_eq!(
             matches, 1,
-            "expected exactly one implicit-config log line, got {captured:?}"
+            "expected exactly one implicit-config log line, got {lines:?}"
         );
     }
 

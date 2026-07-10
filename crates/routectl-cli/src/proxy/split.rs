@@ -537,52 +537,12 @@ mod tests {
         );
     }
 
-    /// Minimal `tracing::Subscriber` that records every event's fields
-    /// (via `Debug`, matching what `%field`/`?field` interpolation would
-    /// also produce) into a flat `Vec<String>`, one entry per event.
-    /// Deliberately does not implement span storage beyond a constant
-    /// dummy `Id` -- this module's events never open spans.
-    struct LineVisitor<'a>(&'a mut String);
-
-    impl tracing::field::Visit for LineVisitor<'_> {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            use std::fmt::Write as _;
-            let _ = write!(self.0, " {}={value:?}", field.name());
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct CaptureSubscriber {
-        lines: Arc<std::sync::Mutex<Vec<String>>>,
-    }
-
-    impl tracing::Subscriber for CaptureSubscriber {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut line = String::new();
-            let mut visitor = LineVisitor(&mut line);
-            event.record(&mut visitor);
-            if let Ok(mut lines) = self.lines.lock() {
-                lines.push(line);
-            }
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
     /// Exercises both tracing call sites in this module that fire on a
     /// request carrying a client `Authorization` header -- the anti-drift
     /// 404 path (`tracing::error!`) and the unknown-path warn
     /// (`warn_once`'s `tracing::warn!`) -- and asserts the token never
     /// appears in any captured log line. `#[tokio::test]` defaults to a
-    /// `current_thread` runtime, which is required here: `set_default`
+    /// `current_thread` runtime, which is required here: `capture_lines`
     /// installs a thread-local subscriber.
     #[tokio::test]
     async fn authorization_token_never_appears_in_any_log_line() {
@@ -606,45 +566,25 @@ mod tests {
             Url::parse(&upstream_server.uri()).unwrap(),
         );
 
-        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = CaptureSubscriber {
-            lines: lines.clone(),
-        };
-        // `tracing-core`'s callsite-interest cache has a fast path
-        // ("has_just_one") that, while exactly one `Dispatch` is alive
-        // process-wide, resolves a callsite's first-ever registration
-        // through the CALLING THREAD's own ambient dispatch rather than
-        // the real registry. Sibling tests in this module call
-        // `handle_request` on other threads without any subscriber
-        // installed, so if one of them is the first to hit this
-        // module's `error!`/`warn!` callsites while we are the only
-        // live `Dispatch`, that thread's ambient (none) gets cached as
-        // `Interest::never()` for the callsite process-wide -- even
-        // though our capturing subscriber is live. Keeping a second
-        // `Dispatch` alive for the duration of this test forces the
-        // registry to have more than one entry, which routes every
-        // callsite registration through the real (thread-agnostic)
-        // dispatcher list instead of that single-dispatch shortcut.
-        let _second_dispatch_keepalive = tracing::Dispatch::new(CaptureSubscriber::default());
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let ((), captured) = routectl_testkit::capture_lines(async {
+            let drift_req = Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("authorization", format!("Bearer {SECRET_TOKEN}"))
+                .body(body(b"{}"))
+                .unwrap();
+            let _ = handle_request(&ctx, drift_req).await;
 
-        let drift_req = Request::builder()
-            .method("POST")
-            .uri("/v1/messages")
-            .header("authorization", format!("Bearer {SECRET_TOKEN}"))
-            .body(body(b"{}"))
-            .unwrap();
-        let _ = handle_request(&ctx, drift_req).await;
+            let unknown_req = Request::builder()
+                .method("GET")
+                .uri("/v1/unknown-thing")
+                .header("authorization", format!("Bearer {SECRET_TOKEN}"))
+                .body(body(b""))
+                .unwrap();
+            let _ = handle_request(&ctx, unknown_req).await;
+        })
+        .await;
 
-        let unknown_req = Request::builder()
-            .method("GET")
-            .uri("/v1/unknown-thing")
-            .header("authorization", format!("Bearer {SECRET_TOKEN}"))
-            .body(body(b""))
-            .unwrap();
-        let _ = handle_request(&ctx, unknown_req).await;
-
-        let captured = lines.lock().unwrap().clone();
         assert!(
             !captured.is_empty(),
             "expected at least one log line to be captured"

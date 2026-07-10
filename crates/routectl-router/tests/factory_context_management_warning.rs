@@ -13,105 +13,13 @@
 //! in `crates/routectl-cli/tests/anthropic_forward_compat_stream.rs`.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_router::{
     BuildOptions, Config, HistoryReasoning, ModelEntry, ProviderEntry, build_resolved_models,
 };
-use tracing::field::{Field, Visit};
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // target/level read via Debug on assert failure
-struct CapturedEvent {
-    level: tracing::Level,
-    target: String,
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-#[derive(Default)]
-struct FieldCollector {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl Visit for FieldCollector {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else {
-            self.fields.push((field.name().into(), value.into()));
-        }
-    }
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let s = format!("{value:?}");
-        if field.name() == "message" {
-            self.message = s.trim_matches('"').to_string();
-        } else {
-            self.fields.push((field.name().into(), s));
-        }
-    }
-    fn record_u64(&mut self, field: &Field, value: u64) {
-        self.fields.push((field.name().into(), value.to_string()));
-    }
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        self.fields.push((field.name().into(), value.to_string()));
-    }
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields.push((field.name().into(), value.to_string()));
-    }
-}
-
-#[derive(Default)]
-struct CaptureSubscriber {
-    captured: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-impl tracing::Subscriber for CaptureSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        let meta = event.metadata();
-        let mut visitor = FieldCollector::default();
-        event.record(&mut visitor);
-        let captured = CapturedEvent {
-            level: *meta.level(),
-            target: meta.target().to_string(),
-            message: visitor.message,
-            fields: visitor.fields,
-        };
-        if let Ok(mut guard) = self.captured.lock() {
-            guard.push(captured);
-        }
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-/// Drive `fut` under the capture subscriber and return its output
-/// alongside the captured events. `#[tokio::test]` defaults to a
-/// current_thread runtime so the thread-local subscriber spans the
-/// whole future.
-async fn with_capture<F, T>(fut: F) -> (T, Vec<CapturedEvent>)
-where
-    F: std::future::Future<Output = T>,
-{
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = CaptureSubscriber {
-        captured: captured.clone(),
-    };
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let out = fut.await;
-    let events = captured.lock().expect("capture lock poisoned").clone();
-    (out, events)
-}
+use routectl_testkit::{CapturedEvent, with_capture};
 
 /// Build a single-model `Config` whose anthropic-api provider has the
 /// given `context_management` flag and whose model carries the given

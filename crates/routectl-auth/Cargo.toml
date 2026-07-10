@@ -59,6 +59,7 @@ wiremock.workspace = true
 http.workspace = true
 bytes.workspace = true
 base64 = "0.22"
+routectl-testkit.workspace = true
 
 [lints]
 workspace = true

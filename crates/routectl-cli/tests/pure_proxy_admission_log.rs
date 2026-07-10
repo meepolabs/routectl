@@ -16,7 +16,7 @@
 //! binary the callsite is only ever evaluated under this capture subscriber.
 //! Mirrors the router-side `forwarded_gate_log.rs` capture pattern.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use axum::Json;
@@ -26,9 +26,9 @@ use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::server::AppState;
 use routectl_router::config::CredentialSource;
 use routectl_router::{Config, MitmConfig, Router};
+use routectl_testkit::{CapturedEvent, with_capture};
 use routectl_usage::UsageWriter;
 use serde_json::{Value, json};
-use tracing::field::{Field, Visit};
 
 /// The forwarded token. Distinctive so any leak into a log field, the log
 /// message, or the client response is unmistakable.
@@ -79,86 +79,6 @@ fn identity_missing_headers() -> HeaderMap {
     h
 }
 
-// ---- tracing capture (mirrors router-side forwarded_gate_log.rs) ----
-
-#[derive(Debug, Clone)]
-struct CapturedEvent {
-    level: tracing::Level,
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-#[derive(Default)]
-struct FieldCollector {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl Visit for FieldCollector {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else {
-            self.fields.push((field.name().into(), value.into()));
-        }
-    }
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let s = format!("{value:?}");
-        if field.name() == "message" {
-            self.message = s.trim_matches('"').to_string();
-        } else {
-            self.fields.push((field.name().into(), s));
-        }
-    }
-}
-
-#[derive(Default)]
-struct CaptureSubscriber {
-    captured: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-impl tracing::Subscriber for CaptureSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        let meta = event.metadata();
-        let mut visitor = FieldCollector::default();
-        event.record(&mut visitor);
-        if let Ok(mut guard) = self.captured.lock() {
-            guard.push(CapturedEvent {
-                level: *meta.level(),
-                message: visitor.message,
-                fields: visitor.fields,
-            });
-        }
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-/// Drive `fut` under a thread-local capture subscriber and return its output
-/// plus the captured events. `#[tokio::test]` defaults to a current_thread
-/// runtime, so the subscriber spans the whole future.
-async fn with_capture<F, T>(fut: F) -> (T, Vec<CapturedEvent>)
-where
-    F: std::future::Future<Output = T>,
-{
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = CaptureSubscriber {
-        captured: captured.clone(),
-    };
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let out = fut.await;
-    let events = captured.lock().expect("capture lock poisoned").clone();
-    (out, events)
-}
-
 #[tokio::test]
 async fn rejection_logs_safe_dimensions_and_never_the_token() {
     let (state, _dir) = forwarded_app_state();
@@ -197,18 +117,11 @@ async fn rejection_logs_safe_dimensions_and_never_the_token() {
     let rejection = rejections[0];
     assert_eq!(rejection.level, tracing::Level::WARN);
 
-    let field = |name: &str| {
-        rejection
-            .fields
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
-    };
-    assert_eq!(field("reason"), Some("identity_missing"));
-    assert_eq!(field("status"), Some("400"));
-    assert_eq!(field("credential_source"), Some("forwarded"));
+    assert_eq!(rejection.field("reason"), Some("identity_missing"));
+    assert_eq!(rejection.field("status"), Some("400"));
+    assert_eq!(rejection.field("credential_source"), Some("forwarded"));
     assert_eq!(
-        field("has_client_session_id"),
+        rejection.field("has_client_session_id"),
         Some("false"),
         "the identity_missing case carries no client session id",
     );

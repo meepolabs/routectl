@@ -1,0 +1,15 @@
+[package]
+name = "routectl-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Shared in-process tracing-capture test double for routectl's dev-dependency test suites."
+
+[dependencies]
+tracing.workspace = true
+
+[lints]
+workspace = true

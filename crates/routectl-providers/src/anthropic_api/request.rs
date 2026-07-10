@@ -864,114 +864,6 @@ mod multi_turn_tool_use_tests {
         B64_STANDARD.encode([0x12u8, 0x34, 0x56, tag])
     }
 
-    /// Minimal in-process tracing capture used by
-    /// `emits_warn_when_stripping_occurs` to assert structured fields
-    /// without taking on a `tracing-test` dev-dependency. Scoped via
-    /// `tracing::subscriber::with_default` so concurrent unit tests do
-    /// not leak captured state across threads.
-    mod test_capture {
-        // TODO(consolidation): this is the third copy of the same in-process
-        // tracing-capture pattern. The other two live at:
-        //   - crates/routectl-cli/tests/anthropic_forward_compat_stream.rs
-        //     (lines 175-269): async with_capture for #[tokio::test].
-        //   - crates/routectl-core/tests/common/mod.rs:
-        //     synchronous capture_events with a TRACE level hint.
-        // Next person to touch any of these three: extract a shared helper
-        // (likely in routectl-core/tests/common/) that supports both sync
-        // and async closures plus an opt-in TRACE level hint, then collapse
-        // the copies. Keeping the inline copy for now because each consumer
-        // wants a slightly different shape and full extraction is a larger
-        // refactor than the original strip-instead-of-reject change.
-        use std::sync::{Arc, Mutex};
-        use tracing::field::{Field, Visit};
-
-        #[derive(Debug, Clone)]
-        #[allow(dead_code)]
-        pub struct CapturedEvent {
-            pub level: tracing::Level,
-            pub target: String,
-            pub message: String,
-            pub fields: Vec<(String, String)>,
-        }
-
-        #[derive(Default)]
-        struct Collector {
-            message: String,
-            fields: Vec<(String, String)>,
-        }
-
-        impl Visit for Collector {
-            fn record_str(&mut self, field: &Field, value: &str) {
-                if field.name() == "message" {
-                    self.message = value.to_string();
-                } else {
-                    self.fields.push((field.name().into(), value.into()));
-                }
-            }
-            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-                let s = format!("{value:?}");
-                if field.name() == "message" {
-                    self.message = s.trim_matches('"').to_string();
-                } else {
-                    self.fields.push((field.name().into(), s));
-                }
-            }
-            fn record_u64(&mut self, field: &Field, value: u64) {
-                self.fields.push((field.name().into(), value.to_string()));
-            }
-            fn record_i64(&mut self, field: &Field, value: i64) {
-                self.fields.push((field.name().into(), value.to_string()));
-            }
-            fn record_bool(&mut self, field: &Field, value: bool) {
-                self.fields.push((field.name().into(), value.to_string()));
-            }
-        }
-
-        struct CaptureSubscriber {
-            captured: Arc<Mutex<Vec<CapturedEvent>>>,
-        }
-
-        impl tracing::Subscriber for CaptureSubscriber {
-            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-                true
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-                tracing::span::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                let meta = event.metadata();
-                let mut visitor = Collector::default();
-                event.record(&mut visitor);
-                let captured_event = CapturedEvent {
-                    level: *meta.level(),
-                    target: meta.target().to_string(),
-                    message: visitor.message,
-                    fields: visitor.fields,
-                };
-                if let Ok(mut guard) = self.captured.lock() {
-                    guard.push(captured_event);
-                }
-            }
-            fn enter(&self, _: &tracing::span::Id) {}
-            fn exit(&self, _: &tracing::span::Id) {}
-        }
-
-        /// Run `f` with the capture subscriber installed as the
-        /// thread-local default. Returns the captured events.
-        pub fn with_capture<F: FnOnce()>(f: F) -> Vec<CapturedEvent> {
-            let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-            let subscriber = CaptureSubscriber {
-                captured: captured.clone(),
-            };
-            let _guard = tracing::subscriber::set_default(subscriber);
-            f();
-
-            captured.lock().expect("capture lock poisoned").clone()
-        }
-    }
-
     fn user_msg(text: &str) -> Message {
         Message {
             refusal: None,
@@ -1336,7 +1228,7 @@ mod multi_turn_tool_use_tests {
             ..Default::default()
         };
 
-        let captured = test_capture::with_capture(|| {
+        let captured = routectl_testkit::capture_events(|| {
             normalize("provider-x", &req, false, &[], false, None).expect("normalize succeeds");
         });
 
@@ -2517,7 +2409,7 @@ mod multi_turn_tool_use_tests {
         // Act: normalize under a capture so we can also assert no strip
         // WARN fires.
         let mut body = None;
-        let captured = test_capture::with_capture(|| {
+        let captured = routectl_testkit::capture_events(|| {
             body = Some(
                 normalize("deepseek", &req, false, &[], false, None).expect("normalize succeeds"),
             );
@@ -2905,7 +2797,7 @@ mod multi_turn_tool_use_tests {
 
         // Act: normalize under capture to observe the emitted WARN.
         let mut body_out: Option<Value> = None;
-        let captured = test_capture::with_capture(|| {
+        let captured = routectl_testkit::capture_events(|| {
             body_out = Some(
                 normalize("prov-test", &req, false, &[], false, None)
                     .expect("normalize must succeed"),

@@ -16,7 +16,7 @@
 //! in `factory_context_management_warning.rs`.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -24,7 +24,7 @@ use routectl_core::error::Result;
 use routectl_core::schema::ForwardedBearer;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider, TokenCount};
 use routectl_router::{AliasValue, Config, ProviderEntry, ResolvedModel, Router};
-use tracing::field::{Field, Visit};
+use routectl_testkit::{CapturedEvent, with_capture};
 
 /// The forwarded token. Distinctive so any leak into a log field, the
 /// log message, or the client error is unmistakable.
@@ -100,86 +100,6 @@ fn forwarded_req() -> ChatRequest {
     req
 }
 
-// ---- tracing capture ----
-
-#[derive(Debug, Clone)]
-struct CapturedEvent {
-    level: tracing::Level,
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-#[derive(Default)]
-struct FieldCollector {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl Visit for FieldCollector {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else {
-            self.fields.push((field.name().into(), value.into()));
-        }
-    }
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let s = format!("{value:?}");
-        if field.name() == "message" {
-            self.message = s.trim_matches('"').to_string();
-        } else {
-            self.fields.push((field.name().into(), s));
-        }
-    }
-}
-
-#[derive(Default)]
-struct CaptureSubscriber {
-    captured: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-impl tracing::Subscriber for CaptureSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        let meta = event.metadata();
-        let mut visitor = FieldCollector::default();
-        event.record(&mut visitor);
-        if let Ok(mut guard) = self.captured.lock() {
-            guard.push(CapturedEvent {
-                level: *meta.level(),
-                message: visitor.message,
-                fields: visitor.fields,
-            });
-        }
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-/// Drive `fut` under a thread-local capture subscriber and return its
-/// output plus the captured events. `#[tokio::test]` defaults to a
-/// current_thread runtime, so the subscriber spans the whole future.
-async fn with_capture<F, T>(fut: F) -> (T, Vec<CapturedEvent>)
-where
-    F: std::future::Future<Output = T>,
-{
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = CaptureSubscriber {
-        captured: captured.clone(),
-    };
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let out = fut.await;
-    let events = captured.lock().expect("capture lock poisoned").clone();
-    (out, events)
-}
-
 #[tokio::test]
 async fn refuse_logs_safe_dimensions_and_never_the_token() {
     let router = router_with_non_anthropic_target();
@@ -209,17 +129,10 @@ async fn refuse_logs_safe_dimensions_and_never_the_token() {
     let refuse = refusals[0];
     assert_eq!(refuse.level, tracing::Level::WARN);
 
-    let field = |name: &str| {
-        refuse
-            .fields
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
-    };
-    assert_eq!(field("reason"), Some("non_anthropic_target"));
-    assert_eq!(field("credential_source"), Some("forwarded"));
+    assert_eq!(refuse.field("reason"), Some("non_anthropic_target"));
+    assert_eq!(refuse.field("credential_source"), Some("forwarded"));
     assert_eq!(
-        field("provider_kind"),
+        refuse.field("provider_kind"),
         Some("openai-compat"),
         "provider_kind is a safe dimension identifying the refused kind",
     );

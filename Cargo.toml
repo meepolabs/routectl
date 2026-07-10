@@ -7,6 +7,7 @@ members = [
     "crates/routectl-auth",
     "crates/routectl-cli",
     "crates/routectl-usage",
+    "crates/routectl-testkit",
 ]
 
 [workspace.package]
@@ -29,6 +30,9 @@ routectl-core = { path = "crates/routectl-core" }
 routectl-providers = { path = "crates/routectl-providers", default-features = false }
 routectl-router = { path = "crates/routectl-router" }
 routectl-auth = { path = "crates/routectl-auth" }
+# Dev-dependency only (shared tracing-capture test double); never a
+# production dependency of any crate.
+routectl-testkit = { path = "crates/routectl-testkit" }
 
 # Async + runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }

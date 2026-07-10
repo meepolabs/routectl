@@ -12,12 +12,10 @@
 //! toggle to `true` here without disturbing any other test. Mirrors
 //! tests/header_trace_outgoing_redacts.rs (dir-2).
 
-mod common;
-
-use common::capture_events;
 use routectl_core::{
     HDR_MSG_UPSTREAM, header_trace_enabled, headers_to_json, trace_upstream_response_headers,
 };
+use routectl_testkit::capture_events;
 
 #[test]
 fn upstream_emit_redacts_set_cookie_and_security_token() {

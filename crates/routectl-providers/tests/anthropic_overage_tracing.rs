@@ -26,91 +26,17 @@
 
 #![cfg(feature = "anthropic-api")]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use routectl_core::Provider;
 use routectl_core::{ChatRequest, Message, MessageContent, Role};
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
 };
+use routectl_testkit::{CapturedEvent, with_capture};
 use serde_json::json;
-use tracing::field::{Field, Visit};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-#[derive(Debug, Clone)]
-struct CapturedEvent {
-    level: tracing::Level,
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl CapturedEvent {
-    fn field(&self, name: &str) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
-    }
-}
-
-#[derive(Default)]
-struct FieldCollector {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl Visit for FieldCollector {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else {
-            self.fields.push((field.name().into(), value.into()));
-        }
-    }
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let s = format!("{value:?}");
-        if field.name() == "message" {
-            self.message = s.trim_matches('"').to_string();
-        } else {
-            self.fields.push((field.name().into(), s));
-        }
-    }
-}
-
-#[derive(Default)]
-struct CaptureSubscriber {
-    captured: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-impl tracing::Subscriber for CaptureSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-        Some(tracing::level_filters::LevelFilter::TRACE)
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        let meta = event.metadata();
-        let mut visitor = FieldCollector::default();
-        event.record(&mut visitor);
-        let captured = CapturedEvent {
-            level: *meta.level(),
-            message: visitor.message,
-            fields: visitor.fields,
-        };
-        if let Ok(mut guard) = self.captured.lock() {
-            guard.push(captured);
-        }
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
 
 fn user_msg(text: &str) -> Message {
     Message {
@@ -201,22 +127,21 @@ fn flip_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn flip_into_overage_warns_once_then_steady_state_is_silent() {
-    // Arrange: capture subscriber active for this thread.
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(CaptureSubscriber {
-        captured: captured.clone(),
-    });
+    // Arrange
     let server = MockServer::start().await;
     mount_with_claim(&server, "overage").await;
     let provider = make_provider(&server.uri());
 
-    // Act: two requests, both reporting overage.
-    provider.complete(base_req()).await.unwrap();
-    provider.complete(base_req()).await.unwrap();
+    // Act: two requests, both reporting overage, under the capture
+    // subscriber.
+    let ((), events) = with_capture(async {
+        provider.complete(base_req()).await.unwrap();
+        provider.complete(base_req()).await.unwrap();
+    })
+    .await;
 
     // Assert: exactly ONE flip log (the entry into overage); the second
     // request is steady state and emits nothing.
-    let events = captured.lock().unwrap().clone();
     let flips = flip_events(&events);
     assert_eq!(
         flips.len(),
@@ -244,18 +169,13 @@ async fn flip_into_overage_warns_once_then_steady_state_is_silent() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn recovery_out_of_overage_emits_info_once() {
-    // Arrange
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(CaptureSubscriber {
-        captured: captured.clone(),
-    });
-
-    // One server, one provider instance. The overage mock is scoped to a
-    // single match (`up_to_n_times(1)`); the five_hour mock serves every
-    // subsequent request. So request 1 observes overage (one WARN) and
-    // request 2 observes five_hour and flips back OUT (one INFO). The flip
-    // state lives on the provider instance, so reusing the same provider
-    // across both requests is what exercises the recovery.
+    // Arrange: one server, one provider instance. The overage mock is
+    // scoped to a single match (`up_to_n_times(1)`); the five_hour mock
+    // serves every subsequent request. So request 1 observes overage
+    // (one WARN) and request 2 observes five_hour and flips back OUT
+    // (one INFO). The flip state lives on the provider instance, so
+    // reusing the same provider across both requests is what exercises
+    // the recovery.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -266,11 +186,13 @@ async fn recovery_out_of_overage_emits_info_once() {
     mount_with_claim(&server, "five_hour").await;
     let provider = make_provider(&server.uri());
 
-    provider.complete(base_req()).await.unwrap();
-    provider.complete(base_req()).await.unwrap();
+    let ((), events) = with_capture(async {
+        provider.complete(base_req()).await.unwrap();
+        provider.complete(base_req()).await.unwrap();
+    })
+    .await;
 
     // Assert: one WARN (entry) then one INFO (recovery).
-    let events = captured.lock().unwrap().clone();
     let flips = flip_events(&events);
     assert_eq!(
         flips.len(),
@@ -320,11 +242,7 @@ fn stream_claim_response(claim: &str) -> ResponseTemplate {
 async fn stream_path_flip_into_overage_warns_once() {
     use futures::StreamExt;
 
-    // Arrange: capture subscriber active for this thread.
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(CaptureSubscriber {
-        captured: captured.clone(),
-    });
+    // Arrange
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -333,17 +251,20 @@ async fn stream_path_flip_into_overage_warns_once() {
         .await;
     let provider = make_provider(&server.uri());
 
-    // Act: drive one stream to completion so the provider observes the
-    // unified-quota headers and fires the overage-flip WARN.
+    // Act: drive one stream to completion under the capture subscriber
+    // so the provider observes the unified-quota headers and fires the
+    // overage-flip WARN.
     let mut req = base_req();
     req.stream = Some(true);
-    let mut stream = provider.stream(req).await.unwrap();
-    while let Some(result) = stream.next().await {
-        result.unwrap();
-    }
+    let ((), events) = with_capture(async {
+        let mut stream = provider.stream(req).await.unwrap();
+        while let Some(result) = stream.next().await {
+            result.unwrap();
+        }
+    })
+    .await;
 
     // Assert: exactly one overage-flip WARN.
-    let events = captured.lock().unwrap().clone();
     let flips = flip_events(&events);
     assert_eq!(
         flips.len(),
@@ -360,10 +281,6 @@ async fn stream_path_flip_into_overage_warns_once() {
 /// upstream status is still surfaced to the router and returns the
 /// captured events for log-level assertions.
 async fn count_tokens_error_events(status: u16, message: &str) -> Vec<CapturedEvent> {
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let _guard = tracing::subscriber::set_default(CaptureSubscriber {
-        captured: captured.clone(),
-    });
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages/count_tokens"))
@@ -375,12 +292,13 @@ async fn count_tokens_error_events(status: u16, message: &str) -> Vec<CapturedEv
         .await;
     let provider = make_provider(&server.uri());
 
-    let err = provider.count_tokens(base_req()).await.unwrap_err();
+    let (err, events) = with_capture(provider.count_tokens(base_req())).await;
+    let err = err.unwrap_err();
     assert!(
         matches!(&err, routectl_core::Error::Upstream { status: got, .. } if *got == status),
         "count_tokens must still surface the upstream {status} to the router; got {err:?}",
     );
-    captured.lock().unwrap().clone()
+    events
 }
 
 #[tokio::test(flavor = "current_thread")]

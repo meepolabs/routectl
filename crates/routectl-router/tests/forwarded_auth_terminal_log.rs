@@ -18,7 +18,7 @@
 //! evaluated under this capture subscriber. Mirrors `forwarded_gate_log.rs`.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -26,7 +26,7 @@ use routectl_core::error::{Error, Result};
 use routectl_core::schema::ForwardedBearer;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider};
 use routectl_router::{AliasValue, Config, ProviderEntry, ResolvedModel, Router};
-use tracing::field::{Field, Visit};
+use routectl_testkit::{CapturedEvent, with_capture};
 
 /// The forwarded token. Distinctive so any leak into a log field, the
 /// log message, or the client error is unmistakable.
@@ -119,83 +119,6 @@ fn forwarded_req(with_session: bool) -> ChatRequest {
     req
 }
 
-// ---- tracing capture (mirrors forwarded_gate_log.rs) ----
-
-#[derive(Debug, Clone)]
-struct CapturedEvent {
-    level: tracing::Level,
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-#[derive(Default)]
-struct FieldCollector {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl Visit for FieldCollector {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else {
-            self.fields.push((field.name().into(), value.into()));
-        }
-    }
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let s = format!("{value:?}");
-        if field.name() == "message" {
-            self.message = s.trim_matches('"').to_string();
-        } else {
-            self.fields.push((field.name().into(), s));
-        }
-    }
-}
-
-#[derive(Default)]
-struct CaptureSubscriber {
-    captured: Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-impl tracing::Subscriber for CaptureSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        let meta = event.metadata();
-        let mut visitor = FieldCollector::default();
-        event.record(&mut visitor);
-        if let Ok(mut guard) = self.captured.lock() {
-            guard.push(CapturedEvent {
-                level: *meta.level(),
-                message: visitor.message,
-                fields: visitor.fields,
-            });
-        }
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-async fn with_capture<F, T>(fut: F) -> (T, Vec<CapturedEvent>)
-where
-    F: std::future::Future<Output = T>,
-{
-    let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = CaptureSubscriber {
-        captured: captured.clone(),
-    };
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let out = fut.await;
-    let events = captured.lock().expect("capture lock poisoned").clone();
-    (out, events)
-}
-
 /// The single f2.09 surfaced-verbatim WARN in `events`, if present.
 fn terminal_warn(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
     events
@@ -206,13 +129,6 @@ fn terminal_warn(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
                 .any(|(k, v)| k == "credential_source" && v == "forwarded")
         })
         .collect()
-}
-
-fn field<'a>(e: &'a CapturedEvent, name: &str) -> Option<&'a str> {
-    e.fields
-        .iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.as_str())
 }
 
 fn assert_no_secret_leak(events: &[CapturedEvent]) {
@@ -260,13 +176,13 @@ async fn forwarded_terminal_warn_carries_safe_dimensions_with_session() {
     let warn = warns[0];
     assert_eq!(warn.level, tracing::Level::WARN);
     assert_eq!(
-        field(warn, "status"),
+        warn.field("status"),
         Some("401"),
         "verbatim upstream status"
     );
-    assert_eq!(field(warn, "credential_source"), Some("forwarded"));
+    assert_eq!(warn.field("credential_source"), Some("forwarded"));
     assert_eq!(
-        field(warn, "has_client_session_id"),
+        warn.field("has_client_session_id"),
         Some("true"),
         "session id was present on the request",
     );
@@ -285,9 +201,9 @@ async fn forwarded_terminal_warn_reports_false_when_no_session_id() {
     let warns = terminal_warn(&events);
     assert_eq!(warns.len(), 1, "expected exactly one WARN; got: {events:?}");
     let warn = warns[0];
-    assert_eq!(field(warn, "credential_source"), Some("forwarded"));
+    assert_eq!(warn.field("credential_source"), Some("forwarded"));
     assert_eq!(
-        field(warn, "has_client_session_id"),
+        warn.field("has_client_session_id"),
         Some("false"),
         "no session id was present on the request",
     );

@@ -8,13 +8,11 @@
 //! the only thing gating emission is the header-trace toggle), every
 //! emitter must no-op when `ROUTECTL_TRACE_HEADERS` is unset.
 
-mod common;
-
-use common::capture_events;
 use routectl_core::{
     header_trace_enabled, headers_to_json, trace_egress_headers, trace_ingress_headers,
     trace_outgoing_headers, trace_upstream_response_headers,
 };
+use routectl_testkit::capture_events;
 
 #[test]
 fn header_emitters_emit_nothing_when_tracing_disabled() {

@@ -11,12 +11,10 @@
 //! the env var at the start of the single test below freezes the
 //! toggle to `true` here without disturbing any other test.
 
-mod common;
-
-use common::capture_events;
 use routectl_core::{
     HDR_MSG_OUTGOING, header_trace_enabled, headers_to_json, trace_outgoing_headers,
 };
+use routectl_testkit::capture_events;
 
 #[test]
 fn outgoing_emit_redacts_authorization_and_x_api_key() {
