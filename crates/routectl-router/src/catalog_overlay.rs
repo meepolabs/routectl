@@ -1,0 +1,632 @@
+//! Layer-2 catalog overlay store: null-disable / value overrides on top of
+//! the baked catalog table, persisted at `catalog_overlay.json`.
+//!
+//! EXTRACTION SEAM: this module imports only `std` plus generic infra
+//! crates already in the workspace (`serde`, `serde_json`, `thiserror`,
+//! `tempfile`) -- zero `routectl_core` types and zero router-specific type
+//! imports (no `Config`, no `CatalogRow`, ...), so it can later `mv`
+//! to a standalone crate with a Cargo.toml edit and nothing else. The one
+//! router-crate touch point is [`default_path`], which calls the sibling
+//! `config::routectl_config_dir()` function (a plain `PathBuf` helper, not
+//! a type) to resolve the on-disk location; every other function here
+//! takes its `path: &Path` as an argument.
+//!
+//! Semantics of a map value `Option<OverlayCell>` (see [`CatalogOverlay`]):
+//! - `Some(Some(cell))` (JSON object) -> overlay value.
+//! - `Some(None)` (JSON `null`) -> DISABLED (key present, value null).
+//! - absent key -> fall through to the baked row.
+//!
+//! The overlay is behavioral (null-disable), so a corrupt or
+//! too-new-to-understand file is never silently ignored: [`load`] fails
+//! closed rather than risk warn-and-ignore silently re-enabling a row an
+//! operator explicitly disabled. Only a genuinely missing file (first run)
+//! resolves to an empty overlay.
+//!
+//! Writer discipline extends the OAuth credentials-file standard
+//! (`routectl-auth/src/oauth/file_io.rs`) with a post-rename
+//! parent-directory `fsync` (not yet backported to routectl-auth): temp
+//! file in the same directory, `0o600` set before the write, `fsync`,
+//! atomic `rename`, `0o600` re-set after, then `fsync` the PARENT
+//! DIRECTORY -- `rename` is atomic for concurrent readers, but is not
+//! durable across a crash/power loss until the directory entry pointing
+//! at the new inode is flushed too (mirrors
+//! `crate::config_migrate::write_config_atomic`). [`save`] additionally
+//! compares the on-disk `revision` against an
+//! `expected_revision` before writing: a caller working from a stale
+//! snapshot gets an explicit conflict instead of a silent lost update (the
+//! bug being replaced: `routectl-cli/src/commands/pricing.rs`'s sidecar
+//! writer does a bare load-modify-write with no revision check and no
+//! fsync/0600). NOTE: the check-then-write sequence holds no lock, so two
+//! TRULY CONCURRENT writers can still race the window between load and
+//! rename; callers adding interactive write verbs must serialize writers
+//! (advisory lock) first.
+
+use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// Overlay schema version this build understands. [`load`] fails closed
+/// (an explicit [`OverlayError::VersionTooNew`]) on a file whose
+/// `schema_version` exceeds this -- a newer routectl wrote fields/semantics
+/// this build cannot safely interpret.
+pub const CATALOG_OVERLAY_SCHEMA_VERSION: u32 = 1;
+
+/// On-disk overlay: a revision-checked map of per-selector overrides
+/// layered on top of the baked catalog table at merge time.
+///
+/// `#[serde(default)]`, NOT `deny_unknown_fields`: a field this build
+/// doesn't know about (written by a newer routectl, f2+) is ignored rather
+/// than rejected, and a field this build expects but an older/hand-edited
+/// file omits falls back to [`Default::default`] rather than erroring.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CatalogOverlay {
+    pub schema_version: u32,
+    pub revision: u64,
+    /// Selector (row key) -> overlay value. See the module doc for the
+    /// three-state `Option<Option<OverlayCell>>` semantics via
+    /// `cells.get(key)`.
+    pub cells: BTreeMap<String, Option<OverlayCell>>,
+}
+
+impl Default for CatalogOverlay {
+    fn default() -> Self {
+        Self {
+            schema_version: CATALOG_OVERLAY_SCHEMA_VERSION,
+            revision: 0,
+            cells: BTreeMap::new(),
+        }
+    }
+}
+
+/// Provenance of an overlay cell: an imported legacy stamp/override
+/// (migration) versus an operator-authored one (f2 verbs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OverlaySource {
+    Import,
+    User,
+}
+
+/// One overlay cell: sparse per-field overrides on top of a baked
+/// `CatalogRow`, plus provenance. Every value field is `Option`; an
+/// unset field inherits the baked value at merge time.
+///
+/// `source` and `verified_at` are NOT optional: a real overlay cell always
+/// carries both (the writer in this module always sets them), so a JSON
+/// object missing either is treated as malformed input -- the container's
+/// `#[serde(default)]` does not extend to this struct, deliberately, so a
+/// truncated/hand-edited cell surfaces as a load error (fail-closed) rather
+/// than silently filling in a fabricated provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverlayCell {
+    pub source: OverlaySource,
+    pub verified_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wm: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rm: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_prefix_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<BTreeMap<String, bool>>,
+}
+
+/// Errors from loading or saving the overlay file. Every variant carries
+/// enough context (path, and either a parse reason or the conflicting
+/// revisions) for an operator to act without re-deriving it from a bare
+/// `std::io::Error` or `serde_json::Error`.
+#[derive(Debug, thiserror::Error)]
+pub enum OverlayError {
+    /// The file exists but is not valid JSON, or does not match
+    /// [`CatalogOverlay`]'s shape.
+    #[error("catalog overlay {path}: corrupt or invalid: {reason}")]
+    Corrupt { path: String, reason: String },
+
+    /// `schema_version` in the file is greater than
+    /// [`CATALOG_OVERLAY_SCHEMA_VERSION`]: a newer routectl wrote this
+    /// file and this build cannot safely interpret it.
+    #[error(
+        "catalog overlay {path}: schema_version {found} is newer than the {current} this build supports"
+    )]
+    VersionTooNew {
+        path: String,
+        found: u32,
+        current: u32,
+    },
+
+    /// A filesystem-level failure (permission denied, disk full, a
+    /// missing parent that could not be created, ...) distinct from a
+    /// content problem.
+    #[error("catalog overlay {path}: {reason}")]
+    Io { path: String, reason: String },
+
+    /// [`save`]'s `expected_revision` did not match the on-disk revision.
+    /// No write occurred; the caller re-reads and retries explicitly (no
+    /// auto-retry here -- see the module doc).
+    #[error("catalog overlay revision conflict: expected {expected}, on-disk revision is {actual}")]
+    RevisionConflict { expected: u64, actual: u64 },
+}
+
+/// Resolve the overlay file's default path: `catalog_overlay.json` inside
+/// `routectl_config_dir()`. The one call in this module that reaches into
+/// the rest of the router crate -- see the module doc's extraction-seam
+/// note. `pub` (not `pub(crate)`) so the shared config loader (routectl-cli)
+/// can resolve the path directly; `catalog::overlay_default_path`'s
+/// duplicate re-implementation of this same join is gone -- this is the one
+/// path source of truth, re-exported crate-wide as `overlay_default_path`.
+pub fn default_path() -> PathBuf {
+    crate::config::routectl_config_dir().join("catalog_overlay.json")
+}
+
+/// Load the overlay at `path`.
+///
+/// FAIL-CLOSED LOAD MATRIX:
+/// - missing file -> `Ok` with an empty, current-schema overlay (`revision`
+///   0). NOT an error -- first run / no overlay yet.
+/// - corrupt / invalid JSON -> `Err(OverlayError::Corrupt)`.
+/// - `schema_version` greater than [`CATALOG_OVERLAY_SCHEMA_VERSION`] ->
+///   `Err(OverlayError::VersionTooNew)`.
+/// - any other I/O failure (permission denied, ...) -> `Err(OverlayError::Io)`.
+///
+/// Callers decide posture on error: cold startup should fail; a hot config
+/// reload should reject the reload and keep the prior router live (wired
+/// by the shared config loader in routectl-cli).
+pub fn load(path: &Path) -> Result<CatalogOverlay, OverlayError> {
+    let display = path.display().to_string();
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CatalogOverlay::default());
+        }
+        Err(e) => {
+            return Err(OverlayError::Io {
+                path: display,
+                reason: e.to_string(),
+            });
+        }
+    };
+
+    let overlay: CatalogOverlay =
+        serde_json::from_slice(&bytes).map_err(|e| OverlayError::Corrupt {
+            path: display.clone(),
+            reason: e.to_string(),
+        })?;
+
+    if overlay.schema_version > CATALOG_OVERLAY_SCHEMA_VERSION {
+        return Err(OverlayError::VersionTooNew {
+            path: display,
+            found: overlay.schema_version,
+            current: CATALOG_OVERLAY_SCHEMA_VERSION,
+        });
+    }
+
+    Ok(overlay)
+}
+
+/// Revision-checked atomic save: read the current on-disk overlay, compare
+/// its `revision` against `expected_revision`, and -- only on a match --
+/// atomically write `cells` at `revision + 1`.
+///
+/// A mismatch returns `Err(OverlayError::RevisionConflict)` and leaves the
+/// on-disk file byte-unchanged; there is no auto-retry (the caller
+/// re-reads and re-decides). A load failure (corrupt file, too-new schema,
+/// I/O error) propagates from [`load`] unchanged -- a caller cannot write
+/// blind over a file it could not validate.
+///
+/// f1: only the migrator calls this. f2 adds import/user verbs on the same
+/// function.
+pub fn save(
+    path: &Path,
+    expected_revision: u64,
+    cells: BTreeMap<String, Option<OverlayCell>>,
+) -> Result<CatalogOverlay, OverlayError> {
+    let current = load(path)?;
+    if current.revision != expected_revision {
+        return Err(OverlayError::RevisionConflict {
+            expected: expected_revision,
+            actual: current.revision,
+        });
+    }
+
+    let next = CatalogOverlay {
+        schema_version: CATALOG_OVERLAY_SCHEMA_VERSION,
+        revision: expected_revision + 1,
+        cells,
+    };
+    write_atomic(path, &next)?;
+    Ok(next)
+}
+
+/// Top-level write driver: ensure the parent directory, write to a temp
+/// file in the same directory, then atomically rename onto `path`. Mirrors
+/// `oauth::file_io::save_blocking`'s three-step shape.
+fn write_atomic(path: &Path, overlay: &CatalogOverlay) -> Result<(), OverlayError> {
+    ensure_dir(path)?;
+    let tmp = write_to_temp(path, overlay)?;
+    atomic_rename(tmp, path)
+}
+
+/// Ensure the parent directory exists with `0o700` perms on Unix.
+/// Idempotent and self-healing if the operator loosened the dir's mode.
+fn ensure_dir(path: &Path) -> Result<(), OverlayError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent).map_err(|e| OverlayError::Io {
+        path: parent.display().to_string(),
+        reason: format!("create_dir_all: {e}"),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Best-effort: the file itself still gets 0o600 below, so a
+        // stripped dir bit is not a security failure on its own.
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// Serialize `overlay`, write it to a temp file in `path`'s parent
+/// directory, `chmod 0o600` BEFORE writing (so a partial write is never
+/// wider than the final permissions), and `fsync` before returning the
+/// still-open temp file for the caller to rename.
+fn write_to_temp(
+    path: &Path,
+    overlay: &CatalogOverlay,
+) -> Result<tempfile::NamedTempFile, OverlayError> {
+    let display = path.display().to_string();
+    let parent = path.parent().ok_or_else(|| OverlayError::Io {
+        path: display.clone(),
+        reason: "path has no parent directory".to_string(),
+    })?;
+
+    let json = serde_json::to_vec_pretty(overlay).map_err(|e| OverlayError::Io {
+        path: display.clone(),
+        reason: format!("serialize: {e}"),
+    })?;
+
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".catalog_overlay.tmp.")
+        .suffix(".json")
+        .tempfile_in(parent)
+        .map_err(|e| OverlayError::Io {
+            path: parent.display().to_string(),
+            reason: format!("tempfile: {e}"),
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| OverlayError::Io {
+                path: display.clone(),
+                reason: format!("chmod tempfile: {e}"),
+            })?;
+    }
+
+    tmp.write_all(&json).map_err(|e| OverlayError::Io {
+        path: display.clone(),
+        reason: format!("write tempfile: {e}"),
+    })?;
+    tmp.as_file().sync_all().map_err(|e| OverlayError::Io {
+        path: display.clone(),
+        reason: format!("fsync tempfile: {e}"),
+    })?;
+
+    Ok(tmp)
+}
+
+/// Persist the temp file onto `path` via `rename` (atomic on POSIX within
+/// one filesystem), then re-set `0o600` as defense-in-depth in case a
+/// paranoid umask stripped bits during the rename.
+///
+/// Also `fsync`s the PARENT DIRECTORY after the rename: `rename` is atomic
+/// for concurrent readers, but the rename itself is not durable across a
+/// crash/power loss until the directory entry pointing at the new inode is
+/// flushed too -- without this, a crash right after this call returns can
+/// roll the directory entry back to the pre-rename file even though the
+/// temp file's own contents were already fsynced. Mirrors
+/// `crate::config_migrate::write_config_atomic`'s same fix.
+fn atomic_rename(tmp: tempfile::NamedTempFile, path: &Path) -> Result<(), OverlayError> {
+    let display = path.display().to_string();
+    let parent = path.parent().map(Path::to_path_buf);
+    tmp.persist(path).map_err(|e| OverlayError::Io {
+        path: display.clone(),
+        reason: format!("rename: {e}"),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Some(parent) = parent
+        && let Ok(dir) = std::fs::File::open(&parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn import_cell() -> OverlayCell {
+        OverlayCell {
+            source: OverlaySource::Import,
+            verified_at: "2026-01-01".to_string(),
+            wm: Some(1.25),
+            rm: Some(0.10),
+            ttl_seconds: Some(300),
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            capabilities: None,
+        }
+    }
+
+    fn user_cell() -> OverlayCell {
+        OverlayCell {
+            source: OverlaySource::User,
+            verified_at: "2026-07-01".to_string(),
+            wm: None,
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: Some(1024),
+            max_context_tokens: Some(200_000),
+            capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Round-trip: import cell + user cell + disabled cell + absent key.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn round_trip_preserves_import_user_and_disabled_cells() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert("openai-compat:grok-*".to_string(), Some(import_cell()));
+        cells.insert(
+            "anthropic-api:claude-opus-4-8*".to_string(),
+            Some(user_cell()),
+        );
+        cells.insert("openai-compat:disabled-model".to_string(), None);
+
+        // Act
+        let saved = save(&path, 0, cells.clone()).expect("save");
+        let loaded = load(&path).expect("load");
+
+        // Assert: exact round-trip equality.
+        assert_eq!(loaded, saved);
+        assert_eq!(loaded.cells, cells);
+        assert_eq!(loaded.revision, 1);
+
+        // The disabled cell round-trips to `Some(None)` (present, null);
+        // an absent key (never inserted) is simply not in the map.
+        assert_eq!(
+            loaded.cells.get("openai-compat:disabled-model"),
+            Some(&None)
+        );
+        assert!(!loaded.cells.contains_key("never-inserted"));
+
+        // On-disk JSON literally shows `null` for the disabled cell.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"openai-compat:disabled-model\": null"),
+            "disabled cell must serialize as JSON null: {raw}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Missing file -> empty overlay, not an error.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_missing_file_returns_empty_overlay() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+
+        // Act
+        let overlay = load(&path).expect("missing file must not be an error");
+
+        // Assert
+        assert_eq!(overlay.schema_version, CATALOG_OVERLAY_SCHEMA_VERSION);
+        assert_eq!(overlay.revision, 0);
+        assert!(overlay.cells.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fail-closed: corrupt JSON and schema_version too new.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_corrupt_json_returns_err_with_path_and_reason() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, b"not json {{{").unwrap();
+
+        // Act
+        let err = load(&path).expect_err("corrupt JSON must fail closed");
+
+        // Assert
+        match err {
+            OverlayError::Corrupt { path: p, reason } => {
+                assert!(p.contains("catalog_overlay.json"), "path: {p}");
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_schema_version_too_new_returns_err() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":{},"revision":0,"cells":{{}}}}"#,
+                CATALOG_OVERLAY_SCHEMA_VERSION + 1
+            ),
+        )
+        .unwrap();
+
+        // Act
+        let err = load(&path).expect_err("newer schema_version must fail closed");
+
+        // Assert
+        match err {
+            OverlayError::VersionTooNew { found, current, .. } => {
+                assert_eq!(found, CATALOG_OVERLAY_SCHEMA_VERSION + 1);
+                assert_eq!(current, CATALOG_OVERLAY_SCHEMA_VERSION);
+            }
+            other => panic!("expected VersionTooNew, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Atomic save: 0600 mode, no leftover tempfiles, parent dir creation.
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn save_sets_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        // Act
+        save(&path, 0, BTreeMap::new()).expect("save");
+
+        // Assert
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "catalog_overlay.json must be 0600, got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[test]
+    fn save_overwrites_atomically_and_leaves_no_tempfiles() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        save(&path, 0, BTreeMap::new()).expect("first save");
+
+        let mut cells = BTreeMap::new();
+        cells.insert("a:b".to_string(), Some(import_cell()));
+
+        // Act
+        save(&path, 1, cells.clone()).expect("second save");
+
+        // Assert: latest content wins.
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.cells, cells);
+        assert_eq!(loaded.revision, 2);
+
+        // No `.tmp.` files left behind.
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "atomic write left tempfiles: {leftover:?}"
+        );
+    }
+
+    #[test]
+    fn save_creates_parent_directory() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("catalog_overlay.json");
+
+        // Act
+        save(&nested, 0, BTreeMap::new()).expect("save");
+
+        // Assert
+        assert!(nested.exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // Revision-checked write: stale expected_revision is rejected, file
+    // byte-unchanged; matching revision writes revision + 1.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn save_rejects_stale_expected_revision_and_leaves_file_unchanged() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert("a:b".to_string(), Some(import_cell()));
+        save(&path, 0, cells).expect("first save at revision 0 -> 1");
+        let before = std::fs::read(&path).unwrap();
+
+        // Act: stale expected_revision (0, but on-disk is now 1).
+        let mut conflicting = BTreeMap::new();
+        conflicting.insert("c:d".to_string(), Some(user_cell()));
+        let err = save(&path, 0, conflicting).expect_err("stale revision must conflict");
+
+        // Assert
+        match err {
+            OverlayError::RevisionConflict { expected, actual } => {
+                assert_eq!(expected, 0);
+                assert_eq!(actual, 1);
+            }
+            other => panic!("expected RevisionConflict, got {other:?}"),
+        }
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "file must be byte-unchanged on conflict");
+    }
+
+    #[test]
+    fn save_with_matching_revision_writes_revision_plus_one() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let first = save(&path, 0, BTreeMap::new()).expect("first save");
+        assert_eq!(first.revision, 1);
+
+        // Act
+        let second = save(&path, 1, BTreeMap::new()).expect("second save at matching revision");
+
+        // Assert
+        assert_eq!(second.revision, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // default_path resolves under routectl_config_dir() with the expected
+    // basename.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_path_uses_catalog_overlay_json_basename() {
+        // Act
+        let path = default_path();
+
+        // Assert
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("catalog_overlay.json")
+        );
+    }
+}

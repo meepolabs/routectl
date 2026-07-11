@@ -25,6 +25,8 @@ use routectl_providers::openai_responses::{
 #[cfg(feature = "gemini")]
 use routectl_providers::gemini::{GeminiAuthMode, GeminiConfig, GeminiProvider};
 
+use crate::catalog::{lookup_baked_with_overrides, lookup_overlay_cell, merge};
+use crate::catalog_overlay::CatalogOverlay;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{Config, ProviderEntry};
@@ -1137,6 +1139,52 @@ pub async fn build_resolved_models(
     }
 
     Ok((models, failed))
+}
+
+/// Stamp each resolved model's precomputed [`crate::catalog::EffectiveRow`]
+/// (the two-layer catalog merge for that model's `(provider_kind, upstream)`
+/// selector) onto the table [`build_resolved_models`] returned.
+///
+/// Deliberately a POST-pass over the already-built map rather than folded
+/// into `build_resolved_models`'s own loop: threading `overlay` through that
+/// function's signature would force every existing call site -- including
+/// the many tests across this crate and `routectl-cli` that build a
+/// resolved table without caring about the overlay -- to pass one.
+/// Chaining this on after the fact keeps `build_resolved_models` itself
+/// overlay-agnostic; only the callers that need the merge (the server's
+/// shared config loader) call this too.
+///
+/// The two-layer merge runs HERE, once, at chain-build/load time -- not
+/// per dispatch. `Router::record_would_trim` reads `ResolvedModel::effective_row`
+/// directly instead of re-running `lookup_baked_with_overrides` + `merge`.
+/// `tier` is fixed to `None` (the 5m default), matching the ONE tier the
+/// dispatch-path pricing call has ever priced against.
+#[must_use]
+pub fn apply_catalog_overlay(
+    models: BTreeMap<String, Arc<ResolvedModel>>,
+    config: &Config,
+    overlay: &CatalogOverlay,
+) -> BTreeMap<String, Arc<ResolvedModel>> {
+    models
+        .into_iter()
+        .map(|(nickname, model)| {
+            let provider_kind = config
+                .models
+                .get(&nickname)
+                .and_then(|entry| config.providers.get(&entry.provider))
+                .map_or("", ProviderEntry::kind_str);
+            let baked = lookup_baked_with_overrides(
+                provider_kind,
+                &model.upstream,
+                None,
+                &config.cache_pricing,
+            );
+            let overlay_cell = lookup_overlay_cell(provider_kind, &model.upstream, overlay);
+            let effective_row = merge(baked.as_ref(), overlay_cell);
+            let stamped = Arc::new((*model).clone().with_effective_row(effective_row));
+            (nickname, stamped)
+        })
+        .collect()
 }
 
 /// Returns `true` when `entry` is `ProviderEntry::AnthropicApi { context_management: true, .. }`.
@@ -2823,6 +2871,101 @@ mod build_resolved_models_tests {
             .expect("ok");
         let opus = models.get("opus").expect("opus entry");
         assert!(opus.seats.is_none(), "a non-oauth ref must never pool");
+    }
+
+    // -------------------------------------------------------------------
+    // apply_catalog_overlay: the post-pass that stamps each resolved
+    // model's precomputed EffectiveRow.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn apply_catalog_overlay_stamps_baked_row_when_no_overlay_cell_matches() {
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
+        );
+        let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
+            .await
+            .expect("ok");
+        assert!(failed.is_empty());
+
+        let stamped = apply_catalog_overlay(models, &cfg, &CatalogOverlay::default());
+        let haiku = stamped.get("haiku").expect("haiku entry");
+        match &haiku.effective_row {
+            crate::catalog::EffectiveRow::Present { source, .. } => {
+                assert_eq!(*source, crate::catalog::Source::Baked);
+            }
+            other => panic!("expected Present/Baked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_catalog_overlay_overrides_a_baked_field() {
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
+        );
+        let (models, _) = build_resolved_models(&cfg, store, BuildOptions::default())
+            .await
+            .expect("ok");
+
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "anthropic-api:claude-haiku-4-5*".to_string(),
+            Some(crate::catalog_overlay::OverlayCell {
+                source: crate::catalog_overlay::OverlaySource::User,
+                verified_at: "2026-07-01".to_string(),
+                wm: Some(9.5),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        let overlay = CatalogOverlay {
+            schema_version: crate::catalog_overlay::CATALOG_OVERLAY_SCHEMA_VERSION,
+            revision: 1,
+            cells,
+        };
+
+        let stamped = apply_catalog_overlay(models, &cfg, &overlay);
+        let haiku = stamped.get("haiku").expect("haiku entry");
+        let row = haiku
+            .effective_row
+            .priced()
+            .expect("overlay cell resolves Present");
+        assert_eq!(row.wm, 9.5, "the overlay's wm must win over the baked row");
+    }
+
+    #[tokio::test]
+    async fn apply_catalog_overlay_null_cell_disables_the_target() {
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let cfg = config_with_models(
+            vec![("anthropic", ProviderEntry::anthropic_api("literal:k"))],
+            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
+        );
+        let (models, _) = build_resolved_models(&cfg, store, BuildOptions::default())
+            .await
+            .expect("ok");
+
+        let mut cells = BTreeMap::new();
+        cells.insert("anthropic-api:claude-haiku-4-5*".to_string(), None);
+        let overlay = CatalogOverlay {
+            schema_version: crate::catalog_overlay::CATALOG_OVERLAY_SCHEMA_VERSION,
+            revision: 1,
+            cells,
+        };
+
+        let stamped = apply_catalog_overlay(models, &cfg, &overlay);
+        let haiku = stamped.get("haiku").expect("haiku entry");
+        assert_eq!(haiku.effective_row, crate::catalog::EffectiveRow::Disabled);
+        assert!(
+            haiku.effective_row.priced().is_none(),
+            "a null-disabled cell must fold to the conservative sentinel behavior"
+        );
     }
 }
 

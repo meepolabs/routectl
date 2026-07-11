@@ -4,8 +4,15 @@
 //! resolves an incoming request's `model` against the configured aliases, and
 //! walks the fallback chain on `5xx`/`429`/timeout errors.
 
-pub mod cache_pricing;
+pub mod catalog;
+pub(crate) mod catalog_baked;
+#[doc(hidden)]
+pub mod catalog_codegen;
+pub(crate) mod catalog_codegen_selectors;
+pub mod catalog_overlay;
+pub(crate) mod catalog_state;
 pub mod config;
+pub mod config_migrate;
 pub mod context_trim;
 pub mod cost_gate;
 pub mod factory;
@@ -17,17 +24,31 @@ pub mod router;
 pub mod runtime_state;
 pub(crate) mod seat_pool;
 
-pub use cache_pricing::{
-    BakedPricingRow, CachePricingOverride, CachePricingRow, CachePricingSelector, baked_table_rows,
-    is_stale_today, lookup, lookup_with_overrides, stale_after_days, validate_overrides,
+pub use catalog::{
+    BakedPricingRow, CachePricingOverride, CachePricingSelector, CatalogRow, EffectiveRow, Source,
+    baked_table_rows, is_stale_today, lookup, lookup_baked_with_overrides, lookup_overlay_cell,
+    lookup_with_overrides, merge, stale_after_days, validate_overrides,
+};
+pub use catalog_baked::{CATALOG_SNAPSHOT_DATE, CATALOG_VERSION};
+pub use catalog_overlay::{
+    CATALOG_OVERLAY_SCHEMA_VERSION, CatalogOverlay, OverlayCell, OverlayError, OverlaySource,
+    default_path as overlay_default_path, load as load_catalog_overlay,
+    save as save_catalog_overlay,
+};
+pub use catalog_state::{
+    check_drift_and_persist_state, default_path as catalog_state_default_path,
+    selector_key as catalog_state_selector_key,
 };
 pub use config::{
-    AliasValue, CacheCapability, CacheConfig, Config, HistoryReasoning, LogConfig, MitmConfig,
-    ModelEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy, ReasoningDialect,
-    ReductionConfig, RegistryEntry, RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
+    AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, Config, HistoryReasoning,
+    LogConfig, MitmConfig, ModelEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
+    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, ServerAuth, ServerConfig,
+    TrimConfig, UsageConfig, VersionTooNewError, preflight_config_version,
+    validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockGlobalConfig};
+pub use config_migrate::{MigrationError, MigrationOutcome, migrate_v1_to_v2};
 pub use context_trim::{
     ElisionMark, NearLosslessMarks, SteadyStateTrimParams, SteadyStateTrimPlan, apply_trim_plan,
     collect_near_lossless_marks, near_lossless_candidate, propose_steady_state_trim,
@@ -37,9 +58,10 @@ pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_ev
 #[cfg(feature = "bedrock")]
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
-    BuildOptions, build_provider, build_provider_with_options, build_resolved_models,
-    validate_alias_chain_targets, validate_alias_patterns, validate_mitm_config,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
+    BuildOptions, apply_catalog_overlay, build_provider, build_provider_with_options,
+    build_resolved_models, validate_alias_chain_targets, validate_alias_patterns,
+    validate_mitm_config, validate_reasoning_defaults, validate_registry_patterns,
+    validate_retry_policy,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{

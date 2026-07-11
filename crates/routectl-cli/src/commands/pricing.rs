@@ -1,35 +1,54 @@
-//! `routectl pricing` -- inspect and stamp the cache-economics pricing manifest.
+//! `routectl pricing` -- inspect and stamp the cache-economics catalog.
 //!
 //! Two subcommands:
-//!   list    -- print the effective manifest (baked rows merged with operator overrides
-//!              and sidecar verifications) as an aligned ASCII table.
-//!   verify  -- stamp a baked cell verified as of today, persisting the stamp to a
-//!              machine-managed sidecar file (`pricing_verifications.json` in the
-//!              routectl config dir).
+//!   list    -- print the EFFECTIVE catalog (the two-layer merge of the
+//!              baked table with the on-disk `catalog_overlay.json`,
+//!              `routectl_router::merge`) as an aligned ASCII table. Every
+//!              row renders PRESENT (with derived provenance + a staleness
+//!              marker) or DISABLED (overlay `null`); MISSING never
+//!              appears in this catalog-only listing (see
+//!              [`build_list_data`]'s doc) even though the render path
+//!              still renders it correctly (see the `missing_state_renders`
+//!              test) for a future consumer keyed on configured aliases.
+//!   verify  -- stamp an EXISTING overlay cell's `verified_at` to today,
+//!              flipping its `source` to `user` (verifying is a user act).
+//!              Writes through the revision-checked overlay writer
+//!              (`routectl_router::save_catalog_overlay`). A selector with
+//!              no overlay cell (baked-only, or entirely unknown) has
+//!              nothing to stamp and is an error -- creating a new overlay
+//!              cell is a later import/set verb.
 //!
-//! The sidecar is purely additive: it only inserts a `verified_at`-only override for
-//! selectors that have no existing entry in `config.cache_pricing`. If the operator
-//! has a `[cache_pricing]` entry for the same key, that entry wins (config.toml beats
-//! the sidecar at merge time).
+//! LEGACY SIDECAR (`pricing_verifications.json`): this module still carries
+//! the READ side of the old sidecar format ([`PricingVerifications`],
+//! [`load_verifications`], [`merge_verifications_into`],
+//! [`load_and_merge_verifications`]) -- but ONLY as a read path consumed by
+//! the v1 -> v2 config migration (`server::load_effective_config`, which
+//! calls [`load_and_merge_verifications`] to fold any historical sidecar
+//! stamps into `config.cache_pricing` before the migrator moves them into
+//! the catalog overlay). Nothing in the CLI writes the sidecar anymore --
+//! `verify` now stamps the overlay directly -- so the write side
+//! (`save_verification` / the atomic sidecar writer) is gone. The read side
+//! stays until v1 config support itself is dropped.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use routectl_router::{
-    BakedPricingRow, CachePricingOverride, CachePricingSelector, Config, baked_table_rows,
-    is_stale_today,
+    CachePricingOverride, CachePricingSelector, CatalogOverlay, CatalogRow, Config, EffectiveRow,
+    OverlayCell, OverlaySource, Source, baked_table_rows, is_stale_today, load_catalog_overlay,
+    merge, overlay_default_path, save_catalog_overlay,
 };
 
 // ---------------------------------------------------------------------------
-// Sidecar store
+// Legacy sidecar (read-only, migration-only)
 // ---------------------------------------------------------------------------
 
-/// On-disk shape for `pricing_verifications.json`.
+/// On-disk shape for the legacy `pricing_verifications.json` sidecar.
 ///
 /// Uses a wrapper struct (not a bare map) so future fields can be added
-/// without a format break.
+/// without a format break. Read-only: nothing writes this shape anymore.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PricingVerifications {
     /// Maps a selector string (`"provider_kind:model_glob"`) to a
@@ -38,8 +57,8 @@ pub struct PricingVerifications {
     pub verified: BTreeMap<String, String>,
 }
 
-/// Path to the sidecar file. Mirrors the `resolve_config_path` dir logic
-/// in `main.rs`.
+/// Path to the legacy sidecar file. Mirrors the `resolve_config_path` dir
+/// logic in `main.rs`.
 pub fn verifications_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -71,60 +90,8 @@ pub fn load_verifications(path: &Path) -> Result<PricingVerifications, String> {
         .map_err(|e| format!("malformed pricing verifications `{}`: {e}", path.display()))
 }
 
-/// Save a single verification entry atomically (load-modify-save).
-/// Validates the selector and date before persisting so the sidecar
-/// cannot be poisoned by malformed input. Ensures the parent directory
-/// exists. Uses a PID-suffixed temp-then-rename pattern so the file is
-/// never partially written and concurrent writers cannot clobber each
-/// other.
-pub fn save_verification(
-    path: &Path,
-    selector: &str,
-    date: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    CachePricingSelector::parse(selector)
-        .map_err(|e| format!("invalid selector `{selector}`: {e}"))?;
-    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .map_err(|e| format!("invalid date `{date}`: {e}"))?;
-
-    let mut v = load_verifications(path)?;
-    v.verified.insert(selector.to_string(), date.to_string());
-    save_verifications_atomic(path, &v)?;
-    Ok(())
-}
-
-fn save_verifications_atomic(
-    path: &Path,
-    v: &PricingVerifications,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("path has no parent: {}", path.display()))?;
-
-    std::fs::create_dir_all(parent)
-        .map_err(|e| format!("create_dir_all {}: {e}", parent.display()))?;
-
-    let json = serde_json::to_string_pretty(v)
-        .map_err(|e| format!("serialize pricing verifications: {e}"))?;
-
-    // PID-suffixed temp name in the same directory: rename is atomic
-    // within one filesystem and concurrent writers cannot clobber each
-    // other.
-    let tmp_path = parent.join(format!(
-        ".pricing_verifications.{}.tmp.json",
-        std::process::id()
-    ));
-    std::fs::write(&tmp_path, json.as_bytes())
-        .map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
-
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| format!("rename {} -> {}: {e}", tmp_path.display(), path.display()))?;
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
-// Config merge
+// Legacy config merge (migration input only)
 // ---------------------------------------------------------------------------
 
 /// For each `(selector, date)` in `v` whose selector is NOT already a key in
@@ -158,6 +125,11 @@ pub fn merge_verifications_into(config: &mut Config, v: &PricingVerifications) -
 /// is silently ignored (first run). A malformed sidecar JSON logs a warning
 /// and skips the merge. Individual entries with a malformed date are dropped
 /// with a per-entry warning.
+///
+/// Called ONLY by the v1 -> v2 config migration path (`server::
+/// load_effective_config`, gated on `config.version < CURRENT_CONFIG_VERSION`)
+/// so any historical sidecar stamp reaches the migrator's `cache_pricing`
+/// input exactly once, before it folds into the catalog overlay.
 pub fn load_and_merge_verifications(config: &mut Config) {
     let path = verifications_path();
     match load_verifications(&path) {
@@ -181,126 +153,150 @@ pub fn load_and_merge_verifications(config: &mut Config) {
 }
 
 // ---------------------------------------------------------------------------
-// Effective-row computation (pure, testable)
+// Effective-catalog display (two-layer merge)
 // ---------------------------------------------------------------------------
 
-/// Compute the effective `CachePricingRow` for a baked cell against the
-/// operator's config. Falls back to the baked row if the override fails
-/// validation.
-fn effective_row(cell: &BakedPricingRow, config: &Config) -> routectl_router::CachePricingRow {
-    let key = format!("{}:{}", cell.provider_kind, cell.model_glob);
-    match config.cache_pricing.get(&key) {
-        Some(ov) => cell.row.with_overrides(ov).unwrap_or(cell.row),
-        None => cell.row,
+/// Table column header, in order.
+const HEADER: &[&str] = &[
+    "provider_kind",
+    "model_glob",
+    "status",
+    "tier",
+    "wm",
+    "rm",
+    "ttl(s)",
+    "min_prefix",
+    "auto",
+    "max_ctx",
+    "source",
+    "verified_at",
+    "stale",
+];
+
+/// Split a `"provider_kind:model_glob"` selector key for display. Every key
+/// in this table is drawn from the baked table or a loaded overlay, both of
+/// which are already selector-shaped, so a parse failure should not occur in
+/// practice; falls back to `("?", key)` rather than panic on a hand-edited
+/// overlay with a malformed key.
+fn split_selector(key: &str) -> (String, String) {
+    match CachePricingSelector::parse(key) {
+        Ok(sel) => (sel.provider_kind, sel.model_glob),
+        Err(_) => ("?".to_string(), key.to_string()),
     }
 }
 
-/// True when `selector` exactly names a baked cell
-/// (provider_kind AND model_glob both match).
-fn names_baked_cell(sel: &CachePricingSelector) -> bool {
-    baked_table_rows()
-        .iter()
-        .any(|cell| cell.provider_kind == sel.provider_kind && cell.model_glob == sel.model_glob)
+/// Provenance label for a `Present` row's winning layer.
+const fn source_str(source: Source) -> &'static str {
+    match source {
+        Source::Baked => "baked",
+        Source::Import => "import",
+        Source::User => "user",
+    }
 }
 
-/// Build the table rows, the count of config keys that do not exactly match
-/// any baked cell, and the punch-list of configured models whose effective
-/// `max_context_tokens` is unknown (`None`). Returns
-/// `(table_rows, unmatched_count, punch_list)`.
-///
-/// Each element of `table_rows` is a `Vec<String>` of column values in the
-/// order: provider_kind, model_glob, tier, wm, rm, ttl(s), min_prefix, auto,
-/// verified, source, verified_at, stale, max_ctx.
-///
-/// The punch-list checks the EFFECTIVE row (baked value merged with any
-/// operator override via `effective_row`), so an override that supplies a
-/// window removes that model from the punch-list even when the baked cell
-/// itself carries `None`.
-pub fn build_list_data(config: &Config) -> (Vec<Vec<String>>, usize, Vec<String>) {
-    let header = vec![
-        "provider_kind".to_string(),
-        "model_glob".to_string(),
-        "tier".to_string(),
-        "wm".to_string(),
-        "rm".to_string(),
-        "ttl(s)".to_string(),
-        "min_prefix".to_string(),
-        "auto".to_string(),
-        "verified".to_string(),
-        "source".to_string(),
-        "verified_at".to_string(),
-        "stale".to_string(),
-        "max_ctx".to_string(),
-    ];
-
-    let baked = baked_table_rows();
-    let mut rows = vec![header];
-    let mut punch_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for cell in &baked {
-        let row = effective_row(cell, config);
-        let stale = if row.verified && is_stale_today(row.verified_at) {
-            "STALE"
-        } else {
-            ""
-        };
-        let max_ctx = row
-            .max_context_tokens
-            .map_or_else(|| "-".to_string(), |n| n.to_string());
-        if row.max_context_tokens.is_none() {
-            punch_set.insert(format!("{}:{}", cell.provider_kind, cell.model_glob));
+/// Render one selector's [`EffectiveRow`] to the table's column order.
+/// `DISABLED` and `MISSING` share the same conservative "nothing else to
+/// show" shape (dashes for every economics / provenance column) -- the two
+/// states share the same downstream sentinel treatment, so the display
+/// treats them identically apart from the status label itself.
+fn render_row(key: &str, effective: &EffectiveRow) -> Vec<String> {
+    let (provider_kind, model_glob) = split_selector(key);
+    match effective {
+        EffectiveRow::Present {
+            row,
+            source,
+            verified_at,
+        } => {
+            let stale = if is_stale_today(verified_at) {
+                "WARN"
+            } else {
+                "-"
+            };
+            vec![
+                provider_kind,
+                model_glob,
+                "PRESENT".to_string(),
+                row.tier.unwrap_or("-").to_string(),
+                format!("{:.4}", row.wm),
+                format!("{:.4}", row.rm),
+                row.ttl_seconds.to_string(),
+                row.min_prefix_tokens.to_string(),
+                if row.auto_cacher { "yes" } else { "no" }.to_string(),
+                row.max_context_tokens
+                    .map_or_else(|| "-".to_string(), |n| n.to_string()),
+                source_str(*source).to_string(),
+                verified_at.clone(),
+                stale.to_string(),
+            ]
         }
-        rows.push(vec![
-            cell.provider_kind.to_string(),
-            cell.model_glob.to_string(),
-            row.tier.unwrap_or("-").to_string(),
-            format!("{:.4}", row.wm),
-            format!("{:.4}", row.rm),
-            row.ttl_seconds.to_string(),
-            row.min_prefix_tokens.to_string(),
-            if row.auto_cacher { "yes" } else { "no" }.to_string(),
-            row.verified.to_string(),
-            row.source.to_string(),
-            row.verified_at.to_string(),
-            stale.to_string(),
-            max_ctx,
-        ]);
+        EffectiveRow::Disabled => dashed_row(provider_kind, model_glob, "DISABLED"),
+        EffectiveRow::Missing => dashed_row(provider_kind, model_glob, "MISSING"),
     }
-    // Each model can carry multiple baked rows (one per cache tier), so the
-    // punch-list dedups through a set: a "None-window model" is reported
-    // once per model, not once per tier.
-    let punch_list: Vec<String> = punch_set.into_iter().collect();
+}
 
-    let baked_keys: std::collections::BTreeSet<String> = baked
-        .iter()
-        .map(|cell| format!("{}:{}", cell.provider_kind, cell.model_glob))
-        .collect();
-    let unmatched = config
-        .cache_pricing
-        .keys()
-        .filter(|k| !baked_keys.contains(*k))
-        .count();
+/// A row whose only meaningful columns are the selector and `status`; every
+/// economics / provenance column is a dash placeholder.
+fn dashed_row(provider_kind: String, model_glob: String, status: &str) -> Vec<String> {
+    let mut row = vec![provider_kind, model_glob, status.to_string()];
+    row.extend(std::iter::repeat_n("-".to_string(), HEADER.len() - 3));
+    row
+}
 
-    (rows, unmatched, punch_list)
+/// Build the table rows and the punch-list of selectors whose EFFECTIVE
+/// `max_context_tokens` is unknown (`Present` with a `None` window; a
+/// `Disabled` / `Missing` selector carries no window to be unknown about,
+/// so it is never punch-listed).
+///
+/// Rows are the two-layer merge ([`merge`]) of every selector key appearing
+/// in EITHER the baked table or the loaded overlay -- the union, keyed
+/// exactly as `"provider_kind:model_glob"`. A selector appearing in
+/// neither layer is not a row here (there is nothing to enumerate it from);
+/// [`EffectiveRow::Missing`] is reachable from this table only when an
+/// overlay entry is later removed leaving a dangling reference elsewhere --
+/// day-to-day, every displayed row backs onto at least one layer by
+/// construction. See the `missing state renders` test below for the
+/// direct classification/render coverage `MISSING` still needs.
+pub fn build_list_data(overlay: &CatalogOverlay) -> (Vec<Vec<String>>, Vec<String>) {
+    let baked = baked_table_rows();
+    let mut baked_map: BTreeMap<String, &CatalogRow> = BTreeMap::new();
+    for cell in &baked {
+        baked_map.insert(
+            format!("{}:{}", cell.provider_kind, cell.model_glob),
+            &cell.row,
+        );
+    }
+
+    let mut keys: BTreeSet<String> = baked_map.keys().cloned().collect();
+    keys.extend(overlay.cells.keys().cloned());
+
+    let mut rows = vec![HEADER.iter().map(|s| s.to_string()).collect()];
+    let mut punch_set: BTreeSet<String> = BTreeSet::new();
+    for key in &keys {
+        let baked_row = baked_map.get(key).copied();
+        let overlay_cell = overlay.cells.get(key);
+        let effective = merge(baked_row, overlay_cell);
+        if let Some(row) = effective.priced()
+            && row.max_context_tokens.is_none()
+        {
+            punch_set.insert(key.clone());
+        }
+        rows.push(render_row(key, &effective));
+    }
+
+    (rows, punch_set.into_iter().collect())
 }
 
 // ---------------------------------------------------------------------------
 // CLI entry points
 // ---------------------------------------------------------------------------
 
-/// `routectl pricing list` -- print the effective pricing manifest.
-pub fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let (table, unmatched, punch_list) = build_list_data(config);
+/// `routectl pricing list` -- print the effective catalog (baked + overlay).
+pub fn list(overlay: &CatalogOverlay) -> Result<(), Box<dyn std::error::Error>> {
+    let (table, punch_list) = build_list_data(overlay);
     print!("{}", render_table(&table));
-    if unmatched > 0 {
-        println!(
-            "\nnote: {unmatched} override/verification selector(s) do not exactly name a baked \
-             cell; they still apply by glob at request-lookup time but are not reflected in the \
-             rows above."
-        );
-    }
     if !punch_list.is_empty() {
         println!(
-            "\npunch-list: {} configured model(s) with an unknown max_context_tokens \
+            "\npunch-list: {} selector(s) with an unknown max_context_tokens \
              (context-fraction advisory falls back to absolute tokens only):",
             punch_list.len()
         );
@@ -311,24 +307,62 @@ pub fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `routectl pricing verify <selector>` -- stamp a baked cell verified today.
+/// `routectl pricing verify <selector>` -- stamp an existing overlay cell
+/// verified today. Resolves the default overlay path; see [`verify_at`] for
+/// the testable core.
 pub fn verify(selector_raw: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let sel =
-        CachePricingSelector::parse(selector_raw).map_err(|e| format!("invalid selector: {e}"))?;
+    verify_at(selector_raw, &overlay_default_path())
+}
 
-    if !names_baked_cell(&sel) {
-        println!(
-            "note: selector `{selector_raw}` matches no baked cell; \
-             the verification will apply by glob at lookup time"
-        );
-    }
+/// Core of [`verify`], taking the overlay path explicitly so tests can point
+/// it at a temp directory instead of the real `catalog_overlay.json`.
+///
+/// Verifying is a USER act: an existing cell -- whichever layer wrote it --
+/// is rewritten with `source: user` and `verified_at` bumped to today; every
+/// other field on the cell is carried through unchanged. A selector with no
+/// overlay cell (baked-only, or entirely unknown to both layers) has nothing
+/// to stamp: creating a NEW overlay cell is a later import/set verb, so this
+/// returns a clear error instead of silently pinning the current effective
+/// values. A selector whose overlay cell is explicitly `null` (disabled) is
+/// likewise nothing to stamp -- verify never resurrects a disabled row.
+fn verify_at(selector_raw: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    CachePricingSelector::parse(selector_raw).map_err(|e| format!("invalid selector: {e}"))?;
+
+    let overlay = load_catalog_overlay(path)?;
+    let cell = match overlay.cells.get(selector_raw) {
+        None => {
+            return Err(format!(
+                "no overlay cell for selector `{selector_raw}`; nothing to stamp (baked-only or \
+                 unknown to the catalog) -- creating a new overlay cell is a later import/set verb"
+            )
+            .into());
+        }
+        Some(None) => {
+            return Err(format!(
+                "selector `{selector_raw}` is disabled in the overlay (null); nothing to stamp"
+            )
+            .into());
+        }
+        Some(Some(cell)) => cell,
+    };
 
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let path = verifications_path();
-    save_verification(&path, selector_raw, &today)?;
+    let stamped = OverlayCell {
+        source: OverlaySource::User,
+        verified_at: today.clone(),
+        wm: cell.wm,
+        rm: cell.rm,
+        ttl_seconds: cell.ttl_seconds,
+        min_prefix_tokens: cell.min_prefix_tokens,
+        max_context_tokens: cell.max_context_tokens,
+        capabilities: cell.capabilities.clone(),
+    };
+    let mut cells = overlay.cells.clone();
+    cells.insert(selector_raw.to_string(), Some(stamped));
+    save_catalog_overlay(path, overlay.revision, cells)?;
 
     println!(
-        "verified: selector={selector_raw}  date={today}  written to {}",
+        "verified: selector={selector_raw}  date={today}  source=user  written to {}",
         path.display()
     );
     Ok(())
@@ -380,17 +414,22 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // Sidecar round-trip
+    // Legacy sidecar: read side only (round-trips a manually-written file --
+    // the write side that used to produce it is gone).
     // -----------------------------------------------------------------------
 
     #[test]
-    fn sidecar_save_then_load_round_trips_stamped_entry() {
+    fn load_verifications_reads_a_manually_written_sidecar_file() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pricing_verifications.json");
+        std::fs::write(
+            &path,
+            r#"{"verified":{"openai-compat:grok-*":"2026-06-30"}}"#,
+        )
+        .unwrap();
 
         // Act
-        save_verification(&path, "openai-compat:grok-*", "2026-06-30").unwrap();
         let loaded = load_verifications(&path).unwrap();
 
         // Assert
@@ -402,10 +441,6 @@ mod tests {
             Some("2026-06-30")
         );
     }
-
-    // -----------------------------------------------------------------------
-    // load_verifications on missing path returns Default
-    // -----------------------------------------------------------------------
 
     #[test]
     fn load_verifications_missing_path_returns_empty_default() {
@@ -420,10 +455,6 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().verified.is_empty());
     }
-
-    // -----------------------------------------------------------------------
-    // load_verifications on malformed JSON returns error
-    // -----------------------------------------------------------------------
 
     #[test]
     fn load_verifications_malformed_json_returns_error() {
@@ -542,313 +573,388 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Effective-row helper: baked unverified cell + pure verification override
+    // build_list_data: PRESENT (baked / import / user), DISABLED, punch-list
     // -----------------------------------------------------------------------
 
     #[test]
-    fn effective_row_with_verification_override_sets_verified_and_source() {
-        // Arrange: find an unverified baked cell to use as the base
-        // (or use grok-* which is known unverified in the baked table)
-        let baked = baked_table_rows();
-        let cell = baked
-            .iter()
-            .find(|c| c.provider_kind == "openai-compat" && c.model_glob == "grok-*")
-            .expect("expected openai-compat:grok-* in baked table");
+    fn present_baked_row_shows_baked_source_and_no_stale_warn() {
+        // Arrange: no overlay entry -- the baked cell wins as-is.
+        let overlay = CatalogOverlay::default();
 
-        let mut config = minimal_config();
-        config.cache_pricing.insert(
+        // Act
+        let (rows, _) = build_list_data(&overlay);
+
+        // Assert
+        let row = find_row(&rows, "openai-compat", "grok-*").expect("baked row present");
+        assert_eq!(row[2], "PRESENT");
+        assert_eq!(row[10], "baked");
+        assert_eq!(row[12], "-", "the fresh baked snapshot date is not stale");
+    }
+
+    #[test]
+    fn present_import_cell_overrides_baked_and_shows_import_source() {
+        // Arrange: an import cell for a real baked selector, overriding wm.
+        let mut overlay = CatalogOverlay::default();
+        overlay.cells.insert(
             "openai-compat:grok-*".to_string(),
-            CachePricingOverride {
-                verified_at: Some("2026-06-30".to_string()),
-                ..Default::default()
-            },
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-07-01".to_string(),
+                wm: Some(0.5),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
         );
 
         // Act
-        let row = effective_row(cell, &config);
+        let (rows, _) = build_list_data(&overlay);
+
+        // Assert
+        let row = find_row(&rows, "openai-compat", "grok-*").expect("row present");
+        assert_eq!(row[2], "PRESENT");
+        assert_eq!(row[4], "0.5000", "wm overridden by the import cell");
+        assert_eq!(row[10], "import");
+        assert_eq!(row[11], "2026-07-01");
+    }
+
+    #[test]
+    fn present_user_cell_with_no_baked_match_renders_from_sentinel_base() {
+        // Arrange: a user cell naming a selector no baked cell backs.
+        let mut overlay = CatalogOverlay::default();
+        overlay.cells.insert(
+            "openai-compat:totally-new-model-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::User,
+                verified_at: "2026-07-05".to_string(),
+                wm: None,
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: Some(999),
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+
+        // Act
+        let (rows, _) = build_list_data(&overlay);
+
+        // Assert: sentinel base (wm 2.0) with the user's min_prefix override.
+        let row = find_row(&rows, "openai-compat", "totally-new-model-*").expect("row present");
+        assert_eq!(row[2], "PRESENT");
+        assert_eq!(row[4], "2.0000", "sentinel wm as the base");
+        assert_eq!(row[7], "999", "user min_prefix override applied");
+        assert_eq!(row[10], "user");
+    }
+
+    #[test]
+    fn disabled_cell_renders_disabled_status_regardless_of_baked() {
+        // Arrange: a null overlay entry for a real baked selector.
+        let mut overlay = CatalogOverlay::default();
+        overlay
+            .cells
+            .insert("openai-compat:grok-*".to_string(), None);
+
+        // Act
+        let (rows, _) = build_list_data(&overlay);
+
+        // Assert: every economics / provenance column dashes out.
+        let row = find_row(&rows, "openai-compat", "grok-*").expect("row present");
+        assert_eq!(row[2], "DISABLED");
+        for col in &row[3..] {
+            assert_eq!(col, "-");
+        }
+    }
+
+    #[test]
+    fn stale_verified_at_renders_warn_marker() {
+        // Arrange: an import cell stamped far in the past.
+        let mut overlay = CatalogOverlay::default();
+        overlay.cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2020-01-01".to_string(),
+                wm: None,
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+
+        // Act
+        let (rows, _) = build_list_data(&overlay);
+
+        // Assert
+        let row = find_row(&rows, "openai-compat", "grok-*").expect("row present");
+        assert_eq!(row[12], "WARN");
+    }
+
+    #[test]
+    fn round_trip_display_renders_import_user_and_disabled_states() {
+        // Arrange: one import cell, one user cell, one null-disabled cell,
+        // all round-tripped through the real overlay writer/loader.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-07-01".to_string(),
+                wm: Some(0.5),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        cells.insert(
+            "anthropic-api:claude-opus-4-8*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::User,
+                verified_at: "2026-07-05".to_string(),
+                wm: None,
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: Some(1024),
+                max_context_tokens: Some(200_000),
+                capabilities: None,
+            }),
+        );
+        cells.insert("openai-compat:disabled-model".to_string(), None);
+        routectl_router::save_catalog_overlay(&path, 0, cells).expect("save");
+
+        // Act
+        let overlay = load_catalog_overlay(&path).expect("load");
+        let (rows, _) = build_list_data(&overlay);
+
+        // Assert: all three states render distinctly.
+        let import_row = find_row(&rows, "openai-compat", "grok-*").expect("import row");
+        assert_eq!(import_row[2], "PRESENT");
+        assert_eq!(import_row[10], "import");
+
+        let user_row = find_row(&rows, "anthropic-api", "claude-opus-4-8*").expect("user row");
+        assert_eq!(user_row[2], "PRESENT");
+        assert_eq!(user_row[10], "user");
+
+        let disabled_row =
+            find_row(&rows, "openai-compat", "disabled-model").expect("disabled row");
+        assert_eq!(disabled_row[2], "DISABLED");
+    }
+
+    #[test]
+    fn missing_state_renders_missing_status() {
+        // MISSING requires calling `merge` with neither layer present, which
+        // cannot arise from `build_list_data`'s own baked-union-overlay key
+        // enumeration (every enumerated key backs onto at least one layer by
+        // construction). Exercised directly here so the render path's
+        // MISSING arm is covered.
+        let effective = merge(None, None);
+        assert_eq!(effective, EffectiveRow::Missing);
+
+        let row = render_row("openai-compat:nowhere-*", &effective);
+        assert_eq!(row[2], "MISSING");
+        for col in &row[3..] {
+            assert_eq!(col, "-");
+        }
+    }
+
+    #[test]
+    fn punch_list_names_present_row_with_unknown_max_context_tokens() {
+        // Arrange: the anthropic-api "*" catch-all is baked with an unknown
+        // window; no overlay entry supplies one.
+        let overlay = CatalogOverlay::default();
+
+        // Act
+        let (_, punch_list) = build_list_data(&overlay);
 
         // Assert
         assert!(
-            row.verified,
-            "should be verified after pure-verification override"
-        );
-        assert_eq!(
-            row.source, "operator-verified",
-            "source should be operator-verified"
-        );
-    }
-
-    #[test]
-    fn effective_row_without_override_returns_baked_row_unchanged() {
-        // Arrange
-        let baked = baked_table_rows();
-        let cell = baked
-            .iter()
-            .find(|c| c.provider_kind == "openai-compat" && c.model_glob == "grok-*")
-            .expect("expected openai-compat:grok-* in baked table");
-
-        let config = minimal_config();
-
-        // Act
-        let row = effective_row(cell, &config);
-
-        // Assert: the row is identical to the baked row
-        assert_eq!(row.wm, cell.row.wm);
-        assert_eq!(row.rm, cell.row.rm);
-        assert_eq!(row.verified, cell.row.verified);
-        assert_eq!(row.source, cell.row.source);
-    }
-
-    // -----------------------------------------------------------------------
-    // names_baked_cell predicate
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn names_baked_cell_true_for_known_entry() {
-        // Arrange
-        let sel = CachePricingSelector::parse("openai-compat:grok-*").unwrap();
-
-        // Act / Assert
-        assert!(
-            names_baked_cell(&sel),
-            "openai-compat:grok-* should be in the baked table"
-        );
-    }
-
-    #[test]
-    fn names_baked_cell_false_for_unknown_entry() {
-        // Arrange
-        let sel = CachePricingSelector::parse("openai-compat:totally-made-up-*").unwrap();
-
-        // Act / Assert
-        assert!(
-            !names_baked_cell(&sel),
-            "totally-made-up-* should not be in the baked table"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // build_list_data round-trip: merged verification shows verified/source/date
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn build_list_data_merged_verification_shows_verified_operator_source_and_date() {
-        // Arrange: merge a verification for grok-* into an otherwise empty config
-        let mut config = minimal_config();
-        let mut v = PricingVerifications::default();
-        v.verified
-            .insert("openai-compat:grok-*".to_string(), "2026-06-30".to_string());
-        merge_verifications_into(&mut config, &v);
-
-        // Act
-        let (rows, _, _) = build_list_data(&config);
-
-        // Find the grok-* row (skip header at index 0)
-        let grok_row = rows
-            .iter()
-            .skip(1)
-            .find(|r| r[0] == "openai-compat" && r[1] == "grok-*")
-            .expect("grok-* row should be present");
-
-        // verified col = index 8, source = 9, verified_at = 10
-        assert_eq!(grok_row[8], "true", "verified should be true");
-        assert_eq!(
-            grok_row[9], "operator-verified",
-            "source should be operator-verified"
-        );
-        assert_eq!(grok_row[10], "2026-06-30", "verified_at should match stamp");
-    }
-
-    // -----------------------------------------------------------------------
-    // stale rendering: far-past verified_at -> STALE; recent -> empty
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn build_list_data_stale_column_reflects_staleness() {
-        // Arrange: inject a verified override with a date from 1971 (always stale)
-        let mut config = minimal_config();
-        config.cache_pricing.insert(
-            "openai-compat:grok-*".to_string(),
-            CachePricingOverride {
-                verified_at: Some("1971-01-01".to_string()),
-                ..Default::default()
-            },
-        );
-
-        // Act
-        let (rows, _, _) = build_list_data(&config);
-        let grok_row = rows
-            .iter()
-            .skip(1)
-            .find(|r| r[0] == "openai-compat" && r[1] == "grok-*")
-            .expect("grok-* row should be present");
-
-        // stale col = index 11
-        assert_eq!(grok_row[11], "STALE", "1971-01-01 should be STALE");
-
-        // Arrange: fresh date should not be STALE
-        let mut config2 = minimal_config();
-        config2.cache_pricing.insert(
-            "openai-compat:grok-*".to_string(),
-            CachePricingOverride {
-                verified_at: Some("2099-01-01".to_string()),
-                ..Default::default()
-            },
-        );
-        let (rows2, _, _) = build_list_data(&config2);
-        let grok_row2 = rows2
-            .iter()
-            .skip(1)
-            .find(|r| r[0] == "openai-compat" && r[1] == "grok-*")
-            .expect("grok-* row should be present");
-        assert_eq!(grok_row2[11], "", "future date should not show STALE");
-    }
-
-    // -----------------------------------------------------------------------
-    // unmatched-note count: glob key naming no baked cell -> count == 1
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn build_list_data_unmatched_count_for_glob_naming_no_baked_cell() {
-        // Arrange: a config key that names no baked cell
-        let mut config = minimal_config();
-        config.cache_pricing.insert(
-            "openai-compat:totally-made-up-*".to_string(),
-            CachePricingOverride::default(),
-        );
-
-        // Act
-        let (_, unmatched, _) = build_list_data(&config);
-
-        // Assert
-        assert_eq!(
-            unmatched, 1,
-            "one override naming no baked cell -> unmatched == 1"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // max_context_tokens column + punch-list
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn build_list_data_max_ctx_column_reflects_baked_window() {
-        // Arrange: no overrides -- baked windows only. claude-opus-4-8* is
-        // baked with a known window; claude-haiku-3-5* is baked `None`.
-        let config = minimal_config();
-
-        // Act
-        let (rows, _, _) = build_list_data(&config);
-
-        // Assert: max_ctx is the last column.
-        let opus_row = rows
-            .iter()
-            .skip(1)
-            .find(|r| r[0] == "anthropic-api" && r[1] == "claude-opus-4-8*")
-            .expect("claude-opus-4-8* row should be present");
-        assert_eq!(opus_row.last().unwrap(), "1000000");
-
-        let haiku_row = rows
-            .iter()
-            .skip(1)
-            .find(|r| r[0] == "anthropic-api" && r[1] == "claude-haiku-3-5*")
-            .expect("claude-haiku-3-5* row should be present");
-        assert_eq!(haiku_row.last().unwrap(), "-");
-    }
-
-    #[test]
-    fn build_list_data_punch_list_names_none_window_model_and_omits_some_window_model() {
-        // Arrange: no overrides -- baked windows only.
-        let config = minimal_config();
-
-        // Act
-        let (_, _, punch_list) = build_list_data(&config);
-
-        // Assert: the None-window model is named exactly once (deduped
-        // across its 5m/1h tiers); the Some-window model does not appear.
-        let haiku_hits = punch_list
-            .iter()
-            .filter(|name| name.as_str() == "anthropic-api:claude-haiku-3-5*")
-            .count();
-        assert_eq!(
-            haiku_hits, 1,
-            "None-window model appears exactly once, not once per tier: {punch_list:?}"
+            punch_list.contains(&"anthropic-api:*".to_string()),
+            "punch_list: {punch_list:?}"
         );
         assert!(
             !punch_list.contains(&"anthropic-api:claude-opus-4-8*".to_string()),
-            "Some-window model must not appear in the punch-list: {punch_list:?}"
+            "a known-window model must not appear: {punch_list:?}"
         );
     }
 
     #[test]
-    fn build_list_data_punch_list_respects_override_supplied_window() {
-        // Arrange: an operator override supplies a window for the
-        // otherwise-None-window claude-haiku-3-5* baked cell.
-        let mut config = minimal_config();
-        config.cache_pricing.insert(
-            "anthropic-api:claude-haiku-3-5*".to_string(),
-            CachePricingOverride {
+    fn punch_list_cleared_when_overlay_supplies_a_window() {
+        // Arrange: an overlay cell supplies the missing window for the
+        // otherwise-unknown anthropic-api "*" catch-all.
+        let mut overlay = CatalogOverlay::default();
+        overlay.cells.insert(
+            "anthropic-api:*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::User,
+                verified_at: "2026-07-05".to_string(),
+                wm: None,
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
                 max_context_tokens: Some(200_000),
-                ..Default::default()
-            },
+                capabilities: None,
+            }),
         );
 
         // Act
-        let (_, _, punch_list) = build_list_data(&config);
+        let (_, punch_list) = build_list_data(&overlay);
 
-        // Assert: the override resolves the gap, so the model drops off the
-        // punch-list even though the baked value itself is None.
+        // Assert
         assert!(
-            !punch_list.contains(&"anthropic-api:claude-haiku-3-5*".to_string()),
-            "an override supplying a window must clear the punch-list entry: {punch_list:?}"
+            !punch_list.contains(&"anthropic-api:*".to_string()),
+            "punch_list: {punch_list:?}"
         );
     }
 
+    /// Locate a rendered row by `(provider_kind, model_glob)`.
+    fn find_row<'a>(
+        rows: &'a [Vec<String>],
+        provider_kind: &str,
+        model_glob: &str,
+    ) -> Option<&'a Vec<String>> {
+        rows.iter()
+            .skip(1)
+            .find(|r| r[0] == provider_kind && r[1] == model_glob)
+    }
+
     // -----------------------------------------------------------------------
-    // save_verification rejects bad selector and bad date
+    // verify_at: stamps an EXISTING overlay cell -- verifying is a user
+    // act; creating cells is a separate import/set concern.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn save_verification_rejects_malformed_date() {
+    fn verify_at_stamps_existing_user_cell_updates_verified_at_only() {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pricing_verifications.json");
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::User,
+                verified_at: "2020-01-01".to_string(),
+                wm: Some(1.5),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: Some(512),
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&path, 0, cells).expect("seed");
 
         // Act
-        let result = save_verification(&path, "openai-compat:grok-*", "not-a-date");
+        verify_at("openai-compat:grok-*", &path).expect("verify");
 
-        // Assert
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("invalid date"),
-            "expected 'invalid date' in: {msg}"
-        );
-        assert!(!path.exists(), "sidecar should not have been written");
+        // Assert: source stays user, verified_at bumped to today, values kept.
+        let overlay = load_catalog_overlay(&path).expect("load");
+        let cell = overlay
+            .cells
+            .get("openai-compat:grok-*")
+            .and_then(Option::as_ref)
+            .expect("cell present");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_eq!(cell.source, OverlaySource::User);
+        assert_eq!(cell.verified_at, today, "verified_at bumped to today");
+        assert_eq!(cell.wm, Some(1.5));
+        assert_eq!(cell.min_prefix_tokens, Some(512));
     }
 
     #[test]
-    fn save_verification_rejects_bad_selector() {
-        // Arrange
+    fn verify_at_flips_import_cell_source_to_user() {
+        // Arrange: an import cell -- verifying is a user act, so the source
+        // flips even though the cell originated from an import.
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pricing_verifications.json");
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-01-01".to_string(),
+                wm: Some(0.5),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&path, 0, cells).expect("seed");
 
-        // Act: selector missing the colon
-        let result = save_verification(&path, "no-colon-here", "2026-06-30");
+        // Act
+        verify_at("openai-compat:grok-*", &path).expect("verify");
 
         // Assert
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("invalid selector"),
-            "expected 'invalid selector' in: {msg}"
-        );
-        assert!(!path.exists(), "sidecar should not have been written");
+        let overlay = load_catalog_overlay(&path).expect("load");
+        let cell = overlay
+            .cells
+            .get("openai-compat:grok-*")
+            .and_then(Option::as_ref)
+            .expect("cell present");
+        assert_eq!(cell.source, OverlaySource::User);
+        assert_eq!(cell.wm, Some(0.5), "value fields carry through unchanged");
     }
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
+    #[test]
+    fn verify_at_errors_when_no_overlay_cell_exists_for_selector() {
+        // Arrange: an empty overlay (the selector is baked-only or unknown).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        save_catalog_overlay(&path, 0, BTreeMap::new()).expect("seed empty");
+
+        // Act
+        let err =
+            verify_at("openai-compat:grok-*", &path).expect_err("no overlay cell must be an error");
+
+        // Assert
+        let msg = err.to_string();
+        assert!(msg.contains("nothing to stamp"), "msg: {msg}");
+        assert!(msg.contains("baked-only"), "msg: {msg}");
+    }
+
+    #[test]
+    fn verify_at_errors_when_overlay_cell_is_disabled() {
+        // Arrange: the selector is explicitly disabled (JSON null).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert("openai-compat:grok-*".to_string(), None);
+        save_catalog_overlay(&path, 0, cells).expect("seed");
+
+        // Act
+        let err =
+            verify_at("openai-compat:grok-*", &path).expect_err("a disabled cell must be an error");
+
+        // Assert: never resurrects a disabled row.
+        let msg = err.to_string();
+        assert!(msg.contains("disabled"), "msg: {msg}");
+        let overlay = load_catalog_overlay(&path).expect("load");
+        assert_eq!(
+            overlay.cells.get("openai-compat:grok-*"),
+            Some(&None),
+            "the disabled cell must remain untouched"
+        );
+    }
+
+    #[test]
+    fn verify_at_rejects_malformed_selector() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        let err =
+            verify_at("no-colon-here", &path).expect_err("malformed selector must be rejected");
+        assert!(err.to_string().contains("invalid selector"), "msg: {err}");
+        assert!(!path.exists(), "nothing should have been written");
+    }
 
     fn minimal_config() -> Config {
         let toml = r#"

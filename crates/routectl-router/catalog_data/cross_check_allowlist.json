@@ -1,0 +1,14 @@
+{
+  "anthropic-api:claude-sonnet-4-5*:max_context_tokens": {
+    "reason": "models.dev states limit.context = 1000000 for claude-sonnet-4-5, but litellm states max_input_tokens = 200000 for the same model id. Both anthropic-api rows for claude-sonnet-4-6 and the surrounding Opus generation agree at 1000000, so this looks like a models.dev data error rather than a real 1M beta window specific to sonnet-4-5. Resolving to the smaller (litellm) figure -- the conservative choice consistent with the catalog's fail-closed posture.",
+    "resolved": 200000
+  },
+  "openai-compat:qwen-*:max_context_tokens": {
+    "reason": "models.dev states limit.context = 32768 for dashscope/qwen-max, litellm states max_input_tokens = 30720. Small rounding-style discrepancy between the two vendor-tracking projects; resolving to the smaller (litellm) figure.",
+    "resolved": 30720
+  },
+  "openai-compat:minimax-*:max_context_tokens": {
+    "reason": "models.dev states limit.context = 196608 for minimax/MiniMax-M2, litellm states max_input_tokens = 200000. 196608 (192Ki) is the precise power-of-two figure typical of an exact vendor-enforced limit; 200000 reads as a rounded marketing figure. Resolving to the smaller (models.dev) figure, which is also the conservative choice.",
+    "resolved": 196608
+  }
+}

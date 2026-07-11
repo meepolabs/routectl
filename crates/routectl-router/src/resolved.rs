@@ -23,6 +23,7 @@ use std::sync::Arc;
 use routectl_core::Provider;
 use serde_json::Value;
 
+use crate::catalog::EffectiveRow;
 use crate::config::{HistoryReasoning, ReasoningDialect};
 
 /// One fully-resolved model entry: a nickname bound to a concrete
@@ -127,6 +128,15 @@ pub struct ResolvedModel {
     /// `provider` / `auth_secret_ref` above mirror the first (default)
     /// seat. `Arc<[..]>` so cloning at dispatch is a refcount bump.
     pub(crate) seats: Option<Arc<[crate::seat_pool::SeatTarget]>>,
+    /// The two-layer catalog merge (baked table + overlay cell) resolved
+    /// for this model's `(provider_kind, upstream)` selector at chain-build
+    /// time. The merge runs here, once, when the resolved table is built
+    /// (see `factory::apply_catalog_overlay`); the dispatch-path pricing
+    /// helper (`Router::record_would_trim`) reads this precomputed result
+    /// instead of re-running `lookup_baked_with_overrides` + `merge` per
+    /// request. Defaults to [`EffectiveRow::Missing`] until
+    /// `with_effective_row` stamps the real value.
+    pub effective_row: EffectiveRow,
 }
 
 impl ResolvedModel {
@@ -155,6 +165,7 @@ impl ResolvedModel {
             visible_routectl_provider: true,
             auth_secret_ref: None,
             seats: None,
+            effective_row: EffectiveRow::Missing,
         }
     }
 
@@ -253,6 +264,16 @@ impl ResolvedModel {
         self.seats = Some(seats);
         self
     }
+
+    /// Stamp the precomputed two-layer catalog merge for this model.
+    /// Called by `factory::apply_catalog_overlay` as a post-pass over the
+    /// resolved table so `build_resolved_models` itself never needs to
+    /// widen its own signature with an overlay parameter.
+    #[must_use]
+    pub fn with_effective_row(mut self, effective_row: EffectiveRow) -> Self {
+        self.effective_row = effective_row;
+        self
+    }
 }
 
 impl std::fmt::Debug for ResolvedModel {
@@ -297,6 +318,7 @@ impl std::fmt::Debug for ResolvedModel {
                     .as_ref()
                     .map(|s| s.iter().map(|t| t.state_key.as_str()).collect::<Vec<_>>()),
             )
+            .field("effective_row", &self.effective_row)
             .finish()
     }
 }
@@ -387,6 +409,20 @@ mod tests {
         assert!(m.header_extras.is_empty());
         assert!(m.payload_extras.is_none());
         assert!(m.stream_first_byte_timeout_ms.is_none());
+    }
+
+    #[test]
+    fn default_effective_row_is_missing_until_stamped() {
+        let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
+        let m = ResolvedModel::new("x", "p", p, "u");
+        assert_eq!(m.effective_row, EffectiveRow::Missing);
+    }
+
+    #[test]
+    fn with_effective_row_stamps_the_precomputed_merge() {
+        let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
+        let m = ResolvedModel::new("x", "p", p, "u").with_effective_row(EffectiveRow::Disabled);
+        assert_eq!(m.effective_row, EffectiveRow::Disabled);
     }
 
     #[test]

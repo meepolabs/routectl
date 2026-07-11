@@ -28,11 +28,8 @@
 //! steers these requests to a leg that DOES enforce it.
 
 use routectl_core::ToolDef;
+use routectl_core::capability::STRUCTURED_OUTPUT as STRUCTURED_OUTPUT_KEY;
 use serde_json::Value;
-
-/// Feature key for requests that need constrained decoding -- either an
-/// `output_config.format` structured output or a strict tool.
-const STRUCTURED_OUTPUT_KEY: &str = "structured_output";
 
 /// Derive feature keys from the request's `tools` array and
 /// `provider_extras`. Tool-type keys come from `ToolDef::Other(v)

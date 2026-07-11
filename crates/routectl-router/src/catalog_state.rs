@@ -1,0 +1,1223 @@
+//! Cross-version catalog drift observability: `catalog_state.json`.
+//!
+//! A SEPARATE, purely rebuildable state file (never behavioral, unlike
+//! [`crate::catalog_overlay`]): it records the baked catalog row this
+//! build last observed for every IN-USE selector (a
+//! `(provider_kind, model)` pair a configured, selectable model
+//! actually references), keyed against the `CATALOG_VERSION` that
+//! produced it. On the boot where `CATALOG_VERSION` changes,
+//! [`check_drift_and_persist_state`] diffs the prior snapshot against
+//! today's baked rows and emits one structured `tracing::warn!` per
+//! selector whose row actually changed -- making a silent codegen
+//! refresh visible to the operator instead of a mystery pricing
+//! shift months later.
+//!
+//! NEVER blocks serve: every failure mode (missing file, corrupt JSON,
+//! a `schema_version` too new to understand, a write that fails) is
+//! caught inside this module and turned into a `tracing::warn!` plus a
+//! rebuild-from-scratch, never a propagated `Err`. Losing this file
+//! costs exactly one skipped diff on the next `CATALOG_VERSION` bump --
+//! there is nothing here worth failing startup over.
+//!
+//! Writer discipline extends the OAuth credentials-file standard
+//! (`routectl-auth/src/oauth/file_io.rs`) with the post-rename
+//! parent-directory `fsync` `crate::catalog_overlay` already carries (not
+//! yet backported to routectl-auth): temp file in the same directory,
+//! `0o600` set before the write, `fsync` the temp file, atomic `rename`,
+//! `0o600` re-set after, then `fsync` the PARENT DIRECTORY so the
+//! rename itself survives a crash (mirrors
+//! `crate::config_migrate::write_config_atomic`). Unlike the overlay's
+//! `save`, there is deliberately NO revision check here: this file is
+//! rebuildable observability data, so a last-write-wins race between
+//! two boots is harmless (the loser's boot simply gets re-diffed on the
+//! next `CATALOG_VERSION` change from whichever snapshot won).
+
+use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::catalog::{CatalogRow, lookup, lookup_overlay_cell};
+use crate::catalog_overlay::CatalogOverlay;
+
+/// Schema version this build understands for `catalog_state.json`. A
+/// file whose `schema_version` exceeds this is treated exactly like a
+/// corrupt file by [`check_drift_and_persist_state`]: warn once, skip
+/// this boot's diff, rebuild. Unlike the overlay, there is no
+/// fail-closed posture to preserve here -- this file carries no
+/// behavior, so "rebuild from scratch" is always the safe answer.
+pub const CATALOG_STATE_SCHEMA_VERSION: u32 = 1;
+
+/// On-disk cross-version drift state: the `CATALOG_VERSION` this
+/// build's serve process last observed, and the baked row it saw at
+/// that time for every in-use selector.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CatalogState {
+    pub schema_version: u32,
+    pub last_seen_catalog_version: u32,
+    /// Selector (see [`selector_key`]) -> the baked row
+    /// [`crate::catalog::lookup`] returned for it as of
+    /// `last_seen_catalog_version`.
+    pub in_use_snapshot: BTreeMap<String, CatalogRow>,
+}
+
+impl Default for CatalogState {
+    fn default() -> Self {
+        Self {
+            schema_version: CATALOG_STATE_SCHEMA_VERSION,
+            last_seen_catalog_version: 0,
+            in_use_snapshot: BTreeMap::new(),
+        }
+    }
+}
+
+/// Hand-written `Deserialize`: `CatalogRow` carries `tier: Option<&'static
+/// str>`, and deriving `Deserialize` on a type that nests `CatalogRow`
+/// inside another `#[derive(Deserialize)]` type requires proving `'de:
+/// 'static` for an arbitrary caller-chosen `'de` -- unsatisfiable, so the
+/// derive does not compile here (unlike `CatalogRow`'s OWN derive, which
+/// never has to prove that for an arbitrary caller). This impl
+/// deserializes into a fully-owned shadow ([`StoredRow`], `tier: Option<
+/// String>`) and converts to the real `&'static str` tier via
+/// [`StoredRow::into_catalog_row`].
+impl<'de> Deserialize<'de> for CatalogState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Raw {
+            schema_version: u32,
+            last_seen_catalog_version: u32,
+            in_use_snapshot: BTreeMap<String, StoredRow>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let mut in_use_snapshot = BTreeMap::new();
+        for (selector, stored) in raw.in_use_snapshot {
+            let row = stored
+                .into_catalog_row()
+                .map_err(serde::de::Error::custom)?;
+            in_use_snapshot.insert(selector, row);
+        }
+        Ok(Self {
+            schema_version: raw.schema_version,
+            last_seen_catalog_version: raw.last_seen_catalog_version,
+            in_use_snapshot,
+        })
+    }
+}
+
+/// Fully-owned shadow of [`CatalogRow`] used ONLY as the `Deserialize`
+/// target for `in_use_snapshot` values -- see [`CatalogState`]'s manual
+/// `Deserialize` impl for why `CatalogRow` cannot derive it directly in
+/// this nested position. Every field matches `CatalogRow`'s except
+/// `tier`, which stays a plain owned `String` until
+/// [`into_catalog_row`](StoredRow::into_catalog_row) maps it onto the
+/// small fixed set of real `&'static str` tier tokens.
+///
+/// Deliberately NOT `#[serde(default)]` -- mirrors
+/// [`crate::catalog_overlay::OverlayCell`]'s same deliberate choice: our
+/// own writer always emits every field (including `null` for an unset
+/// `Option`, since `CatalogRow`'s `Serialize` has no
+/// `skip_serializing_if`), so a row object missing a field is truncated
+/// or hand-edited input, not a legitimate forward-compat gap. Silently
+/// defaulting a missing `wm`/`rm`/etc. to `0.0` would fabricate a false
+/// drift signal instead of routing the file through the `Corrupt` path
+/// [`check_drift_and_persist_state`] advertises.
+#[derive(Debug, Deserialize)]
+struct StoredRow {
+    wm: f32,
+    rm: f32,
+    ttl_seconds: u32,
+    min_prefix_tokens: u32,
+    has_storage_rent: bool,
+    storage_rent: f32,
+    auto_cacher: bool,
+    tier: Option<String>,
+    max_context_tokens: Option<u32>,
+    capabilities: BTreeMap<String, bool>,
+}
+
+impl StoredRow {
+    /// Convert to a real [`CatalogRow`], mapping `tier` onto its
+    /// `&'static str` token. `Err` on any tier string other than the two
+    /// this build knows about -- a state file is rebuildable
+    /// observability data, so an unrecognized tier (a newer routectl's
+    /// tier vocabulary) is treated as corrupt input by the caller rather
+    /// than silently coerced to `None`.
+    fn into_catalog_row(self) -> Result<CatalogRow, String> {
+        let tier = match self.tier.as_deref() {
+            None => None,
+            Some("5m") => Some("5m"),
+            Some("1h") => Some("1h"),
+            Some(other) => {
+                return Err(format!("catalog state: unknown tier `{other}`"));
+            }
+        };
+        Ok(CatalogRow {
+            wm: self.wm,
+            rm: self.rm,
+            ttl_seconds: self.ttl_seconds,
+            min_prefix_tokens: self.min_prefix_tokens,
+            has_storage_rent: self.has_storage_rent,
+            storage_rent: self.storage_rent,
+            auto_cacher: self.auto_cacher,
+            tier,
+            max_context_tokens: self.max_context_tokens,
+            capabilities: self.capabilities,
+        })
+    }
+}
+
+/// Errors from loading `catalog_state.json`. Every variant is folded
+/// into the SAME "warn once, skip the diff, rebuild" posture by
+/// [`check_drift_and_persist_state`] -- see the module doc.
+#[derive(Debug, thiserror::Error)]
+pub enum CatalogStateError {
+    #[error("catalog state {path}: corrupt or invalid: {reason}")]
+    Corrupt { path: String, reason: String },
+
+    #[error(
+        "catalog state {path}: schema_version {found} is newer than the {current} this build supports"
+    )]
+    VersionTooNew {
+        path: String,
+        found: u32,
+        current: u32,
+    },
+
+    #[error("catalog state {path}: {reason}")]
+    Io { path: String, reason: String },
+}
+
+/// Resolve the state file's default path: `catalog_state.json` inside
+/// `routectl_config_dir()`, sibling to `catalog_overlay.json`.
+#[must_use]
+pub fn default_path() -> PathBuf {
+    crate::config::routectl_config_dir().join("catalog_state.json")
+}
+
+/// Build the `"provider_kind:model"` key this module uses to name an
+/// in-use catalog selector. Distinct from
+/// [`crate::catalog::CachePricingSelector`]'s glob-keyed selectors:
+/// this key names one CONCRETE resolved model string, never a pattern.
+#[must_use]
+pub fn selector_key(provider_kind: &str, model: &str) -> String {
+    format!("{provider_kind}:{model}")
+}
+
+/// Load `catalog_state.json` at `path`.
+///
+/// - missing file -> `Ok(None)` (first run; not an error).
+/// - corrupt / invalid JSON -> `Err(CatalogStateError::Corrupt)`.
+/// - `schema_version` newer than this build understands ->
+///   `Err(CatalogStateError::VersionTooNew)`.
+/// - any other I/O failure -> `Err(CatalogStateError::Io)`.
+fn load(path: &Path) -> Result<Option<CatalogState>, CatalogStateError> {
+    let display = path.display().to_string();
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(CatalogStateError::Io {
+                path: display,
+                reason: e.to_string(),
+            });
+        }
+    };
+
+    let state: CatalogState =
+        serde_json::from_slice(&bytes).map_err(|e| CatalogStateError::Corrupt {
+            path: display.clone(),
+            reason: e.to_string(),
+        })?;
+
+    if state.schema_version > CATALOG_STATE_SCHEMA_VERSION {
+        return Err(CatalogStateError::VersionTooNew {
+            path: display,
+            found: state.schema_version,
+            current: CATALOG_STATE_SCHEMA_VERSION,
+        });
+    }
+
+    Ok(Some(state))
+}
+
+/// Persist `state` atomically: temp file in `path`'s parent directory,
+/// `0o600`, `fsync`, `rename`, re-`0o600`, then `fsync` the parent
+/// directory. No revision check -- see the module doc.
+fn save(path: &Path, state: &CatalogState) -> Result<(), CatalogStateError> {
+    ensure_dir(path)?;
+    let tmp = write_to_temp(path, state)?;
+    atomic_rename(tmp, path)
+}
+
+/// Ensure the parent directory exists with `0o700` perms on Unix.
+/// Idempotent and self-healing if the operator loosened the dir's mode.
+fn ensure_dir(path: &Path) -> Result<(), CatalogStateError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent).map_err(|e| CatalogStateError::Io {
+        path: parent.display().to_string(),
+        reason: format!("create_dir_all: {e}"),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// Serialize `state`, write it to a temp file in `path`'s parent
+/// directory, `chmod 0o600` BEFORE writing, and `fsync` before
+/// returning the still-open temp file for the caller to rename.
+fn write_to_temp(
+    path: &Path,
+    state: &CatalogState,
+) -> Result<tempfile::NamedTempFile, CatalogStateError> {
+    let display = path.display().to_string();
+    let parent = path.parent().ok_or_else(|| CatalogStateError::Io {
+        path: display.clone(),
+        reason: "path has no parent directory".to_string(),
+    })?;
+
+    let json = serde_json::to_vec_pretty(state).map_err(|e| CatalogStateError::Io {
+        path: display.clone(),
+        reason: format!("serialize: {e}"),
+    })?;
+
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".catalog_state.tmp.")
+        .suffix(".json")
+        .tempfile_in(parent)
+        .map_err(|e| CatalogStateError::Io {
+            path: parent.display().to_string(),
+            reason: format!("tempfile: {e}"),
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| CatalogStateError::Io {
+                path: display.clone(),
+                reason: format!("chmod tempfile: {e}"),
+            })?;
+    }
+
+    tmp.write_all(&json).map_err(|e| CatalogStateError::Io {
+        path: display.clone(),
+        reason: format!("write tempfile: {e}"),
+    })?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| CatalogStateError::Io {
+            path: display.clone(),
+            reason: format!("fsync tempfile: {e}"),
+        })?;
+
+    Ok(tmp)
+}
+
+/// Persist the temp file onto `path` via `rename` (atomic on POSIX
+/// within one filesystem), re-set `0o600` as defense-in-depth, then
+/// `fsync` the parent directory: `rename` is atomic for concurrent
+/// readers, but is not durable across a crash/power loss until the
+/// directory entry pointing at the new inode is flushed too.
+fn atomic_rename(tmp: tempfile::NamedTempFile, path: &Path) -> Result<(), CatalogStateError> {
+    let display = path.display().to_string();
+    let parent = path.parent().map(Path::to_path_buf);
+    tmp.persist(path).map_err(|e| CatalogStateError::Io {
+        path: display.clone(),
+        reason: format!("rename: {e}"),
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Some(parent) = parent
+        && let Ok(dir) = std::fs::File::open(&parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Compute the current baked row for every in-use `(provider_kind,
+/// model)` pair, keyed by [`selector_key`]. Pure baked lookup
+/// ([`crate::catalog::lookup`] -- no overlay, no legacy
+/// `[cache_pricing]` overrides): this file tracks the COMPILED-IN
+/// catalog table across `CATALOG_VERSION` bumps, independent of any
+/// operator override layer.
+fn current_snapshot(in_use: &[(String, String)]) -> BTreeMap<String, CatalogRow> {
+    in_use
+        .iter()
+        .map(|(provider_kind, model)| {
+            (
+                selector_key(provider_kind, model),
+                lookup(provider_kind, model, None),
+            )
+        })
+        .collect()
+}
+
+/// Check `catalog_state.json` for a `CATALOG_VERSION` change since the
+/// last boot, emit a structured per-cell drift log for every in-use
+/// selector whose baked row actually changed, and persist the
+/// refreshed state. NEVER fails: every I/O or corruption error is
+/// caught, warned once, and treated as "rebuild from an empty
+/// baseline" -- this is observability, not behavior, and must
+/// never block `serve`.
+///
+/// `in_use` is the caller's list of `(provider_kind, model)` pairs
+/// currently referenced by configured, selectable `[models]` entries
+/// -- i.e. what the built router actually resolved this boot (the same
+/// derivation `crate::factory::apply_catalog_overlay` uses per resolved
+/// model). `overlay` is this boot's loaded catalog overlay, used only
+/// to compute the `overlay_masked` flag on a changed cell -- this
+/// function never reads or writes the overlay file itself.
+pub fn check_drift_and_persist_state(
+    in_use: &[(String, String)],
+    overlay: &CatalogOverlay,
+    path: &Path,
+) {
+    let catalog_version = crate::catalog_baked::CATALOG_VERSION;
+    let current = current_snapshot(in_use);
+
+    match load(path) {
+        Ok(None) => persist(path, catalog_version, current),
+        Ok(Some(state)) if state.last_seen_catalog_version == catalog_version => {
+            // No-op: this exact CATALOG_VERSION was already diffed (or
+            // baselined) on a prior boot. Deliberately does not
+            // rewrite the file -- an in-use set that grew or shrank
+            // since that boot is baselined on the NEXT CATALOG_VERSION
+            // change instead, keeping "exactly once per version" a
+            // hard property rather than a best-effort one.
+        }
+        Ok(Some(state)) => {
+            log_drift(in_use, &state.in_use_snapshot, &current, overlay);
+            persist(path, catalog_version, current);
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                reason = %e,
+                "catalog_state.json is corrupt, unreadable, or from a newer routectl \
+                 build; skipping this boot's cross-version catalog drift diff and \
+                 rebuilding the state file",
+            );
+            persist(path, catalog_version, current);
+        }
+    }
+}
+
+/// Serialize and atomically persist a fresh [`CatalogState`], warning
+/// (never propagating) on write failure.
+fn persist(path: &Path, catalog_version: u32, in_use_snapshot: BTreeMap<String, CatalogRow>) {
+    let state = CatalogState {
+        schema_version: CATALOG_STATE_SCHEMA_VERSION,
+        last_seen_catalog_version: catalog_version,
+        in_use_snapshot,
+    };
+    if let Err(e) = save(path, &state) {
+        tracing::warn!(
+            path = %path.display(),
+            reason = %e,
+            "failed to persist catalog_state.json; cross-version catalog drift \
+             observability is degraded for the next CATALOG_VERSION change, but serve \
+             continues normally",
+        );
+    }
+}
+
+/// Emit one structured `tracing::warn!` per in-use selector whose baked
+/// row differs between `prior` (the last-persisted snapshot) and
+/// `current` (this boot's baked lookup). A selector absent from
+/// `prior` (newly in use since the last boot) has nothing to diff
+/// against and is silently skipped -- it is simply added to the
+/// persisted snapshot going forward.
+fn log_drift(
+    in_use: &[(String, String)],
+    prior: &BTreeMap<String, CatalogRow>,
+    current: &BTreeMap<String, CatalogRow>,
+    overlay: &CatalogOverlay,
+) {
+    for (provider_kind, model) in in_use {
+        let selector = selector_key(provider_kind, model);
+        let Some(old_row) = prior.get(&selector) else {
+            continue;
+        };
+        let Some(new_row) = current.get(&selector) else {
+            continue;
+        };
+        let Some((impact_class, old_diff, new_diff)) = diff_row(old_row, new_row) else {
+            continue;
+        };
+        let overlay_masked = lookup_overlay_cell(provider_kind, model, overlay).is_some();
+        tracing::warn!(
+            selector = selector.as_str(),
+            impact_class,
+            overlay_masked,
+            old = old_diff.as_str(),
+            new = new_diff.as_str(),
+            "catalog baked row changed across a CATALOG_VERSION update",
+        );
+    }
+}
+
+/// Serialize `v` to a `serde_json::Value`, falling back to `Value::Null`
+/// on the (practically unreachable, since every `CatalogRow` field is a
+/// plain number/bool/string/map) serialize failure -- this is a
+/// best-effort diagnostic log, never worth a panic.
+fn jv<T: Serialize>(v: T) -> Value {
+    serde_json::to_value(v).unwrap_or(Value::Null)
+}
+
+/// Diff two baked rows for the SAME selector across a `CATALOG_VERSION`
+/// change. Returns `None` when every tracked field is identical (no
+/// drift to log). Otherwise returns the impact class -- `"economics"`
+/// (any of `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/storage-rent
+/// shape/`auto_cacher`/`tier` changed, taking PRIORITY over the other
+/// two classes since it changes the break-even math even when
+/// `max_context_tokens` or `capabilities` changed too), `"window"`
+/// (`max_context_tokens` changed with no economics change, regardless
+/// of whether capabilities also changed), or `"capabilities-only"`
+/// (ONLY the capability-prior map changed) -- plus compact-JSON
+/// `old`/`new` subsets covering ONLY the fields that actually differ.
+///
+/// This function's field list must track [`CatalogRow`]'s exactly (see
+/// `diff_row_covers_every_catalog_row_field` in the test module, an
+/// exhaustive-destructure guard that fails to COMPILE if a field is
+/// ever added to or removed from the row without a matching update
+/// here) -- an omitted field would silently drop out of drift
+/// detection.
+fn diff_row(old: &CatalogRow, new: &CatalogRow) -> Option<(&'static str, String, String)> {
+    let mut changed: Vec<(&'static str, Value, Value)> = Vec::new();
+    let mut economics_changed = false;
+    let mut window_changed = false;
+
+    if old.wm != new.wm {
+        economics_changed = true;
+        changed.push(("wm", jv(old.wm), jv(new.wm)));
+    }
+    if old.rm != new.rm {
+        economics_changed = true;
+        changed.push(("rm", jv(old.rm), jv(new.rm)));
+    }
+    if old.ttl_seconds != new.ttl_seconds {
+        economics_changed = true;
+        changed.push(("ttl_seconds", jv(old.ttl_seconds), jv(new.ttl_seconds)));
+    }
+    if old.min_prefix_tokens != new.min_prefix_tokens {
+        economics_changed = true;
+        changed.push((
+            "min_prefix_tokens",
+            jv(old.min_prefix_tokens),
+            jv(new.min_prefix_tokens),
+        ));
+    }
+    if old.has_storage_rent != new.has_storage_rent {
+        economics_changed = true;
+        changed.push((
+            "has_storage_rent",
+            jv(old.has_storage_rent),
+            jv(new.has_storage_rent),
+        ));
+    }
+    if old.storage_rent != new.storage_rent {
+        economics_changed = true;
+        changed.push(("storage_rent", jv(old.storage_rent), jv(new.storage_rent)));
+    }
+    if old.auto_cacher != new.auto_cacher {
+        economics_changed = true;
+        changed.push(("auto_cacher", jv(old.auto_cacher), jv(new.auto_cacher)));
+    }
+    if old.tier != new.tier {
+        // A tier reclassification (e.g. a selector moving from the 5m
+        // to the 1h breakpoint row in a codegen refresh) changes which
+        // write-multiplier economics apply even when `wm`/`rm`
+        // themselves happen to coincide -- always economics-impacting.
+        economics_changed = true;
+        changed.push(("tier", jv(old.tier), jv(new.tier)));
+    }
+    if old.max_context_tokens != new.max_context_tokens {
+        window_changed = true;
+        changed.push((
+            "max_context_tokens",
+            jv(old.max_context_tokens),
+            jv(new.max_context_tokens),
+        ));
+    }
+    if old.capabilities != new.capabilities {
+        changed.push(("capabilities", jv(&old.capabilities), jv(&new.capabilities)));
+    }
+
+    if changed.is_empty() {
+        return None;
+    }
+
+    let impact_class = if economics_changed {
+        "economics"
+    } else if window_changed {
+        "window"
+    } else {
+        "capabilities-only"
+    };
+
+    let mut old_obj = Map::new();
+    let mut new_obj = Map::new();
+    for (field, old_value, new_value) in changed {
+        old_obj.insert(field.to_string(), old_value);
+        new_obj.insert(field.to_string(), new_value);
+    }
+    Some((
+        impact_class,
+        Value::Object(old_obj).to_string(),
+        Value::Object(new_obj).to_string(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog_overlay::{OverlayCell, OverlaySource};
+
+    /// Pin: fails to COMPILE if `CatalogRow` ever gains or loses a
+    /// field without a matching update to `diff_row` (and `StoredRow`)
+    /// above. See `diff_row`'s doc comment for why this guard exists.
+    #[test]
+    fn diff_row_covers_every_catalog_row_field() {
+        let CatalogRow {
+            wm: _,
+            rm: _,
+            ttl_seconds: _,
+            min_prefix_tokens: _,
+            has_storage_rent: _,
+            storage_rent: _,
+            auto_cacher: _,
+            tier: _,
+            max_context_tokens: _,
+            capabilities: _,
+        } = CatalogRow::sentinel();
+    }
+
+    /// A real, stable in-use pair the baked table matches with a
+    /// tiered (5m) row -- mirrors the fixture other `catalog.rs` tests
+    /// already use for `lookup("anthropic-api", "claude-opus-4-8", ..)`.
+    const SELECTOR: (&str, &str) = ("anthropic-api", "claude-opus-4-8");
+
+    fn in_use() -> Vec<(String, String)> {
+        vec![(SELECTOR.0.to_string(), SELECTOR.1.to_string())]
+    }
+
+    fn current_row() -> CatalogRow {
+        lookup(SELECTOR.0, SELECTOR.1, None)
+    }
+
+    // -----------------------------------------------------------------------
+    // Shape + atomic write: 0600, no leftover tempfiles, round-trips.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_path_uses_catalog_state_json_basename() {
+        let path = default_path();
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("catalog_state.json")
+        );
+    }
+
+    #[test]
+    fn check_drift_first_run_persists_baseline_without_any_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path)
+        });
+
+        assert!(
+            events.is_empty(),
+            "first run must not emit any event: {events:?}"
+        );
+
+        let loaded = load(&path)
+            .unwrap()
+            .expect("state file must exist after first run");
+        assert_eq!(loaded.schema_version, CATALOG_STATE_SCHEMA_VERSION);
+        assert_eq!(
+            loaded.last_seen_catalog_version,
+            crate::catalog_baked::CATALOG_VERSION
+        );
+        assert_eq!(
+            loaded
+                .in_use_snapshot
+                .get(&selector_key(SELECTOR.0, SELECTOR.1)),
+            Some(&current_row())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_state_file_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "catalog_state.json must be 0600");
+    }
+
+    #[test]
+    fn check_drift_leaves_no_leftover_tempfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftover.is_empty(), "left tempfiles: {leftover:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // No-op when the catalog version is unchanged: exactly-once per version.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn no_op_when_last_seen_catalog_version_matches_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+
+        let state = CatalogState {
+            schema_version: CATALOG_STATE_SCHEMA_VERSION,
+            last_seen_catalog_version: crate::catalog_baked::CATALOG_VERSION,
+            in_use_snapshot: BTreeMap::new(),
+        };
+        save(&path, &state).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert!(
+            events.is_empty(),
+            "unchanged version must emit nothing: {events:?}"
+        );
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "unchanged version must not rewrite the file");
+    }
+
+    #[test]
+    fn second_start_on_the_same_version_after_a_diff_emits_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+
+        let mut drifted = current_row();
+        drifted.wm += 1.0;
+        let mut snapshot = BTreeMap::new();
+        snapshot.insert(selector_key(SELECTOR.0, SELECTOR.1), drifted);
+        let stale_version = crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1);
+        save(
+            &path,
+            &CatalogState {
+                schema_version: CATALOG_STATE_SCHEMA_VERSION,
+                last_seen_catalog_version: stale_version,
+                in_use_snapshot: snapshot,
+            },
+        )
+        .unwrap();
+
+        let first_boot = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+        assert_eq!(
+            first_boot.len(),
+            1,
+            "the version change must log exactly one drifted cell"
+        );
+
+        let second_boot = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+        assert!(
+            second_boot.is_empty(),
+            "a second start on the same (now-current) version must emit nothing: {second_boot:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CATALOG_VERSION change: per-cell structured drift log, in-use only,
+    // impact_class + overlay_masked correctness.
+    // -----------------------------------------------------------------------
+
+    fn prior_state_with(row: CatalogRow, last_seen: u32) -> CatalogState {
+        let mut snapshot = BTreeMap::new();
+        snapshot.insert(selector_key(SELECTOR.0, SELECTOR.1), row);
+        CatalogState {
+            schema_version: CATALOG_STATE_SCHEMA_VERSION,
+            last_seen_catalog_version: last_seen,
+            in_use_snapshot: snapshot,
+        }
+    }
+
+    #[test]
+    fn version_change_logs_economics_drift_for_changed_wm() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let mut drifted = current_row();
+        drifted.wm += 1.0;
+        save(
+            &path,
+            &prior_state_with(
+                drifted,
+                crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(
+            event.field("selector"),
+            Some(selector_key(SELECTOR.0, SELECTOR.1).as_str())
+        );
+        assert_eq!(event.field("impact_class"), Some("economics"));
+        assert_eq!(event.field("overlay_masked"), Some("false"));
+        assert!(event.field("old").unwrap().contains("\"wm\""));
+        assert!(event.field("new").unwrap().contains("\"wm\""));
+    }
+
+    #[test]
+    fn version_change_logs_window_drift_when_only_context_window_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let mut drifted = current_row();
+        drifted.max_context_tokens = Some(drifted.max_context_tokens.unwrap_or(0) + 1);
+        save(
+            &path,
+            &prior_state_with(
+                drifted,
+                crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].field("impact_class"), Some("window"));
+    }
+
+    #[test]
+    fn version_change_logs_economics_drift_for_changed_tier() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let mut drifted = current_row();
+        drifted.tier = Some("1h");
+        save(
+            &path,
+            &prior_state_with(
+                drifted,
+                crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].field("impact_class"), Some("economics"));
+        assert!(events[0].field("old").unwrap().contains("\"tier\""));
+    }
+
+    #[test]
+    fn window_takes_priority_over_capabilities_when_both_changed_with_no_economics_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let mut drifted = current_row();
+        drifted.max_context_tokens = Some(drifted.max_context_tokens.unwrap_or(0) + 1);
+        drifted.capabilities.insert("web_search".to_string(), true);
+        save(
+            &path,
+            &prior_state_with(
+                drifted,
+                crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].field("impact_class"), Some("window"));
+        // Both changed fields still land in the subset, even though
+        // `window` won the classification.
+        assert!(
+            events[0]
+                .field("old")
+                .unwrap()
+                .contains("\"max_context_tokens\"")
+        );
+        assert!(events[0].field("old").unwrap().contains("\"capabilities\""));
+    }
+
+    #[test]
+    fn version_change_logs_capabilities_only_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let mut drifted = current_row();
+        drifted.capabilities.insert("web_search".to_string(), true);
+        save(
+            &path,
+            &prior_state_with(
+                drifted,
+                crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].field("impact_class"), Some("capabilities-only"));
+    }
+
+    #[test]
+    fn version_change_with_no_actual_row_change_emits_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        save(
+            &path,
+            &prior_state_with(
+                current_row(),
+                crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert!(events.is_empty(), "identical rows must not log: {events:?}");
+    }
+
+    #[test]
+    fn version_change_skips_selectors_absent_from_the_prior_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        // Prior snapshot has NO entry for our selector -- e.g. a model
+        // added to `[models]` since the last boot.
+        save(
+            &path,
+            &CatalogState {
+                schema_version: CATALOG_STATE_SCHEMA_VERSION,
+                last_seen_catalog_version: crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+                in_use_snapshot: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert!(
+            events.is_empty(),
+            "a newly-in-use selector has nothing to diff: {events:?}"
+        );
+    }
+
+    #[test]
+    fn version_change_ignores_selectors_no_longer_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let mut snapshot = BTreeMap::new();
+        // A selector that was in use last boot but is NOT in `in_use()`
+        // this boot, with a drifted row.
+        let mut drifted = current_row();
+        drifted.wm += 1.0;
+        snapshot.insert(selector_key("openai-compat", "retired-model"), drifted);
+        save(
+            &path,
+            &CatalogState {
+                schema_version: CATALOG_STATE_SCHEMA_VERSION,
+                last_seen_catalog_version: crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+                in_use_snapshot: snapshot,
+            },
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert!(
+            events.is_empty(),
+            "a selector no longer in use must not be diffed: {events:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_masked_true_when_an_overlay_cell_wins_over_the_changed_selector() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let mut drifted = current_row();
+        drifted.wm += 1.0;
+        save(
+            &path,
+            &prior_state_with(
+                drifted,
+                crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            ),
+        )
+        .unwrap();
+
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            format!("{}:{}", SELECTOR.0, SELECTOR.1),
+            Some(OverlayCell {
+                source: OverlaySource::User,
+                verified_at: "2026-07-01".to_string(),
+                wm: Some(9.99),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        let overlay = CatalogOverlay {
+            schema_version: 1,
+            revision: 1,
+            cells,
+        };
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &overlay, &path);
+        });
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].field("overlay_masked"), Some("true"));
+    }
+
+    #[test]
+    fn overlay_masked_false_when_no_overlay_cell_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let mut drifted = current_row();
+        drifted.wm += 1.0;
+        save(
+            &path,
+            &prior_state_with(
+                drifted,
+                crate::catalog_baked::CATALOG_VERSION.wrapping_sub(1),
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].field("overlay_masked"), Some("false"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Corrupt / unreadable / newer schema_version: warn once, never blocks,
+    // rebuilds after.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn corrupt_state_file_warns_once_skips_diff_and_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        std::fs::write(&path, b"not json {{{").unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(
+            events.len(),
+            1,
+            "corrupt file must warn exactly once: {events:?}"
+        );
+        assert!(events[0].message.contains("corrupt"));
+
+        // Never blocks: the function returned normally (no panic, no
+        // Result to propagate), and the state is rebuilt for next boot.
+        let loaded = load(&path)
+            .unwrap()
+            .expect("state must be rebuilt after a corrupt boot");
+        assert_eq!(
+            loaded.last_seen_catalog_version,
+            crate::catalog_baked::CATALOG_VERSION
+        );
+    }
+
+    #[test]
+    fn unknown_tier_string_is_treated_as_corrupt_warns_once_and_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let selector = selector_key(SELECTOR.0, SELECTOR.1);
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":1,"last_seen_catalog_version":0,"in_use_snapshot":{{"{selector}":{{
+                    "wm":1.25,"rm":0.1,"ttl_seconds":300,"min_prefix_tokens":4096,
+                    "has_storage_rent":false,"storage_rent":0.0,"auto_cacher":false,
+                    "tier":"3h","max_context_tokens":null,"capabilities":{{}}
+                }}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(
+            events.len(),
+            1,
+            "an unrecognized tier string must warn exactly once, same as corrupt JSON: {events:?}"
+        );
+        assert!(events[0].message.contains("corrupt"));
+
+        let loaded = load(&path)
+            .unwrap()
+            .expect("state must still be rebuilt after an unknown-tier boot");
+        assert_eq!(
+            loaded.last_seen_catalog_version,
+            crate::catalog_baked::CATALOG_VERSION
+        );
+    }
+
+    #[test]
+    fn row_object_missing_a_field_is_treated_as_corrupt_not_silently_defaulted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        let selector = selector_key(SELECTOR.0, SELECTOR.1);
+        // Omits "wm" entirely -- our own writer always emits every
+        // field, so a missing key means truncated/hand-edited input.
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":1,"last_seen_catalog_version":0,"in_use_snapshot":{{"{selector}":{{
+                    "rm":0.1,"ttl_seconds":300,"min_prefix_tokens":4096,
+                    "has_storage_rent":false,"storage_rent":0.0,"auto_cacher":false,
+                    "tier":null,"max_context_tokens":null,"capabilities":{{}}
+                }}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(
+            events.len(),
+            1,
+            "a row missing a required field must warn as corrupt, not silently default: {events:?}"
+        );
+        assert!(events[0].message.contains("corrupt"));
+    }
+
+    #[test]
+    fn newer_schema_version_warns_once_skips_diff_and_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":{},"last_seen_catalog_version":1,"in_use_snapshot":{{}}}}"#,
+                CATALOG_STATE_SCHEMA_VERSION + 1
+            ),
+        )
+        .unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        assert_eq!(
+            events.len(),
+            1,
+            "too-new schema must warn exactly once: {events:?}"
+        );
+
+        let loaded = load(&path).unwrap().expect("state must be rebuilt");
+        assert_eq!(loaded.schema_version, CATALOG_STATE_SCHEMA_VERSION);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_state_file_warns_once_skips_diff_and_never_blocks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_state.json");
+        save(&path, &CatalogState::default()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let events = routectl_testkit::capture_events(|| {
+            check_drift_and_persist_state(&in_use(), &CatalogOverlay::default(), &path);
+        });
+
+        // Restore perms before any assertion can panic and leave a
+        // locked-down tempdir behind for the OS to clean up awkwardly.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Running as root (some CI/dev containers) bypasses the
+        // permission bit entirely, in which case this degrades to the
+        // "readable" path -- skip rather than false-fail.
+        if events.is_empty() {
+            return;
+        }
+        assert_eq!(
+            events.len(),
+            1,
+            "unreadable file must warn exactly once: {events:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // selector_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn selector_key_joins_provider_kind_and_model_with_a_colon() {
+        assert_eq!(
+            selector_key("anthropic-api", "claude-opus-4-8"),
+            "anthropic-api:claude-opus-4-8"
+        );
+    }
+}
