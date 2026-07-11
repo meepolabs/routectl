@@ -1,19 +1,24 @@
 //! Filesystem-watch wiring for routectl's hot-reload path.
 //!
-//! Watches the parent directories of `config.toml` and
-//! `credentials.json` (passed in as `WatchTarget`s), debounces a burst
-//! of fs events into a single delivery via `notify-debouncer-full`,
-//! routes events back to the reload coordinator by exact-basename
-//! match against each target, and emits one `ReloadRequest` per
-//! target whose final-name event survives the debounce.
+//! Watches the parent directories of `config.toml`,
+//! `credentials.json`, and `catalog_overlay.json` (passed in as
+//! `WatchTarget`s), debounces a burst of fs events into a single
+//! delivery via `notify-debouncer-full`, routes events back to the
+//! reload coordinator by exact-basename match against each target,
+//! and emits one `ReloadRequest` per target whose final-name event
+//! survives the debounce.
 //!
-//! Why parent directories: both writers go through the
+//! Why parent directories: all three writers go through the
 //! tempfile + fsync + rename-into-place pattern (see
-//! `crates/routectl-auth/src/oauth/file_io.rs`). Watching the target
-//! file inode directly misses the swap because `rename` replaces the
-//! inode under the watched path on Linux. Watching the parent dir +
-//! filtering on `path.file_name() == target.file_name()` reliably
-//! sees the final post-rename event.
+//! `crates/routectl-auth/src/oauth/file_io.rs` and
+//! `crates/routectl-router/src/catalog_overlay.rs::save`). Watching
+//! the target file inode directly misses the swap because `rename`
+//! replaces the inode under the watched path on Linux. Watching the
+//! parent dir + filtering on `path.file_name() == target.file_name()`
+//! reliably sees the final post-rename event -- including the first
+//! write ever, since a not-yet-existent overlay file's parent
+//! directory (`routectl_config_dir()`) already exists once a config
+//! path is registered.
 //!
 //! Self-write filter: NONE. Reload is idempotent (load -> parse ->
 //! write-lock-overwrite + Arc swap). At worst a self-triggered fs
@@ -41,6 +46,11 @@ pub enum ReloadRequest {
     /// Re-read `credentials.json` into the in-memory `OAuthStore`
     /// cache. No Router rebuild required.
     Credentials,
+    /// Re-read `catalog_overlay.json` (alongside `config.toml`, via
+    /// the same shared loader) and rebuild + `ArcSwap` the `Router`.
+    /// A dedicated variant (rather than reusing `Config`) so the
+    /// reload coordinator's logs say which file triggered the reload.
+    CatalogOverlay,
 }
 
 /// A single file the watcher should track. The parent directory of
@@ -54,12 +64,18 @@ pub enum WatchTarget {
     /// `credentials.json` -- emits `ReloadRequest::Credentials` on
     /// change.
     Credentials(PathBuf),
+    /// `catalog_overlay.json` -- emits `ReloadRequest::CatalogOverlay`
+    /// on change. The overlay may not exist yet at watch-install time
+    /// (first run, no writer has landed a cell); the parent-directory
+    /// watch strategy below picks up its later creation the same way
+    /// it picks up any other rename-into-place.
+    CatalogOverlay(PathBuf),
 }
 
 impl WatchTarget {
     const fn path(&self) -> &PathBuf {
         match self {
-            Self::Config(p) | Self::Credentials(p) => p,
+            Self::Config(p) | Self::Credentials(p) | Self::CatalogOverlay(p) => p,
         }
     }
 
@@ -67,6 +83,7 @@ impl WatchTarget {
         match self {
             Self::Config(_) => ReloadRequest::Config,
             Self::Credentials(_) => ReloadRequest::Credentials,
+            Self::CatalogOverlay(_) => ReloadRequest::CatalogOverlay,
         }
     }
 }
@@ -82,10 +99,10 @@ const DEBOUNCE_MS: u64 = 250;
 /// failure). On any unrecoverable failure during setup, returns an
 /// error and emits no `ReloadRequest`s.
 ///
-/// `targets` may contain a mix of `WatchTarget::Config(_)` and
-/// `WatchTarget::Credentials(_)`. Empty `targets` is supported and
-/// produces a no-op watcher (the spawned task immediately observes
-/// shutdown). This is the test path.
+/// `targets` may contain a mix of `WatchTarget::Config(_)`,
+/// `WatchTarget::Credentials(_)`, and `WatchTarget::CatalogOverlay(_)`.
+/// Empty `targets` is supported and produces a no-op watcher (the
+/// spawned task immediately observes shutdown). This is the test path.
 pub fn spawn_watcher(
     targets: Vec<WatchTarget>,
     tx: mpsc::Sender<ReloadRequest>,
@@ -233,6 +250,7 @@ async fn handle_event_batch(
     // into one batch.
     let mut emit_config = false;
     let mut emit_credentials = false;
+    let mut emit_catalog_overlay = false;
 
     for ev in &events {
         if !is_reload_kind(&ev.kind) {
@@ -270,6 +288,7 @@ async fn handle_event_batch(
                 match target.to_request() {
                     ReloadRequest::Config => emit_config = true,
                     ReloadRequest::Credentials => emit_credentials = true,
+                    ReloadRequest::CatalogOverlay => emit_catalog_overlay = true,
                 }
             }
         }
@@ -280,6 +299,9 @@ async fn handle_event_batch(
     }
     if emit_credentials {
         send_reload(tx, ReloadRequest::Credentials).await;
+    }
+    if emit_catalog_overlay {
+        send_reload(tx, ReloadRequest::CatalogOverlay).await;
     }
 }
 
@@ -515,6 +537,95 @@ mod tests {
         // Assert: exactly one ReloadRequest::Credentials arrives.
         let first = wait_for_one(&mut rx, StdDuration::from_secs(3)).await;
         assert_eq!(first, Some(ReloadRequest::Credentials));
+        let extras = drain_quiet_window(&mut rx, StdDuration::from_millis(500)).await;
+        assert!(
+            extras.is_empty(),
+            "rename-into-place should emit exactly one reload; saw extras: {extras:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn creating_a_not_yet_existent_overlay_file_emits_reload_request() {
+        // Arrange: the overlay target does NOT exist when the watcher is
+        // armed (first run -- no writer has landed a cell yet). The
+        // parent dir does exist (it always does once a config path is
+        // registered), so canonicalize's fallback-to-textual-path branch
+        // resolves the same parent the eventual write lands under.
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("catalog_overlay.json");
+        assert!(!target.exists(), "target must not exist yet");
+
+        let (tx, mut rx) = mpsc::channel::<ReloadRequest>(8);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(());
+        let _handle = spawn_watcher(
+            vec![WatchTarget::CatalogOverlay(target.clone())],
+            tx,
+            shutdown_rx,
+        )
+        .unwrap();
+
+        tokio::time::sleep(StdDuration::from_millis(SETTLE_MS)).await;
+
+        // Act: the overlay's first write, via the same tempfile + rename
+        // pattern `catalog_overlay::save` uses.
+        let tmp = tempfile::Builder::new()
+            .prefix(".catalog_overlay.tmp.")
+            .suffix(".json")
+            .tempfile_in(dir.path())
+            .unwrap();
+        std::fs::write(
+            tmp.path(),
+            br#"{"schema_version":1,"revision":1,"cells":{}}"#,
+        )
+        .unwrap();
+        tmp.persist(&target).unwrap();
+
+        // Assert: a CatalogOverlay reload request arrives despite the
+        // file not existing when the watch was installed.
+        let got = wait_for_one(&mut rx, StdDuration::from_secs(3)).await;
+        assert_eq!(
+            got,
+            Some(ReloadRequest::CatalogOverlay),
+            "overlay creation must fire a reload even though the file did not exist at watch-install time",
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_into_place_emits_one_reload_for_overlay() {
+        // Arrange: mirror `catalog_overlay::save`'s write pattern for an
+        // EXISTING overlay file, same coalescing contract the config /
+        // credentials targets already get.
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("catalog_overlay.json");
+        std::fs::write(&target, br#"{"schema_version":1,"revision":0,"cells":{}}"#).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<ReloadRequest>(8);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(());
+        let _handle = spawn_watcher(
+            vec![WatchTarget::CatalogOverlay(target.clone())],
+            tx,
+            shutdown_rx,
+        )
+        .unwrap();
+
+        tokio::time::sleep(StdDuration::from_millis(SETTLE_MS)).await;
+
+        // Act: tempfile + persist (atomic rename).
+        let tmp = tempfile::Builder::new()
+            .prefix(".catalog_overlay.tmp.")
+            .suffix(".json")
+            .tempfile_in(dir.path())
+            .unwrap();
+        std::fs::write(
+            tmp.path(),
+            br#"{"schema_version":1,"revision":1,"cells":{}}"#,
+        )
+        .unwrap();
+        tmp.persist(&target).unwrap();
+
+        // Assert: exactly one ReloadRequest::CatalogOverlay arrives.
+        let first = wait_for_one(&mut rx, StdDuration::from_secs(3)).await;
+        assert_eq!(first, Some(ReloadRequest::CatalogOverlay));
         let extras = drain_quiet_window(&mut rx, StdDuration::from_millis(500)).await;
         assert!(
             extras.is_empty(),

@@ -458,13 +458,13 @@ fn log_drift(
         let Some(new_row) = current.get(&selector) else {
             continue;
         };
-        let Some((impact_class, old_diff, new_diff)) = diff_row(old_row, new_row) else {
+        let Some((impact, old_diff, new_diff)) = diff_row(old_row, new_row) else {
             continue;
         };
         let overlay_masked = lookup_overlay_cell(provider_kind, model, overlay).is_some();
         tracing::warn!(
             selector = selector.as_str(),
-            impact_class,
+            impact_class = impact.label(),
             overlay_masked,
             old = old_diff.as_str(),
             new = new_diff.as_str(),
@@ -481,17 +481,120 @@ fn jv<T: Serialize>(v: T) -> Value {
     serde_json::to_value(v).unwrap_or(Value::Null)
 }
 
+/// Escalation class for one changed catalog field, shared by the
+/// baked-row drift log ([`diff_row`]) and the overlay import diff
+/// (`crate::catalog_import::diff_overlay`). `Ord`-derived in ascending
+/// severity (`DisplayOnly < CostAffecting < RoutingAffecting`) so
+/// [`escalate`] -- folding several changed fields on the same row --
+/// always keeps the highest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ImpactClass {
+    /// Provenance-only: the value carried no pricing or routing
+    /// consequence (`verified_at`, `source`).
+    DisplayOnly,
+    /// Changes the break-even $ math (`wm`, `rm`, `auto_cacher`, and the
+    /// baked-only reserved economics fields `has_storage_rent` /
+    /// `storage_rent` / `tier`, which shift write economics the same
+    /// way `wm` does).
+    CostAffecting,
+    /// Changes WHETHER or HOW a request gets cached / routed
+    /// (`ttl_seconds`, `min_prefix_tokens`, `max_context_tokens`, a
+    /// capability flip, or a row's enable/disable state).
+    RoutingAffecting,
+}
+
+impl ImpactClass {
+    /// The stable label rendered in a diff row or a log line. A public
+    /// contract once the import diff renders it to an operator: never
+    /// rename, only add a class.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DisplayOnly => "display-only",
+            Self::CostAffecting => "cost-affecting",
+            Self::RoutingAffecting => "routing-affecting",
+        }
+    }
+}
+
+/// Fold a second changed field's class into an already-accumulated
+/// [`ImpactClass`], keeping the higher of the two. Mixed changes on the
+/// same row escalate to their highest-severity field.
+#[must_use]
+pub const fn escalate(a: ImpactClass, b: ImpactClass) -> ImpactClass {
+    if matches!(
+        (a, b),
+        (ImpactClass::RoutingAffecting, _) | (_, ImpactClass::RoutingAffecting)
+    ) {
+        ImpactClass::RoutingAffecting
+    } else if matches!(
+        (a, b),
+        (ImpactClass::CostAffecting, _) | (_, ImpactClass::CostAffecting)
+    ) {
+        ImpactClass::CostAffecting
+    } else {
+        ImpactClass::DisplayOnly
+    }
+}
+
+/// One classifiable catalog field, spanning both the baked
+/// [`CatalogRow`] (drift log) domain and the overlay `OverlayCell`
+/// (import diff) domain -- see [`classify_field`]. `HasStorageRent` /
+/// `StorageRent` / `Tier` only ever appear on the baked side (no
+/// `OverlayCell` field carries them, by design -- see
+/// `crate::catalog_import`'s module doc); `VerifiedAt` / `Source` only
+/// ever appear on the overlay side (no `CatalogRow` field carries them);
+/// `Enablement` is synthetic, standing in for a whole row flipping
+/// between enabled and disabled rather than a single field's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImpactField {
+    Wm,
+    Rm,
+    TtlSeconds,
+    MinPrefixTokens,
+    MaxContextTokens,
+    Capabilities,
+    AutoCacher,
+    HasStorageRent,
+    StorageRent,
+    Tier,
+    VerifiedAt,
+    Source,
+    Enablement,
+}
+
+/// The shared impact taxonomy (see the module-level classes on
+/// [`ImpactClass`]): display-only (`verified_at`, `source`),
+/// cost-affecting (`wm`, `rm`, `auto_cacher`, plus the baked-only
+/// reserved economics fields), routing-affecting (`ttl_seconds`,
+/// `min_prefix_tokens`, `max_context_tokens`, a capability flip, or a
+/// row's enable/disable state). Reused verbatim by
+/// `crate::catalog_import::diff_overlay` for its own row labels.
+#[must_use]
+pub const fn classify_field(field: ImpactField) -> ImpactClass {
+    match field {
+        ImpactField::VerifiedAt | ImpactField::Source => ImpactClass::DisplayOnly,
+        ImpactField::Wm
+        | ImpactField::Rm
+        | ImpactField::AutoCacher
+        | ImpactField::HasStorageRent
+        | ImpactField::StorageRent
+        | ImpactField::Tier => ImpactClass::CostAffecting,
+        ImpactField::TtlSeconds
+        | ImpactField::MinPrefixTokens
+        | ImpactField::MaxContextTokens
+        | ImpactField::Capabilities
+        | ImpactField::Enablement => ImpactClass::RoutingAffecting,
+    }
+}
+
 /// Diff two baked rows for the SAME selector across a `CATALOG_VERSION`
 /// change. Returns `None` when every tracked field is identical (no
-/// drift to log). Otherwise returns the impact class -- `"economics"`
-/// (any of `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/storage-rent
-/// shape/`auto_cacher`/`tier` changed, taking PRIORITY over the other
-/// two classes since it changes the break-even math even when
-/// `max_context_tokens` or `capabilities` changed too), `"window"`
-/// (`max_context_tokens` changed with no economics change, regardless
-/// of whether capabilities also changed), or `"capabilities-only"`
-/// (ONLY the capability-prior map changed) -- plus compact-JSON
-/// `old`/`new` subsets covering ONLY the fields that actually differ.
+/// drift to log). Otherwise returns the changed fields' escalated
+/// [`ImpactClass`] (the same classifier
+/// `crate::catalog_import::diff_overlay` uses for its own row labels --
+/// "one classifier drives both") plus compact-JSON `old`/`new` subsets
+/// covering ONLY the fields that actually differ.
 ///
 /// This function's field list must track [`CatalogRow`]'s exactly (see
 /// `diff_row_covers_every_catalog_row_field` in the test module, an
@@ -499,78 +602,88 @@ fn jv<T: Serialize>(v: T) -> Value {
 /// ever added to or removed from the row without a matching update
 /// here) -- an omitted field would silently drop out of drift
 /// detection.
-fn diff_row(old: &CatalogRow, new: &CatalogRow) -> Option<(&'static str, String, String)> {
+fn diff_row(old: &CatalogRow, new: &CatalogRow) -> Option<(ImpactClass, String, String)> {
     let mut changed: Vec<(&'static str, Value, Value)> = Vec::new();
-    let mut economics_changed = false;
-    let mut window_changed = false;
+    let mut impact = ImpactClass::DisplayOnly;
+
+    let mut note = |field: ImpactField, name: &'static str, old_v: Value, new_v: Value| {
+        changed.push((name, old_v, new_v));
+        impact = escalate(impact, classify_field(field));
+    };
 
     if old.wm != new.wm {
-        economics_changed = true;
-        changed.push(("wm", jv(old.wm), jv(new.wm)));
+        note(ImpactField::Wm, "wm", jv(old.wm), jv(new.wm));
     }
     if old.rm != new.rm {
-        economics_changed = true;
-        changed.push(("rm", jv(old.rm), jv(new.rm)));
+        note(ImpactField::Rm, "rm", jv(old.rm), jv(new.rm));
     }
     if old.ttl_seconds != new.ttl_seconds {
-        economics_changed = true;
-        changed.push(("ttl_seconds", jv(old.ttl_seconds), jv(new.ttl_seconds)));
+        note(
+            ImpactField::TtlSeconds,
+            "ttl_seconds",
+            jv(old.ttl_seconds),
+            jv(new.ttl_seconds),
+        );
     }
     if old.min_prefix_tokens != new.min_prefix_tokens {
-        economics_changed = true;
-        changed.push((
+        note(
+            ImpactField::MinPrefixTokens,
             "min_prefix_tokens",
             jv(old.min_prefix_tokens),
             jv(new.min_prefix_tokens),
-        ));
+        );
     }
     if old.has_storage_rent != new.has_storage_rent {
-        economics_changed = true;
-        changed.push((
+        note(
+            ImpactField::HasStorageRent,
             "has_storage_rent",
             jv(old.has_storage_rent),
             jv(new.has_storage_rent),
-        ));
+        );
     }
     if old.storage_rent != new.storage_rent {
-        economics_changed = true;
-        changed.push(("storage_rent", jv(old.storage_rent), jv(new.storage_rent)));
+        note(
+            ImpactField::StorageRent,
+            "storage_rent",
+            jv(old.storage_rent),
+            jv(new.storage_rent),
+        );
     }
     if old.auto_cacher != new.auto_cacher {
-        economics_changed = true;
-        changed.push(("auto_cacher", jv(old.auto_cacher), jv(new.auto_cacher)));
+        note(
+            ImpactField::AutoCacher,
+            "auto_cacher",
+            jv(old.auto_cacher),
+            jv(new.auto_cacher),
+        );
     }
     if old.tier != new.tier {
         // A tier reclassification (e.g. a selector moving from the 5m
         // to the 1h breakpoint row in a codegen refresh) changes which
         // write-multiplier economics apply even when `wm`/`rm`
         // themselves happen to coincide -- always economics-impacting.
-        economics_changed = true;
-        changed.push(("tier", jv(old.tier), jv(new.tier)));
+        note(ImpactField::Tier, "tier", jv(old.tier), jv(new.tier));
     }
     if old.max_context_tokens != new.max_context_tokens {
-        window_changed = true;
-        changed.push((
+        note(
+            ImpactField::MaxContextTokens,
             "max_context_tokens",
             jv(old.max_context_tokens),
             jv(new.max_context_tokens),
-        ));
+        );
     }
     if old.capabilities != new.capabilities {
-        changed.push(("capabilities", jv(&old.capabilities), jv(&new.capabilities)));
+        note(
+            ImpactField::Capabilities,
+            "capabilities",
+            jv(&old.capabilities),
+            jv(&new.capabilities),
+        );
     }
 
     if changed.is_empty() {
         return None;
     }
-
-    let impact_class = if economics_changed {
-        "economics"
-    } else if window_changed {
-        "window"
-    } else {
-        "capabilities-only"
-    };
 
     let mut old_obj = Map::new();
     let mut new_obj = Map::new();
@@ -579,7 +692,7 @@ fn diff_row(old: &CatalogRow, new: &CatalogRow) -> Option<(&'static str, String,
         new_obj.insert(field.to_string(), new_value);
     }
     Some((
-        impact_class,
+        impact,
         Value::Object(old_obj).to_string(),
         Value::Object(new_obj).to_string(),
     ))
@@ -799,10 +912,41 @@ mod tests {
             event.field("selector"),
             Some(selector_key(SELECTOR.0, SELECTOR.1).as_str())
         );
-        assert_eq!(event.field("impact_class"), Some("economics"));
+        assert_eq!(event.field("impact_class"), Some("cost-affecting"));
         assert_eq!(event.field("overlay_masked"), Some("false"));
         assert!(event.field("old").unwrap().contains("\"wm\""));
         assert!(event.field("new").unwrap().contains("\"wm\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared classifier: the SAME `classify_field` call this log's
+    // `impact_class` field used above is exactly what
+    // `crate::catalog_import::diff_overlay` calls for its own row
+    // labels (see `catalog_import`'s
+    // `diff_overlay_applies_a_cost_affecting_wm_change_over_baked` test)
+    // -- a `wm` change is `cost-affecting` in both consumers.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classify_field_wm_is_cost_affecting_matching_the_import_diffs_own_label() {
+        assert_eq!(classify_field(ImpactField::Wm), ImpactClass::CostAffecting);
+        assert_eq!(classify_field(ImpactField::Wm).label(), "cost-affecting");
+    }
+
+    #[test]
+    fn escalate_keeps_the_highest_of_two_classes() {
+        assert_eq!(
+            escalate(ImpactClass::DisplayOnly, ImpactClass::CostAffecting),
+            ImpactClass::CostAffecting
+        );
+        assert_eq!(
+            escalate(ImpactClass::CostAffecting, ImpactClass::RoutingAffecting),
+            ImpactClass::RoutingAffecting
+        );
+        assert_eq!(
+            escalate(ImpactClass::RoutingAffecting, ImpactClass::DisplayOnly),
+            ImpactClass::RoutingAffecting
+        );
     }
 
     #[test]
@@ -825,7 +969,7 @@ mod tests {
         });
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].field("impact_class"), Some("window"));
+        assert_eq!(events[0].field("impact_class"), Some("routing-affecting"));
     }
 
     #[test]
@@ -848,12 +992,12 @@ mod tests {
         });
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].field("impact_class"), Some("economics"));
+        assert_eq!(events[0].field("impact_class"), Some("cost-affecting"));
         assert!(events[0].field("old").unwrap().contains("\"tier\""));
     }
 
     #[test]
-    fn window_takes_priority_over_capabilities_when_both_changed_with_no_economics_change() {
+    fn max_context_tokens_and_capabilities_changes_both_land_in_the_diff_subset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog_state.json");
         let mut drifted = current_row();
@@ -873,9 +1017,9 @@ mod tests {
         });
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].field("impact_class"), Some("window"));
-        // Both changed fields still land in the subset, even though
-        // `window` won the classification.
+        assert_eq!(events[0].field("impact_class"), Some("routing-affecting"));
+        // Both changed fields land in the subset, even though they share
+        // one escalated class.
         assert!(
             events[0]
                 .field("old")
@@ -905,7 +1049,7 @@ mod tests {
         });
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].field("impact_class"), Some("capabilities-only"));
+        assert_eq!(events[0].field("impact_class"), Some("routing-affecting"));
     }
 
     #[test]

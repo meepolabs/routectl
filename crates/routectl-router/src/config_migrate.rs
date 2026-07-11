@@ -84,7 +84,7 @@ pub enum MigrationError {
 /// `cache_pricing` (the operator's `[cache_pricing]` table, ALREADY merged
 /// with any legacy `pricing_verifications.json` stamps by the caller --
 /// see `crate::config::CachePricingOverride`'s doc and
-/// `routectl-cli`'s `commands::pricing::load_and_merge_verifications`) into
+/// `routectl-cli`'s `commands::catalog::load_and_merge_verifications`) into
 /// the catalog overlay at `overlay_path`, then rewriting `config.toml` to
 /// `version = 2` with `[cache_pricing]` dropped.
 ///
@@ -139,7 +139,7 @@ pub fn migrate_v1_to_v2(
 ///
 /// Provenance is `OverlaySource::User`: this data was operator-authored
 /// (a `[cache_pricing]` entry the operator wrote, or a date the operator
-/// stamped via `routectl pricing verify`), not a bulk vendor import --
+/// stamped via `routectl catalog verify`), not a bulk vendor import --
 /// `OverlaySource::Import` is reserved for a later bulk-refresh pipeline.
 ///
 /// `has_storage_rent` / `storage_rent` / `auto_cacher` have no field on

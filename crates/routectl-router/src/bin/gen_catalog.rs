@@ -7,6 +7,11 @@
 //! models.dev-vs-litellm mismatch; never writes a partial or fallback
 //! file on failure.
 
+#[cfg(not(feature = "gen-catalog"))]
+compile_error!(
+    "gen_catalog requires the `gen-catalog` feature: cargo run --bin gen_catalog --features gen-catalog"
+);
+
 use std::path::PathBuf;
 
 fn main() {
