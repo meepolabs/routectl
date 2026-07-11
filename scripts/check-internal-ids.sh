@@ -26,13 +26,15 @@ if [[ "${ROUTECTL_SKIP_ID_SCAN:-0}" == "1" ]]; then
     exit 0
 fi
 
-# Captured replay fixtures hold real upstream model ids, token counts,
-# and UUIDs that would false-trip the high-signal patterns. They are not
-# author-written content, so exclude the whole tree from the scan. The
-# scanner's own self-test carries synthetic ID-shaped fixtures by design,
-# so it is excluded too.
+# Captured replay fixtures and vendored catalog snapshots hold real
+# upstream model ids, token counts, and UUIDs that would false-trip the
+# high-signal patterns (e.g. vendor model names shaped like M<n>.<m>).
+# They are not author-written content, so exclude those trees from the
+# scan. The scanner's own self-test carries synthetic ID-shaped fixtures
+# by design, so it is excluded too.
 EXCLUDE_PATHS=(
     "crates/routectl-cli/tests/fixtures/captured/"
+    "crates/routectl-router/catalog_data/"
     "scripts/check-internal-ids.test.sh"
 )
 

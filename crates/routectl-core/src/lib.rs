@@ -5,6 +5,7 @@
 //! `provider` for the per-backend trait.
 
 pub mod cache_control;
+pub mod capability;
 pub mod cloud_project;
 pub mod content_part;
 pub mod context_reduction;
@@ -32,6 +33,7 @@ pub use cache_control::{
     Breakpoint, BreakpointPosition, CacheBreakpointSource, CacheControl, FrozenFloor,
     OwnedBreakpoint, compute_frozen_floor, mutable_suffix_start, validate_source,
 };
+pub use capability::{COMPUTER_USE, STRUCTURED_OUTPUT, WEB_SEARCH, WELL_KNOWN_CAPABILITY_KEYS};
 pub use cloud_project::{CloudProjectCache, InMemoryProjectCache};
 pub use content_part::{ContentPart, KnownContentPart};
 pub use context_reduction::{

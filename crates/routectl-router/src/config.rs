@@ -15,6 +15,25 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Schema-version stamp for this `config.toml`. Absent in the file
+    /// (every pre-v0.9 config) deserializes to `1`. [`CURRENT_CONFIG_VERSION`]
+    /// is `2`: a `version < 2` config's legacy `[cache_pricing]` table is
+    /// retired into the catalog overlay by `crate::config_migrate` the
+    /// first time it loads under a v2-aware binary, and this field is
+    /// rewritten to `2` in place. A `version` greater than
+    /// [`CURRENT_CONFIG_VERSION`] is rejected before this struct is even
+    /// deserialized -- see [`preflight_config_version`].
+    ///
+    /// NOTE: `Config::default()` (plain Rust construction, e.g. in tests)
+    /// yields `0`, not `1` -- the `1` default applies only on the serde
+    /// deserialize-from-TOML path (an absent key in the file).
+    /// `#[derive(Default)]` cannot special-case one field's constant, and
+    /// every caller that gates on `version < CURRENT_CONFIG_VERSION`
+    /// treats `0` and `1` identically, so the two never diverge in
+    /// practice.
+    #[serde(default = "default_config_version")]
+    pub version: u32,
+
     /// Server bind config.
     #[serde(default)]
     pub server: ServerConfig,
@@ -111,21 +130,22 @@ pub struct Config {
     #[serde(default)]
     pub trim: TrimConfig,
 
-    /// Operator-facing `[cache_pricing]` field-level override table for the
-    /// baked prompt-cache economics rows (`crate::cache_pricing`). Each key
-    /// is a `"provider_kind:model_glob"` selector (e.g.
+    /// Operator-facing LEGACY `[cache_pricing]` field-level override table
+    /// for the baked catalog economics rows (`crate::catalog`). Slated for
+    /// retirement once its data migrates into the catalog overlay
+    /// (`crate::catalog_overlay`). Each
+    /// key is a `"provider_kind:model_glob"` selector (e.g.
     /// `"openai-compat:grok-*"`); each value is a sparse
-    /// [`crate::cache_pricing::CachePricingOverride`] -- only the fields the
+    /// [`crate::catalog::CachePricingOverride`] -- only the fields the
     /// operator wants to correct, the rest inheriting the baked-in value.
-    /// routectl ships a verified baked table, so an empty / omitted block is
-    /// the norm; this exists to patch a cell that drifted before a routectl
-    /// release can re-bake it. An override that sets `wm` below the
-    /// conservative sentinel must carry `override_acknowledges_cost_risk =
-    /// true` or the merge is rejected by the consuming cost gate. The
-    /// selector keys are NOT validated against the baked table here (an
-    /// unmatched selector is simply inert).
+    /// An empty / omitted block is the norm; this exists to patch a cell
+    /// that drifted before a routectl release can re-bake it. An override
+    /// that sets `wm` below the conservative sentinel must carry
+    /// `override_acknowledges_cost_risk = true` or the merge is rejected by
+    /// the consuming cost gate. The selector keys are NOT validated against
+    /// the baked table here (an unmatched selector is simply inert).
     #[serde(default)]
-    pub cache_pricing: BTreeMap<String, crate::cache_pricing::CachePricingOverride>,
+    pub cache_pricing: BTreeMap<String, crate::catalog::CachePricingOverride>,
 
     /// Optional `[mitm]` block for the MITM front-proxy (TLS-terminating
     /// local listener that fronts a first-party upstream, e.g. Claude
@@ -134,6 +154,192 @@ pub struct Config {
     /// omitted) keeps today's behavior with zero MITM proxy startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mitm: Option<MitmConfig>,
+}
+
+/// Current config schema version this build writes and fully understands.
+/// `1` -> `2` retires the legacy `[cache_pricing]` override table into the
+/// catalog overlay (`crate::config_migrate`).
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
+const fn default_config_version() -> u32 {
+    1
+}
+
+/// Error from [`preflight_config_version`]: the config file names a schema
+/// version newer than this build understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "config version {found} is newer than the {supported} this build supports; upgrade \
+     routectl or downgrade the config's `version` key"
+)]
+pub struct VersionTooNewError {
+    pub found: u32,
+    pub supported: u32,
+}
+
+/// Read the `version` key straight off the RAW TOML text, before `Config`'s
+/// full (`#[serde(deny_unknown_fields)]`) deserialize runs. A config written
+/// by a newer routectl may carry fields this build does not know about;
+/// deserializing it directly would fail with a confusing "unknown field"
+/// error that buries the real cause. This preflight catches that case
+/// explicitly: a `version` greater than [`CURRENT_CONFIG_VERSION`] fails
+/// closed here with a clear message. Callers wire this in at both cold
+/// startup (propagate the error, fail hard) and hot config reload (reject
+/// the reload, keep the prior router live).
+///
+/// A missing `version` key, TOML that fails to parse at all, or a
+/// `version` that is not a plain non-negative integer are all left for the
+/// normal typed deserialize to report -- this function only ever returns
+/// an error for the one case it exists to catch, so it never masks a
+/// genuine syntax error behind a version message.
+pub fn preflight_config_version(raw_toml: &str) -> Result<u32, VersionTooNewError> {
+    let found = toml::from_str::<toml::Value>(raw_toml)
+        .ok()
+        .and_then(|v| v.get("version").and_then(toml::Value::as_integer))
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or_else(default_config_version);
+
+    if found > CURRENT_CONFIG_VERSION {
+        return Err(VersionTooNewError {
+            found,
+            supported: CURRENT_CONFIG_VERSION,
+        });
+    }
+    Ok(found)
+}
+
+/// At `version >= CURRENT_CONFIG_VERSION`, a non-empty legacy
+/// `[cache_pricing]` table is a startup-time misconfiguration, not
+/// silently-ignored data: the v1->v2 migration
+/// (`crate::config_migrate::migrate_v1_to_v2`) already folds
+/// `[cache_pricing]` into the catalog overlay and clears it from
+/// `config.toml`, so a non-empty table at v2+ means the file was
+/// hand-edited back into an inconsistent state (or authored fresh from a
+/// stale example). Names the migrator so the operator knows the fix.
+pub fn validate_cache_pricing_retired(config: &Config) -> Result<(), String> {
+    if config.version >= CURRENT_CONFIG_VERSION && !config.cache_pricing.is_empty() {
+        return Err(format!(
+            "config version {} carries a non-empty [cache_pricing] table ({} entries), but \
+             [cache_pricing] is retired as of version {CURRENT_CONFIG_VERSION} -- it should \
+             have been migrated into the catalog overlay by the v1->v2 migrator \
+             (crate::config_migrate::migrate_v1_to_v2); set `version` back below \
+             {CURRENT_CONFIG_VERSION} to re-run the migration, or remove [cache_pricing] by hand",
+            config.version,
+            config.cache_pricing.len(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod config_version_tests {
+    use super::{
+        CURRENT_CONFIG_VERSION, Config, preflight_config_version, validate_cache_pricing_retired,
+    };
+
+    #[test]
+    fn absent_version_key_deserializes_to_one() {
+        // Arrange / Act
+        let config: Config = toml::from_str("[server]\nhost = \"127.0.0.1\"\n").expect("parse");
+
+        // Assert
+        assert_eq!(config.version, 1);
+    }
+
+    #[test]
+    fn explicit_current_version_round_trips() {
+        // Arrange / Act
+        let config: Config =
+            toml::from_str("version = 2\n[server]\nhost = \"127.0.0.1\"\n").expect("parse");
+
+        // Assert
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn preflight_accepts_absent_version() {
+        assert_eq!(preflight_config_version("[server]\nhost = \"x\"\n"), Ok(1));
+    }
+
+    #[test]
+    fn preflight_accepts_current_version() {
+        assert_eq!(
+            preflight_config_version("version = 2\n[server]\nhost = \"x\"\n"),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_version_newer_than_current() {
+        // Act
+        let err = preflight_config_version("version = 3\n[server]\nhost = \"x\"\n")
+            .expect_err("version 3 must be rejected");
+
+        // Assert
+        assert_eq!(err.found, 3);
+        assert_eq!(err.supported, CURRENT_CONFIG_VERSION);
+    }
+
+    /// Preflight must catch a too-new version BEFORE the full deserialize
+    /// runs, so a newer routectl's unknown fields never reach
+    /// `deny_unknown_fields` and mask the version error behind a
+    /// confusing "unknown field" message.
+    #[test]
+    fn preflight_rejects_newer_version_even_with_fields_this_build_does_not_know() {
+        let raw = "version = 99\nsome_field_from_the_future = true\n[server]\nhost = \"x\"\n";
+
+        let err = preflight_config_version(raw).expect_err("version 99 must be rejected");
+        assert_eq!(err.found, 99);
+
+        // The typed deserialize is never reached for this input in the
+        // real load path; confirm it WOULD have failed with the confusing
+        // unknown-field error preflight exists to avoid.
+        let deny_unknown_err = toml::from_str::<Config>(raw).expect_err("must fail to parse");
+        assert!(
+            !deny_unknown_err.to_string().contains("newer"),
+            "sanity: the raw deserialize error must NOT already read like a version message"
+        );
+    }
+
+    #[test]
+    fn validate_cache_pricing_retired_allows_nonempty_at_v1() {
+        let mut config = Config {
+            version: 1,
+            ..Config::default()
+        };
+        config.cache_pricing.insert(
+            "openai-compat:grok-*".to_string(),
+            crate::catalog::CachePricingOverride::default(),
+        );
+
+        assert!(validate_cache_pricing_retired(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_cache_pricing_retired_allows_empty_at_current_version() {
+        let config = Config {
+            version: CURRENT_CONFIG_VERSION,
+            ..Config::default()
+        };
+
+        assert!(validate_cache_pricing_retired(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_cache_pricing_retired_rejects_nonempty_at_current_version() {
+        let mut config = Config {
+            version: CURRENT_CONFIG_VERSION,
+            ..Config::default()
+        };
+        config.cache_pricing.insert(
+            "openai-compat:grok-*".to_string(),
+            crate::catalog::CachePricingOverride::default(),
+        );
+
+        let err = validate_cache_pricing_retired(&config).expect_err("must reject");
+        assert!(err.contains("config_migrate"), "err: {err}");
+        assert!(err.contains('1'), "err should name the entry count: {err}");
+    }
 }
 
 /// Operator-facing `[cache]` config block. Global policy for the
@@ -361,7 +567,7 @@ const fn default_retention_days() -> u32 {
 /// set, else `$HOME/.config`, else a relative `.config` fallback,
 /// joined with `routectl`. Returns an absolute, `~`-free path so
 /// callers can hand a child path straight to SQLite or a file writer.
-fn routectl_config_dir() -> PathBuf {
+pub(crate) fn routectl_config_dir() -> PathBuf {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
         _ => match std::env::var_os("HOME") {

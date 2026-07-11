@@ -7,7 +7,10 @@ use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::config::CredentialSource;
-use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, Router};
+use routectl_router::{
+    AliasValue, CatalogOverlay, Config, ModelEntry, ProviderEntry, Router,
+    check_drift_and_persist_state,
+};
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
@@ -106,8 +109,20 @@ fn is_loopback(host: &str) -> bool {
 /// config file. The file-watch coordinator uses it to pick up edits
 /// without a restart. `None` disables the config half of the watcher
 /// (tests that build a `Config` in-memory have no path to watch).
+///
+/// `catalog_overlay` is the overlay [`load_effective_config`] loaded
+/// alongside `config` at the SAME cold-start read -- `main.rs` threads it
+/// straight through rather than this function re-reading the overlay file
+/// itself, so a config-path reload (which DOES re-read both) and the
+/// cold-start boot never diverge on how the overlay was obtained. `serve`
+/// has exactly one caller (`main.rs`'s `Cmd::Serve`), so its signature
+/// carries the overlay directly; [`serve_on_listener`] stays a thin
+/// empty-overlay wrapper over [`serve_on_listener_with_overlay`] because
+/// it is ALSO the test seam a dozen integration tests call with an
+/// in-memory `Config` and no loader involved at all.
 pub async fn serve(
     config: Arc<Config>,
+    catalog_overlay: Arc<CatalogOverlay>,
     host: &str,
     port: u16,
     unsafe_public: bool,
@@ -120,7 +135,7 @@ pub async fn serve(
         .await
         .map_err(|e| Error::Internal(format!("bind {addr}: {e}")))?;
 
-    serve_on_listener(config, listener, config_path).await
+    serve_on_listener_with_overlay(config, catalog_overlay, listener, config_path).await
 }
 
 /// Format the one-line startup cache-policy banner from the two policy
@@ -137,15 +152,54 @@ fn cache_policy_banner(auto_emit_top_level: bool, reduction: bool) -> String {
     )
 }
 
-/// Serve on an already-bound listener. Used by tests so the OS-assigned port
-/// can be read back with `listener.local_addr()` before handing it over.
-///
-/// `config_path` follows the same semantics as `serve`: `Some(path)`
-/// installs the file-watch + SIGHUP coordinator; `None` skips the
-/// config-half of the watcher (the credentials half still wires when
-/// the OAuth arm is available).
+/// Serve on an already-bound listener, with an EMPTY catalog overlay. Used
+/// by the many integration tests that build a `Config` in-memory and never
+/// go through the shared loader at all -- an empty overlay is what every
+/// target already resolved to before the overlay existed, so this keeps
+/// those tests behavior-unchanged. Kept as the STABLE public signature
+/// (unlike `serve`, this one has a dozen external callers); production
+/// boot goes through [`serve`] -> [`serve_on_listener_with_overlay`]
+/// instead.
 pub async fn serve_on_listener(
     config: Arc<Config>,
+    listener: TcpListener,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    serve_on_listener_with_overlay(
+        config,
+        Arc::new(CatalogOverlay::default()),
+        listener,
+        config_path,
+    )
+    .await
+}
+
+/// Every `(provider_kind, upstream)` pair this boot's SELECTABLE
+/// `[models]` entries reference. Mirrors
+/// `routectl_router::apply_catalog_overlay`'s own per-model derivation
+/// (`config.models` -> provider -> `ProviderEntry::kind_str`) so the
+/// drift log's "in use" set matches what the router actually resolves,
+/// without needing the built `Router` itself -- the pair is a pure
+/// function of `config`.
+fn in_use_catalog_selectors(config: &Config) -> Vec<(String, String)> {
+    config
+        .models
+        .values()
+        .filter(|entry| entry.selectable)
+        .filter_map(|entry| {
+            let provider_kind = config.providers.get(&entry.provider)?.kind_str();
+            Some((provider_kind.to_string(), entry.upstream.clone()))
+        })
+        .collect()
+}
+
+/// The real `serve_on_listener` body. `config_path` follows the same
+/// semantics as `serve`: `Some(path)` installs the file-watch + SIGHUP
+/// coordinator; `None` skips the config-half of the watcher (the
+/// credentials half still wires when the OAuth arm is available).
+pub async fn serve_on_listener_with_overlay(
+    config: Arc<Config>,
+    catalog_overlay: Arc<CatalogOverlay>,
     listener: TcpListener,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
@@ -160,7 +214,39 @@ pub async fn serve_on_listener(
     let oauth_store = composite.oauth_store();
     let secrets: Arc<dyn SecretStore> = Arc::new(composite);
 
-    let router = build_router_from_config(config.clone(), secrets.clone()).await?;
+    let router =
+        build_router_from_config_with_overlay(config.clone(), &catalog_overlay, secrets.clone())
+            .await?;
+
+    // Cross-version catalog drift observability: AFTER the router
+    // build, so the in-use selectors below are the same set
+    // `apply_catalog_overlay` just resolved against. Startup-only (not
+    // wired into the config-reload path) -- `catalog_state.json` is a
+    // separate, rebuildable file the overlay never touches, and this
+    // call is fully self-contained: it never fails serve, no matter
+    // what state its own file is in.
+    //
+    // Colocated with `config_path`'s directory rather than the
+    // hardcoded `routectl_config_dir()`, and skipped entirely when
+    // `config_path` is `None`: the many in-memory-`Config` test
+    // helpers that call `serve_on_listener` (never `serve` itself)
+    // pass `None` here precisely because they have no real on-disk
+    // config to anchor a reload watch to either -- writing this file
+    // to a hardcoded real path regardless would mean every `cargo
+    // test` run mutates the developer's ACTUAL `~/.config/routectl/`
+    // directory. When `config_path` IS `Some`, its parent directory is
+    // `routectl_config_dir()` in every real deployment (see
+    // `main.rs::resolve_config_path`) and is the test's own tempdir
+    // when a test explicitly points `config_path` at one (e.g.
+    // `hot_reload.rs`) -- either way this lands next to the config
+    // that actually produced this boot's router.
+    if let Some(dir) = config_path.as_deref().and_then(Path::parent) {
+        check_drift_and_persist_state(
+            &in_use_catalog_selectors(&config),
+            &catalog_overlay,
+            &dir.join("catalog_state.json"),
+        );
+    }
 
     // One-shot warm of the K-estimator session store from the usage
     // ledger, on the owned `router` BEFORE it is wrapped in the ArcSwap.
@@ -296,6 +382,7 @@ pub async fn serve_on_listener(
 
     let mut reload_handles = spawn_reload_pipeline(
         config.clone(),
+        catalog_overlay.clone(),
         config_path.clone(),
         oauth_store,
         secrets.clone(),
@@ -679,13 +766,31 @@ fn inject_synthetic_anthropic_egress_if_needed(config: Arc<Config>) -> Arc<Confi
 }
 
 /// Build a `Router` from the parsed config + a shared
+/// `Arc<dyn SecretStore>`, with an EMPTY catalog overlay. Thin wrapper kept
+/// for the many call sites (this crate's own unit tests plus
+/// `handlers::ingress_handle_tests`) that build a Router without caring
+/// about the overlay -- an empty overlay is behaviorally identical to
+/// "every target falls through to the baked catalog", which is what those
+/// callers already exercised before the overlay existed. Callers that DO
+/// care (the server's boot + reload paths) use
+/// [`build_router_from_config_with_overlay`] instead.
+#[cfg(test)]
+pub(crate) async fn build_router_from_config(
+    config: Arc<Config>,
+    secrets: Arc<dyn SecretStore>,
+) -> Result<Router> {
+    build_router_from_config_with_overlay(config, &CatalogOverlay::default(), secrets).await
+}
+
+/// Build a `Router` from the parsed config + catalog overlay + a shared
 /// `Arc<dyn SecretStore>`. The store is hoisted out of this function
 /// (the caller passes it in) so a hot-reload config change that
 /// triggers a Router rebuild reuses the SAME store handle, preserving
 /// the OAuthStore in-memory token cache and the per-provider
 /// single-flight refresh mutex across rebuilds.
-pub(crate) async fn build_router_from_config(
+pub(crate) async fn build_router_from_config_with_overlay(
     config: Arc<Config>,
+    catalog_overlay: &CatalogOverlay,
     secrets: Arc<dyn SecretStore>,
 ) -> Result<Router> {
     let config = inject_synthetic_anthropic_egress_if_needed(config);
@@ -741,10 +846,11 @@ pub(crate) async fn build_router_from_config(
     // failing here names the offending selector upfront.
     routectl_router::validate_overrides(&config.cache_pricing).map_err(Error::Config)?;
 
-    // Advisory: warn (never fail) if the baked prompt-cache pricing table
-    // has gone stale (> 90 days since a cell's verified_at). The numbers
-    // drift; a stale stamp is the operator's cue to re-verify.
-    routectl_router::cache_pricing::warn_if_stale();
+    // Advisory: warn (never fail) if the WHOLE baked catalog table's
+    // snapshot has gone stale (> 90 days). A redesign dropped the per-row
+    // `verified_at`, so this is now a single table-wide check rather than
+    // per-cell (see `routectl_router::catalog::warn_if_stale`'s doc).
+    routectl_router::catalog::warn_if_stale();
 
     let opts = routectl_router::BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
@@ -757,6 +863,13 @@ pub(crate) async fn build_router_from_config(
     // chain references a model whose provider failed to build.
     let (resolved_models, failed) =
         routectl_router::build_resolved_models(&config, secrets, opts).await?;
+    // Stamp each resolved model's precomputed two-layer catalog merge
+    // (baked table + this boot/reload's overlay) onto the table BEFORE
+    // installing it, so `Router::record_would_trim` reads a resolved
+    // `EffectiveRow` straight off the dispatch target instead of
+    // re-resolving the merge per request.
+    let resolved_models =
+        routectl_router::apply_catalog_overlay(resolved_models, &config, catalog_overlay);
     router.install_resolved_models(resolved_models);
 
     // Provider build failures are normally non-fatal (an operator
@@ -873,8 +986,10 @@ fn build_axum_router(
 /// `JoinHandle`s alive until `serve_on_listener` returns; dropping
 /// them only detaches because each task observes the shared
 /// `shutdown_rx` and exits cleanly.
+#[allow(clippy::too_many_arguments)]
 fn spawn_reload_pipeline(
     initial_config: Arc<Config>,
+    initial_overlay: Arc<CatalogOverlay>,
     config_path: Option<PathBuf>,
     oauth_store: Option<Arc<routectl_auth::OAuthStore>>,
     secrets: Arc<dyn SecretStore>,
@@ -920,6 +1035,7 @@ fn spawn_reload_pipeline(
 
     let coordinator_handle = tokio::spawn(run_reload_coordinator(
         initial_config,
+        initial_overlay,
         ReloadContext {
             config_path,
             oauth_store,
@@ -983,8 +1099,16 @@ struct ReloadContext {
 /// Drain `ReloadRequest`s and apply them. Each request is processed
 /// to completion before the next is read so a Router swap and a
 /// credentials reload do not interleave.
+///
+/// `current_overlay` is a loop variable alongside `current_config`: a
+/// config-path reload re-reads BOTH from disk (the shared loader),
+/// updating both; a credentials-only reload rebuilds off the CURRENT
+/// (unchanged) overlay -- no dedicated overlay watch yet (f1; a config
+/// touch or restart is how an overlay edit lands), so a seat-set-change
+/// rebuild must not silently drop the operator's overlay back to empty.
 async fn run_reload_coordinator(
     mut current_config: Arc<Config>,
+    mut current_overlay: Arc<CatalogOverlay>,
     ctx: ReloadContext,
     mut reload_rx: mpsc::Receiver<ReloadRequest>,
     mut shutdown: watch::Receiver<()>,
@@ -999,13 +1123,14 @@ async fn run_reload_coordinator(
                         handle_credentials_reload(
                             &ctx.oauth_store,
                             &current_config,
+                            &current_overlay,
                             ctx.secrets.clone(),
                             &ctx.router_swap,
                         )
                         .await;
                     }
                     ReloadRequest::Config => {
-                        if let Some(new_config) = handle_config_reload(
+                        if let Some((new_config, new_overlay)) = handle_config_reload(
                             ctx.config_path.as_deref(),
                             &current_config,
                             ctx.secrets.clone(),
@@ -1013,6 +1138,7 @@ async fn run_reload_coordinator(
                             &ctx.usage,
                         ).await {
                             current_config = new_config;
+                            current_overlay = new_overlay;
                         }
                     }
                 }
@@ -1038,6 +1164,7 @@ async fn run_reload_coordinator(
 async fn handle_credentials_reload(
     oauth_store: &Option<Arc<routectl_auth::OAuthStore>>,
     current_config: &Arc<Config>,
+    current_overlay: &Arc<CatalogOverlay>,
     secrets: Arc<dyn SecretStore>,
     router_swap: &Arc<ArcSwap<Router>>,
 ) {
@@ -1070,23 +1197,38 @@ async fn handle_credentials_reload(
         return;
     }
 
-    rebuild_router_for_seat_change(current_config, secrets, router_swap, &before, &after).await;
+    rebuild_router_for_seat_change(
+        current_config,
+        current_overlay,
+        secrets,
+        router_swap,
+        &before,
+        &after,
+    )
+    .await;
 }
 
-/// Rebuild the live Router from the unchanged config after a seat-set
-/// change, preserving per-seat runtime state and honoring the
-/// disk-first-keep-old invariant on a build failure. No config re-read
-/// is needed (the config is unchanged); re-running the startup
-/// validators on it is harmless. Split out of `handle_credentials_reload`
+/// Rebuild the live Router from the unchanged config + overlay after a
+/// seat-set change, preserving per-seat runtime state and honoring the
+/// disk-first-keep-old invariant on a build failure. Neither config nor
+/// overlay is re-read (both are unchanged); re-running the startup
+/// validators on them is harmless. Split out of `handle_credentials_reload`
 /// to keep that function under the size ceiling.
 async fn rebuild_router_for_seat_change(
     current_config: &Arc<Config>,
+    current_overlay: &Arc<CatalogOverlay>,
     secrets: Arc<dyn SecretStore>,
     router_swap: &Arc<ArcSwap<Router>>,
     before: &std::collections::BTreeSet<String>,
     after: &std::collections::BTreeSet<String>,
 ) {
-    let mut new_router = match build_router_from_config(current_config.clone(), secrets).await {
+    let mut new_router = match build_router_from_config_with_overlay(
+        current_config.clone(),
+        current_overlay,
+        secrets,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(
@@ -1117,21 +1259,54 @@ async fn rebuild_router_for_seat_change(
 /// new Router into `router_swap` atomically and returns the new
 /// `Arc<Config>` so the coordinator can diff future reloads against
 /// the live config rather than the original-startup config.
+/// Handle a `ReloadRequest::Config`: re-read config.toml + the catalog
+/// overlay via the shared loader, rebuild the Router against BOTH, and
+/// swap it in. Returns the new `(config, overlay)` pair on success so the
+/// coordinator's loop variables advance together -- a partial update (new
+/// config, stale overlay or vice versa) would desync the pair the next
+/// reload diffs against.
 async fn handle_config_reload(
     config_path: Option<&Path>,
     current_config: &Arc<Config>,
     secrets: Arc<dyn SecretStore>,
     router_swap: &Arc<ArcSwap<Router>>,
     usage: &UsageHandle,
-) -> Option<Arc<Config>> {
+) -> Option<(Arc<Config>, Arc<CatalogOverlay>)> {
     let Some(path) = config_path else {
         tracing::debug!("config reload requested but no config path was registered; ignoring",);
         return None;
     };
 
-    let new_config = read_parse_validate_config(path).await?;
+    // `read_parse_validate_config` is fully synchronous (TOML parse, the
+    // v1 -> v2 migration's fsyncs, and the overlay read all hit disk
+    // directly) -- run it off the runtime so a slow disk or a large
+    // migration never stalls every other task sharing this worker
+    // thread. A panic inside the closure (`JoinError`) is treated the
+    // same as any other load failure: reject the reload, keep the prior
+    // router live.
+    let path_owned = path.to_path_buf();
+    let loaded =
+        match tokio::task::spawn_blocking(move || read_parse_validate_config(&path_owned)).await {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => return None,
+            Err(join_err) => {
+                tracing::warn!(
+                    error = %join_err,
+                    "config reload failed: loader task panicked; keeping previous config",
+                );
+                return None;
+            }
+        };
+    let new_config = Arc::new(loaded.config);
+    let new_overlay = Arc::new(loaded.catalog_overlay);
 
-    let mut new_router = match build_router_from_config(new_config.clone(), secrets).await {
+    let mut new_router = match build_router_from_config_with_overlay(
+        new_config.clone(),
+        &new_overlay,
+        secrets,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(
@@ -1171,72 +1346,137 @@ async fn handle_config_reload(
         );
     }
 
-    Some(new_config)
+    Some((new_config, new_overlay))
 }
 
-/// Read, parse, and validate the config at `path`. Returns `None` and
-/// emits a warn on any failure so the coordinator can keep the previous
-/// config installed. Pulled out of `handle_config_reload` to keep that
-/// function focused on the swap + diff phases.
-async fn read_parse_validate_config(path: &Path) -> Option<Arc<Config>> {
-    let text = match tokio::fs::read_to_string(path).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "config reload failed: read error; keeping previous config",
-            );
-            return None;
-        }
-    };
+/// SINGLE shared config loader: preflight the schema `version`, parse
+/// `config.toml`, run the v1 -> v2 migration when the file is still
+/// `version < CURRENT_CONFIG_VERSION` (folding the LEGACY
+/// `pricing_verifications.json` sidecar + `[cache_pricing]` overrides into
+/// the catalog overlay via `routectl_router::migrate_v1_to_v2`), load
+/// the catalog overlay (fail-closed per `routectl_router::load_catalog_overlay`'s
+/// matrix), and run the startup validators. Used by BOTH the CLI's
+/// cold-start `load_config` (`main.rs`) and this module's hot-reload path
+/// (`read_parse_validate_config`) -- PRE-EXISTING split-brain this closed:
+/// only the cold-start path used to merge the sidecar, so a config reload
+/// silently dropped sidecar / `[cache_pricing]` data. A reload now re-reads
+/// the overlay from disk too (no dedicated overlay watch yet -- restart or
+/// a config-file touch picks up overlay edits; a dedicated watch target is a later increment).
+/// A `version` newer than this build supports fails closed here too (a
+/// cold-start error propagates; a reload rejects and keeps the prior
+/// router live, same posture as every other load failure below).
+///
+/// The loaded overlay rides back on [`LoadedConfig::catalog_overlay`] --
+/// callers that build a Router thread it into
+/// [`build_router_from_config_with_overlay`] so the two-layer merge
+/// (`routectl_router::apply_catalog_overlay`) sees the SAME overlay this
+/// call validated, at both cold start and every config reload.
+///
+/// Overlay / parse / validate failure ALWAYS returns `Err` here; callers
+/// choose the posture -- cold startup propagates the error (fails hard),
+/// a hot reload logs a warn and keeps the prior config + router live
+/// (`read_parse_validate_config` below does exactly that).
+pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
 
-    let new_config: Config = match toml::from_str(&text) {
+    // PREFLIGHT: read `version` off the raw TOML before the full,
+    // `deny_unknown_fields` typed deserialize below -- a config written by
+    // a newer routectl may carry fields this build does not know about,
+    // and deserializing it directly would fail with a confusing
+    // "unknown field" error that buries the real cause. A hot
+    // reload hitting this error rejects and keeps the prior router live
+    // (the caller of this function on that path, `read_parse_validate_config`,
+    // already treats any `Err` from here that way).
+    routectl_router::preflight_config_version(&text).map_err(|e| e.to_string())?;
+
+    let mut config: Config = toml::from_str(&text)
+        .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
+
+    let overlay_path = routectl_router::overlay_default_path();
+
+    // v1 -> v2 MIGRATION: the legacy `[cache_pricing]` table and the
+    // `pricing_verifications.json` sidecar both fold into the catalog
+    // overlay, then config.toml is rewritten to `version = 2`. Gated on
+    // the file's OWN version so this runs exactly once per config; at
+    // `version >= CURRENT_CONFIG_VERSION` the sidecar is intentionally
+    // NOT merged here (it already landed in the overlay during
+    // migration -- merging it again would double-apply it).
+    if config.version < routectl_router::CURRENT_CONFIG_VERSION {
+        crate::commands::pricing::load_and_merge_verifications(&mut config);
+        routectl_router::migrate_v1_to_v2(&config.cache_pricing, path, &overlay_path)
+            .map_err(|e| format!("config migration error: {e}"))?;
+        config.version = routectl_router::CURRENT_CONFIG_VERSION;
+        config.cache_pricing.clear();
+    }
+
+    let catalog_overlay = routectl_router::load_catalog_overlay(&overlay_path)
+        .map_err(|e| format!("catalog overlay load error: {e}"))?;
+
+    validate_effective_config(&config)?;
+
+    Ok(LoadedConfig {
+        config,
+        catalog_overlay,
+    })
+}
+
+/// Return of [`load_effective_config`]: the parsed (and, when still `version
+/// < CURRENT_CONFIG_VERSION`, migrated-forward) `Config` alongside the
+/// catalog overlay loaded from the SAME call, so a caller building a Router
+/// (`build_router_from_config_with_overlay`) never has the two drift apart
+/// by loading them at different times.
+pub struct LoadedConfig {
+    pub config: Config,
+    pub catalog_overlay: CatalogOverlay,
+}
+
+/// The startup validators shared by [`load_effective_config`] and
+/// `build_router_from_config`'s own validation pass (intentionally
+/// redundant: this is the cheap fail-fast gate before the heavier router
+/// rebuild).
+fn validate_effective_config(config: &Config) -> Result<(), String> {
+    routectl_router::validate_cache_pricing_retired(config)?;
+    routectl_router::validate_bedrock_global_config(config).map_err(|e| e.to_string())?;
+    routectl_router::validate_reasoning_defaults(config).map_err(|e| e.to_string())?;
+    routectl_router::validate_alias_chain_targets(config).map_err(|e| e.to_string())?;
+    routectl_router::validate_alias_patterns(config).map_err(|e| e.to_string())?;
+    routectl_router::validate_retry_policy(config).map_err(|e| e.to_string())?;
+    routectl_router::validate_registry_patterns(config).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read, parse, and validate the config at `path` via the shared
+/// [`load_effective_config`]. Returns `None` and emits a warn on any
+/// failure so the coordinator can keep the previous config installed.
+/// Pulled out of `handle_config_reload` to keep that function focused on
+/// the swap + diff phases.
+fn read_parse_validate_config(path: &Path) -> Option<LoadedConfig> {
+    let loaded = match load_effective_config(path) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
                 error = %e,
-                "config reload failed: parse error; keeping previous config",
+                "config reload failed; keeping previous config",
             );
             return None;
         }
     };
-    let new_config = Arc::new(new_config);
 
     // Unix-only: WARN when the config file is group/world-readable
     // and carries sensitive values. Non-fatal so dev setups with
     // literal: secrets still start; the operator is informed and can
-    // restrict permissions when it matters.
+    // restrict permissions when it matters. A second small read is
+    // acceptable on this rarely-hit reload path -- `load_effective_config`
+    // does not hand back the raw text, and this check is orthogonal to
+    // parsing.
     #[cfg(unix)]
-    warn_if_config_world_readable(path, &new_config, &text);
-
-    if let Err(e) = routectl_router::validate_bedrock_global_config(&new_config) {
-        tracing::warn!(error = %e, "config reload rejected by validate_bedrock_global_config; keeping previous config");
-        return None;
-    }
-    if let Err(e) = routectl_router::validate_reasoning_defaults(&new_config) {
-        tracing::warn!(error = %e, "config reload rejected by validate_reasoning_defaults; keeping previous config");
-        return None;
-    }
-    if let Err(e) = routectl_router::validate_alias_chain_targets(&new_config) {
-        tracing::warn!(error = %e, "config reload rejected by validate_alias_chain_targets; keeping previous config");
-        return None;
-    }
-    if let Err(e) = routectl_router::validate_alias_patterns(&new_config) {
-        tracing::warn!(error = %e, "config reload rejected by validate_alias_patterns; keeping previous config");
-        return None;
-    }
-    if let Err(e) = routectl_router::validate_retry_policy(&new_config) {
-        tracing::warn!(error = %e, "config reload rejected by validate_retry_policy; keeping previous config");
-        return None;
-    }
-    if let Err(e) = routectl_router::validate_registry_patterns(&new_config) {
-        tracing::warn!(error = %e, "config reload rejected by validate_registry_patterns; keeping previous config");
-        return None;
+    if let Ok(text) = std::fs::read_to_string(path) {
+        warn_if_config_world_readable(path, &loaded.config, &text);
     }
 
-    Some(new_config)
+    Some(loaded)
 }
 
 /// Emit a one-time WARN when `path` is group/world-readable AND the
@@ -2083,7 +2323,8 @@ default = "claude"
             &creds,
             &[("anthropic", "tok-default"), ("anthropic#seat-b", "tok-b")],
         );
-        handle_credentials_reload(&Some(oauth), &config, secrets, &swap).await;
+        let overlay = Arc::new(CatalogOverlay::default());
+        handle_credentials_reload(&Some(oauth), &config, &overlay, secrets, &swap).await;
 
         // Assert: the live Router now resolves two seat targets.
         assert_eq!(
@@ -2118,7 +2359,8 @@ default = "claude"
                 ("anthropic#seat-b", "tok-b-rotated"),
             ],
         );
-        handle_credentials_reload(&Some(oauth), &config, secrets, &swap).await;
+        let overlay = Arc::new(CatalogOverlay::default());
+        handle_credentials_reload(&Some(oauth), &config, &overlay, secrets, &swap).await;
 
         // Assert: the Router Arc is pointer-unchanged (no rebuild fired).
         let after = swap.load_full();
@@ -2157,7 +2399,8 @@ default = "claude"
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
-        handle_credentials_reload(&Some(oauth), &config, secrets, &swap).await;
+        let overlay = Arc::new(CatalogOverlay::default());
+        handle_credentials_reload(&Some(oauth), &config, &overlay, secrets, &swap).await;
 
         // Assert: a failed reload leaves the previous Router installed.
         let after = swap.load_full();
@@ -2185,7 +2428,19 @@ default = "claude"
     /// the live gate WITHOUT rebuilding the writer: the same `UsageHandle`
     /// the daemon holds reports `is_enabled() == false` after the reload,
     /// and the Router Arc is swapped (proving the reload ran).
+    ///
+    /// `#[serial]`: `handle_config_reload` reads the AMBIENT
+    /// `catalog_overlay.json` via `routectl_router::overlay_default_path()`
+    /// (XDG_CONFIG_HOME / HOME), same as every other loader call. Without
+    /// this, a concurrently-running `#[serial]` test that points
+    /// `XDG_CONFIG_HOME` at a tempdir holding a DELIBERATELY corrupt
+    /// overlay (see `config_reload_picks_up_overlay_file_change_and_fails_closed_on_corruption`)
+    /// can race this test's reload into reading that corrupt file and
+    /// failing closed here too -- `serial_test` only excludes OTHER
+    /// `#[serial]` tests, so this test must join the same group to be
+    /// protected.
     #[tokio::test]
+    #[serial_test::serial]
     async fn config_reload_flips_usage_enabled_gate_live() {
         // Arrange: a temp DB + a config file starting enabled=true, and a
         // writer/handle pair the daemon would own across the reload.
@@ -2209,7 +2464,7 @@ default = "claude"
         let before_router = swap.load_full();
 
         // Act: reload the on-disk config (enabled=false).
-        let new_config =
+        let (new_config, _new_overlay) =
             handle_config_reload(Some(&cfg_path), &start_config, secrets, &swap, &usage)
                 .await
                 .expect("config reload must apply");
@@ -2224,6 +2479,79 @@ default = "claude"
         assert!(
             !Arc::ptr_eq(&before_router, &after_router),
             "config reload must swap the router"
+        );
+    }
+
+    /// Shared-loader symmetry: a config reload re-reads
+    /// the catalog overlay from disk, not just config.toml -- and a corrupt
+    /// overlay fails the reload closed, keeping the previously-installed
+    /// router live. Isolated `XDG_CONFIG_HOME` so this test controls
+    /// exactly what `routectl_router::overlay_default_path()` resolves to.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corruption() {
+        // Arrange: an isolated config dir, a minimal config.toml, and NO
+        // overlay file yet (first run -> empty overlay).
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, "[server]\nhost = \"127.0.0.1\"\nport = 0\n").unwrap();
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let mut initial_config = Config::default();
+        let _usage_dir = isolate_usage_db(&mut initial_config);
+        let initial_config = Arc::new(initial_config);
+        let (usage, _writer) = build_usage_writer(&initial_config);
+        let router = build_router_from_config_with_overlay(
+            initial_config.clone(),
+            &CatalogOverlay::default(),
+            secrets.clone(),
+        )
+        .await
+        .expect("initial router build");
+        let swap = Arc::new(ArcSwap::from_pointee(router));
+
+        // Act 1: write a real overlay cell to disk, then reload.
+        let overlay_dir = dir.path().join("routectl");
+        std::fs::create_dir_all(&overlay_dir).unwrap();
+        std::fs::write(
+            overlay_dir.join("catalog_overlay.json"),
+            r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+        )
+        .unwrap();
+        let (new_config, new_overlay) = handle_config_reload(
+            Some(&cfg_path),
+            &initial_config,
+            secrets.clone(),
+            &swap,
+            &usage,
+        )
+        .await
+        .expect("reload with a fresh overlay file must apply");
+
+        // Assert: the reload re-read the overlay from disk (not the empty
+        // overlay the initial router booted with).
+        assert!(
+            new_overlay
+                .cells
+                .contains_key("anthropic-api:claude-opus-4-8*"),
+            "config reload must re-read the catalog overlay file from disk",
+        );
+        let router_after_good_reload = swap.load_full();
+
+        // Act 2: corrupt the overlay file, reload again.
+        std::fs::write(overlay_dir.join("catalog_overlay.json"), b"not json {{{").unwrap();
+        let result =
+            handle_config_reload(Some(&cfg_path), &new_config, secrets, &swap, &usage).await;
+
+        // Assert: a corrupt overlay fails the reload closed -- no
+        // config/overlay update, and the router installed by the LAST GOOD
+        // reload stays live.
+        assert!(result.is_none(), "a corrupt overlay must fail the reload");
+        assert!(
+            Arc::ptr_eq(&swap.load_full(), &router_after_good_reload),
+            "a failed reload must keep the previously-installed router",
         );
     }
 
@@ -2463,5 +2791,211 @@ default = "claude"
             would_trim_raw_marks: None,
             would_trim_context_fraction: None,
         }
+    }
+
+    /// Temporarily set an env var for the test's duration, restoring the
+    /// prior value (or unsetting it) on drop. Mirrors `secrets.rs`'s
+    /// private `EnvGuard` (not reused across modules -- kept local and
+    /// minimal here).
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: serialized against every other `#[serial]` env-mutating
+            // test in this crate via `serial_test::serial`.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                // SAFETY: see `set` above.
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    /// The pre-existing split-brain this closed: startup
+    /// (`main.rs`'s `load_config`) used to merge the `pricing_verifications.json`
+    /// sidecar into `config.cache_pricing`, but the hot-reload path
+    /// (`read_parse_validate_config`) never called that merge at all, so a
+    /// config reload silently dropped sidecar data. Both paths now call the
+    /// SAME `load_effective_config`; this test drives that shared function
+    /// directly (what the reload path calls).
+    ///
+    /// The v1 -> v2 migration superseded the ORIGINAL assertion here (the
+    /// sidecar stamp used to
+    /// stay in `config.cache_pricing` after load): a config with no
+    /// explicit `version` is `version < CURRENT_CONFIG_VERSION`, so this
+    /// load now also runs the v1 -> v2 migration, which folds the merged
+    /// sidecar stamp into the catalog overlay and clears
+    /// `config.cache_pricing`. The split-brain fix (the merge itself still
+    /// runs before migration reads `cache_pricing`) is unchanged; only
+    /// where the data ends up is different.
+    #[test]
+    #[serial_test::serial]
+    fn load_effective_config_folds_the_legacy_sidecar_merge_into_the_overlay() {
+        // Arrange: a config.toml with no `[cache_pricing]` entry for this
+        // selector, plus a `pricing_verifications.json` sidecar stamp for
+        // it, under an isolated `XDG_CONFIG_HOME`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, "[server]\nhost = \"127.0.0.1\"\nport = 4000\n")
+            .expect("write config.toml");
+
+        let sidecar_dir = dir.path().join("routectl");
+        std::fs::create_dir_all(&sidecar_dir).expect("create sidecar dir");
+        std::fs::write(
+            sidecar_dir.join("pricing_verifications.json"),
+            r#"{"verified":{"openai-compat:grok-*":"2026-06-30"}}"#,
+        )
+        .expect("write sidecar");
+
+        // Act: load via the SAME function the reload path
+        // (`read_parse_validate_config`) calls.
+        let loaded = load_effective_config(&cfg_path).expect("load must succeed");
+
+        // Assert: migration ran (version bumped, cache_pricing cleared) and
+        // the sidecar stamp landed in the catalog overlay, not
+        // `config.cache_pricing`.
+        assert_eq!(
+            loaded.config.version,
+            routectl_router::CURRENT_CONFIG_VERSION
+        );
+        assert!(loaded.config.cache_pricing.is_empty());
+        assert!(
+            loaded
+                .catalog_overlay
+                .cells
+                .contains_key("openai-compat:grok-*"),
+            "the sidecar stamp must be folded into the catalog overlay by migration",
+        );
+
+        // Assert: config.toml itself was rewritten to version = 2.
+        let rewritten = std::fs::read_to_string(&cfg_path).expect("read rewritten config");
+        assert!(rewritten.contains("version = 2"), "rewritten: {rewritten}");
+    }
+
+    /// At `version >= CURRENT_CONFIG_VERSION`, the legacy sidecar is
+    /// intentionally NOT merged -- migration already folded it into the
+    /// overlay when the file was first upgraded to v2; merging it again on
+    /// every subsequent load would double-apply the same stamp through two
+    /// independent merge paths.
+    #[test]
+    #[serial_test::serial]
+    fn load_effective_config_ignores_the_sidecar_at_current_version() {
+        // Arrange: a v2 config (no [cache_pricing] -- already migrated),
+        // plus a sidecar file that would otherwise reintroduce a stamp.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            "version = 2\n[server]\nhost = \"127.0.0.1\"\nport = 4000\n",
+        )
+        .expect("write config.toml");
+
+        let sidecar_dir = dir.path().join("routectl");
+        std::fs::create_dir_all(&sidecar_dir).expect("create sidecar dir");
+        std::fs::write(
+            sidecar_dir.join("pricing_verifications.json"),
+            r#"{"verified":{"openai-compat:grok-*":"2026-06-30"}}"#,
+        )
+        .expect("write sidecar");
+
+        // Act
+        let loaded = load_effective_config(&cfg_path).expect("load must succeed");
+
+        // Assert: the sidecar stamp is NOT merged into cache_pricing (which
+        // would then fail `validate_cache_pricing_retired`), and the
+        // overlay -- untouched by this load -- stays empty.
+        assert!(loaded.config.cache_pricing.is_empty());
+        assert!(loaded.catalog_overlay.cells.is_empty());
+    }
+
+    /// Cold-start posture: a config whose `version` is newer than this
+    /// build supports fails the load closed with a clear message, via the
+    /// preflight raw-TOML read -- before the `deny_unknown_fields` typed
+    /// deserialize would otherwise mask it behind an unknown-field error.
+    #[test]
+    fn load_effective_config_rejects_a_version_newer_than_supported() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, "version = 99\n[server]\nhost = \"127.0.0.1\"\n")
+            .expect("write config.toml");
+
+        // Act. `LoadedConfig` is not `Debug`, so match rather than
+        // `expect_err`.
+        let err = match load_effective_config(&cfg_path) {
+            Ok(_) => panic!("version 99 must be rejected"),
+            Err(e) => e,
+        };
+
+        // Assert
+        assert!(err.contains("99"), "err: {err}");
+        assert!(
+            err.contains(&routectl_router::CURRENT_CONFIG_VERSION.to_string()),
+            "err: {err}"
+        );
+    }
+
+    /// Hot-reload posture: a config edited to a too-new `version`
+    /// rejects the reload and keeps the prior router live, same as any
+    /// other reload-time load failure.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_router() {
+        // Arrange: a good v2 config, an initial router built from it.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            "version = 2\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .unwrap();
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let mut initial_config = Config {
+            version: routectl_router::CURRENT_CONFIG_VERSION,
+            ..Default::default()
+        };
+        let _usage_dir = isolate_usage_db(&mut initial_config);
+        let initial_config = Arc::new(initial_config);
+        let (usage, _writer) = build_usage_writer(&initial_config);
+        let router = build_router_from_config_with_overlay(
+            initial_config.clone(),
+            &CatalogOverlay::default(),
+            secrets.clone(),
+        )
+        .await
+        .expect("initial router build");
+        let swap = Arc::new(ArcSwap::from_pointee(router));
+        let router_before = swap.load_full();
+
+        // Act: edit the config to a version newer than this build
+        // supports, then reload.
+        std::fs::write(
+            &cfg_path,
+            "version = 99\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .unwrap();
+        let result =
+            handle_config_reload(Some(&cfg_path), &initial_config, secrets, &swap, &usage).await;
+
+        // Assert: the reload rejects and the prior router stays installed.
+        assert!(result.is_none(), "a too-new version must reject the reload");
+        let router_after = swap.load_full();
+        assert!(
+            Arc::ptr_eq(&router_before, &router_after),
+            "the prior router must stay installed on a rejected reload"
+        );
     }
 }

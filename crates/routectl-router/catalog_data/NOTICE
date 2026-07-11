@@ -1,0 +1,53 @@
+Vendored data snapshots for the routectl baked catalog table
+==============================================================
+
+This directory contains third-party data snapshots consumed by
+`cargo run --bin gen_catalog` (see `../src/bin/gen_catalog.rs` and
+`../src/catalog_codegen.rs`) to generate `../src/catalog_baked.rs`. Both
+snapshots are used strictly as read-only reference data: numeric pricing
+and capability facts are extracted programmatically, no source code from
+either project is reused.
+
+1. litellm_model_prices_and_context_window.json
+   -------------------------------------------------------------------
+   Source:    BerriAI/litellm, `model_prices_and_context_window.json`
+   URL:       https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+   License:   MIT (https://raw.githubusercontent.com/BerriAI/litellm/main/LICENSE;
+              the MIT grant covers this file -- the repository's
+              "enterprise/" carve-out does not apply to it)
+   Copyright: Copyright (c) 2023 Berri AI
+   Snapshot date: 2026-07-11
+
+2. models_dev.json
+   -------------------------------------------------------------------
+   Source:    models.dev model/pricing API, built from the sst/models.dev
+              repository
+   URL:       https://models.dev/api.json
+   License:   MIT (https://raw.githubusercontent.com/sst/models.dev/dev/LICENSE)
+   Copyright: Copyright (c) 2025 models.dev
+   Snapshot date: 2026-07-11
+
+Both sources are MIT-licensed; MIT permits use, copy, modification, and
+redistribution (including baking derived facts into another project's
+compiled output), subject to including the license and copyright notice,
+reproduced above, alongside the vendored copies.
+
+cross_check_allowlist.json
+-------------------------------------------------------------------
+Not vendored data -- a routectl-authored file recording the specific
+(selector, field) pairs where the two sources above disagree and which
+value the generator uses, with a rationale. See that file for the
+current entries.
+
+Refreshing the snapshots
+-------------------------------------------------------------------
+1. Re-fetch both URLs above, overwrite the two JSON files in this
+   directory, and update the snapshot dates here.
+2. Update `CATALOG_SNAPSHOT_DATE` in `../src/catalog_codegen.rs` to match.
+3. Run `cargo run --bin gen_catalog` from the workspace root (or this
+   crate) to regenerate `../src/catalog_baked.rs`.
+4. Bump `CATALOG_VERSION` in `../src/catalog_codegen.rs` if the output
+   changed materially (rows added/removed, derivation rules changed) --
+   not on every refresh with an unchanged shape.
+5. Run `cargo fmt` and `cargo test -p routectl-router` (the drift-guard
+   test fails if the checked-in file is stale).

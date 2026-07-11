@@ -1,15 +1,15 @@
-//! Per-(provider_kind, model) prompt-cache PRICING data module.
+//! Per-(provider_kind, model) catalog data module: the baked reference
+//! table for prompt-cache economics, context window, and capability
+//! priors, plus the two-layer merge with the on-disk overlay
+//! ([`crate::catalog_overlay`]).
 //!
-//! This is a DATA module: a single-file baked table of cache-break
-//! economics multipliers keyed on `(provider_kind, model_glob, tier)`,
-//! plus a fallback lookup and a field-level operator TOML override merge.
-//!
-//! It carries NO decision logic. The break-even cost gate that consumes
-//! these rows is a separate, later concern; nothing here touches the live
-//! dispatch path. The numbers are the verified June 2026 provider-cache
-//! mechanics; cells the research could not resolve from primary vendor
-//! docs are baked `verified = false` so the gate that will read them
-//! treats them as the conservative sentinel until a live probe confirms.
+//! TWO LAYERS: layer 1 is this module's baked
+//! table, compiled into the binary; layer 2 is [`crate::catalog_overlay`]'s
+//! `catalog_overlay.json`. [`merge`] combines a baked row with its overlay
+//! cell into an [`EffectiveRow`] -- the overlay wins over baked, JSON
+//! `null` disables the entry, and provenance (`source` + `verified_at`) is
+//! carried ONLY on the merge result, never stored on [`CatalogRow`]
+//! itself.
 //!
 //! Keying is `(provider_kind, model)` -- not provider alone -- because the
 //! read multiplier `rm` is model-dependent WITHIN several providers (Grok,
@@ -26,18 +26,33 @@
 //! ([`crate::glob::AliasPattern`]); longest-prefix-wins.
 //!
 //! Lookup is: exact-or-glob model match within the provider kind -> the
-//! provider `"*"` catch-all -> the tier-agnostic sentinel. The requested
-//! `tier` defaults to `"5m"` (routectl's auto-emit default and the common
-//! case); a tier-agnostic cell matches any tier, a tiered cell matches only
-//! its own tier.
+//! provider `"*"` catch-all -> the conservative sentinel (only via
+//! [`lookup`] / [`lookup_with_overrides`]; the two-layer merge uses
+//! [`lookup_baked_with_overrides`], which reports a genuine catalog miss as
+//! `None` instead of synthesizing a sentinel row). The requested `tier`
+//! defaults to `"5m"` (routectl's auto-emit default and the common case); a
+//! tier-agnostic cell matches any tier, a tiered cell matches only its own
+//! tier.
+//!
+//! GENERATED BAKED TABLE: [`TABLE`] is populated at startup from
+//! [`crate::catalog_baked::baked_cells`], the output of
+//! `cargo run --bin gen_catalog` (see [`crate::catalog_codegen`] for the
+//! derivation from vendored models.dev + litellm snapshots). Every
+//! baked-matched row is treated as equally trustworthy
+//! (`EffectiveRow::Present { source: Baked, .. }`); the old per-row
+//! `verified = false` "PROBE" flag is gone along with the row fields it
+//! lived on.
 
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog_overlay::{CatalogOverlay, OverlayCell, OverlaySource};
 use crate::glob::AliasPattern;
 
-/// Staleness horizon: a baked row whose `verified_at` is more than this
+/// Staleness horizon: a baked row whose snapshot date is more than this
 /// many days before today triggers a startup WARN (never a panic).
 const STALE_AFTER_DAYS: i64 = 90;
 
@@ -48,21 +63,33 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// any provider whose real threshold is unknown. High on purpose: a high
 /// `min_prefix_tokens` makes the (later) break-even gate fold the
 /// min-prefix guard pessimistically, biasing toward KEEP.
-const SENTINEL_MIN_PREFIX_TOKENS: u32 = 4096;
+pub(crate) const SENTINEL_MIN_PREFIX_TOKENS: u32 = 4096;
 
-/// One row of prompt-cache economics for a `(provider_kind, model_glob)`
-/// cell. Multipliers are relative to the base input price per token.
+/// Snapshot date for the WHOLE baked table (per-row `verified_at` left the
+/// row; a baked-sourced [`EffectiveRow::Present`] stamps this table-wide
+/// date). Forwards [`crate::catalog_baked::CATALOG_SNAPSHOT_DATE`] -- the
+/// generated file's display-only const -- under the name the rest of this
+/// module already uses.
+const BAKED_SNAPSHOT_DATE: &str = crate::catalog_baked::CATALOG_SNAPSHOT_DATE;
+
+/// One row of prompt-cache economics, context window, and capability
+/// priors for a `(provider_kind, model_glob)` cell. Multipliers are
+/// relative to the base input price per token.
 ///
 /// `#[non_exhaustive]`: more economics fields (storage-rent shape,
 /// per-model convergence priors) are expected later, so construct rows
-/// only through the baked table / [`CachePricingRow::sentinel`] /
-/// [`CachePricingRow::with_overrides`]; struct-literal syntax is
-/// unavailable to external crates.
+/// only through the baked table / [`CatalogRow::sentinel`] /
+/// [`CatalogRow::with_overrides`]; struct-literal syntax is unavailable to
+/// external crates.
 ///
-/// `Eq` is deliberately NOT derived: the multipliers are `f32`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Carries NO provenance (`verified` / `source` / `verified_at` LEFT the
+/// row): a row is pure economics + capability data, and provenance is
+/// a property of the two-layer merge result ([`EffectiveRow`]), never of
+/// the row itself. `Copy` is deliberately NOT derived: `capabilities` is a
+/// `BTreeMap`. `Eq` is deliberately NOT derived: the multipliers are `f32`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct CachePricingRow {
+pub struct CatalogRow {
     /// Write multiplier: cost to (re)write a cached prefix block, relative
     /// to base input price. `1.0` means no write premium (auto-cachers).
     pub wm: f32,
@@ -85,53 +112,34 @@ pub struct CachePricingRow {
     /// Whether the upstream caches automatically (no explicit breakpoint
     /// to place) versus an explicit-breakpoint provider.
     pub auto_cacher: bool,
-    /// Whether this cell's multipliers were confirmed against a primary
-    /// vendor doc / live probe. `false` cells fall to sentinel treatment
-    /// in the consuming gate.
-    pub verified: bool,
     /// TTL tier this cell applies to: `Some("5m")` or `Some("1h")` for the
     /// tiered Anthropic / Bedrock rows whose write economics differ by
     /// breakpoint TTL; `None` for every tier-agnostic row (matches any
     /// requested tier). The sentinel is tier-agnostic.
     pub tier: Option<&'static str>,
-    /// Verification date as `"YYYY-MM-DD"`. Parsed for the staleness check.
-    pub verified_at: &'static str,
-    /// Free-form provenance string (vendor doc, `"sentinel"`, etc.).
-    pub source: &'static str,
     /// The model's total context window in tokens, when confirmed against a
     /// primary vendor doc for this exact `(provider_kind, model_glob)` cell.
-    /// `None` (fail-closed, same posture as `verified = false`) when the
-    /// window could not be confirmed -- e.g. a bare `"*"` catch-all that can
-    /// match models with genuinely different windows, or a model/family
-    /// whose window is not stated as an exact figure in current vendor docs.
-    /// A `None` here is the correct, safe answer; a guessed window would be
-    /// a silent data error downstream (`context_fraction`, f1.06).
+    /// `None` (fail-closed) when the window could not be confirmed -- e.g. a
+    /// bare `"*"` catch-all that can match models with genuinely different
+    /// windows, or a model/family whose window is not stated as an exact
+    /// figure in current vendor docs. A `None` here is the correct, safe
+    /// answer; a guessed window would be a silent data error downstream
+    /// (`context_fraction`, deferred to the display work).
     pub max_context_tokens: Option<u32>,
+    /// Capability priors keyed on the well-known namespace
+    /// (`routectl_core::capability`). Absent key = NO PRIOR (distinct from
+    /// `Some(false)`, an asserted absence). Empty on every transitional
+    /// baked row (a later codegen pass populates this); an overlay cell can
+    /// still set entries via [`crate::catalog_overlay::OverlayCell::capabilities`].
+    pub capabilities: BTreeMap<String, bool>,
 }
 
-/// Intern a `verified_at` date string, leaking at most one allocation per
-/// distinct value for the process lifetime. The cardinality is tiny (date
-/// strings like "2026-07-01"), so the total leak is bounded. The small lock
-/// sits on the advisory would-trim path only; it is never held across I/O.
-fn intern_verified_at(s: &str) -> &'static str {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static INTERN: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
-    let m = INTERN.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(&v) = g.get(s) {
-        return v;
-    }
-    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
-    g.insert(s.to_owned(), leaked);
-    leaked
-}
-
-impl CachePricingRow {
+impl CatalogRow {
     /// The conservative SENTINEL row: the most-expensive-to-break shape, so
-    /// an unknown / unverified cell forces KEEP at the margin in the
+    /// an unknown / unpriced cell forces KEEP at the margin in the
     /// consuming gate. `wm = 2.0` (the 1h-premium write tax), `rm = 0.10`,
-    /// 5-minute TTL, a high min-prefix, and `verified = false`.
+    /// 5-minute TTL, and a high min-prefix.
+    #[must_use]
     pub const fn sentinel() -> Self {
         Self {
             wm: 2.0,
@@ -141,41 +149,29 @@ impl CachePricingRow {
             has_storage_rent: false,
             storage_rent: 0.0,
             auto_cacher: false,
-            verified: false,
             tier: None,
-            verified_at: "1970-01-01",
-            source: "sentinel",
             max_context_tokens: None,
+            capabilities: BTreeMap::new(),
         }
     }
 
-    /// Merge a field-level operator override onto this baked row. Every
-    /// override field is `Option`; `None` inherits the baked value (the
-    /// operator restates only the cells they know are wrong).
+    /// Merge a field-level LEGACY `[cache_pricing]` operator override onto
+    /// this row. Every override field is `Option`; `None` inherits this
+    /// row's value (the operator restates only the cells they know are
+    /// wrong).
     ///
     /// RELIABILITY GUARD: a degenerate override is rejected up front via
     /// [`CachePricingOverride::validate`] (a below-sentinel `wm` without the
-    /// cost-risk ack, or a non-positive `rm`). On success the override fields
-    /// merge over the baked values and the row is stamped `verified = true`.
+    /// cost-risk ack, or a non-positive `rm`).
     ///
-    /// Provenance: when the override is a pure verification stamp (only
-    /// `verified_at` set, all value fields `None`), `source` is set to
-    /// `"operator-verified"`; otherwise `"operator-override"`.
-    ///
-    /// `verified_at`: when `ov.verified_at` is `Some`, the returned row
-    /// carries that date string (leaked to `'static` for the field type);
-    /// when `None`, the baked `verified_at` is inherited unchanged.
+    /// PURE VALUE MERGE ONLY: this no longer stamps `verified` / `source`
+    /// (this redesign killed the hardcoded provenance stamp -- provenance now comes
+    /// exclusively from the two-layer merge result, [`EffectiveRow`]).
+    /// `ov.verified_at` is still format-validated but has no row field to
+    /// land on; a later legacy-config migration reads it directly off the
+    /// raw override.
     pub fn with_overrides(&self, ov: &CachePricingOverride) -> Result<Self, String> {
         ov.validate()?;
-        let verified_at: &'static str = match &ov.verified_at {
-            Some(s) => intern_verified_at(s),
-            None => self.verified_at,
-        };
-        let source: &'static str = if ov.is_pure_verification() {
-            "operator-verified"
-        } else {
-            "operator-override"
-        };
         Ok(Self {
             wm: ov.wm.unwrap_or(self.wm),
             rm: ov.rm.unwrap_or(self.rm),
@@ -184,24 +180,18 @@ impl CachePricingRow {
             has_storage_rent: ov.has_storage_rent.unwrap_or(self.has_storage_rent),
             storage_rent: ov.storage_rent.unwrap_or(self.storage_rent),
             auto_cacher: ov.auto_cacher.unwrap_or(self.auto_cacher),
-            verified: true,
             tier: self.tier,
-            verified_at,
-            source,
             max_context_tokens: ov.max_context_tokens.or(self.max_context_tokens),
+            capabilities: self.capabilities.clone(),
         })
     }
 }
 
 /// Field-level operator override for one `(provider_kind, model_glob)`
-/// cell, deserialized from a `[cache_pricing]` TOML entry. Every field is
-/// optional; an omitted field inherits the baked-in value (see
-/// [`CachePricingRow::with_overrides`]).
-///
-/// Setting only `verified_at` (all value fields `None`) is a pure
-/// verification stamp: the operator confirms the baked values are still
-/// correct as of the given date without re-asserting any numbers. The
-/// merged row will carry `source = "operator-verified"` in that case.
+/// cell, deserialized from a LEGACY `[cache_pricing]` TOML entry (retired
+/// in a later increment). Every
+/// field is optional; an omitted field inherits the baked-in value (see
+/// [`CatalogRow::with_overrides`]).
 ///
 /// `Eq` is deliberately NOT derived: the multipliers are `f32`.
 /// `#[serde(deny_unknown_fields)]` rejects typos at config-load time.
@@ -222,11 +212,11 @@ pub struct CachePricingOverride {
     pub storage_rent: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_cacher: Option<bool>,
-    /// Operator-supplied verification date (`"YYYY-MM-DD"`). When set,
-    /// the merged row's `verified_at` is updated to this value. A pure
-    /// verification stamp (all value fields `None`, only `verified_at`
-    /// set) produces `source = "operator-verified"`; a value-plus-date
-    /// override still produces `source = "operator-override"`.
+    /// Operator-supplied verification date (`"YYYY-MM-DD"`). Format-
+    /// validated but no longer stamped onto the merged row (provenance
+    /// lives on [`EffectiveRow`], not on [`CatalogRow`]). Retained so the
+    /// legacy-config migration can read it when building an overlay
+    /// candidate from an existing `[cache_pricing]` entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<String>,
     /// Operator's explicit acknowledgement that a below-sentinel `wm` is
@@ -252,19 +242,19 @@ impl CachePricingOverride {
     /// zero or negative read multiplier makes the break-even math degenerate.
     /// A `verified_at` value that does not parse as `YYYY-MM-DD` is rejected
     /// so a malformed stamp fails fast at startup rather than silently going
-    /// wrong at staleness-check time.
-    /// Shared by the merge path ([`CachePricingRow::with_overrides`]) and the
+    /// wrong later.
+    /// Shared by the merge path ([`CatalogRow::with_overrides`]) and the
     /// startup validate-only pass ([`validate_overrides`]).
     pub fn validate(&self) -> Result<(), String> {
         if let Some(wm) = self.wm
-            && wm < CachePricingRow::sentinel().wm
+            && wm < CatalogRow::sentinel().wm
             && !self.override_acknowledges_cost_risk
         {
             return Err(format!(
                 "cache-pricing override sets wm = {wm} below the conservative sentinel wm = \
                      {}, which can make a cache break look falsely profitable; set \
                      override_acknowledges_cost_risk = true to accept this risk",
-                CachePricingRow::sentinel().wm
+                CatalogRow::sentinel().wm
             ));
         }
         if let Some(rm) = self.rm
@@ -291,28 +281,14 @@ impl CachePricingOverride {
         }
         Ok(())
     }
-
-    /// True when this override is a pure verification stamp: no value fields
-    /// are set and `verified_at` is `Some`. The merged row gets
-    /// `source = "operator-verified"` rather than `"operator-override"`.
-    const fn is_pure_verification(&self) -> bool {
-        self.wm.is_none()
-            && self.rm.is_none()
-            && self.ttl_seconds.is_none()
-            && self.min_prefix_tokens.is_none()
-            && self.has_storage_rent.is_none()
-            && self.storage_rent.is_none()
-            && self.auto_cacher.is_none()
-            && self.max_context_tokens.is_none()
-            && self.verified_at.is_some()
-    }
 }
 
 /// A parsed `"provider_kind:model_glob"` config-key selector for the
 /// `[cache_pricing]` override table. The raw key is split on the FIRST
 /// colon so a model glob may itself contain colons (real Bedrock ids do).
 /// [`best_override`] uses this to apply `Config.cache_pricing` overrides
-/// onto baked rows during [`lookup_with_overrides`].
+/// onto baked rows during [`lookup_with_overrides`] /
+/// [`lookup_baked_with_overrides`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachePricingSelector {
     pub provider_kind: String,
@@ -347,713 +323,41 @@ impl CachePricingSelector {
 struct BakedCell {
     provider_kind: &'static str,
     model_glob: &'static str,
-    row: CachePricingRow,
+    row: CatalogRow,
 }
 
-/// Helper to build a baked verified row tersely. Reserved (unused) fields
-/// (`has_storage_rent`, `storage_rent`) are always `false` / `0.0`. The
-/// argument count is the price of a flat, scannable static table; the
-/// helper is private and each call site reads positionally against the
-/// doc-defined column order. `tier` is `None` for tier-agnostic rows and
-/// `Some("5m")` / `Some("1h")` for the tiered Anthropic / Bedrock cells.
-#[allow(clippy::too_many_arguments)]
-const fn row(
-    wm: f32,
-    rm: f32,
-    ttl_seconds: u32,
-    min_prefix_tokens: u32,
-    auto_cacher: bool,
-    verified: bool,
-    tier: Option<&'static str>,
-    verified_at: &'static str,
-    source: &'static str,
-    max_context_tokens: Option<u32>,
-) -> CachePricingRow {
-    CachePricingRow {
-        wm,
-        rm,
-        ttl_seconds,
-        min_prefix_tokens,
-        has_storage_rent: false,
-        storage_rent: 0.0,
-        auto_cacher,
-        verified,
-        tier,
-        verified_at,
-        source,
-        max_context_tokens,
-    }
-}
-
-/// Verification stamp shared by the cells resolved in the 2026-06-24
-/// primary-doc fan-out. Edit this when the table is re-verified.
-const VERIFIED_AT: &str = "2026-06-24";
-
-/// The baked pricing table. Keyed on `(provider_kind, model_glob)`. The
+/// The baked catalog table. Keyed on `(provider_kind, model_glob)`. The
 /// provider-kind tokens are the stable `kind_str()` discriminants
 /// (`anthropic-api`, `bedrock`, `openai-responses`, `openai-compat`); the
 /// openai-compat sub-providers are model_glob rows under `openai-compat`.
 ///
-/// Cells the source doc marks `[PROBE]` / UNKNOWN / unverified are baked
-/// `verified = false` (Grok, Kimi, Mistral, the openai-compat catch-all)
-/// so the consuming gate treats them as sentinel for live cuts. The
-/// `verified = true` cells carry the doc's exact multipliers.
-const TABLE: &[BakedCell] = &[
-    // -- Anthropic (explicit; 5m default ephemeral + 1h GA) ---------------
-    // min-prefix is model-dependent: 1024 for Opus 4.8 / Sonnet 4.6 / 4.5,
-    // 2048 for Haiku 3.5 / Opus 4.7, 4096 for Opus 4.6 / 4.5 / Haiku 4.5.
-    // Each per-model row exists at both the 5m tier (wm=1.25, ttl=300) and
-    // the 1h tier (wm=2.0, ttl=3600); 1h is GA and verified.
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-opus-4-8*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            1024,
-            false,
-            true,
-            Some("5m"),
-            VERIFIED_AT,
-            "anthropic-5m",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-opus-4-8*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            1024,
-            false,
-            true,
-            Some("1h"),
-            VERIFIED_AT,
-            "anthropic-1h",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-sonnet-4-6*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            1024,
-            false,
-            true,
-            Some("5m"),
-            VERIFIED_AT,
-            "anthropic-5m",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-sonnet-4-6*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            1024,
-            false,
-            true,
-            Some("1h"),
-            VERIFIED_AT,
-            "anthropic-1h",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-sonnet-4-5*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            1024,
-            false,
-            true,
-            Some("5m"),
-            VERIFIED_AT,
-            "anthropic-5m",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-sonnet-4-5*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            1024,
-            false,
-            true,
-            Some("1h"),
-            VERIFIED_AT,
-            "anthropic-1h",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-haiku-3-5*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            2048,
-            false,
-            true,
-            Some("5m"),
-            VERIFIED_AT,
-            "anthropic-5m",
-            None,
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-haiku-3-5*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            2048,
-            false,
-            true,
-            Some("1h"),
-            VERIFIED_AT,
-            "anthropic-1h",
-            None,
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-opus-4-7*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            2048,
-            false,
-            true,
-            Some("5m"),
-            VERIFIED_AT,
-            "anthropic-5m",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-opus-4-7*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            2048,
-            false,
-            true,
-            Some("1h"),
-            VERIFIED_AT,
-            "anthropic-1h",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-opus-4-6*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            4096,
-            false,
-            true,
-            Some("5m"),
-            VERIFIED_AT,
-            "anthropic-5m",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-opus-4-6*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            4096,
-            false,
-            true,
-            Some("1h"),
-            VERIFIED_AT,
-            "anthropic-1h",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-opus-4-5*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            4096,
-            false,
-            true,
-            Some("5m"),
-            VERIFIED_AT,
-            "anthropic-5m",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-opus-4-5*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            4096,
-            false,
-            true,
-            Some("1h"),
-            VERIFIED_AT,
-            "anthropic-1h",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-haiku-4-5*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            4096,
-            false,
-            true,
-            Some("5m"),
-            VERIFIED_AT,
-            "anthropic-5m",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "claude-haiku-4-5*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            4096,
-            false,
-            true,
-            Some("1h"),
-            VERIFIED_AT,
-            "anthropic-1h",
-            Some(200_000),
-        ),
-    },
-    // Anthropic provider-level catch-all: tier-agnostic so it backstops a
-    // request at either TTL. The 5m write premium, conservative 4096
-    // min-prefix. Verified shape, but a generic model id.
-    BakedCell {
-        provider_kind: "anthropic-api",
-        model_glob: "*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            4096,
-            false,
-            true,
-            None,
-            VERIFIED_AT,
-            "anthropic-5m-default",
-            None,
-        ),
-    },
-    // -- Bedrock (Claude via cachePoint) ----------------------------------
-    // Wm 1.25 (5m) / 2.0 (1h); rm ~0.1 PROBE on the pricing page (not yet
-    // stamped) -> verified=false. Real Bedrock ids carry a vendor prefix
-    // (anthropic.claude-...), so globs are trailing-only. 1h applies ONLY
-    // to the 4.5-class (Opus 4.5 / Sonnet 4.5 / Haiku 4.5); Sonnet 4.6 is
-    // 5m-only. min-prefix: 4096 for 4.5-class; 1024 for Sonnet 4.6.
-    BakedCell {
-        provider_kind: "bedrock",
-        model_glob: "anthropic.claude-sonnet-4-6*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            1024,
-            false,
-            false,
-            Some("5m"),
-            VERIFIED_AT,
-            "bedrock-probe-rm",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "bedrock",
-        model_glob: "anthropic.claude-sonnet-4-5*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            4096,
-            false,
-            false,
-            Some("5m"),
-            VERIFIED_AT,
-            "bedrock-probe-rm",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "bedrock",
-        model_glob: "anthropic.claude-sonnet-4-5*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            4096,
-            false,
-            false,
-            Some("1h"),
-            VERIFIED_AT,
-            "bedrock-probe-rm",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "bedrock",
-        model_glob: "anthropic.claude-haiku-4-5*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            4096,
-            false,
-            false,
-            Some("5m"),
-            VERIFIED_AT,
-            "bedrock-probe-rm",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "bedrock",
-        model_glob: "anthropic.claude-haiku-4-5*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            4096,
-            false,
-            false,
-            Some("1h"),
-            VERIFIED_AT,
-            "bedrock-probe-rm",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "bedrock",
-        model_glob: "anthropic.claude-opus-4-5*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            4096,
-            false,
-            false,
-            Some("5m"),
-            VERIFIED_AT,
-            "bedrock-probe-rm",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "bedrock",
-        model_glob: "anthropic.claude-opus-4-5*",
-        row: row(
-            2.0,
-            0.10,
-            3_600,
-            4096,
-            false,
-            false,
-            Some("1h"),
-            VERIFIED_AT,
-            "bedrock-probe-rm",
-            Some(200_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "bedrock",
-        model_glob: "*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            4096,
-            false,
-            false,
-            None,
-            VERIFIED_AT,
-            "bedrock-probe-rm",
-            None,
-        ),
-    },
-    // -- OpenAI Responses (automatic prefix, no write premium) ------------
-    // 24h DEFAULT retention on GPT-5.5+, free writes (Wm 1.0), rm 0.10.
-    BakedCell {
-        provider_kind: "openai-responses",
-        model_glob: "*",
-        row: row(
-            1.0,
-            0.10,
-            86_400,
-            1024,
-            true,
-            true,
-            None,
-            VERIFIED_AT,
-            "openai-24h",
-            None,
-        ),
-    },
-    // -- openai-compat sub-providers (model_glob rows) --------------------
-    // DeepSeek: automatic disk-KV prefix, free writes, very deep reads.
-    // V4-Pro rm ~0.0083; V4-Flash rm ~0.02; min-prefix from token 0.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "deepseek-v4-pro*",
-        row: row(
-            1.0,
-            0.0083,
-            3_600,
-            1,
-            true,
-            true,
-            None,
-            VERIFIED_AT,
-            "deepseek-v4-pro",
-            Some(1_000_000),
-        ),
-    },
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "deepseek-*",
-        row: row(
-            1.0,
-            0.02,
-            3_600,
-            1,
-            true,
-            true,
-            None,
-            VERIFIED_AT,
-            "deepseek-v4-flash",
-            None,
-        ),
-    },
-    // Gemini implicit: automatic prefix, free writes, rm ~0.10. min-prefix
-    // 2048 (2.5) / 4096 (3.1-Pro, 3.5-Flash) -> conservative 4096.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "gemini-*",
-        row: row(
-            1.0,
-            0.10,
-            300,
-            4096,
-            true,
-            true,
-            None,
-            VERIFIED_AT,
-            "gemini-implicit",
-            None,
-        ),
-    },
-    // Mistral: explicit-keyed prefix; caller must supply prompt_cache_key,
-    // not automatic -> auto_cacher=false. Free writes, rm 0.10, 64-token
-    // block. TTL UNKNOWN [PROBE] -> verified=false.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "mistral-*",
-        row: row(
-            1.0,
-            0.10,
-            300,
-            64,
-            false,
-            false,
-            None,
-            VERIFIED_AT,
-            "mistral-probe-ttl",
-            None,
-        ),
-    },
-    // xAI Grok: automatic prefix, free writes, rm model-dependent
-    // (0.05-0.16). min-prefix + TTL UNKNOWN [PROBE] -> verified=false.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "grok-*",
-        row: row(
-            1.0,
-            0.16,
-            300,
-            4096,
-            true,
-            false,
-            None,
-            VERIFIED_AT,
-            "grok-probe",
-            None,
-        ),
-    },
-    // Moonshot Kimi: hybrid auto/explicit, free auto writes, rm ~0.16-0.20.
-    // min-prefix + explicit ttl bounds UNKNOWN [PROBE] -> verified=false.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "kimi-*",
-        row: row(
-            1.0,
-            0.20,
-            300,
-            4096,
-            true,
-            false,
-            None,
-            VERIFIED_AT,
-            "kimi-probe",
-            None,
-        ),
-    },
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "moonshot-*",
-        row: row(
-            1.0,
-            0.20,
-            300,
-            4096,
-            true,
-            false,
-            None,
-            VERIFIED_AT,
-            "kimi-probe",
-            None,
-        ),
-    },
-    // Qwen explicit: explicit cache_control ephemeral, Wm 1.25, rm 0.10,
-    // 5-min TTL, 1024 explicit min-prefix.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "qwen-*",
-        row: row(
-            1.25,
-            0.10,
-            300,
-            1024,
-            false,
-            true,
-            None,
-            VERIFIED_AT,
-            "qwen-explicit",
-            None,
-        ),
-    },
-    // MiniMax M3 (flagship): passive auto, FREE writes, rm 0.2, 512 prefix.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "minimax-m3*",
-        row: row(
-            1.0,
-            0.20,
-            300,
-            512,
-            true,
-            true,
-            None,
-            VERIFIED_AT,
-            "minimax-m3",
-            Some(1_000_000),
-        ),
-    },
-    // MiniMax 2.7 / 2.5 snapshots: passive + explicit, wm 1.25, rm 0.2, 512 prefix.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "minimax-*",
-        row: row(
-            1.25,
-            0.20,
-            300,
-            512,
-            false,
-            true,
-            None,
-            VERIFIED_AT,
-            "minimax-m2",
-            Some(204_800),
-        ),
-    },
-    // openai-compat catch-all: unknown OpenAI-compatible upstream. The shape
-    // varies wildly across pass-through gateways (OpenRouter, OpenCode Zen,
-    // Fireworks, self-host vLLM/NIM/llama.cpp), so this stays unverified ->
-    // the consuming gate falls through to the sentinel for live cuts.
-    BakedCell {
-        provider_kind: "openai-compat",
-        model_glob: "*",
-        row: row(
-            1.0,
-            0.10,
-            300,
-            SENTINEL_MIN_PREFIX_TOKENS,
-            true,
-            false,
-            None,
-            VERIFIED_AT,
-            "openai-compat-default",
-            None,
-        ),
-    },
-];
+/// Populated from [`crate::catalog_baked::baked_cells`] -- the checked-in
+/// output of `cargo run --bin gen_catalog` (see [`crate::catalog_codegen`]
+/// for the derivation from vendored snapshots). A `LazyLock<Vec<..>>` (not
+/// a `const` slice): `CatalogRow` is no longer `Copy` (it carries a
+/// `BTreeMap`), and lookup is off the hot path (dispatch never calls into
+/// this table directly -- see the module doc).
+static TABLE: LazyLock<Vec<BakedCell>> = LazyLock::new(|| {
+    crate::catalog_baked::baked_cells()
+        .into_iter()
+        .map(|cell| BakedCell {
+            provider_kind: cell.provider_kind,
+            model_glob: cell.model_glob,
+            row: cell.row,
+        })
+        .collect()
+});
 
-/// Look up the pricing row for a `(provider_kind, model, tier)` triple.
-///
-/// `tier` is the requested TTL tier (`Some("5m")` / `Some("1h")`);
-/// `None` resolves to the `"5m"` default (routectl's auto-emit default and
-/// the common case). A tier-agnostic baked cell (`cell.tier == None`)
-/// matches any request; a tiered cell matches only when its tier equals the
-/// resolved `want`.
-///
-/// Three-tier fallback, every miss converging on the conservative
-/// sentinel:
-///   1. an exact-or-glob model match under the given `provider_kind` and
-///      tier (longest matching prefix wins);
-///   2. the `provider_kind` `"*"` catch-all row (tier-agnostic);
-///   3. [`CachePricingRow::sentinel`] (tier-agnostic).
-///
-/// Model matching reuses [`AliasPattern`] (the alias-table glob matcher);
-/// the `"*"` provider catch-all is handled directly, not through the
-/// matcher (which rejects a bare `*`).
-pub fn lookup(provider_kind: &str, model: &str, tier: Option<&str>) -> CachePricingRow {
+/// Tier-1 lookup: the longest matching model glob within the given
+/// provider kind and tier, excluding the provider `"*"` catch-all (tier 2,
+/// see [`provider_catch_all`]). A tier-agnostic cell matches any `want`.
+fn find_best_match(
+    provider_kind: &str,
+    model: &str,
+    tier: Option<&str>,
+) -> Option<&'static CatalogRow> {
     let want = tier.unwrap_or("5m");
-
-    // Tier 1: longest-prefix model match within this provider kind and the
-    // requested tier. A literal `"*"` glob is the provider catch-all
-    // (tier 2), excluded here. A tier-agnostic cell matches any `want`.
-    let best = TABLE
+    TABLE
         .iter()
         .filter(|cell| {
             cell.provider_kind == provider_kind
@@ -1064,25 +368,51 @@ pub fn lookup(provider_kind: &str, model: &str, tier: Option<&str>) -> CachePric
                 }
         })
         .filter_map(|cell| match AliasPattern::parse(cell.model_glob) {
-            Ok(pat) if pat.matches(model) => Some((pat.prefix_len(), cell.row)),
+            Ok(pat) if pat.matches(model) => Some((pat.prefix_len(), &cell.row)),
             _ => None,
         })
         .max_by_key(|(len, _)| *len)
-        .map(|(_, r)| r);
-    if let Some(r) = best {
-        return r;
-    }
+        .map(|(_, row)| row)
+}
 
-    // Tier 2: provider-kind catch-all (tier-agnostic).
-    if let Some(cell) = TABLE
+/// Tier-2 lookup: the provider-kind `"*"` catch-all (tier-agnostic).
+fn provider_catch_all(provider_kind: &str) -> Option<&'static CatalogRow> {
+    TABLE
         .iter()
         .find(|cell| cell.provider_kind == provider_kind && cell.model_glob == "*")
-    {
-        return cell.row;
-    }
+        .map(|cell| &cell.row)
+}
 
-    // Tier 3: conservative sentinel.
-    CachePricingRow::sentinel()
+/// Look up a REAL baked-table cell for `(provider_kind, model, tier)`, with
+/// NO sentinel fallback: `None` when nothing matches (both
+/// [`find_best_match`] and [`provider_catch_all`] miss). Feeds the
+/// two-layer merge ([`merge`]) -- a genuine catalog miss is `Missing`, not
+/// a synthesized conservative row. See [`lookup`] for the sentinel-
+/// fallback convenience wrapper.
+fn lookup_baked(
+    provider_kind: &str,
+    model: &str,
+    tier: Option<&str>,
+) -> Option<&'static CatalogRow> {
+    find_best_match(provider_kind, model, tier).or_else(|| provider_catch_all(provider_kind))
+}
+
+/// Look up the catalog row for a `(provider_kind, model, tier)` triple.
+///
+/// `tier` is the requested TTL tier (`Some("5m")` / `Some("1h")`);
+/// `None` resolves to the `"5m"` default (routectl's auto-emit default and
+/// the common case).
+///
+/// Delegates to [`lookup_baked`] (exact-or-glob model match, then the
+/// provider `"*"` catch-all) and falls back to [`CatalogRow::sentinel`]
+/// when neither matches. Model matching reuses [`AliasPattern`] (the
+/// alias-table glob matcher); the `"*"` provider catch-all is handled
+/// directly, not through the matcher (which rejects a bare `*`).
+#[must_use]
+pub fn lookup(provider_kind: &str, model: &str, tier: Option<&str>) -> CatalogRow {
+    lookup_baked(provider_kind, model, tier)
+        .cloned()
+        .unwrap_or_else(CatalogRow::sentinel)
 }
 
 /// The distinct provider-kind tokens present in the baked table. Used by
@@ -1131,7 +461,7 @@ fn selector_glob_specificity(model_glob: &str) -> usize {
 fn best_override<'a>(
     provider_kind: &str,
     model: &str,
-    overrides: &'a std::collections::BTreeMap<String, CachePricingOverride>,
+    overrides: &'a BTreeMap<String, CachePricingOverride>,
 ) -> Option<&'a CachePricingOverride> {
     let mut exact: Option<(usize, &'a CachePricingOverride)> = None;
     let mut star: Option<(usize, &'a CachePricingOverride)> = None;
@@ -1154,22 +484,23 @@ fn best_override<'a>(
     exact.or(star).map(|(_, ov)| ov)
 }
 
-/// Look up the pricing row for a `(provider_kind, model, tier)` triple,
-/// then apply the most-specific matching operator override from
-/// `overrides` (the `[cache_pricing]` table).
+/// Look up the catalog row for a `(provider_kind, model, tier)` triple,
+/// then apply the most-specific matching LEGACY `[cache_pricing]` override
+/// from `overrides`.
 ///
-/// Resolves the baked row via [`lookup`], then merges the best-matching
-/// override (see [`best_override`]). When NO override matches, returns the
-/// baked row unchanged (byte-identical to `lookup`). When a matched
+/// Resolves the baked row via [`lookup`] (sentinel fallback included),
+/// then merges the best-matching override (see [`best_override`]). When NO
+/// override matches, returns the baked row unchanged. When a matched
 /// override is degenerate (it slipped past [`validate_overrides`] and
 /// `with_overrides` rejects it), this falls back to the baked row and warns
-/// -- it never panics, keeping the lookup path fail-closed.
+/// -- it never panics.
+#[must_use]
 pub fn lookup_with_overrides(
     provider_kind: &str,
     model: &str,
     tier: Option<&str>,
-    overrides: &std::collections::BTreeMap<String, CachePricingOverride>,
-) -> CachePricingRow {
+    overrides: &BTreeMap<String, CachePricingOverride>,
+) -> CatalogRow {
     let baked = lookup(provider_kind, model, tier);
     let Some(ov) = best_override(provider_kind, model, overrides) else {
         return baked;
@@ -1188,6 +519,39 @@ pub fn lookup_with_overrides(
     }
 }
 
+/// Look up a REAL baked-table cell for `(provider_kind, model, tier)` (see
+/// [`lookup_baked`] -- NO sentinel fallback) and apply the best-matching
+/// LEGACY `[cache_pricing]` override, if any. Returns `None` when no baked
+/// cell matches: an override targeting a wholly-unmatched selector no
+/// longer synthesizes a row (the `[cache_pricing]` channel is retired in
+/// later; this is its last transitional shape). Feed the result to
+/// [`merge`] as the `baked` layer -- a `None` here is a genuine catalog
+/// miss (`Missing`), not a row to price against.
+#[must_use]
+pub fn lookup_baked_with_overrides(
+    provider_kind: &str,
+    model: &str,
+    tier: Option<&str>,
+    overrides: &BTreeMap<String, CachePricingOverride>,
+) -> Option<CatalogRow> {
+    let baked = lookup_baked(provider_kind, model, tier)?;
+    let Some(ov) = best_override(provider_kind, model, overrides) else {
+        return Some(baked.clone());
+    };
+    match baked.with_overrides(ov) {
+        Ok(row) => Some(row),
+        Err(reason) => {
+            tracing::warn!(
+                provider_kind,
+                model,
+                %reason,
+                "cache-pricing override is degenerate; falling back to the baked row",
+            );
+            Some(baked.clone())
+        }
+    }
+}
+
 /// Validate every `[cache_pricing]` override at startup, failing fast on a
 /// bad selector key or a degenerate override so a misconfiguration surfaces
 /// at boot rather than silently going inert at lookup time. A likely-typo
@@ -1198,7 +562,7 @@ pub fn lookup_with_overrides(
 /// is prefixed with the offending selector key so the operator knows which
 /// entry to fix.
 pub fn validate_overrides(
-    overrides: &std::collections::BTreeMap<String, CachePricingOverride>,
+    overrides: &BTreeMap<String, CachePricingOverride>,
 ) -> Result<(), String> {
     for (key, ov) in overrides {
         let selector =
@@ -1248,9 +612,10 @@ fn parse_epoch_day(date: &str) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
-/// True when a `verified_at` date is more than [`STALE_AFTER_DAYS`] before
-/// `today` (both epoch-days). A row whose date fails to parse is treated
-/// as stale so a malformed stamp surfaces rather than hides.
+/// True when a `verified_at` / snapshot date is more than
+/// [`STALE_AFTER_DAYS`] before `today` (both epoch-days). A date that fails
+/// to parse is treated as stale so a malformed stamp surfaces rather than
+/// hides.
 fn is_stale(verified_at: &str, today: i64) -> bool {
     match parse_epoch_day(verified_at) {
         Some(day) => today - day > STALE_AFTER_DAYS,
@@ -1258,10 +623,15 @@ fn is_stale(verified_at: &str, today: i64) -> bool {
     }
 }
 
-/// Emit a `tracing::warn!` for every baked, `verified` row whose
-/// `verified_at` is more than 90 days stale. Never panics. Called once at
-/// startup. Unverified rows are skipped -- they are already sentinel-
-/// treated, so their date carries no economic weight.
+/// Emit a `tracing::warn!` when the WHOLE baked table's snapshot date
+/// ([`BAKED_SNAPSHOT_DATE`]) is more than 90 days stale. Never panics.
+/// Called once at startup.
+///
+/// This redesign dropped the per-row `verified_at` field, so staleness is no
+/// longer a per-cell check: every transitional baked row shares the SAME
+/// table-wide snapshot date, so the table is either stale or it is not.
+/// A later codegen pass restores per-build granularity via a generated
+/// `CATALOG_VERSION` + snapshot date.
 pub fn warn_if_stale() {
     warn_if_stale_at(today_epoch_day());
 }
@@ -1269,37 +639,34 @@ pub fn warn_if_stale() {
 /// Testable core of [`warn_if_stale`]: takes "today" as an epoch-day so a
 /// test can pin a deterministic clock.
 fn warn_if_stale_at(today: i64) {
-    for cell in TABLE {
-        if cell.row.verified && is_stale(cell.row.verified_at, today) {
-            tracing::warn!(
-                provider_kind = cell.provider_kind,
-                model_glob = cell.model_glob,
-                verified_at = cell.row.verified_at,
-                stale_after_days = STALE_AFTER_DAYS,
-                "cache-pricing row is stale; re-verify the multipliers against the vendor doc",
-            );
-        }
+    if is_stale(BAKED_SNAPSHOT_DATE, today) {
+        tracing::warn!(
+            snapshot_date = BAKED_SNAPSHOT_DATE,
+            stale_after_days = STALE_AFTER_DAYS,
+            "baked catalog snapshot is stale; a newer catalog build may be available",
+        );
     }
 }
 
-/// One entry from the baked pricing table, exposing the provider kind and
-/// model glob alongside the pricing row. Returned by [`baked_table_rows`].
+/// One entry from the baked catalog table, exposing the provider kind and
+/// model glob alongside the row. Returned by [`baked_table_rows`].
 pub struct BakedPricingRow {
     pub provider_kind: &'static str,
     pub model_glob: &'static str,
-    pub row: CachePricingRow,
+    pub row: CatalogRow,
 }
 
-/// Return a `Vec` of every entry in the baked pricing table in table order.
+/// Return a `Vec` of every entry in the baked catalog table in table order.
 /// Each element carries the provider kind, model glob, and the full
-/// [`CachePricingRow`]. The vec length equals the number of baked cells.
+/// [`CatalogRow`]. The vec length equals the number of baked cells.
+#[must_use]
 pub fn baked_table_rows() -> Vec<BakedPricingRow> {
     TABLE
         .iter()
         .map(|cell| BakedPricingRow {
             provider_kind: cell.provider_kind,
             model_glob: cell.model_glob,
-            row: cell.row,
+            row: cell.row.clone(),
         })
         .collect()
 }
@@ -1307,14 +674,185 @@ pub fn baked_table_rows() -> Vec<BakedPricingRow> {
 /// True when `verified_at` is more than [`stale_after_days`] before today
 /// (as measured by the system clock). Wraps [`is_stale`] with the live
 /// clock for callers that do not need a pinned test clock.
+#[must_use]
 pub fn is_stale_today(verified_at: &str) -> bool {
     is_stale(verified_at, today_epoch_day())
 }
 
-/// The staleness horizon in days. A baked row whose `verified_at` is more
-/// than this many days before today triggers a startup WARN.
+/// The staleness horizon in days. A snapshot date more than this many days
+/// before today triggers a startup WARN.
+#[must_use]
 pub const fn stale_after_days() -> i64 {
     STALE_AFTER_DAYS
+}
+
+// ---------------------------------------------------------------------------
+// Two-layer merge: baked catalog + overlay -> EffectiveRow
+// ---------------------------------------------------------------------------
+
+/// Provenance of the value carried by an [`EffectiveRow::Present`] cell:
+/// which layer won at merge time. Derived, never stored on [`CatalogRow`]
+/// itself -- the row is pure economics / capability data; provenance
+/// is a property of the MERGE result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The compiled-in baked catalog table.
+    Baked,
+    /// An overlay cell imported by a later refresh pipeline, or migrated
+    /// from a legacy `[cache_pricing]` / `pricing_verifications.json`
+    /// entry.
+    Import,
+    /// An overlay cell an operator wrote directly (later user-edit verbs).
+    User,
+}
+
+/// The result of merging a baked catalog row with its overlay cell. Pure
+/// data -- see [`merge`], the only constructor consumers should rely on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EffectiveRow {
+    /// A usable row, with the winning layer's provenance and staleness
+    /// stamp attached.
+    Present {
+        row: CatalogRow,
+        source: Source,
+        verified_at: String,
+    },
+    /// The overlay cell for this selector is JSON `null`: an operator (or
+    /// import) explicitly disabled this entry. Distinct from `Missing`.
+    Disabled,
+    /// Neither layer has a row for this selector: no baked cell matched
+    /// and the overlay carries no entry either.
+    Missing,
+}
+
+impl EffectiveRow {
+    /// Fold to the row usable for pricing / capability decisions, or
+    /// `None` when this cell is `Disabled` or `Missing` -- the two states
+    /// share the SAME conservative sentinel behavior at every consumer: no
+    /// break-even K, no context fraction, no enabling capability prior.
+    #[must_use]
+    pub const fn priced(&self) -> Option<&CatalogRow> {
+        match self {
+            Self::Present { row, .. } => Some(row),
+            Self::Disabled | Self::Missing => None,
+        }
+    }
+}
+
+/// Merge a baked catalog row with its overlay cell. Pure function, no
+/// I/O: callers resolve `baked` (e.g. via [`lookup_baked_with_overrides`])
+/// and `overlay_cell` (a `CatalogOverlay.cells.get(key)` lookup) themselves.
+///
+/// - `overlay_cell = Some(Some(cell))` (present, non-null): the overlay
+///   wins. Its sparse fields apply over `baked` (or over the conservative
+///   sentinel when `baked` is `None`); provenance is the cell's own
+///   `source` + `verified_at`.
+/// - `overlay_cell = Some(None)` (present, JSON `null`): the entry is
+///   explicitly DISABLED, regardless of `baked`.
+/// - `overlay_cell = None` (absent key): falls through to `baked` --
+///   `Present { source: Baked, .. }` when a baked row exists, `Missing`
+///   otherwise.
+#[must_use]
+pub fn merge(
+    baked: Option<&CatalogRow>,
+    overlay_cell: Option<&Option<OverlayCell>>,
+) -> EffectiveRow {
+    match overlay_cell {
+        Some(Some(cell)) => {
+            let source = match cell.source {
+                OverlaySource::Import => Source::Import,
+                OverlaySource::User => Source::User,
+            };
+            let base = baked.cloned().unwrap_or_else(CatalogRow::sentinel);
+            EffectiveRow::Present {
+                row: apply_overlay_cell(&base, cell),
+                source,
+                verified_at: cell.verified_at.clone(),
+            }
+        }
+        Some(None) => EffectiveRow::Disabled,
+        None => match baked {
+            Some(row) => EffectiveRow::Present {
+                row: row.clone(),
+                source: Source::Baked,
+                verified_at: BAKED_SNAPSHOT_DATE.to_string(),
+            },
+            None => EffectiveRow::Missing,
+        },
+    }
+}
+
+/// Apply an overlay cell's sparse fields over `base`. Every value field on
+/// [`OverlayCell`] is `Option`; an unset field inherits `base`'s value.
+/// `capabilities` merges per-key: overlay entries win per key, base keys
+/// the overlay does not mention pass through unchanged.
+fn apply_overlay_cell(base: &CatalogRow, cell: &OverlayCell) -> CatalogRow {
+    CatalogRow {
+        wm: cell.wm.unwrap_or(base.wm),
+        rm: cell.rm.unwrap_or(base.rm),
+        ttl_seconds: cell.ttl_seconds.unwrap_or(base.ttl_seconds),
+        min_prefix_tokens: cell.min_prefix_tokens.unwrap_or(base.min_prefix_tokens),
+        has_storage_rent: base.has_storage_rent,
+        storage_rent: base.storage_rent,
+        auto_cacher: base.auto_cacher,
+        tier: base.tier,
+        max_context_tokens: cell.max_context_tokens.or(base.max_context_tokens),
+        capabilities: merge_capabilities(&base.capabilities, cell.capabilities.as_ref()),
+    }
+}
+
+/// Overlay capability entries win per-key; base keys the overlay omits
+/// pass through unchanged.
+fn merge_capabilities(
+    base: &BTreeMap<String, bool>,
+    overlay: Option<&BTreeMap<String, bool>>,
+) -> BTreeMap<String, bool> {
+    let mut merged = base.clone();
+    if let Some(ov) = overlay {
+        for (k, v) in ov {
+            merged.insert(k.clone(), *v);
+        }
+    }
+    merged
+}
+
+/// Select the overlay cell for `(provider_kind, model)`, mirroring
+/// [`best_override`]'s selector-match precedence: an exact-provider match
+/// beats the `"*"` catch-all, and within a tier the longest model-glob
+/// prefix wins. Overlay keys share the SAME `"provider_kind:model_glob"`
+/// shape as `[cache_pricing]` selector keys, so [`CachePricingSelector`]
+/// parses them too.
+///
+/// Returns `None` when no key matches -- the caller then passes `None` to
+/// [`merge`], which falls through to the baked layer. Returns
+/// `Some(&Option<OverlayCell>)` on a match; the inner `None` is the
+/// null-disable sentinel `merge` reads directly (see the module's overlay
+/// docs on [`crate::catalog_overlay`]).
+#[must_use]
+pub fn lookup_overlay_cell<'a>(
+    provider_kind: &str,
+    model: &str,
+    overlay: &'a CatalogOverlay,
+) -> Option<&'a Option<OverlayCell>> {
+    let mut exact: Option<(usize, &'a Option<OverlayCell>)> = None;
+    let mut star: Option<(usize, &'a Option<OverlayCell>)> = None;
+    for (key, cell) in &overlay.cells {
+        let Ok(selector) = CachePricingSelector::parse(key) else {
+            continue;
+        };
+        if !selector_glob_matches(&selector.model_glob, model) {
+            continue;
+        }
+        let len = selector_glob_specificity(&selector.model_glob);
+        if selector.provider_kind == provider_kind {
+            if exact.is_none_or(|(best, _)| len > best) {
+                exact = Some((len, cell));
+            }
+        } else if selector.provider_kind == "*" && star.is_none_or(|(best, _)| len > best) {
+            star = Some((len, cell));
+        }
+    }
+    exact.or(star).map(|(_, cell)| cell)
 }
 
 #[cfg(test)]
@@ -1332,7 +870,6 @@ mod tests {
         assert_eq!(r.rm, 0.10);
         assert_eq!(r.ttl_seconds, 300);
         assert_eq!(r.min_prefix_tokens, 1024);
-        assert!(r.verified);
     }
 
     #[test]
@@ -1343,8 +880,6 @@ mod tests {
         // Assert: the anthropic-api "*" row (4096 min-prefix default).
         assert_eq!(r.wm, 1.25);
         assert_eq!(r.min_prefix_tokens, 4096);
-        assert_eq!(r.source, "anthropic-5m-default");
-        assert!(r.verified);
     }
 
     #[test]
@@ -1357,62 +892,77 @@ mod tests {
         assert_eq!(r.rm, 0.10);
         assert_eq!(r.ttl_seconds, 300);
         assert_eq!(r.min_prefix_tokens, SENTINEL_MIN_PREFIX_TOKENS);
-        assert!(!r.verified);
-        assert_eq!(r.source, "sentinel");
+    }
+
+    #[test]
+    fn lookup_baked_returns_none_for_unknown_provider_and_model() {
+        // Unlike `lookup`, the no-sentinel-fallback variant reports a
+        // genuine catalog miss as `None` -- this is what makes `Missing`
+        // reachable through the two-layer merge.
+        assert!(lookup_baked("some-future-kind", "whatever-model", None).is_none());
     }
 
     #[test]
     fn sentinel_has_the_documented_conservative_shape() {
         // Arrange / Act
-        let s = CachePricingRow::sentinel();
+        let s = CatalogRow::sentinel();
 
         // Assert
         assert_eq!(s.wm, 2.0);
         assert_eq!(s.rm, 0.10);
         assert_eq!(s.ttl_seconds, 300);
-        assert!(!s.verified);
         assert!(!s.auto_cacher);
+        assert!(s.capabilities.is_empty());
     }
 
     #[test]
-    fn verified_anthropic_5m_loads_exact_multipliers() {
+    fn catalog_row_carries_no_provenance_fields() {
+        // Pin: `CatalogRow` has no `verified` / `source` / `verified_at`
+        // field -- provenance lives on `EffectiveRow` only. This test
+        // exists to fail loudly (compile error) if those fields ever creep
+        // back onto the row.
+        let row = CatalogRow::sentinel();
+        let CatalogRow {
+            wm: _,
+            rm: _,
+            ttl_seconds: _,
+            min_prefix_tokens: _,
+            has_storage_rent: _,
+            storage_rent: _,
+            auto_cacher: _,
+            tier: _,
+            max_context_tokens: _,
+            capabilities: _,
+        } = row;
+    }
+
+    #[test]
+    fn anthropic_5m_loads_exact_multipliers() {
         let r = lookup("anthropic-api", "claude-sonnet-4-6", None);
         assert_eq!(r.wm, 1.25);
         assert_eq!(r.rm, 0.10);
         assert_eq!(r.ttl_seconds, 300);
-        assert!(r.verified);
     }
 
     #[test]
-    fn verified_openai_loads_24h_ttl_and_free_writes() {
+    fn openai_responses_loads_24h_ttl_and_auto_cacher() {
         let r = lookup("openai-responses", "gpt-5.5", None);
-        assert_eq!(r.wm, 1.0);
+        assert_eq!(r.wm, 1.25);
         assert_eq!(r.rm, 0.10);
         assert_eq!(r.ttl_seconds, 86_400);
         assert!(r.auto_cacher);
-        assert!(r.verified);
     }
 
     #[test]
-    fn verified_deepseek_loads_deep_read_multiplier() {
+    fn deepseek_loads_deep_read_multiplier() {
         // V4-Pro: the deepest read discount.
         let pro = lookup("openai-compat", "deepseek-v4-pro", None);
-        assert_eq!(pro.wm, 1.0);
-        assert_eq!(pro.rm, 0.0083);
-        assert!(pro.verified);
+        assert_eq!(pro.wm, 0.0);
+        assert!((pro.rm - 0.008_333_333).abs() < 1e-6);
 
         // V4 (non-pro) falls to the flash row via the broader glob.
         let flash = lookup("openai-compat", "deepseek-v4-flash", None);
         assert_eq!(flash.rm, 0.02);
-        assert!(flash.verified);
-    }
-
-    #[test]
-    fn unverified_probe_cell_loads_with_verified_false() {
-        // Grok is a [PROBE] cell: researched shape, but not stamped.
-        let r = lookup("openai-compat", "grok-4-3", None);
-        assert!(!r.verified);
-        assert_eq!(r.source, "grok-probe");
     }
 
     #[test]
@@ -1434,7 +984,6 @@ mod tests {
         assert_eq!(merged.rm, baked.rm);
         assert_eq!(merged.min_prefix_tokens, baked.min_prefix_tokens);
         assert_eq!(merged.has_storage_rent, baked.has_storage_rent);
-        assert_eq!(merged.source, "operator-override");
     }
 
     #[test]
@@ -1487,8 +1036,8 @@ mod tests {
     #[test]
     fn override_rejects_non_positive_rm() {
         // Arrange: a zero read multiplier is never valid -- it makes the
-        // break-even math degenerate and could flip verified=true on a bogus
-        // row. Rejected unconditionally (no ack flag exempts it).
+        // break-even math degenerate. Rejected unconditionally (no ack flag
+        // exempts it).
         let baked = lookup("anthropic-api", "claude-opus-4-8", None);
 
         // Act / Assert: rm == 0.0 is rejected.
@@ -1518,7 +1067,10 @@ mod tests {
         // deepseek-v4-pro* (longer literal prefix) must beat the broad
         // deepseek-* row for a pro model id.
         let r = lookup("openai-compat", "deepseek-v4-pro-0610", None);
-        assert_eq!(r.rm, 0.0083, "the deepseek pro glob must win");
+        assert!(
+            (r.rm - 0.008_333_333).abs() < 1e-6,
+            "the deepseek pro glob must win"
+        );
 
         // A non-pro deepseek id falls to the broader deepseek-* row.
         let flash = lookup("openai-compat", "deepseek-v4-0610", None);
@@ -1562,7 +1114,7 @@ mod tests {
     #[test]
     fn bedrock_real_model_id_matches_trailing_glob() {
         // Real Bedrock ids carry a vendor prefix; the trailing-glob row must
-        // match (the old leading-wildcard glob was rejected and silently
+        // match (a leading-wildcard glob would be rejected and silently
         // dropped, falling through to the catch-all).
         let r = lookup(
             "bedrock",
@@ -1570,8 +1122,6 @@ mod tests {
             Some("5m"),
         );
         assert_eq!(r.min_prefix_tokens, 1024);
-        assert_eq!(r.source, "bedrock-probe-rm");
-        assert!(!r.verified);
     }
 
     #[test]
@@ -1626,9 +1176,9 @@ mod tests {
 
     #[test]
     fn warn_if_stale_does_not_panic() {
-        // Smoke test: the startup hook runs over the real table without
-        // panicking, at a deterministic "today" near the baked stamp.
-        let today = parse_epoch_day(VERIFIED_AT).expect("parse VERIFIED_AT");
+        // Smoke test: the startup hook runs without panicking, at a
+        // deterministic "today" near the baked snapshot date.
+        let today = parse_epoch_day(BAKED_SNAPSHOT_DATE).expect("parse BAKED_SNAPSHOT_DATE");
         warn_if_stale_at(today);
     }
 
@@ -1640,8 +1190,6 @@ mod tests {
         // A full year later.
         assert_eq!(parse_epoch_day("1971-01-01"), Some(365));
     }
-
-    use std::collections::BTreeMap;
 
     /// Build a one-entry override map tersely.
     fn ov_map(key: &str, ov: CachePricingOverride) -> BTreeMap<String, CachePricingOverride> {
@@ -1668,11 +1216,9 @@ mod tests {
         let merged =
             lookup_with_overrides("anthropic-api", "claude-opus-4-8", Some("5m"), &overrides);
 
-        // Assert: the overridden field changed; verified + source flipped to the
-        // operator-assertion shape; unset fields inherited from the baked row.
+        // Assert: the overridden field changed; unset fields inherited from
+        // the baked row.
         assert_eq!(merged.min_prefix_tokens, 512);
-        assert!(merged.verified);
-        assert_eq!(merged.source, "operator-override");
         assert_eq!(merged.wm, baked.wm);
         assert_eq!(merged.rm, baked.rm);
         assert_eq!(merged.ttl_seconds, baked.ttl_seconds);
@@ -1801,6 +1347,42 @@ mod tests {
     }
 
     #[test]
+    fn lookup_baked_with_overrides_returns_none_for_wholly_unmatched_selector() {
+        // Arrange: an override targeting a selector with no baked backing at
+        // all. Unlike the legacy `lookup_with_overrides`, this must NOT
+        // synthesize a sentinel-based row.
+        let overrides = ov_map(
+            "some-future-kind:whatever-*",
+            CachePricingOverride {
+                rm: Some(0.5),
+                ..Default::default()
+            },
+        );
+
+        // Act / Assert
+        assert!(
+            lookup_baked_with_overrides("some-future-kind", "whatever-model", None, &overrides)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lookup_baked_with_overrides_applies_override_onto_a_real_match() {
+        let overrides = ov_map(
+            "anthropic-api:claude-opus-4-8*",
+            CachePricingOverride {
+                min_prefix_tokens: Some(512),
+                ..Default::default()
+            },
+        );
+
+        let merged =
+            lookup_baked_with_overrides("anthropic-api", "claude-opus-4-8", Some("5m"), &overrides)
+                .expect("real baked cell must resolve");
+        assert_eq!(merged.min_prefix_tokens, 512);
+    }
+
+    #[test]
     fn validate_overrides_accepts_empty_map() {
         let empty: BTreeMap<String, CachePricingOverride> = BTreeMap::new();
         assert!(validate_overrides(&empty).is_ok());
@@ -1905,7 +1487,7 @@ mod tests {
 
     #[test]
     fn pricing_row_reserved_fields_are_zeroed_on_baked_rows() {
-        for cell in TABLE {
+        for cell in TABLE.iter() {
             assert!(
                 !cell.row.has_storage_rent,
                 "{} {} must not set has_storage_rent (reserved; kept zero in the baked table)",
@@ -1917,102 +1499,6 @@ mod tests {
                 cell.provider_kind, cell.model_glob,
             );
         }
-    }
-
-    // -- verified_at override field tests -----------------------------------
-
-    #[test]
-    fn validate_accepts_well_formed_verified_at() {
-        // Arrange
-        let ov = CachePricingOverride {
-            verified_at: Some("2026-07-01".to_string()),
-            ..Default::default()
-        };
-
-        // Act / Assert
-        assert!(ov.validate().is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_malformed_verified_at_naming_the_value() {
-        // Arrange
-        let ov = CachePricingOverride {
-            verified_at: Some("not-a-date".to_string()),
-            ..Default::default()
-        };
-
-        // Act
-        let err = ov.validate().expect_err("malformed date must be rejected");
-
-        // Assert: error message names the bad value and the expected shape.
-        assert!(err.contains("not-a-date"), "msg: {err}");
-        assert!(err.contains("YYYY-MM-DD"), "msg: {err}");
-    }
-
-    #[test]
-    fn with_overrides_pure_verification_sets_operator_verified_source() {
-        // Arrange: only verified_at set -- a pure verification stamp.
-        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
-        let ov = CachePricingOverride {
-            verified_at: Some("2026-07-01".to_string()),
-            ..Default::default()
-        };
-
-        // Act
-        let merged = baked.with_overrides(&ov).expect("accepted");
-
-        // Assert: verified true, source operator-verified, date updated,
-        // all value fields inherited from the baked row.
-        assert!(merged.verified);
-        assert_eq!(merged.source, "operator-verified");
-        assert_eq!(merged.verified_at, "2026-07-01");
-        assert_eq!(merged.wm, baked.wm);
-        assert_eq!(merged.rm, baked.rm);
-        assert_eq!(merged.ttl_seconds, baked.ttl_seconds);
-        assert_eq!(merged.min_prefix_tokens, baked.min_prefix_tokens);
-        assert_eq!(merged.auto_cacher, baked.auto_cacher);
-    }
-
-    #[test]
-    fn with_overrides_value_plus_verified_at_sets_operator_override_source() {
-        // Arrange: a value field AND verified_at both set.
-        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
-        let ov = CachePricingOverride {
-            min_prefix_tokens: Some(512),
-            verified_at: Some("2026-07-01".to_string()),
-            ..Default::default()
-        };
-
-        // Act
-        let merged = baked.with_overrides(&ov).expect("accepted");
-
-        // Assert: source is operator-override (not operator-verified),
-        // date is the override date, value field applied.
-        assert!(merged.verified);
-        assert_eq!(merged.source, "operator-override");
-        assert_eq!(merged.verified_at, "2026-07-01");
-        assert_eq!(merged.min_prefix_tokens, 512);
-    }
-
-    #[test]
-    fn with_overrides_no_verified_at_inherits_baked_verified_at() {
-        // Arrange: a value-only override, no verified_at. The merged row
-        // must be byte-identical to the current behavior (source
-        // "operator-override", verified_at inherited from the baked row).
-        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
-        let ov = CachePricingOverride {
-            ttl_seconds: Some(3_600),
-            ..Default::default()
-        };
-
-        // Act
-        let merged = baked.with_overrides(&ov).expect("accepted");
-
-        // Assert: verified_at unchanged, source operator-override.
-        assert_eq!(merged.verified_at, baked.verified_at);
-        assert_eq!(merged.source, "operator-override");
-        assert_eq!(merged.ttl_seconds, 3_600);
-        assert_eq!(merged.wm, baked.wm);
     }
 
     // -- baked_table_rows tests ---------------------------------------------
@@ -2040,7 +1526,6 @@ mod tests {
 
     #[test]
     fn baked_table_rows_length_matches_table_constant() {
-        // TABLE is reachable from inside this module.
         assert_eq!(baked_table_rows().len(), TABLE.len());
     }
 
@@ -2048,13 +1533,8 @@ mod tests {
 
     #[test]
     fn is_stale_today_returns_false_for_recent_baked_stamp() {
-        // VERIFIED_AT is the baked stamp ("2026-06-24"); it was within 90
-        // days of the time this test was written, so is_stale_today should
-        // return false when the real clock is near that date.
-        // Use parse_epoch_day for a deterministic test: pin a synthetic
-        // "today" 10 days after the stamp and call the inner is_stale.
-        let stamp = parse_epoch_day(VERIFIED_AT).expect("parse VERIFIED_AT");
-        assert!(!is_stale(VERIFIED_AT, stamp + 10));
+        let stamp = parse_epoch_day(BAKED_SNAPSHOT_DATE).expect("parse BAKED_SNAPSHOT_DATE");
+        assert!(!is_stale(BAKED_SNAPSHOT_DATE, stamp + 10));
     }
 
     #[test]
@@ -2083,32 +1563,6 @@ mod tests {
         assert!(is_stale_today("1971-01-01"));
     }
 
-    #[test]
-    fn with_overrides_interns_verified_at_no_per_call_leak() {
-        // Arrange: two separate CachePricingOverride values with the same
-        // verified_at string. The interner must return the same &'static str
-        // pointer for both, proving no per-call allocation occurs.
-        let baked = lookup("anthropic-api", "claude-opus-4-8", None);
-        let ov1 = CachePricingOverride {
-            verified_at: Some("2026-07-01".to_string()),
-            ..Default::default()
-        };
-        let ov2 = CachePricingOverride {
-            verified_at: Some("2026-07-01".to_string()),
-            ..Default::default()
-        };
-
-        // Act
-        let r1 = baked.with_overrides(&ov1).expect("accepted");
-        let r2 = baked.with_overrides(&ov2).expect("accepted");
-
-        // Assert: same pointer -- interned, not freshly leaked each call.
-        assert!(
-            std::ptr::eq(r1.verified_at.as_ptr(), r2.verified_at.as_ptr()),
-            "verified_at must be the same interned pointer for identical strings"
-        );
-    }
-
     // -- max_context_tokens tests --------------------------------------------
 
     #[test]
@@ -2132,7 +1586,7 @@ mod tests {
 
     #[test]
     fn sentinel_max_context_tokens_is_none() {
-        assert_eq!(CachePricingRow::sentinel().max_context_tokens, None);
+        assert_eq!(CatalogRow::sentinel().max_context_tokens, None);
     }
 
     #[test]
@@ -2263,10 +1717,12 @@ mod tests {
             ("anthropic-api", "claude-haiku-4-5", Some(200_000)),
             ("bedrock", "anthropic.claude-sonnet-4-5", Some(200_000)),
             ("openai-compat", "deepseek-v4-pro", Some(1_000_000)),
-            // Explicit None row (not a catch-all -- haiku 3.5 has its own
-            // baked cell that carries no confirmed window).
+            // A model with no dedicated baked cell falls through to the
+            // provider `"*"` catch-all, which carries no confirmed window.
             ("anthropic-api", "claude-haiku-3-5", None),
-            // Broad glob, fails closed (unverified TTL), not a bare "*".
+            // Broad glob, fails closed (the family spans genuinely
+            // different confirmed windows -- see `catalog_codegen`'s
+            // `context_ambiguous` selectors), not a bare "*".
             ("openai-compat", "mistral-large", None),
             // Bare "*" provider catch-alls.
             ("bedrock", "anthropic.claude-nonexistent-9", None),
@@ -2280,5 +1736,263 @@ mod tests {
                 "lookup({provider_kind:?}, {model:?}) max_context_tokens"
             );
         }
+    }
+
+    // -- two-layer merge -------------------------------------------------
+
+    fn baked_fixture() -> CatalogRow {
+        lookup("anthropic-api", "claude-opus-4-8", Some("5m"))
+    }
+
+    fn import_cell() -> OverlayCell {
+        OverlayCell {
+            source: OverlaySource::Import,
+            verified_at: "2026-06-01".to_string(),
+            wm: Some(1.5),
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            capabilities: None,
+        }
+    }
+
+    fn user_cell() -> OverlayCell {
+        OverlayCell {
+            source: OverlaySource::User,
+            verified_at: "2026-07-01".to_string(),
+            wm: Some(1.75),
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            capabilities: None,
+        }
+    }
+
+    #[test]
+    fn merge_overlay_present_wins_and_carries_source_through() {
+        let baked = baked_fixture();
+        let cell = Some(import_cell());
+        let effective = merge(Some(&baked), Some(&cell));
+
+        match effective {
+            EffectiveRow::Present {
+                row,
+                source,
+                verified_at,
+            } => {
+                assert_eq!(source, Source::Import);
+                assert_eq!(verified_at, "2026-06-01");
+                // wm applied from the overlay; unset fields inherit baked.
+                assert_eq!(row.wm, 1.5);
+                assert_eq!(row.rm, baked.rm);
+            }
+            other => panic!("expected Present, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_overlay_null_disables_regardless_of_baked() {
+        let baked = baked_fixture();
+        let effective = merge(Some(&baked), Some(&None));
+        assert_eq!(effective, EffectiveRow::Disabled);
+    }
+
+    #[test]
+    fn merge_absent_overlay_key_falls_through_to_baked_present() {
+        let baked = baked_fixture();
+        let effective = merge(Some(&baked), None);
+        match effective {
+            EffectiveRow::Present {
+                row,
+                source,
+                verified_at,
+            } => {
+                assert_eq!(source, Source::Baked);
+                assert_eq!(verified_at, BAKED_SNAPSHOT_DATE);
+                assert_eq!(row, baked);
+            }
+            other => panic!("expected Present, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_no_baked_and_absent_overlay_is_missing() {
+        let effective = merge(None, None);
+        assert_eq!(effective, EffectiveRow::Missing);
+    }
+
+    #[test]
+    fn merge_overlay_field_applies_over_baked_field() {
+        let baked = baked_fixture();
+        let cell = Some(OverlayCell {
+            source: OverlaySource::User,
+            verified_at: "2026-07-01".to_string(),
+            wm: None,
+            rm: None,
+            ttl_seconds: Some(9_999),
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            capabilities: None,
+        });
+        let effective = merge(Some(&baked), Some(&cell));
+        let row = effective.priced().expect("present");
+        assert_eq!(row.ttl_seconds, 9_999);
+        // Untouched fields still inherit the baked row.
+        assert_eq!(row.wm, baked.wm);
+        assert_eq!(row.rm, baked.rm);
+    }
+
+    #[test]
+    fn merge_overlay_capabilities_apply_per_key_over_baked() {
+        let baked = baked_fixture();
+        // Precondition: the baked row already carries capability priors
+        // (derived from the vendored snapshots) but not `web_search`.
+        assert!(!baked.capabilities.is_empty());
+        assert_eq!(baked.capabilities.get("web_search"), None);
+        let cell = Some(OverlayCell {
+            source: OverlaySource::User,
+            verified_at: "2026-07-01".to_string(),
+            wm: None,
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            capabilities: Some(BTreeMap::from([("web_search".to_string(), true)])),
+        });
+        let effective = merge(Some(&baked), Some(&cell));
+        let row = effective.priced().expect("present");
+        // The overlay's key is added; the baked row's own keys pass through
+        // unchanged (per-key merge, not a wholesale replacement).
+        assert_eq!(row.capabilities.get("web_search"), Some(&true));
+        for (key, value) in &baked.capabilities {
+            assert_eq!(row.capabilities.get(key), Some(value));
+        }
+    }
+
+    #[test]
+    fn merge_no_baked_with_overlay_present_uses_sentinel_as_base() {
+        // An overlay cell naming a selector with no baked backing still
+        // resolves `Present` -- the sentinel is the base, and the cell's
+        // fields apply over it.
+        let cell = Some(OverlayCell {
+            source: OverlaySource::User,
+            verified_at: "2026-07-01".to_string(),
+            wm: Some(1.0),
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            capabilities: None,
+        });
+        let effective = merge(None, Some(&cell));
+        let row = effective.priced().expect("present");
+        assert_eq!(row.wm, 1.0);
+        assert_eq!(row.rm, CatalogRow::sentinel().rm);
+    }
+
+    #[test]
+    fn effective_row_priced_folds_disabled_and_missing_to_none() {
+        assert!(EffectiveRow::Disabled.priced().is_none());
+        assert!(EffectiveRow::Missing.priced().is_none());
+        let present = merge(Some(&baked_fixture()), None);
+        assert!(present.priced().is_some());
+    }
+
+    // -------------------------------------------------------------------
+    // lookup_overlay_cell: selector-match precedence over CatalogOverlay.
+    // -------------------------------------------------------------------
+
+    fn overlay_with(cells: Vec<(&str, Option<OverlayCell>)>) -> CatalogOverlay {
+        CatalogOverlay {
+            schema_version: crate::catalog_overlay::CATALOG_OVERLAY_SCHEMA_VERSION,
+            revision: 0,
+            cells: cells.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        }
+    }
+
+    #[test]
+    fn lookup_overlay_cell_returns_none_when_no_key_matches() {
+        let overlay = overlay_with(vec![("openai-compat:grok-*", Some(import_cell()))]);
+        assert!(lookup_overlay_cell("anthropic-api", "claude-opus-4-8", &overlay).is_none());
+    }
+
+    #[test]
+    fn lookup_overlay_cell_exact_provider_beats_star_catch_all() {
+        let overlay = overlay_with(vec![
+            ("*:claude-opus-4-8*", Some(import_cell())),
+            ("anthropic-api:claude-opus-4-8*", Some(user_cell())),
+        ]);
+        let found = lookup_overlay_cell("anthropic-api", "claude-opus-4-8", &overlay)
+            .expect("a cell must match");
+        assert_eq!(
+            found.as_ref().map(|c| c.source),
+            Some(OverlaySource::User),
+            "the exact-provider cell must win over the `*` catch-all",
+        );
+    }
+
+    #[test]
+    fn lookup_overlay_cell_longest_glob_prefix_wins() {
+        let overlay = overlay_with(vec![
+            ("anthropic-api:claude-*", Some(import_cell())),
+            ("anthropic-api:claude-opus-4-8*", Some(user_cell())),
+        ]);
+        let found = lookup_overlay_cell("anthropic-api", "claude-opus-4-8", &overlay)
+            .expect("a cell must match");
+        assert_eq!(found.as_ref().map(|c| c.source), Some(OverlaySource::User));
+    }
+
+    #[test]
+    fn lookup_overlay_cell_surfaces_null_disable_entry() {
+        let overlay = overlay_with(vec![("anthropic-api:claude-opus-4-8*", None)]);
+        let found = lookup_overlay_cell("anthropic-api", "claude-opus-4-8", &overlay)
+            .expect("the disabled key itself must be found");
+        assert!(found.is_none(), "a null cell must surface as Some(None)");
+    }
+
+    #[test]
+    fn breadth_floor_every_adapter_kind_has_a_dedicated_flagship_row() {
+        // Breadth floor (spec): every shipped adapter kind's current
+        // flagship model resolves to a DEDICATED baked cell -- not just the
+        // provider `"*"` catch-all every model falls through to. Each
+        // `find_best_match` call below excludes the catch-all by
+        // construction, so a `None` here means the generated table is
+        // missing real per-model coverage for that adapter kind.
+        let flagships: &[(&str, &str)] = &[
+            ("anthropic-api", "claude-opus-4-8"),
+            ("bedrock", "anthropic.claude-sonnet-4-6-20260401-v1:0"),
+            ("openai-compat", "deepseek-v4-pro"),
+            ("openai-compat", "deepseek-v4-flash"),
+            ("openai-compat", "gemini-3.5-flash"),
+            ("openai-compat", "grok-4.5"),
+            ("openai-compat", "kimi-k2-thinking"),
+            ("openai-compat", "moonshot-kimi-k2-thinking"),
+            ("openai-compat", "mistral-large-latest"),
+            ("openai-compat", "qwen-max"),
+            ("openai-compat", "minimax-m3"),
+            ("openai-compat", "minimax-m2"),
+        ];
+        for (provider_kind, model) in flagships {
+            assert!(
+                find_best_match(provider_kind, model, None).is_some(),
+                "breadth floor: no dedicated (non-catch-all) baked row matches \
+                 {provider_kind}/{model}",
+            );
+        }
+    }
+
+    #[test]
+    fn breadth_floor_openai_responses_catch_all_carries_real_flagship_data() {
+        // openai-responses has exactly one row by design (a single glob
+        // catch-all covers the whole adapter kind -- see the module doc),
+        // so the breadth floor here is that the row itself carries REAL
+        // derived data for the current flagship, not a placeholder.
+        let r = lookup("openai-responses", "gpt-5.6", None);
+        assert!(
+            r.max_context_tokens.is_some(),
+            "openai-responses catch-all must carry a real (derived) context window",
+        );
     }
 }

@@ -230,10 +230,18 @@ enum ConfigCmd {
 
 #[derive(Debug, Subcommand)]
 enum PricingCmd {
-    /// List the effective cache-economics pricing manifest.
+    /// List the effective catalog (baked table merged with the on-disk
+    /// overlay): every selector renders PRESENT (with provenance and a
+    /// staleness marker) or DISABLED (overlay `null`). A catalog-only
+    /// listing never enumerates a selector missing from BOTH layers, so
+    /// MISSING never appears here -- it is a real merge outcome the two-
+    /// layer merge still distinguishes at request-lookup time.
     List,
-    /// Stamp a baked pricing row verified as of today.
-    /// `selector` is `"provider_kind:model_glob"` (e.g. `openai-compat:grok-*`).
+    /// Stamp an EXISTING overlay cell's `verified_at` to today (its
+    /// `source` becomes `user`). Errors if the selector has no overlay
+    /// cell yet (baked-only, or unknown) -- creating one is a later
+    /// import/set verb. `selector` is `"provider_kind:model_glob"` (e.g.
+    /// `openai-compat:grok-*`).
     Verify { selector: String },
 }
 
@@ -260,8 +268,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             unsafe_public,
         } => {
             let resolved_config_path = resolve_config_path(cli.config.as_deref());
-            let config = load_config(cli.config.as_deref())?;
-            let mut config = config;
+            let loaded = load_config_with_overlay(cli.config.as_deref())?;
+            let mut config = loaded.config;
 
             if let Some(h) = host {
                 config.server.host = h;
@@ -273,9 +281,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let host = config.server.host.clone();
             let port = config.server.port;
             let config = Arc::new(config);
+            let catalog_overlay = Arc::new(loaded.catalog_overlay);
 
             if let Err(e) = server::serve(
                 config,
+                catalog_overlay,
                 &host,
                 port,
                 unsafe_public,
@@ -357,7 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             c_after,
             ttl_tier,
         } => {
-            let config = load_config(cli.config.as_deref())?;
+            let loaded = load_config_with_overlay(cli.config.as_deref())?;
             let projection = commands::prompt_size::ProjectionArgs {
                 hypothetical_d,
                 hypothetical_k,
@@ -365,7 +375,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ttl_tier: &ttl_tier,
                 steady_state,
             };
-            if let Err(e) = commands::prompt_size::run(config, &alias, &request, projection) {
+            if let Err(e) = commands::prompt_size::run(
+                loaded.config,
+                &loaded.catalog_overlay,
+                &alias,
+                &request,
+                projection,
+            ) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -410,8 +426,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Pricing { action } => match action {
             PricingCmd::List => {
-                let config = load_config(cli.config.as_deref())?;
-                if let Err(e) = commands::pricing::list(&config) {
+                let loaded = load_config_with_overlay(cli.config.as_deref())?;
+                if let Err(e) = commands::pricing::list(&loaded.catalog_overlay) {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
@@ -452,20 +468,32 @@ fn init_tracing() {
         .init();
 }
 
+/// Cold-start config load, via the SINGLE shared loader
+/// (`server::load_effective_config`) also used by
+/// the hot-reload path -- closes the pre-existing split-brain where only
+/// this path merged the `pricing_verifications.json` sidecar /
+/// `[cache_pricing]` overrides and loaded the catalog overlay.
+///
+/// Discards the loaded catalog overlay: the subcommands that call this
+/// (`test`, `config check/show`, `usage`, `rc`) never consult it.
+/// `Cmd::Serve`, `Cmd::PromptSize`, and `Cmd::Pricing`'s `list` verb -- the
+/// callers that DO need the overlay (list renders the two-layer merge) --
+/// use [`load_config_with_overlay`] instead.
 fn load_config(
     explicit: Option<&std::path::Path>,
 ) -> Result<routectl_router::Config, Box<dyn std::error::Error>> {
+    Ok(load_config_with_overlay(explicit)?.config)
+}
+
+/// Cold-start config + catalog-overlay load, via the SAME shared loader
+/// [`load_config`] wraps. `Cmd::Serve` threads both into the Router build;
+/// `Cmd::PromptSize` threads both into the offline economics projection so
+/// it prices through the real overlay instead of an implicit empty one.
+fn load_config_with_overlay(
+    explicit: Option<&std::path::Path>,
+) -> Result<server::LoadedConfig, Box<dyn std::error::Error>> {
     let path = resolve_config_path(explicit);
-
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
-
-    let mut cfg: routectl_router::Config = toml::from_str(&text)
-        .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
-
-    commands::pricing::load_and_merge_verifications(&mut cfg);
-
-    Ok(cfg)
+    Ok(server::load_effective_config(&path)?)
 }
 
 /// Resolve the config path the same way `load_config` does, but

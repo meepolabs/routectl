@@ -21,7 +21,7 @@ use routectl_core::{
 };
 use serde_json::Value;
 
-use crate::cache_pricing::{CachePricingRow, lookup_with_overrides};
+use crate::catalog::{CatalogRow, EffectiveRow};
 use crate::config::{
     AliasValue, CacheCapability, Config, HistoryReasoning, ReasoningDialect, RetryPolicy,
 };
@@ -307,18 +307,18 @@ pub struct DispatchMeta {
     pub would_trim_tokens: Option<u64>,
     /// Non-mutating steady-state would-trim advisory: the break-even reuse
     /// count K* the cost gate priced for the would-cut candidate. `None` when
-    /// the trimmer proposed no cut, OR the resolved pricing cell is
-    /// unverified / sentinel (an unknown / unverified provider records the
-    /// freed-token count but no K* -- no trusted pricing), OR the verified
-    /// row carried no finite break-even. Recording only.
+    /// the trimmer proposed no cut, OR the two-layer catalog merge resolved
+    /// `Disabled` / `Missing` (an unknown provider or a disabled cell records
+    /// the freed-token count but no K* -- no trusted pricing), OR the
+    /// resolved row carried no finite break-even. Recording only.
     pub would_trim_break_even_k: Option<f64>,
     /// Non-mutating steady-state would-trim advisory: the lower confidence
     /// bound `k_floor` of the per-session K estimate, recorded ONLY when the
     /// K estimator returned a `Calibrated` confidence (the only bound the
     /// cost gate may consult to authorize a future cut). `None` for a
-    /// `Cold` / `Low` estimate (insufficient history), for an unverified
-    /// pricing cell (no `break_even_k` to compare against), and when no
-    /// would-cut candidate was proposed. Recording only.
+    /// `Cold` / `Low` estimate (insufficient history), for a `Disabled` /
+    /// `Missing` catalog cell (no `break_even_k` to compare against), and
+    /// when no would-cut candidate was proposed. Recording only.
     pub would_trim_k_floor: Option<f64>,
     /// Non-mutating shadow misfire monitor: `Some(0)` when the trimmed
     /// cacheable prefix hash matched the prior turn for this session triple
@@ -1604,6 +1604,7 @@ impl Router {
                 target.provider_kind,
                 model,
                 target.nickname.as_deref().unwrap_or(model),
+                &target.model.effective_row,
                 meta,
             );
 
@@ -2307,6 +2308,7 @@ impl Router {
                 target.provider_kind,
                 model,
                 target.nickname.as_deref().unwrap_or(model),
+                &target.model.effective_row,
                 meta,
             );
 
@@ -2765,13 +2767,14 @@ impl Router {
     /// `stream_inner` -- so the two byte-identical dispatch blocks cannot
     /// drift.
     ///
-    /// An unknown / unverified-provider target (e.g. `provider_kind` is `None`
-    /// for a legacy / direct-construction target, or the cell is a sentinel /
-    /// unverified row) records freed-token / attribution counts but no
-    /// break-even K*: an unverified row carries no trusted multipliers, so a
-    /// break-even number would be misleading. This matches the offline
-    /// prompt-size advisory convention (compute `break_even_k` only when
-    /// `row.verified`).
+    /// An unknown / unresolved-catalog target (e.g. `provider_kind` is
+    /// `None` for a legacy / direct-construction target, or the two-layer
+    /// merge resolves `Disabled` / `Missing`) records freed-token /
+    /// attribution counts but no break-even K*: a merge result other than
+    /// `Present` carries no trusted multipliers, so a break-even number
+    /// would be misleading. This matches the offline prompt-size advisory
+    /// convention (compute `break_even_k` only when the merge resolved
+    /// `Present`).
     ///
     /// Additionally, when the size-baseline plan exists, consults the
     /// in-process [`crate::k_estimator::KEstimator`] over the request's
@@ -2805,6 +2808,7 @@ impl Router {
         provider_kind: Option<&'static str>,
         model: &str,
         served_model: &str,
+        effective: &EffectiveRow,
         meta: &mut DispatchMeta,
     ) {
         let params = self.config.trim.to_params();
@@ -2812,24 +2816,22 @@ impl Router {
             return;
         }
 
-        // Tier defaults to the trimmer's auto-emit default (5m) via the lookup.
-        // K* is recorded only for a VERIFIED row (no reuse count K is assumed
-        // here); an unverified / sentinel row records None. Shared by both the
-        // size-baseline block below and the near-lossless pass, so the two
-        // measurements price against the identical resolved cell.
-        let row = lookup_with_overrides(
-            provider_kind.unwrap_or(""),
-            model,
-            None,
-            &self.config.cache_pricing,
-        );
+        // The two-layer merge (baked catalog + overlay) is resolved
+        // once at chain-build time and rides the resolved target
+        // (`ResolvedModel::effective_row`, stamped by
+        // `factory::apply_catalog_overlay`) -- this dispatch-path function
+        // only reads the precomputed result, never re-runs
+        // `lookup_baked_with_overrides` + `merge` per request. `Present`
+        // prices normally; `Disabled` / `Missing` fold to the SAME
+        // conservative sentinel behavior (`row` below is `None`). Shared
+        // by both the size-baseline block below and the near-lossless
+        // pass, so the two measurements price against the identical
+        // resolved cell.
+        let row = effective.priced();
 
         if let Some(plan) = propose_steady_state_trim(attempt_req, &params) {
             meta.would_trim_tokens = Some(plan.candidate.d);
-            let break_even = row
-                .verified
-                .then(|| break_even_k(&row, &plan.candidate))
-                .flatten();
+            let break_even = row.and_then(|r| break_even_k(r, &plan.candidate));
             meta.would_trim_break_even_k = break_even;
 
             // Consult the K estimator over the SAME row whose TTL priced K*: the
@@ -2840,11 +2842,15 @@ impl Router {
             // estimator reads PRIOR-turn samples only. The query keys on
             // `served_model` (the nickname), NOT the upstream `model`, so the
             // query triple matches the triple `record_k_sample` writes under.
+            // A `Disabled` / `Missing` cell has no row to read `ttl_seconds`
+            // from; the sentinel's TTL is the same conservative default used
+            // everywhere else a trusted row is unavailable.
+            let ttl_seconds = row.map_or(CatalogRow::sentinel().ttl_seconds, |r| r.ttl_seconds);
             let estimate = self.k_estimator.estimate(&crate::k_estimator::KQuery {
                 session_key: attempt_req.routectl_internal.inbound_session_key.as_deref(),
                 provider_kind: provider_kind.unwrap_or(""),
                 model: served_model,
-                ttl: Duration::from_secs(u64::from(row.ttl_seconds)),
+                ttl: Duration::from_secs(u64::from(ttl_seconds)),
                 now: SystemTime::now(),
             });
 
@@ -2884,7 +2890,7 @@ impl Router {
             }
         }
 
-        record_near_lossless_marks(attempt_req, &params, &row, meta);
+        record_near_lossless_marks(attempt_req, &params, row, meta);
     }
 }
 
@@ -2904,10 +2910,12 @@ const NEAR_LOSSLESS_RECORDER_VERSION: i64 = 1;
 /// the caller's `None` (pass did not run, below trigger).
 ///
 /// `would_trim_context_fraction` is fail-closed: `None` whenever `row`'s
-/// context window is unknown, never a guessed value.
+/// context window is unknown, never a guessed value. `row` is `None` when
+/// the two-layer merge resolved `Disabled` / `Missing` -- context_fraction
+/// and break-even fold to the same `None` in that case.
 ///
 /// Prices the near-lossless candidate via the UNCHANGED `break_even_k` gate,
-/// verified-row-only, mirroring the `would_trim_break_even_k` convention --
+/// present-row-only, mirroring the `would_trim_break_even_k` convention --
 /// but only LOGS the result via `tracing::debug!`. There is no persisted
 /// column for it: unlike the shipped size-baseline plan, the near-lossless
 /// candidate has no DispatchMeta / UsageRecord economics field in this
@@ -2921,7 +2929,7 @@ const NEAR_LOSSLESS_RECORDER_VERSION: i64 = 1;
 fn record_near_lossless_marks(
     attempt_req: &ChatRequest,
     params: &SteadyStateTrimParams,
-    row: &CachePricingRow,
+    row: Option<&CatalogRow>,
     meta: &mut DispatchMeta,
 ) {
     let n = attempt_req.messages.len();
@@ -2934,15 +2942,12 @@ fn record_near_lossless_marks(
     meta.would_trim_path_units = Some(marks.path_units);
     meta.would_trim_path_extractable = Some(marks.path_extractable);
     meta.would_trim_context_fraction = row
-        .max_context_tokens
+        .and_then(|r| r.max_context_tokens)
         .map(|window| estimate_total_tokens(attempt_req) as f64 / window as f64);
     meta.would_trim_raw_marks = Some(serde_json::to_value(&marks.marks).unwrap_or(Value::Null));
 
     if let Some(candidate) = near_lossless_candidate(attempt_req, &marks.marks) {
-        let break_even = row
-            .verified
-            .then(|| break_even_k(row, &candidate))
-            .flatten();
+        let break_even = row.and_then(|r| break_even_k(r, &candidate));
         tracing::debug!(
             dedup_tokens = marks.dedup_tokens,
             supersession_tokens = marks.supersession_tokens,
@@ -2954,7 +2959,7 @@ fn record_near_lossless_marks(
 
 /// Pure helper that selects the `would_trim_k_floor` value recorded by
 /// `Router::record_would_trim`. Returns `Some(estimate.k_floor)` only when
-/// `break_even` is a verified-row K* AND the estimator's confidence is
+/// `break_even` is a Present-row K* AND the estimator's confidence is
 /// `Calibrated`; every other case records `None`. The met/unmet/cold/
 /// unpriced verdict is derived downstream as a pure query over the numeric
 /// advisory columns (`would_trim_break_even_k`, `would_trim_k_floor`).
@@ -10678,6 +10683,7 @@ mod auto_emit_cache_control_tests {
         global_enabled: bool,
         fail_first: usize,
     ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
+        let provider_kind = entry.kind_str();
         let mut config = Config {
             cache: CacheConfig {
                 auto_emit_top_level_breakpoint: global_enabled,
@@ -10699,8 +10705,22 @@ mod auto_emit_cache_control_tests {
             fail_first,
             seen: AtomicUsize::new(0),
         });
+        // Mirror `factory::apply_catalog_overlay` (empty overlay, no
+        // `[cache_pricing]` overrides): this test rig builds `ResolvedModel`
+        // directly instead of through the factory, so it must stamp
+        // `effective_row` itself the same way -- `record_would_trim` now
+        // reads the precomputed merge off the resolved target rather than
+        // re-resolving `(provider_kind, upstream)` at dispatch time.
+        let baked = crate::catalog::lookup_baked_with_overrides(
+            provider_kind,
+            "upstream-model",
+            None,
+            &BTreeMap::new(),
+        );
+        let effective_row = crate::catalog::merge(baked.as_ref(), None);
         let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-        let resolved = ResolvedModel::new("m", "p", provider, "upstream-model");
+        let resolved = ResolvedModel::new("m", "p", provider, "upstream-model")
+            .with_effective_row(effective_row);
         models.insert("m".into(), Arc::new(resolved));
         router.install_resolved_models(models);
         (router, captured)
@@ -11032,12 +11052,12 @@ mod auto_emit_cache_control_tests {
     }
 
     #[tokio::test]
-    async fn would_trim_unverified_row_records_tokens_but_no_break_even_k() {
+    async fn would_trim_provider_catch_all_row_prices_normally_via_baked_match() {
         // An openai-compat target with no specific cell resolves to the
-        // unverified `"*"` catch-all (a sentinel-treated row). The long request
-        // still records the freed-token count, but K* is None -- an unverified
-        // row carries no trusted multipliers, matching the offline prompt-size
-        // advisory convention.
+        // provider's `"*"` catch-all -- a REAL baked-table match (tier 2), so
+        // it prices normally. K* suppression is reserved for a `Disabled` /
+        // `Missing` merge result (see
+        // `record_would_trim_folds_missing_baked_row_to_no_break_even`).
         let (router, _captured) = rig(openai_entry(), true, 0);
         let dispatched = router
             .complete_with_options(long_tool_request(), RouterOptions::new())
@@ -11050,11 +11070,11 @@ mod auto_emit_cache_control_tests {
         assert_eq!(
             dispatched.meta.would_trim_tokens,
             Some(plan.candidate.d),
-            "an unverified row must still record the freed-token count",
+            "the catch-all row must record the freed-token count",
         );
-        assert_eq!(
-            dispatched.meta.would_trim_break_even_k, None,
-            "an unverified / sentinel row must record K* = None (no trusted pricing)",
+        assert!(
+            dispatched.meta.would_trim_break_even_k.is_some(),
+            "a baked-matched provider catch-all prices",
         );
     }
 
@@ -11192,8 +11212,9 @@ mod auto_emit_cache_control_tests {
     /// (non-`None`) context window.
     fn rig_with_cache_pricing_override(
         entry: ProviderEntry,
-        cache_pricing: BTreeMap<String, crate::cache_pricing::CachePricingOverride>,
+        cache_pricing: BTreeMap<String, crate::catalog::CachePricingOverride>,
     ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
+        let provider_kind = entry.kind_str();
         let mut config = Config {
             cache: CacheConfig {
                 auto_emit_top_level_breakpoint: true,
@@ -11202,6 +11223,17 @@ mod auto_emit_cache_control_tests {
             ..Config::default()
         };
         config.providers.insert("p".into(), entry);
+
+        // Mirror `factory::apply_catalog_overlay` (empty overlay, but the
+        // SAME `[cache_pricing]` overrides `config` carries) -- see the
+        // matching note on `rig` above.
+        let baked = crate::catalog::lookup_baked_with_overrides(
+            provider_kind,
+            "upstream-model",
+            None,
+            &config.cache_pricing,
+        );
+        let effective_row = crate::catalog::merge(baked.as_ref(), None);
 
         let mut router = Router::new(Arc::new(config));
         let captured: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
@@ -11212,7 +11244,8 @@ mod auto_emit_cache_control_tests {
             seen: AtomicUsize::new(0),
         });
         let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-        let resolved = ResolvedModel::new("m", "p", provider, "upstream-model");
+        let resolved = ResolvedModel::new("m", "p", provider, "upstream-model")
+            .with_effective_row(effective_row);
         models.insert("m".into(), Arc::new(resolved));
         router.install_resolved_models(models);
         (router, captured)
@@ -11315,7 +11348,7 @@ mod auto_emit_cache_control_tests {
         // `context_fraction` into a computed `Some(fraction)`.
         let overrides = BTreeMap::from([(
             "anthropic-api:*".to_string(),
-            crate::cache_pricing::CachePricingOverride {
+            crate::catalog::CachePricingOverride {
                 max_context_tokens: Some(1_000_000),
                 ..Default::default()
             },
@@ -11659,6 +11692,155 @@ mod auto_emit_cache_control_tests {
         assert_eq!(
             CacheInjection::ValidationRolledBack.strategy_str(),
             "auto_skipped:validation_rolled_back",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Overlay end-to-end: a REAL on-disk overlay round-trip, merged via
+    // the REAL `factory::apply_catalog_overlay` (not a hand-built
+    // `EffectiveRow`), dispatched through the REAL Router -- proving the
+    // seam this module's `record_would_trim` reads (`ResolvedModel::
+    // effective_row`) actually changes behavior when a loader-shaped
+    // overlay is present, not just that the pure `merge` unit resolves
+    // correctly in isolation.
+    // -----------------------------------------------------------------
+
+    /// Save `cells` to a tempfile then load it straight back, so the
+    /// returned `CatalogOverlay` came from a REAL disk round-trip (the
+    /// same `catalog_overlay::save` / `load` pair the config loader and
+    /// the (future) migrator use), not an in-memory struct literal.
+    fn overlay_from_disk(
+        cells: BTreeMap<String, Option<crate::catalog_overlay::OverlayCell>>,
+    ) -> crate::catalog_overlay::CatalogOverlay {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog_overlay.json");
+        crate::catalog_overlay::save(&path, 0, cells).expect("save");
+        crate::catalog_overlay::load(&path).expect("load")
+    }
+
+    /// Build a router exactly like `rig`, except the resolved model's
+    /// `effective_row` is stamped by the REAL `factory::apply_catalog_overlay`
+    /// post-pass (the same call `build_router_from_config_with_overlay`
+    /// makes) instead of a hand-rolled merge -- so `overlay` must carry
+    /// through `[models.m]` / `[providers.p]` resolution exactly as
+    /// production config would.
+    fn rig_with_overlay(
+        entry: ProviderEntry,
+        overlay: crate::catalog_overlay::CatalogOverlay,
+    ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
+        let mut config = Config {
+            cache: CacheConfig {
+                auto_emit_top_level_breakpoint: true,
+            },
+            retry: RetryPolicy {
+                initial_backoff_ms: 0,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        config.providers.insert("p".into(), entry);
+        config.models.insert(
+            "m".into(),
+            crate::config::ModelEntry::new("p", "upstream-model"),
+        );
+        let config = Arc::new(config);
+
+        let mut router = Router::new(config.clone());
+        let captured: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {
+            id: "cap".into(),
+            captured: captured.clone(),
+            fail_first: 0,
+            seen: AtomicUsize::new(0),
+        });
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m".into(),
+            Arc::new(ResolvedModel::new("m", "p", provider, "upstream-model")),
+        );
+        let models = crate::factory::apply_catalog_overlay(models, &config, &overlay);
+        router.install_resolved_models(models);
+        (router, captured)
+    }
+
+    #[tokio::test]
+    async fn overlay_override_through_real_load_path_changes_would_trim_pricing() {
+        // Arrange: baseline (no overlay) vs. an overlay cell overriding the
+        // anthropic-api catch-all's `wm`, round-tripped through disk.
+        let (baseline_router, _c) = rig(anthropic_entry(), true, 0);
+        let baseline = baseline_router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        baseline.result.expect("ok");
+        let baseline_k = baseline
+            .meta
+            .would_trim_break_even_k
+            .expect("baseline (baked catch-all) must price");
+
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "anthropic-api:*".to_string(),
+            Some(crate::catalog_overlay::OverlayCell {
+                source: crate::catalog_overlay::OverlaySource::User,
+                verified_at: "2026-07-01".to_string(),
+                wm: Some(9.5),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        let overlay = overlay_from_disk(cells);
+
+        // Act: dispatch the IDENTICAL request through the overlay-stamped
+        // router.
+        let (router, _captured) = rig_with_overlay(anthropic_entry(), overlay);
+        let dispatched = router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+        let overridden_k = dispatched
+            .meta
+            .would_trim_break_even_k
+            .expect("overlay-priced target must still price");
+
+        // Assert: the overlay's wm actually moved the priced outcome --
+        // this fails if `record_would_trim` ever falls back to the baked
+        // row instead of reading `ResolvedModel::effective_row`.
+        assert_ne!(
+            baseline_k, overridden_k,
+            "an overlay cell overriding a baked field must change the priced break-even K* \
+             through the real load -> merge -> dispatch path",
+        );
+    }
+
+    #[tokio::test]
+    async fn overlay_null_disable_through_real_load_path_folds_to_conservative_sentinel() {
+        // Arrange: a null overlay cell (JSON `null`, round-tripped through
+        // disk) for the same selector the baseline test prices normally.
+        let mut cells = BTreeMap::new();
+        cells.insert("anthropic-api:*".to_string(), None);
+        let overlay = overlay_from_disk(cells);
+
+        // Act
+        let (router, _captured) = rig_with_overlay(anthropic_entry(), overlay);
+        let dispatched = router
+            .complete_with_options(long_tool_request(), RouterOptions::new())
+            .await;
+        dispatched.result.expect("ok");
+
+        // Assert: disabled folds to the SAME conservative sentinel as a
+        // catalog miss -- no break-even K -- while the freed-token count
+        // (independent of pricing trust) still records.
+        assert_eq!(
+            dispatched.meta.would_trim_break_even_k, None,
+            "a null-disabled overlay cell must fold to the conservative sentinel \
+             through the real load -> merge -> dispatch path",
+        );
+        assert!(
+            dispatched.meta.would_trim_tokens.is_some(),
+            "the freed-token count records regardless of pricing trust",
         );
     }
 }
@@ -12632,6 +12814,16 @@ mod k_query_key_tests {
     /// on it exactly as it does in production.
     const UPSTREAM: &str = "claude-opus-4-8";
 
+    /// Build the `EffectiveRow` `record_would_trim` now expects to be handed
+    /// (mirroring `factory::apply_catalog_overlay`'s chain-build-time merge,
+    /// with no overlay cell -- these regression tests exercise the baked
+    /// layer only).
+    fn effective_row_for(provider_kind: &str, model: &str) -> EffectiveRow {
+        use crate::catalog::{lookup_baked_with_overrides, merge};
+        let baked = lookup_baked_with_overrides(provider_kind, model, None, &BTreeMap::new());
+        merge(baked.as_ref(), None)
+    }
+
     /// A bulky payload of roughly `tokens` tokens (4 bytes/token estimate).
     fn payload_of_tokens(tokens: usize) -> String {
         "x".repeat(tokens * 4)
@@ -12789,7 +12981,15 @@ mod k_query_key_tests {
         // Act: drive the would-trim query path with the upstream wire id AND
         // the served nickname threaded separately, mirroring the two dispatch
         // call sites (pricing keys on upstream; K keys on the served model).
-        router.record_would_trim(&req, Some(PROVIDER_KIND), UPSTREAM, SERVED_MODEL, &mut meta);
+        let effective = effective_row_for(PROVIDER_KIND, UPSTREAM);
+        router.record_would_trim(
+            &req,
+            Some(PROVIDER_KIND),
+            UPSTREAM,
+            SERVED_MODEL,
+            &effective,
+            &mut meta,
+        );
 
         // Assert: pricing resolved on the verified upstream cell (sanity that
         // the query block was reached), AND the K query hit the calibrated
@@ -12803,6 +13003,39 @@ mod k_query_key_tests {
         assert!(
             meta.would_trim_k_floor.is_some(),
             "K query must key on the served model to match the sample-write key",
+        );
+    }
+
+    #[test]
+    fn record_would_trim_folds_missing_baked_row_to_no_break_even() {
+        // Arrange: a provider_kind that names no baked cell at all -- not
+        // even a provider catch-all (every routectl-shipped provider kind
+        // carries one). The two-layer merge resolves `Missing`, which
+        // folds to the SAME conservative sentinel behavior as `Disabled`:
+        // no break-even K, even though the freed-token count still
+        // records.
+        const UNKNOWN_KIND: &str = "totally-unknown-kind";
+        let router = Router::new(Arc::new(Config::default()));
+        let req = triggering_req();
+        let mut meta = DispatchMeta::for_alias(SERVED_MODEL);
+
+        let effective = effective_row_for(UNKNOWN_KIND, UPSTREAM);
+        router.record_would_trim(
+            &req,
+            Some(UNKNOWN_KIND),
+            UPSTREAM,
+            SERVED_MODEL,
+            &effective,
+            &mut meta,
+        );
+
+        assert!(
+            meta.would_trim_tokens.is_some(),
+            "the freed-token count records regardless of pricing trust",
+        );
+        assert_eq!(
+            meta.would_trim_break_even_k, None,
+            "a Missing catalog row must record K* = None",
         );
     }
 }

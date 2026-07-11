@@ -1,7 +1,7 @@
 //! Pure break-even COST GATE for prompt-cache prefix reduction.
 //!
 //! This module answers a single question with arithmetic only: given a
-//! tier-correct [`CachePricingRow`] and a proposed prefix edit, is breaking
+//! tier-correct [`CatalogRow`] and a proposed prefix edit, is breaking
 //! the warm cache net-positive in dollars, or should the original prefix be
 //! kept? It is advisory-only: nothing here mutates a request,
 //! estimates the reuse count `K`, or touches the dispatch path. The caller
@@ -14,7 +14,7 @@
 //! Breaking is therefore worth it only when the read savings over the
 //! assumed future reuses exceed the one-time re-write / re-send tax.
 //!
-//! Two branches keyed on [`CachePricingRow::auto_cacher`]:
+//! Two branches keyed on [`CatalogRow::auto_cacher`]:
 //! - WRITE-PREMIUM providers (`auto_cacher == false`, e.g. Anthropic /
 //!   Bedrock / Qwen-explicit) pay a real write tax on the re-warm, so
 //!   BREAK iff `k * d * rm > c_after * wm`.
@@ -23,14 +23,18 @@
 //!   is re-sending the disturbed suffix at miss price instead of a cheap
 //!   read, so BREAK iff `k * d * rm > c_after * (1 - rm)`.
 //!
-//! Every doubt resolves to KEEP: an unverified / sentinel row, no candidate,
-//! or a post-cut prefix below the cacheable floor all force KEEP before the
-//! branch inequality is even consulted.
+//! Every doubt resolves to KEEP: no candidate, or a post-cut prefix below
+//! the cacheable floor, force KEEP before the branch inequality is even
+//! consulted. TRUST is no longer this module's concern: a row's
+//! provenance lives on the two-layer merge result
+//! ([`crate::catalog::EffectiveRow`]), and callers gate whether to invoke
+//! [`evaluate`] / [`break_even_k`] at all -- a `Disabled` / `Missing` merge
+//! result never reaches this module.
 //!
-//! Purity: depends only on [`crate::cache_pricing::CachePricingRow`] and
-//! std. The `f32` row multipliers are widened to `f64` for the arithmetic.
+//! Purity: depends only on [`crate::catalog::CatalogRow`] and std. The
+//! `f32` row multipliers are widened to `f64` for the arithmetic.
 
-use crate::cache_pricing::CachePricingRow;
+use crate::catalog::CatalogRow;
 
 /// A proposed prefix reduction handed to the gate. Immutable; the gate never
 /// mutates it. Token counts are in prefix tokens.
@@ -71,8 +75,11 @@ pub enum KeepReason {
     /// provider's cacheable floor, so the remainder re-bills at full input
     /// price every request. A hard KEEP.
     BelowMinPrefix,
-    /// The row is unverified / sentinel: its multipliers are not trusted for
-    /// a live break. Fail closed to KEEP.
+    /// No trusted row to price against: the two-layer merge resolved
+    /// `Disabled` or `Missing` ([`crate::catalog::EffectiveRow`]). This
+    /// module no longer derives this itself (a redesign removed the per-row
+    /// `verified` flag) -- CALLERS construct this variant directly when
+    /// they choose not to invoke [`evaluate`] at all.
     InsufficientData,
     /// There is nothing to remove (`d == 0` or `c_after == 0`).
     NoCandidate,
@@ -115,14 +122,14 @@ impl GateDecision {
 /// (within the TTL window) at which breaking the cache turns net-positive.
 ///
 /// Returns `None` when there is nothing to remove (`d == 0`), which would
-/// otherwise divide by zero. Branch on [`CachePricingRow::auto_cacher`]:
+/// otherwise divide by zero. Branch on [`CatalogRow::auto_cacher`]:
 /// - write-premium: `K* = (c_after * wm) / (d * rm)`.
 /// - auto-cacher:   `K* = (c_after * (1 - rm)) / (d * rm)`.
 ///
 /// Arithmetic is in `f64` (the `f32` row fields are widened) to avoid
 /// precision loss on the deep DeepSeek read multipliers.
 #[must_use]
-pub fn break_even_k(row: &CachePricingRow, candidate: &PrefixReductionCandidate) -> Option<f64> {
+pub fn break_even_k(row: &CatalogRow, candidate: &PrefixReductionCandidate) -> Option<f64> {
     if candidate.d == 0 {
         return None;
     }
@@ -148,23 +155,18 @@ pub fn break_even_k(row: &CachePricingRow, candidate: &PrefixReductionCandidate)
 /// Decide KEEP vs BREAK for a candidate at an assumed reuse count `k`.
 ///
 /// Guards run in order, each short-circuiting to KEEP:
-/// 1. `!row.verified` -> `Keep { InsufficientData }`.
-/// 2. `d == 0` or `c_after == 0` -> `Keep { NoCandidate }`.
-/// 3. `(c - d) < row.min_prefix_tokens` -> `Keep { BelowMinPrefix }`.
-/// 4. otherwise the branch inequality: BREAK iff `k * d * rm` beats the
+/// 1. `d == 0` or `c_after == 0` -> `Keep { NoCandidate }`.
+/// 2. `(c - d) < row.min_prefix_tokens` -> `Keep { BelowMinPrefix }`.
+/// 3. otherwise the branch inequality: BREAK iff `k * d * rm` beats the
 ///    one-time tax (write-premium: `c_after * wm`; auto-cacher:
 ///    `c_after * (1 - rm)`).
+///
+/// Trust-gating moved OUT of this function: callers decide whether
+/// `row` is trustworthy enough to price (i.e. whether the two-layer merge
+/// resolved `Present`) BEFORE calling `evaluate` at all; a `Disabled` /
+/// `Missing` merge result should never reach here.
 #[must_use]
-pub fn evaluate(
-    row: &CachePricingRow,
-    candidate: &PrefixReductionCandidate,
-    k: f64,
-) -> GateDecision {
-    if !row.verified {
-        return GateDecision::Keep {
-            reason: KeepReason::InsufficientData,
-        };
-    }
+pub fn evaluate(row: &CatalogRow, candidate: &PrefixReductionCandidate, k: f64) -> GateDecision {
     if candidate.d == 0 || candidate.c_after == 0 {
         return GateDecision::Keep {
             reason: KeepReason::NoCandidate,
@@ -200,7 +202,7 @@ pub fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache_pricing::{CachePricingRow, lookup};
+    use crate::catalog::{CatalogRow, lookup};
 
     // The doc's worked-result scenario, reused as the K* oracle:
     // 200k cached prefix, drop 50k oldest-first, so c_after == c == 200k.
@@ -244,7 +246,8 @@ mod tests {
 
     #[test]
     fn break_even_k_openai_auto_cacher_is_thirty_six() {
-        // Arrange: auto-cacher row (free writes), rm=0.10.
+        // Arrange: auto-cacher row (the one-time cost ignores `wm` for
+        // auto-cachers -- see `break_even_k`), rm=0.10.
         let row = lookup("openai-responses", "gpt-5.5", None);
         assert!(row.auto_cacher, "openai-responses must be an auto-cacher");
 
@@ -256,28 +259,30 @@ mod tests {
     }
 
     #[test]
-    fn break_even_k_deepseek_pro_is_about_four_seventy_eight() {
-        // Arrange: deepest read multiplier (rm=0.0083), auto-cacher.
+    fn break_even_k_deepseek_pro_is_about_four_seventy_six() {
+        // Arrange: deepest read multiplier (rm = 1/120, the generated
+        // catalog's exact ratio -- see `catalog_codegen`), auto-cacher.
         let row = lookup("openai-compat", "deepseek-v4-pro", None);
         assert!(row.auto_cacher);
 
         // Act
         let k_star = break_even_k(&row, &scenario()).expect("d > 0");
 
-        // Assert: computed from the row's ACTUAL rm, not the doc's rounded
-        // 0.008 (which gives ~496). (200000 * (1 - rm)) / (50000 * rm).
+        // Assert: computed from the row's ACTUAL rm. (200000 * (1 - rm)) /
+        // (50000 * rm), which for rm = 1/120 reduces to 200000 * 119 / 50000
+        // = 476 exactly (up to f32 rounding of rm itself).
         let rm = row.rm as f64;
         let expected = (C_AFTER as f64 * (1.0 - rm)) / (D as f64 * rm);
         assert!((k_star - expected).abs() < 1e-6, "K* was {k_star}");
         assert!(
-            (477.0..479.0).contains(&k_star),
-            "K* {k_star} should land near 478 for rm=0.0083",
+            (475.9..476.1).contains(&k_star),
+            "K* {k_star} should land near 476 for rm=1/120",
         );
     }
 
     #[test]
     fn break_even_k_returns_none_when_nothing_removed() {
-        // Arrange: a verified row but d == 0.
+        // Arrange: a real baked row but d == 0.
         let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
         let candidate = PrefixReductionCandidate::new(0, C_AFTER, C);
 
@@ -289,7 +294,7 @@ mod tests {
     fn break_even_k_pure_row_write_premium_matches_formula() {
         // A direct sentinel construction exercises the pure math without a
         // table lookup (the sentinel is write-premium, wm=2.0, rm=0.10).
-        let row = CachePricingRow::sentinel();
+        let row = CatalogRow::sentinel();
         assert!(!row.auto_cacher);
 
         let k_star = break_even_k(&row, &scenario()).expect("d > 0");
@@ -401,8 +406,8 @@ mod tests {
         // Arrange: a row with f32-exact multipliers (wm=1.0, rm=0.125) and a
         // candidate (c_after=50_000, d=8_000) chosen so K* is EXACTLY 50.0
         // with no float drift: (50_000 * 1.0) / (8_000 * 0.125) == 50.0.
-        // Built off the sentinel via overrides so it is verified.
-        use crate::cache_pricing::CachePricingOverride;
+        // Built off the sentinel via overrides.
+        use crate::catalog::CachePricingOverride;
         let ov = CachePricingOverride {
             wm: Some(1.0),
             rm: Some(0.125),
@@ -410,7 +415,7 @@ mod tests {
             override_acknowledges_cost_risk: true,
             ..Default::default()
         };
-        let row = CachePricingRow::sentinel()
+        let row = CatalogRow::sentinel()
             .with_overrides(&ov)
             .expect("accepted with ack");
         assert!(!row.auto_cacher, "must be write-premium");
@@ -434,21 +439,28 @@ mod tests {
     // -- guard tests -------------------------------------------------------
 
     #[test]
-    fn evaluate_unverified_row_keeps_insufficient_data_even_with_huge_k() {
-        // Arrange: an unknown provider resolves to the unverified sentinel.
-        let row = lookup("some-future-kind", "whatever-model", None);
-        assert!(!row.verified);
-
-        // Act: a wildly favorable k must NOT override the verified guard.
+    fn evaluate_no_longer_gates_on_row_trust_internally() {
+        // The per-row `verified` flag is gone; `evaluate` prices ANY
+        // row handed to it -- trust-gating (whether to call `evaluate` at
+        // all) moved to the caller, which reads the two-layer merge result
+        // (`crate::catalog::EffectiveRow`) before ever reaching this
+        // module. A sentinel row now runs the normal branch inequality
+        // instead of an internal guard.
+        let row = CatalogRow::sentinel();
         let decision = evaluate(&row, &scenario(), 1_000_000.0);
+        assert_eq!(decision, GateDecision::Break { delta_tokens: D });
+    }
 
-        // Assert
-        assert_eq!(
-            decision,
-            GateDecision::Keep {
-                reason: KeepReason::InsufficientData
-            }
-        );
+    #[test]
+    fn insufficient_data_is_caller_constructed_not_evaluate_derived() {
+        // `KeepReason::InsufficientData` still exists as a variant callers
+        // construct directly (see `routectl-cli`'s `prompt_size` and the
+        // router's `EffectiveRow` fold) -- pin that it round-trips through
+        // `GateDecision` / `strategy_str` like any other reason.
+        let decision = GateDecision::Keep {
+            reason: KeepReason::InsufficientData,
+        };
+        assert_eq!(decision.strategy_str(), "cost_gate:keep");
     }
 
     #[test]

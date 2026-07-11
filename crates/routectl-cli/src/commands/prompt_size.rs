@@ -19,11 +19,12 @@ use routectl_core::context_reduction::{ReductionOutcome, apply_json_minify};
 use routectl_core::schema::Role;
 use routectl_core::{ChatRequest, Error, Result, scan_volatile};
 use routectl_router::{
-    ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CachePricingRow,
-    Config, GateDecision, KeepReason, PrefixReductionCandidate, TrimConfig, break_even_k, evaluate,
-    lookup_with_overrides, propose_steady_state_trim, validate_alias_chain_targets,
-    validate_alias_patterns, validate_bedrock_global_config, validate_overrides,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
+    ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CatalogOverlay,
+    Config, EffectiveRow, GateDecision, KeepReason, PrefixReductionCandidate, TrimConfig,
+    break_even_k, evaluate, lookup_baked_with_overrides, lookup_overlay_cell, merge,
+    propose_steady_state_trim, validate_alias_chain_targets, validate_alias_patterns,
+    validate_bedrock_global_config, validate_overrides, validate_reasoning_defaults,
+    validate_registry_patterns, validate_retry_policy,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -142,9 +143,15 @@ pub struct EconomicsProjection {
     pub model: Option<String>,
     /// The priced TTL tier (`5m` / `1h`).
     pub tier: String,
-    /// Whether the resolved pricing cell is verified against a primary vendor
-    /// doc. An unverified cell falls to the conservative sentinel treatment.
-    pub verified: bool,
+    /// Whether the resolved catalog cell is `Present` in the two-layer
+    /// merge (`routectl_router::EffectiveRow`) -- `false` when
+    /// `Disabled` or `Missing` (no target resolved offline, or no
+    /// baked/overlay row for it). Named `priced`, not `verified`: `Present`
+    /// no longer implies vendor-doc verification -- that per-row
+    /// distinction was replaced by the merge's `source` provenance
+    /// (`Baked` / `Import` / `User`), which this offline projection does
+    /// not yet render (deferred to a later increment).
+    pub priced: bool,
     /// Break-even reuse count K*: the minimum future prefix reuses at which
     /// breaking the cache turns net-positive. `None` when `d == 0` or the row
     /// is a sentinel (no live decision is meaningful).
@@ -217,18 +224,21 @@ pub fn build_report(
 /// `target` is `Some((provider_kind, model))` when the alias resolved offline,
 /// or `None` (the cell then prices as the sentinel and the verdict reads
 /// "insufficient data"). The resolved row honors the operator's
-/// `[cache_pricing]` `overrides` for the requested `tier`.
+/// `[cache_pricing]` `overrides` for the requested `tier`, THEN the
+/// on-disk catalog `overlay` (which wins over both baked and
+/// `[cache_pricing]` per the two-layer merge).
 fn build_economics(
     report_total_tokens: usize,
     target: Option<(&'static str, String)>,
     overrides: &BTreeMap<String, CachePricingOverride>,
+    overlay: &CatalogOverlay,
     args: &ProjectionArgs,
 ) -> EconomicsProjection {
     let d = args.hypothetical_d.unwrap_or(0);
     let c = report_total_tokens as u64;
     let c_after = args.c_after.unwrap_or(c);
     let candidate = PrefixReductionCandidate::new(d, c_after, c);
-    price_candidate(candidate, target, overrides, args, None)
+    price_candidate(candidate, target, overrides, overlay, args, None)
 }
 
 /// Build the advisory economics projection for the REAL steady-state-trim
@@ -247,53 +257,69 @@ fn build_steady_state_economics(
     req: &ChatRequest,
     target: Option<(&'static str, String)>,
     overrides: &BTreeMap<String, CachePricingOverride>,
+    overlay: &CatalogOverlay,
     args: &ProjectionArgs,
     trim: &TrimConfig,
 ) -> EconomicsProjection {
     let params = trim.to_params();
     if let Some(plan) = propose_steady_state_trim(req, &params) {
-        price_candidate(plan.candidate, target, overrides, args, Some(true))
+        price_candidate(plan.candidate, target, overrides, overlay, args, Some(true))
     } else {
         let zero = PrefixReductionCandidate::new(0, 0, 0);
-        price_candidate(zero, target, overrides, args, Some(false))
+        price_candidate(zero, target, overrides, overlay, args, Some(false))
     }
 }
 
-/// Shared pricing core: resolve the pricing cell for `target`, compute the
-/// break-even K* and (when `--hypothetical-k` was given) the keep/break
-/// verdict, and assemble the projection. `would_trim` flags whether this came
-/// from the steady-state trimmer (`Some`) or the hypothetical-d path (`None`).
+/// Shared pricing core: resolve the two-layer catalog merge for `target`,
+/// compute the break-even K* and (when `--hypothetical-k` was given) the
+/// keep/break verdict, and assemble the projection. `would_trim` flags
+/// whether this came from the steady-state trimmer (`Some`) or the
+/// hypothetical-d path (`None`).
+///
+/// `prompt-size` is an offline CLI: it has no resolved-target chain to ride
+/// a precomputed `EffectiveRow` on (riding the resolved target is a
+/// dispatch-path concern), so it resolves the merge here, at its own load
+/// point, through the SAME shared `lookup_baked_with_overrides` + `merge`
+/// entry the router's chain-build pass uses -- never a duplicate merge
+/// implementation.
 fn price_candidate(
     candidate: PrefixReductionCandidate,
     target: Option<(&'static str, String)>,
     overrides: &BTreeMap<String, CachePricingOverride>,
+    overlay: &CatalogOverlay,
     args: &ProjectionArgs,
     would_trim: Option<bool>,
 ) -> EconomicsProjection {
-    let (provider_kind, model, row) = match &target {
-        Some((kind, model)) => (
-            Some((*kind).to_string()),
-            Some(model.clone()),
-            lookup_with_overrides(kind, model, Some(args.ttl_tier), overrides),
-        ),
-        None => (None, None, CachePricingRow::sentinel()),
+    let (provider_kind, model, effective) = match &target {
+        Some((kind, model)) => {
+            let baked = lookup_baked_with_overrides(kind, model, Some(args.ttl_tier), overrides);
+            let overlay_cell = lookup_overlay_cell(kind, model, overlay);
+            (
+                Some((*kind).to_string()),
+                Some(model.clone()),
+                merge(baked.as_ref(), overlay_cell),
+            )
+        }
+        None => (None, None, EffectiveRow::Missing),
     };
+    let row = effective.priced();
 
-    // A sentinel / unverified cell carries no trusted multipliers, so a live
-    // break-even number is meaningless; suppress it and let the verdict carry
-    // the "insufficient data" message instead.
-    let break_even = if row.verified {
-        break_even_k(&row, &candidate)
-    } else {
-        None
-    };
-    let verdict = args.hypothetical_k.map(|k| evaluate(&row, &candidate, k));
+    // `Disabled` / `Missing` carry no trusted multipliers, so a live
+    // break-even number is meaningless; suppress it and let the verdict
+    // carry the "insufficient data" message instead.
+    let break_even = row.and_then(|r| break_even_k(r, &candidate));
+    let verdict = args.hypothetical_k.map(|k| match row {
+        Some(r) => evaluate(r, &candidate, k),
+        None => GateDecision::Keep {
+            reason: KeepReason::InsufficientData,
+        },
+    });
 
     EconomicsProjection {
         provider_kind,
         model,
         tier: args.ttl_tier.to_string(),
-        verified: row.verified,
+        priced: row.is_some(),
         break_even_k: break_even,
         candidate,
         verdict,
@@ -393,7 +419,8 @@ fn resolve_supports_top_level(config: &Config, alias: &str) -> Option<bool> {
 /// SAME config-only precedence as `resolve_supports_top_level` -- no live
 /// secret resolution, no provider build, no network. `provider_kind` is the
 /// stable `kind_str()` discriminant; `model` is the resolved upstream id. The
-/// cache-economics projection feeds these to `lookup`. Returns `None` when any
+/// cache-economics projection feeds these to `lookup_baked_with_overrides` +
+/// the two-layer merge. Returns `None` when any
 /// hop cannot be resolved offline.
 fn resolve_target(config: &Config, alias: &str) -> Option<(&'static str, String)> {
     let value = resolve_alias_value(config, alias)?;
@@ -458,6 +485,7 @@ fn first_nickname(config: &Config, value: AliasValue, depth: usize) -> Option<St
 
 pub fn run(
     config: Config,
+    catalog_overlay: &CatalogOverlay,
     alias: &str,
     request_path: &Path,
     projection: ProjectionArgs,
@@ -507,6 +535,7 @@ pub fn run(
             &req,
             target,
             &config.cache_pricing,
+            catalog_overlay,
             &projection,
             &config.trim,
         ));
@@ -516,6 +545,7 @@ pub fn run(
             report.total.approx_tokens,
             target,
             &config.cache_pricing,
+            catalog_overlay,
             &projection,
         ));
     } else if projection.c_after.is_some() || projection.hypothetical_k.is_some() {
@@ -588,7 +618,7 @@ fn render_economics(economics: &EconomicsProjection) -> String {
             if would_trim { "yes" } else { "no" }
         );
     }
-    let _ = writeln!(out, "pricing cell: {}", trust_label(economics.verified));
+    let _ = writeln!(out, "pricing cell: {}", trust_label(economics.priced));
     let _ = writeln!(
         out,
         "candidate: D={} tokens  C_after={} tokens  C={} tokens",
@@ -599,7 +629,7 @@ fn render_economics(economics: &EconomicsProjection) -> String {
         Some(k_star) => {
             let _ = writeln!(out, "break-even K* = {k_star:.2} future reuses");
         }
-        None if !economics.verified => {
+        None if !economics.priced => {
             let _ = writeln!(out, "break-even K*: n/a (insufficient data)");
         }
         None => {
@@ -613,12 +643,19 @@ fn render_economics(economics: &EconomicsProjection) -> String {
     out
 }
 
-/// Operator-facing trust label for a pricing cell.
-const fn trust_label(verified: bool) -> &'static str {
-    if verified {
-        "verified"
+/// Operator-facing pricing-trust label for a cell: `priced` when the
+/// two-layer merge resolved `Present` (the SAME state a `Baked`,
+/// `Import`, or `User`-sourced row shares -- this offline projection does
+/// not yet render provenance, see `EconomicsProjection::priced`'s doc),
+/// else the conservative `NEEDS-LIVE-PROBE` label (`Disabled` / `Missing`).
+/// Named `priced`, not `verified`: a redesign moved vendor-doc
+/// verification off the row and onto the merge's `source` provenance, so
+/// `Present` alone no longer means "verified".
+const fn trust_label(priced: bool) -> &'static str {
+    if priced {
+        "priced"
     } else {
-        "unverified (NEEDS-LIVE-PROBE)"
+        "unpriced (NEEDS-LIVE-PROBE)"
     }
 }
 
@@ -1048,29 +1085,7 @@ fast = "sonnet"
     /// unknown upstream that prices to the unverified catch-all (sentinel
     /// treatment).
     fn economics_config() -> Config {
-        let toml = r#"
-[providers.anthro]
-kind = "anthropic-api"
-api_key_ref = "literal:placeholder"
-
-[providers.compat]
-kind = "openai-compat"
-base_url = "https://api.example.invalid/v1"
-api_key_ref = "literal:placeholder"
-
-[models.opus]
-provider = "anthro"
-upstream = "claude-opus-4-8"
-
-[models.mystery_model]
-provider = "compat"
-upstream = "totally-unknown-model-xyz"
-
-[aliases]
-heavy = "opus"
-mystery = "mystery_model"
-"#;
-        toml::from_str(toml).expect("test config should deserialize")
+        toml::from_str(economics_config_toml()).expect("test config should deserialize")
     }
 
     #[test]
@@ -1093,7 +1108,13 @@ mystery = "mystery_model"
         };
 
         // Act: C is the report's total approx tokens; pass 200_000 directly.
-        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
+        let economics = build_economics(
+            200_000,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
 
         // Assert: the projected K* equals the cost gate's own computation for
         // the looked-up row + candidate (wiring matches the math).
@@ -1103,7 +1124,7 @@ mystery = "mystery_model"
         assert_eq!(economics.break_even_k, Some(expected));
         // Sanity-anchor on the doc's worked result (K* == 50 at 5m).
         assert!((economics.break_even_k.unwrap() - 50.0).abs() < 1e-4);
-        assert!(economics.verified);
+        assert!(economics.priced);
         assert_eq!(economics.provider_kind.as_deref(), Some("anthropic-api"));
     }
 
@@ -1121,7 +1142,13 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
+        let economics = build_economics(
+            200_000,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
 
         // Assert: a BREAK verdict carrying the cut token count + ledger token.
         let verdict = economics.verdict.expect("k was supplied");
@@ -1137,9 +1164,13 @@ mystery = "mystery_model"
     }
 
     #[test]
-    fn build_economics_unverified_target_reads_keep_insufficient_data() {
-        // Arrange: `mystery` resolves to openai-compat / unknown model, which
-        // prices to the unverified catch-all (sentinel treatment).
+    fn build_economics_provider_catch_all_now_prices_since_verified_removed() {
+        // Arrange: `mystery` resolves to openai-compat / an unknown model,
+        // which resolves to the provider's `"*"` catch-all -- a REAL
+        // baked-table match (a redesign dropped the per-row `verified` flag;
+        // every baked-matched row prices now, since every configured
+        // provider kind carries a catch-all). Only a `Disabled` overlay
+        // cell or a genuinely unresolved target suppresses economics now.
         let config = economics_config();
         let target = resolve_target(&config, "mystery");
         assert_eq!(
@@ -1155,24 +1186,25 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
-
-        // Assert: the cell is labeled unverified, no live break-even is shown,
-        // and the verdict reads KEEP (insufficient data) even at a huge k.
-        assert!(!economics.verified);
-        assert_eq!(
-            trust_label(economics.verified),
-            "unverified (NEEDS-LIVE-PROBE)"
+        let economics = build_economics(
+            200_000,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
         );
-        assert_eq!(economics.break_even_k, None);
+
+        // Assert: the catch-all cell prices; a huge hypothetical k BREAKs.
+        assert!(economics.priced);
+        assert_eq!(trust_label(economics.priced), "priced");
+        assert!(economics.break_even_k.is_some());
         let verdict = economics.verdict.expect("k was supplied");
         assert_eq!(
             verdict,
-            GateDecision::Keep {
-                reason: KeepReason::InsufficientData
+            GateDecision::Break {
+                delta_tokens: 50_000
             }
         );
-        assert!(describe_verdict(&verdict).contains("insufficient data"));
     }
 
     #[test]
@@ -1190,10 +1222,16 @@ mystery = "mystery_model"
         };
 
         // Act: C defaults from the report total; C_after defaults to C.
-        let economics = build_economics(80_000, target, &config.cache_pricing, &args);
+        let economics = build_economics(
+            80_000,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
 
         // Assert: sentinel treatment -- unverified, no K*, KEEP/insufficient.
-        assert!(!economics.verified);
+        assert!(!economics.priced);
         assert_eq!(economics.provider_kind, None);
         assert_eq!(economics.break_even_k, None);
         assert_eq!(economics.candidate.c, 80_000);
@@ -1248,6 +1286,7 @@ mystery = "mystery_model"
                 report.total.approx_tokens,
                 Some(("anthropic-api", "claude-opus-4-8".to_string())),
                 &BTreeMap::new(),
+                &CatalogOverlay::default(),
                 &projection,
             ));
         }
@@ -1287,7 +1326,13 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(1_500, target, &config.cache_pricing, &args);
+        let economics = build_economics(
+            1_500,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
 
         // Assert: finite K* (the math is well-defined) AND a hard KEEP below
         // the cacheable floor even at a wildly favorable k.
@@ -1333,7 +1378,13 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
+        let economics = build_economics(
+            200_000,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
 
         // Assert: K* equals the gate's computation for the 1h (wm=2.0) row.
         let row = lookup("anthropic-api", "claude-opus-4-8", Some("1h"));
@@ -1347,11 +1398,13 @@ mystery = "mystery_model"
     }
 
     #[test]
-    fn build_economics_honors_operator_override_flipping_the_verdict() {
-        // Arrange: the unverified `mystery` target (openai-compat catch-all)
-        // reads KEEP/insufficient-data with no override. An operator override on
-        // that selector supplies verified-trust multipliers, so the SAME inputs
-        // now yield a live break-even and a real BREAK verdict.
+    fn build_economics_operator_override_changes_the_verdict() {
+        // Arrange: `mystery` resolves to the openai-compat catch-all -- a
+        // REAL baked-table match (every configured provider kind
+        // carries a catch-all, so a resolvable target always prices now;
+        // trust is no longer a per-row flag). Baseline: the default
+        // catch-all economics (min_prefix = 4096) BREAK at a huge
+        // hypothetical k.
         let config = economics_config();
         let target = resolve_target(&config, "mystery");
         assert_eq!(
@@ -1366,47 +1419,54 @@ mystery = "mystery_model"
             steady_state: false,
         };
 
-        // Baseline: no override -> unverified -> KEEP/insufficient-data.
-        let baseline = build_economics(200_000, target.clone(), &config.cache_pricing, &args);
-        assert!(!baseline.verified);
-        assert_eq!(baseline.break_even_k, None);
+        let baseline = build_economics(
+            200_000,
+            target.clone(),
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
+        assert!(baseline.priced);
         assert_eq!(
             baseline.verdict,
-            Some(GateDecision::Keep {
-                reason: KeepReason::InsufficientData
+            Some(GateDecision::Break {
+                delta_tokens: 50_000
             })
         );
 
-        // Arrange the override: a small min-prefix and a sane wm/rm under the
-        // exact catch-all selector for this provider/model.
+        // Arrange the override: a min-prefix ABOVE the post-cut remainder
+        // (200_000 - 50_000 = 150_000) forces a hard `BelowMinPrefix` KEEP
+        // regardless of k.
         let mut overrides = std::collections::BTreeMap::new();
         overrides.insert(
             "openai-compat:*".to_string(),
             routectl_router::CachePricingOverride {
-                wm: Some(1.0),
-                rm: Some(0.10),
-                min_prefix_tokens: Some(1),
-                override_acknowledges_cost_risk: true,
+                min_prefix_tokens: Some(200_000),
                 ..Default::default()
             },
         );
 
         // Act
-        let overridden = build_economics(200_000, target, &overrides, &args);
-
-        // Assert: the override flipped the cell to verified -> a live break-even
-        // now exists and the verdict differs from the unverified baseline.
-        assert!(
-            overridden.verified,
-            "override should mark the cell verified"
+        let overridden = build_economics(
+            200_000,
+            target,
+            &overrides,
+            &CatalogOverlay::default(),
+            &args,
         );
-        assert!(
-            overridden.break_even_k.is_some(),
-            "a verified cell yields a live K*"
+
+        // Assert: the override changed the economics enough to flip BREAK
+        // into a hard KEEP, even at the same huge k.
+        assert!(overridden.priced);
+        assert_eq!(
+            overridden.verdict,
+            Some(GateDecision::Keep {
+                reason: KeepReason::BelowMinPrefix
+            })
         );
         assert_ne!(
             overridden.verdict, baseline.verdict,
-            "override should change the verdict vs the no-override baseline"
+            "override should change the verdict vs the baseline",
         );
     }
 
@@ -1425,7 +1485,13 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
+        let economics = build_economics(
+            200_000,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
 
         // Assert: a KEEP/NetNegative verdict whose rendered text conveys the
         // net-negative reason.
@@ -1507,8 +1573,14 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics =
-            build_steady_state_economics(&req, target, &config.cache_pricing, &args, &config.trim);
+        let economics = build_steady_state_economics(
+            &req,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+            &config.trim,
+        );
 
         // Assert: a real cut was proposed, a live K* exists, and the rendered
         // projection surfaces the would-trim line + the candidate.
@@ -1517,7 +1589,7 @@ mystery = "mystery_model"
             economics.candidate.d > 0,
             "real candidate should free tokens"
         );
-        assert!(economics.verified);
+        assert!(economics.priced);
         assert!(economics.break_even_k.is_some());
         let rendered = render_economics(&economics);
         assert!(
@@ -1549,8 +1621,14 @@ mystery = "mystery_model"
         };
 
         // Act
-        let economics =
-            build_steady_state_economics(&req, target, &config.cache_pricing, &args, &config.trim);
+        let economics = build_steady_state_economics(
+            &req,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+            &config.trim,
+        );
 
         // Assert: would-trim no, a zero candidate, and a KEEP verdict.
         assert_eq!(economics.steady_state_would_trim, Some(false));
@@ -1582,13 +1660,173 @@ mystery = "mystery_model"
             steady_state: false,
         };
 
-        let economics = build_economics(200_000, target, &config.cache_pricing, &args);
+        let economics = build_economics(
+            200_000,
+            target,
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
 
         assert_eq!(economics.steady_state_would_trim, None);
         let rendered = render_economics(&economics);
         assert!(
             !rendered.contains("steady-state trim:"),
             "hypothetical-d output must not show a steady-state line: {rendered}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Overlay end-to-end: a REAL on-disk config.toml + catalog_overlay.json,
+    // loaded through the SAME shared loader (`server::load_effective_config`)
+    // the CLI uses -- proving the overlay reaches `price_candidate` and
+    // changes the projection, not just that `merge` resolves correctly on
+    // hand-built inputs.
+    // -----------------------------------------------------------------
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: serialized against every other `#[serial]` env-mutating
+            // test in this crate via `serial_test::serial`.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                // SAFETY: see `set` above.
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    /// Write `economics_config()`'s TOML alongside a `catalog_overlay.json`
+    /// holding `overlay_json`, under a fresh isolated `XDG_CONFIG_HOME`, and
+    /// load both back through the real shared loader. Returns the guard
+    /// alongside the loaded config so the caller keeps the isolated env
+    /// var alive for the duration of the test.
+    fn load_economics_config_with_overlay_json(
+        overlay_json: &str,
+    ) -> (EnvGuard, Config, CatalogOverlay) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, economics_config_toml()).expect("write config.toml");
+
+        let overlay_dir = dir.path().join("routectl");
+        std::fs::create_dir_all(&overlay_dir).expect("create overlay dir");
+        std::fs::write(overlay_dir.join("catalog_overlay.json"), overlay_json)
+            .expect("write catalog_overlay.json");
+
+        let loaded = crate::server::load_effective_config(&cfg_path).expect("load must succeed");
+        (xdg, loaded.config, loaded.catalog_overlay)
+    }
+
+    /// The TOML text `economics_config()` parses. Extracted so the overlay
+    /// end-to-end tests can write the SAME config to a real file on disk.
+    fn economics_config_toml() -> &'static str {
+        r#"
+[providers.anthro]
+kind = "anthropic-api"
+api_key_ref = "literal:placeholder"
+
+[providers.compat]
+kind = "openai-compat"
+base_url = "https://api.example.invalid/v1"
+api_key_ref = "literal:placeholder"
+
+[models.opus]
+provider = "anthro"
+upstream = "claude-opus-4-8"
+
+[models.mystery_model]
+provider = "compat"
+upstream = "totally-unknown-model-xyz"
+
+[aliases]
+heavy = "opus"
+mystery = "mystery_model"
+"#
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn overlay_override_through_real_loader_changes_prompt_size_pricing() {
+        // Arrange: an overlay cell overriding `heavy`'s baked `wm`, written
+        // to a REAL `catalog_overlay.json` and loaded via
+        // `server::load_effective_config` -- the same loader main.rs uses.
+        let (_xdg, config, overlay) = load_economics_config_with_overlay_json(
+            r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+        );
+        let target = resolve_target(&config, "heavy");
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: None,
+            c_after: Some(200_000),
+            ttl_tier: "5m",
+            steady_state: false,
+        };
+
+        // Act: baseline (empty overlay) vs. the REAL loaded overlay, same
+        // target and candidate.
+        let baseline = build_economics(
+            200_000,
+            target.clone(),
+            &config.cache_pricing,
+            &CatalogOverlay::default(),
+            &args,
+        );
+        let overridden = build_economics(200_000, target, &config.cache_pricing, &overlay, &args);
+
+        // Assert: the overlay's wm actually moved the projected break-even
+        // K* -- this fails if `price_candidate` ever ignores the loaded
+        // overlay instead of threading it into `merge`.
+        assert!(baseline.priced);
+        assert!(overridden.priced);
+        assert_ne!(
+            baseline.break_even_k, overridden.break_even_k,
+            "an overlay cell overriding a baked field must change prompt-size's \
+             projected break-even K* through the real loader",
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn overlay_null_disable_through_real_loader_folds_to_insufficient_data() {
+        // Arrange: a null-disable cell for the same selector, via the real
+        // loader.
+        let (_xdg, config, overlay) = load_economics_config_with_overlay_json(
+            r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":null}}"#,
+        );
+        let target = resolve_target(&config, "heavy");
+        let args = ProjectionArgs {
+            hypothetical_d: Some(50_000),
+            hypothetical_k: Some(1_000_000.0),
+            c_after: Some(200_000),
+            ttl_tier: "5m",
+            steady_state: false,
+        };
+
+        // Act
+        let economics = build_economics(200_000, target, &config.cache_pricing, &overlay, &args);
+
+        // Assert: disabled folds to the same conservative sentinel as a
+        // catalog miss -- unpriced, no break-even K, KEEP/insufficient.
+        assert!(!economics.priced);
+        assert_eq!(economics.break_even_k, None);
+        assert_eq!(
+            economics.verdict,
+            Some(GateDecision::Keep {
+                reason: KeepReason::InsufficientData
+            })
         );
     }
 }

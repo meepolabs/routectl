@@ -1250,7 +1250,7 @@ mod tests {
     #[test]
     fn candidate_feeds_evaluate_matching_gate_math() {
         // Arrange: a verified anthropic row + a real plan.
-        use crate::cache_pricing::lookup;
+        use crate::catalog::lookup;
         use crate::cost_gate::{GateDecision, break_even_k, evaluate};
         let req = long_conversation(8, 12_000);
         let params = SteadyStateTrimParams::default();
@@ -1874,7 +1874,7 @@ mod tests {
     fn near_lossless_candidate_prices_through_unchanged_gate() {
         // Arrange: a big dedup pair (meaningful d) plus distinct bulky filler
         // so the total prefix c is large and c-d stays above min_prefix.
-        use crate::cache_pricing::lookup;
+        use crate::catalog::lookup;
         use crate::cost_gate::{GateDecision, break_even_k, evaluate};
 
         let dup = json!(payload_of_tokens(12_000));
