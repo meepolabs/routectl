@@ -44,6 +44,7 @@
 //! number (see [`OPENAI_COMPAT_SELECTORS`]).
 
 use std::collections::BTreeMap;
+#[cfg(feature = "gen-catalog")]
 use std::fmt::Write as _;
 
 use routectl_core::capability::{COMPUTER_USE, STRUCTURED_OUTPUT, WEB_SEARCH};
@@ -59,22 +60,27 @@ use crate::catalog_codegen_selectors::{
 /// changes materially (rows added/removed, a derivation rule changed) --
 /// NOT on a vendor-snapshot refresh that leaves the generated shape
 /// unchanged. Rendered into `catalog_baked.rs` as `CATALOG_VERSION: u32`.
+#[cfg(feature = "gen-catalog")]
 const CATALOG_VERSION: u32 = 1;
 
 /// Display-only date the vendored snapshots under `catalog_data/` were
 /// fetched, hand-maintained here (never the wall clock -- see the module
 /// doc's determinism note) and rendered into `catalog_baked.rs` as a
 /// separate `&str` const from `CATALOG_VERSION`.
+#[cfg(feature = "gen-catalog")]
 const CATALOG_SNAPSHOT_DATE: &str = "2026-07-11";
 
+#[cfg(feature = "gen-catalog")]
 const LITELLM_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/catalog_data/litellm_model_prices_and_context_window.json"
 ));
+#[cfg(feature = "gen-catalog")]
 const MODELS_DEV_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/catalog_data/models_dev.json"
 ));
+#[cfg(feature = "gen-catalog")]
 const ALLOWLIST_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/catalog_data/cross_check_allowlist.json"
@@ -83,17 +89,36 @@ const ALLOWLIST_JSON: &str = include_str!(concat!(
 /// One generated cell, pre-render. Mirrors [`CatalogRow`]'s fields plus
 /// the `(provider_kind, model_glob)` key; `capabilities` is a `Vec` (not
 /// the row's `BTreeMap`) purely to control rendered-source key order.
-struct GeneratedCell {
-    provider_kind: &'static str,
-    model_glob: &'static str,
-    wm: f32,
-    rm: f32,
-    ttl_seconds: u32,
-    min_prefix_tokens: u32,
-    auto_cacher: bool,
-    tier: Option<&'static str>,
-    max_context_tokens: Option<u32>,
-    capabilities: Vec<(&'static str, bool)>,
+///
+/// This type's derivation functions ([`derive_cells`] and everything it
+/// calls) stay compiled and reachable regardless of `gen-catalog`:
+/// `crate::catalog_import::build_import_candidate` is the runtime caller
+/// that drives them unconditionally, reading `wm` / `rm` / `ttl_seconds`
+/// / `min_prefix_tokens` / `max_context_tokens` / `capabilities` off
+/// every derived cell (via its own group-and-agree mapping). Only
+/// `provider_kind` / `model_glob` / `auto_cacher` / `tier` stay
+/// gen-catalog-gated -- the import path re-derives its own selector
+/// attribution and never reads those four fields off `GeneratedCell`
+/// itself, so they go unread outside the `gen-catalog` render pipeline
+/// (`render_cell`, `tier_rank`) and outside tests, and are marked
+/// `allow(dead_code)` individually rather than for the whole struct.
+/// `pub(crate)` so that runtime caller in another module of this crate
+/// can hold the cells [`derive_cells`] returns.
+pub(crate) struct GeneratedCell {
+    #[cfg_attr(not(feature = "gen-catalog"), allow(dead_code))]
+    pub(crate) provider_kind: &'static str,
+    #[cfg_attr(not(feature = "gen-catalog"), allow(dead_code))]
+    pub(crate) model_glob: &'static str,
+    pub(crate) wm: f32,
+    pub(crate) rm: f32,
+    pub(crate) ttl_seconds: u32,
+    pub(crate) min_prefix_tokens: u32,
+    #[cfg_attr(not(feature = "gen-catalog"), allow(dead_code))]
+    pub(crate) auto_cacher: bool,
+    #[cfg_attr(not(feature = "gen-catalog"), allow(dead_code))]
+    pub(crate) tier: Option<&'static str>,
+    pub(crate) max_context_tokens: Option<u32>,
+    pub(crate) capabilities: Vec<(&'static str, bool)>,
 }
 
 /// An allowlisted resolution for one cross-check mismatch, loaded from
@@ -102,9 +127,25 @@ struct AllowlistEntry {
     resolved: Value,
 }
 
-struct Allowlist(BTreeMap<String, AllowlistEntry>);
+/// `pub(crate)` so it can appear in [`derive_cells`]'s signature:
+/// `crate::catalog_import::build_import_candidate` needs one too (see
+/// [`Allowlist::empty`]), since the cross-check logic [`derive_cells`]
+/// shares with the codegen path takes an allowlist regardless of the
+/// source.
+pub(crate) struct Allowlist(BTreeMap<String, AllowlistEntry>);
 
 impl Allowlist {
+    /// An allowlist with no entries: every cross-check mismatch fails
+    /// closed. The import path (`crate::catalog_import`) always runs
+    /// `derive_cells` with this -- the checked-in
+    /// `cross_check_allowlist.json` resolves noise specific to the
+    /// vendored codegen snapshots, which does not apply to freshly
+    /// fetched sources.
+    pub(crate) const fn empty() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    #[cfg_attr(not(feature = "gen-catalog"), allow(dead_code))]
     fn parse(raw: &str) -> Result<Self, String> {
         let root: Value = serde_json::from_str(raw)
             .map_err(|e| format!("parse cross_check_allowlist.json: {e}"))?;
@@ -162,6 +203,7 @@ impl Allowlist {
 /// unformatted text if `rustfmt` is not on `PATH` -- the drift-guard test
 /// then fails with an actionable diff instead of silently passing on
 /// non-canonical output.
+#[cfg(feature = "gen-catalog")]
 #[must_use]
 pub fn render_catalog_baked_rs() -> String {
     let raw = try_render().unwrap_or_else(|e| panic!("gen_catalog: {e}"));
@@ -173,6 +215,7 @@ pub fn render_catalog_baked_rs() -> String {
 /// from the process's cwd to discover it). Returns `None` on any failure
 /// (rustfmt missing, non-UTF8 output, non-Rust input) so the caller can
 /// fall back rather than panic.
+#[cfg(feature = "gen-catalog")]
 fn rustfmt(src: &str) -> Option<String> {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
@@ -194,6 +237,7 @@ fn rustfmt(src: &str) -> Option<String> {
     String::from_utf8(output.stdout).ok()
 }
 
+#[cfg(feature = "gen-catalog")]
 fn try_render() -> Result<String, String> {
     let litellm: Value =
         serde_json::from_str(LITELLM_JSON).map_err(|e| format!("parse litellm snapshot: {e}"))?;
@@ -202,57 +246,8 @@ fn try_render() -> Result<String, String> {
     let allowlist = Allowlist::parse(ALLOWLIST_JSON)?;
 
     let mut cells = Vec::new();
-    for sel in ANTHROPIC_SELECTORS {
-        cells.extend(anthropic_like_cells(
-            "anthropic-api",
-            sel,
-            "anthropic",
-            &litellm,
-            &models_dev,
-            &allowlist,
-        )?);
-    }
-    for sel in BEDROCK_SELECTORS {
-        cells.extend(anthropic_like_cells(
-            "bedrock",
-            sel,
-            "amazon-bedrock",
-            &litellm,
-            &models_dev,
-            &allowlist,
-        )?);
-    }
-    for sel in OPENAI_RESPONSES_SELECTORS {
-        cells.push(auto_cacher_cell(
-            "openai-responses",
-            sel,
-            &litellm,
-            &models_dev,
-            &allowlist,
-        )?);
-    }
-    for sel in OPENAI_COMPAT_SELECTORS {
-        cells.push(auto_cacher_cell(
-            "openai-compat",
-            sel,
-            &litellm,
-            &models_dev,
-            &allowlist,
-        )?);
-    }
-    for catch_all in CATCH_ALL_ROWS {
-        cells.push(GeneratedCell {
-            provider_kind: catch_all.provider_kind,
-            model_glob: "*",
-            wm: catch_all.wm,
-            rm: catch_all.rm,
-            ttl_seconds: catch_all.ttl_seconds,
-            min_prefix_tokens: catch_all.min_prefix_tokens,
-            auto_cacher: catch_all.auto_cacher,
-            tier: None,
-            max_context_tokens: None,
-            capabilities: Vec::new(),
-        });
+    for (_, result) in derive_cells(&litellm, &models_dev, &allowlist) {
+        cells.extend(result?);
     }
 
     cells.sort_by(|a, b| {
@@ -266,9 +261,103 @@ fn try_render() -> Result<String, String> {
     Ok(render_source(&cells))
 }
 
+/// Derive every generated cell from the two source `Value`s, one entry per
+/// static selector (see `catalog_codegen_selectors`), each tagged with its
+/// selector key (`"provider_kind:model_glob"`, via
+/// `crate::catalog_state::selector_key`) so a caller can attribute an `Err`
+/// back to the selector that produced it without re-deriving the key from a
+/// `GeneratedCell` an error variant never carries. A tiered Anthropic-shaped
+/// selector's entry carries its 5m row and, when the source publishes a 1h
+/// price, its 1h row together (see [`anthropic_like_cells`]); every other
+/// selector's entry carries exactly one row. Unlike [`try_render`]'s prior
+/// inline loop, this does not short-circuit on the first error: every
+/// selector is derived so a caller can partition ok/err per selector (a
+/// healthy source disagreement on one family should not hide the outcome of
+/// every other family). `allowlist` is shared across every selector,
+/// matching the codegen path's single vendored `cross_check_allowlist.json`;
+/// a caller deriving from freshly fetched sources instead of the vendored
+/// snapshots passes an empty one.
+///
+/// Compiled in regardless of `gen-catalog`: [`try_render`] calls this on
+/// the include_str snapshots (feature-gated), and
+/// `crate::catalog_import::build_import_candidate` (never feature-gated)
+/// calls it on freshly fetched sources -- the actual runtime caller, not
+/// a hypothetical future one.
+pub(crate) fn derive_cells(
+    litellm: &Value,
+    models_dev: &Value,
+    allowlist: &Allowlist,
+) -> Vec<(String, Result<Vec<GeneratedCell>, String>)> {
+    let mut out = Vec::new();
+    for sel in ANTHROPIC_SELECTORS {
+        let key = crate::catalog_state::selector_key("anthropic-api", sel.model_glob);
+        out.push((
+            key,
+            anthropic_like_cells(
+                "anthropic-api",
+                sel,
+                "anthropic",
+                litellm,
+                models_dev,
+                allowlist,
+            ),
+        ));
+    }
+    for sel in BEDROCK_SELECTORS {
+        let key = crate::catalog_state::selector_key("bedrock", sel.model_glob);
+        out.push((
+            key,
+            anthropic_like_cells(
+                "bedrock",
+                sel,
+                "amazon-bedrock",
+                litellm,
+                models_dev,
+                allowlist,
+            ),
+        ));
+    }
+    for sel in OPENAI_RESPONSES_SELECTORS {
+        let key = crate::catalog_state::selector_key("openai-responses", sel.model_glob);
+        out.push((
+            key,
+            auto_cacher_cell("openai-responses", sel, litellm, models_dev, allowlist)
+                .map(|cell| vec![cell]),
+        ));
+    }
+    for sel in OPENAI_COMPAT_SELECTORS {
+        let key = crate::catalog_state::selector_key("openai-compat", sel.model_glob);
+        out.push((
+            key,
+            auto_cacher_cell("openai-compat", sel, litellm, models_dev, allowlist)
+                .map(|cell| vec![cell]),
+        ));
+    }
+    for catch_all in CATCH_ALL_ROWS {
+        let key = crate::catalog_state::selector_key(catch_all.provider_kind, "*");
+        out.push((
+            key,
+            Ok(vec![GeneratedCell {
+                provider_kind: catch_all.provider_kind,
+                model_glob: "*",
+                wm: catch_all.wm,
+                rm: catch_all.rm,
+                ttl_seconds: catch_all.ttl_seconds,
+                min_prefix_tokens: catch_all.min_prefix_tokens,
+                auto_cacher: catch_all.auto_cacher,
+                tier: None,
+                max_context_tokens: None,
+                capabilities: Vec::new(),
+            }]),
+        ));
+    }
+    out
+}
+
 /// Sort key for a cell's tier: groups the tier-agnostic / catch-all rows
 /// first, then 5-minute, then 1-hour, for a stable and readable order
 /// within an equal `(provider_kind, model_glob)` pair.
+#[cfg(feature = "gen-catalog")]
 fn tier_rank(tier: Option<&str>) -> u8 {
     match tier {
         None => 0,
@@ -597,6 +686,7 @@ fn resolve_bool(
     }
 }
 
+#[cfg(feature = "gen-catalog")]
 fn render_source(cells: &[GeneratedCell]) -> String {
     let mut out = String::new();
     out.push_str(
@@ -643,6 +733,7 @@ fn render_source(cells: &[GeneratedCell]) -> String {
     out
 }
 
+#[cfg(feature = "gen-catalog")]
 fn render_cell(out: &mut String, cell: &GeneratedCell) {
     let tier = match cell.tier {
         None => "None".to_string(),
@@ -697,6 +788,7 @@ fn render_cell(out: &mut String, cell: &GeneratedCell) {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "gen-catalog")]
     #[test]
     fn regenerating_matches_the_committed_catalog_baked_file() {
         let fresh = render_catalog_baked_rs();
@@ -708,6 +800,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gen-catalog")]
     #[test]
     fn regenerating_twice_is_byte_identical() {
         assert_eq!(render_catalog_baked_rs(), render_catalog_baked_rs());
@@ -733,5 +826,74 @@ mod tests {
         let err = resolve_f64("k", "f", Some(1.0), Some(2.0), &allowlist)
             .expect_err("must fail without an allowlist entry");
         assert!(err.contains("cross-check mismatch"), "msg: {err}");
+    }
+
+    /// Drives `derive_cells` on small in-memory `Value`s keyed to one real
+    /// tiered selector (`ANTHROPIC_SELECTORS[0]`) and one real auto-cacher
+    /// selector (`OPENAI_RESPONSES_SELECTORS[0]`), leaving every other
+    /// static selector's source data absent (their `Err`s are expected and
+    /// ignored here). Every source field both selectors need agrees
+    /// exactly between the two `Value`s so no allowlist entry is needed.
+    #[test]
+    fn derive_cells_splits_a_tiered_family_and_derives_an_auto_cacher_family() {
+        let tiered = &ANTHROPIC_SELECTORS[0];
+        let auto_cacher = &OPENAI_RESPONSES_SELECTORS[0];
+
+        let litellm = serde_json::json!({
+            tiered.litellm_key: {
+                "input_cost_per_token": 1.0e-5,
+                "cache_read_input_token_cost": 1.0e-6,
+                "cache_creation_input_token_cost": 1.25e-5,
+                "cache_creation_input_token_cost_above_1hr": 2.0e-5,
+                "max_input_tokens": 200_000.0,
+            },
+            auto_cacher.litellm_key: {
+                "input_cost_per_token": 2.0e-6,
+                "cache_read_input_token_cost": 2.0e-7,
+                "max_input_tokens": 400_000.0,
+            },
+        });
+        let models_dev = serde_json::json!({
+            "anthropic": {
+                "models": {
+                    tiered.models_dev_model: {
+                        "cost": {"input": 1.0e-5, "cache_read": 1.0e-6, "cache_write": 1.25e-5},
+                        "limit": {"context": 200_000},
+                    },
+                },
+            },
+            auto_cacher.models_dev_provider: {
+                "models": {
+                    auto_cacher.models_dev_model: {
+                        "cost": {"input": 2.0e-6, "cache_read": 2.0e-7},
+                        "limit": {"context": 400_000},
+                    },
+                },
+            },
+        });
+        let allowlist = Allowlist::parse("{}").expect("parse");
+
+        let results = derive_cells(&litellm, &models_dev, &allowlist);
+
+        let tiered_cells = results
+            .iter()
+            .filter_map(|(_, r)| r.as_ref().ok())
+            .find(|cells| cells[0].model_glob == tiered.model_glob)
+            .expect("the tiered selector derives");
+        assert_eq!(tiered_cells.len(), 2, "5m/1h split");
+        assert_eq!(tiered_cells[0].tier, Some("5m"));
+        assert_eq!(tiered_cells[0].wm, 1.25);
+        assert_eq!(tiered_cells[1].tier, Some("1h"));
+        assert_eq!(tiered_cells[1].wm, 2.0);
+        assert_eq!(tiered_cells[0].rm, tiered_cells[1].rm);
+
+        let auto_cacher_cells = results
+            .iter()
+            .filter_map(|(_, r)| r.as_ref().ok())
+            .find(|cells| cells[0].provider_kind == "openai-responses")
+            .expect("the auto-cacher selector derives");
+        assert_eq!(auto_cacher_cells.len(), 1, "single tier-agnostic row");
+        assert!(auto_cacher_cells[0].tier.is_none());
+        assert_eq!(auto_cacher_cells[0].max_context_tokens, Some(400_000));
     }
 }

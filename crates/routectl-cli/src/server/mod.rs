@@ -1002,6 +1002,17 @@ fn spawn_reload_pipeline(
     let mut targets: Vec<WatchTarget> = Vec::new();
     if let Some(path) = config_path.as_ref() {
         targets.push(WatchTarget::Config(path.clone()));
+        // Registered alongside (not independently of) the config target:
+        // `handle_config_reload` -- the handler both a config-file and an
+        // overlay-file event route into -- requires `config_path` to do
+        // anything at all (it re-reads config.toml from that path AND the
+        // overlay from `overlay_default_path()` in the same call). Without
+        // a registered config path there is no reload to trigger, so
+        // watching the overlay would only add ambient-path fs-watch
+        // overhead with no effect.
+        targets.push(WatchTarget::CatalogOverlay(
+            routectl_router::overlay_default_path(),
+        ));
     }
     if let Some(store) = oauth_store.as_ref() {
         targets.push(WatchTarget::Credentials(store.path().to_path_buf()));
@@ -1084,6 +1095,28 @@ async fn run_sighup_listener(tx: mpsc::Sender<ReloadRequest>, mut shutdown: watc
     }
 }
 
+/// Which watched file's change triggered a call into
+/// `handle_config_reload`. Both `ReloadRequest::Config` and
+/// `ReloadRequest::CatalogOverlay` route into that SAME function --
+/// `load_effective_config` always re-reads config.toml and the overlay
+/// together, so there is no narrower per-file reload path to run. This
+/// only labels the reload's success log line so an operator can tell
+/// which watched file fired a given reload.
+#[derive(Debug, Clone, Copy)]
+enum ReloadTrigger {
+    ConfigFile,
+    CatalogOverlay,
+}
+
+impl ReloadTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfigFile => "config change",
+            Self::CatalogOverlay => "overlay change",
+        }
+    }
+}
+
 /// Long-lived dependencies the reload coordinator carries across every
 /// `ReloadRequest`. Bundling them keeps the coordinator and its helpers
 /// under the argument-count ceiling; the `current_config` it diffs
@@ -1101,11 +1134,11 @@ struct ReloadContext {
 /// credentials reload do not interleave.
 ///
 /// `current_overlay` is a loop variable alongside `current_config`: a
-/// config-path reload re-reads BOTH from disk (the shared loader),
-/// updating both; a credentials-only reload rebuilds off the CURRENT
-/// (unchanged) overlay -- no dedicated overlay watch yet (f1; a config
-/// touch or restart is how an overlay edit lands), so a seat-set-change
-/// rebuild must not silently drop the operator's overlay back to empty.
+/// config-path OR catalog-overlay reload re-reads BOTH from disk (the
+/// shared loader) via `handle_config_reload`, updating both; a
+/// credentials-only reload rebuilds off the CURRENT (unchanged) overlay,
+/// so a seat-set-change rebuild must not silently drop the operator's
+/// overlay back to empty.
 async fn run_reload_coordinator(
     mut current_config: Arc<Config>,
     mut current_overlay: Arc<CatalogOverlay>,
@@ -1136,6 +1169,25 @@ async fn run_reload_coordinator(
                             ctx.secrets.clone(),
                             &ctx.router_swap,
                             &ctx.usage,
+                            ReloadTrigger::ConfigFile,
+                        ).await {
+                            current_config = new_config;
+                            current_overlay = new_overlay;
+                        }
+                    }
+                    ReloadRequest::CatalogOverlay => {
+                        // Same loader as `ReloadRequest::Config`:
+                        // `handle_config_reload` re-reads config.toml AND
+                        // the overlay together on every call regardless
+                        // of which watched file changed. Only the
+                        // tracing label differs.
+                        if let Some((new_config, new_overlay)) = handle_config_reload(
+                            ctx.config_path.as_deref(),
+                            &current_config,
+                            ctx.secrets.clone(),
+                            &ctx.router_swap,
+                            &ctx.usage,
+                            ReloadTrigger::CatalogOverlay,
                         ).await {
                             current_config = new_config;
                             current_overlay = new_overlay;
@@ -1259,18 +1311,24 @@ async fn rebuild_router_for_seat_change(
 /// new Router into `router_swap` atomically and returns the new
 /// `Arc<Config>` so the coordinator can diff future reloads against
 /// the live config rather than the original-startup config.
-/// Handle a `ReloadRequest::Config`: re-read config.toml + the catalog
-/// overlay via the shared loader, rebuild the Router against BOTH, and
-/// swap it in. Returns the new `(config, overlay)` pair on success so the
-/// coordinator's loop variables advance together -- a partial update (new
-/// config, stale overlay or vice versa) would desync the pair the next
-/// reload diffs against.
+/// Handle a `ReloadRequest::Config` or `ReloadRequest::CatalogOverlay`:
+/// re-read config.toml + the catalog overlay via the shared loader,
+/// rebuild the Router against BOTH, and swap it in. Both request
+/// variants call this SAME function -- `load_effective_config` always
+/// re-reads both files together, so there is no narrower "overlay-only"
+/// reload to perform; `trigger` only labels which watched file's change
+/// fired this call, for the success log line. Returns the new
+/// `(config, overlay)` pair on success so the coordinator's loop
+/// variables advance together -- a partial update (new config, stale
+/// overlay or vice versa) would desync the pair the next reload diffs
+/// against.
 async fn handle_config_reload(
     config_path: Option<&Path>,
     current_config: &Arc<Config>,
     secrets: Arc<dyn SecretStore>,
     router_swap: &Arc<ArcSwap<Router>>,
     usage: &UsageHandle,
+    trigger: ReloadTrigger,
 ) -> Option<(Arc<Config>, Arc<CatalogOverlay>)> {
     let Some(path) = config_path else {
         tracing::debug!("config reload requested but no config path was registered; ignoring",);
@@ -1335,6 +1393,7 @@ async fn handle_config_reload(
 
     tracing::info!(
         path = %path.display(),
+        trigger = trigger.as_str(),
         "config reloaded; router rebuilt and swapped",
     );
 
@@ -1360,8 +1419,10 @@ async fn handle_config_reload(
 /// (`read_parse_validate_config`) -- PRE-EXISTING split-brain this closed:
 /// only the cold-start path used to merge the sidecar, so a config reload
 /// silently dropped sidecar / `[cache_pricing]` data. A reload now re-reads
-/// the overlay from disk too (no dedicated overlay watch yet -- restart or
-/// a config-file touch picks up overlay edits; a dedicated watch target is a later increment).
+/// the overlay from disk too -- both a config-file touch and a dedicated
+/// overlay-file write (`WatchTarget::CatalogOverlay` in `file_watch.rs`)
+/// trigger this same re-read via `ReloadRequest::Config` /
+/// `ReloadRequest::CatalogOverlay`.
 /// A `version` newer than this build supports fails closed here too (a
 /// cold-start error propagates; a reload rejects and keeps the prior
 /// router live, same posture as every other load failure below).
@@ -1403,7 +1464,7 @@ pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
     // NOT merged here (it already landed in the overlay during
     // migration -- merging it again would double-apply it).
     if config.version < routectl_router::CURRENT_CONFIG_VERSION {
-        crate::commands::pricing::load_and_merge_verifications(&mut config);
+        crate::commands::catalog::load_and_merge_verifications(&mut config);
         routectl_router::migrate_v1_to_v2(&config.cache_pricing, path, &overlay_path)
             .map_err(|e| format!("config migration error: {e}"))?;
         config.version = routectl_router::CURRENT_CONFIG_VERSION;
@@ -2464,10 +2525,16 @@ default = "claude"
         let before_router = swap.load_full();
 
         // Act: reload the on-disk config (enabled=false).
-        let (new_config, _new_overlay) =
-            handle_config_reload(Some(&cfg_path), &start_config, secrets, &swap, &usage)
-                .await
-                .expect("config reload must apply");
+        let (new_config, _new_overlay) = handle_config_reload(
+            Some(&cfg_path),
+            &start_config,
+            secrets,
+            &swap,
+            &usage,
+            ReloadTrigger::ConfigFile,
+        )
+        .await
+        .expect("config reload must apply");
 
         // Assert: gate flipped live (same handle), router swapped.
         assert!(!new_config.usage.enabled);
@@ -2526,6 +2593,7 @@ default = "claude"
             secrets.clone(),
             &swap,
             &usage,
+            ReloadTrigger::ConfigFile,
         )
         .await
         .expect("reload with a fresh overlay file must apply");
@@ -2542,8 +2610,15 @@ default = "claude"
 
         // Act 2: corrupt the overlay file, reload again.
         std::fs::write(overlay_dir.join("catalog_overlay.json"), b"not json {{{").unwrap();
-        let result =
-            handle_config_reload(Some(&cfg_path), &new_config, secrets, &swap, &usage).await;
+        let result = handle_config_reload(
+            Some(&cfg_path),
+            &new_config,
+            secrets,
+            &swap,
+            &usage,
+            ReloadTrigger::ConfigFile,
+        )
+        .await;
 
         // Assert: a corrupt overlay fails the reload closed -- no
         // config/overlay update, and the router installed by the LAST GOOD
@@ -2552,6 +2627,186 @@ default = "claude"
         assert!(
             Arc::ptr_eq(&swap.load_full(), &router_after_good_reload),
             "a failed reload must keep the previously-installed router",
+        );
+    }
+
+    /// `ReloadRequest::Config` and `ReloadRequest::CatalogOverlay` both
+    /// call `handle_config_reload` -- the SAME loader re-reads config +
+    /// overlay together regardless of which file changed -- but each
+    /// must label its own success log with the trigger that fired it, so
+    /// an operator can tell an overlay-driven reload from a config-file
+    /// one. Drives `handle_config_reload` directly (no `tokio::spawn`)
+    /// under `with_capture` so the thread-local capture subscriber sees
+    /// the event.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, "[server]\nhost = \"127.0.0.1\"\nport = 0\n").unwrap();
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let mut config = Config::default();
+        let _usage_dir = isolate_usage_db(&mut config);
+        let config = Arc::new(config);
+        let (usage, _writer) = build_usage_writer(&config);
+        let router = build_router_from_config_with_overlay(
+            config.clone(),
+            &CatalogOverlay::default(),
+            secrets.clone(),
+        )
+        .await
+        .unwrap();
+        let swap = Arc::new(ArcSwap::from_pointee(router));
+
+        // Act: the SAME function, once per trigger. `Box::pin` keeps
+        // each call's future off this test's own stack frame --
+        // `handle_config_reload`'s future is large enough to trip
+        // clippy's large-futures lint otherwise.
+        let (config_result, config_events) =
+            routectl_testkit::with_capture(Box::pin(handle_config_reload(
+                Some(&cfg_path),
+                &config,
+                secrets.clone(),
+                &swap,
+                &usage,
+                ReloadTrigger::ConfigFile,
+            )))
+            .await;
+        config_result.expect("config-triggered reload must apply");
+
+        let (overlay_result, overlay_events) =
+            routectl_testkit::with_capture(Box::pin(handle_config_reload(
+                Some(&cfg_path),
+                &config,
+                secrets,
+                &swap,
+                &usage,
+                ReloadTrigger::CatalogOverlay,
+            )))
+            .await;
+        overlay_result.expect("overlay-triggered reload must apply");
+
+        // Assert: each call's success log names its OWN trigger.
+        let success_message = "config reloaded; router rebuilt and swapped";
+        let config_trigger = config_events
+            .iter()
+            .find(|e| e.message == success_message)
+            .and_then(|e| e.field("trigger"))
+            .expect("config-triggered reload must log a trigger field");
+        assert_eq!(config_trigger, "config change");
+
+        let overlay_trigger = overlay_events
+            .iter()
+            .find(|e| e.message == success_message)
+            .and_then(|e| e.field("trigger"))
+            .expect("overlay-triggered reload must log a trigger field");
+        assert_eq!(overlay_trigger, "overlay change");
+    }
+
+    /// Full-stack proof that `spawn_reload_pipeline` -- the actual
+    /// production wiring, not a hand-rolled substitute -- watches the
+    /// catalog overlay path and routes its writes through the SAME
+    /// reload coordinator as config: a real overlay write (through the
+    /// real `notify` watcher) swaps the router, and a corrupt overlay
+    /// write keeps the PRIOR router live. `#[serial]`: the path this
+    /// wiring watches is the ambient `routectl_router::overlay_default_path()`
+    /// (XDG_CONFIG_HOME-derived).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn spawn_reload_pipeline_watches_overlay_and_swaps_router_on_write() {
+        // Arrange: config.toml and the (not-yet-written) overlay share
+        // `routectl_config_dir()`, mirroring the real deployment layout
+        // -- the watcher needs the overlay's PARENT directory to exist at
+        // watch-install time even though the overlay FILE does not.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let config_dir = dir.path().join("routectl");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let cfg_path = config_dir.join("config.toml");
+        std::fs::write(&cfg_path, "[server]\nhost = \"127.0.0.1\"\nport = 0\n").unwrap();
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let mut initial_config = Config::default();
+        let _usage_dir = isolate_usage_db(&mut initial_config);
+        let initial_config = Arc::new(initial_config);
+        let (usage, _writer) = build_usage_writer(&initial_config);
+        let router = build_router_from_config_with_overlay(
+            initial_config.clone(),
+            &CatalogOverlay::default(),
+            secrets.clone(),
+        )
+        .await
+        .unwrap();
+        let swap = Arc::new(ArcSwap::from_pointee(router));
+        let before_router = swap.load_full();
+
+        let (_shutdown_tx, shutdown_rx) = watch::channel(());
+        let _handles = spawn_reload_pipeline(
+            initial_config,
+            Arc::new(CatalogOverlay::default()),
+            Some(cfg_path),
+            None,
+            secrets,
+            swap.clone(),
+            usage,
+            shutdown_rx,
+        );
+
+        // Settle the watch install before writing.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Act 1: a real overlay write, via the same tempfile + rename
+        // pattern `catalog_overlay::save` uses.
+        let overlay_path = routectl_router::overlay_default_path();
+        std::fs::create_dir_all(overlay_path.parent().unwrap()).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix(".catalog_overlay.tmp.")
+            .suffix(".json")
+            .tempfile_in(overlay_path.parent().unwrap())
+            .unwrap();
+        std::fs::write(
+            tmp.path(),
+            br#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+        )
+        .unwrap();
+        tmp.persist(&overlay_path).unwrap();
+
+        // Assert: the router swaps within the debounce + reload window.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut router_after_write = swap.load_full();
+        while tokio::time::Instant::now() < deadline {
+            router_after_write = swap.load_full();
+            if !Arc::ptr_eq(&before_router, &router_after_write) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            !Arc::ptr_eq(&before_router, &router_after_write),
+            "an overlay write through the real watcher must trigger a reload and swap the router",
+        );
+
+        // Act 2: a corrupt overlay write, same rename pattern.
+        let tmp2 = tempfile::Builder::new()
+            .prefix(".catalog_overlay.tmp.")
+            .suffix(".json")
+            .tempfile_in(overlay_path.parent().unwrap())
+            .unwrap();
+        std::fs::write(tmp2.path(), b"not json {{{").unwrap();
+        tmp2.persist(&overlay_path).unwrap();
+
+        // No positive signal to poll for here (the swap must NOT
+        // happen); a fixed settle window mirrors the negative-outcome
+        // checks in the integration suite (`partial_write_keeps_old_config`).
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+        assert!(
+            Arc::ptr_eq(&swap.load_full(), &router_after_write),
+            "a corrupt overlay write must keep the previously-installed router live",
         );
     }
 
@@ -2987,8 +3242,15 @@ default = "claude"
             "version = 99\n[server]\nhost = \"127.0.0.1\"\nport = 0\n",
         )
         .unwrap();
-        let result =
-            handle_config_reload(Some(&cfg_path), &initial_config, secrets, &swap, &usage).await;
+        let result = handle_config_reload(
+            Some(&cfg_path),
+            &initial_config,
+            secrets,
+            &swap,
+            &usage,
+            ReloadTrigger::ConfigFile,
+        )
+        .await;
 
         // Assert: the reload rejects and the prior router stays installed.
         assert!(result.is_none(), "a too-new version must reject the reload");

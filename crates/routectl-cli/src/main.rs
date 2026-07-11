@@ -12,7 +12,8 @@
 //!            credentials store.
 //!   test     One-shot completion against an alias or model nickname.
 //!   config   Validate or print the resolved config.
-//!   pricing  Inspect or stamp the cache-economics pricing manifest.
+//!   catalog  Inspect, verify, import, or edit the cache-economics catalog
+//!            (hidden alias: `pricing`).
 //!   rc       Print MITM-proxy env vars, or force a CA rotation.
 
 use std::path::PathBuf;
@@ -205,10 +206,12 @@ enum Cmd {
         #[arg(long = "k-calibration")]
         k_calibration: bool,
     },
-    /// Inspect or stamp the cache-economics pricing manifest.
-    Pricing {
+    /// Inspect, verify, import, or edit the cache-economics catalog.
+    /// Hidden alias `pricing` kept for muscle memory (dropped at 1.0).
+    #[command(alias = "pricing")]
+    Catalog {
         #[command(subcommand)]
-        action: PricingCmd,
+        action: CatalogCmd,
     },
     /// Print MITM front-proxy env vars, or force a CA rotation.
     /// Requires a `[mitm]` config block.
@@ -229,20 +232,78 @@ enum ConfigCmd {
 }
 
 #[derive(Debug, Subcommand)]
-enum PricingCmd {
+enum CatalogCmd {
     /// List the effective catalog (baked table merged with the on-disk
     /// overlay): every selector renders PRESENT (with provenance and a
     /// staleness marker) or DISABLED (overlay `null`). A catalog-only
     /// listing never enumerates a selector missing from BOTH layers, so
     /// MISSING never appears here -- it is a real merge outcome the two-
-    /// layer merge still distinguishes at request-lookup time.
+    /// layer merge still distinguishes at request-lookup time. Headed by
+    /// an overlay summary line (revision + counts by source + disabled
+    /// count).
     List,
     /// Stamp an EXISTING overlay cell's `verified_at` to today (its
     /// `source` becomes `user`). Errors if the selector has no overlay
-    /// cell yet (baked-only, or unknown) -- creating one is a later
-    /// import/set verb. `selector` is `"provider_kind:model_glob"` (e.g.
+    /// cell yet (baked-only, or unknown) -- creating one is a `set`
+    /// concern. `selector` is `"provider_kind:model_glob"` (e.g.
     /// `openai-compat:grok-*`).
     Verify { selector: String },
+    /// Opt-in refresh of the catalog overlay from the litellm + models.dev
+    /// sources: fetches both (or reads both from disk via the `--*-file`
+    /// flags), builds one candidate, shows an impact-labeled diff, and --
+    /// on confirmation -- applies it ALL-OR-NOTHING. Never runs at
+    /// startup; a fetch failure on either source aborts the whole apply
+    /// with the overlay left byte-identical.
+    Import {
+        /// Read the litellm source from this file instead of the network.
+        /// Must be given together with `--models-dev-file`.
+        #[arg(long)]
+        litellm_file: Option<PathBuf>,
+        /// Read the models.dev source from this file instead of the
+        /// network. Must be given together with `--litellm-file`.
+        #[arg(long)]
+        models_dev_file: Option<PathBuf>,
+        /// Skip the y/N confirmation prompt (scripting).
+        #[arg(long)]
+        yes: bool,
+        /// Bypass ONLY the shrink guard's per-source/per-family floors.
+        /// Never bypasses a fetch failure, a cross-check skip, a
+        /// `source: user` conflict, or a revision conflict.
+        #[arg(long)]
+        allow_shrink: bool,
+    },
+    /// Write a `source: user` cell for a KNOWN selector (an existing
+    /// baked row, or an existing overlay cell of either provenance),
+    /// field by field. `selector` is `"provider_kind:model_glob"`.
+    /// Rejects a selector unknown to the catalog -- creating a brand-new
+    /// one is not supported by this verb.
+    ///
+    /// Each `field` is a `field=value` pair; supported fields are `wm`
+    /// (f32), `rm` (f32), `ttl_seconds` (u32), `min_prefix_tokens` (u32),
+    /// `max_context_tokens` (u32), and a capability flag via
+    /// `cap:<name>=true|false` (e.g. `cap:web_search=true`).
+    /// `auto_cacher` / `has_storage_rent` / `storage_rent` /
+    /// `verified_at` are hard-rejected: the first three live only on the
+    /// baked catalog table, and `verified_at` is always stamped
+    /// automatically to today (UTC).
+    ///
+    /// A `wm` below the conservative sentinel (2.0) needs
+    /// `--acknowledge-cost-risk`; `rm` must be `> 0`; `max_context_tokens`
+    /// must not be `0`.
+    Set {
+        selector: String,
+        #[arg(required = true, num_args = 1..)]
+        fields: Vec<String>,
+        /// Required to set a `wm` below the conservative sentinel (2.0):
+        /// a too-cheap write multiplier can make a cache break look
+        /// falsely profitable.
+        #[arg(long = "acknowledge-cost-risk")]
+        acknowledge_cost_risk: bool,
+    },
+    /// Write a JSON-null overlay cell for a KNOWN selector, disabling it
+    /// regardless of what it previously carried. Rejects a selector
+    /// unknown to the catalog. Re-enabling is a fresh `set`.
+    Disable { selector: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -424,16 +485,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Cmd::Pricing { action } => match action {
-            PricingCmd::List => {
+        Cmd::Catalog { action } => match action {
+            CatalogCmd::List => {
                 let loaded = load_config_with_overlay(cli.config.as_deref())?;
-                if let Err(e) = commands::pricing::list(&loaded.catalog_overlay) {
+                if let Err(e) = commands::catalog::list(&loaded.catalog_overlay) {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
             }
-            PricingCmd::Verify { selector } => {
-                if let Err(e) = commands::pricing::verify(&selector) {
+            CatalogCmd::Verify { selector } => {
+                if let Err(e) = commands::catalog::verify(&selector) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            CatalogCmd::Import {
+                litellm_file,
+                models_dev_file,
+                yes,
+                allow_shrink,
+            } => {
+                let args = commands::catalog_import::ImportArgs {
+                    litellm_file,
+                    models_dev_file,
+                    yes,
+                    allow_shrink,
+                };
+                if let Err(e) = commands::catalog_import::run(&args).await {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            CatalogCmd::Set {
+                selector,
+                fields,
+                acknowledge_cost_risk,
+            } => {
+                if let Err(e) = commands::catalog::set(&selector, &fields, acknowledge_cost_risk) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            CatalogCmd::Disable { selector } => {
+                if let Err(e) = commands::catalog::disable(&selector) {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
@@ -476,7 +570,7 @@ fn init_tracing() {
 ///
 /// Discards the loaded catalog overlay: the subcommands that call this
 /// (`test`, `config check/show`, `usage`, `rc`) never consult it.
-/// `Cmd::Serve`, `Cmd::PromptSize`, and `Cmd::Pricing`'s `list` verb -- the
+/// `Cmd::Serve`, `Cmd::PromptSize`, and `Cmd::Catalog`'s `list` verb -- the
 /// callers that DO need the overlay (list renders the two-layer merge) --
 /// use [`load_config_with_overlay`] instead.
 fn load_config(
@@ -512,4 +606,31 @@ fn resolve_config_path(explicit: Option<&std::path::Path>) -> PathBuf {
                 .join(".config")
         });
     base.join("routectl").join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `pricing` is a HIDDEN clap alias for the renamed `catalog` family
+    /// (muscle memory, dropped at 1.0): `routectl pricing list` must still
+    /// parse to the SAME variant as `routectl catalog list`.
+    #[test]
+    fn pricing_alias_still_resolves_to_the_catalog_family() {
+        let cli = Cli::parse_from(["routectl", "pricing", "list"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Catalog {
+                action: CatalogCmd::List
+            }
+        ));
+
+        let cli = Cli::parse_from(["routectl", "catalog", "list"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Catalog {
+                action: CatalogCmd::List
+            }
+        ));
+    }
 }

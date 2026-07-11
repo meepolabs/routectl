@@ -5,6 +5,11 @@
 //! `context_ambiguous`). The derivation logic that turns these into
 //! [`crate::catalog_codegen::GeneratedCell`]s lives in the parent module;
 //! this module is data only.
+//!
+//! Read unconditionally by `crate::catalog_codegen::derive_cells`: the
+//! `gen-catalog`-gated render pipeline calls it on the vendored snapshots,
+//! and `crate::catalog_import::build_import_candidate` (never
+//! feature-gated) calls it on freshly fetched sources.
 
 use crate::catalog::SENTINEL_MIN_PREFIX_TOKENS;
 

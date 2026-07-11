@@ -9,6 +9,8 @@ pub(crate) mod catalog_baked;
 #[doc(hidden)]
 pub mod catalog_codegen;
 pub(crate) mod catalog_codegen_selectors;
+pub mod catalog_import;
+pub(crate) mod catalog_import_state;
 pub mod catalog_overlay;
 pub(crate) mod catalog_state;
 pub mod config;
@@ -30,13 +32,24 @@ pub use catalog::{
     lookup_with_overrides, merge, stale_after_days, validate_overrides,
 };
 pub use catalog_baked::{CATALOG_SNAPSHOT_DATE, CATALOG_VERSION};
+pub use catalog_import::{
+    CandidateOrigin, DiffRow, ExistingCell, ImportCandidate, ImportDiff, ShrinkCounts,
+    ShrinkVerdict, ShrunkFamily, ShrunkSource, SkippedSelector, baked_row_map, baked_shrink_counts,
+    build_import_candidate, candidate_shrink_counts, diff_overlay, shrink_guard,
+};
+pub use catalog_import_state::{
+    CatalogImportState, CatalogImportStateError, default_path as catalog_import_state_default_path,
+    load_baseline as load_catalog_import_baseline,
+    persist_baseline as persist_catalog_import_baseline,
+};
 pub use catalog_overlay::{
     CATALOG_OVERLAY_SCHEMA_VERSION, CatalogOverlay, OverlayCell, OverlayError, OverlaySource,
-    default_path as overlay_default_path, load as load_catalog_overlay,
-    save as save_catalog_overlay,
+    default_path as overlay_default_path, load as load_catalog_overlay, overlay_revision,
+    save as save_catalog_overlay, with_overlay_write_lock,
 };
 pub use catalog_state::{
-    check_drift_and_persist_state, default_path as catalog_state_default_path,
+    ImpactClass, ImpactField, check_drift_and_persist_state, classify_field,
+    default_path as catalog_state_default_path, escalate,
     selector_key as catalog_state_selector_key,
 };
 pub use config::{

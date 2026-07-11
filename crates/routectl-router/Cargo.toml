@@ -19,6 +19,15 @@ bedrock = ["routectl-providers/bedrock"]
 # Forward the providers crate's `gemini` feature so the router can
 # build GeminiProvider instances when this is enabled.
 "gemini" = ["routectl-providers/gemini"]
+# Compiles in the vendored catalog snapshots and the render pipeline that
+# regenerates `catalog_baked.rs` from them (the `gen_catalog` bin and its
+# drift-guard test). Off by default so the runtime binary does not carry
+# the multi-megabyte snapshot text.
+gen-catalog = []
+
+[[bin]]
+name = "gen_catalog"
+required-features = ["gen-catalog"]
 
 [dependencies]
 routectl-core.workspace = true
@@ -38,6 +47,7 @@ parking_lot = "0.12"
 lru.workspace = true
 url.workspace = true
 tempfile = "3"
+fd-lock = "4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

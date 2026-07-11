@@ -60,9 +60,10 @@ sections:
 [registry."<glob>"]   # per-upstream pricing for cost estimation.
                       # Optional; no defaults shipped.
 
-[cache_pricing."<sel>"] # field-level overrides for the baked
-                      # prompt-cache economics table. Optional; a
-                      # verified table ships baked-in.
+# Prompt-cache economics (wm/rm/ttl/...) live outside config.toml as of
+# schema v2: a baked table plus catalog_overlay.json, managed via
+# `routectl catalog`. A v1 config's [cache_pricing] table auto-migrates
+# into the overlay on load; see "Catalog: prompt-cache economics" below.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
                       # listener fronting a first-party upstream.
@@ -1288,128 +1289,137 @@ different providers be priced differently -- give each a distinct key
 (the table is keyed by pattern string) and set `provider` on the scoped
 one.
 
-## Cache-economics pricing overrides (`[cache_pricing."<selector>"]`)
+## Catalog: prompt-cache economics (`routectl catalog`)
 
-routectl ships a verified, baked-in table of prompt-cache *economics*
+routectl ships a two-layer catalog of prompt-cache *economics*
 multipliers -- the write multiplier (`wm`), read multiplier (`rm`), TTL,
-and minimum cacheable prefix -- per `(provider_kind, model)`. These feed
-the (later) cache-break break-even reasoning; they are distinct from the
-`[registry]` dollar prices above, which feed usage-cost estimation.
+minimum cacheable prefix, and a small set of capability flags -- per
+`(provider_kind, model)`. These feed the cache-break break-even
+reasoning (see `prompt-size --hypothetical-d` above); they are distinct
+from the `[registry]` dollar prices above, which feed usage-cost
+estimation.
 
-You do not normally need to touch this. The table is re-verified against
-vendor docs on each routectl release, and unverified cells already fall
-back to a conservative sentinel. The `[cache_pricing]` block exists only
-to patch a cell that drifted between releases.
+**Layer 1: the baked table.** Every routectl build carries a table
+derived from vendor-published pricing snapshots, re-verified on each
+release. You do not normally need to touch it.
 
-```toml
-# Selector key is "<provider_kind>:<model_glob>". provider_kind is the
-# stable `kind = "..."` token (anthropic-api, bedrock, openai-responses,
-# openai-compat); model_glob is an exact id or a trailing-`*` prefix.
-[cache_pricing."openai-compat:grok-4-3*"]
-rm = 0.05            # correct just the read multiplier; everything else
-                     # (wm, ttl_seconds, min_prefix_tokens, ...) inherits
-                     # the baked-in value -- an omitted field is NOT reset.
+**Layer 2: the overlay.** `catalog_overlay.json` -- next to
+`config.toml` and `credentials.json`, under
+`$XDG_CONFIG_HOME/routectl/` (falling back to `~/.config/routectl/`) --
+holds per-selector overrides on top of the baked table. An overlay cell
+wins over the baked row field by field: a field it sets wins, a field it
+leaves unset inherits the baked value. A JSON `null` value for a
+selector key DISABLES that row outright, overriding even the baked
+table's own default; a selector absent from the overlay falls through
+to the baked row unchanged. A running `routectl serve` watches the
+overlay file and picks up a write automatically -- no restart needed.
+
+**Retirement of `[cache_pricing]`.** Config schema v1's `[cache_pricing]`
+TOML table (and its `pricing_verifications.json` sidecar) is retired as
+of schema v2, the current version. Loading a v1 config auto-migrates it:
+every `[cache_pricing]` entry (already merged with any sidecar
+verification) is folded into `catalog_overlay.json` as a `source:
+import` cell, then `config.toml` is rewritten in place to `version = 2`
+with `[cache_pricing]` dropped. The migration is idempotent, and fails
+closed on any conflict between a migrated entry and a pre-existing
+overlay value -- nothing is written for ANY key until the conflict is
+resolved by hand. `pricing_verifications.json` is read only as part of
+this migration; nothing writes to it anymore.
+
+### `routectl catalog list`
+
+Prints the EFFECTIVE catalog (the baked table merged with the overlay)
+as an aligned ASCII table, headed by a summary line (overlay revision,
+cell counts by source, disabled count). Columns: `provider_kind`,
+`model_glob`, `status`, `tier`, `wm`, `rm`, `ttl(s)`, `min_prefix`,
+`auto`, `max_ctx`, `source`, `verified_at`, `stale`. Every row renders
+`PRESENT` (with its provenance and a staleness marker) or `DISABLED`
+(overlay `null`); a trailing punch-list names any selector with an
+unknown `max_context_tokens` (its context-fraction advisory falls back
+to absolute tokens for those).
+
+### `routectl catalog verify <selector>`
+
+Stamps an EXISTING overlay cell's `verified_at` to today (UTC) and flips
+its `source` to `user` -- verifying is a user act, even for a cell an
+import last wrote. Every other field on the cell carries through
+unchanged. `selector` is `"provider_kind:model_glob"` (e.g.
+`openai-compat:grok-*`). A selector with no overlay cell yet (baked-only,
+or unknown to the catalog), or one that is explicitly disabled, has
+nothing to stamp and is rejected -- creating a new overlay cell is a
+`set` concern.
+
+### `routectl catalog import`
+
+Opt-in bulk refresh of the overlay from the two vendored economics
+sources (litellm + models.dev): fetches both over the network (or reads
+both from disk via the file flags below), derives one candidate, prints
+an impact-labeled diff, and -- on confirmation -- applies it.
+
+```sh
+routectl catalog import
+routectl catalog import --litellm-file ./litellm.json \
+  --models-dev-file ./models_dev.json --yes
 ```
 
-**Field-level merge.** Every field is optional. A field you set wins; a
-field you omit inherits the baked-in cell value. You never have to
-restate the whole row. Overridable fields:
+- `--litellm-file <PATH>` / `--models-dev-file <PATH>` -- read a source
+  from disk instead of the network. Must be given together (both, or
+  neither).
+- `--yes` -- skip the y/N confirmation prompt (scripting).
+- `--allow-shrink` -- bypass ONLY the shrink guard's per-source /
+  per-family floors (a candidate whose row counts dropped too far
+  relative to the last successful import). Never bypasses a fetch
+  failure, a cross-check disagreement, a `source: user` conflict, or a
+  revision conflict.
 
-| Field                  | Meaning                                              |
-|------------------------|------------------------------------------------------|
-| `wm`                   | write multiplier (cost to re-write a cached block)   |
-| `rm`                   | read multiplier (cost to read a warm cached block)   |
-| `ttl_seconds`          | cache time-to-live in seconds                        |
-| `min_prefix_tokens`    | minimum prefix tokens below which caching stops      |
-| `has_storage_rent`     | whether the provider charges per-hour cache rent     |
-| `storage_rent`         | per-hour storage-rent multiplier                     |
-| `auto_cacher`          | whether the upstream caches automatically            |
-| `verified_at`          | verification date (`YYYY-MM-DD`); marks the cell verified and refreshes the 90-day staleness clock without re-asserting any multiplier. A pure verification (only this field set) is recorded with source `operator-verified`. |
+The printed diff sorts every candidate selector into exactly one bucket:
+`applied` (a fresh selector, or one whose existing overlay cell is
+itself `source: import`), `skipped` (a per-selector cross-check
+disagreement between the two sources, or a selector unknown to the
+baked table), or `conflicted` (an existing `source: user` cell, or an
+explicit disable). USER-WINS: a conflicted row's existing value is
+always preserved untouched, regardless of what the candidate proposed.
+Each `applied` / `conflicted` row is labeled `display-only`,
+`cost-affecting`, or `routing-affecting`, and flags whether the change
+trends toward a lower cache-break break-even reuse count.
 
-**Cost-risk acknowledgement.** An override that sets `wm` *below* the
-conservative sentinel value (`2.0`) is **rejected** unless it also carries
-`override_acknowledges_cost_risk = true`. A too-cheap write multiplier
-makes a cache break look falsely profitable, so dropping below the
-sentinel requires an explicit operator acknowledgement:
+The apply is TRANSACTIONAL: a fetch failure on either source aborts
+before a candidate is even built, leaving the overlay byte-identical.
+Once a candidate is built and confirmed, only the `applied` rows are
+written, through the same revision-checked, advisory-locked writer every
+overlay mutation goes through -- a write from a concurrent `catalog`
+invocation is detected and recomputes one bounded fresh diff rather than
+silently overwriting or losing an update.
 
-```toml
-[cache_pricing."openai-compat:my-cheap-host-*"]
-wm = 1.0
-override_acknowledges_cost_risk = true   # required: wm < 2.0 sentinel
+### `routectl catalog set` / `routectl catalog disable`
+
+`set <selector> <field>=<value>...` writes a `source: user` cell for a
+KNOWN selector (an existing baked row, or an existing overlay cell of
+either provenance), field by field; a field left unnamed inherits the
+prior cell's value. `disable <selector>` writes a JSON-null cell for a
+KNOWN selector, discarding whatever it previously carried. Both REJECT a
+selector unknown to the catalog (no baked row, no existing overlay
+cell) -- creating a brand-new selector is not supported by either verb.
+
+Supported `set` fields: `wm` (f32), `rm` (f32), `ttl_seconds` (u32),
+`min_prefix_tokens` (u32), `max_context_tokens` (u32), and a capability
+flag via `cap:<name>=true|false`. `auto_cacher` / `has_storage_rent` /
+`storage_rent` are hard-rejected -- they live only on the baked table;
+`verified_at` is hard-rejected too, since `set` and `verify` alike
+always stamp it automatically to today (UTC).
+
+A `wm` set below the conservative sentinel (`2.0`) is rejected unless
+the call also carries `--acknowledge-cost-risk`: a too-cheap write
+multiplier can make a cache break look falsely profitable. `rm` must be
+`> 0`; `max_context_tokens` must not be `0`.
+
+```sh
+routectl catalog set openai-compat:my-cheap-host-* wm=1.0 --acknowledge-cost-risk
+routectl catalog disable openai-compat:retired-model-*
 ```
 
-The selector keys are not validated against the baked table -- a
-selector that matches no baked cell is simply inert (it overrides
-nothing). A baked cell whose `verified_at` is more than 90 days old logs
-a startup `WARN` advising re-verification; this is advisory only and
-never blocks startup.
-
-### `routectl pricing` -- inspect and stamp the manifest
-
-Two subcommands let you inspect the effective manifest and stamp
-individual cells without editing `config.toml` by hand.
-
-**`routectl pricing list`**
-
-Prints every baked cell as an aligned ASCII table, with overrides and
-sidecar verifications already merged in. Columns (in order):
-`provider_kind`, `model_glob`, `tier`, `wm`, `rm`, `ttl(s)`,
-`min_prefix`, `auto`, `verified`, `source`, `verified_at`, and `stale`.
-A verified cell whose `verified_at` is more than 90 days before today
-shows `STALE` in the last column.
-
-Override selectors that exactly name a baked cell
-(`provider_kind:model_glob`) are reflected in the per-row values.
-Selectors using a broader or different glob, or a `"*"` provider, still
-apply at request-lookup time but are not reflected per-row. A trailing
-note counts how many such selectors are present.
-
-**`routectl pricing verify <selector>`**
-
-Stamps a baked cell verified as of today's local date WITHOUT
-re-asserting its multipliers. The selector format is
-`provider_kind:model_glob` -- for example, `openai-compat:grok-*`.
-A selector that names no baked cell is accepted with a note; the stamp
-applies by glob at lookup time.
-
-The stamp is saved to the sidecar file (see below). A running server
-does NOT pick up a new verification until it is restarted -- the sidecar
-is merged at config-load time and is not file-watched.
-
-**Verification sidecar (`pricing_verifications.json`)**
-
-`routectl pricing verify` writes to a machine-managed JSON sidecar at:
-
-```
-$XDG_CONFIG_HOME/routectl/pricing_verifications.json
-```
-
-(falling back to `~/.config/routectl/pricing_verifications.json`),
-next to `config.toml` and `credentials.json`. Do not edit this file
-by hand under normal circumstances.
-
-At config load (every subcommand, including `serve`), the sidecar is
-merged into the `[cache_pricing]` override table as `verified_at`-only
-overrides. The merge is **additive only**: if `config.toml` already
-carries a `[cache_pricing]` entry for the same selector, the
-`config.toml` entry wins and the sidecar entry is silently skipped.
-
-A malformed sidecar date is dropped at load time with a `WARN` log
-entry and never blocks a command. A completely unparseable sidecar JSON
-logs a `WARN` and skips the merge.
-
-Because `config show` prints the RESOLVED (effective) config after the
-sidecar merge, sidecar-derived verifications appear in its
-`[cache_pricing]` output even though the operator did not write them to
-`config.toml` by hand.
-
-**Why it matters**
-
-An unverified cell is treated as insufficient-data by the break-even
-gate: no actionable break-even K* can be computed, so the advisory path
-returns KEEP. Verifying a cell whose baked multipliers you have
-confirmed against the vendor documentation unlocks real break-even
-economics on the would-trim advisory path.
+**`pricing` alias.** `routectl pricing ...` is a hidden alias for
+`routectl catalog ...`, kept for muscle memory; it is dropped at 1.0.
 
 ## Prompt-cache auto-emission (`[cache]`)
 

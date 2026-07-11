@@ -34,14 +34,16 @@
 //! compares the on-disk `revision` against an
 //! `expected_revision` before writing: a caller working from a stale
 //! snapshot gets an explicit conflict instead of a silent lost update (the
-//! bug being replaced: `routectl-cli/src/commands/pricing.rs`'s sidecar
+//! bug being replaced: `routectl-cli/src/commands/catalog.rs`'s sidecar
 //! writer does a bare load-modify-write with no revision check and no
-//! fsync/0600). NOTE: the check-then-write sequence holds no lock, so two
-//! TRULY CONCURRENT writers can still race the window between load and
-//! rename; callers adding interactive write verbs must serialize writers
-//! (advisory lock) first.
+//! fsync/0600). NOTE: `save` on its own still holds no lock, so a caller
+//! that bypasses [`with_overlay_write_lock`] and calls `load`/`save`
+//! directly can still race the window between load and rename. Every
+//! writer that goes through [`with_overlay_write_lock`] is closed to that
+//! race: the advisory lock is held across the whole load -> mutate -> save
+//! sequence, so two truly concurrent callers serialize instead of racing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -56,12 +58,18 @@ pub const CATALOG_OVERLAY_SCHEMA_VERSION: u32 = 1;
 /// On-disk overlay: a revision-checked map of per-selector overrides
 /// layered on top of the baked catalog table at merge time.
 ///
-/// `#[serde(default)]`, NOT `deny_unknown_fields`: a field this build
-/// doesn't know about (written by a newer routectl, f2+) is ignored rather
-/// than rejected, and a field this build expects but an older/hand-edited
-/// file omits falls back to [`Default::default`] rather than erroring.
+/// NOT `deny_unknown_fields`, and NOT `#[serde(default)]` on the
+/// container: a field this build doesn't know about (written by a newer
+/// routectl) is ignored rather than rejected (forward compat), but every
+/// field THIS struct declares must be present -- a truncated or
+/// hand-edited file missing `schema_version` / `revision` / `cells`
+/// (including the degenerate `{}`) surfaces as
+/// [`OverlayError::Corrupt`] naming the missing field, rather than
+/// silently resolving to an empty overlay that would discard every
+/// disable an operator wrote. Every writer in this module always
+/// serializes all three fields, so a file this module itself wrote
+/// always round-trips.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct CatalogOverlay {
     pub schema_version: u32,
     pub revision: u64,
@@ -242,6 +250,128 @@ pub fn save(
     };
     write_atomic(path, &next)?;
     Ok(next)
+}
+
+/// Read the current revision of an already-loaded overlay. A thin
+/// accessor so callers (the invalidation-breadcrumb consumer chief among
+/// them) never need to reach into [`CatalogOverlay`]'s field directly.
+#[must_use]
+pub const fn overlay_revision(overlay: &CatalogOverlay) -> u64 {
+    overlay.revision
+}
+
+/// The single serialized write entry point for the overlay: acquire a
+/// kernel advisory lock on a sibling `.lock` file, load the current
+/// overlay under that lock, hand it to `f` for the caller to mutate (or
+/// abort by returning `Err`), and -- only on success -- run the
+/// revision-checked [`save`] under the SAME held lock before releasing it.
+///
+/// LOCK SCOPE: the lock covers exactly load -> `f` -> save, nothing more.
+/// It must never be held across a network fetch or an interactive confirm
+/// prompt -- callers that need either do that work BEFORE calling this
+/// function and pass only the already-decided mutation into `f`. Two
+/// truly concurrent callers on the same `path` serialize: the second
+/// blocks on the lock until the first's save (or abort) releases it, then
+/// loads whatever the first one left behind, so no update is lost.
+///
+/// `f` receives the overlay as loaded under the lock and returns the
+/// mutated overlay to persist; `f`'s own `revision`/`schema_version`
+/// fields on the returned value are ignored -- only `cells` is used, and
+/// [`save`] is called with the revision this function observed at load
+/// time, so the last-line-defense revision check in [`save`] can never
+/// itself trip inside a single lock hold.
+///
+/// After a successful save, this function emits ONE `tracing::info!` line
+/// carrying the new revision and the selector keys whose cell value
+/// changed (added, removed, or edited) between the pre-write and
+/// post-write cell maps.
+pub fn with_overlay_write_lock<E, F>(path: &Path, f: F) -> Result<CatalogOverlay, E>
+where
+    E: From<OverlayError>,
+    F: FnOnce(CatalogOverlay) -> Result<CatalogOverlay, E>,
+{
+    ensure_dir(path)?;
+    let lock_path = lock_path_for(path);
+    let lock_file = open_lock_file(&lock_path)?;
+    let mut file_lock = fd_lock::RwLock::new(lock_file);
+    let _guard = acquire_write_lock(&lock_path, &mut file_lock)?;
+
+    let loaded = load(path)?;
+    let expected_revision = loaded.revision;
+    let cells_before = loaded.cells.clone();
+    let mutated = f(loaded)?;
+    let saved = save(path, expected_revision, mutated.cells)?;
+
+    let changed = changed_selectors(&cells_before, &saved.cells);
+    tracing::info!(
+        revision = saved.revision,
+        changed_selectors = %changed.join(","),
+        "catalog overlay write committed",
+    );
+
+    Ok(saved)
+}
+
+/// Path to the sibling advisory-lock file for `path`, e.g.
+/// `catalog_overlay.json` -> `catalog_overlay.json.lock`. The lock file's
+/// own contents are never read or written -- it exists purely as a kernel
+/// lock handle, so its lifetime and the overlay's are independent (a
+/// stale empty lock file left behind by an old build is harmless).
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Open (creating if absent) the sibling lock file for
+/// [`fd_lock::RwLock`] to hold. Read+write access, never truncated -- the
+/// file's contents are unused.
+fn open_lock_file(lock_path: &Path) -> Result<std::fs::File, OverlayError> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|e| OverlayError::Io {
+            path: lock_path.display().to_string(),
+            reason: format!("open lock file: {e}"),
+        })
+}
+
+/// Block until the advisory write lock on `lock_file` is held. RAII: the
+/// returned guard releases the lock on drop.
+fn acquire_write_lock<'a>(
+    lock_path: &Path,
+    lock_file: &'a mut fd_lock::RwLock<std::fs::File>,
+) -> Result<fd_lock::RwLockWriteGuard<'a, std::fs::File>, OverlayError> {
+    lock_file.write().map_err(|e| OverlayError::Io {
+        path: lock_path.display().to_string(),
+        reason: format!("acquire advisory write lock: {e}"),
+    })
+}
+
+/// The selector keys whose value differs between `before` and `after` --
+/// added, removed, or edited (including a flip between `Some(cell)` and
+/// `None`/disabled). A cheap `BTreeMap` structural compare; overlays are
+/// small (one row per configured selector), so this never needs to be
+/// smarter than "diff both maps".
+fn changed_selectors(
+    before: &BTreeMap<String, Option<OverlayCell>>,
+    after: &BTreeMap<String, Option<OverlayCell>>,
+) -> Vec<String> {
+    let mut changed: BTreeSet<&str> = BTreeSet::new();
+    for (key, before_value) in before {
+        if after.get(key) != Some(before_value) {
+            changed.insert(key);
+        }
+    }
+    for key in after.keys() {
+        if !before.contains_key(key) {
+            changed.insert(key);
+        }
+    }
+    changed.into_iter().map(str::to_string).collect()
 }
 
 /// Top-level write driver: ensure the parent directory, write to a temp
@@ -497,6 +627,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn load_empty_object_is_rejected_as_corrupt_rather_than_an_empty_overlay() {
+        // Arrange: `{}` must never parse as an empty overlay -- that would
+        // silently discard every disable an operator wrote.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, b"{}").unwrap();
+
+        // Act
+        let err = load(&path).expect_err("an empty object must fail closed");
+
+        // Assert
+        match err {
+            OverlayError::Corrupt { path: p, reason } => {
+                assert!(p.contains("catalog_overlay.json"), "path: {p}");
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_missing_cells_key_is_rejected_as_corrupt_naming_the_field() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, br#"{"schema_version":1,"revision":0}"#).unwrap();
+
+        // Act
+        let err = load(&path).expect_err("a file missing `cells` must fail closed");
+
+        // Assert
+        match err {
+            OverlayError::Corrupt { reason, .. } => {
+                assert!(reason.contains("cells"), "reason: {reason}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_tolerates_an_unknown_top_level_field_for_forward_compat() {
+        // Arrange: every known field present, plus one this build has
+        // never heard of -- must load, not reject (NOT deny_unknown_fields).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(
+            &path,
+            br#"{"schema_version":1,"revision":0,"cells":{},"future_field":"x"}"#,
+        )
+        .unwrap();
+
+        // Act
+        let overlay = load(&path).expect("an unknown top-level field must not be rejected");
+
+        // Assert
+        assert_eq!(overlay.schema_version, 1);
+        assert_eq!(overlay.revision, 0);
+        assert!(overlay.cells.is_empty());
+    }
+
     // -----------------------------------------------------------------------
     // Atomic save: 0600 mode, no leftover tempfiles, parent dir creation.
     // -----------------------------------------------------------------------
@@ -627,6 +818,237 @@ mod tests {
         assert_eq!(
             path.file_name().and_then(|n| n.to_str()),
             Some("catalog_overlay.json")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // overlay_revision: thin accessor.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn overlay_revision_reads_the_current_revision() {
+        // Arrange
+        let overlay = CatalogOverlay {
+            revision: 7,
+            ..CatalogOverlay::default()
+        };
+
+        // Act / Assert
+        assert_eq!(overlay_revision(&overlay), 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // with_overlay_write_lock: load -> mutate -> save under one lock hold.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn with_overlay_write_lock_persists_the_closures_mutation() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        // Act
+        let saved = with_overlay_write_lock::<OverlayError, _>(&path, |overlay| {
+            let mut next = overlay;
+            next.cells.insert("a:b".to_string(), Some(import_cell()));
+            Ok(next)
+        })
+        .expect("write");
+
+        // Assert: persisted at revision 1, and the lock is released
+        // (a second write against the same path succeeds too).
+        assert_eq!(saved.revision, 1);
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.cells.get("a:b"), Some(&Some(import_cell())));
+
+        let saved_again = with_overlay_write_lock::<OverlayError, _>(&path, |overlay| {
+            let mut next = overlay;
+            next.cells.insert("c:d".to_string(), Some(user_cell()));
+            Ok(next)
+        })
+        .expect("second write after the first released its lock");
+        assert_eq!(saved_again.revision, 2);
+    }
+
+    #[test]
+    fn with_overlay_write_lock_propagates_an_abort_without_writing() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        save(&path, 0, BTreeMap::new()).expect("seed");
+        let before = std::fs::read(&path).unwrap();
+
+        // Act: the closure aborts instead of returning a mutated overlay.
+        let events = routectl_testkit::capture_events(|| {
+            let err = with_overlay_write_lock::<OverlayError, _>(&path, |_overlay| {
+                Err(OverlayError::Corrupt {
+                    path: "n/a".to_string(),
+                    reason: "caller-chosen abort".to_string(),
+                })
+            })
+            .expect_err("closure abort must propagate");
+            assert!(matches!(err, OverlayError::Corrupt { .. }));
+        });
+
+        // Assert: no save happened and no breadcrumb was emitted.
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(before, after, "an aborted closure must not write");
+        assert!(
+            events.is_empty(),
+            "an aborted write must not emit a breadcrumb: {events:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // changed_selectors: added / removed / edited / disabled-flip.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn changed_selectors_detects_added_removed_edited_and_disabled_flip() {
+        // Arrange
+        let mut before = BTreeMap::new();
+        before.insert("keep-same:1".to_string(), Some(import_cell()));
+        before.insert("removed:1".to_string(), Some(import_cell()));
+        before.insert("edited:1".to_string(), Some(import_cell()));
+        before.insert("flip-to-disabled:1".to_string(), Some(import_cell()));
+
+        let mut after = BTreeMap::new();
+        after.insert("keep-same:1".to_string(), Some(import_cell()));
+        after.insert("edited:1".to_string(), Some(user_cell()));
+        after.insert("flip-to-disabled:1".to_string(), None);
+        after.insert("added:1".to_string(), Some(user_cell()));
+
+        // Act
+        let changed = changed_selectors(&before, &after);
+
+        // Assert: every non-identical key, sorted; "keep-same" excluded.
+        assert_eq!(
+            changed,
+            vec![
+                "added:1".to_string(),
+                "edited:1".to_string(),
+                "flip-to-disabled:1".to_string(),
+                "removed:1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_overlay_write_lock_emits_one_breadcrumb_with_revision_and_changed_selectors() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        save(&path, 0, BTreeMap::new()).expect("seed at revision 1");
+
+        // Act
+        let events = routectl_testkit::capture_events(|| {
+            with_overlay_write_lock::<OverlayError, _>(&path, |overlay| {
+                let mut next = overlay;
+                next.cells.insert("a:b".to_string(), Some(import_cell()));
+                Ok(next)
+            })
+            .expect("write");
+        });
+
+        // Assert: exactly one structured line, carrying the new revision
+        // and the changed selector.
+        assert_eq!(events.len(), 1, "events: {events:?}");
+        let event = &events[0];
+        assert_eq!(event.field("revision"), Some("2"));
+        assert_eq!(event.field("changed_selectors"), Some("a:b"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_writers_against_the_same_path_serialize_with_no_lost_update() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        let path_a = path.clone();
+        let path_b = path.clone();
+
+        // Act: two threads race to write different selectors through the
+        // same lock.
+        let writer_a = std::thread::spawn(move || {
+            with_overlay_write_lock::<OverlayError, _>(&path_a, |overlay| {
+                let mut next = overlay;
+                next.cells.insert("a:b".to_string(), Some(import_cell()));
+                Ok(next)
+            })
+        });
+        let writer_b = std::thread::spawn(move || {
+            with_overlay_write_lock::<OverlayError, _>(&path_b, |overlay| {
+                let mut next = overlay;
+                next.cells.insert("c:d".to_string(), Some(user_cell()));
+                Ok(next)
+            })
+        });
+
+        let result_a = writer_a.join().expect("writer_a thread");
+        let result_b = writer_b.join().expect("writer_b thread");
+
+        // Assert: both writers succeed (serialized, never a
+        // RevisionConflict), and the final overlay carries both writes.
+        result_a.expect("writer_a must not see a revision conflict");
+        result_b.expect("writer_b must not see a revision conflict");
+
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.revision, 2, "two serialized writes -> revision 2");
+        assert_eq!(loaded.cells.get("a:b"), Some(&Some(import_cell())));
+        assert_eq!(loaded.cells.get("c:d"), Some(&Some(user_cell())));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_writer_blocks_on_the_lock_held_by_another_thread() {
+        // Arrange: the holder signals once it is inside the locked closure,
+        // then sleeps for `HOLD` before returning -- proving a real overlap
+        // (not just lucky thread scheduling) requires the waiter's total
+        // wait time to be at least `HOLD`.
+        const HOLD: std::time::Duration = std::time::Duration::from_millis(200);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let (holder_ready_tx, holder_ready_rx) = std::sync::mpsc::channel::<()>();
+
+        let path_holder = path.clone();
+        let holder = std::thread::spawn(move || {
+            with_overlay_write_lock::<OverlayError, _>(&path_holder, move |overlay| {
+                holder_ready_tx
+                    .send(())
+                    .expect("signal holder is inside the lock");
+                std::thread::sleep(HOLD);
+                let mut next = overlay;
+                next.cells.insert("a:b".to_string(), Some(import_cell()));
+                Ok(next)
+            })
+        });
+
+        holder_ready_rx
+            .recv()
+            .expect("holder must signal before the waiter starts");
+
+        // Act: the waiter can only proceed once the holder's sleep +
+        // save + lock release completes.
+        let waiter_start = std::time::Instant::now();
+        let path_waiter = path.clone();
+        let waiter_result = with_overlay_write_lock::<OverlayError, _>(&path_waiter, |overlay| {
+            let mut next = overlay;
+            next.cells.insert("c:d".to_string(), Some(user_cell()));
+            Ok(next)
+        });
+        let elapsed = waiter_start.elapsed();
+
+        // Assert
+        waiter_result.expect("waiter must succeed after the holder releases");
+        holder
+            .join()
+            .expect("holder thread")
+            .expect("holder must succeed");
+        assert!(
+            elapsed >= HOLD,
+            "waiter must block until the holder releases the lock, elapsed={elapsed:?}"
         );
     }
 }

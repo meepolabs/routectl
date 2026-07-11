@@ -1,10 +1,14 @@
-//! `routectl pricing` -- inspect and stamp the cache-economics catalog.
+//! `routectl catalog` -- inspect, verify, import, and edit the
+//! cache-economics catalog. `pricing` is a hidden alias kept for muscle
+//! memory (dropped at 1.0).
 //!
-//! Two subcommands:
+//! Subcommands:
 //!   list    -- print the EFFECTIVE catalog (the two-layer merge of the
 //!              baked table with the on-disk `catalog_overlay.json`,
-//!              `routectl_router::merge`) as an aligned ASCII table. Every
-//!              row renders PRESENT (with derived provenance + a staleness
+//!              `routectl_router::merge`) as an aligned ASCII table, headed
+//!              by an overlay summary line (revision + counts by source +
+//!              disabled count -- see [`overlay_summary_line`]). Every row
+//!              renders PRESENT (with derived provenance + a staleness
 //!              marker) or DISABLED (overlay `null`); MISSING never
 //!              appears in this catalog-only listing (see
 //!              [`build_list_data`]'s doc) even though the render path
@@ -12,11 +16,21 @@
 //!              test) for a future consumer keyed on configured aliases.
 //!   verify  -- stamp an EXISTING overlay cell's `verified_at` to today,
 //!              flipping its `source` to `user` (verifying is a user act).
-//!              Writes through the revision-checked overlay writer
-//!              (`routectl_router::save_catalog_overlay`). A selector with
-//!              no overlay cell (baked-only, or entirely unknown) has
-//!              nothing to stamp and is an error -- creating a new overlay
-//!              cell is a later import/set verb.
+//!              Writes through the serialized, revision-checked overlay
+//!              writer (`routectl_router::with_overlay_write_lock`). A
+//!              selector with no overlay cell (baked-only, or entirely
+//!              unknown) has nothing to stamp and is an error -- creating a
+//!              new overlay cell is a `set` concern.
+//!   import  -- opt-in bulk refresh from the vendored economics sources;
+//!              see `commands::catalog_import`.
+//!   set     -- write a `source: user` cell for a KNOWN selector (an
+//!              existing baked row, or an existing overlay cell of either
+//!              provenance), field by field. See [`set_at`] for the
+//!              admission rule, the field syntax, and the value-validation
+//!              contract it reuses.
+//!   disable -- write a JSON-null overlay cell for a KNOWN selector,
+//!              disabling it regardless of what it previously carried. See
+//!              [`disable_at`].
 //!
 //! LEGACY SIDECAR (`pricing_verifications.json`): this module still carries
 //! the READ side of the old sidecar format ([`PricingVerifications`],
@@ -37,9 +51,11 @@ use serde::{Deserialize, Serialize};
 
 use routectl_router::{
     CachePricingOverride, CachePricingSelector, CatalogOverlay, CatalogRow, Config, EffectiveRow,
-    OverlayCell, OverlaySource, Source, baked_table_rows, is_stale_today, load_catalog_overlay,
-    merge, overlay_default_path, save_catalog_overlay,
+    OverlayCell, OverlayError, OverlaySource, Source, baked_table_rows, catalog_state_selector_key,
+    is_stale_today, merge, overlay_default_path, overlay_revision, with_overlay_write_lock,
 };
+#[cfg(test)]
+use routectl_router::{load_catalog_overlay, save_catalog_overlay};
 
 // ---------------------------------------------------------------------------
 // Legacy sidecar (read-only, migration-only)
@@ -290,8 +306,33 @@ pub fn build_list_data(overlay: &CatalogOverlay) -> (Vec<Vec<String>>, Vec<Strin
 // CLI entry points
 // ---------------------------------------------------------------------------
 
-/// `routectl pricing list` -- print the effective catalog (baked + overlay).
+/// One-line overlay summary header for [`list`]: the on-disk revision plus
+/// a provenance breakdown of every overlay cell (`source: user` /
+/// `source: import` / disabled). Says nothing about the baked table --
+/// only the overlay carries a revision.
+fn overlay_summary_line(overlay: &CatalogOverlay) -> String {
+    let mut user = 0usize;
+    let mut import = 0usize;
+    let mut disabled = 0usize;
+    for cell in overlay.cells.values() {
+        match cell {
+            Some(c) => match c.source {
+                OverlaySource::User => user += 1,
+                OverlaySource::Import => import += 1,
+            },
+            None => disabled += 1,
+        }
+    }
+    format!(
+        "overlay revision {} -- {} cell(s): {user} user, {import} import, {disabled} disabled",
+        overlay_revision(overlay),
+        overlay.cells.len(),
+    )
+}
+
+/// `routectl catalog list` -- print the effective catalog (baked + overlay).
 pub fn list(overlay: &CatalogOverlay) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}\n", overlay_summary_line(overlay));
     let (table, punch_list) = build_list_data(overlay);
     print!("{}", render_table(&table));
     if !punch_list.is_empty() {
@@ -307,7 +348,17 @@ pub fn list(overlay: &CatalogOverlay) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// `routectl pricing verify <selector>` -- stamp an existing overlay cell
+/// Today's date (UTC), the stamp every catalog writer (`verify`, `set`,
+/// `import`) uses for `verified_at` -- one shared UTC clock read so the
+/// writers can never disagree about "today" across a timezone (this
+/// replaces `verify_at`'s prior `chrono::Local` read, which could stamp a
+/// different calendar date than `set_at`'s UTC read near a local
+/// midnight).
+pub(crate) fn today_verified_at() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+/// `routectl catalog verify <selector>` -- stamp an existing overlay cell
 /// verified today. Resolves the default overlay path; see [`verify_at`] for
 /// the testable core.
 pub fn verify(selector_raw: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -321,45 +372,53 @@ pub fn verify(selector_raw: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// is rewritten with `source: user` and `verified_at` bumped to today; every
 /// other field on the cell is carried through unchanged. A selector with no
 /// overlay cell (baked-only, or entirely unknown to both layers) has nothing
-/// to stamp: creating a NEW overlay cell is a later import/set verb, so this
+/// to stamp: creating a NEW overlay cell is a `set` concern, so this
 /// returns a clear error instead of silently pinning the current effective
 /// values. A selector whose overlay cell is explicitly `null` (disabled) is
 /// likewise nothing to stamp -- verify never resurrects a disabled row.
-fn verify_at(selector_raw: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// The load-modify-save runs through [`with_overlay_write_lock`], so a
+/// concurrent verify/import/set against the same overlay file serializes
+/// instead of racing; the "nothing to stamp" checks below abort the closure
+/// (returning `Err` before it produces a mutated overlay), so a rejected
+/// verify never reaches the write.
+pub(crate) fn verify_at(selector_raw: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     CachePricingSelector::parse(selector_raw).map_err(|e| format!("invalid selector: {e}"))?;
 
-    let overlay = load_catalog_overlay(path)?;
-    let cell = match overlay.cells.get(selector_raw) {
-        None => {
-            return Err(format!(
-                "no overlay cell for selector `{selector_raw}`; nothing to stamp (baked-only or \
-                 unknown to the catalog) -- creating a new overlay cell is a later import/set verb"
-            )
-            .into());
-        }
-        Some(None) => {
-            return Err(format!(
-                "selector `{selector_raw}` is disabled in the overlay (null); nothing to stamp"
-            )
-            .into());
-        }
-        Some(Some(cell)) => cell,
-    };
+    let today = today_verified_at();
+    let selector = selector_raw.to_string();
+    with_overlay_write_lock::<Box<dyn std::error::Error>, _>(path, |overlay| {
+        let existing = match overlay.cells.get(&selector) {
+            None => {
+                return Err(format!(
+                    "no overlay cell for selector `{selector}`; nothing to stamp (baked-only or \
+                     unknown to the catalog) -- creating a new overlay cell is a `set` concern"
+                )
+                .into());
+            }
+            Some(None) => {
+                return Err(format!(
+                    "selector `{selector}` is disabled in the overlay (null); nothing to stamp"
+                )
+                .into());
+            }
+            Some(Some(cell)) => cell.clone(),
+        };
 
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let stamped = OverlayCell {
-        source: OverlaySource::User,
-        verified_at: today.clone(),
-        wm: cell.wm,
-        rm: cell.rm,
-        ttl_seconds: cell.ttl_seconds,
-        min_prefix_tokens: cell.min_prefix_tokens,
-        max_context_tokens: cell.max_context_tokens,
-        capabilities: cell.capabilities.clone(),
-    };
-    let mut cells = overlay.cells.clone();
-    cells.insert(selector_raw.to_string(), Some(stamped));
-    save_catalog_overlay(path, overlay.revision, cells)?;
+        let stamped = OverlayCell {
+            source: OverlaySource::User,
+            verified_at: today.clone(),
+            wm: existing.wm,
+            rm: existing.rm,
+            ttl_seconds: existing.ttl_seconds,
+            min_prefix_tokens: existing.min_prefix_tokens,
+            max_context_tokens: existing.max_context_tokens,
+            capabilities: existing.capabilities,
+        };
+        let mut next = overlay;
+        next.cells.insert(selector.clone(), Some(stamped));
+        Ok(next)
+    })?;
 
     println!(
         "verified: selector={selector_raw}  date={today}  source=user  written to {}",
@@ -369,13 +428,341 @@ fn verify_at(selector_raw: &str, path: &Path) -> Result<(), Box<dyn std::error::
 }
 
 // ---------------------------------------------------------------------------
+// set / disable: user-edit verbs
+// ---------------------------------------------------------------------------
+
+/// Errors from `catalog set` / `catalog disable`. Distinguishes an
+/// intentional admission/validation abort from a raw [`OverlayError`] so an
+/// unknown selector, or a field the overlay cannot carry, never reads as a
+/// storage failure.
+#[derive(Debug, thiserror::Error)]
+pub enum CatalogWriteError {
+    #[error("invalid selector `{selector}`: {reason}")]
+    InvalidSelector { selector: String, reason: String },
+
+    #[error(
+        "selector `{0}` is unknown to the catalog (no baked row, no existing overlay cell); \
+         creating a brand-new selector is not supported by `set` / `disable`"
+    )]
+    UnknownSelector(String),
+
+    #[error("field `{field}` is not supported by `catalog set`: {reason}")]
+    UnsupportedField { field: String, reason: String },
+
+    #[error("invalid field `{raw}`: {reason}")]
+    InvalidField { raw: String, reason: String },
+
+    #[error("{0}")]
+    Validation(String),
+
+    #[error(transparent)]
+    Overlay(#[from] OverlayError),
+}
+
+fn parse_selector(selector_raw: &str) -> Result<(), CatalogWriteError> {
+    CachePricingSelector::parse(selector_raw)
+        .map(|_| ())
+        .map_err(|reason| CatalogWriteError::InvalidSelector {
+            selector: selector_raw.to_string(),
+            reason,
+        })
+}
+
+/// One parsed `field=value` pair from `catalog set`'s variadic field list.
+#[derive(Debug)]
+enum FieldUpdate {
+    Wm(f32),
+    Rm(f32),
+    TtlSeconds(u32),
+    MinPrefixTokens(u32),
+    MaxContextTokens(u32),
+    /// A `cap:<name>=true|false` capability flag.
+    Capability(String, bool),
+}
+
+/// Fields [`OverlayCell`] structurally cannot carry: they live only on the
+/// baked catalog table (settled: the import pipeline cannot produce a
+/// differing `auto_cacher`, and the storage-rent fields are
+/// reserved-unused on every baked row), so `set` hard-rejects an attempt to
+/// set them rather than silently drop them.
+const UNSUPPORTED_FIELDS: &[&str] = &["auto_cacher", "has_storage_rent", "storage_rent"];
+
+/// Parse one `field=value` argument. Capability flags use the
+/// `cap:<name>=true|false` syntax (documented in `--help`); every other
+/// supported field is a bare name. `verified_at` and the baked-only fields
+/// are named explicitly in the error so the operator knows why they were
+/// rejected rather than getting a generic "unknown field".
+fn parse_field(raw: &str) -> Result<FieldUpdate, CatalogWriteError> {
+    let (field, value) = raw
+        .split_once('=')
+        .ok_or_else(|| CatalogWriteError::InvalidField {
+            raw: raw.to_string(),
+            reason: "expected `field=value`".to_string(),
+        })?;
+
+    if let Some(name) = field.strip_prefix("cap:") {
+        if name.is_empty() {
+            return Err(CatalogWriteError::InvalidField {
+                raw: raw.to_string(),
+                reason: "capability name must not be empty".to_string(),
+            });
+        }
+        let flag = parse_bool_value(value).ok_or_else(|| CatalogWriteError::InvalidField {
+            raw: raw.to_string(),
+            reason: "capability value must be `true` or `false`".to_string(),
+        })?;
+        return Ok(FieldUpdate::Capability(name.to_string(), flag));
+    }
+
+    if field == "verified_at" {
+        return Err(CatalogWriteError::UnsupportedField {
+            field: field.to_string(),
+            reason: "verified_at is stamped automatically to today; it cannot be set directly"
+                .to_string(),
+        });
+    }
+    if UNSUPPORTED_FIELDS.contains(&field) {
+        return Err(CatalogWriteError::UnsupportedField {
+            field: field.to_string(),
+            reason: "this field lives only on the baked catalog table; the overlay has no field \
+                     to carry it"
+                .to_string(),
+        });
+    }
+
+    match field {
+        "wm" => parse_num(raw, value).map(FieldUpdate::Wm),
+        "rm" => parse_num(raw, value).map(FieldUpdate::Rm),
+        "ttl_seconds" => parse_num(raw, value).map(FieldUpdate::TtlSeconds),
+        "min_prefix_tokens" => parse_num(raw, value).map(FieldUpdate::MinPrefixTokens),
+        "max_context_tokens" => parse_num(raw, value).map(FieldUpdate::MaxContextTokens),
+        other => Err(CatalogWriteError::InvalidField {
+            raw: raw.to_string(),
+            reason: format!(
+                "unknown field `{other}`; supported fields are wm, rm, ttl_seconds, \
+                 min_prefix_tokens, max_context_tokens, cap:<name>"
+            ),
+        }),
+    }
+}
+
+fn parse_bool_value(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_num<T: std::str::FromStr>(raw: &str, value: &str) -> Result<T, CatalogWriteError> {
+    value.parse().map_err(|_| CatalogWriteError::InvalidField {
+        raw: raw.to_string(),
+        reason: format!("`{value}` is not a valid number"),
+    })
+}
+
+fn apply_field_update(cell: &mut OverlayCell, update: FieldUpdate) {
+    match update {
+        FieldUpdate::Wm(v) => cell.wm = Some(v),
+        FieldUpdate::Rm(v) => cell.rm = Some(v),
+        FieldUpdate::TtlSeconds(v) => cell.ttl_seconds = Some(v),
+        FieldUpdate::MinPrefixTokens(v) => cell.min_prefix_tokens = Some(v),
+        FieldUpdate::MaxContextTokens(v) => cell.max_context_tokens = Some(v),
+        FieldUpdate::Capability(name, flag) => {
+            cell.capabilities
+                .get_or_insert_with(BTreeMap::new)
+                .insert(name, flag);
+        }
+    }
+}
+
+/// True when `selector` is known to the catalog: either an EXACT
+/// baked-table key (`"provider_kind:model_glob"`) or an existing overlay
+/// cell (present or disabled). This is the synthetic-row poisoning guard:
+/// `merge`'s own `Some(cell)` + no baked row still yields `Present` (over
+/// the sentinel), so an unbounded selector would otherwise be silently
+/// admitted the moment `set`/`disable` write it.
+fn selector_known(selector: &str, overlay: &CatalogOverlay) -> bool {
+    if overlay.cells.contains_key(selector) {
+        return true;
+    }
+    baked_table_rows()
+        .into_iter()
+        .any(|row| catalog_state_selector_key(row.provider_kind, row.model_glob) == selector)
+}
+
+/// Reuse [`CachePricingOverride::validate`]'s degeneracy contract (`rm >
+/// 0`, `max_context_tokens != 0`, below-sentinel `wm` needs the ack flag)
+/// against ONLY the fields THIS call is setting -- never against a field
+/// inherited unchanged from a prior cell. A baked/import cell can
+/// legitimately carry a `wm` below the sentinel already (auto-cachers
+/// commonly do); re-validating the whole merged cell on every edit would
+/// force an unrelated `set rm=...` to also re-acknowledge a `wm` it never
+/// touched.
+fn validate_updates(
+    updates: &[FieldUpdate],
+    acknowledge_cost_risk: bool,
+) -> Result<(), CatalogWriteError> {
+    let mut ov = CachePricingOverride {
+        override_acknowledges_cost_risk: acknowledge_cost_risk,
+        ..Default::default()
+    };
+    for update in updates {
+        match update {
+            FieldUpdate::Wm(v) => ov.wm = Some(*v),
+            FieldUpdate::Rm(v) => ov.rm = Some(*v),
+            FieldUpdate::MaxContextTokens(v) => ov.max_context_tokens = Some(*v),
+            FieldUpdate::TtlSeconds(_)
+            | FieldUpdate::MinPrefixTokens(_)
+            | FieldUpdate::Capability(..) => {}
+        }
+    }
+    ov.validate().map_err(CatalogWriteError::Validation)
+}
+
+/// The same serve-pickup note `catalog import` prints after a write: a
+/// running `routectl serve` re-reads the overlay via its file watch.
+/// `pub(crate)` so `commands::catalog_import`'s own summary can print the
+/// identical line without a second copy of the string.
+pub(crate) fn print_pickup_note() {
+    println!(
+        "note: a running `routectl serve` picks up this change automatically via the overlay \
+         watch."
+    );
+}
+
+/// `routectl catalog set <selector> <field>=<value>...` -- resolves the
+/// default overlay path; see [`set_at`] for the testable core.
+pub fn set(
+    selector_raw: &str,
+    fields: &[String],
+    acknowledge_cost_risk: bool,
+) -> Result<(), CatalogWriteError> {
+    set_at(
+        selector_raw,
+        fields,
+        acknowledge_cost_risk,
+        &overlay_default_path(),
+    )
+}
+
+/// Core of [`set`], taking the overlay path explicitly so tests can point
+/// it at a temp directory instead of the real `catalog_overlay.json`.
+///
+/// Selector SYNTAX and field PARSING are checked up front -- pure, no I/O.
+/// ADMISSION -- is the selector actually known to the catalog (see
+/// [`selector_known`]) -- and value VALIDATION (see [`validate_updates`])
+/// both run INSIDE the write lock, admission first: a selector typo'd
+/// alongside a bad value reads as "unknown selector", not a value error,
+/// and neither check needs the loaded overlay for validation, but keeping
+/// both under the same lock hold keeps the ordering simple. A brand-new
+/// selector is rejected: creating one is a future explicit create path,
+/// not this verb.
+///
+/// `set` on a selector that already carries a present overlay cell (either
+/// provenance) starts from that cell's own fields, so an unset field in
+/// `fields` still inherits whatever the prior cell -- import or user --
+/// already had; naming a field overwrites it. `set` on a baked-only
+/// selector, or on a currently-DISABLED one, starts from an all-`None`
+/// sparse cell instead: a disabled cell carries no fields to inherit, and
+/// re-enabling via `set` is exactly that -- a fresh cell. Every call always
+/// stamps `source: user` and `verified_at` to today (UTC) -- editing a
+/// cell is itself a ratification, even of one an import last wrote.
+pub(crate) fn set_at(
+    selector_raw: &str,
+    fields: &[String],
+    acknowledge_cost_risk: bool,
+    path: &Path,
+) -> Result<(), CatalogWriteError> {
+    parse_selector(selector_raw)?;
+    let updates: Vec<FieldUpdate> = fields
+        .iter()
+        .map(|f| parse_field(f))
+        .collect::<Result<_, _>>()?;
+
+    let today = today_verified_at();
+    let selector = selector_raw.to_string();
+
+    with_overlay_write_lock::<CatalogWriteError, _>(path, |overlay| {
+        if !selector_known(&selector, &overlay) {
+            return Err(CatalogWriteError::UnknownSelector(selector.clone()));
+        }
+        validate_updates(&updates, acknowledge_cost_risk)?;
+
+        let mut cell = match overlay.cells.get(&selector) {
+            Some(Some(existing)) => existing.clone(),
+            _ => OverlayCell {
+                source: OverlaySource::User,
+                verified_at: today.clone(),
+                wm: None,
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            },
+        };
+        cell.source = OverlaySource::User;
+        cell.verified_at = today.clone();
+        for update in updates {
+            apply_field_update(&mut cell, update);
+        }
+
+        let mut next = overlay;
+        next.cells.insert(selector.clone(), Some(cell));
+        Ok(next)
+    })?;
+
+    println!(
+        "set: selector={selector_raw}  source=user  verified_at={today}  written to {}",
+        path.display()
+    );
+    print_pickup_note();
+    Ok(())
+}
+
+/// `routectl catalog disable <selector>` -- resolves the default overlay
+/// path; see [`disable_at`] for the testable core.
+pub fn disable(selector_raw: &str) -> Result<(), CatalogWriteError> {
+    disable_at(selector_raw, &overlay_default_path())
+}
+
+/// Core of [`disable`]. Same admission rule as [`set_at`] (a brand-new
+/// selector is rejected). A disable always writes JSON `null` regardless
+/// of what the selector previously carried -- there is nothing to
+/// preserve; disabling discards the cell's own field values by design, and
+/// re-enabling is a fresh `set`.
+pub(crate) fn disable_at(selector_raw: &str, path: &Path) -> Result<(), CatalogWriteError> {
+    parse_selector(selector_raw)?;
+    let selector = selector_raw.to_string();
+
+    with_overlay_write_lock::<CatalogWriteError, _>(path, |overlay| {
+        if !selector_known(&selector, &overlay) {
+            return Err(CatalogWriteError::UnknownSelector(selector.clone()));
+        }
+        let mut next = overlay;
+        next.cells.insert(selector.clone(), None);
+        Ok(next)
+    })?;
+
+    println!(
+        "disabled: selector={selector_raw}  written to {}",
+        path.display()
+    );
+    print_pickup_note();
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Table renderer (local copy; do not share the private fn from usage.rs)
 // ---------------------------------------------------------------------------
 
 /// Left-align column 0, right-align the rest, padded to the widest cell in
 /// each column. ASCII spaces only. Callers must pass rows of uniform column
-/// count; a ragged row renders misaligned (never panics).
-fn render_table(rows: &[Vec<String>]) -> String {
+/// count; a ragged row renders misaligned (never panics). `pub(crate)` so
+/// `commands::catalog_import` reuses the same rendering for its diff table
+/// instead of duplicating the alignment logic.
+pub(crate) fn render_table(rows: &[Vec<String>]) -> String {
     if rows.is_empty() {
         return String::new();
     }
@@ -570,6 +957,53 @@ mod tests {
             config.cache_pricing.contains_key("openai-compat:mistral-*"),
             "valid sibling should be inserted"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // overlay_summary_line: list's header (revision + counts by source).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn overlay_summary_line_counts_user_import_and_disabled_cells() {
+        // Arrange: one of each state, at a non-zero revision.
+        let mut overlay = CatalogOverlay {
+            revision: 4,
+            ..CatalogOverlay::default()
+        };
+        overlay.cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::User,
+                ..blank_user_cell()
+            }),
+        );
+        overlay.cells.insert(
+            "openai-compat:mistral-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                ..blank_user_cell()
+            }),
+        );
+        overlay
+            .cells
+            .insert("openai-compat:disabled-model".to_string(), None);
+
+        // Act
+        let line = overlay_summary_line(&overlay);
+
+        // Assert
+        assert!(line.contains("revision 4"), "line: {line}");
+        assert!(line.contains("3 cell(s)"), "line: {line}");
+        assert!(line.contains("1 user"), "line: {line}");
+        assert!(line.contains("1 import"), "line: {line}");
+        assert!(line.contains("1 disabled"), "line: {line}");
+    }
+
+    #[test]
+    fn overlay_summary_line_on_an_empty_overlay_reports_zero_counts() {
+        let line = overlay_summary_line(&CatalogOverlay::default());
+        assert!(line.contains("revision 0"), "line: {line}");
+        assert!(line.contains("0 cell(s)"), "line: {line}");
     }
 
     // -----------------------------------------------------------------------
@@ -861,9 +1295,9 @@ mod tests {
             .get("openai-compat:grok-*")
             .and_then(Option::as_ref)
             .expect("cell present");
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today = today_verified_at();
         assert_eq!(cell.source, OverlaySource::User);
-        assert_eq!(cell.verified_at, today, "verified_at bumped to today");
+        assert_eq!(cell.verified_at, today, "verified_at bumped to UTC today");
         assert_eq!(cell.wm, Some(1.5));
         assert_eq!(cell.min_prefix_tokens, Some(512));
     }
@@ -954,6 +1388,347 @@ mod tests {
             verify_at("no-colon-here", &path).expect_err("malformed selector must be rejected");
         assert!(err.to_string().contains("invalid selector"), "msg: {err}");
         assert!(!path.exists(), "nothing should have been written");
+    }
+
+    // -----------------------------------------------------------------------
+    // set_at / disable_at: user-edit verbs.
+    // -----------------------------------------------------------------------
+
+    fn blank_user_cell() -> OverlayCell {
+        OverlayCell {
+            source: OverlaySource::User,
+            verified_at: "2026-01-01".to_string(),
+            wm: None,
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: None,
+            capabilities: None,
+        }
+    }
+
+    #[test]
+    fn disable_writes_a_null_cell_that_merges_to_disabled_through_the_real_merge_and_never_reuses_a_prior_cell()
+     {
+        // Arrange: seed a present user cell so a disable's discard-on-write
+        // behavior is observable (not just "there was nothing there").
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                min_prefix_tokens: Some(9_999),
+                ..blank_user_cell()
+            }),
+        );
+        save_catalog_overlay(&path, 0, cells).expect("seed");
+
+        // Act
+        disable_at("openai-compat:grok-*", &path).expect("disable must succeed");
+
+        // Assert: the prior cell's fields are gone -- disabling writes a
+        // bare JSON null, not a null-flavored copy of the old values.
+        let overlay = load_catalog_overlay(&path).expect("load");
+        assert_eq!(overlay.cells.get("openai-compat:grok-*"), Some(&None));
+    }
+
+    #[test]
+    fn set_at_writes_a_user_cell_for_a_baked_selector_with_the_field_landing() {
+        // Arrange: an empty overlay -- "openai-compat:grok-*" is baked-known
+        // but has no overlay cell yet.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        // Act
+        set_at(
+            "openai-compat:grok-*",
+            &["min_prefix_tokens=777".to_string()],
+            false,
+            &path,
+        )
+        .expect("set must succeed for a known baked selector");
+
+        // Assert
+        let overlay = load_catalog_overlay(&path).expect("load");
+        let cell = overlay
+            .cells
+            .get("openai-compat:grok-*")
+            .and_then(Option::as_ref)
+            .expect("cell present");
+        assert_eq!(cell.source, OverlaySource::User);
+        assert_eq!(cell.min_prefix_tokens, Some(777));
+        let today = today_verified_at();
+        assert_eq!(cell.verified_at, today, "verified_at auto-stamped to today");
+    }
+
+    #[test]
+    fn set_at_on_an_import_cell_flips_source_to_user_and_keeps_unset_fields() {
+        // Arrange: an existing import cell for a baked selector.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        let mut cells = BTreeMap::new();
+        cells.insert(
+            "openai-compat:grok-*".to_string(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2020-01-01".to_string(),
+                wm: Some(0.5),
+                rm: None,
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&path, 0, cells).expect("seed");
+
+        // Act: set only rm -- this IS ratification-by-edit of the import cell.
+        set_at(
+            "openai-compat:grok-*",
+            &["rm=0.2".to_string()],
+            false,
+            &path,
+        )
+        .expect("set must succeed");
+
+        // Assert
+        let overlay = load_catalog_overlay(&path).expect("load");
+        let cell = overlay
+            .cells
+            .get("openai-compat:grok-*")
+            .and_then(Option::as_ref)
+            .expect("cell present");
+        assert_eq!(cell.source, OverlaySource::User);
+        assert_eq!(cell.rm, Some(0.2));
+        assert_eq!(
+            cell.wm,
+            Some(0.5),
+            "the unset wm field carries through from the prior import cell"
+        );
+    }
+
+    #[test]
+    fn disable_writes_a_null_cell_that_merges_to_disabled_through_the_real_merge() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        // Act
+        disable_at("openai-compat:grok-*", &path)
+            .expect("disable must succeed for a known baked selector");
+
+        // Assert: JSON null on disk, and the real two-layer merge reports
+        // Disabled regardless of the baked row underneath.
+        let overlay = load_catalog_overlay(&path).expect("load");
+        assert_eq!(overlay.cells.get("openai-compat:grok-*"), Some(&None));
+
+        let baked = baked_table_rows();
+        let baked_map: BTreeMap<String, CatalogRow> = baked
+            .into_iter()
+            .map(|c| (format!("{}:{}", c.provider_kind, c.model_glob), c.row))
+            .collect();
+        let effective = merge(
+            baked_map.get("openai-compat:grok-*"),
+            overlay.cells.get("openai-compat:grok-*"),
+        );
+        assert_eq!(effective, EffectiveRow::Disabled);
+    }
+
+    #[test]
+    fn set_at_rejects_an_unknown_selector() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        let err = set_at(
+            "openai-compat:totally-unknown-model-xyz",
+            &["min_prefix_tokens=1".to_string()],
+            false,
+            &path,
+        )
+        .expect_err("an unknown selector must be rejected");
+
+        assert!(
+            matches!(err, CatalogWriteError::UnknownSelector(_)),
+            "{err}"
+        );
+        assert!(!path.exists(), "nothing should have been written");
+    }
+
+    #[test]
+    fn set_at_reports_unknown_selector_even_when_the_value_would_also_fail_validation() {
+        // Admission is checked before value validation: a typo'd selector
+        // paired with a bad value reads as "unknown selector", not a
+        // confusing validation error about a selector that will be
+        // rejected anyway.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        let err = set_at(
+            "openai-compat:totally-unknown-model-xyz",
+            &["wm=1.0".to_string()],
+            false,
+            &path,
+        )
+        .expect_err("an unknown selector must be rejected first");
+
+        assert!(
+            matches!(err, CatalogWriteError::UnknownSelector(_)),
+            "{err}"
+        );
+        assert!(!path.exists(), "nothing should have been written");
+    }
+
+    #[test]
+    fn disable_at_rejects_an_unknown_selector() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        let err = disable_at("openai-compat:totally-unknown-model-xyz", &path)
+            .expect_err("an unknown selector must be rejected");
+
+        assert!(
+            matches!(err, CatalogWriteError::UnknownSelector(_)),
+            "{err}"
+        );
+        assert!(!path.exists(), "nothing should have been written");
+    }
+
+    #[test]
+    fn set_at_and_disable_at_surface_a_corrupt_overlay_as_a_transparent_overlay_error() {
+        // Arrange: a corrupt overlay file -- `with_overlay_write_lock`'s own
+        // `load` fails closed, and that `OverlayError` must propagate through
+        // `CatalogWriteError::Overlay` rather than being swallowed or
+        // misreported as an admission/validation failure.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+        std::fs::write(&path, b"not json {{{").unwrap();
+
+        let err = set_at(
+            "openai-compat:grok-*",
+            &["min_prefix_tokens=1".to_string()],
+            false,
+            &path,
+        )
+        .expect_err("a corrupt overlay must surface as an error");
+        assert!(matches!(err, CatalogWriteError::Overlay(_)), "{err}");
+
+        let err =
+            disable_at("openai-compat:grok-*", &path).expect_err("a corrupt overlay must error");
+        assert!(matches!(err, CatalogWriteError::Overlay(_)), "{err}");
+    }
+
+    #[test]
+    fn set_at_rejects_auto_cacher_naming_the_limitation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        let err = set_at(
+            "openai-compat:grok-*",
+            &["auto_cacher=true".to_string()],
+            false,
+            &path,
+        )
+        .expect_err("auto_cacher must be hard-rejected");
+
+        match err {
+            CatalogWriteError::UnsupportedField { field, reason } => {
+                assert_eq!(field, "auto_cacher");
+                assert!(!reason.is_empty(), "the error must name the limitation");
+            }
+            other => panic!("expected UnsupportedField, got {other:?}"),
+        }
+        assert!(!path.exists(), "nothing should have been written");
+    }
+
+    #[test]
+    fn set_at_rejects_storage_rent_fields_and_verified_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        for raw in [
+            "has_storage_rent=true",
+            "storage_rent=1.0",
+            "verified_at=2020-01-01",
+        ] {
+            let err = set_at("openai-compat:grok-*", &[raw.to_string()], false, &path)
+                .expect_err("field must be hard-rejected");
+            assert!(
+                matches!(err, CatalogWriteError::UnsupportedField { .. }),
+                "raw={raw} err={err}"
+            );
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn set_at_rejects_below_sentinel_wm_without_ack_and_accepts_with_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog_overlay.json");
+
+        // Act / Assert: rejected without the ack flag.
+        let err = set_at(
+            "openai-compat:grok-*",
+            &["wm=1.0".to_string()],
+            false,
+            &path,
+        )
+        .expect_err("a below-sentinel wm without ack must be rejected");
+        assert!(matches!(err, CatalogWriteError::Validation(_)), "{err}");
+        assert!(!path.exists(), "nothing should have been written");
+
+        // Act / Assert: the SAME wm, with the ack flag, is accepted.
+        set_at("openai-compat:grok-*", &["wm=1.0".to_string()], true, &path)
+            .expect("the same wm with the ack flag must be accepted");
+        let overlay = load_catalog_overlay(&path).expect("load");
+        let cell = overlay
+            .cells
+            .get("openai-compat:grok-*")
+            .and_then(Option::as_ref)
+            .expect("cell present");
+        assert_eq!(cell.wm, Some(1.0));
+    }
+
+    #[test]
+    fn validate_updates_enforces_the_override_validate_contract() {
+        // rm <= 0 rejected unconditionally.
+        assert!(validate_updates(&[FieldUpdate::Rm(0.0)], true).is_err());
+
+        // max_context_tokens == 0 (the "window") rejected.
+        assert!(validate_updates(&[FieldUpdate::MaxContextTokens(0)], true).is_err());
+
+        // below-sentinel wm needs the ack flag; the same value with the ack
+        // flag is accepted.
+        assert!(validate_updates(&[FieldUpdate::Wm(1.0)], false).is_err());
+        assert!(validate_updates(&[FieldUpdate::Wm(1.0)], true).is_ok());
+
+        // A field that is not being touched at all needs no ack -- an
+        // untouched, already-below-sentinel `wm` inherited from a prior
+        // cell is never re-validated by this call.
+        assert!(validate_updates(&[FieldUpdate::Rm(0.2)], false).is_ok());
+    }
+
+    #[test]
+    fn parse_field_accepts_a_capability_flag_and_rejects_a_malformed_pair() {
+        match parse_field("cap:web_search=true") {
+            Ok(FieldUpdate::Capability(name, flag)) => {
+                assert_eq!(name, "web_search");
+                assert!(flag);
+            }
+            other => panic!("expected a Capability update, got {other:?}"),
+        }
+
+        let err = parse_field("no-equals-sign").expect_err("must reject a pair with no `=`");
+        assert!(
+            matches!(err, CatalogWriteError::InvalidField { .. }),
+            "{err}"
+        );
+
+        let err = parse_field("wm=not-a-number").expect_err("must reject a malformed number");
+        assert!(
+            matches!(err, CatalogWriteError::InvalidField { .. }),
+            "{err}"
+        );
     }
 
     fn minimal_config() -> Config {
