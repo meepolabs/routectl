@@ -4055,6 +4055,40 @@ impl RetryPolicy {
         true
     }
 
+    /// Raw-status escape hatch: when an operator has explicitly named a
+    /// status in `retry_allowlist` or `retry_denylist`, that naming wins
+    /// over whatever a failure-class policy (429 vs. 5xx vs. network)
+    /// would otherwise decide for the same code. Centralizing the
+    /// precedence check here means every future consumer that layers
+    /// class-level retry policy on top of this one calls this method
+    /// first and only falls back to class policy on `None` -- so the
+    /// "an explicit list entry beats the class default" rule is encoded
+    /// exactly once instead of re-derived at each call site.
+    ///
+    /// Returns:
+    ///   - `Some(true)` -- `retry_allowlist` is non-empty and contains
+    ///     `status`.
+    ///   - `Some(false)` -- `retry_allowlist` is non-empty but does not
+    ///     contain `status` (an allowlist that doesn't name a code is an
+    ///     explicit exclude for it), OR `retry_allowlist` is empty and
+    ///     `retry_denylist` is `Some` and contains `status`.
+    ///   - `None` -- neither list applies to `status`, i.e. no explicit
+    ///     override exists and the caller should fall through to class
+    ///     policy.
+    pub fn explicit_status_override(&self, status: u16) -> Option<bool> {
+        if !self.retry_allowlist.is_empty() {
+            return Some(self.retry_allowlist.contains(&status));
+        }
+        if let Some(denylist) = &self.retry_denylist {
+            return if denylist.contains(&status) {
+                Some(false)
+            } else {
+                None
+            };
+        }
+        None
+    }
+
     /// Resolve the retry cap for a given upstream HTTP status code.
     /// Returns 0 for non-retryable errors.
     ///
@@ -4632,6 +4666,102 @@ tokens = ["literal:abc", "env://TOK"]
         let cfg: Config = toml::from_str(toml_text).expect("valid auth block parses");
         let auth = cfg.server.auth.expect("auth present");
         assert_eq!(auth.tokens, vec!["literal:abc", "env://TOK"]);
+    }
+}
+
+#[cfg(test)]
+mod explicit_status_override_tests {
+    //! Cover every branch of `RetryPolicy::explicit_status_override`.
+    use super::RetryPolicy;
+
+    fn policy() -> RetryPolicy {
+        RetryPolicy::default()
+    }
+
+    #[test]
+    fn allowlist_hit_returns_some_true() {
+        let mut p = policy();
+        p.retry_allowlist = vec![503];
+        p.retry_denylist = None;
+        assert_eq!(p.explicit_status_override(503), Some(true));
+    }
+
+    #[test]
+    fn allowlist_set_but_miss_returns_some_false() {
+        let mut p = policy();
+        p.retry_allowlist = vec![503];
+        p.retry_denylist = None;
+        // 500 is a 5xx but not named in the allowlist -- an
+        // allowlist-set-but-miss is an explicit exclude, not "defer to
+        // class policy".
+        assert_eq!(p.explicit_status_override(500), Some(false));
+    }
+
+    #[test]
+    fn denylist_hit_returns_some_false() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = Some(vec![501]);
+        assert_eq!(p.explicit_status_override(501), Some(false));
+    }
+
+    #[test]
+    fn denylist_miss_returns_none() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = Some(vec![501]);
+        // 503 is not named in the denylist -- no explicit override,
+        // defer to class policy.
+        assert_eq!(p.explicit_status_override(503), None);
+    }
+
+    #[test]
+    fn neither_list_set_returns_none() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = None;
+        assert_eq!(p.explicit_status_override(503), None);
+    }
+
+    #[test]
+    fn allowlist_hit_outside_error_range_returns_some_true() {
+        // The override is a pure list-membership check with no range
+        // gating (unlike `is_fallbackable_status`), so a status outside
+        // 400..=599 still resolves via allowlist/denylist membership.
+        let mut p = policy();
+        p.retry_allowlist = vec![200];
+        p.retry_denylist = None;
+        assert_eq!(p.explicit_status_override(200), Some(true));
+    }
+
+    #[test]
+    fn allowlist_miss_outside_error_range_returns_some_false() {
+        let mut p = policy();
+        p.retry_allowlist = vec![200];
+        p.retry_denylist = None;
+        assert_eq!(p.explicit_status_override(201), Some(false));
+    }
+
+    #[test]
+    fn denylist_hit_outside_error_range_returns_some_false() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = Some(vec![200]);
+        assert_eq!(p.explicit_status_override(200), Some(false));
+    }
+
+    #[test]
+    fn denylist_miss_outside_error_range_returns_none() {
+        let mut p = policy();
+        p.retry_allowlist = vec![];
+        p.retry_denylist = Some(vec![200]);
+        assert_eq!(p.explicit_status_override(201), None);
+    }
+
+    #[test]
+    fn neither_list_set_outside_error_range_returns_none() {
+        let neither = policy();
+        assert_eq!(neither.explicit_status_override(200), None);
     }
 }
 
