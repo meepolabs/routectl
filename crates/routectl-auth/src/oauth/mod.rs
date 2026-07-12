@@ -17,7 +17,7 @@
 //! - `file_io.rs`: atomic load/save of credentials.json (tempfile +
 //!   rename), `chmod 0600` enforcement on Unix.
 //! - `pkce.rs`: code verifier, code challenge (SHA-256, base64url-no-pad),
-//!   CSRF state token. `OsRng`-sourced; never logged.
+//!   CSRF state token. `SysRng`-sourced; never logged.
 //! - `store.rs`: `OAuthStore` -- the `SecretStore` impl that owns the
 //!   in-memory cache and the refresh single-flight gate.
 //! - `login.rs`: callback `axum` sub-app + `webbrowser` launch + flow
