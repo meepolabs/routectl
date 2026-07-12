@@ -359,6 +359,30 @@ pub fn diff_overlay(
     diff
 }
 
+/// `true` when applying `diff.applied` would write nothing new to the
+/// overlay: every applied row's candidate cell is byte-identical
+/// (including `verified_at`) to the overlay cell already sitting there
+/// under that selector. Vacuously `true` when `diff.applied` is empty --
+/// the pre-existing no-op case this extends.
+///
+/// A row only reaches `applied` with `ExistingCell::Absent` or
+/// `ExistingCell::Present` (never `Disabled`, which always sorts into
+/// `conflicted` -- see [`diff_overlay`]'s doc). `Absent` is never a
+/// no-op: there is nothing yet on disk to match, so a fresh selector
+/// always counts as a real change. `Present` is a no-op exactly when the
+/// existing cell equals the candidate field-for-field -- which, for a
+/// same-day re-import, includes `verified_at`: both runs stamp the same
+/// calendar date, so a byte-identical source pair produces a
+/// byte-identical candidate cell. A re-import on a LATER day moves
+/// `verified_at` even with unchanged prices, and that counts as a real
+/// change, same as any other field's drift.
+#[must_use]
+pub fn diff_has_no_effective_change(diff: &ImportDiff) -> bool {
+    diff.applied.iter().all(|row| {
+        matches!(&row.existing, ExistingCell::Present(existing) if *existing == row.candidate)
+    })
+}
+
 /// Build one [`DiffRow`], escalating the impact class of every
 /// candidate field that actually differs from the CURRENT effective
 /// value: `existing`'s own field when it sets one, else `baked`'s.
@@ -1353,6 +1377,85 @@ mod tests {
 
         // Assert
         assert_eq!(diff.skipped, candidate.skipped);
+    }
+
+    // -----------------------------------------------------------------------
+    // diff_has_no_effective_change: the byte-identical re-import guard.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn diff_has_no_effective_change_is_vacuously_true_for_an_empty_applied_set() {
+        let diff = ImportDiff::default();
+        assert!(diff_has_no_effective_change(&diff));
+    }
+
+    #[test]
+    fn diff_has_no_effective_change_true_when_the_existing_import_cell_matches_exactly() {
+        // Arrange: the candidate re-derives the exact same cell (including
+        // verified_at) already sitting in the overlay -- a same-day,
+        // byte-identical re-import.
+        let selector = opus_selector();
+        let candidate = one_cell_candidate(&selector, candidate_cell(1.0, 0.10));
+        let overlay = overlay_with_cell(&selector, Some(candidate_cell(1.0, 0.10)));
+        let baked = baked_row_map();
+
+        // Act
+        let diff = diff_overlay(&overlay, &candidate, &baked);
+
+        // Assert
+        assert_eq!(diff.applied.len(), 1, "still classified as applied");
+        assert!(diff_has_no_effective_change(&diff));
+    }
+
+    #[test]
+    fn diff_has_no_effective_change_false_when_a_value_field_actually_differs() {
+        // Arrange: same selector, but the candidate's rm differs from the
+        // existing import cell's rm.
+        let selector = opus_selector();
+        let candidate = one_cell_candidate(&selector, candidate_cell(1.0, 0.10));
+        let overlay = overlay_with_cell(&selector, Some(candidate_cell(1.0, 0.20)));
+        let baked = baked_row_map();
+
+        // Act
+        let diff = diff_overlay(&overlay, &candidate, &baked);
+
+        // Assert
+        assert!(!diff_has_no_effective_change(&diff));
+    }
+
+    #[test]
+    fn diff_has_no_effective_change_false_when_only_verified_at_moved() {
+        // Arrange: every value field agrees, but the existing cell's
+        // verified_at is an earlier date than the candidate's -- a
+        // re-import on a later day must still count as a real change.
+        let selector = opus_selector();
+        let candidate = one_cell_candidate(&selector, candidate_cell(1.0, 0.10));
+        let mut stale = candidate_cell(1.0, 0.10);
+        stale.verified_at = "2020-01-01".to_string();
+        let overlay = overlay_with_cell(&selector, Some(stale));
+        let baked = baked_row_map();
+
+        // Act
+        let diff = diff_overlay(&overlay, &candidate, &baked);
+
+        // Assert
+        assert!(!diff_has_no_effective_change(&diff));
+    }
+
+    #[test]
+    fn diff_has_no_effective_change_false_for_a_fresh_absent_selector() {
+        // Arrange: a fresh apply into an absent overlay key is never a
+        // no-op, even though it is the only row in `applied`.
+        let selector = opus_selector();
+        let candidate = one_cell_candidate(&selector, candidate_cell(1.0, 0.10));
+        let baked = baked_row_map();
+
+        // Act
+        let diff = diff_overlay(&CatalogOverlay::default(), &candidate, &baked);
+
+        // Assert
+        assert_eq!(diff.applied[0].existing, ExistingCell::Absent);
+        assert!(!diff_has_no_effective_change(&diff));
     }
 
     // -----------------------------------------------------------------------

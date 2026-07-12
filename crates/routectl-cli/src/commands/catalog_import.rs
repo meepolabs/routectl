@@ -31,8 +31,8 @@ use serde_json::Value;
 use routectl_router::{
     CandidateOrigin, CatalogOverlay, CatalogRow, ImpactClass, ImportCandidate, ImportDiff,
     OverlayError, ShrinkVerdict, baked_row_map, baked_shrink_counts, build_import_candidate,
-    candidate_shrink_counts, catalog_import_state_default_path, diff_overlay,
-    load_catalog_import_baseline, load_catalog_overlay, overlay_default_path,
+    candidate_shrink_counts, catalog_import_state_default_path, diff_has_no_effective_change,
+    diff_overlay, load_catalog_import_baseline, load_catalog_overlay, overlay_default_path,
     persist_catalog_import_baseline, shrink_guard, with_overlay_write_lock,
 };
 
@@ -196,7 +196,7 @@ async fn run_at(
 
     let baked = baked_row_map();
     let initial_overlay = load_catalog_overlay(overlay_path)?;
-    let (diff, saved) = confirm_and_apply(
+    let (diff, saved, wrote) = confirm_and_apply(
         overlay_path,
         &candidate,
         &baked,
@@ -215,7 +215,7 @@ async fn run_at(
         source_hashes,
     );
 
-    print_summary(&diff, &saved);
+    print_summary(&diff, &saved, wrote);
     Ok(())
 }
 
@@ -450,13 +450,28 @@ fn apply_diff(
 /// against the overlay [`apply_diff`] actually saw and confirms again; a
 /// SECOND conflict aborts (bounded, no retry loop) -- the verbatim
 /// lock-scope flow this module's doc describes. When the confirmed diff
-/// has nothing in `applied` (every row skipped or conflicted), the write
-/// lock is never acquired at all -- there is nothing to merge, and
-/// acquiring it anyway would still bump the overlay's revision for zero
-/// content change.
+/// carries no EFFECTIVE change (see
+/// [`routectl_router::diff_has_no_effective_change`] -- either
+/// `applied` is empty, or every applied row is byte-identical to what the
+/// overlay already carries for that selector, the byte-identical
+/// re-import case), the write lock is never acquired: instead, a cheap
+/// unlocked re-read of `overlay_path` confirms nothing has changed since
+/// the diff was computed (the confirm window the lock never covers). A
+/// revision match there means the no-op verdict is still valid, so the
+/// lock is skipped entirely -- acquiring it anyway would still bump the
+/// overlay's revision (and fire a hot-reload watch) for zero content
+/// change. A revision MISMATCH there is treated exactly like a
+/// [`ApplyError::RevisionChanged`] at apply time: one fresh diff is
+/// recomputed and confirmed again against the re-read overlay, sharing
+/// the SAME bounded single-retry budget as the write path (a second
+/// mismatch of EITHER kind aborts). The returned `bool` is `true`
+/// exactly when a write actually landed -- callers use it to report "no
+/// changes" instead of a written count, and to skip the reload pickup
+/// note.
 ///
-/// `before_apply` runs once per non-empty-diff attempt, right after
-/// confirmation and right before the write-lock is acquired: production
+/// `before_apply` runs once per confirmed attempt, right after
+/// confirmation and right before this function acts on the diff (the
+/// unlocked no-op re-read, or the write-lock acquisition): production
 /// passes a no-op; tests use it to inject a concurrent write into the
 /// confirm window the lock never covers.
 fn confirm_and_apply(
@@ -466,7 +481,7 @@ fn confirm_and_apply(
     initial_overlay: CatalogOverlay,
     yes: bool,
     mut before_apply: impl FnMut(),
-) -> Result<(ImportDiff, CatalogOverlay), ImportError> {
+) -> Result<(ImportDiff, CatalogOverlay, bool), ImportError> {
     let mut overlay = initial_overlay;
     let mut attempt: u8 = 0;
     loop {
@@ -484,24 +499,39 @@ fn confirm_and_apply(
             return Err(ImportError::Cancelled);
         }
 
-        if diff.applied.is_empty() {
-            // Nothing to write: skip the lock entirely rather than pay for
-            // a no-op merge that would still bump the overlay's revision
-            // (`with_overlay_write_lock`'s `save` always writes revision +
-            // 1 once the closure returns `Ok`, even with unchanged cell
-            // content).
-            tracing::info!(attempt, outcome = "noop", "catalog import: commit result",);
-            return Ok((diff, overlay));
-        }
-
         before_apply();
+
+        if diff_has_no_effective_change(&diff) {
+            let on_disk = load_catalog_overlay(overlay_path)?;
+            if on_disk.revision == overlay.revision {
+                // Nothing to write: skip the lock entirely rather than pay
+                // for a no-op merge that would still bump the overlay's
+                // revision (`with_overlay_write_lock`'s `save` always
+                // writes revision + 1 once the closure returns `Ok`, even
+                // with unchanged cell content). The unlocked re-read just
+                // above proves no concurrent writer moved the overlay out
+                // from under this verdict, so it is safe to trust.
+                tracing::info!(attempt, outcome = "noop", "catalog import: commit result",);
+                return Ok((diff, overlay, false));
+            }
+            attempt += 1;
+            if attempt >= 2 {
+                return Err(ImportError::RevisionConflictBounded);
+            }
+            println!(
+                "note: the overlay changed since this diff was shown; recomputing one \
+                 fresh diff..."
+            );
+            overlay = on_disk;
+            continue;
+        }
 
         let expected_revision = overlay.revision;
         let started = Instant::now();
         match apply_diff(overlay_path, expected_revision, &diff) {
             Ok(saved) => {
                 log_commit_result(expected_revision, Some(saved.revision), started.elapsed());
-                return Ok((diff, saved));
+                return Ok((diff, saved, true));
             }
             Err(ApplyError::RevisionChanged(fresh)) => {
                 log_commit_result(expected_revision, None, started.elapsed());
@@ -640,16 +670,40 @@ fn opt_u32(v: Option<u32>) -> String {
     v.map_or_else(|| "-".to_string(), |n| n.to_string())
 }
 
-fn print_summary(diff: &ImportDiff, saved: &CatalogOverlay) {
-    println!(
-        "\nimport applied: {} selector(s) written, {} skipped, {} conflicted; overlay revision \
-         is now {}.",
-        diff.applied.len(),
-        diff.skipped.len(),
-        diff.conflicted.len(),
-        saved.revision,
-    );
-    super::catalog::print_pickup_note();
+fn print_summary(diff: &ImportDiff, saved: &CatalogOverlay, wrote: bool) {
+    println!("\n{}", summary_line(diff, saved, wrote));
+    if wrote {
+        super::catalog::print_pickup_note();
+    }
+}
+
+/// The one-line commit summary [`print_summary`] prints. Pure (returns a
+/// `String` rather than printing directly) so the "no changes" vs.
+/// "applied" wording is unit-testable without capturing stdout. `wrote`
+/// is `false` exactly when [`confirm_and_apply`] took its no-effective-
+/// change path (see its doc) -- the write lock was never acquired, so
+/// `saved` is whatever overlay [`confirm_and_apply`] last saw rather than
+/// a freshly-persisted one, and no reload pickup note follows.
+fn summary_line(diff: &ImportDiff, saved: &CatalogOverlay, wrote: bool) -> String {
+    if wrote {
+        format!(
+            "import applied: {} selector(s) written, {} skipped, {} conflicted; overlay \
+             revision is now {}.",
+            diff.applied.len(),
+            diff.skipped.len(),
+            diff.conflicted.len(),
+            saved.revision,
+        )
+    } else {
+        format!(
+            "import: no changes ({} selector(s) already up to date, {} skipped, {} conflicted); \
+             overlay revision remains {}.",
+            diff.applied.len(),
+            diff.skipped.len(),
+            diff.conflicted.len(),
+            saved.revision,
+        )
+    }
 }
 
 /// A cheap, non-cryptographic content fingerprint for
@@ -747,6 +801,55 @@ mod tests {
             !overlay.cells.is_empty(),
             "at least one selector must have been admitted"
         );
+    }
+
+    #[tokio::test]
+    async fn a_byte_identical_reimport_through_run_at_does_not_bump_the_overlay_revision() {
+        // Arrange: run the same file-sourced import twice against the same
+        // unchanged fixtures. The first run persists a baseline that
+        // exactly matches the real candidate's own counts (see the sibling
+        // happy-path test's doc for why), so the second run's shrink guard
+        // stays healthy too.
+        let dir = tempfile::tempdir().unwrap();
+        let real_candidate = real_candidate_from_fixtures(dir.path());
+        let baseline_path = dir.path().join("catalog_import_state.json");
+        inflated_baseline(&baseline_path, &real_candidate, 1);
+
+        let (litellm, models_dev) = copy_fixtures(dir.path());
+        let overlay_path = dir.path().join("catalog_overlay.json");
+
+        // Act: first import writes the candidate's cells.
+        run_at(
+            &file_args(litellm.clone(), models_dev.clone(), false),
+            &overlay_path,
+            &baseline_path,
+            &noop_endpoints(),
+        )
+        .await
+        .expect("first import must succeed");
+        let after_first = load_catalog_overlay(&overlay_path).expect("load after first import");
+        let revision_after_first = after_first.revision;
+        let bytes_after_first = std::fs::read(&overlay_path).unwrap();
+
+        // Act: an immediate re-import of the exact same fixtures.
+        run_at(
+            &file_args(litellm, models_dev, false),
+            &overlay_path,
+            &baseline_path,
+            &noop_endpoints(),
+        )
+        .await
+        .expect("a byte-identical re-import must still succeed");
+
+        // Assert: the overlay is byte-unchanged -- no revision bump, no
+        // write at all -- for zero content change.
+        let bytes_after_second = std::fs::read(&overlay_path).unwrap();
+        assert_eq!(
+            bytes_after_first, bytes_after_second,
+            "a byte-identical re-import must leave the overlay file byte-unchanged"
+        );
+        let after_second = load_catalog_overlay(&overlay_path).expect("load after second import");
+        assert_eq!(after_second.revision, revision_after_first);
     }
 
     #[tokio::test]
@@ -1005,7 +1108,7 @@ mod tests {
         let baked = baked_row_map();
 
         // Act
-        let (diff, saved) = confirm_and_apply(
+        let (diff, saved, wrote) = confirm_and_apply(
             &overlay_path,
             &candidate,
             &baked,
@@ -1022,6 +1125,7 @@ mod tests {
         assert_eq!(diff.applied.len(), 0);
         assert_eq!(diff.conflicted.len(), 1);
         assert_eq!(saved.revision, initial_revision);
+        assert!(!wrote, "an empty applied set must never write");
         let reloaded = load_catalog_overlay(&overlay_path).expect("reload");
         let cell = reloaded
             .cells
@@ -1030,6 +1134,168 @@ mod tests {
             .expect("cell still present");
         assert_eq!(cell.source, OverlaySource::User);
         assert_eq!(cell.wm, Some(9.99), "the user's value must be preserved");
+    }
+
+    // -----------------------------------------------------------------------
+    // Byte-identical re-import: the no-effective-change guard skips the
+    // write (and the revision bump), even though the row still sorts into
+    // `applied` (its selector's existing cell is `source: import`).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn confirm_and_apply_skips_the_write_on_a_byte_identical_reimport() {
+        // Arrange: seed the overlay with exactly the cell `opus_candidate`
+        // would (re-)derive -- same source, verified_at, wm, and rm --
+        // simulating a same-day re-import of unchanged upstream data.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let selector = "anthropic-api:claude-opus-4-8*".to_string();
+        let mut seed = BTreeMap::new();
+        seed.insert(
+            selector.clone(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-07-11".to_string(),
+                wm: Some(1.0),
+                rm: Some(0.1),
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&overlay_path, 0, seed).expect("seed overlay");
+        let initial_overlay = load_catalog_overlay(&overlay_path).expect("reload seeded overlay");
+        let initial_revision = initial_overlay.revision;
+        let candidate = opus_candidate();
+        let baked = baked_row_map();
+
+        // Act
+        let (diff, saved, wrote) = confirm_and_apply(
+            &overlay_path,
+            &candidate,
+            &baked,
+            initial_overlay,
+            true,
+            || {},
+        )
+        .expect("a byte-identical re-import must still succeed");
+
+        // Assert: the row is classified applied (an import cell is always
+        // eligible), but nothing was actually written -- no revision bump.
+        assert_eq!(diff.applied.len(), 1, "still classified as applied");
+        assert!(!wrote, "a byte-identical re-import must not write");
+        assert_eq!(saved.revision, initial_revision, "revision must not bump");
+        let reloaded = load_catalog_overlay(&overlay_path).expect("reload");
+        assert_eq!(
+            reloaded.revision, initial_revision,
+            "on-disk revision must not bump either"
+        );
+        let cell = reloaded
+            .cells
+            .get(&selector)
+            .and_then(Option::as_ref)
+            .expect("cell still present");
+        assert_eq!(cell.wm, Some(1.0));
+    }
+
+    #[test]
+    fn confirm_and_apply_still_writes_and_bumps_when_one_field_actually_changed() {
+        // Arrange: the existing import cell's wm differs from the
+        // candidate's -- a real change, not a re-import no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let selector = "anthropic-api:claude-opus-4-8*".to_string();
+        let mut seed = BTreeMap::new();
+        seed.insert(
+            selector,
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-07-11".to_string(),
+                wm: Some(1.5),
+                rm: Some(0.1),
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&overlay_path, 0, seed).expect("seed overlay");
+        let initial_overlay = load_catalog_overlay(&overlay_path).expect("reload seeded overlay");
+        let initial_revision = initial_overlay.revision;
+        let candidate = opus_candidate();
+        let baked = baked_row_map();
+
+        // Act
+        let (diff, saved, wrote) = confirm_and_apply(
+            &overlay_path,
+            &candidate,
+            &baked,
+            initial_overlay,
+            true,
+            || {},
+        )
+        .expect("a real change must apply");
+
+        // Assert
+        assert_eq!(diff.applied.len(), 1);
+        assert!(wrote, "a changed field must write");
+        assert_eq!(saved.revision, initial_revision + 1);
+    }
+
+    #[test]
+    fn confirm_and_apply_treats_a_verified_at_only_change_as_a_real_change_when_the_date_differs() {
+        // Arrange: every value field agrees with the candidate, but the
+        // existing cell's verified_at is an earlier date -- a re-import on
+        // a LATER day must still bump the revision, per the module's
+        // no-effective-change contract.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let selector = "anthropic-api:claude-opus-4-8*".to_string();
+        let mut seed = BTreeMap::new();
+        seed.insert(
+            selector.clone(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2020-01-01".to_string(),
+                wm: Some(1.0),
+                rm: Some(0.1),
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&overlay_path, 0, seed).expect("seed overlay");
+        let initial_overlay = load_catalog_overlay(&overlay_path).expect("reload seeded overlay");
+        let initial_revision = initial_overlay.revision;
+        let candidate = opus_candidate();
+        let baked = baked_row_map();
+
+        // Act
+        let (_, saved, wrote) = confirm_and_apply(
+            &overlay_path,
+            &candidate,
+            &baked,
+            initial_overlay,
+            true,
+            || {},
+        )
+        .expect("a verified_at-only change on a later day must apply");
+
+        // Assert
+        assert!(
+            wrote,
+            "a moved verified_at date must count as a real change"
+        );
+        assert_eq!(saved.revision, initial_revision + 1);
+        let reloaded = load_catalog_overlay(&overlay_path).expect("reload");
+        let cell = reloaded
+            .cells
+            .get(&selector)
+            .and_then(Option::as_ref)
+            .expect("cell still present");
+        assert_eq!(cell.verified_at, "2026-07-11");
     }
 
     // -----------------------------------------------------------------------
@@ -1097,9 +1363,10 @@ mod tests {
 
         // Assert: exactly one re-diff recovers and the second attempt
         // succeeds.
-        let (diff, saved) = result.expect("a single interleaved write must be recoverable");
+        let (diff, saved, wrote) = result.expect("a single interleaved write must be recoverable");
         assert_eq!(diff.applied.len(), 1);
         assert_eq!(saved.revision, 3, "seed(1) + interleaved(2) + apply(3)");
+        assert!(wrote);
     }
 
     #[test]
@@ -1135,6 +1402,234 @@ mod tests {
 
         // Assert: bounded -- no infinite retry loop, a clear abort instead.
         let err = result.expect_err("a second interleaved write must abort");
+        assert!(matches!(err, ImportError::RevisionConflictBounded));
+    }
+
+    // -----------------------------------------------------------------------
+    // The no-effective-change fast path never trusts a stale snapshot: a
+    // concurrent write during the confirm window (which the lock never
+    // covers) is caught by the unlocked revision re-read and forces one
+    // bounded recompute, exactly like a revision conflict at apply time.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[serial]
+    fn a_concurrent_write_to_an_unrelated_selector_during_the_noop_window_still_confirms_the_noop()
+    {
+        // Arrange: seed the overlay with exactly the cell `opus_candidate`
+        // would re-derive -- a byte-identical re-import setup -- then have
+        // the FIRST attempt's hook write to a DIFFERENT selector, moving
+        // the revision without touching the selector the no-op verdict is
+        // about.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let selector = "anthropic-api:claude-opus-4-8*".to_string();
+        let mut seed = BTreeMap::new();
+        seed.insert(
+            selector.clone(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-07-11".to_string(),
+                wm: Some(1.0),
+                rm: Some(0.1),
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&overlay_path, 0, seed).expect("seed overlay");
+        let initial_overlay = load_catalog_overlay(&overlay_path).expect("reload seeded overlay");
+        let candidate = opus_candidate();
+        let baked = baked_row_map();
+        let overlay_path_for_hook = overlay_path.clone();
+        let mut interleaved_once = false;
+
+        // Act
+        let result = confirm_and_apply(
+            &overlay_path,
+            &candidate,
+            &baked,
+            initial_overlay,
+            true,
+            move || {
+                if !interleaved_once {
+                    interleaved_once = true;
+                    with_overlay_write_lock::<OverlayError, _>(&overlay_path_for_hook, |overlay| {
+                        let mut next = overlay;
+                        next.cells.insert("bedrock:*".to_string(), None);
+                        Ok(next)
+                    })
+                    .expect("interleaved writer");
+                }
+            },
+        );
+
+        // Assert: the recompute against the fresh overlay still finds the
+        // opus selector unaffected, so the no-op verdict holds -- but the
+        // reported revision reflects the interleaved writer's bump, not a
+        // second bump from this call.
+        let (diff, saved, wrote) =
+            result.expect("an unrelated interleaved write must not derail the no-op verdict");
+        assert_eq!(diff.applied.len(), 1);
+        assert!(!wrote, "the opus selector itself never changed");
+        assert_eq!(
+            saved.revision, 2,
+            "seed(1) + interleaved bedrock disable(2)"
+        );
+        let cell = load_catalog_overlay(&overlay_path)
+            .expect("reload")
+            .cells
+            .get(&selector)
+            .and_then(Option::as_ref)
+            .cloned()
+            .expect("cell still present");
+        assert_eq!(cell.wm, Some(1.0), "the opus cell must be untouched");
+    }
+
+    #[test]
+    #[serial]
+    fn a_concurrent_write_to_the_same_selector_during_the_noop_window_is_caught_and_applied() {
+        // Arrange: same byte-identical-re-import seed as above, but this
+        // time the interleaved writer changes the EXACT selector the
+        // candidate targets -- a real concurrent edit that must invalidate
+        // the pre-confirm no-op verdict, not silently vanish behind it.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let selector = "anthropic-api:claude-opus-4-8*".to_string();
+        let mut seed = BTreeMap::new();
+        seed.insert(
+            selector.clone(),
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-07-11".to_string(),
+                wm: Some(1.0),
+                rm: Some(0.1),
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&overlay_path, 0, seed).expect("seed overlay");
+        let initial_overlay = load_catalog_overlay(&overlay_path).expect("reload seeded overlay");
+        let candidate = opus_candidate();
+        let baked = baked_row_map();
+        let overlay_path_for_hook = overlay_path.clone();
+        let mut interleaved_once = false;
+
+        // Act: the interleaved writer bumps the SAME selector's wm to 2.0
+        // (still `source: import`) before this call's no-op check would
+        // otherwise have trusted its stale pre-confirm snapshot.
+        let result = confirm_and_apply(
+            &overlay_path,
+            &candidate,
+            &baked,
+            initial_overlay,
+            true,
+            move || {
+                if !interleaved_once {
+                    interleaved_once = true;
+                    with_overlay_write_lock::<OverlayError, _>(&overlay_path_for_hook, |overlay| {
+                        let mut next = overlay;
+                        next.cells.insert(
+                            selector.clone(),
+                            Some(OverlayCell {
+                                source: OverlaySource::Import,
+                                verified_at: "2026-07-11".to_string(),
+                                wm: Some(2.0),
+                                rm: Some(0.1),
+                                ttl_seconds: None,
+                                min_prefix_tokens: None,
+                                max_context_tokens: None,
+                                capabilities: None,
+                            }),
+                        );
+                        Ok(next)
+                    })
+                    .expect("interleaved writer");
+                }
+            },
+        );
+
+        // Assert: the recompute against the fresh overlay sees a real
+        // change (candidate wm=1.0 vs. the interleaved wm=2.0), applies
+        // it, and the candidate's value -- not the interleaved one -- wins
+        // on disk.
+        let (diff, saved, wrote) =
+            result.expect("a same-selector interleaved write must be recoverable");
+        assert_eq!(diff.applied.len(), 1);
+        assert!(
+            wrote,
+            "a real concurrent edit must not be reported as a no-op"
+        );
+        assert_eq!(
+            saved.revision, 3,
+            "seed(1) + interleaved same-selector write(2) + this apply(3)"
+        );
+        let cell = load_catalog_overlay(&overlay_path)
+            .expect("reload")
+            .cells
+            .get("anthropic-api:claude-opus-4-8*")
+            .and_then(Option::as_ref)
+            .cloned()
+            .expect("cell still present");
+        assert_eq!(
+            cell.wm,
+            Some(1.0),
+            "the candidate's own value must win, not the interleaved one"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_second_concurrent_write_during_the_noop_window_aborts_with_no_retry_loop() {
+        // Arrange: same byte-identical-re-import seed, but EVERY attempt's
+        // hook writes to the overlay, so the revision has already moved
+        // again by the time the second no-op re-read re-checks it.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("catalog_overlay.json");
+        let selector = "anthropic-api:claude-opus-4-8*".to_string();
+        let mut seed = BTreeMap::new();
+        seed.insert(
+            selector,
+            Some(OverlayCell {
+                source: OverlaySource::Import,
+                verified_at: "2026-07-11".to_string(),
+                wm: Some(1.0),
+                rm: Some(0.1),
+                ttl_seconds: None,
+                min_prefix_tokens: None,
+                max_context_tokens: None,
+                capabilities: None,
+            }),
+        );
+        save_catalog_overlay(&overlay_path, 0, seed).expect("seed overlay");
+        let initial_overlay = load_catalog_overlay(&overlay_path).expect("reload seeded overlay");
+        let candidate = opus_candidate();
+        let baked = baked_row_map();
+        let overlay_path_for_hook = overlay_path.clone();
+
+        // Act
+        let result = confirm_and_apply(
+            &overlay_path,
+            &candidate,
+            &baked,
+            initial_overlay,
+            true,
+            move || {
+                with_overlay_write_lock::<OverlayError, _>(&overlay_path_for_hook, |overlay| {
+                    let mut next = overlay;
+                    next.cells.insert("bedrock:*".to_string(), None);
+                    Ok(next)
+                })
+                .expect("interleaved writer");
+            },
+        );
+
+        // Assert: bounded -- no infinite retry loop, a clear abort instead.
+        let err =
+            result.expect_err("a second interleaved write during the no-op window must abort");
         assert!(matches!(err, ImportError::RevisionConflictBounded));
     }
 
@@ -1178,7 +1673,7 @@ mod tests {
         });
 
         // Act
-        let (_, saved) = confirm_and_apply(
+        let (_, saved, wrote) = confirm_and_apply(
             &overlay_path,
             &candidate,
             &baked,
@@ -1198,6 +1693,7 @@ mod tests {
         let final_overlay = load_catalog_overlay(&overlay_path).expect("final load");
         assert_eq!(final_overlay.revision, 3);
         assert!(saved.revision >= 2);
+        assert!(wrote);
         let opus = final_overlay
             .cells
             .get("anthropic-api:claude-opus-4-8*")
@@ -1242,7 +1738,7 @@ mod tests {
         });
 
         // Act
-        let (_, saved) = confirm_and_apply(
+        let (_, saved, wrote) = confirm_and_apply(
             &overlay_path,
             &candidate,
             &baked,
@@ -1262,6 +1758,7 @@ mod tests {
         let final_overlay = load_catalog_overlay(&overlay_path).expect("final load");
         assert_eq!(final_overlay.revision, 3);
         assert!(saved.revision >= 2);
+        assert!(wrote);
         let opus = final_overlay
             .cells
             .get("anthropic-api:claude-opus-4-8*")
@@ -1291,6 +1788,35 @@ mod tests {
     fn source_mode_reports_file_vs_network() {
         assert_eq!(source_mode(Some(std::path::Path::new("x"))), "file");
         assert_eq!(source_mode(None), "network");
+    }
+
+    #[test]
+    fn summary_line_reports_no_changes_when_nothing_was_written() {
+        let diff = ImportDiff::default();
+        let saved = CatalogOverlay {
+            revision: 3,
+            ..CatalogOverlay::default()
+        };
+
+        let line = summary_line(&diff, &saved, false);
+
+        assert!(line.contains("no changes"), "line: {line}");
+        assert!(line.contains("remains 3"), "line: {line}");
+    }
+
+    #[test]
+    fn summary_line_reports_a_written_count_when_a_write_occurred() {
+        let diff = ImportDiff::default();
+        let saved = CatalogOverlay {
+            revision: 4,
+            ..CatalogOverlay::default()
+        };
+
+        let line = summary_line(&diff, &saved, true);
+
+        assert!(line.contains("written"), "line: {line}");
+        assert!(line.contains("is now 4"), "line: {line}");
+        assert!(!line.contains("no changes"), "line: {line}");
     }
 
     #[test]
