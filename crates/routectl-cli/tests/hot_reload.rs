@@ -212,6 +212,95 @@ async fn invalid_toml_keeps_old_config() {
     );
 }
 
+/// A config text identical to `config_text_with_alias` except it also
+/// carries `[retry.classes.feature-unsupported]`, a reserved class that
+/// `routectl_router::validate_class_policy` hard-rejects. Syntactically
+/// valid TOML -- the rejection is semantic, caught by the startup
+/// validators `load_effective_config` runs after parsing.
+fn config_text_with_reserved_class_override(alias: &str) -> String {
+    format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[retry.classes.feature-unsupported]
+retry = 1
+
+[providers.fast]
+kind = "openai-compat"
+base_url = "http://127.0.0.1:1"
+api_key_ref = "literal:test-key"
+
+[models.gpt-4o]
+provider = "fast"
+upstream = "gpt-4o"
+
+[aliases]
+{alias} = "gpt-4o"
+"#
+    )
+}
+
+/// `[retry.classes.feature-unsupported]` is rejected directly at the
+/// `load_effective_config` seam -- the same loader the hot-reload path
+/// and cold start both run through. Exercising this seam directly
+/// (rather than only through the fs-watch + poll path) pins the exact
+/// validator that rejects, without depending on watcher timing.
+#[test]
+fn class_policy_reject_surfaces_through_load_effective_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        config_text_with_reserved_class_override("reject-me"),
+    )
+    .unwrap();
+
+    let err = match routectl_cli::server::load_effective_config(&config_path) {
+        Ok(_) => panic!("[retry.classes.feature-unsupported] must be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("feature-unsupported") && err.contains("reserved"),
+        "error must name the reserved class, got: {err}"
+    );
+}
+
+/// End-to-end companion to the seam test above: writing a reload
+/// candidate carrying `[retry.classes.feature-unsupported]` at the
+/// running server's watched config path must NOT swap the live router
+/// -- the old alias stays visible on `/v1/models` (and the new
+/// candidate's alias never surfaces) exactly like the parse-rejected
+/// cases above (`partial_write_keeps_old_config`,
+/// `invalid_toml_keeps_old_config`), because `validate_class_policy`
+/// runs inside the same `load_effective_config` those reject at. The
+/// candidate names a DIFFERENT alias than the running config so a
+/// wrongly-applied reload is distinguishable from a correctly-rejected
+/// one (both configs are otherwise syntactically valid).
+#[tokio::test]
+async fn feature_unsupported_class_override_rejected_old_router_stays_live() {
+    let (base_url, config_path, _dir) = spawn_watched_server("class-policy-stable").await;
+
+    write_atomic(
+        &config_path,
+        config_text_with_reserved_class_override("class-policy-rejected").as_bytes(),
+    );
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let ids = list_model_ids(&base_url).await;
+    assert!(
+        ids.iter().any(|s| s == "class-policy-stable"),
+        "old alias must remain after a class-policy-rejected reload: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|s| s == "class-policy-rejected"),
+        "the rejected candidate's alias must never surface: {ids:?}"
+    );
+}
+
 /// Five sequential rewrites of the config (each with a unique
 /// alias) all complete without dead-locking. The final alias is
 /// what `/v1/models` returns. Pins the no-filter design's
@@ -516,5 +605,134 @@ default = "claude"
     assert!(
         succeeded,
         "credentials hot-reload did not surface second-access-token within 5s"
+    );
+}
+
+// -----------------------------------------------------------------
+// Per-class retry-cap change applies post-reload
+// -----------------------------------------------------------------
+
+/// Config text wiring a single `anthropic-api` provider at `upstream_uri`
+/// with a `[retry.classes.rate-limited]` override of `retry_cap`. Zero
+/// backoff/jitter keeps a same-provider retry loop from adding latency
+/// the test would otherwise have to sleep through.
+fn config_text_with_rate_limited_cap(upstream_uri: &str, retry_cap: u32) -> String {
+    format!(
+        r#"
+[server]
+host = "127.0.0.1"
+port = 0
+strict_translation = false
+
+[retry]
+initial_backoff_ms = 0
+jitter_ms = 0
+
+[retry.classes.rate-limited]
+retry = {retry_cap}
+
+[providers.up]
+kind = "anthropic-api"
+base_url = "{upstream_uri}"
+api_key_ref = "literal:test-key"
+
+[models.claude]
+provider = "up"
+upstream = "claude-sonnet-4-6"
+
+[aliases]
+default = "claude"
+"#
+    )
+}
+
+/// Send one `POST /v1/messages` and return how many additional requests
+/// the mock upstream received as a result -- the direct behavioral
+/// signal for how many times the router dispatched to the SAME provider
+/// for this one client call (the retry-cap-for-class this test pins).
+async fn same_provider_dispatch_count(
+    client: &reqwest::Client,
+    base_url: &str,
+    mock: &MockServer,
+) -> usize {
+    let before = mock
+        .received_requests()
+        .await
+        .expect("recording enabled")
+        .len();
+    let body = json!({
+        "model": "default",
+        // Above `probe_max_tokens` (default 1) so the request is not
+        // treated as an availability probe -- a probe fast-fails a 429
+        // with no retry regardless of the configured class cap.
+        "max_tokens": 50,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let _ = client
+        .post(format!("{base_url}/v1/messages"))
+        .json(&body)
+        .send()
+        .await
+        .expect("post messages");
+    let after = mock
+        .received_requests()
+        .await
+        .expect("recording enabled")
+        .len();
+    after - before
+}
+
+/// A `[retry.classes.rate-limited]` cap raised across a reload takes
+/// effect on the REBUILT router: a single client request dispatched
+/// against an upstream that always returns 429 hits that upstream
+/// exactly `retry_cap` times (the same-provider retry loop stops once
+/// `attempts_made` reaches the class's resolved cap). Observed through
+/// real dispatch rather than through `routectl-testkit` capture, which
+/// only sees events on the SAME task -- irrelevant here since the
+/// server runs its own spawned tasks.
+#[tokio::test]
+async fn retry_classes_cap_change_applies_after_reload() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(wiremock_path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "type": "error",
+            "error": {"type": "rate_limit_error", "message": "rate limited"}
+        })))
+        .mount(&mock)
+        .await;
+
+    let (base_url, dir) =
+        spawn_server_with_config_text(&config_text_with_rate_limited_cap(&mock.uri(), 0)).await;
+    let config_path = dir.path().join("config.toml");
+    let client = reqwest::Client::new();
+
+    // Sanity: retry = 0 means the provider is dispatched exactly once.
+    let before_reload = same_provider_dispatch_count(&client, &base_url, &mock).await;
+    assert_eq!(
+        before_reload, 1,
+        "retry.classes.rate-limited.retry = 0 must dispatch exactly once"
+    );
+
+    // Act: reload with the cap raised to 2.
+    write_atomic(
+        &config_path,
+        config_text_with_rate_limited_cap(&mock.uri(), 2).as_bytes(),
+    );
+
+    // Assert: poll a single client call at a time until it observes 2
+    // upstream hits -- proof the rebuilt router resolved the raised cap.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut observed = before_reload;
+    while Instant::now() < deadline {
+        observed = same_provider_dispatch_count(&client, &base_url, &mock).await;
+        if observed == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        observed, 2,
+        "raised retry.classes.rate-limited cap did not apply within 5s after reload"
     );
 }

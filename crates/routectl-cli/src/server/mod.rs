@@ -826,6 +826,18 @@ pub(crate) async fn build_router_from_config_with_overlay(
     // letting the silently-ignored denylist mask operator intent.
     routectl_router::validate_retry_policy(&config)?;
 
+    // Reject the reserved `[retry.classes.feature-unsupported]` key and
+    // any `[providers.X.class_overrides]` remap targeting a class the
+    // router retries or debits for health. Advisory findings on the
+    // same surface (a health-status source remapped away from breaker
+    // accounting, an empty `ClassPolicy` block, a class block shadowed
+    // by an explicit retry_allowlist/retry_denylist code) are logged
+    // rather than rejected.
+    routectl_router::validate_class_policy(&config)?;
+    for warning in routectl_router::class_policy_warnings(&config) {
+        tracing::warn!(warning = %warning, "class policy warning");
+    }
+
     // Reject malformed `[registry]` glob keys at startup so query-time
     // cost resolution never silently skips a key it cannot parse.
     routectl_router::validate_registry_patterns(&config)?;
@@ -932,8 +944,7 @@ const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// const path that stops being served here, shows up as a failing test.
 /// It does NOT catch the reverse -- a new inference route added below
 /// that forgets to also update the const -- so that direction of drift
-/// relies on review, not CI; this is an accepted tradeoff from the
-/// decision doc, not an oversight.
+/// relies on review, not CI; this is an accepted, deliberate tradeoff, not an oversight.
 fn build_axum_router(
     state: Arc<AppState>,
     token_set: Arc<TokenSet>,
@@ -1504,6 +1515,7 @@ fn validate_effective_config(config: &Config) -> Result<(), String> {
     routectl_router::validate_alias_patterns(config).map_err(|e| e.to_string())?;
     routectl_router::validate_retry_policy(config).map_err(|e| e.to_string())?;
     routectl_router::validate_registry_patterns(config).map_err(|e| e.to_string())?;
+    routectl_router::validate_class_policy(config).map_err(|e| e.to_string())?;
     Ok(())
 }
 

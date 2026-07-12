@@ -13,6 +13,7 @@ pub mod catalog_import;
 pub(crate) mod catalog_import_state;
 pub mod catalog_overlay;
 pub(crate) mod catalog_state;
+pub mod class_policy;
 pub mod config;
 pub mod config_migrate;
 pub mod context_trim;
@@ -72,9 +73,9 @@ pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_ev
 pub use factory::validate_bedrock_global_config;
 pub use factory::{
     BuildOptions, apply_catalog_overlay, build_provider, build_provider_with_options,
-    build_resolved_models, validate_alias_chain_targets, validate_alias_patterns,
-    validate_mitm_config, validate_reasoning_defaults, validate_registry_patterns,
-    validate_retry_policy,
+    build_resolved_models, class_policy_warnings, validate_alias_chain_targets,
+    validate_alias_patterns, validate_class_policy, validate_mitm_config,
+    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{

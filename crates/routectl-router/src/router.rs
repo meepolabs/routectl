@@ -614,6 +614,16 @@ struct DispatchTarget {
     /// accounting can record how the seat was chosen. Observability only --
     /// never affects seat order, the target set, or dispatch.
     selection_decision: Option<&'static str>,
+    /// Per-status failure-class remap for this target's provider, adapted
+    /// ONCE at chain expansion from the operator's
+    /// `[providers.X.class_overrides]` config table (`ConfigFailureClass`
+    /// -> canonical `FailureClass` via `ConfigFailureClass::to_failure_class`).
+    /// Consulted immediately after `classify` at each of the three dispatch
+    /// error arms (`apply_remap`): a status-key match replaces the
+    /// classifier's native class with the operator's override, keeping the
+    /// native `matched_by`. Empty (the default, and the value every
+    /// constructor starts with) leaves native classification untouched.
+    class_overrides: BTreeMap<u16, FailureClass>,
 }
 
 impl Router {
@@ -1074,6 +1084,12 @@ impl Router {
     /// per-request rotated start). The expanded seat targets slot inline
     /// where the model sat, preserving the operator's fallback order so a
     /// chain `[opus, sonnet]` becomes `[opus-seatA, opus-seatB, sonnet]`.
+    ///
+    /// The post-loop pass also fills `provider_kind` and `class_overrides`
+    /// from the target's `[providers.X]` config entry, each only when the
+    /// constructor left it empty -- mirroring discipline so a seat target
+    /// that already carries its own seat-resolved `provider_kind` (see
+    /// `dispatch_target_for_seat`) is never overwritten.
     fn expand_chain_to_targets(
         &self,
         chain: Vec<Arc<ResolvedModel>>,
@@ -1087,12 +1103,19 @@ impl Router {
             }
         }
         for target in &mut out {
+            let provider_entry = self.config.providers.get(&target.provider_name);
             if target.provider_kind.is_none() {
-                target.provider_kind = self
-                    .config
-                    .providers
-                    .get(&target.provider_name)
-                    .map(super::config::ProviderEntry::kind_str);
+                target.provider_kind = provider_entry.map(super::config::ProviderEntry::kind_str);
+            }
+            if target.class_overrides.is_empty()
+                && let Some(entry) = provider_entry
+            {
+                target.class_overrides = entry
+                    .runtime()
+                    .class_overrides
+                    .iter()
+                    .map(|(status, class)| (*status, class.to_failure_class()))
+                    .collect();
             }
         }
         out
@@ -1752,7 +1775,16 @@ impl Router {
                         return Ok(resp);
                     }
                     Err(e) => {
-                        let cf = classify(&e, target.provider_kind);
+                        let native_cf = classify(&e, target.provider_kind);
+                        let original_class = native_cf.class.clone();
+                        let remap_candidate_status = upstream_status_for_remap(&e);
+                        let (cf, remapped) =
+                            apply_remap(native_cf, remap_candidate_status, &target.class_overrides);
+                        let remap_status = if remapped {
+                            remap_candidate_status
+                        } else {
+                            None
+                        };
                         // A forwarded-credential request that drew
                         // an upstream 401/403/429 is TERMINAL -- bypass BOTH
                         // the on_auth_failure refresh-and-retry (below) AND
@@ -1824,7 +1856,7 @@ impl Router {
                             probe_guard.disarm();
                             continue;
                         }
-                        let do_fallback = should_fallback(&e, &policy, is_probe);
+                        let do_fallback = should_fallback(&e, &cf.class, &policy, is_probe);
                         // Probe fast-fail: a probe (max_tokens <=
                         // probe_max_tokens) that hit a rate-limit/overload
                         // (429/529) returns the status immediately via an
@@ -1890,11 +1922,14 @@ impl Router {
                         self.emit_class_observability(
                             &e,
                             &cf,
+                            &original_class,
+                            remapped,
+                            remap_status,
                             DispatchSurface::Complete,
                             provider_name,
                             target,
                             do_fallback,
-                            retry_cap_for(&e, &policy),
+                            retry_cap_for(&cf.class, &policy),
                             debits,
                             raw_override_label(explicit_status_decision(&e, &policy)),
                             is_probe,
@@ -1910,7 +1945,13 @@ impl Router {
                             return Err(e);
                         }
                         let can_retry_here = attempts_made < hard_cap
-                            && should_retry_same_provider(&e, &policy, attempts_made, is_probe);
+                            && should_retry_same_provider(
+                                &e,
+                                &cf.class,
+                                &policy,
+                                attempts_made,
+                                is_probe,
+                            );
                         if can_retry_here {
                             tracing::debug!(
                                 provider = provider_name,
@@ -2241,7 +2282,12 @@ impl Router {
                     // health fallback stays reserved for the messages path,
                     // so a 429 here does NOT walk.
                     let policy = self.policy_for(&req.model);
-                    let cf = classify(&e, target.provider_kind);
+                    let native_cf = classify(&e, target.provider_kind);
+                    let (cf, _remapped) = apply_remap(
+                        native_cf,
+                        upstream_status_for_remap(&e),
+                        &target.class_overrides,
+                    );
                     let reset_hint = rate_limit_reset_hint(&e, &policy);
                     if class_debits(&cf.class) {
                         match reset_hint {
@@ -2519,7 +2565,16 @@ impl Router {
                         return Ok(wrap_with_breaker_accounting(relabeled.boxed(), state));
                     }
                     Err(e) => {
-                        let cf = classify(&e, target.provider_kind);
+                        let native_cf = classify(&e, target.provider_kind);
+                        let original_class = native_cf.class.clone();
+                        let remap_candidate_status = upstream_status_for_remap(&e);
+                        let (cf, remapped) =
+                            apply_remap(native_cf, remap_candidate_status, &target.class_overrides);
+                        let remap_status = if remapped {
+                            remap_candidate_status
+                        } else {
+                            None
+                        };
                         // A forwarded-credential 401/403/429 is
                         // TERMINAL -- bypass the on_auth_failure refresh
                         // (below) AND the fallback hop, surface verbatim.
@@ -2570,7 +2625,7 @@ impl Router {
                             probe_guard.disarm();
                             continue;
                         }
-                        let do_fallback = should_fallback(&e, &policy, is_probe);
+                        let do_fallback = should_fallback(&e, &cf.class, &policy, is_probe);
                         // Probe fast-fail: a probe that hit a rate-limit/
                         // overload (429/529) returns the status immediately
                         // -- no fallback, no breaker failure debit. The early
@@ -2624,11 +2679,14 @@ impl Router {
                         self.emit_class_observability(
                             &e,
                             &cf,
+                            &original_class,
+                            remapped,
+                            remap_status,
                             DispatchSurface::Stream,
                             provider_name,
                             target,
                             do_fallback,
-                            retry_cap_for(&e, &policy),
+                            retry_cap_for(&cf.class, &policy),
                             debits,
                             raw_override_label(explicit_status_decision(&e, &policy)),
                             is_probe,
@@ -2702,11 +2760,17 @@ impl Router {
     /// class-decision event (DEBUG, or WARN on an Unknown-classified
     /// upstream outcome). Called from BOTH dispatch error arms with only
     /// safe, structured facts -- never the error body / Display string.
+    /// `cf` is the EFFECTIVE (post-remap) classification every other
+    /// consumer already acted on; `original_class` is the classifier's
+    /// pre-remap decision, carried through purely for provenance.
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn emit_class_observability(
         &self,
         err: &Error,
         cf: &ClassifiedFailure,
+        original_class: &FailureClass,
+        remapped: bool,
+        remap_status: Option<u16>,
         surface: DispatchSurface,
         provider: &str,
         target: &DispatchTarget,
@@ -2731,6 +2795,7 @@ impl Router {
                     cf.matched_by,
                     surface,
                     is_forwarded,
+                    remapped,
                 );
             }
             FailureClass::Unknown if facts.status.is_some() => {
@@ -2742,7 +2807,8 @@ impl Router {
             provider,
             model,
             surface,
-            class: &cf.class,
+            original_class,
+            effective_class: &cf.class,
             matched_by: cf.matched_by,
             facts,
             fallback,
@@ -2751,6 +2817,8 @@ impl Router {
             raw_override,
             is_probe,
             is_forwarded,
+            remapped,
+            remap_status,
         });
     }
 
@@ -3757,6 +3825,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
         visible_routectl_provider: m.visible_routectl_provider,
         model: m,
         selection_decision: None,
+        class_overrides: BTreeMap::new(),
     }
 }
 
@@ -3793,6 +3862,7 @@ fn dispatch_target_for_seat(
         visible_routectl_provider: m.visible_routectl_provider,
         model: m.clone(),
         selection_decision: None,
+        class_overrides: BTreeMap::new(),
     }
 }
 
@@ -4297,23 +4367,14 @@ const fn raw_override_label(decision: Option<bool>) -> &'static str {
     }
 }
 
-/// The same-provider retry cap for `err` under `policy`, keyed by failure
-/// class family -- the value the retry branch compares `attempts_made`
-/// against. A class outside the retryable set yields 0. Shared by
+/// The same-provider retry cap for `class` under `policy` -- the value the
+/// retry branch compares `attempts_made` against. Delegates to
+/// [`RetryPolicy::resolved_class`], which layers any operator per-class
+/// `[retry.classes]` override on top of the baked class default. Shared by
 /// [`should_retry_same_provider`] and the class-decision observability so
 /// the logged cap never drifts from the cap actually enforced.
-fn retry_cap_for(err: &Error, policy: &RetryPolicy) -> u32 {
-    match classify(err, None).class {
-        FailureClass::RateLimited => policy.retry_on_429.unwrap_or(policy.max_attempts),
-        FailureClass::ServerError | FailureClass::Overloaded => {
-            policy.retry_on_5xx.unwrap_or(policy.max_attempts)
-        }
-        // Streaming and status-0 both classify NetworkError -- bucket
-        // them under `retry_on_network` so configuration matches the
-        // error class.
-        FailureClass::NetworkError => policy.retry_on_network.unwrap_or(policy.max_attempts),
-        _ => 0,
-    }
+fn retry_cap_for(class: &FailureClass, policy: &RetryPolicy) -> u32 {
+    policy.resolved_class(class).0
 }
 
 /// Safe, structured inputs for the per-arm class-decision observability
@@ -4323,7 +4384,12 @@ struct ClassDecisionObs<'a> {
     provider: &'a str,
     model: &'a str,
     surface: DispatchSurface,
-    class: &'a FailureClass,
+    /// The classifier's decision BEFORE any operator status remap.
+    original_class: &'a FailureClass,
+    /// The class every downstream consumer (predicates, debit, this
+    /// event) actually acted on -- `original_class` unless a remap fired.
+    effective_class: &'a FailureClass,
+    /// How the NATIVE classification was decided; unaffected by a remap.
     matched_by: MatchedBy,
     facts: UpstreamFacts<'a>,
     fallback: bool,
@@ -4332,6 +4398,12 @@ struct ClassDecisionObs<'a> {
     raw_override: &'static str,
     is_probe: bool,
     is_forwarded: bool,
+    /// Whether the operator's per-provider `class_overrides` replaced the
+    /// native class for this error.
+    remapped: bool,
+    /// The status key that matched an override, iff `remapped`. `None`
+    /// when `remapped` is false.
+    remap_status: Option<u16>,
 }
 
 /// Emit exactly one structured event per error-arm pass at the point the
@@ -4340,7 +4412,8 @@ struct ClassDecisionObs<'a> {
 /// a silent fail-closed-unknown on a genuine upstream response would hide
 /// a gap in the status map / token vocabulary. Safe dimensions only.
 fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
-    let unknown_upstream = matches!(obs.class, FailureClass::Unknown) && obs.facts.status.is_some();
+    let unknown_upstream =
+        matches!(obs.effective_class, FailureClass::Unknown) && obs.facts.status.is_some();
     if unknown_upstream {
         tracing::warn!(
             provider = obs.provider,
@@ -4348,7 +4421,8 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             surface = obs.surface.as_str(),
             status = ?obs.facts.status,
             upstream_type = obs.facts.upstream_type.unwrap_or(""),
-            class = class_label(obs.class),
+            original_class = class_label(obs.original_class),
+            effective_class = class_label(obs.effective_class),
             matched_by = matched_by_label(obs.matched_by),
             fallback = obs.fallback,
             retry_cap = obs.retry_cap,
@@ -4356,6 +4430,8 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             raw_override = obs.raw_override,
             is_probe = obs.is_probe,
             is_forwarded = obs.is_forwarded,
+            remapped = obs.remapped,
+            remap_status = ?obs.remap_status,
             "unknown failure classification on upstream outcome (fail-closed)",
         );
     } else {
@@ -4365,7 +4441,8 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             surface = obs.surface.as_str(),
             status = ?obs.facts.status,
             upstream_type = obs.facts.upstream_type.unwrap_or(""),
-            class = class_label(obs.class),
+            original_class = class_label(obs.original_class),
+            effective_class = class_label(obs.effective_class),
             matched_by = matched_by_label(obs.matched_by),
             fallback = obs.fallback,
             retry_cap = obs.retry_cap,
@@ -4373,6 +4450,8 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
             raw_override = obs.raw_override,
             is_probe = obs.is_probe,
             is_forwarded = obs.is_forwarded,
+            remapped = obs.remapped,
+            remap_status = ?obs.remap_status,
             "router failure class decision",
         );
     }
@@ -4383,7 +4462,10 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
 /// [`FailureClass::FeatureUnsupported`]. Carries only safe, structured
 /// dimensions -- NEVER a body, prompt, header, token, or the error's
 /// Display/Debug text. `capability` is the upstream token the classifier
-/// matched, already best-effort and non-sensitive.
+/// matched, already best-effort and non-sensitive. `remapped` is true
+/// when this FeatureUnsupported came from an operator status remap
+/// (carrying the `OPERATOR_REMAP_CAPABILITY` token) rather than a real
+/// upstream lift.
 #[allow(clippy::too_many_arguments)]
 fn emit_feature_unsupported(
     provider: &str,
@@ -4394,6 +4476,7 @@ fn emit_feature_unsupported(
     matched_by: MatchedBy,
     surface: DispatchSurface,
     is_forwarded: bool,
+    remapped: bool,
 ) {
     tracing::info!(
         target: "routectl::feature_unsupported",
@@ -4407,8 +4490,45 @@ fn emit_feature_unsupported(
         matched_by = matched_by_label(matched_by),
         surface = surface.as_str(),
         is_forwarded,
+        remapped,
         "upstream reported an unsupported capability",
     );
+}
+
+/// The upstream HTTP status carried by `err`, for the per-provider class
+/// remap lookup ONLY: `Some` for an [`Error::Upstream`] status in
+/// `400..=599`, `None` for status 0 and every non-upstream variant.
+/// Mirrors the range `explicit_status_decision` consults, but this seam
+/// consults the target's own `class_overrides`, never `policy`.
+fn upstream_status_for_remap(err: &Error) -> Option<u16> {
+    match err {
+        Error::Upstream { status, .. } if (400..=599).contains(status) => Some(*status),
+        _ => None,
+    }
+}
+
+/// Apply the operator's per-provider status remap on top of the
+/// classifier's native decision. A `status` that keys into `overrides`
+/// replaces the class with the operator's override, keeping the NATIVE
+/// `matched_by` -- the remap changes WHICH class was decided, not HOW the
+/// classifier itself matched. No status, or no matching key (including
+/// the empty-map default), returns `native` unchanged. Returns the
+/// effective `ClassifiedFailure` plus whether a remap fired.
+fn apply_remap(
+    native: ClassifiedFailure,
+    status: Option<u16>,
+    overrides: &BTreeMap<u16, FailureClass>,
+) -> (ClassifiedFailure, bool) {
+    match status.and_then(|s| overrides.get(&s)) {
+        Some(class) => (
+            ClassifiedFailure {
+                class: class.clone(),
+                matched_by: native.matched_by,
+            },
+            true,
+        ),
+        None => (native, false),
+    }
 }
 
 /// Whether a failure of this class debits the per-seat circuit breaker's
@@ -4433,7 +4553,12 @@ const fn class_debits(class: &FailureClass) -> bool {
     )
 }
 
-fn should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
+fn should_fallback(
+    err: &Error,
+    class: &FailureClass,
+    policy: &RetryPolicy,
+    is_probe: bool,
+) -> bool {
     // Availability-probe fast-fail: a probe (max_tokens <=
     // probe_max_tokens) that hits a rate-limit (429) or overload (529)
     // does not fall back. Every OTHER error class -- generic 5xx,
@@ -4453,25 +4578,12 @@ fn should_fallback(err: &Error, policy: &RetryPolicy, is_probe: bool) -> bool {
     if let Some(explicit) = explicit_status_decision(err, policy) {
         return explicit;
     }
-    match classify(err, None).class {
-        FailureClass::Unknown => false,
-        FailureClass::RateLimited
-        | FailureClass::Auth
-        | FailureClass::BadRequest
-        | FailureClass::ContentPolicy
-        | FailureClass::ContextWindow
-        | FailureClass::ServerError
-        | FailureClass::Timeout
-        | FailureClass::NetworkError
-        | FailureClass::Overloaded
-        | FailureClass::FeatureUnsupported { .. } => true,
-        // Fail closed on any class the classifier gains later.
-        _ => false,
-    }
+    policy.resolved_class(class).1
 }
 
 fn should_retry_same_provider(
     err: &Error,
+    class: &FailureClass,
     policy: &RetryPolicy,
     attempts_made: u32,
     is_probe: bool,
@@ -4488,7 +4600,7 @@ fn should_retry_same_provider(
     if explicit_status_decision(err, policy) == Some(false) {
         return false;
     }
-    let cap = retry_cap_for(err, policy);
+    let cap = retry_cap_for(class, policy);
     attempts_made < cap
 }
 
@@ -4666,10 +4778,11 @@ mod tests {
         // future refactor of `is_fallbackable_status` can't accidentally
         // break network-error fallback.
         let err = Error::upstream("p", 0, "tcp connect refused");
+        let class = classify(&err, None).class;
 
         // (1) Default policy (allowlist populated, denylist None).
         let policy_default = RetryPolicy::default();
-        assert!(should_fallback(&err, &policy_default, false));
+        assert!(should_fallback(&err, &class, &policy_default, false));
 
         // (2) Empty allowlist (would otherwise mean "no HTTP fallback").
         let policy_empty_allow = RetryPolicy {
@@ -4677,7 +4790,7 @@ mod tests {
             retry_denylist: None,
             ..RetryPolicy::default()
         };
-        assert!(should_fallback(&err, &policy_empty_allow, false));
+        assert!(should_fallback(&err, &class, &policy_empty_allow, false));
 
         // (3) Denylist set (governs HTTP statuses, not status 0).
         let policy_deny = RetryPolicy {
@@ -4685,7 +4798,7 @@ mod tests {
             retry_denylist: Some(vec![501]),
             ..RetryPolicy::default()
         };
-        assert!(should_fallback(&err, &policy_deny, false));
+        assert!(should_fallback(&err, &class, &policy_deny, false));
     }
 
     // --- Differential oracle: class-based predicates vs pre-class rules ---
@@ -4861,18 +4974,21 @@ mod tests {
         let mut cells = 0usize;
         for status in statuses {
             for err in shapes(status) {
+                let class = classify(&err, None).class;
                 for (pname, policy) in &policies {
                     for is_probe in [false, true] {
                         cells += 1;
                         assert_eq!(
-                            should_fallback(&err, policy, is_probe),
+                            should_fallback(&err, &class, policy, is_probe),
                             old_should_fallback(&err, policy, is_probe),
                             "should_fallback mismatch: status={status} policy={pname} \
                              is_probe={is_probe} err={err:?}",
                         );
                         for attempts in attempts_range.clone() {
                             assert_eq!(
-                                should_retry_same_provider(&err, policy, attempts, is_probe),
+                                should_retry_same_provider(
+                                    &err, &class, policy, attempts, is_probe
+                                ),
                                 old_should_retry(&err, policy, attempts, is_probe),
                                 "should_retry mismatch: status={status} policy={pname} \
                                  is_probe={is_probe} attempts={attempts} err={err:?}",
@@ -4885,6 +5001,129 @@ mod tests {
         // Guard the grid actually ran (201 statuses x 6 shapes x 6
         // policies x 2 probe states).
         assert_eq!(cells, 201 * 6 * 6 * 2);
+    }
+
+    // --- Per-class operator overrides route through `resolved_class` ---
+
+    #[test]
+    fn retry_override_on_one_class_leaves_the_sibling_5xx_class_untouched() {
+        // Arrange: [retry.classes.overloaded] retry = 0, with a distinct
+        // baked retry_on_5xx cap so a leak into ServerError is visible.
+        use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+        let mut classes = std::collections::BTreeMap::new();
+        classes.insert(
+            ConfigFailureClass::Overloaded,
+            ClassPolicy {
+                retry: Some(0),
+                fallback: None,
+            },
+        );
+        let policy = RetryPolicy {
+            retry_on_5xx: Some(3),
+            classes,
+            ..RetryPolicy::default()
+        };
+        let overloaded_err = Error::upstream_full(
+            "p",
+            503,
+            "body",
+            None,
+            Some("overloaded_error".into()),
+            None,
+        );
+        let server_err = Error::upstream("p", 500, "body");
+        let overloaded_class = classify(&overloaded_err, None).class;
+        let server_class = classify(&server_err, None).class;
+
+        // Act + Assert: the overridden class caps to 0 and cannot retry.
+        assert_eq!(retry_cap_for(&overloaded_class, &policy), 0);
+        assert!(!should_retry_same_provider(
+            &overloaded_err,
+            &overloaded_class,
+            &policy,
+            0,
+            false,
+        ));
+        // The un-overridden sibling class in the same baked 5xx family
+        // keeps its own retry_on_5xx cap.
+        assert_eq!(retry_cap_for(&server_class, &policy), 3);
+        assert!(should_retry_same_provider(
+            &server_err,
+            &server_class,
+            &policy,
+            0,
+            false,
+        ));
+        // Fallback is untouched for both -- only the retry leaf was
+        // overridden.
+        assert!(should_fallback(
+            &overloaded_err,
+            &overloaded_class,
+            &policy,
+            false
+        ));
+        assert!(should_fallback(&server_err, &server_class, &policy, false));
+    }
+
+    #[test]
+    fn fallback_override_on_bad_request_leaves_auth_untouched() {
+        // Arrange: [retry.classes.bad-request] fallback = false.
+        use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+        let mut classes = std::collections::BTreeMap::new();
+        classes.insert(
+            ConfigFailureClass::BadRequest,
+            ClassPolicy {
+                retry: None,
+                fallback: Some(false),
+            },
+        );
+        let policy = RetryPolicy {
+            classes,
+            ..RetryPolicy::default()
+        };
+        let bad_request_err = Error::upstream("p", 400, "body");
+        let auth_err = Error::upstream("p", 401, "body");
+        let bad_request_class = classify(&bad_request_err, None).class;
+        let auth_class = classify(&auth_err, None).class;
+
+        // Act + Assert: a plain 400 stops falling back...
+        assert!(!should_fallback(
+            &bad_request_err,
+            &bad_request_class,
+            &policy,
+            false,
+        ));
+        // ...but a 401 (different class, no overlay entry) still does.
+        assert!(should_fallback(&auth_err, &auth_class, &policy, false));
+    }
+
+    #[test]
+    fn unknown_provider_falls_back_regardless_of_class_or_override() {
+        // Regression: `Error::UnknownProvider` short-circuits to true
+        // BEFORE the class match, independent of both the class passed in
+        // (classify() never sees an UnknownProvider, so this pins the
+        // caller can pass any class here) and any per-class override that
+        // would otherwise deny fallback for that class.
+        use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+        let err = Error::UnknownProvider("missing-provider".to_string());
+        let mut classes = std::collections::BTreeMap::new();
+        classes.insert(
+            ConfigFailureClass::BadRequest,
+            ClassPolicy {
+                retry: None,
+                fallback: Some(false),
+            },
+        );
+        let policy = RetryPolicy {
+            classes,
+            ..RetryPolicy::default()
+        };
+        assert!(should_fallback(
+            &err,
+            &FailureClass::BadRequest,
+            &policy,
+            false,
+        ));
     }
 
     #[test]
@@ -5181,6 +5420,128 @@ mod tests {
 }
 
 #[cfg(test)]
+mod remap_tests {
+    //! `apply_remap` / `upstream_status_for_remap`: the pure classify ->
+    //! remap seam consulted at all three dispatch error arms.
+    use super::*;
+
+    fn native(class: FailureClass, matched_by: MatchedBy) -> ClassifiedFailure {
+        ClassifiedFailure { class, matched_by }
+    }
+
+    #[test]
+    fn apply_remap_empty_map_is_a_no_op() {
+        // Arrange: the default, no-op case -- an operator who never
+        // configured `class_overrides` must see native classification
+        // pass through unchanged, whatever the status.
+        let cf = native(FailureClass::ServerError, MatchedBy::Status);
+        let overrides = BTreeMap::new();
+
+        // Act
+        let (effective, remapped) = apply_remap(cf.clone(), Some(503), &overrides);
+
+        // Assert
+        assert_eq!(effective, cf);
+        assert!(!remapped);
+    }
+
+    #[test]
+    fn apply_remap_no_matching_key_is_a_no_op() {
+        // Arrange: overrides present, but not for this status.
+        let cf = native(FailureClass::ServerError, MatchedBy::Status);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(429, FailureClass::RateLimited);
+
+        // Act
+        let (effective, remapped) = apply_remap(cf.clone(), Some(503), &overrides);
+
+        // Assert
+        assert_eq!(effective, cf);
+        assert!(!remapped);
+    }
+
+    #[test]
+    fn apply_remap_none_status_is_a_no_op_even_with_a_matching_key_present() {
+        // Arrange: a non-upstream / status-0 error carries no status to
+        // key on, so the override table is never consulted at all.
+        let cf = native(FailureClass::NetworkError, MatchedBy::Status);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(503, FailureClass::ContentPolicy);
+
+        // Act
+        let (effective, remapped) = apply_remap(cf.clone(), None, &overrides);
+
+        // Assert
+        assert_eq!(effective, cf);
+        assert!(!remapped);
+    }
+
+    #[test]
+    fn apply_remap_matching_key_replaces_class_but_keeps_native_matched_by() {
+        // Arrange: native classify(503) is ServerError matched_by Status;
+        // the operator remaps 503 to ContentPolicy.
+        let cf = native(FailureClass::ServerError, MatchedBy::Status);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(503, FailureClass::ContentPolicy);
+
+        // Act
+        let (effective, remapped) = apply_remap(cf, Some(503), &overrides);
+
+        // Assert: the class changed, but matched_by still describes HOW
+        // the classifier reached its native decision, not the remap.
+        assert_eq!(effective.class, FailureClass::ContentPolicy);
+        assert_eq!(effective.matched_by, MatchedBy::Status);
+        assert!(remapped);
+    }
+
+    #[test]
+    fn apply_remap_preserves_upstream_type_matched_by_on_a_lifted_native_class() {
+        // Arrange: a native lift (matched_by = UpstreamType) still keeps
+        // that provenance after a remap replaces the class.
+        let cf = native(
+            FailureClass::FeatureUnsupported {
+                capability: "unsupported_parameter".to_string(),
+            },
+            MatchedBy::UpstreamType,
+        );
+        let mut overrides = BTreeMap::new();
+        overrides.insert(400, FailureClass::BadRequest);
+
+        // Act
+        let (effective, remapped) = apply_remap(cf, Some(400), &overrides);
+
+        // Assert
+        assert_eq!(effective.class, FailureClass::BadRequest);
+        assert_eq!(effective.matched_by, MatchedBy::UpstreamType);
+        assert!(remapped);
+    }
+
+    #[test]
+    fn upstream_status_for_remap_extracts_in_range_upstream_status() {
+        let err = Error::upstream("p", 503, "body");
+        assert_eq!(upstream_status_for_remap(&err), Some(503));
+    }
+
+    #[test]
+    fn upstream_status_for_remap_none_for_status_zero() {
+        let err = Error::upstream("p", 0, "body");
+        assert_eq!(upstream_status_for_remap(&err), None);
+    }
+
+    #[test]
+    fn upstream_status_for_remap_none_for_out_of_range_status() {
+        let err = Error::upstream("p", 600, "body");
+        assert_eq!(upstream_status_for_remap(&err), None);
+    }
+
+    #[test]
+    fn upstream_status_for_remap_none_for_non_upstream_variant() {
+        let err = Error::Streaming("boom".into());
+        assert_eq!(upstream_status_for_remap(&err), None);
+    }
+}
+
+#[cfg(test)]
 mod probe_fast_fail_tests {
     //! Availability-probe fast-fail. Claude Code sends `max_tokens=1`
     //! quota/health probes to `/v1/messages`. On a rate-limit (429) or
@@ -5196,6 +5557,10 @@ mod probe_fast_fail_tests {
         Error::upstream("probe-test-provider", status, "x")
     }
 
+    fn class_of(err: &Error) -> FailureClass {
+        classify(err, None).class
+    }
+
     fn req_with_max_tokens(max_tokens: Option<u32>) -> ChatRequest {
         ChatRequest {
             model: "m".into(),
@@ -5209,9 +5574,10 @@ mod probe_fast_fail_tests {
     fn probe_429_does_not_fall_back() {
         // Arrange
         let err = upstream(429);
+        let class = class_of(&err);
         let policy = RetryPolicy::default();
         // Act
-        let fall_back = should_fallback(&err, &policy, true);
+        let fall_back = should_fallback(&err, &class, &policy, true);
         // Assert
         assert!(
             !fall_back,
@@ -5224,9 +5590,10 @@ mod probe_fast_fail_tests {
         // Arrange: attempts_made=0 so the ONLY reason not to retry is
         // the probe short-circuit (the cap would otherwise allow it).
         let err = upstream(429);
+        let class = class_of(&err);
         let policy = RetryPolicy::default();
         // Act
-        let retry = should_retry_same_provider(&err, &policy, 0, true);
+        let retry = should_retry_same_provider(&err, &class, &policy, 0, true);
         // Assert
         assert!(
             !retry,
@@ -5239,16 +5606,18 @@ mod probe_fast_fail_tests {
         // 529 is Anthropic's overload status; on an all-Anthropic chain
         // every hop shares it, so a probe fast-fails it like a 429.
         let err = upstream(529);
+        let class = class_of(&err);
         let policy = RetryPolicy::default();
-        assert!(!should_fallback(&err, &policy, true));
+        assert!(!should_fallback(&err, &class, &policy, true));
     }
 
     #[test]
     fn probe_529_does_not_retry_same_provider() {
         // Symmetry with the 429 retry short-circuit, for the 529 branch.
         let err = upstream(529);
+        let class = class_of(&err);
         let policy = RetryPolicy::default();
-        assert!(!should_retry_same_provider(&err, &policy, 0, true));
+        assert!(!should_retry_same_provider(&err, &class, &policy, 0, true));
     }
 
     #[test]
@@ -5256,8 +5625,9 @@ mod probe_fast_fail_tests {
         // Bedrock rejects max_tokens=1 with a 400; a sibling provider
         // may accept it, so a probe must still walk the chain on 4xx.
         let err = upstream(400);
+        let class = class_of(&err);
         let policy = RetryPolicy::default();
-        assert!(should_fallback(&err, &policy, true));
+        assert!(should_fallback(&err, &class, &policy, true));
     }
 
     #[test]
@@ -5265,8 +5635,9 @@ mod probe_fast_fail_tests {
         // 503 is generic unavailability (not the chain-wide 429/529); a
         // sibling provider may be healthy, so the probe still falls back.
         let err = upstream(503);
+        let class = class_of(&err);
         let policy = RetryPolicy::default();
-        assert!(should_fallback(&err, &policy, true));
+        assert!(should_fallback(&err, &class, &policy, true));
     }
 
     #[test]
@@ -5274,13 +5645,14 @@ mod probe_fast_fail_tests {
         // is_probe=false (a real request): a 429 keeps today's behavior
         // -- fallbackable AND retryable up to the policy cap.
         let err = upstream(429);
+        let class = class_of(&err);
         let policy = RetryPolicy::default();
         assert!(
-            should_fallback(&err, &policy, false),
+            should_fallback(&err, &class, &policy, false),
             "real-request 429 still falls back",
         );
         assert!(
-            should_retry_same_provider(&err, &policy, 0, false),
+            should_retry_same_provider(&err, &class, &policy, 0, false),
             "real-request 429 still retries (attempts_made=0 < cap)",
         );
     }
@@ -5322,8 +5694,11 @@ mod probe_fast_fail_tests {
 
         let is_probe = is_probe_request(&req, &policy); // false
         let err = upstream(429);
-        assert!(should_fallback(&err, &policy, is_probe));
-        assert!(should_retry_same_provider(&err, &policy, 0, is_probe));
+        let class = class_of(&err);
+        assert!(should_fallback(&err, &class, &policy, is_probe));
+        assert!(should_retry_same_provider(
+            &err, &class, &policy, 0, is_probe
+        ));
     }
 
     #[test]
@@ -5347,8 +5722,10 @@ mod probe_fast_fail_tests {
         );
         // Downstream: an at-threshold probe still fast-fails a 429.
         let is_probe = is_probe_request(&req_with_max_tokens(Some(2)), &policy);
+        let err = upstream(429);
+        let class = class_of(&err);
         assert!(
-            !should_fallback(&upstream(429), &policy, is_probe),
+            !should_fallback(&err, &class, &policy, is_probe),
             "an at-threshold probe must not fall back on 429 at a custom threshold",
         );
     }
@@ -6305,6 +6682,80 @@ mod resolved_models_tests {
                 "seat target must carry the configured provider kind",
             );
         }
+    }
+
+    #[test]
+    fn expand_chain_to_targets_fills_class_overrides_from_provider_config() {
+        // The provider's `[class_overrides]` table is adapted to canonical
+        // `FailureClass` ONCE at chain expansion, mirroring the
+        // `provider_kind` only-when-empty fill discipline. Uses the real
+        // `ConfigFailureClass` adapter (`to_failure_class`), not a
+        // hand-built `FailureClass`.
+        use crate::class_policy::ConfigFailureClass;
+        let mut entry = crate::config::ProviderEntry::anthropic_api("literal:k");
+        if let crate::config::ProviderEntry::AnthropicApi { runtime, .. } = &mut entry {
+            runtime
+                .class_overrides
+                .insert(503, ConfigFailureClass::ContentPolicy);
+            runtime
+                .class_overrides
+                .insert(529, ConfigFailureClass::FeatureUnsupported);
+        }
+        let mut config = Config::default();
+        config.providers.insert("test-prov".into(), entry);
+        let router = Router::new(Arc::new(config));
+
+        let provider: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "test-prov".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let model = Arc::new(ResolvedModel::new(
+            "nick",
+            "test-prov",
+            provider,
+            "claude-x",
+        ));
+
+        let targets = router.expand_chain_to_targets(vec![model], None);
+        assert_eq!(targets.len(), 1);
+        let target = &targets[0];
+        assert_eq!(
+            target.class_overrides.get(&503),
+            Some(&FailureClass::ContentPolicy),
+        );
+        assert_eq!(
+            target.class_overrides.get(&529),
+            Some(&FailureClass::FeatureUnsupported {
+                capability: crate::class_policy::OPERATOR_REMAP_CAPABILITY.to_string(),
+            }),
+        );
+        assert!(!target.class_overrides.contains_key(&500));
+    }
+
+    #[test]
+    fn expand_chain_to_targets_leaves_class_overrides_empty_with_no_provider_config() {
+        // No `[class_overrides]` on the provider entry (the default) must
+        // leave every target's map empty -- the no-op case for `apply_remap`.
+        let mut config = Config::default();
+        config.providers.insert(
+            "test-prov".into(),
+            crate::config::ProviderEntry::anthropic_api("literal:k"),
+        );
+        let router = Router::new(Arc::new(config));
+
+        let provider: Arc<dyn Provider> = Arc::new(CountedProvider {
+            id: "test-prov".into(),
+            calls: AtomicUsize::new(0),
+        });
+        let model = Arc::new(ResolvedModel::new(
+            "nick",
+            "test-prov",
+            provider,
+            "claude-x",
+        ));
+
+        let targets = router.expand_chain_to_targets(vec![model], None);
+        assert!(targets[0].class_overrides.is_empty());
     }
 
     #[test]
@@ -14218,6 +14669,11 @@ mod observability_seam_tests {
         assert_eq!(ev.field("matched_by"), Some("upstream_type"));
         assert_eq!(ev.field("surface"), Some("complete"));
         assert_eq!(ev.field("is_forwarded"), Some("false"));
+        assert_eq!(
+            ev.field("remapped"),
+            Some("false"),
+            "a real upstream lift is not an operator remap"
+        );
 
         assert_no_body_leak_in_seam(&events);
         assert_eq!(router.metrics.feature_unsupported_total(), 1);
@@ -14262,7 +14718,9 @@ mod observability_seam_tests {
             })
             .expect("unknown-upstream decision must WARN");
         assert_eq!(ev.level, tracing::Level::WARN);
-        assert_eq!(ev.field("class"), Some("unknown"));
+        assert_eq!(ev.field("effective_class"), Some("unknown"));
+        assert_eq!(ev.field("original_class"), Some("unknown"));
+        assert_eq!(ev.field("remapped"), Some("false"));
         assert_eq!(ev.field("matched_by"), Some("status"));
         assert_eq!(ev.field("status"), Some("Some(600)"));
         assert_eq!(ev.field("surface"), Some("complete"));
@@ -14315,7 +14773,9 @@ mod observability_seam_tests {
         assert_eq!(decisions.len(), 1, "one decision event per error-arm pass");
         let ev = decisions[0];
         assert_eq!(ev.level, tracing::Level::DEBUG);
-        assert_eq!(ev.field("class"), Some("bad_request"));
+        assert_eq!(ev.field("effective_class"), Some("bad_request"));
+        assert_eq!(ev.field("original_class"), Some("bad_request"));
+        assert_eq!(ev.field("remapped"), Some("false"));
         assert_eq!(ev.field("matched_by"), Some("status"));
         assert_eq!(ev.field("surface"), Some("complete"));
         assert_eq!(ev.field("fallback"), Some("true"));
@@ -14346,5 +14806,518 @@ mod observability_seam_tests {
         assert_eq!(raw_override_label(None), "none");
         assert_eq!(raw_override_label(Some(true)), "allow");
         assert_eq!(raw_override_label(Some(false)), "deny");
+    }
+}
+
+#[cfg(test)]
+mod remap_test_support {
+    //! Shared fixtures for [`super::provider_remap_tests`] and
+    //! [`super::bedrock_class_remap_tests`]: both exercise the
+    //! per-provider status remap (`[providers.X.class_overrides]`)
+    //! through the REAL `Config` TOML path against a single-leg
+    //! `p1`/`m1` router, so the fixture that builds that router and the
+    //! provider that fails it on demand live here once instead of
+    //! twice.
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A provider that always fails with a fixed status, counting calls
+    /// so a test can pin exactly how many times the SAME provider was
+    /// dispatched -- the direct behavioral proof that a same-provider
+    /// retry did or did not fire.
+    pub(super) struct CountingFailingProvider {
+        pub(super) id: String,
+        pub(super) status: u16,
+        pub(super) calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CountingFailingProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::upstream(&self.id, self.status, "body"))
+        }
+        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::upstream(&self.id, self.status, "body"))
+        }
+    }
+
+    /// Parse `toml_text` through the real `Config` deserialize path (so
+    /// `[providers.p1.class_overrides]` / `[retry.classes]` genuinely
+    /// exercise their adapters), install `provider` under nickname `m1`
+    /// on provider `p1`, and return the resulting `Router`.
+    pub(super) fn router_from_toml(toml_text: &str, provider: Arc<dyn Provider>) -> Router {
+        let config: Config = toml::from_str(toml_text).expect("valid test toml");
+        let mut router = Router::new(Arc::new(config));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m1".to_string(),
+            Arc::new(ResolvedModel::new("m1", "p1", provider, "wire-model")),
+        );
+        router.install_resolved_models(models);
+        router
+    }
+
+    pub(super) fn req_m1() -> ChatRequest {
+        ChatRequest {
+            model: "m1".into(),
+            messages: vec![],
+            ..Default::default()
+        }
+    }
+
+    pub(super) fn find_decision(
+        events: &[routectl_testkit::CapturedEvent],
+    ) -> &routectl_testkit::CapturedEvent {
+        events
+            .iter()
+            .find(|e| e.message == "router failure class decision")
+            .expect("a class-decision event must fire")
+    }
+}
+
+#[cfg(test)]
+mod provider_remap_tests {
+    //! End-to-end coverage for the per-provider status remap
+    //! (`[providers.X.class_overrides]`) parsed through the REAL TOML
+    //! path -- exercising `ConfigFailureClass::to_failure_class`, not a
+    //! hand-built `FailureClass` -- and its effect on debit / same-
+    //! provider retry / fallback plus the class-decision provenance
+    //! fields (`original_class` / `effective_class` / `remapped` /
+    //! `remap_status`) and the `feature_unsupported` event's `remapped`
+    //! field.
+
+    use super::remap_test_support::{
+        CountingFailingProvider, find_decision, req_m1, router_from_toml,
+    };
+    use super::*;
+    use routectl_testkit::with_capture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn override_stops_debit_and_same_provider_retry_but_keeps_fallback_true() {
+        // Arrange: baseline would allow 2 same-provider retries on a 5xx
+        // (retry_on_5xx = 2); the operator remaps THIS provider's 503 to
+        // content-policy (baked cap 0, fallback true).
+        let toml_text = r#"
+[retry]
+max_attempts = 3
+retry_on_5xx = 2
+
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+
+[providers.p1.class_overrides]
+503 = "content-policy"
+"#;
+        let provider = Arc::new(CountingFailingProvider {
+            id: "p1".into(),
+            status: 503,
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_from_toml(toml_text, provider.clone());
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert: the remap's retry_cap of 0 means exactly one call --
+        // no same-provider retry fired.
+        assert!(result.is_err());
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "content-policy's baked retry cap is 0"
+        );
+        let ev = find_decision(&events);
+        assert_eq!(ev.field("remapped"), Some("true"));
+        assert_eq!(ev.field("remap_status"), Some("Some(503)"));
+        assert_eq!(ev.field("original_class"), Some("server_error"));
+        assert_eq!(ev.field("effective_class"), Some("content_policy"));
+        assert_eq!(
+            ev.field("debit"),
+            Some("false"),
+            "content-policy never debits"
+        );
+        assert_eq!(ev.field("retry_cap"), Some("0"));
+        assert_eq!(
+            ev.field("fallback"),
+            Some("true"),
+            "content-policy still falls back by baked default"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_override_503_debits_and_retries_per_baseline() {
+        // Arrange: identical policy, no `class_overrides` -- 503 stays
+        // ServerError and follows the baked debit + retry_on_5xx cap.
+        let toml_text = r#"
+[retry]
+max_attempts = 3
+retry_on_5xx = 2
+
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+"#;
+        let provider = Arc::new(CountingFailingProvider {
+            id: "p1".into(),
+            status: 503,
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_from_toml(toml_text, provider.clone());
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert: the baked retry_on_5xx=2 cap is exhausted before
+        // falling back, so the provider is dispatched twice.
+        assert!(result.is_err());
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            2,
+            "baseline retries the same provider up to retry_on_5xx"
+        );
+        let ev = find_decision(&events);
+        assert_eq!(ev.field("remapped"), Some("false"));
+        assert_eq!(ev.field("remap_status"), Some("None"));
+        assert_eq!(ev.field("original_class"), Some("server_error"));
+        assert_eq!(
+            ev.field("effective_class"),
+            ev.field("original_class"),
+            "no remap means effective == original"
+        );
+        assert_eq!(ev.field("debit"), Some("true"));
+        assert_eq!(ev.field("retry_cap"), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn feature_unsupported_event_remapped_true_when_target_is_operator_remap() {
+        // Arrange: the operator remaps 429 (native RateLimited) to
+        // feature-unsupported -- the classifier never produced this
+        // lift; it is entirely config-sourced.
+        let toml_text = r#"
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+
+[providers.p1.class_overrides]
+429 = "feature-unsupported"
+"#;
+        let provider = Arc::new(CountingFailingProvider {
+            id: "p1".into(),
+            status: 429,
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_from_toml(toml_text, provider);
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let ev = events
+            .iter()
+            .find(|e| e.target == "routectl::feature_unsupported")
+            .expect("feature_unsupported event must fire on an operator remap");
+        assert_eq!(
+            ev.field("capability"),
+            Some(crate::class_policy::OPERATOR_REMAP_CAPABILITY)
+        );
+        assert_eq!(
+            ev.field("remapped"),
+            Some("true"),
+            "an operator remap into feature-unsupported must be flagged"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_classes_fallback_only_override_leaves_retry_cap_at_baked_value() {
+        // Review-nit regression: `[retry.classes.server-error]` sets
+        // ONLY `fallback`, leaving `retry` unset. A sparse leaf-merge
+        // bug would zero out the cap instead of deferring to the baked
+        // `retry_on_5xx`. No `class_overrides` involved -- this pins the
+        // GLOBAL per-class overlay, independent of the per-provider
+        // remap this task adds.
+        let toml_text = r#"
+[retry]
+max_attempts = 3
+retry_on_5xx = 4
+
+[retry.classes.server-error]
+fallback = false
+
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+"#;
+        let provider = Arc::new(CountingFailingProvider {
+            id: "p1".into(),
+            status: 500,
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_from_toml(toml_text, provider);
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert
+        assert!(result.is_err());
+        let ev = find_decision(&events);
+        assert_eq!(
+            ev.field("retry_cap"),
+            Some("4"),
+            "a fallback-only override must not disturb the baked retry cap"
+        );
+        assert_eq!(ev.field("fallback"), Some("false"));
+        assert_eq!(ev.field("remapped"), Some("false"));
+    }
+}
+
+#[cfg(test)]
+mod bedrock_class_remap_tests {
+    //! Bedrock-specific acceptance coverage for the per-provider status
+    //! remap, layered on top of `provider_remap_tests`' 503->content-policy
+    //! and provenance coverage: a `kind = "bedrock"` provider entry whose
+    //! `[providers.X.class_overrides]` remaps 400 to feature-unsupported.
+    //!
+    //! The remap is behaviorally inert over the baseline for routing --
+    //! `BadRequest` and `FeatureUnsupported` share the same terminal
+    //! (retry_cap 0, fallback true, no debit) policy row -- so the
+    //! deliverable under test is the label + the observability events, plus
+    //! two regression pins: the remapped 400 must not debit the breaker or
+    //! retry the same provider (it must still advance the chain to a
+    //! fallback target), and an UNRELATED status (500) on the same
+    //! provider, with the remap block present, must behave exactly like no
+    //! remap at all.
+
+    use super::remap_test_support::{
+        CountingFailingProvider, find_decision, req_m1, router_from_toml,
+    };
+    use super::*;
+    use routectl_testkit::with_capture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Parse `toml_text` and install a two-leg alias chain: `m1` on
+    /// provider `p1`, `m2` on provider `p2`. `[aliases] alias = ["m1",
+    /// "m2"]` must already be present in `toml_text`.
+    fn two_leg_router_from_toml(
+        toml_text: &str,
+        leg1: Arc<dyn Provider>,
+        leg2: Arc<dyn Provider>,
+    ) -> Router {
+        let config: Config = toml::from_str(toml_text).expect("valid test toml");
+        let mut router = Router::new(Arc::new(config));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "m1".to_string(),
+            Arc::new(ResolvedModel::new("m1", "p1", leg1, "wire-model-1")),
+        );
+        models.insert(
+            "m2".to_string(),
+            Arc::new(ResolvedModel::new("m2", "p2", leg2, "wire-model-2")),
+        );
+        router.install_resolved_models(models);
+        router
+    }
+
+    fn req_alias() -> ChatRequest {
+        ChatRequest {
+            model: "alias".into(),
+            messages: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// Non-mutating breaker phase for the seat keyed by `state_key`.
+    fn circuit_phase(router: &Router, state_key: &str) -> crate::runtime_state::CircuitPhase {
+        router
+            .capacity_snapshot_for(state_key, Instant::now())
+            .expect("seat state slot exists")
+            .circuit
+    }
+
+    #[tokio::test]
+    async fn bedrock_400_remaps_to_feature_unsupported_with_operator_capability_token() {
+        // Arrange: a bedrock-kind provider whose 400 is remapped to
+        // feature-unsupported. A plain 400 with no upstream type/code
+        // natively classifies as bad_request (checked below), so the
+        // remap is the only reason this ends up feature-unsupported.
+        let toml_text = r#"
+[providers.p1]
+kind = "bedrock"
+region = "us-east-1"
+creds = { kind = "default-chain" }
+
+[providers.p1.class_overrides]
+400 = "feature-unsupported"
+"#;
+        let provider = Arc::new(CountingFailingProvider {
+            id: "p1".into(),
+            status: 400,
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_from_toml(toml_text, provider);
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert: the feature_unsupported event fires with the
+        // operator-remap capability token and remapped=true.
+        assert!(result.is_err());
+        let fu = events
+            .iter()
+            .find(|e| e.target == "routectl::feature_unsupported")
+            .expect("feature_unsupported event must fire on an operator remap");
+        assert_eq!(
+            fu.field("capability"),
+            Some(crate::class_policy::OPERATOR_REMAP_CAPABILITY)
+        );
+        assert_eq!(fu.field("remapped"), Some("true"));
+        assert_eq!(fu.field("provider_kind"), Some("bedrock"));
+
+        // Assert: the class-decision event carries the original (native)
+        // class alongside the remapped effective class.
+        let ev = find_decision(&events);
+        assert_eq!(ev.field("remapped"), Some("true"));
+        assert_eq!(ev.field("remap_status"), Some("Some(400)"));
+        assert_eq!(ev.field("original_class"), Some("bad_request"));
+        assert_eq!(ev.field("effective_class"), Some("feature_unsupported"));
+    }
+
+    #[tokio::test]
+    async fn bedrock_remapped_400_does_not_debit_breaker_and_chain_advances_to_fallback() {
+        // Arrange: p1 (bedrock) remaps 400 to feature-unsupported and
+        // carries a hair-trigger breaker (circuit_failures = 1); p2 is
+        // the fallback leg. Repeated calls well past the threshold must
+        // never trip p1's breaker (feature-unsupported never debits), and
+        // every call must still reach p2 (no same-provider retry on p1,
+        // whose remapped retry_cap is the baked 0).
+        let toml_text = r#"
+[providers.p1]
+kind = "bedrock"
+region = "us-east-1"
+creds = { kind = "default-chain" }
+circuit_failures = 1
+
+[providers.p1.class_overrides]
+400 = "feature-unsupported"
+
+[providers.p2]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "literal:k"
+
+[aliases]
+alias = ["m1", "m2"]
+"#;
+        let p1 = Arc::new(CountingFailingProvider {
+            id: "p1".into(),
+            status: 400,
+            calls: AtomicUsize::new(0),
+        });
+        let p2 = Arc::new(CountingFailingProvider {
+            id: "p2".into(),
+            status: 400,
+            calls: AtomicUsize::new(0),
+        });
+        let router = two_leg_router_from_toml(toml_text, p1.clone(), p2.clone());
+
+        // Act: fire well past the configured circuit_failures=1 threshold.
+        const ATTEMPTS: usize = 3;
+        for _ in 0..ATTEMPTS {
+            let result = router.complete(req_alias()).await;
+            assert!(result.is_err());
+        }
+
+        // Assert: no same-provider retry on the remap (retry_cap 0) --
+        // p1 is dispatched exactly once per request.
+        assert_eq!(
+            p1.calls.load(Ordering::SeqCst),
+            ATTEMPTS,
+            "the remapped 400's baked retry_cap is 0: no same-provider retry"
+        );
+        // Assert: the chain advances to the fallback target every time.
+        assert_eq!(
+            p2.calls.load(Ordering::SeqCst),
+            ATTEMPTS,
+            "feature-unsupported still falls back to the next chain entry"
+        );
+        // Assert: the breaker never trips, even past its threshold --
+        // feature-unsupported never debits.
+        assert_eq!(
+            circuit_phase(&router, "m1"),
+            crate::runtime_state::CircuitPhase::Closed,
+            "a remapped feature-unsupported outcome must never debit the breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn bedrock_500_with_remap_block_present_behaves_like_no_remap() {
+        // Arrange: identical to `provider_remap_tests::
+        // without_override_503_debits_and_retries_per_baseline`'s
+        // baseline, but on a bedrock-kind provider that ALSO carries a
+        // class_overrides block -- for an unrelated status (400). A 500
+        // must debit and retry per retry_on_5xx exactly as if the remap
+        // block were absent.
+        let toml_text = r#"
+[retry]
+max_attempts = 3
+retry_on_5xx = 2
+
+[providers.p1]
+kind = "bedrock"
+region = "us-east-1"
+creds = { kind = "default-chain" }
+
+[providers.p1.class_overrides]
+400 = "feature-unsupported"
+"#;
+        let provider = Arc::new(CountingFailingProvider {
+            id: "p1".into(),
+            status: 500,
+            calls: AtomicUsize::new(0),
+        });
+        let router = router_from_toml(toml_text, provider.clone());
+
+        // Act
+        let (result, events) = with_capture(router.complete(req_m1())).await;
+
+        // Assert: the baked retry_on_5xx=2 cap is exhausted before
+        // falling back -- the presence of an unrelated remap block for
+        // 400 changes nothing about the 500 path.
+        assert!(result.is_err());
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            2,
+            "normal 5xx traffic retries the same provider up to retry_on_5xx \
+             regardless of an unrelated class_overrides entry"
+        );
+        let ev = find_decision(&events);
+        assert_eq!(ev.field("remapped"), Some("false"));
+        assert_eq!(ev.field("remap_status"), Some("None"));
+        assert_eq!(ev.field("original_class"), Some("server_error"));
+        assert_eq!(
+            ev.field("effective_class"),
+            ev.field("original_class"),
+            "no remap for status 500 means effective == original"
+        );
+        assert_eq!(ev.field("debit"), Some("true"));
+        assert_eq!(ev.field("retry_cap"), Some("2"));
     }
 }
