@@ -13,7 +13,7 @@
 //! `hyper::body::Incoming` in production.
 
 use bytes::Bytes;
-use http::{HeaderName, HeaderValue, Request, Response, StatusCode};
+use http::{HeaderName, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 
 use super::forward::{ForwardBody, ForwardRequest, empty_response, forward};
@@ -148,7 +148,7 @@ where
     );
 
     if is_anthropic_inference_path(&path) {
-        headers.insert(MITM_PROXIED_HEADER_NAME, HeaderValue::from_static("1"));
+        headers.insert(MITM_PROXIED_HEADER_NAME, ctx.seam_nonce.header_value());
         let forward_req = ForwardRequest {
             method: method.clone(),
             raw_path_and_query,
@@ -260,6 +260,7 @@ mod tests {
             reinject_base,
             tested_cc_version: None,
             cc_version_warn_guard: crate::proxy::cc_version::CcVersionWarnGuard::new(),
+            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         }
     }
 
@@ -300,7 +301,8 @@ mod tests {
             .expect("one request recorded");
         assert_eq!(
             last_request.headers.get("x-routectl-mitm-proxied").unwrap(),
-            "1"
+            &ctx.seam_nonce.header_value(),
+            "the reinject leg must stamp the process's own seam nonce, not a fixed literal"
         );
         assert_eq!(
             last_request.headers.get("authorization").unwrap(),

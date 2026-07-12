@@ -202,6 +202,7 @@ allow_disable_fallbacks = false   # harden: ignore client-side fallback bypass h
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
 | `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only; `anthropic_version` default `2023-06-01` (anthropic-api only) |
+| `credential_source`            | `[providers.X]` AnthropicApi    | string, default `"own"`; `"forwarded"` requires empty `api_key_ref` + `base_url` pinned to `api.anthropic.com` (see "credential_source" below) |
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
 | `runtime` (RPM, breaker, timeouts, `unsupported_features`) | `[providers.X]` | provider-only                                                          |
 | `allowed_betas`                | `[providers.X]` AnthropicApi    | provider-only; allowlist for `anthropic_beta` flags to `api.anthropic.com`; empty = pass-through |
@@ -1084,6 +1085,45 @@ context_management        = true
 max_thinking_entry_bytes  = 524288   # tighten or raise from the 1 MiB default
 ```
 
+## credential_source (anthropic-api provider flag) -- forwarded credential
+
+`credential_source` on `[providers.X]` (kind = "anthropic-api") picks which
+credential that provider's Anthropic egress authenticates with. Default
+`"own"` -- the provider authenticates with `api_key_ref`/`auth_kind` exactly
+as every provider always has; this default is byte-for-byte unchanged
+behavior.
+
+Set `credential_source = "forwarded"` to make the provider a pure passthrough
+for the client's own captured claude.ai bearer instead of a routectl-managed
+credential:
+
+```toml
+[providers.anthropic-forwarded]
+kind              = "anthropic-api"
+base_url          = "https://api.anthropic.com"
+credential_source = "forwarded"
+```
+
+- Omit `api_key_ref` entirely -- a forwarded provider has no configured
+  credential of its own. Validation REJECTS a forwarded entry that
+  carries a non-empty `api_key_ref` (the two are mutually exclusive: a
+  forwarded provider's credential comes from the client, never from config).
+- `base_url`'s host must be exactly `api.anthropic.com` (case-insensitive;
+  a path, port, or `user:pass@` prefix on the URL is ignored by the
+  check and does not smuggle in a different host). Validation REJECTS
+  `credential_source = "forwarded"` on any other host -- a hard
+  containment guarantee: the forwarded credential carries the client's
+  full-scope claude.ai bearer, which must never be sent to a non-Anthropic
+  egress.
+- On this leg the dispatched request keeps the client's requested
+  model verbatim instead of being rewritten to the target's configured
+  upstream model, and `GET /v1/models` proxies through to Anthropic's
+  real model list rather than returning routectl's local alias list
+  (falling back to that local list on any other request, or a
+  proxy-side failure). See
+  [REMOTE-CONTROL.md](REMOTE-CONTROL.md#pure-proxy-mode) for the
+  full admission and failure-handling model.
+
 ## Log knobs (`[log]`)
 
 The optional `[log]` block carries operator-facing fallbacks for the
@@ -1228,47 +1268,25 @@ tested_cc_version = "2.1.143"
   restart, since there is no reload path that respawns the proxy
   listener.
 
-### `credential_source` -- who authenticates the Anthropic egress
+`[mitm]` is transport-only: it carries no credential knob. Which
+credential a forwarded egress uses is a per-provider choice -- see
+[credential_source (anthropic-api provider flag)](#credential_source-anthropic-api-provider-flag----forwarded-credential)
+above.
 
-`credential_source` (string, default `"own"`) picks which credential
-the MITM-fronted Anthropic inference call authenticates with:
-
-- `"own"` (the default) -- existing behavior, byte-for-byte. The MITM
-  proxy authenticates the Anthropic inference egress through routectl's
-  own configured aliases/providers/credentials, exactly as every other
-  route does. A forwarded client bearer (the claude.ai session token the
-  MITM proxy re-injects into routectl's own listener for Remote
-  Control) is accepted onto the control plane but never used to
-  authenticate the egress call.
-- `"forwarded"` -- pure-proxy mode. The client's forwarded claude.ai
-  bearer authenticates the Anthropic-dialect inference egress directly:
-  routectl relays it to `api.anthropic.com` untouched instead of
-  resolving its own credential for that request. See
-  [REMOTE-CONTROL.md](REMOTE-CONTROL.md) "Pure-proxy mode" for the full
-  operator guide (enablement, transparent-identity behavior, the
-  admission/failure matrix, and known limitations).
+**Migrating an old config.** A `[mitm]` block that still carries
+`credential_source = "forwarded"` (or `"own"`) is REJECTED at startup
+with an actionable error naming the exact replacement. Delete the key
+and add a provider block instead:
 
 ```toml
-[mitm]
+[providers.anthropic-forwarded]
+kind              = "anthropic-api"
+base_url          = "https://api.anthropic.com"
 credential_source = "forwarded"
 ```
 
-**Zero-config bootstrap.** Setting `credential_source = "forwarded"`
-with an EMPTY `[providers]` table (no `[providers.X]` entries anywhere
-in config) auto-injects, at startup, a synthetic Anthropic egress
-(`base_url = "https://api.anthropic.com"`, OAuth-bearer auth) plus a
-`default` catch-all alias pointing at it. This is logged once at INFO
-so an operator can run Claude Code through routectl with no
-`[providers]` configured and no `routectl login anthropic` run --
-credentials are held only by Claude Code itself. See
-[REMOTE-CONTROL.md](REMOTE-CONTROL.md) "Pure-proxy mode" for the
-model-fidelity limitation this bootstrap carries.
-
-**Security note.** The forwarded credential is presented ONLY to the
-pinned host `api.anthropic.com`; it is never sent to any other egress,
-never logged, and never persisted. It is captured off the inbound
-`Authorization` header, wrapped in a redact-on-Debug carrier the
-instant it is read, and used for exactly one outbound request.
+No `api_key_ref` line -- a forwarded provider has no configured
+credential of its own.
 
 ## Inspecting a request offline (`routectl prompt-size`)
 

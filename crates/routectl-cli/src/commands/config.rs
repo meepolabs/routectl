@@ -5,8 +5,8 @@ use routectl_core::{Error, Result};
 use routectl_router::{
     Config, ProviderEntry, class_policy_warnings, validate_alias_chain_targets,
     validate_alias_patterns, validate_bedrock_global_config, validate_class_policy,
-    validate_overrides, validate_reasoning_defaults, validate_registry_patterns,
-    validate_retry_policy,
+    validate_overrides, validate_provider_credential_sources, validate_reasoning_defaults,
+    validate_registry_patterns, validate_retry_policy,
 };
 
 use crate::server::CompositeStore;
@@ -84,6 +84,9 @@ pub async fn check(config: &Config) -> Result<()> {
         errors.push(e);
     }
     if let Err(e) = validate_class_policy(config) {
+        errors.push(e.to_string());
+    }
+    if let Err(e) = validate_provider_credential_sources(config) {
         errors.push(e.to_string());
     }
     warnings.extend(class_policy_warnings(config));

@@ -332,6 +332,120 @@ fn cache_hit_pct_zero_prompt_guards_divide() {
     assert_eq!(cache_hit_pct(500, 0), 0);
 }
 
+// -------- observe_meta: forwarded-credential disambiguation ---------------
+//
+// `DispatchMeta` is `#[non_exhaustive]`, so it cannot be struct-literal
+// constructed from outside `routectl-router` -- only the router builds one
+// (see `ingress_handle_tests.rs`'s `k_recording_router_and_meta`, the same
+// pattern reused here). `any_dispatch_meta` gets a REAL router-built meta
+// from a one-entry chain over an unreachable upstream: `mark_target` runs
+// BEFORE the upstream is ever touched, so the dispatch fails but the meta
+// is still fully populated, with no network required. These tests then
+// mutate the already-owned instance's public fields directly (legal
+// regardless of `#[non_exhaustive]`, which blocks literal construction,
+// not field mutation on an owned value) to exercise both branches of
+// `observe_meta`'s marker-stamping without needing a full forwarded
+// AnthropicApi chain wired through the factory.
+
+async fn any_dispatch_meta() -> routectl_router::DispatchMeta {
+    use routectl_auth::{MemoryStore, SecretStore};
+    use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".to_string(),
+        ProviderEntry::openai_compat("http://127.0.0.1:1", "literal:k"),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        retry,
+        ..Default::default()
+    });
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+    let router = crate::server::build_router_from_config(config, secrets)
+        .await
+        .expect("build router");
+    let req = routectl_core::ChatRequest {
+        model: "a".to_string(),
+        messages: vec![],
+        ..Default::default()
+    };
+    router
+        .complete_with_options(req, Default::default())
+        .await
+        .meta
+}
+
+#[tokio::test]
+async fn observe_meta_forwarded_credential_stamps_credential_source_marker() {
+    // Arrange: simulate the forwarded branch `mark_target` takes --
+    // served_upstream carries the client's model, and the marker is set.
+    let mut meta = any_dispatch_meta().await;
+    meta.served_forwarded_credential = true;
+    meta.served_upstream = Some("opus".to_string());
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_meta(&meta);
+
+    // Assert: the client's model lands in the `upstream` column, and the
+    // disambiguation marker is stamped into the existing `extra` JSON
+    // column rather than a new schema column.
+    assert_eq!(cap.record.upstream, Some("opus".to_string()));
+    assert_eq!(
+        cap.record.extra,
+        Some(serde_json::json!({"credential_source": "forwarded"})),
+    );
+}
+
+#[tokio::test]
+async fn observe_meta_own_credential_leaves_extra_untouched() {
+    // Arrange: an own-lane meta -- `served_forwarded_credential` is false
+    // by construction (mark_target's default for a non-forwarded target).
+    let meta = any_dispatch_meta().await;
+    assert!(!meta.served_forwarded_credential, "sanity: own lane");
+    let (mut cap, _w, _dir) = capture();
+
+    // Act
+    cap.observe_meta(&meta);
+
+    // Assert: byte-for-byte unchanged -- no disambiguation marker on an
+    // own-credential row.
+    assert_eq!(cap.record.extra, None);
+}
+
+#[tokio::test]
+async fn observe_meta_forwarded_credential_preserves_existing_extra_keys() {
+    // Arrange: `extra` already carries an unrelated marker (as
+    // `mark_stream_stage` would leave it) before observe_meta runs.
+    let mut meta = any_dispatch_meta().await;
+    meta.served_forwarded_credential = true;
+    let (mut cap, _w, _dir) = capture();
+    cap.mark_stream_stage(StreamStage::MidStream);
+
+    // Act
+    cap.observe_meta(&meta);
+
+    // Assert: additive -- both keys survive.
+    assert_eq!(
+        cap.record.extra,
+        Some(serde_json::json!({
+            "stream_stage": "mid_stream",
+            "credential_source": "forwarded",
+        })),
+    );
+}
+
 // -------- build_usage_draft: session_id sourced from inbound_session_key ----
 //
 // `build_usage_draft` no longer takes a separately-derived `session_id`

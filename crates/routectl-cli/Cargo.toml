@@ -41,6 +41,10 @@ chrono.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 dirs = "6"
 subtle = "2"
+# Per-process MITM seam nonce generation (proxy::split stamper +
+# ingress::MitmSeamNonce): OS CSPRNG bytes, base64url-encoded.
+rand.workspace = true
+base64 = "0.22"
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 arc-swap = { workspace = true }
@@ -92,9 +96,6 @@ serial_test = "3"
 # Used by the `routectl usage` command tests to seed rows directly into a
 # temp usage DB via raw SQL. Test-only; the release binary never links it.
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
-# Used by the `oauth://codex` live-matrix test to decode the
-# `chatgpt_account_id` claim out of a real ChatGPT bearer JWT.
-base64 = "0.22"
 routectl-testkit.workspace = true
 # Used by the file-watch / SIGHUP integration tests
 # (`tests/hot_reload.rs`) to deliver SIGHUP into the running test

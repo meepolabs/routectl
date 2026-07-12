@@ -316,6 +316,19 @@ impl UsageCapture {
 
     /// Stamp the dispatch-derived columns from `DispatchMeta`. Valid on
     /// both the success and the all-failed paths.
+    ///
+    /// `meta.served_upstream` already carries the client's requested model
+    /// (not `target.upstream`) when `served_forwarded_credential` is set --
+    /// `DispatchMeta::mark_target` resolves that; this method just copies
+    /// the column. `served_model` (the K-triple nickname dimension) is
+    /// untouched on both lanes. A forwarded row additionally gets the
+    /// `credential_source=forwarded` disambiguation: reused into the
+    /// existing `extra` JSON column (no schema migration) and echoed as a
+    /// tracing field for live-log grep, so a K/pricing query keyed on
+    /// `served_model` is never perturbed by forwarded rows while both a
+    /// DB consumer and an operator tailing logs can still tell them apart
+    /// from own-credential rows. An own-credential row leaves `extra`
+    /// untouched (byte-for-byte unchanged).
     pub(crate) fn observe_meta(&mut self, meta: &DispatchMeta) {
         self.record.alias = meta.resolved_alias.clone();
         self.record.attempt_count = meta.attempt_count;
@@ -324,6 +337,17 @@ impl UsageCapture {
         self.record.provider_kind = meta.served_provider_kind.clone();
         self.record.model = meta.served_model.clone();
         self.record.upstream = meta.served_upstream.clone();
+        if meta.served_forwarded_credential {
+            self.stamp_extra("credential_source", "forwarded");
+            tracing::debug!(
+                request_id = %self.record.request_id,
+                provider = self.record.provider.as_deref().unwrap_or(""),
+                served_model = self.record.model.as_deref().unwrap_or(""),
+                served_upstream = self.record.upstream.as_deref().unwrap_or(""),
+                credential_source = "forwarded",
+                "usage row disambiguated as forwarded-credential dispatch",
+            );
+        }
         self.record.strategy = meta.cache_strategy.map(std::string::ToString::to_string);
         self.record.reduction_strategy = meta
             .reduction_strategy
@@ -479,12 +503,13 @@ impl UsageCapture {
         self.record.error_class = Some(error_class_of(e).to_string());
     }
 
-    /// Stamp a stream-lifecycle stage marker into the record's `extra` JSON
-    /// (`extra.stream_stage`). Lets the ledger tell a warm-hold pre-content
-    /// dispatch failure apart from a mid-stream cut -- both are
-    /// `Outcome::UpstreamError`, so the outcome column alone collapses them.
-    /// Additive: preserves any existing `extra` object keys.
-    pub(crate) fn mark_stream_stage(&mut self, stage: StreamStage) {
+    /// Merge one string key into the record's `extra` JSON object,
+    /// preserving any existing keys. The shared write path for additive
+    /// disambiguation markers that reuse the existing `extra` column
+    /// instead of a new schema column (`mark_stream_stage`'s
+    /// `stream_stage`, `observe_meta`'s forwarded-credential
+    /// `credential_source`).
+    fn stamp_extra(&mut self, key: &str, value: &str) {
         let obj = self
             .record
             .extra
@@ -493,11 +518,17 @@ impl UsageCapture {
             *obj = Value::Object(serde_json::Map::new());
         }
         if let Value::Object(map) = obj {
-            map.insert(
-                "stream_stage".to_string(),
-                Value::String(stage.as_str().to_string()),
-            );
+            map.insert(key.to_string(), Value::String(value.to_string()));
         }
+    }
+
+    /// Stamp a stream-lifecycle stage marker into the record's `extra` JSON
+    /// (`extra.stream_stage`). Lets the ledger tell a warm-hold pre-content
+    /// dispatch failure apart from a mid-stream cut -- both are
+    /// `Outcome::UpstreamError`, so the outcome column alone collapses them.
+    /// Additive: preserves any existing `extra` object keys.
+    pub(crate) fn mark_stream_stage(&mut self, stage: StreamStage) {
+        self.stamp_extra("stream_stage", stage.as_str());
     }
 
     /// Record one live cache-reuse observation into the router's per-session

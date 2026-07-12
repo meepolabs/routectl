@@ -585,11 +585,15 @@ fn default_usage_db_path() -> PathBuf {
     routectl_config_dir().join("usage.db")
 }
 
-/// Which credential the MITM proxy presents to the pinned first-party
-/// upstream. `own` (the default) preserves f1 behavior byte-for-byte:
-/// the proxy authenticates with routectl's own managed credential.
-/// `forwarded` instead relays the client's inbound credential straight
-/// through to the upstream untouched.
+/// Which credential a provider egress authenticates with. `own` (the
+/// default) preserves prior behavior byte-for-byte: the egress
+/// authenticates with routectl's own managed credential. `forwarded`
+/// instead relays the client's inbound credential straight through to
+/// the upstream untouched. Used ONLY by `ProviderEntry::AnthropicApi`
+/// (the forwarded-provider credential, pinned to `api.anthropic.com` by
+/// `validate_provider_credential_sources`) -- the legacy `[mitm]
+/// credential_source` field this enum also backed is removed; see
+/// `preflight_legacy_mitm_credential_source`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CredentialSource {
@@ -608,6 +612,13 @@ pub enum CredentialSource {
 /// `[mitm]` block gates the feature on, matching the `[server.auth]`
 /// convention -- `Config::mitm == None` keeps zero proxy startup and
 /// zero behavior change.
+///
+/// Transport-only (the f1 shape): this block carries no credential
+/// knob. Which credential a forwarded egress uses is a per-provider
+/// choice (`ProviderEntry::AnthropicApi.credential_source`) -- see
+/// `preflight_legacy_mitm_credential_source` for the pre-parse check
+/// that catches a config still carrying the removed `[mitm]
+/// credential_source` key and names the replacement.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MitmConfig {
@@ -645,11 +656,6 @@ pub struct MitmConfig {
     /// `None` (the default) disables the check entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tested_cc_version: Option<String>,
-    /// Which credential the proxy presents to the upstream. Defaults to
-    /// `own` (f1 behavior); `forwarded` relays the client's inbound
-    /// credential untouched.
-    #[serde(default)]
-    pub credential_source: CredentialSource,
 }
 
 impl Default for MitmConfig {
@@ -660,7 +666,6 @@ impl Default for MitmConfig {
             cert_dir: default_mitm_cert_dir(),
             mitm_host: default_mitm_host(),
             tested_cc_version: None,
-            credential_source: CredentialSource::Own,
         }
     }
 }
@@ -679,6 +684,139 @@ fn default_mitm_cert_dir() -> PathBuf {
 
 fn default_mitm_host() -> String {
     "api.anthropic.com".into()
+}
+
+/// The exact `[providers.X]` replacement block named in
+/// [`LegacyMitmCredentialSourceError`] and the CHANGELOG: a forwarded
+/// credential is now a provider-level choice, not a `[mitm]`-level one.
+const LEGACY_MITM_CREDENTIAL_SOURCE_REPLACEMENT_BLOCK: &str = "[providers.anthropic-forwarded]\n\
+     kind = \"anthropic-api\"\n\
+     base_url = \"https://api.anthropic.com\"\n\
+     credential_source = \"forwarded\"";
+
+/// Error from [`preflight_legacy_mitm_credential_source`]: the config
+/// still carries the removed `[mitm] credential_source` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "config carries the removed `[mitm] credential_source` key -- a forwarded credential is \
+     now a per-provider choice, not a `[mitm]`-level one. Replace it with a provider block:\n\n\
+     {LEGACY_MITM_CREDENTIAL_SOURCE_REPLACEMENT_BLOCK}\n\n\
+     (no `api_key_ref` line -- a forwarded provider has no configured credential of its own)"
+)]
+pub struct LegacyMitmCredentialSourceError;
+
+/// Read the `[mitm]` table off the RAW TOML text, before `Config`'s full
+/// (`#[serde(deny_unknown_fields)]`) deserialize runs, and check for the
+/// removed `credential_source` key. Without this preflight, an old
+/// config carrying that key still fails at load (`deny_unknown_fields`
+/// rejects it), but with serde's generic "unknown field" message, which
+/// does not tell the operator what replaces it. This preflight exists
+/// only to make that ONE failure actionable -- it never masks a genuine
+/// parse error or any other unknown field, both of which fall through
+/// to the normal typed deserialize untouched.
+///
+/// Same pattern as [`preflight_config_version`]; callers wire this in
+/// alongside it, before the typed deserialize, at both cold startup
+/// (propagate the error, fail hard) and hot config reload (reject the
+/// reload, keep the prior router live).
+pub fn preflight_legacy_mitm_credential_source(
+    raw_toml: &str,
+) -> Result<(), LegacyMitmCredentialSourceError> {
+    let carries_legacy_key = toml::from_str::<toml::Value>(raw_toml)
+        .ok()
+        .and_then(|v| v.get("mitm").and_then(toml::Value::as_table).cloned())
+        .is_some_and(|mitm| mitm.contains_key("credential_source"));
+
+    if carries_legacy_key {
+        return Err(LegacyMitmCredentialSourceError);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod legacy_mitm_credential_source_preflight_tests {
+    use super::{
+        LEGACY_MITM_CREDENTIAL_SOURCE_REPLACEMENT_BLOCK, preflight_legacy_mitm_credential_source,
+    };
+
+    #[test]
+    fn rejects_forwarded_value() {
+        let err =
+            preflight_legacy_mitm_credential_source("[mitm]\ncredential_source = \"forwarded\"\n")
+                .expect_err("legacy key must be rejected regardless of its value");
+        let msg = err.to_string();
+        assert!(msg.contains("credential_source"), "msg: {msg}");
+        assert!(
+            msg.contains(LEGACY_MITM_CREDENTIAL_SOURCE_REPLACEMENT_BLOCK),
+            "msg must name the exact replacement block: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_own_value() {
+        // Arrange / Act
+        let result =
+            preflight_legacy_mitm_credential_source("[mitm]\ncredential_source = \"own\"\n");
+
+        // Assert: the key itself is the problem, not the value.
+        assert!(result.is_err());
+    }
+
+    /// The replacement block is the actionable payload of the error --
+    /// it must be the exact 4-line shape the provider-level schema
+    /// accepts (kind, base_url, credential_source, no api_key_ref), not
+    /// a paraphrase.
+    #[test]
+    fn error_names_the_exact_provider_replacement_shape() {
+        let err =
+            preflight_legacy_mitm_credential_source("[mitm]\ncredential_source = \"forwarded\"\n")
+                .expect_err("legacy key must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("kind = \"anthropic-api\""), "msg: {msg}");
+        assert!(
+            msg.contains("base_url = \"https://api.anthropic.com\""),
+            "msg: {msg}"
+        );
+        assert!(
+            msg.contains("credential_source = \"forwarded\""),
+            "msg: {msg}"
+        );
+        assert!(
+            !msg.contains("api_key_ref ="),
+            "msg must not suggest an api_key_ref: {msg}"
+        );
+    }
+
+    #[test]
+    fn allows_transport_only_mitm_block() {
+        assert!(preflight_legacy_mitm_credential_source("[mitm]\n").is_ok());
+    }
+
+    #[test]
+    fn allows_absent_mitm_block() {
+        assert!(preflight_legacy_mitm_credential_source("").is_ok());
+        assert!(
+            preflight_legacy_mitm_credential_source("[server]\nhost = \"127.0.0.1\"\n").is_ok()
+        );
+    }
+
+    /// Sanity mirror of `preflight_config_version`'s own sanity test: the
+    /// raw `deny_unknown_fields` deserialize error for this exact input
+    /// does NOT already carry the actionable replacement text -- this
+    /// preflight is the reason the operator sees more than "unknown
+    /// field `credential_source`".
+    #[test]
+    fn raw_deserialize_error_alone_lacks_the_actionable_replacement() {
+        let raw = "[mitm]\ncredential_source = \"forwarded\"\n";
+        let deny_unknown_err = toml::from_str::<crate::config::Config>(raw)
+            .expect_err("legacy key must still fail the typed deserialize too");
+        assert!(
+            !deny_unknown_err
+                .to_string()
+                .contains("[providers.anthropic-forwarded]"),
+            "sanity: the raw deserialize error must NOT already name the replacement block"
+        );
+    }
 }
 
 /// Per-million-token pricing for one `[registry.*]` entry. All fields
@@ -1417,6 +1555,12 @@ pub enum ProviderEntry {
     },
     #[non_exhaustive]
     AnthropicApi {
+        /// Reference to the API key, resolved the same way as every
+        /// other provider's `api_key_ref`. Defaulted (empty string) so a
+        /// `credential_source = "forwarded"` block can omit it entirely
+        /// -- `validate_provider_credential_sources` then REQUIRES it be
+        /// empty for `forwarded` and non-empty for `own`.
+        #[serde(default)]
         api_key_ref: String,
         #[serde(default = "default_anthropic_base")]
         base_url: String,
@@ -1428,6 +1572,15 @@ pub enum ProviderEntry {
         /// subscription access token (`sk-ant-oat01-...`).
         #[serde(default)]
         auth_kind: AuthKind,
+        /// Which credential this provider's Anthropic egress
+        /// authenticates with. Default `own`: the provider uses
+        /// `api_key_ref`/`auth_kind` exactly as before. `forwarded`
+        /// relays the client's captured claude.ai bearer instead --
+        /// `validate_provider_credential_sources` requires `base_url`'s
+        /// host be exactly `api.anthropic.com` and `api_key_ref` be
+        /// empty whenever this is `forwarded`.
+        #[serde(default)]
+        credential_source: CredentialSource,
         /// Provider-level header extras. Merged with per-model entries
         /// at dispatch time.
         #[serde(default)]
@@ -1762,6 +1915,23 @@ impl ProviderEntry {
         }
     }
 
+    /// `Some(base_url)` iff this entry is an `AnthropicApi` variant with
+    /// `credential_source == Forwarded`, `None` otherwise. The single
+    /// place that recognizes "this is the forwarded provider" so
+    /// callers (a boolean scan, a dispatch-target flag, and the
+    /// forwarded-proxy `/v1/models` handler) don't each hand-roll the
+    /// same `matches!` against the enum's inner fields.
+    pub fn forwarded_base_url(&self) -> Option<&str> {
+        match self {
+            Self::AnthropicApi {
+                credential_source: CredentialSource::Forwarded,
+                base_url,
+                ..
+            } => Some(base_url),
+            _ => None,
+        }
+    }
+
     /// Per-provider `header_extras`. Returns a reference to the
     /// per-variant map so the dispatch-layer merge helpers can read
     /// without re-matching the enum.
@@ -1953,6 +2123,7 @@ impl ProviderEntry {
             base_url: default_anthropic_base(),
             anthropic_version: default_anthropic_version(),
             auth_kind: AuthKind::ApiKey,
+            credential_source: CredentialSource::Own,
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
@@ -2142,6 +2313,18 @@ impl ProviderEntry {
         self
     }
 
+    /// Set the AnthropicApi variant's `credential_source`. Panics on
+    /// other variants -- the field is AnthropicApi-only.
+    pub fn with_credential_source(mut self, source: CredentialSource) -> Self {
+        match &mut self {
+            Self::AnthropicApi {
+                credential_source, ..
+            } => *credential_source = source,
+            _ => panic!("ProviderEntry::with_credential_source only applies to anthropic-api"),
+        }
+        self
+    }
+
     /// Set the AnthropicApi variant's `forward_client_headers`
     /// allowlist (names of inbound `x-claude-code-*` headers the
     /// egress may forward to api.anthropic.com). Panics on other
@@ -2203,9 +2386,15 @@ impl ProviderEntry {
 
     pub fn secret_uris(&self) -> Vec<&str> {
         match self {
-            Self::OpenaiCompat { api_key_ref, .. } | Self::AnthropicApi { api_key_ref, .. } => {
-                vec![api_key_ref.as_str()]
-            }
+            Self::OpenaiCompat { api_key_ref, .. } => vec![api_key_ref.as_str()],
+            // A `forwarded` entry's `api_key_ref` is intentionally empty
+            // (validated by `validate_provider_credential_sources`, not
+            // resolved through a `SecretStore`) -- an empty ref is not a
+            // secret URI to resolve, so surfacing it would fail
+            // `SecretRef::parse` with a spurious "unrecognized scheme"
+            // error on an otherwise-clean forwarded provider.
+            Self::AnthropicApi { api_key_ref, .. } if api_key_ref.is_empty() => Vec::new(),
+            Self::AnthropicApi { api_key_ref, .. } => vec![api_key_ref.as_str()],
             #[cfg(feature = "bedrock")]
             Self::Bedrock { creds, .. } => creds.secret_uris(),
             #[cfg(feature = "openai-responses")]
@@ -4794,55 +4983,14 @@ mod explicit_status_override_tests {
 mod mitm_config_tests {
     //! `[mitm]` schema round-trip: absence leaves the feature off,
     //! presence fills in every documented default, explicit values
-    //! survive serde untouched, and an unknown key rejects at parse
-    //! time (same `deny_unknown_fields` footgun-closing convention as
-    //! `[server.auth]`).
+    //! survive serde untouched, and an unknown key -- including the
+    //! removed `credential_source` -- rejects at parse time (same
+    //! `deny_unknown_fields` footgun-closing convention as
+    //! `[server.auth]`). The actionable-error path for the legacy key
+    //! specifically is pinned in
+    //! `legacy_mitm_credential_source_preflight_tests` above.
 
-    use crate::config::{Config, CredentialSource, MitmConfig};
-
-    #[test]
-    fn mitm_credential_source_defaults_to_own_when_omitted() {
-        let toml_text = "[mitm]\n";
-        let cfg: Config = toml::from_str(toml_text).expect("parse bare [mitm] block");
-        let mitm = cfg.mitm.expect("mitm present once the block is declared");
-        assert_eq!(mitm.credential_source, CredentialSource::Own);
-    }
-
-    #[test]
-    fn mitm_default_impl_sets_credential_source_own() {
-        assert_eq!(
-            MitmConfig::default().credential_source,
-            CredentialSource::Own
-        );
-    }
-
-    #[test]
-    fn mitm_credential_source_forwarded_parses() {
-        let toml_text = "[mitm]\ncredential_source = \"forwarded\"\n";
-        let cfg: Config = toml::from_str(toml_text).expect("parse [mitm] with forwarded");
-        let mitm = cfg.mitm.expect("mitm present");
-        assert_eq!(mitm.credential_source, CredentialSource::Forwarded);
-    }
-
-    #[test]
-    fn mitm_credential_source_own_parses() {
-        let toml_text = "[mitm]\ncredential_source = \"own\"\n";
-        let cfg: Config = toml::from_str(toml_text).expect("parse [mitm] with own");
-        let mitm = cfg.mitm.expect("mitm present");
-        assert_eq!(mitm.credential_source, CredentialSource::Own);
-    }
-
-    #[test]
-    fn mitm_credential_source_rejects_unknown_value() {
-        let toml_text = "[mitm]\ncredential_source = \"borrowed\"\n";
-        let err = toml::from_str::<Config>(toml_text)
-            .expect_err("unknown credential_source value must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("borrowed") || msg.contains("unknown variant") || msg.contains("expected"),
-            "expected an unknown-variant parse error; got: {msg}"
-        );
-    }
+    use crate::config::{Config, MitmConfig};
 
     #[test]
     fn mitm_absent_leaves_config_none() {
@@ -4864,6 +5012,7 @@ mod mitm_config_tests {
             "cert_dir: {:?}",
             mitm.cert_dir
         );
+        assert_eq!(mitm, MitmConfig::default());
     }
 
     #[test]
@@ -4900,6 +5049,198 @@ listen_prot = 9443
         assert!(
             msg.contains("listen_prot") || msg.contains("unknown field"),
             "expected unknown-field error naming the typo; got: {msg}"
+        );
+    }
+
+    /// The removed `credential_source` key is exactly as unrepresentable
+    /// on `[mitm]` as any other unknown field -- `deny_unknown_fields`
+    /// rejects the typed deserialize regardless of the value. The
+    /// actionable replacement text lives in the preflight check
+    /// (`legacy_mitm_credential_source_preflight_tests`), not here.
+    #[test]
+    fn mitm_rejects_legacy_credential_source_field() {
+        let toml_text = "[mitm]\ncredential_source = \"forwarded\"\n";
+        let err = toml::from_str::<Config>(toml_text)
+            .expect_err("the removed credential_source key must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("credential_source") || msg.contains("unknown field"),
+            "expected unknown-field error naming credential_source; got: {msg}"
+        );
+    }
+
+    /// Acceptance: a transport-only `[mitm]` block -- the f1 shape, no
+    /// credential knob -- still validates cleanly via the full config
+    /// boundary (not a bare-struct construction).
+    #[test]
+    fn mitm_transport_only_block_still_validates() {
+        let toml_text = r#"
+[mitm]
+upstream_origin = "https://api.anthropic.com"
+listen_port = 8443
+mitm_host = "api.anthropic.com"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("transport-only [mitm] must parse");
+        assert!(cfg.mitm.is_some());
+    }
+}
+
+#[cfg(test)]
+mod provider_credential_source_schema_tests {
+    //! Config-BOUNDARY (parse-via-`toml`) schema tests for
+    //! `ProviderEntry::AnthropicApi.credential_source`: field-coherence
+    //! (host pin, `api_key_ref` matrix) lives in
+    //! `factory::validate_provider_credential_sources_tests` -- this
+    //! module pins only the serde SHAPE: default value, round-trip, and
+    //! that `deny_unknown_fields` makes the field unrepresentable on
+    //! every other `[providers.X]` kind.
+
+    use crate::config::{Config, CredentialSource, ProviderEntry};
+
+    #[test]
+    fn anthropic_api_credential_source_defaults_to_own_when_omitted() {
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse default");
+        match cfg.providers.get("anthropic").expect("anthropic provider") {
+            ProviderEntry::AnthropicApi {
+                credential_source, ..
+            } => assert_eq!(*credential_source, CredentialSource::Own),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+    }
+
+    /// The 4-line forwarded block from the docs/spec: no `api_key_ref`
+    /// line at all, `credential_source = "forwarded"`. Must parse
+    /// cleanly -- `api_key_ref` is `#[serde(default)]` precisely so this
+    /// shape is representable.
+    #[test]
+    fn anthropic_api_forwarded_block_with_no_api_key_ref_parses() {
+        let toml_text = r#"
+[providers.anthropic-forwarded]
+kind = "anthropic-api"
+base_url = "https://api.anthropic.com"
+credential_source = "forwarded"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("forwarded block must parse");
+        match cfg
+            .providers
+            .get("anthropic-forwarded")
+            .expect("anthropic-forwarded provider")
+        {
+            ProviderEntry::AnthropicApi {
+                credential_source,
+                api_key_ref,
+                ..
+            } => {
+                assert_eq!(*credential_source, CredentialSource::Forwarded);
+                assert!(api_key_ref.is_empty(), "got: {api_key_ref:?}");
+            }
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+    }
+
+    /// An empty `api_key_ref` (the forwarded shape) must NOT surface as a
+    /// secret URI to resolve -- `commands::config::check` iterates every
+    /// `secret_uris()` entry through `SecretRef::parse`, which would
+    /// reject an empty string as an unrecognized scheme and fail an
+    /// otherwise-clean forwarded provider.
+    #[test]
+    fn forwarded_entry_reports_no_secret_uris() {
+        let toml_text = r#"
+[providers.anthropic-forwarded]
+kind = "anthropic-api"
+base_url = "https://api.anthropic.com"
+credential_source = "forwarded"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let entry = cfg.providers.get("anthropic-forwarded").unwrap();
+        assert!(
+            entry.secret_uris().is_empty(),
+            "got: {:?}",
+            entry.secret_uris()
+        );
+    }
+
+    #[test]
+    fn anthropic_api_credential_source_round_trips_through_toml() {
+        let toml_text = r#"
+[providers.anthropic-forwarded]
+kind = "anthropic-api"
+base_url = "https://api.anthropic.com"
+credential_source = "forwarded"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("parse");
+        let reserialized = toml::to_string(&cfg).expect("re-serialize");
+        let cfg2: Config = toml::from_str(&reserialized).expect("re-parse");
+        match cfg2.providers.get("anthropic-forwarded").unwrap() {
+            ProviderEntry::AnthropicApi {
+                credential_source, ..
+            } => assert_eq!(*credential_source, CredentialSource::Forwarded),
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_api_rejects_unknown_credential_source_value() {
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+credential_source = "borrowed"
+"#;
+        let err = toml::from_str::<Config>(toml_text)
+            .expect_err("unknown credential_source value must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("borrowed") || msg.contains("unknown variant") || msg.contains("expected"),
+            "expected an unknown-variant parse error; got: {msg}"
+        );
+    }
+
+    /// `deny_unknown_fields` at the enum level makes `credential_source`
+    /// unrepresentable on the `openai-compat` kind -- the field lives
+    /// ONLY on the `AnthropicApi` variant.
+    #[test]
+    fn credential_source_is_rejected_on_openai_compat() {
+        let toml_text = r#"
+[providers.example]
+kind = "openai-compat"
+base_url = "https://api.openai.com"
+api_key_ref = "env://OPENAI_API_KEY"
+credential_source = "forwarded"
+"#;
+        let err = toml::from_str::<Config>(toml_text)
+            .expect_err("credential_source must not parse on openai-compat");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("credential_source") || msg.contains("unknown field"),
+            "expected unknown-field error naming credential_source; got: {msg}"
+        );
+    }
+
+    /// Same guarantee as `credential_source_is_rejected_on_openai_compat`,
+    /// pinned separately for the `openai-responses` kind -- the task's
+    /// acceptance criteria name both kinds explicitly.
+    #[cfg(feature = "openai-responses")]
+    #[test]
+    fn credential_source_is_rejected_on_openai_responses() {
+        let toml_text = r#"
+[providers.example]
+kind = "openai-responses"
+api_key_ref = "literal:test-jwt"
+auth_kind = "api-key"
+credential_source = "forwarded"
+"#;
+        let err = toml::from_str::<Config>(toml_text)
+            .expect_err("credential_source must not parse on openai-responses");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("credential_source") || msg.contains("unknown field"),
+            "expected unknown-field error naming credential_source; got: {msg}"
         );
     }
 }

@@ -23,6 +23,7 @@
 use super::*;
 use axum::body::to_bytes;
 use routectl_core::Error;
+use routectl_router::config::CredentialSource;
 use routectl_usage::{CHANNEL_CAPACITY, Outcome, UsageWriter};
 
 /// A tempdir-backed usage writer + handle for capture tests. Holding the
@@ -243,15 +244,16 @@ async fn anthropic_envelope_validation_error_emits_invalid_request_error() {
 }
 
 #[tokio::test]
-async fn anthropic_envelope_forwarded_non_anthropic_refuse_maps_to_400_invalid_request() {
-    // The ROUTER-side forwarded-passthrough gate refuses a non-Anthropic
-    // target with `Error::Validation` carrying `reason=non_anthropic_target`.
-    // Pin the client-facing contract: HTTP 400, Anthropic
-    // invalid_request_error envelope, and the reason survives into the
-    // message (never a 5xx).
+async fn anthropic_envelope_forwarded_missing_bearer_refuse_maps_to_400_invalid_request() {
+    // The ROUTER-side missing-bearer terminal guard refuses a forwarded
+    // target with no captured client bearer with `Error::Validation`
+    // carrying `reason=missing_forwarded_bearer`. Pin the client-facing
+    // contract: HTTP 400, Anthropic invalid_request_error envelope, and
+    // the reason survives into the message (never a 5xx, never a passed-
+    // through upstream 401).
     let err = Error::Validation(
-        "forwarded request cannot be routed to a non-Anthropic target \
-         (reason=non_anthropic_target)"
+        "forwarded target has no captured client bearer to authenticate this request \
+         (reason=missing_forwarded_bearer)"
             .to_string(),
     );
 
@@ -266,7 +268,7 @@ async fn anthropic_envelope_forwarded_non_anthropic_refuse_maps_to_400_invalid_r
         body["error"]["message"]
             .as_str()
             .unwrap_or("")
-            .contains("non_anthropic_target"),
+            .contains("missing_forwarded_bearer"),
         "the refuse reason must survive into the client envelope message",
     );
 }
@@ -2288,40 +2290,50 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
 // `req.routectl_internal.forwarded_bearer` ONLY when BOTH:
 //   (a) the `x-routectl-mitm-proxied` seam header is present (the MITM
 //       proxy stamps it exclusively on the re-injected inference leg), AND
-//   (b) the resolved `[mitm] credential_source` is `Forwarded`.
-// Every other path (own mode, no `[mitm]` block, no seam header, no
+//   (b) `router.has_forwarded_provider()` is true (a `credential_source =
+//       "forwarded"` provider is configured).
+// Every other path (no forwarded provider configured, no seam header, no
 // inbound bearer) MUST leave the carrier byte-identical to pre-passthrough
 // behavior: `forwarded_bearer == None`. The token, when captured, is the
 // scheme-stripped bearer value (what the egress dispatch path reads) and is
 // never rendered raw by the carrier's `Debug`.
 
-/// Build an `Arc<Router>` whose `[mitm]` config carries `cs`. `None`
-/// models "no `[mitm]` block at all"; `Some(cs)` models a present block
-/// with that credential_source. `Router::new` does no I/O, so this is a
-/// pure carrier for the `router.config.mitm` read the gate performs.
-fn router_with_mitm(cs: Option<CredentialSource>) -> std::sync::Arc<routectl_router::Router> {
-    use routectl_router::{Config, MitmConfig, Router};
+/// Build an `Arc<Router>` whose `[providers]` table carries `cs`. `None`
+/// models "no provider configured at all"; `Some(cs)` models a single
+/// `anthropic-api` provider entry with that `credential_source`. `Router::new`
+/// does no I/O, so this is a pure carrier for the `has_forwarded_provider()`
+/// read the gate performs.
+fn router_with_provider_credential_source(
+    cs: Option<CredentialSource>,
+) -> std::sync::Arc<routectl_router::Router> {
+    use routectl_router::{Config, ProviderEntry, Router};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
-    let mitm = cs.map(|credential_source| MitmConfig {
-        credential_source,
-        ..Default::default()
-    });
+    let mut providers = BTreeMap::new();
+    if let Some(credential_source) = cs {
+        providers.insert(
+            "p".to_string(),
+            ProviderEntry::anthropic_api("").with_credential_source(credential_source),
+        );
+    }
     Arc::new(Router::new(Arc::new(Config {
-        mitm,
+        providers,
         ..Default::default()
     })))
 }
 
 /// Build an inbound `HeaderMap` for the gate tests: optionally the
-/// `x-routectl-mitm-proxied` seam header (value is irrelevant -- the gate
-/// checks presence only) and optionally a raw `Authorization` value.
-fn ingress_headers(seam: bool, authorization: Option<&str>) -> HeaderMap {
+/// `x-routectl-mitm-proxied` seam header stamped with `nonce`'s value, and
+/// optionally a raw `Authorization` value. `nonce` must be the SAME
+/// instance passed to `capture_forwarded_bearer`/`capture_stainless_headers`
+/// for the seam to be recognized as present.
+fn ingress_headers(nonce: Option<&MitmSeamNonce>, authorization: Option<&str>) -> HeaderMap {
     use axum::http::{HeaderName, HeaderValue, header::AUTHORIZATION};
     let mut h = HeaderMap::new();
-    if seam {
+    if let Some(nonce) = nonce {
         h.insert(
             HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
-            HeaderValue::from_static("1"),
+            nonce.header_value(),
         );
     }
     if let Some(a) = authorization {
@@ -2332,23 +2344,26 @@ fn ingress_headers(seam: bool, authorization: Option<&str>) -> HeaderMap {
 
 // ---- capture matrix (the security-critical contract) ----
 
-/// Own mode is the default capability: even with the seam-header hint AND
-/// an inbound bearer present, the config gate is closed, so nothing is
-/// captured.
+/// No forwarded provider configured is the default capability: even with
+/// the seam-header hint AND an inbound bearer present, the config gate is
+/// closed, so nothing is captured. An `Own`-credential provider present
+/// (not just an EMPTY `[providers]` table) proves the gate keys on
+/// `credential_source`, not merely "some provider exists".
 #[test]
-fn forwarded_bearer_stays_none_in_own_mode_even_with_seam_and_bearer() {
+fn forwarded_bearer_stays_none_without_forwarded_provider_even_with_seam_and_bearer() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Own));
-    let headers = ingress_headers(true, Some("Bearer sk-own-mode-tok"));
+    let router = router_with_provider_credential_source(Some(CredentialSource::Own));
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers(Some(&nonce), Some("Bearer sk-own-mode-tok"));
     let mut req = sample_request("m", false);
 
     // Act
-    capture_forwarded_bearer(&headers, &router, &mut req);
+    capture_forwarded_bearer(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert!(
         req.routectl_internal.forwarded_bearer.is_none(),
-        "own mode must never capture the inbound bearer"
+        "no forwarded provider configured must never capture the inbound bearer"
     );
 }
 
@@ -2358,17 +2373,44 @@ fn forwarded_bearer_stays_none_in_own_mode_even_with_seam_and_bearer() {
 #[test]
 fn forwarded_bearer_stays_none_in_forwarded_mode_without_seam_header() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = ingress_headers(false, Some("Bearer sk-no-seam-tok"));
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers(None, Some("Bearer sk-no-seam-tok"));
     let mut req = sample_request("m", false);
 
     // Act
-    capture_forwarded_bearer(&headers, &router, &mut req);
+    capture_forwarded_bearer(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert!(
         req.routectl_internal.forwarded_bearer.is_none(),
         "no seam header -> not the MITM inference leg -> no capture"
+    );
+}
+
+/// Security-critical: a request carrying the seam header with a value that
+/// does NOT match the process nonce (a spoof attempt by a direct caller)
+/// must downgrade to seam-ABSENT -- exactly like a missing header -- not be
+/// treated as present just because the header name exists.
+#[test]
+fn forwarded_bearer_stays_none_when_seam_header_carries_a_spoofed_wrong_value() {
+    // Arrange
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
+    let mut headers = ingress_headers(None, Some("Bearer sk-spoofed-seam-tok"));
+    headers.insert(
+        axum::http::HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
+        axum::http::HeaderValue::from_static("1"),
+    );
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_forwarded_bearer(&headers, &router, &nonce, &mut req);
+
+    // Assert
+    assert!(
+        req.routectl_internal.forwarded_bearer.is_none(),
+        "a spoofed seam header value must never be treated as seam-present"
     );
 }
 
@@ -2379,12 +2421,13 @@ fn forwarded_bearer_stays_none_in_forwarded_mode_without_seam_header() {
 #[test]
 fn forwarded_bearer_captured_when_forwarded_and_seam_and_bearer_present() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = ingress_headers(true, Some("Bearer sk-ant-oat01-passthrough"));
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers(Some(&nonce), Some("Bearer sk-ant-oat01-passthrough"));
     let mut req = sample_request("m", false);
 
     // Act
-    capture_forwarded_bearer(&headers, &router, &mut req);
+    capture_forwarded_bearer(&headers, &router, &nonce, &mut req);
 
     // Assert
     let captured = req
@@ -2399,23 +2442,23 @@ fn forwarded_bearer_captured_when_forwarded_and_seam_and_bearer_present() {
     );
 }
 
-/// No `[mitm]` block at all resolves to `credential_source == None`, which
-/// is not `Forwarded`, so the gate stays closed even with the seam header
-/// and a bearer present.
+/// No provider configured at all: `has_forwarded_provider()` is `false`, so
+/// the gate stays closed even with the seam header and a bearer present.
 #[test]
-fn forwarded_bearer_stays_none_when_no_mitm_config_at_all() {
+fn forwarded_bearer_stays_none_when_no_provider_configured_at_all() {
     // Arrange
-    let router = router_with_mitm(None);
-    let headers = ingress_headers(true, Some("Bearer sk-no-mitm-tok"));
+    let router = router_with_provider_credential_source(None);
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers(Some(&nonce), Some("Bearer sk-no-mitm-tok"));
     let mut req = sample_request("m", false);
 
     // Act
-    capture_forwarded_bearer(&headers, &router, &mut req);
+    capture_forwarded_bearer(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert!(
         req.routectl_internal.forwarded_bearer.is_none(),
-        "absent [mitm] block must never capture the inbound bearer"
+        "no configured provider must never capture the inbound bearer"
     );
 }
 
@@ -2424,12 +2467,13 @@ fn forwarded_bearer_stays_none_when_no_mitm_config_at_all() {
 #[test]
 fn forwarded_bearer_stays_none_when_gates_open_but_no_authorization_header() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = ingress_headers(true, None);
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers(Some(&nonce), None);
     let mut req = sample_request("m", false);
 
     // Act
-    capture_forwarded_bearer(&headers, &router, &mut req);
+    capture_forwarded_bearer(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert!(req.routectl_internal.forwarded_bearer.is_none());
@@ -2441,12 +2485,13 @@ fn forwarded_bearer_stays_none_when_gates_open_but_no_authorization_header() {
 #[test]
 fn forwarded_bearer_stays_none_for_non_bearer_authorization_scheme() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = ingress_headers(true, Some("Basic dXNlcjpwYXNz"));
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers(Some(&nonce), Some("Basic dXNlcjpwYXNz"));
     let mut req = sample_request("m", false);
 
     // Act
-    capture_forwarded_bearer(&headers, &router, &mut req);
+    capture_forwarded_bearer(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert!(req.routectl_internal.forwarded_bearer.is_none());
@@ -2458,12 +2503,13 @@ fn forwarded_bearer_stays_none_for_non_bearer_authorization_scheme() {
 #[test]
 fn captured_bearer_is_redacted_in_carrier_debug() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = ingress_headers(true, Some("Bearer sk-leak-canary-42"));
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers(Some(&nonce), Some("Bearer sk-leak-canary-42"));
     let mut req = sample_request("m", false);
 
     // Act
-    capture_forwarded_bearer(&headers, &router, &mut req);
+    capture_forwarded_bearer(&headers, &router, &nonce, &mut req);
     let rendered = format!("{:?}", req.routectl_internal);
 
     // Assert
@@ -2481,22 +2527,24 @@ fn captured_bearer_is_redacted_in_carrier_debug() {
 //
 // `capture_stainless_headers` stashes the inbound `x-stainless-*` SDK
 // fingerprint headers on `req.routectl_internal.stainless_headers` under
-// the SAME two-key gate as the bearer capture (seam header present AND
-// `[mitm] credential_source == Forwarded`). Every own-mode / non-forwarded
-// path MUST leave the carrier byte-identical: `stainless_headers` empty.
-// These are NON-secret SDK fingerprint values, so no redaction applies --
-// the security contract here is only that own mode is untouched.
+// the SAME two-key gate as the bearer capture (nonce-matching seam header
+// present AND `router.has_forwarded_provider()`). Every path with no
+// forwarded provider configured MUST leave the carrier byte-identical:
+// `stainless_headers` empty. These are NON-secret SDK fingerprint values,
+// so no redaction applies -- the security contract here is only that the
+// gate stays closed.
 
 /// Build an inbound `HeaderMap`: optionally the `x-routectl-mitm-proxied`
-/// seam header plus an arbitrary set of `(name, value)` header entries.
-/// Used to exercise the stainless-capture namespace filter.
-fn ingress_headers_with(seam: bool, entries: &[(&str, &str)]) -> HeaderMap {
+/// seam header stamped with `nonce`'s value, plus an arbitrary set of
+/// `(name, value)` header entries. Used to exercise the stainless-capture
+/// namespace filter.
+fn ingress_headers_with(nonce: Option<&MitmSeamNonce>, entries: &[(&str, &str)]) -> HeaderMap {
     use axum::http::{HeaderName, HeaderValue};
     let mut h = HeaderMap::new();
-    if seam {
+    if let Some(nonce) = nonce {
         h.insert(
             HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
-            HeaderValue::from_static("1"),
+            nonce.header_value(),
         );
     }
     for (name, value) in entries {
@@ -2514,9 +2562,10 @@ fn ingress_headers_with(seam: bool, entries: &[(&str, &str)]) -> HeaderMap {
 #[test]
 fn stainless_headers_captured_when_forwarded_and_seam_present() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers_with(
-        true,
+        Some(&nonce),
         &[
             ("x-stainless-lang", "js"),
             ("x-stainless-package-version", "0.94.0-client"),
@@ -2526,7 +2575,7 @@ fn stainless_headers_captured_when_forwarded_and_seam_present() {
     let mut req = sample_request("m", false);
 
     // Act
-    capture_stainless_headers(&headers, &router, &mut req);
+    capture_stainless_headers(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert_eq!(
@@ -2543,23 +2592,25 @@ fn stainless_headers_captured_when_forwarded_and_seam_present() {
     );
 }
 
-/// Own mode is the default capability: even with the seam hint AND
-/// inbound `x-stainless-*` headers present, the config gate is closed, so
-/// nothing is captured (carrier byte-identical to pre-passthrough).
+/// No forwarded provider configured is the default capability: even with
+/// the seam hint AND inbound `x-stainless-*` headers present, the config
+/// gate is closed, so nothing is captured (carrier byte-identical to
+/// pre-passthrough).
 #[test]
-fn stainless_headers_stays_empty_in_own_mode_even_with_seam() {
+fn stainless_headers_stays_empty_without_forwarded_provider_even_with_seam() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Own));
-    let headers = ingress_headers_with(true, &[("x-stainless-lang", "js")]);
+    let router = router_with_provider_credential_source(Some(CredentialSource::Own));
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers_with(Some(&nonce), &[("x-stainless-lang", "js")]);
     let mut req = sample_request("m", false);
 
     // Act
-    capture_stainless_headers(&headers, &router, &mut req);
+    capture_stainless_headers(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert!(
         req.routectl_internal.stainless_headers.is_empty(),
-        "own mode must never capture x-stainless-* headers"
+        "no forwarded provider configured must never capture x-stainless-* headers"
     );
 }
 
@@ -2568,12 +2619,13 @@ fn stainless_headers_stays_empty_in_own_mode_even_with_seam() {
 #[test]
 fn stainless_headers_stays_empty_without_seam_header() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = ingress_headers_with(false, &[("x-stainless-lang", "js")]);
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers_with(None, &[("x-stainless-lang", "js")]);
     let mut req = sample_request("m", false);
 
     // Act
-    capture_stainless_headers(&headers, &router, &mut req);
+    capture_stainless_headers(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert!(
@@ -2582,23 +2634,48 @@ fn stainless_headers_stays_empty_without_seam_header() {
     );
 }
 
-/// No `[mitm]` block resolves to `credential_source == None`, which is not
-/// `Forwarded`, so the gate stays closed even with the seam header and
-/// stainless headers present.
+/// Security-critical, stainless side: a spoofed seam-header value must
+/// downgrade to seam-ABSENT just like the bearer-capture gate.
 #[test]
-fn stainless_headers_stays_empty_when_no_mitm_config() {
+fn stainless_headers_stays_empty_when_seam_header_carries_a_spoofed_wrong_value() {
     // Arrange
-    let router = router_with_mitm(None);
-    let headers = ingress_headers_with(true, &[("x-stainless-lang", "js")]);
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
+    let mut headers = ingress_headers_with(None, &[("x-stainless-lang", "js")]);
+    headers.insert(
+        axum::http::HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
+        axum::http::HeaderValue::from_static("1"),
+    );
     let mut req = sample_request("m", false);
 
     // Act
-    capture_stainless_headers(&headers, &router, &mut req);
+    capture_stainless_headers(&headers, &router, &nonce, &mut req);
 
     // Assert
     assert!(
         req.routectl_internal.stainless_headers.is_empty(),
-        "absent [mitm] block must never capture x-stainless-* headers"
+        "a spoofed seam header value must never be treated as seam-present"
+    );
+}
+
+/// No provider configured at all: `has_forwarded_provider()` is `false`, so
+/// the gate stays closed even with the seam header and stainless headers
+/// present.
+#[test]
+fn stainless_headers_stays_empty_when_no_provider_configured() {
+    // Arrange
+    let router = router_with_provider_credential_source(None);
+    let nonce = MitmSeamNonce::generate();
+    let headers = ingress_headers_with(Some(&nonce), &[("x-stainless-lang", "js")]);
+    let mut req = sample_request("m", false);
+
+    // Act
+    capture_stainless_headers(&headers, &router, &nonce, &mut req);
+
+    // Assert
+    assert!(
+        req.routectl_internal.stainless_headers.is_empty(),
+        "no configured provider must never capture x-stainless-* headers"
     );
 }
 
@@ -2608,9 +2685,10 @@ fn stainless_headers_stays_empty_when_no_mitm_config() {
 #[test]
 fn stainless_capture_ignores_non_stainless_headers() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    let router = router_with_provider_credential_source(Some(CredentialSource::Forwarded));
+    let nonce = MitmSeamNonce::generate();
     let headers = ingress_headers_with(
-        true,
+        Some(&nonce),
         &[
             ("X-Stainless-Arch", "x64"),
             ("x-claude-code-session-id", "sid-9"),
@@ -2621,7 +2699,7 @@ fn stainless_capture_ignores_non_stainless_headers() {
     let mut req = sample_request("m", false);
 
     // Act
-    capture_stainless_headers(&headers, &router, &mut req);
+    capture_stainless_headers(&headers, &router, &nonce, &mut req);
 
     // Assert: only the (lowercased) x-stainless entry is captured.
     assert_eq!(
@@ -2634,14 +2712,14 @@ fn stainless_capture_ignores_non_stainless_headers() {
 // ---- extract_authorization_bearer (pure) ----
 #[test]
 fn extract_bearer_returns_token_after_scheme() {
-    let h = ingress_headers(false, Some("Bearer abc123"));
+    let h = ingress_headers(None, Some("Bearer abc123"));
     assert_eq!(extract_authorization_bearer(&h).as_deref(), Some("abc123"));
 }
 
 #[test]
 fn extract_bearer_scheme_match_is_case_insensitive() {
     for scheme in ["bearer", "BEARER", "BeArEr"] {
-        let h = ingress_headers(false, Some(&format!("{scheme} tok-9")));
+        let h = ingress_headers(None, Some(&format!("{scheme} tok-9")));
         assert_eq!(
             extract_authorization_bearer(&h).as_deref(),
             Some("tok-9"),
@@ -2652,7 +2730,7 @@ fn extract_bearer_scheme_match_is_case_insensitive() {
 
 #[test]
 fn extract_bearer_trims_surrounding_whitespace_around_token() {
-    let h = ingress_headers(false, Some("Bearer    padded-tok  "));
+    let h = ingress_headers(None, Some("Bearer    padded-tok  "));
     assert_eq!(
         extract_authorization_bearer(&h).as_deref(),
         Some("padded-tok")
@@ -2661,20 +2739,20 @@ fn extract_bearer_trims_surrounding_whitespace_around_token() {
 
 #[test]
 fn extract_bearer_none_when_header_absent() {
-    let h = ingress_headers(false, None);
+    let h = ingress_headers(None, None);
     assert_eq!(extract_authorization_bearer(&h), None);
 }
 
 #[test]
 fn extract_bearer_none_for_non_bearer_scheme() {
-    let h = ingress_headers(false, Some("Basic dXNlcjpwYXNz"));
+    let h = ingress_headers(None, Some("Basic dXNlcjpwYXNz"));
     assert_eq!(extract_authorization_bearer(&h), None);
 }
 
 #[test]
 fn extract_bearer_none_for_empty_token() {
     for val in ["Bearer", "Bearer ", "Bearer     "] {
-        let h = ingress_headers(false, Some(val));
+        let h = ingress_headers(None, Some(val));
         assert_eq!(
             extract_authorization_bearer(&h),
             None,
@@ -2697,7 +2775,7 @@ fn extract_bearer_none_for_non_utf8_header_value() {
 
 #[test]
 fn extract_bearer_preserves_token_internal_structure() {
-    let h = ingress_headers(false, Some("Bearer sk-ant-oat01-AbC_-.123"));
+    let h = ingress_headers(None, Some("Bearer sk-ant-oat01-AbC_-.123"));
     assert_eq!(
         extract_authorization_bearer(&h).as_deref(),
         Some("sk-ant-oat01-AbC_-.123")
@@ -2707,41 +2785,42 @@ fn extract_bearer_preserves_token_internal_structure() {
 // ============ forwarded-mode ingress admission rejections ======
 //
 // The forwarded-mode rejection matrix, enforced at the shared ingress driver
-// BEFORE parse/dispatch, firing ONLY when `credential_source == Forwarded`.
-// Three layers of coverage, all deterministic (no log capture -- that ONE
-// assertion lives in the isolated integration binary
+// BEFORE parse/dispatch, firing ONLY when the `x-routectl-mitm-proxied` seam
+// header carries the process nonce (a request that arrived through the MITM
+// inference path). Three layers of coverage, all deterministic (no log
+// capture -- that ONE assertion lives in the isolated integration binary
 // `tests/pure_proxy_admission_log.rs`, matching the router-side convention,
 // because a thread-local capture subscriber over a shared `warn!` callsite
 // is unreliable inside this 600+-test lib binary):
 //
 //   1. `classify_pure_proxy_rejection`  -- the pure decision core: every
-//      case + the precedence rules + own-mode admits-all.
+//      case + the precedence rules + seam-absent admits-all.
 //   2. `render_pure_proxy_rejection`    -- status + dialect envelope +
 //      safe reason tag per case; never a token.
-//   3. `enforce_pure_proxy_admission`   -- the real header/router/envelope
-//      wiring the driver calls, plus one end-to-end pass through
-//      `ingress_handle`.
+//   3. `enforce_pure_proxy_admission`   -- the real header/envelope wiring
+//      the driver calls, plus one end-to-end pass through `ingress_handle`.
 
 use crate::handlers::pure_proxy_admission::{
     PureProxyAdmissionInputs, classify_pure_proxy_rejection, enforce_pure_proxy_admission,
     render_pure_proxy_rejection,
 };
 use crate::handlers::pure_proxy_metrics::PureProxyRejectionReason;
+use crate::ingress::MitmSeamNonce;
 
-/// Header builder for the admission tests: optionally the MITM seam header,
-/// an `Authorization` value, and the `x-claude-code-session-id` identity
-/// header.
+/// Header builder for the admission tests: optionally the MITM seam header
+/// stamped with `nonce`'s value, an `Authorization` value, and the
+/// `x-claude-code-session-id` identity header.
 fn admission_headers(
-    seam: bool,
+    nonce: Option<&MitmSeamNonce>,
     authorization: Option<&str>,
     session_id: Option<&str>,
 ) -> HeaderMap {
     use axum::http::{HeaderName, HeaderValue, header::AUTHORIZATION};
     let mut h = HeaderMap::new();
-    if seam {
+    if let Some(nonce) = nonce {
         h.insert(
             HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
-            HeaderValue::from_static("1"),
+            nonce.header_value(),
         );
     }
     if let Some(a) = authorization {
@@ -2758,110 +2837,34 @@ fn admission_headers(
 
 // ---- Layer 1: classify_pure_proxy_rejection (the pure decision core) ----
 
-/// Own mode (`forwarded == false`) ADMITS every request, even one carrying
-/// each case's trip conditions: a non-Anthropic dialect, no seam header, no
-/// bearer, and no session id all pass. This is the "byte-identical to
-/// pre-passthrough" guarantee at the decision level.
+/// Seam header ABSENT always admits, regardless of bearer or session id --
+/// a request that did not arrive through the MITM inference path is never
+/// examined by this gate. This is the "own-provider and non-Anthropic-
+/// dialect traffic stays untouched even while a forwarded provider is
+/// configured" guarantee at the decision level.
 #[test]
-fn classify_own_mode_admits_every_would_be_rejection() {
-    // Non-Anthropic dialect, no seam, no bearer, no session id -- every trip
-    // condition at once, but own mode admits.
-    assert_eq!(
-        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: false,
-            is_anthropic_dialect: false,
-            seam_present: false,
-            has_bearer: false,
-            has_session_id: false,
-        }),
-        None
-    );
-    // Anthropic dialect variants that WOULD trip a case in forwarded mode.
-    assert_eq!(
-        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: false,
-            is_anthropic_dialect: true,
-            seam_present: false,
-            has_bearer: false,
-            has_session_id: false,
-        }),
-        None,
-        "own mode admits a would-be not_mitm"
-    );
-    assert_eq!(
-        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: false,
-            is_anthropic_dialect: true,
-            seam_present: true,
-            has_bearer: false,
-            has_session_id: false,
-        }),
-        None,
-        "own mode admits a would-be token_missing"
-    );
-    assert_eq!(
-        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: false,
-            is_anthropic_dialect: true,
-            seam_present: true,
-            has_bearer: true,
-            has_session_id: false,
-        }),
-        None,
-        "own mode admits a would-be identity_missing"
-    );
-}
-
-/// Forwarded + non-Anthropic dialect -> `NonAnthropicDialect`, independent of
-/// the seam header, bearer, or session id (the dialect itself disqualifies).
-#[test]
-fn classify_forwarded_non_anthropic_dialect_rejected() {
-    for seam_present in [false, true] {
-        for has_bearer in [false, true] {
-            for has_session_id in [false, true] {
-                assert_eq!(
-                    classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-                        forwarded: true,
-                        is_anthropic_dialect: false,
-                        seam_present,
-                        has_bearer,
-                        has_session_id,
-                    }),
-                    Some(PureProxyRejectionReason::NonAnthropicDialect),
-                    "non-Anthropic dialect under forwarded mode always rejects \
-                     (seam={seam_present}, bearer={has_bearer}, session={has_session_id})"
-                );
-            }
+fn classify_admits_every_case_when_seam_absent() {
+    for has_bearer in [false, true] {
+        for has_session_id in [false, true] {
+            assert_eq!(
+                classify_pure_proxy_rejection(PureProxyAdmissionInputs {
+                    seam_present: false,
+                    has_bearer,
+                    has_session_id,
+                }),
+                None,
+                "seam absent must always admit (bearer={has_bearer}, session={has_session_id})"
+            );
         }
     }
 }
 
-/// Forwarded Anthropic dialect WITHOUT the seam header -> `NotMitm` (a direct
-/// :9100 loopback client, not a valid pure-proxy path).
+/// Seam header PRESENT, no bearer -> `TokenMissing` (CC not logged into
+/// claude.ai).
 #[test]
-fn classify_forwarded_anthropic_no_seam_is_not_mitm() {
-    // Even with a bearer + session id present, the missing seam header is
-    // disqualifying.
+fn classify_seam_present_no_bearer_is_token_missing() {
     assert_eq!(
         classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: true,
-            is_anthropic_dialect: true,
-            seam_present: false,
-            has_bearer: true,
-            has_session_id: true,
-        }),
-        Some(PureProxyRejectionReason::NotMitm)
-    );
-}
-
-/// Forwarded Anthropic dialect WITH the seam header but no bearer ->
-/// `TokenMissing` (CC not logged into claude.ai).
-#[test]
-fn classify_forwarded_anthropic_seam_no_bearer_is_token_missing() {
-    assert_eq!(
-        classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: true,
-            is_anthropic_dialect: true,
             seam_present: true,
             has_bearer: false,
             has_session_id: true,
@@ -2870,15 +2873,13 @@ fn classify_forwarded_anthropic_seam_no_bearer_is_token_missing() {
     );
 }
 
-/// Precedence: a seam-marked forwarded request missing BOTH the bearer and
-/// the session id surfaces `TokenMissing` (401), not `IdentityMissing` -- the
+/// Precedence: a seam-present request missing BOTH the bearer and the
+/// session id surfaces `TokenMissing` (401), not `IdentityMissing` -- the
 /// more fundamental missing credential wins.
 #[test]
 fn classify_token_missing_takes_precedence_over_identity_missing() {
     assert_eq!(
         classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: true,
-            is_anthropic_dialect: true,
             seam_present: true,
             has_bearer: false,
             has_session_id: false,
@@ -2888,14 +2889,12 @@ fn classify_token_missing_takes_precedence_over_identity_missing() {
     );
 }
 
-/// Forwarded Anthropic dialect, seam + bearer present, but no session id ->
-/// `IdentityMissing` (fail before minting identity).
+/// Seam present, bearer present, but no session id -> `IdentityMissing`
+/// (fail before minting identity).
 #[test]
-fn classify_forwarded_anthropic_seam_bearer_no_session_is_identity_missing() {
+fn classify_seam_present_bearer_no_session_is_identity_missing() {
     assert_eq!(
         classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: true,
-            is_anthropic_dialect: true,
             seam_present: true,
             has_bearer: true,
             has_session_id: false,
@@ -2904,15 +2903,12 @@ fn classify_forwarded_anthropic_seam_bearer_no_session_is_identity_missing() {
     );
 }
 
-/// A fully-formed forwarded request (Anthropic dialect, seam + bearer +
-/// session id) is ADMITTED -- the gate returns `None` and the request
-/// proceeds to parse + dispatch.
+/// A fully-formed seam-present request (bearer + session id) is ADMITTED --
+/// the gate returns `None` and the request proceeds to parse + dispatch.
 #[test]
-fn classify_forwarded_fully_valid_admits() {
+fn classify_seam_present_fully_valid_admits() {
     assert_eq!(
         classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-            forwarded: true,
-            is_anthropic_dialect: true,
             seam_present: true,
             has_bearer: true,
             has_session_id: true,
@@ -2947,26 +2943,6 @@ async fn render_token_missing_is_401_anthropic_authentication_error() {
 }
 
 #[tokio::test]
-async fn render_not_mitm_is_400_anthropic_invalid_request_error() {
-    let resp = render_pure_proxy_rejection(
-        ErrorEnvelopeShape::Anthropic,
-        PureProxyRejectionReason::NotMitm,
-    );
-    let status = resp.status();
-    let body = body_to_value(resp).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["type"], "error");
-    assert_eq!(body["error"]["type"], "invalid_request_error");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("reason=not_mitm")
-    );
-}
-
-#[tokio::test]
 async fn render_identity_missing_is_400_anthropic_invalid_request_error() {
     let resp = render_pure_proxy_rejection(
         ErrorEnvelopeShape::Anthropic,
@@ -2983,30 +2959,6 @@ async fn render_identity_missing_is_400_anthropic_invalid_request_error() {
             .as_str()
             .unwrap_or("")
             .contains("reason=identity_missing")
-    );
-}
-
-#[tokio::test]
-async fn render_non_anthropic_dialect_is_400_openai_envelope() {
-    // The non-Anthropic path renders the flat OpenAI envelope (Codex / the
-    // OpenAI SDK parse `{"error":{...}}` with no top-level `type`).
-    let resp = render_pure_proxy_rejection(
-        ErrorEnvelopeShape::OpenAi,
-        PureProxyRejectionReason::NonAnthropicDialect,
-    );
-    let status = resp.status();
-    let body = body_to_value(resp).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        body.get("type").is_none(),
-        "OpenAI envelope is flat (no top-level type): {body}"
-    );
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("reason=non_anthropic_dialect")
     );
 }
 
@@ -3029,19 +2981,19 @@ async fn render_rejection_message_is_token_free() {
     }
 }
 
-// ---- Layer 3: enforce_pure_proxy_admission (real header/router wiring) ---
+// ---- Layer 3: enforce_pure_proxy_admission (real header/envelope wiring) --
 
-/// Case 1: MITM-marked forwarded request with no `Authorization` -> Some(401
-/// token_missing), read off real headers + a forwarded-mode router.
+/// Case 1: seam-marked request with no `Authorization` -> Some(401
+/// token_missing), read off real headers.
 #[tokio::test]
 async fn enforce_case1_token_missing() {
     // Arrange
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = admission_headers(true, None, Some("sess-1"));
+    let nonce = MitmSeamNonce::generate();
+    let headers = admission_headers(Some(&nonce), None, Some("sess-1"));
 
     // Act
-    let resp = enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::Anthropic)
-        .expect("forwarded + seam + no bearer must reject");
+    let resp = enforce_pure_proxy_admission(&headers, ErrorEnvelopeShape::Anthropic, &nonce)
+        .expect("seam + no bearer must reject");
     let status = resp.status();
     let body = body_to_value(resp).await;
 
@@ -3056,40 +3008,52 @@ async fn enforce_case1_token_missing() {
     );
 }
 
-/// Case 2: forwarded Anthropic request without the seam header (direct :9100
-/// client) -> Some(400 not_mitm).
+/// Case 2 (migrated for f3): a request without the seam header (a direct
+/// :9100 loopback client) is ADMITTED regardless of the other headers --
+/// f3 dropped the request-global `not_mitm` rejection, which used to 400
+/// this exact traffic shape.
 #[tokio::test]
-async fn enforce_case2_not_mitm() {
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    // A bearer + session id present, but no seam header.
-    let headers = admission_headers(false, Some("Bearer sk-direct"), Some("sess-2"));
+async fn enforce_case2_no_seam_is_admitted() {
+    let nonce = MitmSeamNonce::generate();
+    let headers = admission_headers(None, Some("Bearer sk-direct"), Some("sess-2"));
 
-    let resp = enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::Anthropic)
-        .expect("forwarded Anthropic without seam must reject");
-    let status = resp.status();
-    let body = body_to_value(resp).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"]["type"], "invalid_request_error");
     assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("reason=not_mitm")
+        enforce_pure_proxy_admission(&headers, ErrorEnvelopeShape::Anthropic, &nonce).is_none(),
+        "no seam header must be admitted, not rejected as not_mitm"
     );
 }
 
-/// Case 3: MITM-marked forwarded request with a bearer but missing
+/// Security-critical: a spoofed seam-header value (does not match the
+/// process nonce) must downgrade to seam-ABSENT and be admitted, exactly
+/// like a missing header -- proving a direct caller gains nothing by
+/// guessing/spoofing the header.
+#[tokio::test]
+async fn enforce_spoofed_seam_header_downgrades_to_absent_and_is_admitted() {
+    let nonce = MitmSeamNonce::generate();
+    let mut headers = admission_headers(None, None, None);
+    headers.insert(
+        axum::http::HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
+        axum::http::HeaderValue::from_static("1"),
+    );
+
+    assert!(
+        enforce_pure_proxy_admission(&headers, ErrorEnvelopeShape::Anthropic, &nonce).is_none(),
+        "a spoofed seam header (no bearer, no session id) must be admitted, not rejected as \
+         token_missing"
+    );
+}
+
+/// Case 3: seam-marked request with a bearer but missing
 /// `x-claude-code-session-id` -> Some(400 identity_missing). The distinctive
 /// bearer in the header must NOT surface in the client response.
 #[tokio::test]
 async fn enforce_case3_identity_missing_and_never_leaks_bearer() {
     const TOKEN: &str = "sk-ant-oat01-LEAK-CANARY-identity";
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = admission_headers(true, Some(&format!("Bearer {TOKEN}")), None);
+    let nonce = MitmSeamNonce::generate();
+    let headers = admission_headers(Some(&nonce), Some(&format!("Bearer {TOKEN}")), None);
 
-    let resp = enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::Anthropic)
-        .expect("forwarded + seam + bearer + no session id must reject");
+    let resp = enforce_pure_proxy_admission(&headers, ErrorEnvelopeShape::Anthropic, &nonce)
+        .expect("seam + bearer + no session id must reject");
     let status = resp.status();
     let body = body_to_value(resp).await;
 
@@ -3107,41 +3071,27 @@ async fn enforce_case3_identity_missing_and_never_leaks_bearer() {
     );
 }
 
-/// Case 4: a non-Anthropic dialect (OpenAI chat completions / Responses,
-/// both `ErrorEnvelopeShape::OpenAi`) under forwarded mode -> Some(400
-/// non_anthropic_dialect). Proves the check reaches the OpenAI + Responses
-/// adapters via the shared driver, not only the Anthropic one.
+/// Case 4 (migrated for f3): a fully-formed seam-present request (bearer +
+/// session id) is ADMITTED even on the OpenAI-envelope dialect -- f3
+/// dropped the request-global `non_anthropic_dialect` rejection, which used
+/// to 400 this exact case even with every other admission key satisfied.
 #[tokio::test]
-async fn enforce_case4_non_anthropic_dialect() {
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    // Even a fully-populated header set cannot rescue a non-Anthropic dialect.
-    let headers = admission_headers(true, Some("Bearer sk-x"), Some("sess-4"));
+async fn enforce_case4_seam_present_openai_envelope_is_admitted() {
+    let nonce = MitmSeamNonce::generate();
+    let headers = admission_headers(Some(&nonce), Some("Bearer sk-x"), Some("sess-4"));
 
-    let resp = enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::OpenAi)
-        .expect("non-Anthropic dialect under forwarded mode must reject");
-    let status = resp.status();
-    let body = body_to_value(resp).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body.get("type").is_none(),
-        "OpenAI envelope is flat: {body}"
-    );
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .contains("reason=non_anthropic_dialect")
+        enforce_pure_proxy_admission(&headers, ErrorEnvelopeShape::OpenAi, &nonce).is_none(),
+        "a fully-formed seam-present request must be admitted regardless of dialect"
     );
 }
 
-/// Reachability proof: the two non-Anthropic ingress adapters both declare
-/// the OpenAI envelope shape, which is exactly the `is_anthropic_dialect ==
-/// false` signal the admission gate keys on. The Anthropic adapter declares
-/// the Anthropic shape. Ties the classifier's dialect discriminator to the
-/// real adapters.
+/// The two non-Anthropic ingress adapters both declare the OpenAI envelope
+/// shape; the Anthropic adapter declares the Anthropic shape. Used
+/// throughout ingress error rendering (this admission gate included) to
+/// pick the dialect-correct envelope.
 #[test]
-fn adapter_envelope_shapes_drive_the_dialect_discriminator() {
+fn adapter_envelope_shapes_are_dialect_correct() {
     use crate::ingress::IngressAdapter;
     use crate::ingress::anthropic::AnthropicIngress;
     use crate::ingress::openai::OpenAiIngress;
@@ -3164,61 +3114,34 @@ fn adapter_envelope_shapes_drive_the_dialect_discriminator() {
     );
 }
 
-/// Own mode is UNAFFECTED: a request carrying each case's trip conditions is
-/// ADMITTED (the gate returns `None`), so `ingress_handle` behaves exactly as
-/// it did pre-passthrough. Covers both a present `[mitm] credential_source = own`
-/// block and no `[mitm]` block at all.
+/// A fully-formed seam-present request (bearer + session id) is ADMITTED
+/// through the real wiring -- the gate returns `None` and the request
+/// proceeds to parse + dispatch.
 #[test]
-fn enforce_own_mode_admits_every_would_be_case() {
-    // A would-be token_missing (seam, no bearer) under own mode.
-    let own = router_with_mitm(Some(CredentialSource::Own));
-    let h = admission_headers(true, None, None);
+fn enforce_seam_present_fully_valid_is_admitted() {
+    let nonce = MitmSeamNonce::generate();
+    let headers = admission_headers(Some(&nonce), Some("Bearer sk-valid"), Some("sess-ok"));
     assert!(
-        enforce_pure_proxy_admission(&h, &own, ErrorEnvelopeShape::Anthropic).is_none(),
-        "own mode must not reject a would-be token_missing"
-    );
-
-    // A would-be not_mitm (no seam) under own mode.
-    let h = admission_headers(false, Some("Bearer sk-o"), Some("s"));
-    assert!(
-        enforce_pure_proxy_admission(&h, &own, ErrorEnvelopeShape::Anthropic).is_none(),
-        "own mode must not reject a would-be not_mitm"
-    );
-
-    // A would-be non_anthropic_dialect (OpenAI shape) with NO [mitm] block.
-    let no_mitm = router_with_mitm(None);
-    let h = admission_headers(false, None, None);
-    assert!(
-        enforce_pure_proxy_admission(&h, &no_mitm, ErrorEnvelopeShape::OpenAi).is_none(),
-        "absent [mitm] block must not reject a non-Anthropic dialect"
+        enforce_pure_proxy_admission(&headers, ErrorEnvelopeShape::Anthropic, &nonce).is_none(),
+        "a well-formed seam-present request must be admitted"
     );
 }
 
-/// A fully-formed forwarded request (seam + bearer + session id, Anthropic
-/// dialect) is ADMITTED through the real wiring -- the gate returns `None`
-/// and the request proceeds to parse + dispatch.
-#[test]
-fn enforce_forwarded_fully_valid_is_admitted() {
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
-    let headers = admission_headers(true, Some("Bearer sk-valid"), Some("sess-ok"));
-    assert!(
-        enforce_pure_proxy_admission(&headers, &router, ErrorEnvelopeShape::Anthropic).is_none(),
-        "a well-formed forwarded request must be admitted"
-    );
-}
-
-/// End-to-end through `ingress_handle`: a MITM-marked forwarded request with
-/// no `Authorization` is rejected at admission BEFORE parse/dispatch, so the
+/// End-to-end through `ingress_handle`: a seam-marked request with no
+/// `Authorization` is rejected at admission BEFORE parse/dispatch, so the
 /// client receives the 401 Anthropic envelope directly from the driver.
 #[tokio::test]
 async fn ingress_handle_rejects_forwarded_token_missing_end_to_end() {
     use crate::ingress::anthropic::AnthropicIngress;
 
-    // Arrange: a forwarded-mode AppState + a seam-marked, bearer-less request.
-    let router = router_with_mitm(Some(CredentialSource::Forwarded));
+    // Arrange: any router (admission no longer reads config) + a
+    // seam-marked, bearer-less request. The header MUST carry the state's
+    // own nonce -- a bare/wrong value would downgrade to seam-absent and
+    // never reach the rejection this test proves.
+    let router = k_test_router();
     let swap = Arc::new(arc_swap::ArcSwap::from(router));
     let (state, _dir) = AppState::for_test(swap);
-    let headers = admission_headers(true, None, Some("sess-e2e"));
+    let headers = admission_headers(Some(&state.mitm_seam_nonce), None, Some("sess-e2e"));
     // Admission runs before body parse, so the body is never inspected on the
     // rejection path.
     let body: std::result::Result<Json<Value>, axum::extract::rejection::JsonRejection> =
@@ -3239,5 +3162,35 @@ async fn ingress_handle_rejects_forwarded_token_missing_end_to_end() {
             .as_str()
             .unwrap_or("")
             .contains("reason=token_missing")
+    );
+}
+
+/// Security-critical end-to-end: a request that spoofs the seam header with
+/// a value that does NOT match the process's `MitmSeamNonce` must be
+/// admitted (not rejected at admission), and the forwarded-bearer capture
+/// gate must never arm -- proving the fix at the full driver level, not
+/// just at the pure decision core.
+#[tokio::test]
+async fn ingress_handle_admits_a_spoofed_seam_header_end_to_end() {
+    use crate::ingress::anthropic::AnthropicIngress;
+
+    let router = k_test_router();
+    let swap = Arc::new(arc_swap::ArcSwap::from(router));
+    let (state, _dir) = AppState::for_test(swap);
+    let mut headers = admission_headers(None, None, None);
+    headers.insert(
+        axum::http::HeaderName::from_static(crate::ingress::MITM_PROXIED_HEADER),
+        axum::http::HeaderValue::from_static("1"),
+    );
+    let body: std::result::Result<Json<Value>, axum::extract::rejection::JsonRejection> =
+        Ok(Json(json!({"model": "m", "messages": []})));
+
+    let resp = ingress_handle(state, headers, None, body, AnthropicIngress).await;
+    let status = resp.status();
+
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a spoofed seam header must never trigger the token_missing admission rejection"
     );
 }

@@ -1327,6 +1327,22 @@ fn redact_replaces_bare_x_goog_api_key_with_redacted() {
 }
 
 #[test]
+fn redact_replaces_mitm_seam_nonce_header_with_redacted() {
+    // The MITM front-proxy's seam header carries the per-process
+    // unguessable nonce (routectl_cli::ingress::MitmSeamNonce) that makes
+    // the seam unspoofable -- an enabled ingress header trace must never
+    // print it verbatim, or a trace log becomes a way to learn the value.
+    let mut headers = super::headers_to_json([(
+        "x-routectl-mitm-proxied",
+        b"not-the-real-nonce-value".as_slice(),
+    )]);
+    super::redact_header_values(&mut headers);
+    let pair = &headers.as_array().unwrap()[0].as_array().unwrap();
+    assert_eq!(pair[0].as_str(), Some("x-routectl-mitm-proxied"));
+    assert_eq!(pair[1].as_str(), Some("[REDACTED]"));
+}
+
+#[test]
 fn redact_preserves_non_secret_headers_verbatim() {
     // Only secret-bearing names are redacted; anthropic-version /
     // anthropic-beta / originator must round-trip unchanged so the

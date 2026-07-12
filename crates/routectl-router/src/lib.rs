@@ -55,9 +55,10 @@ pub use catalog_state::{
 };
 pub use config::{
     AliasValue, CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, Config, HistoryReasoning,
-    LogConfig, MitmConfig, ModelEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
-    ReasoningDialect, ReductionConfig, RegistryEntry, RetryPolicy, ServerAuth, ServerConfig,
-    TrimConfig, UsageConfig, VersionTooNewError, preflight_config_version,
+    LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry, PricingConfig,
+    ProviderEntry, ProviderRuntimePolicy, ReasoningDialect, ReductionConfig, RegistryEntry,
+    RetryPolicy, ServerAuth, ServerConfig, TrimConfig, UsageConfig, VersionTooNewError,
+    preflight_config_version, preflight_legacy_mitm_credential_source,
     validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
@@ -75,7 +76,8 @@ pub use factory::{
     BuildOptions, apply_catalog_overlay, build_provider, build_provider_with_options,
     build_resolved_models, class_policy_warnings, validate_alias_chain_targets,
     validate_alias_patterns, validate_class_policy, validate_mitm_config,
-    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
+    validate_provider_credential_sources, validate_reasoning_defaults, validate_registry_patterns,
+    validate_retry_policy,
 };
 pub use glob::{AliasPattern, PrefixIndex};
 pub use k_estimator::{

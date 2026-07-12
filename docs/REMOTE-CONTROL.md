@@ -16,12 +16,16 @@ below before enabling this.
 
 This doc covers two distinct features built on the same `[mitm]`
 plumbing: Remote Control (below) keeps routectl authenticating
-Anthropic inference with its own credential (`credential_source =
-"own"`, the default) while re-routing Claude Code's other
-`api.anthropic.com` traffic untouched; [Pure-proxy
-mode](#pure-proxy-mode) further sets `credential_source = "forwarded"`
-so the client's own claude.ai token authenticates the inference call
-too, and routectl holds no Anthropic credential of its own.
+Anthropic inference with its own credential -- the default for any
+`[providers.X]` `anthropic-api` entry (`credential_source = "own"`) --
+while re-routing Claude Code's other `api.anthropic.com` traffic
+untouched; [Pure-proxy mode](#pure-proxy-mode) instead configures a
+provider with `credential_source = "forwarded"` so the client's own
+claude.ai token authenticates the inference call too, and that
+provider holds no Anthropic credential of its own. `credential_source`
+is a per-`[providers.X]` choice, not a `[mitm]`-level one -- `[mitm]`
+itself carries no credential knob (see
+[`docs/CONFIGURATION.md`](CONFIGURATION.md) "credential_source").
 
 ## Prerequisites
 
@@ -162,37 +166,46 @@ existed.
 
 ### What it is
 
-Pure-proxy mode runs Claude Code through routectl with `[mitm]
-credential_source = "forwarded"` and no `[providers]` configured: the
-client's own claude.ai session token authenticates the Anthropic
-inference call directly against `api.anthropic.com`, and routectl never
-holds or resolves an Anthropic credential of its own for that call.
-routectl still sits in the loop as a transparent HTTPS proxy -- it still
-terminates TLS locally, still keeps its usage accounting, trim, and
-translation machinery in the request path, and still logs the request
-the same way it logs every other route. Only the egress credential
-changes: it lives in Claude Code, not in routectl's config or
-credentials store.
+Pure-proxy mode runs Claude Code through routectl with a
+`credential_source = "forwarded"` `anthropic-api` provider configured:
+the client's own claude.ai session token authenticates the Anthropic
+inference call directly against `api.anthropic.com`, and that provider
+never holds or resolves an Anthropic credential of its own for that
+call. routectl still sits in the loop as a transparent HTTPS proxy --
+it still terminates TLS locally, still keeps its usage accounting,
+trim, and translation machinery in the request path, and still logs
+the request the same way it logs every other route. Only the egress
+credential changes: it lives in Claude Code, not in routectl's config
+or credentials store.
 
-Pure-proxy mode is a separate setting from Remote Control's default
-`credential_source = "own"`, but it rides the same `[mitm]` listener,
-CA, and re-injection plumbing described above.
+Pure-proxy mode is a separate per-provider setting from Remote
+Control's default `credential_source = "own"`, but it rides the same
+`[mitm]` listener, CA, and re-injection plumbing described above.
+`credential_source = "forwarded"` is a per-target choice: it coexists
+freely with other `[providers.X]` entries, and a fallback chain may
+mix forwarded and own-credential targets -- only the targets actually
+marked `credential_source = "forwarded"` route on the client's bearer.
 
 ### How to enable
 
+Add an `anthropic-api` provider with `credential_source = "forwarded"`:
+
 ```toml
-[mitm]
+[providers.anthropic-forwarded]
+kind              = "anthropic-api"
+base_url          = "https://api.anthropic.com"
 credential_source = "forwarded"
 ```
 
-With no `[providers]` block anywhere in config, the zero-config
-bootstrap (see [`docs/CONFIGURATION.md`](CONFIGURATION.md)
-"`credential_source`") auto-injects a synthetic Anthropic egress and a
-`default` catch-all alias at startup, so there is nothing else to
-configure. `[mitm]` is read once at daemon startup like every other
-field on this block -- restart `routectl serve` after adding or editing
-`credential_source`. Launch Claude Code through the proxy the same way
-as Remote Control:
+Omit `api_key_ref` -- a forwarded provider has no configured credential
+of its own. Validation rejects a non-empty `api_key_ref` on a
+forwarded entry, and rejects any `base_url` whose host is not exactly
+`api.anthropic.com` (see [`docs/CONFIGURATION.md`](CONFIGURATION.md)
+"credential_source"). Route an alias or model to this provider the
+same way you would any other. Unlike `[mitm]` itself, this is an
+ordinary provider edit -- it hot-reloads on the next config swap, no
+restart required. Launch
+Claude Code through the proxy the same way as Remote Control:
 
 ```bash
 HTTPS_PROXY=http://127.0.0.1:8443 NODE_EXTRA_CA_CERTS=/home/you/.config/routectl/mitm-certs/ca.pem claude
@@ -200,14 +213,23 @@ HTTPS_PROXY=http://127.0.0.1:8443 NODE_EXTRA_CA_CERTS=/home/you/.config/routectl
 
 ### Transparent identity
 
-On the forwarded leg the Anthropic-API egress presents Claude Code's
-OWN identity, not routectl's minted fingerprint. Claude Code's captured
+On a forwarded target the Anthropic-API egress presents Claude Code's
+OWN identity, not routectl's minted fingerprint, and keeps the model
+Claude Code actually requested verbatim rather than rewriting it to
+the target's configured `upstream`. Claude Code's captured
 `x-claude-code-*` headers (the whole set, forwarded transparently) and
 `x-stainless-*` SDK-fingerprint headers, plus its own `anthropic-beta`
 set, all reach Anthropic and override routectl's default cloak headers
 and minted session id. This is deliberate: on this leg routectl is a
 transparent forwarder and the client genuinely is Claude Code, so
 Anthropic sees the real Claude Code request shape end to end.
+
+`GET /v1/models` also proxies through to Anthropic's real model list
+on this leg (arrived via the MITM reinject leg, carrying a captured
+bearer, resolving to a forwarded provider pinned to
+`api.anthropic.com`) instead of returning routectl's local alias list;
+any other case, including a proxy-side failure, falls back to the
+local list.
 
 ### Single-tenant boundary
 
@@ -223,42 +245,34 @@ wire.
 
 ### Admission and failure behavior
 
-Every forwarded (Anthropic-dialect) request is admitted or rejected at
-ingress, before dispatch:
+Any request that arrives via the MITM reinject leg (identified by a
+seam header matching this process's nonce, unspoofable by a direct
+caller) is admitted or rejected at ingress, before dispatch, regardless
+of which provider it ultimately resolves to:
 
 | Condition | Result |
 |---|---|
-| MITM-marked request with no inbound `Authorization` bearer | HTTP 401 -- sign Claude Code into claude.ai (`claude /login`) |
-| Forwarded request that did not arrive via the MITM leg (no `x-routectl-mitm-proxied` seam header) | HTTP 400 |
-| Missing `x-claude-code-session-id` identity header | HTTP 400 |
-| Non-Anthropic dialect (`/v1/chat/completions`, `/v1/responses`) under forwarded mode | HTTP 400 |
+| No inbound `Authorization` bearer | HTTP 401 -- sign Claude Code into claude.ai (`claude /login`) |
+| Bearer present, no `x-claude-code-session-id` identity header | HTTP 400 |
 
-Once a request is admitted, an upstream 401/403/429 on the forwarded
-credential is surfaced to the client verbatim: routectl does not
-refresh it (it never held the credential to refresh) and does not fall
+A request that did NOT arrive via that leg -- no matching seam header,
+including every non-Anthropic-dialect request in practice -- is
+admitted untouched by this gate regardless of dialect or provider
+config.
+
+Past admission, a further per-target guard runs inside the dispatch
+chain walk: a `credential_source = "forwarded"` target with no
+captured client bearer (most commonly because this particular request
+never arrived via the MITM leg at all) is refused before egress with a
+local HTTP 400, per-target -- a chain that never reaches that target is
+unaffected.
+
+Once a forwarded target is actually dispatched, an upstream 401/403/429
+on that request is surfaced to the client verbatim: routectl does not
+refresh the credential (it never held it to refresh) and does not fall
 back to a sibling provider (a request-scoped forwarded token has no
 sibling seat to fall back to). Claude Code owns its own retry/backoff
 for these statuses.
-
-### Known limitations
-
-1. **Zero-config model fidelity.** The zero-config bootstrap's
-   synthetic egress carries exactly one upstream model, and the router
-   rewrites every dispatched request's model to that one target. In
-   zero-config pure-proxy, every request reaches Anthropic as that
-   single model regardless of which model Claude Code actually
-   requested. Operators who need more than one model reachable through
-   pure-proxy must configure `[providers]` / `[models]` / `[aliases]`
-   explicitly rather than relying on the zero-config bootstrap. This is
-   a known limitation of the current release.
-2. **Coexistence with operator-configured providers.**
-   `credential_source = "forwarded"` together with one or more
-   `[providers.X]` entries is not a supported combination in this
-   release: a forwarded request that would resolve to any target other
-   than an `api.anthropic.com` `anthropic-api` egress is refused
-   outright rather than silently routed elsewhere. Pure-proxy mode is
-   intended to run with no `[providers]` configured, relying on the
-   zero-config bootstrap above.
 
 ## Responsible use and fragility
 

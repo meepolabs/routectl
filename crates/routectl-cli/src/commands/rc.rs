@@ -70,7 +70,6 @@ mod tests {
             cert_dir,
             mitm_host: "api.anthropic.com".into(),
             tested_cc_version: None,
-            credential_source: Default::default(),
         }
     }
 

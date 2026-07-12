@@ -2,9 +2,13 @@
 //!
 //! Deliberately isolated from the rest of `routectl-cli`: nothing here
 //! imports `crate::handlers`, `crate::server::AppState`, or
-//! `crate::ingress`. That isolation is the point -- removing the whole
-//! MITM feature should stay a two-file change (delete this directory,
-//! drop the `pub mod proxy;` line in `lib.rs`).
+//! `crate::ingress`. That isolation is one-directional -- removing the
+//! whole MITM feature means deleting this directory, dropping the
+//! `pub mod proxy;` line in `lib.rs`, and updating the three outside
+//! call sites that import from it: `commands/rc.rs` (`proxy::ca`),
+//! `server/mod.rs` (`proxy::listener`), and `handlers/models.rs`
+//! (`proxy::forward` + `proxy::metrics`, for the `/v1/models` forwarded
+//! lane).
 //!
 //! `ca` owns the local CA + leaf certificate lifecycle and hands back a
 //! ready-to-use `tokio_rustls::TlsAcceptor`. `metrics` holds the

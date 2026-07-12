@@ -23,8 +23,8 @@ use routectl_router::{
     Config, EffectiveRow, GateDecision, KeepReason, PrefixReductionCandidate, TrimConfig,
     break_even_k, evaluate, lookup_baked_with_overrides, lookup_overlay_cell, merge,
     propose_steady_state_trim, validate_alias_chain_targets, validate_alias_patterns,
-    validate_bedrock_global_config, validate_overrides, validate_reasoning_defaults,
-    validate_registry_patterns, validate_retry_policy,
+    validate_bedrock_global_config, validate_overrides, validate_provider_credential_sources,
+    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -499,6 +499,7 @@ pub fn run(
     validate_alias_patterns(&config)?;
     validate_retry_policy(&config)?;
     validate_registry_patterns(&config)?;
+    validate_provider_credential_sources(&config)?;
     // Reject a degenerate `[cache_pricing]` override (unparseable selector or
     // a multiplier that breaks the break-even math) here too, so the advisory
     // projection never silently prices off a bad override.

@@ -143,6 +143,15 @@ pub struct AnthropicApiConfig {
     /// `cloak_body` to gate the mode and feed the tool-rename /
     /// sensitive-word passes.
     pub cloak: CloakConfig,
+    /// True only for a provider entry configured
+    /// `credential_source = "forwarded"` (set by the factory from
+    /// `ProviderEntry::AnthropicApi::credential_source`). Gates the WIRE
+    /// choke point: a captured `forwarded_bearer` is consumed ONLY when
+    /// this is true (in addition to the existing bearer-present +
+    /// anthropic-host legs). Default `false` -- an own-creds provider
+    /// never consumes a floating forwarded bearer, even one captured for
+    /// a sibling forwarded provider on the same router.
+    pub use_forwarded_bearer: bool,
 }
 
 impl std::fmt::Debug for AnthropicApiConfig {
@@ -178,6 +187,7 @@ impl std::fmt::Debug for AnthropicApiConfig {
                 "cloak_sensitive_words_count",
                 &self.cloak.sensitive_words.len(),
             )
+            .field("use_forwarded_bearer", &self.use_forwarded_bearer)
             .finish()
     }
 }
@@ -221,6 +231,7 @@ impl AnthropicApiConfig {
             max_thinking_entry_bytes: Self::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         }
     }
 }
@@ -239,6 +250,25 @@ struct BetaDecision {
     oauth_added: bool,
     has_context_1m_beta: bool,
     has_context_management_beta: bool,
+}
+
+/// The single three-way WIRE gate shared by both consumers of the forwarded
+/// bearer (`resolve_effective_token` and the `build_headers` forwarded leg):
+/// the forwarded credential is used EXACTLY when the provider entry was
+/// explicitly configured `credential_source = "forwarded"`, a captured
+/// bearer is present on this request, AND the egress host is exactly
+/// `api.anthropic.com`. Any one leg false means "not the forwarded path" --
+/// in particular an own-mode provider (`use_forwarded_bearer` false) never
+/// consumes a floating bearer captured for a sibling forwarded provider on
+/// the same router. Pure and host-check-free of any live network state so
+/// its full matrix is unit-testable without a live host (host-pinned egress
+/// itself cannot be driven through wiremock).
+fn should_use_forwarded_bearer(
+    use_forwarded_bearer: bool,
+    has_bearer: bool,
+    base_url: &str,
+) -> bool {
+    use_forwarded_bearer && has_bearer && is_anthropic_api_host(base_url)
 }
 
 pub struct AnthropicApiProvider {
@@ -322,30 +352,38 @@ impl AnthropicApiProvider {
     }
 
     /// Resolve the token to stamp as the outbound Anthropic credential,
-    /// host-pinned to the forwarded-passthrough invariant.
+    /// gated on the per-provider WIRE choke point.
     ///
     /// In forwarded (pure-proxy) mode the ingress captures the client's
     /// first-party claude.ai bearer onto
     /// `req.routectl_internal.forwarded_bearer`. That token is a
-    /// full-scope credential and MUST reach ONLY `api.anthropic.com` --
-    /// never any other host. So the forwarded token becomes the effective
-    /// credential EXACTLY when both hold: `base_url`'s host is exactly
-    /// `api.anthropic.com` (`is_anthropic_api_host`) AND `forwarded_bearer`
-    /// is `Some` (ingress ran in forwarded mode for this request). On that
-    /// path `self.cfg.auth.token()` is NOT called: the synthetic pure-proxy
-    /// provider carries no live routectl credential, so resolving it would
-    /// error.
+    /// full-scope credential and MUST reach ONLY a provider explicitly
+    /// configured `credential_source = "forwarded"`, and even then ONLY
+    /// `api.anthropic.com`. So the forwarded token becomes the effective
+    /// credential EXACTLY when `should_use_forwarded_bearer` holds:
+    /// `cfg.use_forwarded_bearer` is true, `forwarded_bearer` is `Some`
+    /// (ingress ran in forwarded mode for this request), AND `base_url`'s
+    /// host is exactly `api.anthropic.com` (`is_anthropic_api_host`). On
+    /// that path `self.cfg.auth.token()` is NOT called: the synthetic
+    /// pure-proxy provider carries no live routectl credential, so
+    /// resolving it would error.
     ///
-    /// On every other path -- own-mode (no forwarded bearer), OR a
-    /// non-anthropic base even when a forwarded bearer is present -- the
-    /// forwarded token is IGNORED (never even read) and the provider
-    /// resolves its own token exactly as before. The raw token is never
-    /// logged.
+    /// On every other path -- an own-mode provider (even with a floating
+    /// bearer captured for a sibling forwarded provider), no captured
+    /// bearer, OR a non-anthropic base -- the forwarded token is IGNORED
+    /// (never even read) and the provider resolves its own token exactly
+    /// as before. The raw token is never logged.
     async fn resolve_effective_token(&self, req: &ChatRequest) -> Result<String> {
-        if is_anthropic_api_host(&self.cfg.base_url)
-            && let Some(forwarded) = req.routectl_internal.forwarded_bearer.as_ref()
-        {
-            return Ok(forwarded.expose().to_string());
+        let forwarded = req.routectl_internal.forwarded_bearer.as_ref();
+        if should_use_forwarded_bearer(
+            self.cfg.use_forwarded_bearer,
+            forwarded.is_some(),
+            &self.cfg.base_url,
+        ) {
+            return Ok(forwarded
+                .expect("forwarded is_some checked above")
+                .expose()
+                .to_string());
         }
         self.cfg.auth.token().await
     }
@@ -363,18 +401,23 @@ impl AnthropicApiProvider {
         };
 
         // Forwarded (pure-proxy) leg: this request arrived carrying the
-        // client's first-party bearer bound for api.anthropic.com. On this
-        // leg the egress is a TRANSPARENT forwarder -- Claude Code's REAL
-        // inbound identity (`x-stainless-*`, `x-claude-code-*`, and its own
-        // `anthropic-beta` set) must reach Anthropic and OVERRIDE routectl's
-        // minted cloak fingerprint. Gated EXACTLY on the pure-proxy pin
-        // (`resolve_effective_token`): a forwarded bearer is present AND the
-        // base is exactly api.anthropic.com. `forwarded_bearer` is read only
-        // as a gate here -- never as a header value. Own mode
-        // (`forwarded_bearer` None) never enters this branch, so its minted
-        // fingerprint is byte-for-byte unchanged.
-        let forwarded_leg = req.routectl_internal.forwarded_bearer.is_some()
-            && is_anthropic_api_host(&self.cfg.base_url);
+        // client's first-party bearer bound for api.anthropic.com, AND this
+        // provider was explicitly configured `credential_source =
+        // "forwarded"`. On this leg the egress is a TRANSPARENT forwarder --
+        // Claude Code's REAL inbound identity (`x-stainless-*`,
+        // `x-claude-code-*`, and its own `anthropic-beta` set) must reach
+        // Anthropic and OVERRIDE routectl's minted cloak fingerprint. Gated
+        // EXACTLY on the same three-way pin as `resolve_effective_token`
+        // (`should_use_forwarded_bearer`) so the two never disagree.
+        // `forwarded_bearer` is read only as a gate here -- never as a
+        // header value. An own-mode provider (`use_forwarded_bearer` false)
+        // never enters this branch even with a floating captured bearer, so
+        // its minted fingerprint is byte-for-byte unchanged.
+        let forwarded_leg = should_use_forwarded_bearer(
+            self.cfg.use_forwarded_bearer,
+            req.routectl_internal.forwarded_bearer.is_some(),
+            &self.cfg.base_url,
+        );
 
         // Computed once here (rather than re-derived at each 4xx log site)
         // so `BetaDecision` and the floor-gating decision below always
@@ -1594,6 +1637,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         }
     }
 
@@ -1711,6 +1755,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "from-client")]);
@@ -1742,6 +1787,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         // ChatRequest is #[non_exhaustive]; mutate after default().
@@ -1780,6 +1826,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = ChatRequest::default();
@@ -1820,6 +1867,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         // ChatRequest is #[non_exhaustive]; mutate after default().
@@ -1860,6 +1908,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = ChatRequest::default();
@@ -1909,6 +1958,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         }
     }
 
@@ -2012,12 +2062,15 @@ mod tests {
     }
 
     /// Build an oauth-bearer config with an explicit base_url and an
-    /// optional session_id, plus optional header_extras. Used by the
-    /// Claude-Code session-identity header tests.
+    /// optional session_id, plus optional header_extras, and an explicit
+    /// forwarded-gate setting. Used by both the Claude-Code
+    /// session-identity header tests (own mode) and the forwarded-leg
+    /// tests (`use_forwarded_bearer: true`).
     fn oauth_cfg_with_session(
         base_url: &str,
         session_id: Option<String>,
         header_extras: Vec<(String, String)>,
+        use_forwarded_bearer: bool,
     ) -> AnthropicApiConfig {
         AnthropicApiConfig {
             id: "test".into(),
@@ -2033,6 +2086,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer,
         }
     }
 
@@ -2046,6 +2100,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("session-stable-123".into()),
             Vec::new(),
+            false,
         ));
         let req = ChatRequest::default();
 
@@ -2103,6 +2158,7 @@ mod tests {
             "https://api.anthropic.com",
             None,
             Vec::new(),
+            false,
         ));
         let req = ChatRequest::default();
         let sid_1 = outbound_header_value(&provider, &req, "x-claude-code-session-id")
@@ -2126,6 +2182,7 @@ mod tests {
             "https://example.invalid",
             Some("session-stable-123".into()),
             Vec::new(),
+            false,
         ));
         let req = ChatRequest::default();
         assert!(
@@ -2151,6 +2208,7 @@ mod tests {
                 "x-claude-code-session-id".into(),
                 "from-operator-config".into(),
             )],
+            false,
         ));
         let req = ChatRequest::default();
         let value = outbound_header_value(&provider, &req, "x-claude-code-session-id")
@@ -2183,6 +2241,7 @@ mod tests {
             "https://api.anthropic.com.evil.example",
             Some("session-stable-123".into()),
             Vec::new(),
+            false,
         ));
         let req = ChatRequest::default();
         assert!(
@@ -2234,6 +2293,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = ChatRequest::default();
@@ -2269,6 +2329,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = ChatRequest::default();
@@ -2297,6 +2358,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = ChatRequest::default();
@@ -2465,6 +2527,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("minted-sid-known".into()),
             Vec::new(),
+            true,
         ));
         // Sanity: without a client value the minted default would win.
         let minted = minted_stainless_package_version();
@@ -2509,6 +2572,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("minted-sid-known".into()),
             Vec::new(),
+            true,
         ));
         let req = forwarded_req(&[], &[("x-claude-code-session-id", "client-sid-abc")], &[]);
 
@@ -2528,6 +2592,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("minted-sid-known".into()),
             Vec::new(),
+            true,
         ));
         let req = forwarded_req(
             &[],
@@ -2554,6 +2619,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("minted-sid-known".into()),
             Vec::new(),
+            true,
         ));
         let req = forwarded_req(&[], &[], &["client-only-beta"]);
 
@@ -2583,6 +2649,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("minted-sid-known".into()),
             Vec::new(),
+            true,
         ));
         let req = forwarded_req(&[], &[], &[]);
 
@@ -2602,6 +2669,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("minted-sid-known".into()),
             Vec::new(),
+            true,
         ));
         let req = forwarded_req(
             &[("x-stainless-package-version", "1.2.3-client")],
@@ -2635,6 +2703,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("minted-sid-known".into()),
             Vec::new(),
+            false,
         ));
         // No forwarded bearer -> own mode, but the carrier is populated as
         // if it had been captured, to prove the gate ignores it.
@@ -2706,6 +2775,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("session-stable-123".into()),
             Vec::new(),
+            false,
         ));
         // Non-CC: no x-claude-code-session-id captured.
         let req = req_with_claude_code_headers(vec![("x-claude-code-agent-id", "aid-7")]);
@@ -2746,6 +2816,7 @@ mod tests {
             "https://api.anthropic.com",
             Some("session-stable-123".into()),
             Vec::new(),
+            false,
         ));
         // Genuine CC: the session-id header is present in the capture.
         let req = req_with_claude_code_headers(vec![("x-claude-code-session-id", "sid-42")]);
@@ -2801,6 +2872,7 @@ mod tests {
             "https://example.invalid",
             Some("session-stable-123".into()),
             Vec::new(),
+            false,
         ));
         let req = req_with_claude_code_headers(Vec::new());
         let mut body = cloak_test_body();
@@ -2833,6 +2905,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: Some("session-stable-123".into()),
             cloak,
+            use_forwarded_bearer: false,
         };
         AnthropicApiProvider::new(cfg)
     }
@@ -3070,10 +3143,16 @@ mod tests {
         }
     }
 
-    /// Build an OauthBearer provider with a chosen `base_url` and token
-    /// source, mirroring the synthetic pure-proxy Anthropic egress
-    /// (OauthBearer, `api.anthropic.com` by default).
-    fn oauth_cfg_with_auth(base_url: &str, auth: Arc<dyn TokenSource>) -> AnthropicApiConfig {
+    /// Build an OauthBearer provider with a chosen `base_url`, token
+    /// source, and forwarded-gate setting, mirroring a
+    /// `credential_source = "forwarded"` provider entry (OauthBearer,
+    /// `api.anthropic.com` by default). Pass `use_forwarded_bearer: false`
+    /// to model a coexisting own-creds Anthropic provider instead.
+    fn oauth_cfg_with_auth(
+        base_url: &str,
+        auth: Arc<dyn TokenSource>,
+        use_forwarded_bearer: bool,
+    ) -> AnthropicApiConfig {
         AnthropicApiConfig {
             id: "test".into(),
             auth,
@@ -3088,6 +3167,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer,
         }
     }
 
@@ -3141,6 +3221,7 @@ mod tests {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
             "https://api.anthropic.com",
             Arc::new(FailingTokenSource),
+            true,
         ));
         let req = req_with_forwarded_bearer("forwarded-full-scope-token");
 
@@ -3164,6 +3245,7 @@ mod tests {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
             "https://api.anthropic.com",
             Arc::new(FailingTokenSource),
+            true,
         ));
         let req = req_with_forwarded_bearer("forwarded-full-scope-token");
 
@@ -3189,6 +3271,7 @@ mod tests {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
             "https://proxy.example.com",
             Arc::new(StaticToken::new("provider-own-token")),
+            true,
         ));
         let req = req_with_forwarded_bearer("forwarded-should-be-ignored");
 
@@ -3226,6 +3309,7 @@ mod tests {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
             "https://api.anthropic.com.evil.example",
             Arc::new(StaticToken::new("provider-own-token")),
+            true,
         ));
         let req = req_with_forwarded_bearer("forwarded-full-scope-token");
 
@@ -3245,6 +3329,80 @@ mod tests {
         );
     }
 
+    /// The coexistence-bug regression: an OWN-creds Anthropic provider
+    /// (`use_forwarded_bearer` false) on the exact anthropic host with a
+    /// floating captured bearer present (e.g. captured for a sibling
+    /// forwarded provider on the same router) must NOT consume it. The
+    /// resolver returns the provider's own token, and no outbound header
+    /// carries the floating bearer.
+    #[tokio::test]
+    async fn own_provider_ignores_floating_forwarded_bearer_on_anthropic_host() {
+        let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
+            "https://api.anthropic.com",
+            Arc::new(StaticToken::new("provider-own-token")),
+            false,
+        ));
+        let req = req_with_forwarded_bearer("floating-forwarded-bearer");
+
+        let token = provider
+            .resolve_effective_token(&req)
+            .await
+            .expect("own-mode provider resolves its own token");
+        assert_eq!(
+            token, "provider-own-token",
+            "an own-mode provider must resolve its own token even with a floating bearer present"
+        );
+
+        let request = build_wire_request(&provider, &req).await;
+        assert!(
+            !any_header_value_contains(&request, "floating-forwarded-bearer"),
+            "the floating bearer must never reach the wire for an own-mode provider"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer provider-own-token"),
+            "the own-mode provider's own token is what gets stamped, not the floating bearer"
+        );
+    }
+
+    /// The pure `should_use_forwarded_bearer` predicate shared by
+    /// `resolve_effective_token` and the `build_headers` forwarded leg.
+    /// Baseline: TRUE only when all three legs hold (configured forwarded +
+    /// bearer present + exact anthropic host). Each case below flips
+    /// exactly one leg off the baseline and must land on false --
+    /// including the two coexistence cases: a forwarded provider on a
+    /// non-anthropic host, and an own-mode provider with a bearer present
+    /// on the exact anthropic host. Host-pinned egress cannot be driven
+    /// through wiremock, so this matrix is the full end-to-end proof of the
+    /// gate's logic.
+    #[test]
+    fn should_use_forwarded_bearer_gate_matrix() {
+        let cases: &[(bool, bool, &str, bool)] = &[
+            // (use_forwarded_bearer, has_bearer, base_url, expected)
+            (true, true, "https://api.anthropic.com", true),
+            (false, true, "https://api.anthropic.com", false),
+            (true, false, "https://api.anthropic.com", false),
+            (true, true, "https://proxy.example.com", false),
+            (false, false, "https://api.anthropic.com", false),
+            (false, true, "https://proxy.example.com", false),
+            (true, false, "https://proxy.example.com", false),
+            (false, false, "https://proxy.example.com", false),
+            (true, true, "https://api.anthropic.com.evil.example", false),
+        ];
+
+        for (use_forwarded_bearer, has_bearer, base_url, expected) in cases {
+            assert_eq!(
+                should_use_forwarded_bearer(*use_forwarded_bearer, *has_bearer, base_url),
+                *expected,
+                "use_forwarded_bearer={use_forwarded_bearer} has_bearer={has_bearer} \
+                 base_url={base_url} expected={expected}"
+            );
+        }
+    }
+
     /// forwarded_bearer None on the anthropic host: identical to today --
     /// the resolver returns the provider's own token via cfg.auth.token().
     #[tokio::test]
@@ -3252,6 +3410,7 @@ mod tests {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
             "https://api.anthropic.com",
             Arc::new(StaticToken::new("provider-token")),
+            true,
         ));
         // ChatRequest::default() leaves forwarded_bearer None.
         let req = ChatRequest::default();
@@ -3276,6 +3435,7 @@ mod tests {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
             "https://api.anthropic.com",
             Arc::new(FailingTokenSource),
+            true,
         ));
         let req = ChatRequest::default();
 
@@ -3297,6 +3457,7 @@ mod tests {
         let provider = AnthropicApiProvider::new(oauth_cfg_with_auth(
             "https://api.anthropic.com",
             Arc::new(FailingTokenSource),
+            true,
         ));
         let secret = "forwarded-full-scope-SECRET-abc123";
         let req = req_with_forwarded_bearer(secret);
@@ -3429,6 +3590,7 @@ mod tests {
             "https://example.invalid",
             None,
             Vec::new(),
+            false,
         ));
         assert!(
             !non_anthropic_provider.should_log_beta_4xx(400, false),
