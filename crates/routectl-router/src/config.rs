@@ -12,6 +12,8 @@ use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -2336,6 +2338,19 @@ pub struct ProviderRuntimePolicy {
     #[serde(default)]
     pub unsupported_features: Vec<String>,
 
+    /// Operator remap of a raw upstream status code to a config-facing
+    /// failure class, keyed by the numeric status. Empty (the default)
+    /// leaves the built-in status-to-class classification untouched. The
+    /// custom (de)serializer routes the numeric keys through string form
+    /// so the map survives serde's `flatten` buffering (see
+    /// `class_policy::status_class_overrides`).
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "crate::class_policy::status_class_overrides"
+    )]
+    pub class_overrides: BTreeMap<u16, ConfigFailureClass>,
+
     /// How dispatch picks among multiple OAuth seats configured for this
     /// provider's credential pool. `fill-first` (the default) drains one
     /// seat before moving to the next; `round-robin` spreads load across
@@ -2523,6 +2538,15 @@ pub struct RetryPolicy {
     /// [`RetryPolicy::max_honored_retry_after`].
     #[serde(default)]
     pub max_honored_retry_after_ms: Option<u64>,
+
+    /// Per-error-class policy overlay keyed by the config-facing failure
+    /// class. A present entry overrides only the leaves it names (retry
+    /// cap and/or fallback), layered over the baked class defaults; an
+    /// absent entry keeps the baked defaults. An empty map (the default)
+    /// leaves every class at its baked default. See
+    /// [`RetryPolicy::resolved_class`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub classes: BTreeMap<ConfigFailureClass, ClassPolicy>,
 }
 
 impl Default for RetryPolicy {
@@ -2549,6 +2573,7 @@ impl Default for RetryPolicy {
             stream_first_byte_timeout_ms: default_stream_first_byte_timeout_ms(),
             probe_max_tokens: default_probe_max_tokens(),
             max_honored_retry_after_ms: None,
+            classes: BTreeMap::new(),
         }
     }
 }

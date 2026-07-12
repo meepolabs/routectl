@@ -639,7 +639,127 @@ yields 0 retries regardless of `retry_on_429` / `retry_on_5xx`, so it
 propagates to the caller immediately. They ship commented in
 [`examples/config.toml`](../examples/config.toml).
 
+Each `retry_on_*` knob above is exactly the retry-same cap source the
+wider per-class policy below consults for its class family -- see
+`[retry.classes]`.
 
+### Per-class retry and fallback policy (`[retry.classes]`)
+
+95% of deployments need nothing here: the baked class matrix below IS
+the policy. `[retry.classes]` and `[providers.X.class_overrides]`
+(next section) are escape hatches over that matrix, not the primary
+way to tune retry/fallback behavior -- reach for `retry_on_429` /
+`retry_on_5xx` / `retry_on_network` above first.
+
+Every upstream failure classifies into one of ten config-facing
+classes (`crates/routectl-router/src/class_policy.rs`). Each class
+resolves to a `(retry_cap, falls_back)` pair via
+`RetryPolicy::resolved_class`, and separately either debits the
+per-seat circuit breaker's health accounting or does not -- a fixed
+set, independent of the retry/fallback decision:
+
+| Class (kebab key) | Retry-same cap source | Falls back? | Debits breaker? |
+|--------------------|------------------------|--------------|-------------------|
+| `rate-limited` | `retry_on_429` (else `max_attempts`) | yes | yes |
+| `server-error` | `retry_on_5xx` (else `max_attempts`) | yes | yes |
+| `overloaded` | `retry_on_5xx` (else `max_attempts`) | yes | yes |
+| `timeout` | `retry_on_network` (else `max_attempts`) | yes | yes |
+| `network-error` | `retry_on_network` (else `max_attempts`) | yes | yes |
+| `auth` | 0 (fixed) | yes | no |
+| `bad-request` | 0 (fixed) | yes | no |
+| `content-policy` | 0 (fixed) | yes | no |
+| `context-window` | 0 (fixed) | yes | no |
+| `feature-unsupported` | 0 (fixed, reserved -- see below) | yes | no |
+
+**Breaker debit is not configurable.** The "debits breaker?" column is
+a fixed set (`RateLimited`, `ServerError`, `Timeout`, `NetworkError`,
+`Overloaded`) baked into the router's `class_debits` predicate
+(`crates/routectl-router/src/router.rs`); no `[retry.classes]` leaf,
+and no `[providers.X.class_overrides]` remap, changes whether a class
+counts against a seat's health. Routing (retry cap, fallback) and
+health accounting are deliberately separate concerns.
+
+Every class above defaults to `fallback = true`.
+`[retry.classes.<class>]` overrides one or both leaves, sparsely:
+
+```toml
+[retry.classes.server-error]
+retry = 3    # same-provider retries above retry_on_5xx / max_attempts
+
+[retry.classes.overloaded]
+retry = 0    # stop retrying same-provider; fall over to the next chain entry immediately
+```
+
+A class with no `[retry.classes.<class>]` block keeps the baked row
+above verbatim. Within a present block, an absent leaf (`retry` or
+`fallback`) still inherits the baked default for that leaf alone --
+`ClassPolicy`'s two leaves are independently optional, so setting
+`retry` does not force an implicit `fallback` value.
+
+`feature-unsupported` is RESERVED: `[retry.classes.feature-unsupported]`,
+even empty, is rejected at config load (`validate_class_policy`,
+`crates/routectl-router/src/factory.rs`). The baked row above already
+governs it; there is no override path for this class yet.
+
+#### `[providers.X.class_overrides]` -- remapping a raw status to a class
+
+Each `[providers.X]` table (flattened, not a `[providers.X.runtime]`
+sub-table -- see "Per-provider runtime gates" above) accepts an
+optional `class_overrides` map from a raw upstream HTTP status to one
+of the ten kebab class keys:
+
+```toml
+[providers.bedrock]
+kind   = "bedrock"
+region = "us-west-2"
+creds  = { kind = "default-chain" }
+
+[providers.bedrock.class_overrides]
+400 = "feature-unsupported"
+```
+
+The remap TARGET is restricted to four terminal, non-retrying classes
+-- `bad-request`, `content-policy`, `context-window`,
+`feature-unsupported` -- rejected at load otherwise
+(`validate_class_policy`). A remap may only make behavior LESS
+aggressive: move a status into one of those four, never into a class
+the router retries or debits for health.
+
+The example above relabels a Bedrock 400 as `feature-unsupported`
+rather than the classifier's default `bad-request`. Both classes
+resolve to the identical baked row (0 retry, falls back, no breaker
+debit), so the remap changes nothing about routing -- a 400 was
+already non-debiting. What it buys is capability-aware telemetry: the
+relabeled failure carries the stable `operator-remap` capability token
+on the `routectl::feature_unsupported` observability event instead of
+surfacing as a generic bad-request, so capability gaps are
+distinguishable from caller-shaped 400s for dashboards and any future
+per-capability handling.
+
+The remap SOURCE has no such restriction, but remapping a breaker
+health-signal status (408, 429, or any `500..=599`) away from its
+native class is flagged by an advisory warning
+(`class_policy_warnings`, never fails the load) since it diverts a
+real health signal away from the breaker -- an outage-masking risk if
+the upstream is actually unhealthy.
+
+#### Precedence
+
+1. An explicit `retry_allowlist` / `retry_denylist` entry naming a
+   status wins over class policy for THAT status only
+   (`RetryPolicy::explicit_status_override`).
+2. Otherwise, class policy (`resolved_class`, including any
+   `[retry.classes]` override and any `class_overrides` remap) governs.
+
+A non-empty `retry_allowlist` is not "named codes only": it decides
+EVERY `4xx`/`5xx` code (member = allow, non-member = deny), so it
+shadows class policy wholesale, not just for the codes it lists. A
+`retry_denylist` stays narrower -- it only opines on the codes it
+names.
+
+The raw lists remain the raw-status escape hatch: a code whose class
+default doesn't fit can be pinned by status without touching class
+policy at all.
 
 ### Honoring upstream resets (`max_honored_retry_after_ms`)
 

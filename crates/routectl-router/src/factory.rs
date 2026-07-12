@@ -1671,6 +1671,427 @@ pub fn validate_retry_policy(config: &crate::config::Config) -> Result<()> {
     Ok(())
 }
 
+/// The four config-facing classes a `[providers.X.class_overrides]` remap
+/// may target. All four are terminal, non-retrying classes under the
+/// baked defaults (see `class_policy::baked_class_defaults`) -- a remap
+/// may only move a status INTO one of these, never toward a class the
+/// router retries or uses for breaker/health accounting. Consumed by
+/// [`validate_class_policy`].
+const ALLOWED_REMAP_TARGETS: [crate::class_policy::ConfigFailureClass; 4] = [
+    crate::class_policy::ConfigFailureClass::BadRequest,
+    crate::class_policy::ConfigFailureClass::ContentPolicy,
+    crate::class_policy::ConfigFailureClass::ContextWindow,
+    crate::class_policy::ConfigFailureClass::FeatureUnsupported,
+];
+
+/// Render a [`crate::class_policy::ConfigFailureClass`] as the kebab-case
+/// token it parses from / serializes to in TOML (e.g. `bad-request`), for
+/// validator and warning messages that name a class. Round-trips through
+/// the type's own `Serialize` impl rather than a hand-duplicated match arm
+/// list, so the two spellings cannot drift.
+fn class_token(class: crate::class_policy::ConfigFailureClass) -> String {
+    serde_json::to_string(&class)
+        .expect("ConfigFailureClass serialization is infallible")
+        .trim_matches('"')
+        .to_string()
+}
+
+/// A status code the router's circuit breaker treats as a health signal:
+/// 408 and 429 (explicit named rows) plus the whole 500..=599 range.
+/// Distinct from "every 4xx/5xx is fallbackable" -- this is the narrower
+/// set the breaker accounting cares about, used by
+/// [`class_policy_warnings`] to flag a remap that would divert a health
+/// signal away from that accounting.
+fn is_health_status(status: u16) -> bool {
+    status == 408 || status == 429 || (500..=599).contains(&status)
+}
+
+/// Validate the `[retry.classes]` overlay and every
+/// `[providers.X.class_overrides]` remap for HARD policy violations that
+/// the loader's serde layer cannot catch on its own (both are
+/// syntactically valid TOML; these are policy rejects).
+///
+/// Two rejects:
+///
+///   - `[retry.classes.feature-unsupported]` is present. This class is
+///     reserved: the baked class defaults already govern it, and an
+///     override here has no path to take effect yet. Rejected outright
+///     (rather than silently accepted as a no-op) so the operator does
+///     not carry dead config; see the `[retry]` section of
+///     `docs/CONFIGURATION.md` for the classes that do accept an
+///     override. This reject is lifted by a later, targeted removal once
+///     the class gains real override semantics.
+///
+///   - Any `[providers.X.class_overrides]` entry whose remap TARGET falls
+///     outside `{bad-request, content-policy, context-window,
+///     feature-unsupported}` ([`ALLOWED_REMAP_TARGETS`]). A remap may
+///     only make behavior less aggressive -- move a status into one of
+///     the terminal, non-retrying classes -- never toward a class the
+///     router retries or debits for health. The error names the
+///     provider, the source status, and the offending target so the
+///     operator can fix the one line.
+///
+/// Call once per process startup alongside the other validators.
+pub fn validate_class_policy(config: &crate::config::Config) -> Result<()> {
+    use crate::class_policy::ConfigFailureClass;
+    use routectl_core::Error;
+
+    if config
+        .retry
+        .classes
+        .contains_key(&ConfigFailureClass::FeatureUnsupported)
+    {
+        return Err(Error::Config(
+            "[retry.classes.feature-unsupported]: this class is reserved -- the baked \
+             defaults already govern it, so an override here is rejected. See the \
+             [retry] section of docs/CONFIGURATION.md for the classes that accept an \
+             override."
+                .into(),
+        ));
+    }
+
+    for (provider_name, entry) in &config.providers {
+        for (status, target) in &entry.runtime().class_overrides {
+            if !ALLOWED_REMAP_TARGETS.contains(target) {
+                return Err(Error::Config(format!(
+                    "[providers.{provider_name}.class_overrides] {status} = {}: a remap \
+                     may only make behavior less aggressive -- the target must be one of \
+                     bad-request, content-policy, context-window, feature-unsupported",
+                    class_token(*target),
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Advisory (never fatal) checks over the same `[retry.classes]` +
+/// `[providers.X.class_overrides]` surface [`validate_class_policy`]
+/// hard-rejects on. Each finding here is a config smell the operator
+/// probably didn't intend, not a misconfiguration the loader must refuse.
+///
+/// Three checks, each producing zero or more warning lines:
+///
+///   - A `class_overrides` remap whose SOURCE status is a health signal
+///     ([`is_health_status`]: 408, 429, or any 500..=599). Since
+///     [`validate_class_policy`] already restricts the target to a
+///     terminal, non-retrying class, any such remap diverts a
+///     breaker-relevant status into a class the breaker does not debit --
+///     an outage-masking risk if the upstream is actually unhealthy.
+///
+///   - An empty `[retry.classes.<c>]` block (both `retry` and `fallback`
+///     leaves `None`). Parses fine and does nothing; almost always a
+///     leftover the operator forgot to fill in or clear out.
+///
+///   - A `[retry.classes.<c>]` block that is shadowed for one or more
+///     codes by an explicit `retry_allowlist` / `retry_denylist` entry.
+///     `RetryPolicy::explicit_status_override` gives the raw-code listing
+///     precedence over class policy for exactly the codes it names, so
+///     the class block's leaves are inert for those codes even though
+///     the block itself is well-formed. The shadow test classifies each
+///     explicit code with `provider_kind: None` (the union token table);
+///     this is an approximation for the warning (a provider-specific
+///     token lift could move a real request's classification), not a
+///     precise per-provider check -- fine for an advisory message.
+///
+/// Call once per process startup (or `routectl config check`) alongside
+/// [`validate_class_policy`]; unlike that function, warnings never fail
+/// the load.
+pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
+    use crate::class_policy::ConfigFailureClass;
+    use routectl_core::Error;
+    use routectl_core::failure_class::classify;
+
+    let mut warnings = Vec::new();
+
+    for (provider_name, entry) in &config.providers {
+        for (status, target) in &entry.runtime().class_overrides {
+            if is_health_status(*status) {
+                warnings.push(format!(
+                    "[providers.{provider_name}.class_overrides] {status} = {}: remapping \
+                     a health status to a request-fault class disables breaker accounting \
+                     for it (outage-masking risk)",
+                    class_token(*target),
+                ));
+            }
+        }
+    }
+
+    // A non-empty `retry_allowlist` gives `explicit_status_override` an
+    // opinion on every 4xx/5xx code (member = allow, non-member = deny),
+    // not just the codes it names -- so the shadow set must walk the
+    // full status range through the precedence function itself rather
+    // than re-deriving "which codes are explicit" from the list
+    // contents. A `retry_denylist` only opines on the codes it names.
+    let explicit_codes: Vec<u16> = (400..=599)
+        .filter(|status| config.retry.explicit_status_override(*status).is_some())
+        .collect();
+
+    for (class, policy) in &config.retry.classes {
+        if policy.retry.is_none() && policy.fallback.is_none() {
+            warnings.push(format!(
+                "[retry.classes.{}]: `retry` and `fallback` are both unset -- this block \
+                 has no effect",
+                class_token(*class),
+            ));
+        }
+
+        let shadowing_codes: Vec<u16> = explicit_codes
+            .iter()
+            .copied()
+            .filter(|code| {
+                let classified = classify(&Error::upstream("routectl", *code, ""), None);
+                ConfigFailureClass::from_failure_class(&classified.class) == Some(*class)
+            })
+            .collect();
+        if !shadowing_codes.is_empty() {
+            warnings.push(format!(
+                "[retry.classes.{}]: shadowed for status code(s) {shadowing_codes:?} by the \
+                 explicit retry_allowlist/retry_denylist -- explicit raw codes win for \
+                 those codes",
+                class_token(*class),
+            ));
+        }
+    }
+
+    warnings
+}
+
+#[cfg(test)]
+mod class_policy_validation_tests {
+    //! Tests for `validate_class_policy` (hard rejects) and
+    //! `class_policy_warnings` (advisory) over `[retry.classes]` and
+    //! `[providers.X.class_overrides]`.
+
+    use super::{class_policy_warnings, validate_class_policy};
+    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
+    use crate::config::{Config, ProviderEntry, ProviderRuntimePolicy};
+    use std::collections::BTreeMap;
+
+    fn provider_with_overrides(overrides: &[(u16, ConfigFailureClass)]) -> ProviderEntry {
+        let class_overrides = overrides.iter().copied().collect::<BTreeMap<_, _>>();
+        ProviderEntry::anthropic_api("literal:sk-ant-test").with_runtime(ProviderRuntimePolicy {
+            class_overrides,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn rejects_reserved_feature_unsupported_classes_block() {
+        // Arrange: an operator override on the reserved key.
+        let mut cfg = Config::default();
+        cfg.retry.classes.insert(
+            ConfigFailureClass::FeatureUnsupported,
+            ClassPolicy {
+                retry: Some(1),
+                fallback: None,
+            },
+        );
+
+        // Act
+        let err = validate_class_policy(&cfg).unwrap_err();
+
+        // Assert
+        let msg = err.to_string();
+        assert!(msg.contains("feature-unsupported"), "msg: {msg}");
+        assert!(msg.contains("reserved"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_class_override_targeting_a_disallowed_class() {
+        // Arrange: 400 remapped to `server-error`, a retrying class
+        // outside the allowed remap-target set.
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "acme".to_string(),
+            provider_with_overrides(&[(400, ConfigFailureClass::ServerError)]),
+        );
+
+        // Act
+        let err = validate_class_policy(&cfg).unwrap_err();
+
+        // Assert: names the provider, the status, and the offending target.
+        let msg = err.to_string();
+        assert!(msg.contains("acme"), "msg: {msg}");
+        assert!(msg.contains("400"), "msg: {msg}");
+        assert!(msg.contains("server-error"), "msg: {msg}");
+    }
+
+    #[test]
+    fn accepts_class_override_targeting_feature_unsupported() {
+        // Arrange: 400 remapped to `feature-unsupported`, one of the
+        // allowed (less-aggressive) remap targets.
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "acme".to_string(),
+            provider_with_overrides(&[(400, ConfigFailureClass::FeatureUnsupported)]),
+        );
+
+        // Act + Assert
+        validate_class_policy(&cfg).expect("an allowed remap target must validate");
+    }
+
+    #[test]
+    fn warns_when_a_health_status_source_is_remapped() {
+        // Arrange: 503 (a health signal) remapped to the allowed
+        // `feature-unsupported` target -- valid per `validate_class_policy`,
+        // but diverts a breaker-relevant status away from health accounting.
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "acme".to_string(),
+            provider_with_overrides(&[(503, ConfigFailureClass::FeatureUnsupported)]),
+        );
+
+        // Act
+        let warnings = class_policy_warnings(&cfg);
+
+        // Assert
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("acme") && w.contains("503") && w.contains("outage-masking")),
+            "warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_an_empty_class_policy_block() {
+        // Arrange: a `[retry.classes.server-error]` block with both
+        // leaves unset -- parses fine and does nothing.
+        let mut cfg = Config::default();
+        cfg.retry.classes.insert(
+            ConfigFailureClass::ServerError,
+            ClassPolicy {
+                retry: None,
+                fallback: None,
+            },
+        );
+
+        // Act
+        let warnings = class_policy_warnings(&cfg);
+
+        // Assert
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("server-error") && w.contains("no effect")),
+            "warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_when_a_class_block_is_shadowed_by_an_explicit_allowlist_code() {
+        // Arrange: status 500 classifies (with provider_kind None) as
+        // `server-error`, and the explicit allowlist names it directly --
+        // shadowing the `[retry.classes.server-error]` block for that code.
+        let mut cfg = Config::default();
+        cfg.retry.classes.insert(
+            ConfigFailureClass::ServerError,
+            ClassPolicy {
+                retry: Some(2),
+                fallback: None,
+            },
+        );
+        cfg.retry.retry_allowlist = vec![500];
+
+        // Act
+        let warnings = class_policy_warnings(&cfg);
+
+        // Assert
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("server-error") && w.contains("500") && w.contains("shadowed")),
+            "warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_when_a_nonempty_allowlist_shadows_a_class_it_never_names() {
+        // Arrange: a non-empty `retry_allowlist` gives
+        // `explicit_status_override` an opinion on every 4xx/5xx code
+        // (member = allow, non-member = deny) -- not just the codes it
+        // names. `retry_allowlist = [500]` never mentions 529, but 529
+        // is fully shadowed (explicitly denied) all the same, so the
+        // `[retry.classes.overloaded]` block is inert.
+        let mut cfg = Config::default();
+        cfg.retry.classes.insert(
+            ConfigFailureClass::Overloaded,
+            ClassPolicy {
+                retry: Some(2),
+                fallback: None,
+            },
+        );
+        cfg.retry.retry_allowlist = vec![500];
+
+        // Act
+        let warnings = class_policy_warnings(&cfg);
+
+        // Assert
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("overloaded") && w.contains("529") && w.contains("shadowed")),
+            "warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn denylist_shadow_only_covers_the_codes_it_names() {
+        // Arrange: unlike a non-empty allowlist, `retry_denylist` only
+        // opines on the codes it lists -- `explicit_status_override`
+        // returns `None` (no override) for every other 4xx/5xx code, so
+        // the shadow set for a denylist config stays exactly the named
+        // codes.
+        let mut cfg = Config::default();
+        cfg.retry.classes.insert(
+            ConfigFailureClass::ServerError,
+            ClassPolicy {
+                retry: Some(2),
+                fallback: None,
+            },
+        );
+        cfg.retry.retry_denylist = Some(vec![501]);
+
+        // Act
+        let warnings = class_policy_warnings(&cfg);
+
+        // Assert: shadowed for 501 only, not for every server-error code.
+        assert!(
+            warnings.iter().any(|w| {
+                w.contains("server-error") && w.contains("shadowed") && w.contains("[501]")
+            }),
+            "warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn clean_config_validates_ok_with_no_warnings() {
+        // Arrange: a well-formed, non-empty class policy plus a
+        // non-health-status, allowed-target remap.
+        let mut cfg = Config::default();
+        cfg.retry.classes.insert(
+            ConfigFailureClass::ServerError,
+            ClassPolicy {
+                retry: Some(2),
+                fallback: Some(true),
+            },
+        );
+        cfg.providers.insert(
+            "acme".to_string(),
+            provider_with_overrides(&[(400, ConfigFailureClass::BadRequest)]),
+        );
+
+        // Act + Assert
+        validate_class_policy(&cfg).expect("clean config must validate");
+        assert!(
+            class_policy_warnings(&cfg).is_empty(),
+            "clean config must produce no warnings"
+        );
+    }
+}
+
 /// Validate that every `[registry]` key is a well-formed upstream-id
 /// glob -- an exact id or a single trailing-`*` prefix. Embedded or bare
 /// asterisks are rejected here at startup so the cost resolver
