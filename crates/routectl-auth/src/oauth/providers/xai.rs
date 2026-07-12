@@ -30,8 +30,8 @@
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::TryRngCore;
-use rand::rngs::OsRng;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use url::Url;
 
 use crate::oauth::providers::{AuthParams, OAuthFlow, truncate};
@@ -78,16 +78,16 @@ const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
 pub struct Xai;
 
 /// Mint a fresh opaque `nonce` for the OIDC authorize request. Uses the
-/// same CSPRNG primitive (`OsRng` -> base64url-no-pad) the PKCE module
+/// same CSPRNG primitive (`SysRng` -> base64url-no-pad) the PKCE module
 /// uses for the verifier and state. xAI's authorize endpoint requires a
 /// `nonce`, but routectl never verifies the id_token's nonce claim (the
 /// id_token is display-only), so a fresh random nonce per call is correct
 /// and need not be persisted across the flow.
 fn generate_nonce() -> String {
     let mut bytes = [0u8; NONCE_BYTES];
-    OsRng
+    SysRng
         .try_fill_bytes(&mut bytes)
-        .expect("OsRng failed to fill OIDC nonce");
+        .expect("SysRng failed to fill OIDC nonce");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

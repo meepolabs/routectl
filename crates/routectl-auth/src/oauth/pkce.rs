@@ -7,13 +7,13 @@
 //! - CSRF `state`: 32 random bytes -> base64url-no-pad (43 chars).
 //!   Constant-time-compared on callback.
 //!
-//! All randomness is sourced from `OsRng` (the OS CSPRNG). The encoded
+//! All randomness is sourced from `SysRng` (the OS CSPRNG). The encoded
 //! values are URL-safe; no further escaping is needed in query strings.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::TryRngCore;
-use rand::rngs::OsRng;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
@@ -39,15 +39,15 @@ pub struct Pkce {
 }
 
 impl Pkce {
-    /// Build a fresh PKCE bundle. Calls `OsRng` twice (verifier + state).
+    /// Build a fresh PKCE bundle. Calls `SysRng` twice (verifier + state).
     /// Panics if the OS CSPRNG fails -- on Linux/macOS this means the
     /// kernel ran out of entropy at boot, which is unrecoverable for
     /// any cryptographic protocol.
     pub fn generate() -> Self {
         let mut vbytes = [0u8; VERIFIER_BYTES];
-        OsRng
+        SysRng
             .try_fill_bytes(&mut vbytes)
-            .expect("OsRng failed to fill PKCE verifier");
+            .expect("SysRng failed to fill PKCE verifier");
         let verifier = URL_SAFE_NO_PAD.encode(vbytes);
         vbytes.zeroize();
 
@@ -58,9 +58,9 @@ impl Pkce {
         };
 
         let mut sbytes = [0u8; STATE_BYTES];
-        OsRng
+        SysRng
             .try_fill_bytes(&mut sbytes)
-            .expect("OsRng failed to fill PKCE state");
+            .expect("SysRng failed to fill PKCE state");
         let state = URL_SAFE_NO_PAD.encode(sbytes);
         sbytes.zeroize();
 
