@@ -5,12 +5,7 @@ use arc_swap::ArcSwap;
 use axum::Router as AxumRouter;
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
-use routectl_providers::anthropic_api::AuthKind;
-use routectl_router::config::CredentialSource;
-use routectl_router::{
-    AliasValue, CatalogOverlay, Config, ModelEntry, ProviderEntry, Router,
-    check_drift_and_persist_state,
-};
+use routectl_router::{CatalogOverlay, Config, Router, check_drift_and_persist_state};
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
@@ -49,6 +44,13 @@ pub use secrets::CompositeStore;
 pub struct AppState {
     pub router: Arc<ArcSwap<Router>>,
     pub usage: UsageHandle,
+    /// The per-process value that makes the `x-routectl-mitm-proxied` seam
+    /// header unspoofable in practice (see
+    /// `crate::ingress::MitmSeamNonce`). Generated ONCE at server bootstrap
+    /// and shared with the MITM proxy listener's `MitmCtx` (the sole
+    /// legitimate stamper) via the SAME `Arc` -- never regenerated
+    /// per-request, never logged, never in config.
+    pub mitm_seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
 }
 
 impl AppState {
@@ -64,7 +66,11 @@ impl AppState {
         let dir = tempfile::tempdir().expect("usage tempdir");
         let (usage, _writer) =
             UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0, false);
-        let state = Arc::new(Self { router, usage });
+        let state = Arc::new(Self {
+            router,
+            usage,
+            mitm_seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
+        });
         (state, dir)
     }
 }
@@ -344,9 +350,17 @@ pub async fn serve_on_listener_with_overlay(
     // runtime gate can flip live on reload without a restart.
     let (usage_handle, usage_writer) = build_usage_writer(&config);
 
+    // Generated ONCE per process, regardless of whether `[mitm]` is
+    // configured: shared with the ingress admission/capture gates via
+    // `AppState` below and, only when the MITM proxy actually starts, with
+    // its `MitmCtx` (the sole legitimate stamper of the seam header this
+    // nonce guards). See `crate::ingress::MitmSeamNonce`.
+    let mitm_seam_nonce = Arc::new(crate::ingress::MitmSeamNonce::generate());
+
     let state = Arc::new(AppState {
         router: router_swap.clone(),
         usage: usage_handle.clone(),
+        mitm_seam_nonce: mitm_seam_nonce.clone(),
     });
 
     // Wire the file-watch + SIGHUP reload coordinator. Shutdown is
@@ -367,16 +381,18 @@ pub async fn serve_on_listener_with_overlay(
     // condition that DOES fail the whole server, because it is a
     // security invariant rather than a resource-availability one.
     let mitm_proxy_handle = match config.mitm.as_ref() {
-        Some(mitm) => match start_mitm_proxy(mitm, bound.port(), shutdown_rx.clone()).await {
-            Ok(handle) => Some(handle),
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    "MITM proxy failed to start; routectl continues to serve without it",
-                );
-                None
+        Some(mitm) => {
+            match start_mitm_proxy(mitm, bound.port(), shutdown_rx.clone(), mitm_seam_nonce).await {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "MITM proxy failed to start; routectl continues to serve without it",
+                    );
+                    None
+                }
             }
-        },
+        }
         None => None,
     };
 
@@ -466,6 +482,7 @@ async fn start_mitm_proxy(
     mitm: &routectl_router::MitmConfig,
     reinject_port: u16,
     shutdown: watch::Receiver<()>,
+    seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
 ) -> std::result::Result<tokio::task::JoinHandle<()>, crate::proxy::listener::ProxyStartError> {
     let proxy_config = crate::proxy::listener::ProxyListenerConfig {
         listen_port: mitm.listen_port,
@@ -474,6 +491,7 @@ async fn start_mitm_proxy(
         upstream_origin: mitm.upstream_origin.clone(),
         reinject_port,
         tested_cc_version: mitm.tested_cc_version.clone(),
+        seam_nonce,
     };
     let (listener, acceptor, ctx) = crate::proxy::listener::build_and_bind(proxy_config).await?;
     let listen_addr = listener
@@ -682,89 +700,6 @@ async fn resolve_listener_tokens(config: &Config) -> Result<Arc<TokenSet>> {
     Ok(Arc::new(TokenSet::new(resolved)))
 }
 
-/// Provider name for the zero-config synthetic Anthropic egress.
-/// Injected only when `[providers]` is declared empty AND `[mitm]
-/// credential_source = "forwarded"` -- see
-/// `inject_synthetic_anthropic_egress_if_needed`.
-const SYNTHETIC_ANTHROPIC_PROVIDER: &str = "anthropic-forwarded";
-
-/// Model nickname for the synthetic egress's single `[models.X]` entry.
-const SYNTHETIC_ANTHROPIC_MODEL: &str = "anthropic-forwarded";
-
-/// Upstream wire `model` id the synthetic model entry forwards. Every
-/// request that resolves through the injected `default` catch-all alias
-/// dispatches with THIS model id, regardless of what the client actually
-/// requested -- the zero-config bootstrap ships exactly one model, not a
-/// per-tier passthrough (a real per-tier bootstrap is future work).
-/// Matches the current-generation Sonnet id already used elsewhere in
-/// this codebase's own examples/tests (`examples/config.toml`,
-/// `pooled_oauth_config` below).
-const SYNTHETIC_ANTHROPIC_UPSTREAM: &str = "claude-sonnet-4-6";
-
-/// Zero-config bootstrap: when the operator sets `[mitm]
-/// credential_source = "forwarded"` and declares NO `[providers]`,
-/// there is no operator-configured egress for Claude Code to route
-/// through at all. Rather than forking a separate synthetic-egress
-/// dispatch path, this augments a CLONE of `config` with one synthetic
-/// `[providers]` / `[models]` / `[aliases]` entry BEFORE `Router::new`
-/// and the rest of the build pipeline run, so alias validation, model
-/// building, and the canonical dispatch pipeline all see the augmented
-/// config exactly like a hand-written one would -- no new `Provider`
-/// impl, no forked inference path. Must run before `Router::new`
-/// specifically: `Router::new` snapshots `config.providers`
-/// (per-provider runtime gate) and `config.aliases` (glob index) at
-/// construction and keeps the exact `Arc<Config>` it was built from as
-/// `Router.config`, so augmenting any later would leave the live Router
-/// pointing at a stale, unaugmented config.
-///
-/// The synthetic provider's `api_key_ref` is the bare pooled
-/// `oauth://anthropic` ref with `auth_kind = OauthBearer`:
-/// `resolve_token_source` (routectl-router's `factory.rs`) parses an
-/// `oauth://` ref WITHOUT touching the `SecretStore` -- it defers
-/// resolution to the returned `TokenSource::token()`, called only at
-/// first dispatch -- so this builds cleanly even with no routectl oauth
-/// login on disk. The forwarded-mode dispatch path is expected to
-/// short-circuit `.token()` for forwarded-credential requests before
-/// it is ever called, so the absent login is never actually needed.
-///
-/// A no-op (returns `config` unchanged, preserving `Arc` identity) for
-/// `Own` mode or when the operator has declared ANY `[providers]` entry
-/// -- the forwarded+operator-providers combination has open product
-/// questions and is intentionally out of scope here.
-fn inject_synthetic_anthropic_egress_if_needed(config: Arc<Config>) -> Arc<Config> {
-    let is_forwarded = config
-        .mitm
-        .as_ref()
-        .is_some_and(|m| m.credential_source == CredentialSource::Forwarded);
-    if !is_forwarded || !config.providers.is_empty() {
-        return config;
-    }
-
-    let mut augmented = (*config).clone();
-    augmented.providers.insert(
-        SYNTHETIC_ANTHROPIC_PROVIDER.to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic").with_auth_kind(AuthKind::OauthBearer),
-    );
-    augmented.models.insert(
-        SYNTHETIC_ANTHROPIC_MODEL.to_string(),
-        ModelEntry::new(SYNTHETIC_ANTHROPIC_PROVIDER, SYNTHETIC_ANTHROPIC_UPSTREAM),
-    );
-    augmented.aliases.insert(
-        "default".to_string(),
-        AliasValue::Single(SYNTHETIC_ANTHROPIC_MODEL.to_string()),
-    );
-
-    tracing::info!(
-        provider = SYNTHETIC_ANTHROPIC_PROVIDER,
-        upstream = SYNTHETIC_ANTHROPIC_UPSTREAM,
-        "forwarded credential_source with no [providers] configured; \
-         injecting a zero-config synthetic Anthropic egress reachable via \
-         the `default` alias",
-    );
-
-    Arc::new(augmented)
-}
-
 /// Build a `Router` from the parsed config + a shared
 /// `Arc<dyn SecretStore>`, with an EMPTY catalog overlay. Thin wrapper kept
 /// for the many call sites (this crate's own unit tests plus
@@ -793,7 +728,6 @@ pub(crate) async fn build_router_from_config_with_overlay(
     catalog_overlay: &CatalogOverlay,
     secrets: Arc<dyn SecretStore>,
 ) -> Result<Router> {
-    let config = inject_synthetic_anthropic_egress_if_needed(config);
     let mut router = Router::new(config.clone());
 
     // Surface incoherent `[bedrock]` config (e.g. populated
@@ -850,6 +784,14 @@ pub(crate) async fn build_router_from_config_with_overlay(
     if config.mitm.is_some() {
         routectl_router::validate_mitm_config(&config)?;
     }
+
+    // Provider-level credential_source coherence (forwarded => host pin +
+    // empty api_key_ref; own => key present). Also runs in the cheap
+    // pre-parse gate (`validate_effective_config`); repeated here because
+    // this builder is also reachable without that gate (tests, callers
+    // constructing a Config directly), and containment point (1) of the
+    // forwarded-credential invariant must hold on every build path.
+    routectl_router::validate_provider_credential_sources(&config)?;
 
     // Reject a degenerate `[cache_pricing]` override (unparseable selector
     // key or a multiplier that makes the break-even math degenerate) at
@@ -1462,6 +1404,12 @@ pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
     // already treats any `Err` from here that way).
     routectl_router::preflight_config_version(&text).map_err(|e| e.to_string())?;
 
+    // Same pre-parse pattern for the removed `[mitm] credential_source`
+    // key: the raw serde "unknown field" error would not tell the operator
+    // how to migrate, so detect the legacy key first and return the error
+    // that names the exact provider-block replacement.
+    routectl_router::preflight_legacy_mitm_credential_source(&text).map_err(|e| e.to_string())?;
+
     let mut config: Config = toml::from_str(&text)
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))?;
 
@@ -1516,6 +1464,7 @@ fn validate_effective_config(config: &Config) -> Result<(), String> {
     routectl_router::validate_retry_policy(config).map_err(|e| e.to_string())?;
     routectl_router::validate_registry_patterns(config).map_err(|e| e.to_string())?;
     routectl_router::validate_class_policy(config).map_err(|e| e.to_string())?;
+    routectl_router::validate_provider_credential_sources(config).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1632,13 +1581,20 @@ fn collect_restart_required_changes(prev: &Config, next: &Config) -> Vec<&'stati
         out.push("usage.db_path");
     }
 
+    if prev.mitm != next.mitm {
+        // The MITM front-proxy listener is spawned once at boot
+        // (`start_mitm_proxy`) from the config it was given; a
+        // hot-reloaded `[mitm]` edit has no live listener to apply to,
+        // so report it restart-required rather than silently no-op.
+        out.push("mitm");
+    }
+
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     #[test]
     fn cache_policy_banner_reflects_both_switches() {
@@ -1758,6 +1714,26 @@ mod tests {
             !changes.contains(&"usage.retention_days") && changes.is_empty(),
             "retention_days must hot-reload; got {changes:?}"
         );
+
+        // [mitm] edit -> restart-required (the MITM listener is
+        // startup-only; a hot-reloaded edit has no live listener to
+        // apply to).
+        use routectl_router::MitmConfig;
+        prev = Config::default();
+        next = prev.clone();
+        next.mitm = Some(MitmConfig::default());
+        let changes = collect_restart_required_changes(&prev, &next);
+        assert!(changes.contains(&"mitm"), "got {changes:?}");
+
+        prev = Config::default();
+        prev.mitm = Some(MitmConfig::default());
+        next = prev.clone();
+        next.mitm = Some(MitmConfig {
+            listen_port: prev.mitm.as_ref().unwrap().listen_port + 1,
+            ..MitmConfig::default()
+        });
+        let changes = collect_restart_required_changes(&prev, &next);
+        assert!(changes.contains(&"mitm"), "got {changes:?}");
     }
 
     #[tokio::test]
@@ -1787,218 +1763,33 @@ mod tests {
         assert!(Arc::ptr_eq(&r2.config, &config));
     }
 
-    /// Build a forwarded-credential `Config` with the given `[providers]`
-    /// map (empty by default via the caller). Shared arrange step for the
-    /// synthetic-egress injection tests below.
-    #[cfg(test)]
-    fn forwarded_config(providers: BTreeMap<String, ProviderEntry>) -> Arc<Config> {
-        use routectl_router::MitmConfig;
-
-        Arc::new(Config {
-            mitm: Some(MitmConfig {
-                credential_source: CredentialSource::Forwarded,
-                ..MitmConfig::default()
-            }),
-            providers,
-            ..Config::default()
-        })
-    }
-
+    /// `validate_provider_credential_sources` is wired into
+    /// `build_router_from_config_with_overlay` itself (not only reachable
+    /// via the separate `commands::config::check` call to the same
+    /// validator) -- a forwarded provider pointed at a non-Anthropic host
+    /// must fail the router build, i.e. serve startup and hot reload,
+    /// which both call this builder directly.
     #[tokio::test]
-    async fn forwarded_empty_providers_injects_one_anthropic_egress() {
-        let config = forwarded_config(BTreeMap::new());
+    async fn build_router_from_config_rejects_forwarded_provider_on_non_anthropic_host() {
+        use routectl_router::ProviderEntry;
+        use routectl_router::config::CredentialSource;
+
+        let mut config = Config::default();
+        let _usage_dir = isolate_usage_db(&mut config);
+        config.providers.insert(
+            "sneaky".into(),
+            ProviderEntry::anthropic_api("")
+                .with_base_url("https://evil.example.com")
+                .with_credential_source(CredentialSource::Forwarded),
+        );
         let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
 
-        let router = build_router_from_config(config, secrets)
-            .await
-            .expect("forwarded zero-config bootstrap must build");
-
-        assert_eq!(
-            router.config.providers.len(),
-            1,
-            "expected exactly one synthetic provider, got {:?}",
-            router.config.providers.keys().collect::<Vec<_>>()
-        );
-        let entry = router
-            .config
-            .providers
-            .get(SYNTHETIC_ANTHROPIC_PROVIDER)
-            .expect("synthetic provider must be present under its well-known name");
-        match entry {
-            ProviderEntry::AnthropicApi {
-                base_url,
-                auth_kind,
-                ..
-            } => {
-                assert_eq!(base_url.as_str(), "https://api.anthropic.com");
-                assert_eq!(*auth_kind, AuthKind::OauthBearer);
-            }
-            other => panic!("expected an AnthropicApi provider, got {other:?}"),
-        }
-
-        assert_eq!(router.config.models.len(), 1, "expected exactly one model");
-        let model_entry = router
-            .config
-            .models
-            .get(SYNTHETIC_ANTHROPIC_MODEL)
-            .expect("synthetic model must be present under its well-known nickname");
-        assert_eq!(model_entry.provider, SYNTHETIC_ANTHROPIC_PROVIDER);
-
-        let default_alias = router
-            .config
-            .aliases
-            .get("default")
-            .expect("`default` catch-all alias must resolve to the synthetic model");
-        assert_eq!(
-            default_alias.nicknames().collect::<Vec<_>>(),
-            vec![SYNTHETIC_ANTHROPIC_MODEL]
-        );
-    }
-
-    /// Secret store that panics if `.get()` is ever called -- proof that
-    /// the synthetic provider's `oauth://anthropic` ref resolves lazily
-    /// (only at first dispatch, via `TokenSource::token()`) rather than
-    /// eagerly during `build_resolved_models`. If a future change made
-    /// the synthetic ref eager, this test would panic instead of silently
-    /// requiring a routectl oauth login to pass.
-    struct PanicOnGetStore;
-
-    #[async_trait::async_trait]
-    impl SecretStore for PanicOnGetStore {
-        async fn get(&self, secret_ref: &SecretRef) -> Result<String> {
-            panic!(
-                "SecretStore::get() must not be called at build time for {secret_ref}; \
-                 oauth:// refs resolve lazily at first dispatch"
-            );
-        }
-        async fn set(&self, _secret_ref: &SecretRef, _value: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn delete(&self, _secret_ref: &SecretRef) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn forwarded_synthetic_provider_builds_without_any_secret_resolution() {
-        let config = forwarded_config(BTreeMap::new());
-        let secrets: Arc<dyn SecretStore> = Arc::new(PanicOnGetStore);
-
-        build_router_from_config(config, secrets)
-            .await
-            .expect("build must succeed with no secret ever resolved and no oauth login");
-    }
-
-    #[tokio::test]
-    async fn own_mode_empty_providers_does_not_inject_synthetic_egress() {
-        use routectl_router::MitmConfig;
-
-        let config = Arc::new(Config {
-            mitm: Some(MitmConfig {
-                credential_source: CredentialSource::Own,
-                ..MitmConfig::default()
-            }),
-            ..Config::default()
-        });
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-
-        let router = build_router_from_config(config, secrets)
-            .await
-            .expect("own-mode zero-provider config still builds (an empty router)");
-
-        assert!(router.config.providers.is_empty());
-        assert!(router.config.models.is_empty());
-        assert!(!router.config.aliases.contains_key("default"));
-    }
-
-    #[tokio::test]
-    async fn forwarded_with_operator_providers_present_skips_injection() {
-        let providers = BTreeMap::from([(
-            "operator-anthropic".to_string(),
-            ProviderEntry::anthropic_api("oauth://anthropic").with_auth_kind(AuthKind::OauthBearer),
-        )]);
-        let mut config = (*forwarded_config(providers)).clone();
-        config.models.insert(
-            "operator-model".to_string(),
-            ModelEntry::new("operator-anthropic", "claude-sonnet-4-6"),
-        );
-        config.aliases.insert(
-            "default".to_string(),
-            AliasValue::Single("operator-model".to_string()),
-        );
-        let config = Arc::new(config);
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-
-        let router = build_router_from_config(config, secrets)
-            .await
-            .expect("operator-configured forwarded config must build");
-
-        assert_eq!(
-            router.config.providers.len(),
-            1,
-            "operator's own provider must be preserved with no synthetic addition"
-        );
-        assert!(router.config.providers.contains_key("operator-anthropic"));
-        assert!(
-            !router
-                .config
-                .providers
-                .contains_key(SYNTHETIC_ANTHROPIC_PROVIDER)
-        );
-        assert_eq!(router.config.models.len(), 1);
-        assert!(router.config.models.contains_key("operator-model"));
-    }
-
-    #[tokio::test]
-    async fn forwarded_bootstrap_logs_implicit_config_exactly_once() {
-        let config = forwarded_config(BTreeMap::new());
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-
-        let ((), lines) = routectl_testkit::capture_lines(async {
-            build_router_from_config(config, secrets)
-                .await
-                .expect("forwarded zero-config bootstrap must build");
-        })
-        .await;
-
-        let matches = lines
-            .iter()
-            .filter(|line| line.contains("synthetic Anthropic egress"))
-            .count();
-        assert_eq!(
-            matches, 1,
-            "expected exactly one implicit-config log line, got {lines:?}"
-        );
-    }
-
-    /// Evidence that the injection lives INSIDE `build_router_from_config`
-    /// (not in a one-time caller-side check): both the seat-change rebuild
-    /// (`rebuild_router_for_seat_change`) and config reload
-    /// (`handle_config_reload`) call this function directly, so a router
-    /// rebuilt from the SAME forwarded+empty-providers config on a second
-    /// call still carries the synthetic egress -- no daemon restart, no
-    /// re-run of any one-time bootstrap step, required.
-    #[tokio::test]
-    async fn forwarded_bootstrap_survives_two_build_calls() {
-        let config = forwarded_config(BTreeMap::new());
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-
-        let r1 = build_router_from_config(config.clone(), secrets.clone())
-            .await
-            .expect("first build (seat-change-rebuild analog)");
-        let r2 = build_router_from_config(config.clone(), secrets.clone())
-            .await
-            .expect("second build (config-reload analog)");
-
-        for router in [&r1, &r2] {
-            assert!(
-                router
-                    .config
-                    .providers
-                    .contains_key(SYNTHETIC_ANTHROPIC_PROVIDER)
-            );
-            assert!(router.config.aliases.contains_key("default"));
-        }
+        // `Router` is not `Debug`, so match rather than `expect_err`.
+        let err = match build_router_from_config(Arc::new(config), secrets).await {
+            Ok(_) => panic!("forwarded provider off the pinned host must fail the router build"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, Error::Config(_)), "got: {err:?}");
     }
 
     /// Build a `Config` whose single listener-auth token is the given
@@ -3211,6 +3002,44 @@ default = "claude"
             err.contains(&routectl_router::CURRENT_CONFIG_VERSION.to_string()),
             "err: {err}"
         );
+    }
+
+    /// `validate_provider_credential_sources` is wired into
+    /// `validate_effective_config`, which `load_effective_config` calls at
+    /// the end of its own pre-parse gate -- this proves the rejection
+    /// fires on the actual serve/reload load path (the function
+    /// `read_parse_validate_config` calls), not only via the separate
+    /// `commands::config::check` entry point that also happens to call
+    /// the same validator.
+    #[test]
+    #[serial_test::serial]
+    fn load_effective_config_rejects_forwarded_provider_on_non_anthropic_host() {
+        // Arrange: `version = 2` skips the v1 -> v2 migration path so this
+        // test exercises only the credential-source validator, not the
+        // migration's file rewrite.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = EnvGuard::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            "version = 2\n\
+             [providers.sneaky]\n\
+             kind = \"anthropic-api\"\n\
+             base_url = \"https://evil.example.com\"\n\
+             credential_source = \"forwarded\"\n",
+        )
+        .expect("write config.toml");
+
+        // Act. `LoadedConfig` is not `Debug`, so match rather than
+        // `expect_err`.
+        let err = match load_effective_config(&cfg_path) {
+            Ok(_) => panic!("forwarded provider off the pinned host must be rejected"),
+            Err(e) => e,
+        };
+
+        // Assert
+        assert!(err.contains("sneaky"), "err: {err}");
+        assert!(err.contains("forwarded"), "err: {err}");
     }
 
     /// Hot-reload posture: a config edited to a too-new `version`

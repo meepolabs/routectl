@@ -1,13 +1,12 @@
-//! Structured-log safety for the f2.09 forwarded-token terminal path.
+//! Structured-log safety for the forwarded-credential terminal path.
 //!
-//! When a forwarded (pure-passthrough) request draws an upstream
-//! 401/403/429, the router surfaces it VERBATIM -- no on_auth_failure
-//! refresh, no fallback hop -- and emits ONE WARN. This test pins the
-//! operator-grep contract: the WARN carries SAFE dimensions only
-//! (`status`, `credential_source`, `has_client_session_id`) and NEVER
-//! the forwarded token -- in a field, in the message, or anywhere.
-//! `has_client_session_id` is derived from whether an inbound session
-//! key was captured, NEVER from the token.
+//! When a forwarded-credential target draws an upstream 401/403/429, the
+//! router surfaces it VERBATIM -- no on_auth_failure refresh, no fallback
+//! hop -- and emits ONE WARN. This test pins the operator-grep contract:
+//! the WARN carries SAFE dimensions only (`status`, `credential_source`,
+//! `has_client_session_id`) and NEVER the forwarded token -- in a field, in
+//! the message, or anywhere. `has_client_session_id` is derived from
+//! whether an inbound session key was captured, NEVER from the token.
 //!
 //! Lives in its own integration-test binary (not the router lib's unit
 //! tests) on purpose: a thread-local capture subscriber over a shared
@@ -15,7 +14,7 @@
 //! because sibling tests hit the same callsite under the default
 //! `NoSubscriber` first and poison tracing's global per-callsite
 //! `Interest` cache. In a dedicated binary the callsite is only ever
-//! evaluated under this capture subscriber. Mirrors `forwarded_gate_log.rs`.
+//! evaluated under this capture subscriber.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -72,15 +71,17 @@ impl Provider for Always401 {
 }
 
 /// Router whose alias `"alias"` resolves to a single `anthropic-api`
-/// target on `api.anthropic.com`, so the forwarded gate ADMITS the
-/// request and dispatch reaches the 401ing seat.
+/// target with `credential_source = "forwarded"`, so the per-target
+/// terminal-bypass re-key admits the request and dispatch reaches the
+/// 401ing seat.
 fn router_with_anthropic_target() -> Router {
     let mut config = Config::default();
     // A forwarded 401 short-circuits before any retry/backoff, so the
     // default retry policy adds no delay here.
     config.providers.insert(
         "p-anthropic".to_string(),
-        ProviderEntry::anthropic_api("literal:k"),
+        ProviderEntry::anthropic_api("literal:k")
+            .with_credential_source(routectl_router::config::CredentialSource::Forwarded),
     );
     config.aliases.insert(
         "alias".to_string(),

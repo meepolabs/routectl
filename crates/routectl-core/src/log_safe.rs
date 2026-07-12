@@ -879,6 +879,12 @@ pub fn headers_to_json<'a>(
 /// `set-cookie` / `cookie`    -- session credentials on either
 ///                                direction (response sets, request
 ///                                echoes back).
+/// `x-routectl-mitm-proxied`  -- carries the MITM front-proxy's
+///                                per-process seam nonce (see
+///                                `routectl_cli::ingress::MitmSeamNonce`);
+///                                not a credential, but an unguessable
+///                                value whose whole purpose is staying
+///                                out of anything a caller can observe.
 const REDACT_HEADER_NAMES: &[&str] = &[
     "authorization",
     "x-api-key",
@@ -886,6 +892,7 @@ const REDACT_HEADER_NAMES: &[&str] = &[
     "proxy-authorization",
     "set-cookie",
     "cookie",
+    "x-routectl-mitm-proxied",
 ];
 
 /// `x-amz-*` sub-headers that are SIGNING METADATA, not secrets, and

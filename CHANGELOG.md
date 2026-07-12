@@ -15,6 +15,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Ingress provenance** -- the canonical request now records which ingress dialect produced it (`Library` / `AnthropicIngress` / `OpenaiIngress`).
 - **Per-request cache strategy in `routectl usage`** -- each row records the auto-cache decision token (`auto_emitted`, `caller_supplied`, `volatile_vetoed`, `auto_skipped:<reason>`) in a new `strategy` column (usage DB schema v2; migrate-on-open). A `cache_auto_outcome` log warns on cache thrash (an auto-emitted breakpoint that created a cache entry but got no read).
 
+### Changed
+
+- **BREAKING: `[mitm] credential_source` removed.** A forwarded credential is now a per-provider choice, not a `[mitm]`-level one -- `[mitm]` reverts to transport-only (bind port, cert dir, upstream pin). A config still carrying the old key fails to load with an actionable error naming the exact replacement. Migrate by deleting the key and adding a provider block:
+  ```toml
+  [providers.anthropic-forwarded]
+  kind              = "anthropic-api"
+  base_url          = "https://api.anthropic.com"
+  credential_source = "forwarded"
+  ```
+  No `api_key_ref` line -- a forwarded provider has no configured credential of its own.
+  `GET /v1/models` also proxies through to Anthropic's live model list on the MITM reinject leg when a forwarded provider is configured and the request carries a captured client bearer; it falls back to the local alias list on every other case, including a proxy-side failure.
+
 ### Fixed
 
 - **`count_tokens` no longer trips the shared circuit breaker on a capability error.** When the first count_tokens-capable seat is capable by kind (`anthropic-api`) but its upstream does not implement `count_tokens` (e.g. an `anthropic-api` base URL that forwards to a Bedrock Invoke egress), it returns a wire 501. That 501 was recorded as a health failure on the per-model breaker shared with completions, so a steady stream of count_tokens probes could flap the breaker open and force completions onto their fallback. `count_tokens` now treats a capability error (local `NotImplemented` or a wire 501) as capability, not health: it releases the probe slot without a breaker debit and walks to the next capable seat, returning a real count. Completion-path 501s are unchanged and still trip the breaker.

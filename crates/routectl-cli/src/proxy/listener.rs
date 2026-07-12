@@ -444,6 +444,11 @@ pub struct ProxyListenerConfig {
     /// the shared `MitmCtx` for the CC-version warn-and-proceed check
     /// (see `proxy::cc_version`).
     pub tested_cc_version: Option<String>,
+    /// The SAME `Arc<MitmSeamNonce>` the server bootstrap put on `AppState`
+    /// -- threaded through so the reinject leg stamps the exact value the
+    /// ingress admission/capture gates compare against. Generated ONCE per
+    /// process, never here.
+    pub seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
 }
 
 /// Failure to start the MITM proxy listener. Every variant is a
@@ -499,6 +504,7 @@ pub async fn build_and_bind(
         reinject_base,
         tested_cc_version: config.tested_cc_version,
         cc_version_warn_guard: CcVersionWarnGuard::new(),
+        seam_nonce: config.seam_nonce,
     });
 
     let addr = format!("127.0.0.1:{}", config.listen_port);
@@ -710,6 +716,7 @@ mod tests {
             reinject_base,
             tested_cc_version: None,
             cc_version_warn_guard: CcVersionWarnGuard::new(),
+            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         })
     }
 
@@ -1137,6 +1144,7 @@ mod tests {
             upstream_origin: "not a url".to_string(),
             reinject_port: 9100,
             tested_cc_version: None,
+            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         };
 
         let result = build_and_bind(config).await;
@@ -1156,6 +1164,7 @@ mod tests {
             upstream_origin: "https://api.anthropic.com".to_string(),
             reinject_port: 9100,
             tested_cc_version: None,
+            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         };
 
         let (listener, _acceptor, _ctx) = build_and_bind(config).await.unwrap();

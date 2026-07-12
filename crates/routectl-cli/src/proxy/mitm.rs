@@ -59,6 +59,11 @@ pub struct MitmCtx {
     /// Dedups the mismatch warning so a steady mismatch doesn't spam
     /// every request.
     pub cc_version_warn_guard: CcVersionWarnGuard,
+    /// The per-process value `split::handle_request` stamps onto the seam
+    /// header on the reinject leg -- the SAME `Arc` the server bootstrap put
+    /// on `AppState`, so the proxy stamper and the ingress checkers agree on
+    /// the exact value without either side re-generating or persisting it.
+    pub seam_nonce: Arc<crate::ingress::MitmSeamNonce>,
 }
 
 /// Terminates TLS on `tcp` with `acceptor`, then serves HTTP/1.1 over
@@ -163,6 +168,7 @@ mod tests {
             reinject_base,
             tested_cc_version: None,
             cc_version_warn_guard: CcVersionWarnGuard::new(),
+            seam_nonce: Arc::new(crate::ingress::MitmSeamNonce::generate()),
         })
     }
 

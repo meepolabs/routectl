@@ -13,7 +13,7 @@
 //! object to hang the counter on at this point. A process-global counter is
 //! the simplest correct home for a whole-process admission tally, and it
 //! stays leak-safe by construction: the counter dimension can only ever be
-//! one of the four fixed reason strings -- NEVER a token, header, or body
+//! one of the two fixed reason strings -- NEVER a token, header, or body
 //! value -- because the only input `incr` accepts is a
 //! [`PureProxyRejectionReason`], and the only input the rejection log
 //! accepts is that reason plus a boolean.
@@ -28,30 +28,22 @@ use axum::http::StatusCode;
 /// a counter label can never carry a token / header / body value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PureProxyRejectionReason {
-    /// MITM-marked forwarded request with no inbound `Authorization` bearer
-    /// (Claude Code not logged into claude.ai). HTTP 401.
+    /// MITM-inference-path request (seam header present) with no inbound
+    /// `Authorization` bearer (Claude Code not logged into claude.ai).
+    /// HTTP 401.
     TokenMissing,
-    /// Forwarded-mode Anthropic-dialect request that did NOT arrive through
-    /// the MITM proxy (no seam header) -- a direct :9100 loopback client, not
-    /// a valid pure-proxy path. HTTP 400.
-    NotMitm,
-    /// MITM-marked forwarded request missing `x-claude-code-session-id`; fail
+    /// MITM-inference-path request missing `x-claude-code-session-id`; fail
     /// before egress rather than minting identity. HTTP 400.
     IdentityMissing,
-    /// Non-Anthropic dialect (OpenAI chat completions / responses) under
-    /// forwarded mode. HTTP 400.
-    NonAnthropicDialect,
 }
 
 impl PureProxyRejectionReason {
-    const COUNT: usize = 4;
+    const COUNT: usize = 2;
 
     const fn index(self) -> usize {
         match self {
             Self::TokenMissing => 0,
-            Self::NotMitm => 1,
-            Self::IdentityMissing => 2,
-            Self::NonAnthropicDialect => 3,
+            Self::IdentityMissing => 1,
         }
     }
 
@@ -60,9 +52,7 @@ impl PureProxyRejectionReason {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::TokenMissing => "token_missing",
-            Self::NotMitm => "not_mitm",
             Self::IdentityMissing => "identity_missing",
-            Self::NonAnthropicDialect => "non_anthropic_dialect",
         }
     }
 
@@ -72,20 +62,13 @@ impl PureProxyRejectionReason {
     pub(crate) const fn status(self) -> StatusCode {
         match self {
             Self::TokenMissing => StatusCode::UNAUTHORIZED,
-            Self::NotMitm | Self::IdentityMissing | Self::NonAnthropicDialect => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::IdentityMissing => StatusCode::BAD_REQUEST,
         }
     }
 
     /// Every variant, for exhaustive tests.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; Self::COUNT] = [
-        Self::TokenMissing,
-        Self::NotMitm,
-        Self::IdentityMissing,
-        Self::NonAnthropicDialect,
-    ];
+    pub(crate) const ALL: [Self; Self::COUNT] = [Self::TokenMissing, Self::IdentityMissing];
 }
 
 /// Lock-free `pure_proxy_rejections_total{reason}` counter. One relaxed
@@ -159,7 +142,7 @@ mod tests {
     use super::*;
 
     /// Incrementing one reason bumps only that reason's dimension and the
-    /// total, leaving the other three untouched.
+    /// total, leaving the other one untouched.
     #[test]
     fn incr_bumps_only_the_matching_reason() {
         // Arrange
@@ -170,12 +153,7 @@ mod tests {
 
         // Assert
         assert_eq!(counter.count(PureProxyRejectionReason::TokenMissing), 1);
-        assert_eq!(counter.count(PureProxyRejectionReason::NotMitm), 0);
         assert_eq!(counter.count(PureProxyRejectionReason::IdentityMissing), 0);
-        assert_eq!(
-            counter.count(PureProxyRejectionReason::NonAnthropicDialect),
-            0
-        );
         assert_eq!(counter.total(), 1);
     }
 
@@ -186,21 +164,17 @@ mod tests {
         let counter = PureProxyRejections::new();
 
         // Act
-        counter.incr(PureProxyRejectionReason::NotMitm);
-        counter.incr(PureProxyRejectionReason::NotMitm);
-        counter.incr(PureProxyRejectionReason::NonAnthropicDialect);
+        counter.incr(PureProxyRejectionReason::IdentityMissing);
+        counter.incr(PureProxyRejectionReason::IdentityMissing);
+        counter.incr(PureProxyRejectionReason::TokenMissing);
 
         // Assert
-        assert_eq!(counter.count(PureProxyRejectionReason::NotMitm), 2);
-        assert_eq!(
-            counter.count(PureProxyRejectionReason::NonAnthropicDialect),
-            1
-        );
-        assert_eq!(counter.count(PureProxyRejectionReason::TokenMissing), 0);
+        assert_eq!(counter.count(PureProxyRejectionReason::IdentityMissing), 2);
+        assert_eq!(counter.count(PureProxyRejectionReason::TokenMissing), 1);
         assert_eq!(counter.total(), 3);
     }
 
-    /// The counter dimension is a CLOSED enum: its only labels are the four
+    /// The counter dimension is a CLOSED enum: its only labels are the two
     /// fixed, safe reason strings. This is the structural guarantee that a
     /// dimension can never carry a token, header, or body value.
     #[test]
@@ -211,16 +185,8 @@ mod tests {
             .map(|r| r.as_str())
             .collect();
 
-        // Assert: exactly the four documented reasons, nothing else.
-        assert_eq!(
-            labels,
-            vec![
-                "token_missing",
-                "not_mitm",
-                "identity_missing",
-                "non_anthropic_dialect",
-            ],
-        );
+        // Assert: exactly the two documented reasons, nothing else.
+        assert_eq!(labels, vec!["token_missing", "identity_missing"]);
         // Every label is a short, fixed token -- never anything that could
         // carry request-derived data (no whitespace, no long values).
         for label in labels {

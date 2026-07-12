@@ -4,32 +4,31 @@
 //! Every test here drives a REAL axum server over a REAL TCP loopback
 //! connection (`helpers::spawn`, same pattern as `anthropic_ingress.rs`),
 //! not a direct in-process call into `ingress_handle`. That is the coverage
-//! gap this file closes: the ADMISSION matrix, the ROUTER refuse, and
+//! gap this file closes: the ADMISSION matrix, coexistence dissolution, and
 //! backward-compat were already pinned at the function-call level
 //! (`ingress_handle_tests.rs`, `pure_proxy_admission_log.rs`,
-//! `routectl-router`'s in-lib forwarded-gate tests) and at the log-capture
-//! level (`forwarded_gate_log.rs`, `forwarded_auth_terminal_log.rs`), but
-//! nothing yet proved the real axum route wiring (JSON extraction, header
-//! parsing, listener auth interaction, TCP round trip) actually reaches
-//! those gates.
+//! `routectl-router`'s in-lib coexistence + missing-bearer tests) and at the
+//! log-capture level (`forwarded_auth_terminal_log.rs`), but nothing yet
+//! proved the real axum route wiring (JSON extraction, header parsing,
+//! listener auth interaction, TCP round trip) actually reaches those gates.
 //!
-//! CONSTRAINT (see the task brief): the WIRE + ROUTER gates pin the
-//! forwarded egress to EXACTLY host `api.anthropic.com`. A wiremock
+//! CONSTRAINT (see the task brief): the WIRE gate pins a forwarded-
+//! CREDENTIAL egress to EXACTLY host `api.anthropic.com`. A wiremock
 //! upstream's host is never that, so it can serve as an upstream ONLY for
-//! scenarios that must never reach it (the ADMISSION matrix rejects before
-//! dispatch; the ROUTER gate refuses before dispatch) or for OWN-mode /
-//! absent-`[mitm]` requests (which are not subject to the host pin at all).
-//! A genuine HTTP round trip of the forwarded HAPPY path or the forwarded
-//! TERMINAL 401/403/429 behavior against a real `AnthropicApiProvider` is
-//! therefore not attempted here -- that composition is proven at the
-//! component level: `AnthropicApiProvider::build_headers` /
-//! `resolve_effective_token` unit tests in
-//! `routectl-providers/src/anthropic_api/mod.rs` (host-pinned WIRE gate +
-//! IDENTITY override) and `Router::complete` / `stream` / `count_tokens`
-//! unit tests in `routectl-router/src/router.rs` (TERMINAL 401/403/429,
-//! ROUTER refuse, forwarded-egress-dispatches-normally), which together
-//! already compose the full pipeline without ever needing to reach the
-//! real Anthropic host.
+//! scenarios that must never reach an Anthropic egress at all (the ADMISSION
+//! matrix rejects before dispatch; a non-Anthropic OWN-credential provider is
+//! never subject to the host pin) or for OWN-mode / absent-`[mitm]` requests.
+//! A genuine HTTP round trip of the forwarded-credential HAPPY path or the
+//! forwarded TERMINAL 401/403/429 behavior against a real
+//! `AnthropicApiProvider` is therefore not attempted here -- that
+//! composition is proven at the component level:
+//! `AnthropicApiProvider::build_headers` / `resolve_effective_token` unit
+//! tests in `routectl-providers/src/anthropic_api/mod.rs` (host-pinned WIRE
+//! gate + IDENTITY override) and `Router::complete` / `stream` /
+//! `count_tokens` unit tests in `routectl-router/src/router.rs` (TERMINAL
+//! 401/403/429, missing-bearer terminal guard, coexistence dissolved),
+//! which together already compose the full pipeline without ever needing to
+//! reach the real Anthropic host.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -87,19 +86,17 @@ fn unique_cert_dir(tag: &str) -> std::path::PathBuf {
     ))
 }
 
-/// `[mitm]` block with the given `credential_source`. `listen_port: 0`
-/// (OS-assigned) avoids colliding with the sentinel `[server] port` these
-/// tests use (see `base_server_config`); the pinned `upstream_origin` /
-/// `mitm_host` defaults are left untouched (`validate_mitm_config` requires
-/// them exact).
-fn mitm_config(credential_source: CredentialSource) -> MitmConfig {
+/// `[mitm]` block for a test scenario tagged `scenario` (used only to keep
+/// each scenario's cert dir distinct -- `[mitm]` itself is transport-only
+/// post-f3, forwardedness now lives on the `[providers.X]` entry, not
+/// here). `listen_port: 0` (OS-assigned) avoids colliding with the
+/// sentinel `[server] port` these tests use (see `base_server_config`);
+/// the pinned `upstream_origin` / `mitm_host` defaults are left untouched
+/// (`validate_mitm_config` requires them exact).
+fn mitm_config(scenario: &str) -> MitmConfig {
     MitmConfig {
-        credential_source,
         listen_port: 0,
-        cert_dir: unique_cert_dir(match credential_source {
-            CredentialSource::Forwarded => "forwarded",
-            CredentialSource::Own => "own",
-        }),
+        cert_dir: unique_cert_dir(scenario),
         ..Default::default()
     }
 }
@@ -142,85 +139,140 @@ fn forwarded_admission_body() -> Value {
 
 // ---------------------------------------------------------------------------
 // ADMISSION rejection matrix -- real HTTP, no upstream involved (every case
-// rejects BEFORE dispatch). Zero `[providers]` triggers the zero-config
-// synthetic-egress injection (`inject_synthetic_anthropic_egress_if_needed`),
-// which is the realistic zero-config forwarded-mode shape and never gets
-// far enough to touch it on any of these paths.
+// rejects BEFORE dispatch).
 // ---------------------------------------------------------------------------
 
-fn forwarded_zero_providers_config() -> Arc<Config> {
-    Arc::new(Config {
-        server: base_server_config(),
-        mitm: Some(mitm_config(CredentialSource::Forwarded)),
-        retry: RetryPolicy::default(),
-        ..Default::default()
-    })
-}
-
-/// Case 1 (token_missing, 401): MITM-marked + a session id, but no inbound
-/// `Authorization` -- Claude Code not logged into claude.ai.
+/// Case 1 (adapted for the seam-nonce hardening): the seam header is now
+/// unspoofable -- it is authoritative only when its value matches the
+/// server's per-process nonce, which no direct HTTP client can ever learn
+/// or supply. A client that sends the header with ANY value (here the old
+/// literal `"1"`) must downgrade to seam-ABSENT: the token_missing
+/// admission rejection never fires, and a request with no bearer and no
+/// session id is admitted and dispatches exactly like ordinary
+/// own-provider traffic, even while a forwarded provider coexists.
 #[tokio::test]
-async fn e2e_admission_rejects_token_missing_401() {
-    let base = helpers::spawn(forwarded_zero_providers_config()).await;
+async fn e2e_admission_spoofed_seam_header_downgrades_to_seam_absent() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_compat_response_body()))
+        .mount(&upstream)
+        .await;
+
+    let config = config_with_forwarded_and_own_providers(&upstream.uri());
+    let base = helpers::spawn(config).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/messages"))
         .header(MITM_SEAM_HEADER, "1")
-        .header(SESSION_ID_HEADER, "sess-token-missing")
         .json(&forwarded_admission_body())
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 401);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["type"], "error", "Anthropic envelope");
-    assert_eq!(body["error"]["type"], "authentication_error");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("reason=token_missing"),
-        "body: {body}"
+    assert_eq!(
+        resp.status(),
+        200,
+        "a spoofed seam header (no matching process nonce) must never trigger the \
+         token_missing admission rejection -- the request is admitted as ordinary \
+         own-provider traffic"
     );
 }
 
-/// Case 2 (not_mitm, 400): a bearer + session id, but no MITM seam header --
-/// a direct :9100 loopback client, not a valid pure-proxy path.
+/// Case 2 (migrated for f3): a bearer + session id, but no MITM seam
+/// header -- a direct :9100 loopback client -- used to 400 as `not_mitm`
+/// whenever `[mitm] credential_source = forwarded` was set. f3 dropped that
+/// request-global rejection: the pre-parse gate now fires ONLY when the
+/// seam header IS present, so this exact traffic shape must be ADMITTED and
+/// dispatch normally to its own-credential provider, even while a forwarded
+/// provider coexists in `[providers]` (`has_forwarded_provider() == true`).
 #[tokio::test]
-async fn e2e_admission_rejects_not_mitm_400() {
-    let base = helpers::spawn(forwarded_zero_providers_config()).await;
+async fn e2e_admission_admits_own_provider_traffic_without_seam_header() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_compat_response_body()))
+        .mount(&upstream)
+        .await;
+
+    let config = config_with_forwarded_and_own_providers(&upstream.uri());
+    let base = helpers::spawn(config).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/messages"))
-        .header("authorization", "Bearer sk-ant-oat01-e2e-not-mitm")
-        .header(SESSION_ID_HEADER, "sess-not-mitm")
+        .header("authorization", "Bearer sk-ant-oat01-e2e-no-seam")
+        .header(SESSION_ID_HEADER, "sess-no-seam")
         .json(&forwarded_admission_body())
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 400);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["type"], "error");
-    assert_eq!(body["error"]["type"], "invalid_request_error");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("reason=not_mitm"),
-        "body: {body}"
+    assert_eq!(
+        resp.status(),
+        200,
+        "an own-provider request without the seam header must be admitted \
+         even while a forwarded provider is configured"
     );
 }
 
-/// Case 3 (identity_missing, 400): MITM-marked + a bearer, but no
-/// `x-claude-code-session-id`. The strongest leak probe of the matrix: it
-/// carries a real-looking token, so pin that the token never appears
-/// anywhere in the HTTP response.
+/// Case 4a (migrated for f3): the SAME "no seam -> admitted" contract,
+/// driven through the REAL `/v1/chat/completions` route. f3 dropped the
+/// `non_anthropic_dialect` rejection along with `not_mitm` -- both fired on
+/// the removed request-global forwarded flag -- so a non-Anthropic-dialect
+/// request without the seam header must be admitted too, proving the
+/// pre-parse gate no longer discriminates by dialect.
 #[tokio::test]
-async fn e2e_admission_rejects_identity_missing_400_and_never_leaks_token() {
+async fn e2e_admission_admits_non_anthropic_dialect_without_seam_header() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_compat_response_body()))
+        .mount(&upstream)
+        .await;
+
+    let config = config_with_forwarded_and_own_providers(&upstream.uri());
+    let base = helpers::spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .header("authorization", "Bearer sk-ant-oat01-e2e-dialect-no-seam")
+        .header(SESSION_ID_HEADER, "sess-dialect-no-seam")
+        .json(&json!({
+            "model": "heavy",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "non-Anthropic-dialect traffic without the seam header must be \
+         admitted even while a forwarded provider is configured"
+    );
+}
+
+/// Case 3 (adapted for the seam-nonce hardening): the OLD identity_missing
+/// rejection required only that the header be present, which a spoofed
+/// value could trigger. Post-hardening, a spoofed value downgrades to
+/// seam-ABSENT, so a bearer-carrying request with no session id is admitted
+/// and dispatches normally instead of being rejected -- and, as the
+/// strongest leak probe, the distinctive bearer must never appear anywhere
+/// in the response or reach the upstream (it is never captured at all: the
+/// forwarded-bearer gate also requires the nonce match).
+#[tokio::test]
+async fn e2e_admission_spoofed_seam_header_with_bearer_downgrades_to_seam_absent() {
     const TOKEN: &str = "sk-ant-oat01-E2E-LEAK-CANARY-identity-missing";
-    let base = helpers::spawn(forwarded_zero_providers_config()).await;
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_compat_response_body()))
+        .mount(&upstream)
+        .await;
+
+    let config = config_with_forwarded_and_own_providers(&upstream.uri());
+    let base = helpers::spawn(config).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/messages"))
@@ -231,132 +283,100 @@ async fn e2e_admission_rejects_identity_missing_400_and_never_leaks_token() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 400);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["type"], "error");
-    assert_eq!(body["error"]["type"], "invalid_request_error");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("reason=identity_missing"),
-        "body: {body}"
+    assert_eq!(
+        resp.status(),
+        200,
+        "a spoofed seam header must never trigger the identity_missing admission rejection \
+         either"
     );
+    let body: Value = resp.json().await.unwrap();
     assert!(
         !body.to_string().contains(TOKEN),
-        "the forwarded token must never appear in the HTTP response: {body}"
+        "the bearer must never leak into the response: {body}"
+    );
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "exactly one upstream dispatch");
+    assert!(
+        !String::from_utf8_lossy(&received[0].body).contains(TOKEN),
+        "the bearer must never leak into the outbound request either"
     );
 }
 
-/// Case 4a (non_anthropic_dialect, 400): a fully-formed forwarded request
-/// (seam + bearer + session id -- every OTHER admission key satisfied) is
-/// still rejected on `/v1/chat/completions`, proving the dialect check is
-/// reachable through the REAL OpenAI chat-completions route, not only via a
-/// direct `enforce_pure_proxy_admission` call with a synthesized envelope
-/// shape.
+/// A well-formed forwarded-marked request (seam + bearer + session id,
+/// Anthropic dialect) is ADMITTED past the admission matrix and then
+/// routes exactly like any other request: f3 dissolved the f2 whole-
+/// chain ROUTER gate, so a captured bearer no longer bends routing --
+/// the alias resolves to its configured (non-Anthropic, OWN-credential)
+/// provider and dispatch proceeds normally, reaching the real upstream
+/// with that provider's own credentials. See `assert_backward_compat_round_trip`
+/// for the header-level proof that the captured bearer never rides the
+/// outbound request.
 #[tokio::test]
-async fn e2e_admission_rejects_non_anthropic_dialect_chat_completions_400() {
-    let base = helpers::spawn(forwarded_zero_providers_config()).await;
+async fn e2e_forwarded_capture_present_but_alias_routes_to_own_credential_provider_normally() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_compat_response_body()))
+        .mount(&upstream)
+        .await;
 
-    let resp = reqwest::Client::new()
-        .post(format!("{base}/v1/chat/completions"))
-        .header(MITM_SEAM_HEADER, "1")
-        .header("authorization", "Bearer sk-ant-oat01-e2e-dialect")
-        .header(SESSION_ID_HEADER, "sess-dialect-chat")
-        .json(&json!({
-            "model": "heavy",
-            "messages": [{"role": "user", "content": "hi"}]
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), 400);
-    let body: Value = resp.json().await.unwrap();
-    assert!(
-        body.get("type").is_none(),
-        "OpenAI envelope is flat (no top-level type): {body}"
-    );
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("reason=non_anthropic_dialect"),
-        "body: {body}"
-    );
-}
-
-/// Case 4b: same rejection, reached through the REAL `/v1/responses` route
-/// -- the second non-Anthropic dialect the shared driver must also gate.
-#[tokio::test]
-async fn e2e_admission_rejects_non_anthropic_dialect_responses_400() {
-    let base = helpers::spawn(forwarded_zero_providers_config()).await;
-
-    let resp = reqwest::Client::new()
-        .post(format!("{base}/v1/responses"))
-        .header(MITM_SEAM_HEADER, "1")
-        .header("authorization", "Bearer sk-ant-oat01-e2e-dialect-responses")
-        .header(SESSION_ID_HEADER, "sess-dialect-responses")
-        .json(&json!({"model": "heavy", "input": "hi"}))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), 400);
-    let body: Value = resp.json().await.unwrap();
-    assert!(
-        body.get("type").is_none(),
-        "OpenAI envelope is flat: {body}"
-    );
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("reason=non_anthropic_dialect"),
-        "body: {body}"
-    );
-}
-
-/// A well-formed forwarded request (seam + bearer + session id, Anthropic
-/// dialect) is ADMITTED past the gate -- proven by a distinct rejection
-/// downstream (ROUTER refuse) rather than the admission 401/400 shapes,
-/// since dispatch to a real Anthropic host cannot happen in this suite (see
-/// the module-level constraint note). Confirms the matrix's ADMIT branch is
-/// reachable end-to-end, not just refused branches.
-#[tokio::test]
-async fn e2e_admission_admits_fully_valid_forwarded_request_past_the_gate() {
-    let config = forwarded_config_with_non_anthropic_provider("http://127.0.0.1:1");
+    let config = forwarded_config_with_non_anthropic_provider(&upstream.uri());
     let base = helpers::spawn(config).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/v1/messages"))
         .header(MITM_SEAM_HEADER, "1")
-        .header("authorization", "Bearer sk-ant-oat01-e2e-admitted")
+        .header("authorization", format!("Bearer {ROGUE_CLIENT_BEARER}"))
         .header(SESSION_ID_HEADER, "sess-admitted")
         .json(&forwarded_admission_body())
         .send()
         .await
         .unwrap();
 
-    // Admission passed the request through to the ROUTER gate, which then
-    // refuses it (400 non_anthropic_target) -- a DIFFERENT reason than any
-    // admission-matrix rejection, proving the request cleared admission.
-    assert_eq!(resp.status(), 400);
-    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "admission passed and the non-Anthropic provider dispatched normally",
+    );
+
+    let received = upstream.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1, "exactly one upstream dispatch");
+    for (name, value) in &received[0].headers {
+        assert_ne!(
+            value.to_str().unwrap_or_default(),
+            format!("Bearer {ROGUE_CLIENT_BEARER}"),
+            "header {name} must not carry the captured forwarded bearer -- \
+             this provider is OWN-credential and must use its own api_key_ref",
+        );
+    }
     assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("non_anthropic_target"),
-        "expected the ROUTER-gate refuse reason (proving admission passed), got: {body}"
+        !String::from_utf8_lossy(&received[0].body).contains(ROGUE_CLIENT_BEARER),
+        "the captured forwarded bearer must not leak into the outbound body",
     );
 }
 
 // ---------------------------------------------------------------------------
-// ROUTER gate refuse -- real HTTP, resolved target is NOT an
-// api.anthropic.com anthropic-api egress. Refused before ANY upstream
-// dispatch; a mounted wiremock upstream must see zero requests.
+// Coexistence dissolved (f3): a captured forwarded bearer no longer bends
+// routing. An alias to a non-Anthropic, OWN-credential provider dispatches
+// normally with that provider's own credentials -- no whole-chain refusal,
+// no steering. The token-containment invariant (the forwarded bearer never
+// reaches a non-Anthropic egress) is proven above at the header/body level.
 // ---------------------------------------------------------------------------
+
+fn openai_compat_response_body() -> Value {
+    json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "some-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
+    })
+}
 
 fn forwarded_config_with_non_anthropic_provider(upstream_base: &str) -> Arc<Config> {
     let mut providers = BTreeMap::new();
@@ -377,7 +397,7 @@ fn forwarded_config_with_non_anthropic_provider(upstream_base: &str) -> Arc<Conf
 
     Arc::new(Config {
         server: base_server_config(),
-        mitm: Some(mitm_config(CredentialSource::Forwarded)),
+        mitm: Some(mitm_config("forwarded")),
         providers,
         aliases,
         models,
@@ -386,45 +406,44 @@ fn forwarded_config_with_non_anthropic_provider(upstream_base: &str) -> Arc<Conf
     })
 }
 
-#[tokio::test]
-async fn e2e_router_refuses_forwarded_request_to_non_anthropic_target_upstream_never_called() {
-    let upstream = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
-        .mount(&upstream)
-        .await;
-
-    let config = forwarded_config_with_non_anthropic_provider(&upstream.uri());
-    let base = helpers::spawn(config).await;
-
-    let resp = reqwest::Client::new()
-        .post(format!("{base}/v1/messages"))
-        .header(MITM_SEAM_HEADER, "1")
-        .header("authorization", "Bearer sk-ant-oat01-e2e-router-refuse")
-        .header(SESSION_ID_HEADER, "sess-router-refuse")
-        .json(&forwarded_admission_body())
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), 400);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["type"], "error", "Anthropic envelope");
-    assert_eq!(body["error"]["type"], "invalid_request_error");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("non_anthropic_target"),
-        "body: {body}"
+/// A config with BOTH a genuinely forwarded `[providers]` entry
+/// (`credential_source = "forwarded"`, pinned to `api.anthropic.com`,
+/// never dispatched to in these tests) and an own-credential provider
+/// aliased as `heavy`. `Router::has_forwarded_provider()` is `true` here --
+/// used to prove the admission gate no longer 400s own-provider /
+/// non-Anthropic-dialect traffic just because a forwarded provider
+/// coexists (f3's whole point: forwardedness moved off the request-global
+/// `[mitm]` flag onto this per-provider config).
+fn config_with_forwarded_and_own_providers(upstream_base: &str) -> Arc<Config> {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "compat-mock".to_string(),
+        ProviderEntry::openai_compat(upstream_base.to_string(), "literal:test-key"),
+    );
+    providers.insert(
+        "forwarded-provider".to_string(),
+        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "heavy-model".to_string(),
+        ModelEntry::new("compat-mock", "some-model"),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "heavy".to_string(),
+        AliasValue::Single("heavy-model".into()),
     );
 
-    let received = upstream.received_requests().await.unwrap();
-    assert!(
-        received.is_empty(),
-        "the ROUTER gate must refuse BEFORE any upstream dispatch; wiremock saw: {received:?}"
-    );
+    Arc::new(Config {
+        server: base_server_config(),
+        mitm: None,
+        providers,
+        aliases,
+        models,
+        retry: RetryPolicy::default(),
+        ..Default::default()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -463,8 +482,9 @@ fn backward_compat_config(upstream_base: &str, mitm: Option<MitmConfig>) -> Arc<
 /// The distinctive rogue bearer a curious (or misconfigured) client sends
 /// alongside the MITM seam header even though the server is NOT in
 /// forwarded mode. Neither backward-compat test's upstream assertion
-/// should ever see this value: own mode's `credential_source == Own`, and
-/// the absent-`[mitm]` path has no forwarded-capture gate to arm at all.
+/// should ever see this value: own mode has no forwarded provider
+/// configured (`has_forwarded_provider() == false`), and the
+/// absent-`[mitm]` path has no forwarded-capture gate to arm at all.
 const ROGUE_CLIENT_BEARER: &str = "sk-ant-oat01-ROGUE-CLIENT-BEARER-must-never-reach-upstream";
 
 async fn assert_backward_compat_round_trip(mitm: Option<MitmConfig>) {
@@ -517,11 +537,11 @@ async fn assert_backward_compat_round_trip(mitm: Option<MitmConfig>) {
     );
 }
 
-/// Own mode (`[mitm] credential_source = "own"`, present explicitly):
-/// forwarded-style headers on the inbound request are inert.
+/// Own mode (`[mitm]` present, transport-only, no forwarded provider
+/// configured): forwarded-style headers on the inbound request are inert.
 #[tokio::test]
 async fn e2e_own_mode_backward_compat_ignores_forwarded_style_headers() {
-    assert_backward_compat_round_trip(Some(mitm_config(CredentialSource::Own))).await;
+    assert_backward_compat_round_trip(Some(mitm_config("own"))).await;
 }
 
 /// Absent `[mitm]` block entirely (the pre-MITM shape, and still the default

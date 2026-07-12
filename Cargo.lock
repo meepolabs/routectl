@@ -2615,6 +2615,7 @@ dependencies = [
  "nix",
  "notify",
  "notify-debouncer-full",
+ "rand 0.10.2",
  "rcgen",
  "reqwest",
  "routectl-auth",

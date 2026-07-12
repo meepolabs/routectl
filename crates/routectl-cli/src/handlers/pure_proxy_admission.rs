@@ -1,51 +1,52 @@
 //! Forwarded-mode (pure-proxy) ingress admission gate.
 //!
 //! Runs the forwarded-mode rejection matrix at the shared ingress
-//! driver, before body parse and dispatch: a forwarded-mode request must
-//! arrive on the Anthropic dialect, through the MITM proxy, carrying an
-//! inbound `Authorization` bearer and a client session id, or it is
+//! driver, before body parse and dispatch: a request that arrived through
+//! the MITM inference path (the `x-routectl-mitm-proxied` seam header,
+//! carrying the process's [`crate::ingress::MitmSeamNonce`] value) must
+//! carry an inbound `Authorization` bearer and a client session id, or it is
 //! rejected with a dialect-correct error envelope and a
-//! `pure_proxy_rejections_total{reason}` bump. A no-op in own mode -- every
-//! non-forwarded request is byte-identical to the pre-passthrough path.
+//! `pure_proxy_rejections_total{reason}` bump. A no-op for every request
+//! that did NOT arrive through that path -- own-provider and non-Anthropic-
+//! dialect traffic is admitted untouched even while a forwarded provider is
+//! configured.
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use routectl_router::config::CredentialSource;
 
 use crate::handlers::ingress_handle::{
     error_response, extract_authorization_bearer, session_id_of,
 };
 use crate::handlers::pure_proxy_metrics::{PureProxyRejectionReason, record_rejection};
-use crate::ingress::ErrorEnvelopeShape;
+use crate::ingress::{ErrorEnvelopeShape, MitmSeamNonce};
 
 /// Forwarded-mode (pure-proxy) ingress admission gate. Runs the
 /// forwarded-mode rejection matrix and, on a rejection, records the
 /// `pure_proxy_rejections_total{reason}` counter + the structured rejection
 /// log, then returns the dialect-correct error `Response`. Returns `None`
-/// (admit) for own mode and for a well-formed forwarded request.
+/// (admit) for every request that did not arrive through the MITM
+/// inference path, and for a well-formed one that did.
 ///
 /// The dialect is read straight off `envelope`: the Anthropic ingress uses
 /// `ErrorEnvelopeShape::Anthropic`; the OpenAI chat-completions and Responses
-/// ingresses both use `ErrorEnvelopeShape::OpenAi`. That is the signal the
-/// non-Anthropic-dialect check keys on, so gating here (the shared driver all
-/// three handlers funnel through) covers every dialect at one point.
+/// ingresses both use `ErrorEnvelopeShape::OpenAi`. It only affects how a
+/// rejection is RENDERED here -- the seam header this gate keys on is
+/// stamped exclusively on the Anthropic MITM inference leg, so it is never
+/// present on the other two dialects in practice.
+///
+/// `seam_nonce` is the process's [`MitmSeamNonce`] (from `AppState`): the
+/// header must carry ITS value, not merely be present, or this gate treats
+/// the request as seam-absent (see `MitmSeamNonce::is_present_in`).
 pub(crate) fn enforce_pure_proxy_admission(
     headers: &HeaderMap,
-    router: &routectl_router::Router,
     envelope: ErrorEnvelopeShape,
+    seam_nonce: &MitmSeamNonce,
 ) -> Option<Response> {
-    let forwarded = matches!(
-        router.config.mitm.as_ref().map(|m| m.credential_source),
-        Some(CredentialSource::Forwarded)
-    );
-    let is_anthropic_dialect = envelope == ErrorEnvelopeShape::Anthropic;
-    let seam_present = headers.contains_key(crate::ingress::MITM_PROXIED_HEADER);
+    let seam_present = seam_nonce.is_present_in(headers);
     let has_bearer = extract_authorization_bearer(headers).is_some();
     let has_session_id = session_id_of(headers).is_some();
 
     let reason = classify_pure_proxy_rejection(PureProxyAdmissionInputs {
-        forwarded,
-        is_anthropic_dialect,
         seam_present,
         has_bearer,
         has_session_id,
@@ -61,13 +62,11 @@ pub(crate) fn enforce_pure_proxy_admission(
 /// the decision core cannot depend on (or leak) request content.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PureProxyAdmissionInputs {
-    /// `[mitm] credential_source == Forwarded` (config-is-the-capability).
-    pub(crate) forwarded: bool,
-    /// The request arrived on the Anthropic dialect (`/v1/messages`); false
-    /// for the OpenAI chat-completions and Responses dialects.
-    pub(crate) is_anthropic_dialect: bool,
-    /// The `x-routectl-mitm-proxied` seam header is present
-    /// (header-is-a-hint: it arrived through the MITM inference path).
+    /// The `x-routectl-mitm-proxied` seam header carries the process's
+    /// nonce value (not merely present) -- the request arrived through the
+    /// MITM inference path. Every other check in this matrix is gated on
+    /// this being true; a request without a matching value is admitted
+    /// untouched regardless of dialect or config.
     pub(crate) seam_present: bool,
     /// A usable inbound `Authorization` bearer is present.
     pub(crate) has_bearer: bool,
@@ -76,31 +75,22 @@ pub(crate) struct PureProxyAdmissionInputs {
 }
 
 /// Pure decision core for the forwarded-mode admission matrix. Returns the
-/// rejection reason, or `None` to admit. Own mode (`!forwarded`) ALWAYS
-/// admits -- none of these checks fire -- so a non-forwarded request stays
-/// byte-identical to the pre-passthrough path.
+/// rejection reason, or `None` to admit. A request with the seam header
+/// ABSENT ALWAYS admits -- none of these checks fire -- so own-provider and
+/// non-Anthropic-dialect traffic is untouched even while a forwarded
+/// provider is configured.
 ///
-/// Precedence (only when `forwarded`):
-/// 1. non-Anthropic dialect -> `NonAnthropicDialect`. The dialect itself is
-///    disqualifying, independent of the seam header.
-/// 2. Anthropic dialect, seam header ABSENT -> `NotMitm` (a direct :9100
-///    loopback client -- not a valid pure-proxy path).
-/// 3. Anthropic dialect, seam header PRESENT, no bearer -> `TokenMissing`
-///    (CC not logged into claude.ai). Checked BEFORE the session id so a
-///    request missing both surfaces the more fundamental missing credential.
-/// 4. Anthropic dialect, seam header PRESENT, bearer present, no session
-///    id -> `IdentityMissing` (fail before minting identity).
+/// Precedence (only when `seam_present`):
+/// 1. no bearer -> `TokenMissing` (CC not logged into claude.ai). Checked
+///    BEFORE the session id so a request missing both surfaces the more
+///    fundamental missing credential.
+/// 2. bearer present, no session id -> `IdentityMissing` (fail before
+///    minting identity).
 pub(crate) const fn classify_pure_proxy_rejection(
     inputs: PureProxyAdmissionInputs,
 ) -> Option<PureProxyRejectionReason> {
-    if !inputs.forwarded {
-        return None;
-    }
-    if !inputs.is_anthropic_dialect {
-        return Some(PureProxyRejectionReason::NonAnthropicDialect);
-    }
     if !inputs.seam_present {
-        return Some(PureProxyRejectionReason::NotMitm);
+        return None;
     }
     if !inputs.has_bearer {
         return Some(PureProxyRejectionReason::TokenMissing);
@@ -143,16 +133,9 @@ fn pure_proxy_rejection_message(reason: PureProxyRejectionReason) -> String {
             "forwarded (pure-proxy) mode requires an inbound Authorization \
              bearer; log Claude Code into claude.ai"
         }
-        PureProxyRejectionReason::NotMitm => {
-            "forwarded (pure-proxy) mode accepts Anthropic-dialect requests \
-             only through the MITM proxy"
-        }
         PureProxyRejectionReason::IdentityMissing => {
             "forwarded (pure-proxy) mode requires the x-claude-code-session-id \
              identity header"
-        }
-        PureProxyRejectionReason::NonAnthropicDialect => {
-            "forwarded (pure-proxy) mode supports the Anthropic dialect only"
         }
     };
     format!("{detail} (reason={})", reason.as_str())

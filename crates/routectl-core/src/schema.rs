@@ -220,12 +220,12 @@ pub struct RoutectlInternal {
 
     /// Inbound `x-stainless-*` SDK fingerprint headers captured on the
     /// forwarded (pure-proxy) leg ONLY -- gated identically to
-    /// [`Self::forwarded_bearer`] (the MITM seam header is present AND
-    /// the resolved `[mitm] credential_source` is `Forwarded`). On that
-    /// leg the Anthropic-API egress presents the CLIENT's real identity,
-    /// so these client-supplied Stainless headers OVERRIDE routectl's
-    /// minted cloak fingerprint (`default_claude_code_identity_headers`)
-    /// on the outbound request.
+    /// [`Self::forwarded_bearer`] (the process's MITM seam nonce matches
+    /// the inbound seam header AND a forwarded-credential provider is
+    /// configured on the router). On that leg the Anthropic-API egress
+    /// presents the CLIENT's real identity, so these client-supplied
+    /// Stainless headers OVERRIDE routectl's minted cloak fingerprint
+    /// (`default_claude_code_identity_headers`) on the outbound request.
     ///
     /// Deliberately a SEPARATE carrier from [`Self::claude_code_headers`]:
     /// that field is contractually `x-claude-code-*`-only (the egress

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use routectl_core::{ChatRequest, Error, Message, Result, Role, schema::MessageContent};
 use routectl_router::{
     BuildOptions, Config, Router, build_resolved_models, validate_alias_chain_targets,
-    validate_alias_patterns, validate_bedrock_global_config, validate_reasoning_defaults,
-    validate_registry_patterns, validate_retry_policy,
+    validate_alias_patterns, validate_bedrock_global_config, validate_provider_credential_sources,
+    validate_reasoning_defaults, validate_registry_patterns, validate_retry_policy,
 };
 
 use crate::server::CompositeStore;
@@ -53,6 +53,11 @@ pub async fn run(config: Config, target: &str, prompt: &str) -> Result<()> {
     // before query-time cost resolution silently skips them. Mirrors the
     // serve-side guard.
     validate_registry_patterns(&config)?;
+
+    // Reject an incoherent provider-level `credential_source` (a
+    // forwarded provider missing the host pin, or carrying a stray
+    // api_key_ref) before dispatch. Mirrors the serve-side guard.
+    validate_provider_credential_sources(&config)?;
 
     // Same BuildOptions path as `serve` so a `routectl test` run
     // exercises exactly the production translation contract. Without

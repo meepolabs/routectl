@@ -41,6 +41,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         AnthropicApiProvider::new(cfg)
     }
@@ -1453,6 +1454,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1491,6 +1493,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1522,6 +1525,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);
@@ -1562,6 +1566,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let mut req = base_req("claude-3-opus", vec![user_msg("hello")]);
@@ -1970,6 +1975,7 @@ mod tests {
             max_thinking_entry_bytes: AnthropicApiConfig::MAX_THINKING_ENTRY_BYTES,
             session_id: None,
             cloak: CloakConfig::default(),
+            use_forwarded_bearer: false,
         };
         let provider = AnthropicApiProvider::new(cfg);
         let req = base_req("claude-3-opus", vec![user_msg("hi")]);

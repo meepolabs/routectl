@@ -87,7 +87,6 @@ fn mitm_config(
         cert_dir: cert_dir.to_path_buf(),
         mitm_host: mitm_host.to_string(),
         tested_cc_version: None,
-        credential_source: Default::default(),
     }
 }
 

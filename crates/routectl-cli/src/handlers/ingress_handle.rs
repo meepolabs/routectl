@@ -18,7 +18,6 @@ use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use routectl_core::Error;
 use routectl_core::ForwardedBearer;
-use routectl_router::config::CredentialSource;
 use routectl_router::{DispatchedStream, RouterOptions};
 use routectl_usage::{Outcome, UsageHandle, UsageRecord};
 use serde_json::{Value, json};
@@ -79,14 +78,13 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     let router = state.router.load_full();
 
     // Forwarded-mode (pure-proxy) admission gate: reject an invalid
-    // forwarded request at the ingress boundary BEFORE body parse and
-    // dispatch. This is the SINGLE shared admission point for all three
-    // dialects -- `messages` (Anthropic), `chat_completions` (OpenAI), and
-    // `responses` all funnel through here -- so the non-Anthropic-dialect
-    // check reaches the OpenAI + Responses adapters too, not only the
-    // Anthropic one. A no-op in own mode: every non-forwarded request is
-    // byte-identical to the pre-passthrough path.
-    if let Some(resp) = enforce_pure_proxy_admission(&headers, &router, envelope) {
+    // MITM-inference-path request at the ingress boundary BEFORE body
+    // parse and dispatch. This is the SINGLE shared admission point for
+    // all three dialects -- `messages` (Anthropic), `chat_completions`
+    // (OpenAI), and `responses` all funnel through here. A no-op for every
+    // request that did not arrive through that path: own-provider and
+    // non-Anthropic-dialect traffic is admitted untouched.
+    if let Some(resp) = enforce_pure_proxy_admission(&headers, envelope, &state.mitm_seam_nonce) {
         return resp;
     }
 
@@ -102,17 +100,18 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
 
     // Forwarded-mode capture gate (first-party passthrough): stash the
     // inbound bearer for opt-in relay to the upstream ONLY when the MITM
-    // seam header is present (header-is-a-hint) AND the resolved
-    // credential_source is Forwarded (config-is-the-capability). Every
-    // own-mode and non-forwarded path leaves `forwarded_bearer` None, so
+    // seam header is present (header-is-a-hint) AND a forwarded provider
+    // is configured (config-is-the-capability). Every path with no
+    // configured forwarded provider leaves `forwarded_bearer` None, so
     // the carrier state is byte-identical to the pre-passthrough path.
-    capture_forwarded_bearer(&headers, &router, &mut req);
+    capture_forwarded_bearer(&headers, &router, &state.mitm_seam_nonce, &mut req);
 
     // Same forwarded-mode gate: capture the client's inbound `x-stainless-*`
     // SDK fingerprint headers so the Anthropic-API egress can present the
     // client's real identity on the forwarded leg (overriding the minted
-    // cloak fingerprint). Own mode leaves `stainless_headers` empty.
-    capture_stainless_headers(&headers, &router, &mut req);
+    // cloak fingerprint). No configured forwarded provider leaves
+    // `stainless_headers` empty.
+    capture_stainless_headers(&headers, &router, &state.mitm_seam_nonce, &mut req);
 
     let mut opts = RouterOptions::new();
     // Gate `x-routectl-disable-fallbacks` behind the server-side
@@ -170,25 +169,28 @@ pub(crate) fn session_id_of(headers: &HeaderMap) -> Option<String> {
 /// Populate `req.routectl_internal.forwarded_bearer` with the inbound
 /// `Authorization` bearer ONLY when BOTH keys of the two-key gate turn:
 ///
-/// - (a) header-is-a-hint: the `x-routectl-mitm-proxied` seam header is
-///   present. The MITM front-proxy (`proxy::split`) stamps it exclusively
-///   on the re-injected api.anthropic.com inference leg, so its presence
+/// - (a) header-is-a-hint: the `x-routectl-mitm-proxied` seam header carries
+///   the process's [`crate::ingress::MitmSeamNonce`] value. The MITM
+///   front-proxy (`proxy::split`) stamps that exact value exclusively on
+///   the re-injected api.anthropic.com inference leg, so a matching value
 ///   marks a request that arrived through that channel; and
-/// - (b) config-is-the-capability: the resolved `[mitm] credential_source`
-///   is `Forwarded`. An absent `[mitm]` block resolves to `None`, which is
-///   never `Forwarded`.
+/// - (b) config-is-the-capability: a `credential_source = "forwarded"`
+///   provider is configured (`Router::has_forwarded_provider`). No
+///   configured forwarded provider means this never turns.
 ///
-/// When either key is missing -- own mode, no `[mitm]` block, no seam
-/// header, or no inbound bearer -- `forwarded_bearer` stays `None` and the
-/// carrier is byte-identical to the non-passthrough path. The raw token is
-/// wrapped in `ForwardedBearer` (redact-on-Debug) the instant it is
-/// captured, and this path emits no tracing, so the token is never logged.
+/// When either key is missing -- no forwarded provider configured, no
+/// nonce-matching seam header, or no inbound bearer -- `forwarded_bearer`
+/// stays `None` and the carrier is byte-identical to the non-passthrough
+/// path. The raw token is wrapped in `ForwardedBearer` (redact-on-Debug) the
+/// instant it is captured, and this path emits no tracing, so the token is
+/// never logged.
 fn capture_forwarded_bearer(
     headers: &HeaderMap,
     router: &routectl_router::Router,
+    seam_nonce: &crate::ingress::MitmSeamNonce,
     req: &mut routectl_core::ChatRequest,
 ) {
-    if !forwarded_capture_armed(headers, router) {
+    if !forwarded_capture_armed(headers, router, seam_nonce) {
         return;
     }
     if let Some(token) = extract_authorization_bearer(headers) {
@@ -203,24 +205,25 @@ const STAINLESS_HEADER_PREFIX: &str = "x-stainless-";
 
 /// Populate `req.routectl_internal.stainless_headers` with the inbound
 /// `x-stainless-*` SDK fingerprint headers, under the SAME two-key gate
-/// as [`capture_forwarded_bearer`] (seam header present AND resolved
-/// `[mitm] credential_source == Forwarded`). On the forwarded (pure-proxy)
-/// leg the Anthropic-API egress presents the client's real identity, so
-/// these client-supplied Stainless headers override routectl's minted
-/// cloak fingerprint downstream.
+/// as [`capture_forwarded_bearer`] (nonce-matching seam header present AND
+/// a forwarded provider configured). On the forwarded (pure-proxy) leg the
+/// Anthropic-API egress presents the client's real identity, so these
+/// client-supplied Stainless headers override routectl's minted cloak
+/// fingerprint downstream.
 ///
 /// A SEPARATE carrier from `claude_code_headers` on purpose: that field is
 /// contractually `x-claude-code-*`-only. These are NON-secret fingerprint
-/// values (no redaction). When either gate key is missing -- own mode, no
-/// `[mitm]` block, or no seam header -- `stainless_headers` stays empty and
-/// the carrier is byte-identical to the non-passthrough path. Non-UTF-8
-/// values are skipped; capture order mirrors inbound order.
+/// values (no redaction). When either gate key is missing -- no forwarded
+/// provider configured, or no nonce-matching seam header -- `stainless_headers`
+/// stays empty and the carrier is byte-identical to the non-passthrough
+/// path. Non-UTF-8 values are skipped; capture order mirrors inbound order.
 fn capture_stainless_headers(
     headers: &HeaderMap,
     router: &routectl_router::Router,
+    seam_nonce: &crate::ingress::MitmSeamNonce,
     req: &mut routectl_core::ChatRequest,
 ) {
-    if !forwarded_capture_armed(headers, router) {
+    if !forwarded_capture_armed(headers, router, seam_nonce) {
         return;
     }
     for (name, val) in headers {
@@ -241,23 +244,31 @@ fn capture_stainless_headers(
 /// The two-key forwarded-capture gate shared by `capture_forwarded_bearer`
 /// and `capture_stainless_headers`:
 ///
-/// - (a) header-is-a-hint: the `x-routectl-mitm-proxied` seam header is
-///   present (the MITM front-proxy stamps it only on the re-injected
-///   api.anthropic.com inference leg); AND
-/// - (b) config-is-the-capability: the resolved `[mitm] credential_source`
-///   is `Forwarded` (an absent `[mitm]` block resolves to `None`, which is
-///   never `Forwarded`).
+/// - (a) header-is-a-hint: the `x-routectl-mitm-proxied` seam header carries
+///   `seam_nonce`'s value (the MITM front-proxy stamps that exact value
+///   only on the re-injected api.anthropic.com inference leg -- a wrong
+///   value or an absent header are both treated as seam-absent, per
+///   `MitmSeamNonce::is_present_in`); AND
+/// - (b) config-is-the-capability: a `credential_source = "forwarded"`
+///   provider is configured (`Router::has_forwarded_provider`, cached at
+///   router build time -- no per-request config scan).
 ///
 /// `false` in own mode and on every non-forwarded path, so both capture
 /// sites leave their carriers byte-identical to the pre-passthrough state.
-fn forwarded_capture_armed(headers: &HeaderMap, router: &routectl_router::Router) -> bool {
-    if !headers.contains_key(crate::ingress::MITM_PROXIED_HEADER) {
+///
+/// `pub(crate)`: also the gate `handlers::models::list_models` reuses to
+/// decide whether the `/v1/models` proxy-through may even attempt to read
+/// a captured bearer -- one gate, shared, so the two call sites cannot
+/// drift on the two-key check.
+pub(crate) fn forwarded_capture_armed(
+    headers: &HeaderMap,
+    router: &routectl_router::Router,
+    seam_nonce: &crate::ingress::MitmSeamNonce,
+) -> bool {
+    if !seam_nonce.is_present_in(headers) {
         return false;
     }
-    matches!(
-        router.config.mitm.as_ref().map(|m| m.credential_source),
-        Some(CredentialSource::Forwarded)
-    )
+    router.has_forwarded_provider()
 }
 
 /// Extract the token from an inbound `Authorization: Bearer <token>`

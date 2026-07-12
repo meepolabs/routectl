@@ -13,7 +13,11 @@
 //! The trait is small on purpose: anything beyond translation belongs in
 //! the router (alias resolution, retry, fallback) or core.
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
     Result, Role, SystemBlock, SystemContent,
@@ -32,10 +36,71 @@ pub const ALIAS_HEADER: &str = "x-routectl-alias";
 /// Seam header the MITM front-proxy (`proxy::split`) stamps on the
 /// re-injected api.anthropic.com inference leg, and ONLY that leg. It is a
 /// HINT consumed by the forwarded-mode capture gate in
-/// `handlers::ingress_handle`; the config-side `[mitm] credential_source`
-/// capability is the real authority. Shared between the proxy set site and
-/// the ingress read site so the two cannot drift on the literal.
+/// `handlers::ingress_handle`; the config-side per-provider forwarded
+/// credential (`Router::has_forwarded_provider`) is the real authority.
+/// Shared between the proxy set site and the ingress read site so the two
+/// cannot drift on the literal.
 pub(crate) const MITM_PROXIED_HEADER: &str = "x-routectl-mitm-proxied";
+
+/// Number of random bytes backing [`MitmSeamNonce`] -- 128 bits, ample
+/// guess-resistance for a loopback-only, per-process value whose only job is
+/// proving "this request came through the reinject leg", not resisting a
+/// cryptographic adversary.
+const MITM_SEAM_NONCE_BYTES: usize = 16;
+
+/// Per-process random value that makes [`MITM_PROXIED_HEADER`] unspoofable
+/// in practice. The MITM front-proxy's re-inject leg (`proxy::split`) is the
+/// ONLY legitimate stamper: it stamps this exact value, generated once at
+/// server bootstrap (`server::serve_on_listener_with_overlay`) and shared
+/// with every ingress checker (`handlers::pure_proxy_admission`,
+/// `handlers::ingress_handle`) via `AppState`.
+///
+/// Bare `headers.contains_key(...)` used to be the whole check -- any direct
+/// caller could set the header and be treated as having arrived through the
+/// MITM inference path. [`MitmSeamNonce::is_present_in`] instead compares the
+/// header's VALUE against this nonce: a wrong value and a missing header are
+/// BOTH `false` (indistinguishable seam-absent), so a spoofer gains nothing
+/// over sending no header at all.
+///
+/// Plain byte-equality (not constant-time) is deliberate: the threat model
+/// is a local, loopback-only caller guessing an exact 128-bit value, not a
+/// remote timing side channel.
+pub struct MitmSeamNonce(String);
+
+impl MitmSeamNonce {
+    /// Generate a fresh nonce from the OS CSPRNG. Panics if the CSPRNG
+    /// fails -- mirrors `routectl_auth::oauth::pkce::Pkce::generate`: on
+    /// Linux/macOS this means the kernel is out of entropy at boot, which is
+    /// unrecoverable for any cryptographic use in this process anyway.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; MITM_SEAM_NONCE_BYTES];
+        SysRng
+            .try_fill_bytes(&mut bytes)
+            .expect("SysRng failed to fill the MITM seam nonce");
+        Self(URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    /// The exact `HeaderValue` the reinject leg stamps and every checker
+    /// compares against.
+    pub fn header_value(&self) -> HeaderValue {
+        HeaderValue::from_str(&self.0).expect("base64url output is always a valid header value")
+    }
+
+    /// `true` only when `headers` carries [`MITM_PROXIED_HEADER`] with a
+    /// value that matches this nonce byte-for-byte. A wrong value and an
+    /// absent header both return `false`.
+    pub(crate) fn is_present_in(&self, headers: &HeaderMap) -> bool {
+        headers
+            .get(MITM_PROXIED_HEADER)
+            .is_some_and(|v| v.as_bytes() == self.0.as_bytes())
+    }
+}
+
+impl std::fmt::Debug for MitmSeamNonce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MitmSeamNonce(<redacted>)")
+    }
+}
 
 /// Fallback wire `error.type` for a non-status error -- a render or
 /// transport failure that carries no HTTP status to classify. Status-
@@ -258,6 +323,65 @@ mod read_alias_header_tests {
     #[test]
     fn empty_header_value_returns_none() {
         assert_eq!(read_alias_header(&h(ALIAS_HEADER, "   ")), None);
+    }
+}
+
+#[cfg(test)]
+mod mitm_seam_nonce_tests {
+    use axum::http::{HeaderName, HeaderValue};
+
+    use super::*;
+
+    fn headers_with(name: &str, value: HeaderValue) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(HeaderName::from_bytes(name.as_bytes()).unwrap(), value);
+        h
+    }
+
+    #[test]
+    fn is_present_in_matches_the_exact_stamped_value() {
+        let nonce = MitmSeamNonce::generate();
+        let headers = headers_with(MITM_PROXIED_HEADER, nonce.header_value());
+        assert!(nonce.is_present_in(&headers));
+    }
+
+    #[test]
+    fn is_present_in_rejects_a_spoofed_wrong_value() {
+        let nonce = MitmSeamNonce::generate();
+        let headers = headers_with(MITM_PROXIED_HEADER, HeaderValue::from_static("1"));
+        assert!(
+            !nonce.is_present_in(&headers),
+            "a bare/spoofed header value must never match the real nonce"
+        );
+    }
+
+    #[test]
+    fn is_present_in_rejects_a_different_processs_nonce() {
+        let a = MitmSeamNonce::generate();
+        let b = MitmSeamNonce::generate();
+        let headers = headers_with(MITM_PROXIED_HEADER, b.header_value());
+        assert!(!a.is_present_in(&headers));
+    }
+
+    #[test]
+    fn is_present_in_is_false_when_the_header_is_absent() {
+        let nonce = MitmSeamNonce::generate();
+        assert!(!nonce.is_present_in(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn two_generates_produce_different_values() {
+        let a = MitmSeamNonce::generate();
+        let b = MitmSeamNonce::generate();
+        assert_ne!(a.header_value(), b.header_value());
+    }
+
+    #[test]
+    fn debug_never_renders_the_raw_value() {
+        let nonce = MitmSeamNonce::generate();
+        let rendered = format!("{nonce:?}");
+        assert!(!rendered.contains(&nonce.0));
+        assert!(rendered.contains("<redacted>"));
     }
 }
 

@@ -241,6 +241,49 @@ async fn config_check_fails_for_empty_alias_chain() {
     }
 }
 
+/// Proves `validate_provider_credential_sources` is wired into
+/// `routectl config check`, not only serve startup: a forwarded
+/// provider pointed at a non-Anthropic host must fail `check`.
+#[tokio::test]
+async fn config_check_fails_for_forwarded_provider_on_non_anthropic_host() {
+    use routectl_router::config::CredentialSource;
+
+    let mut config = bare_config();
+    config.providers.insert(
+        "sneaky".into(),
+        ProviderEntry::anthropic_api("")
+            .with_base_url("https://evil.example.com")
+            .with_credential_source(CredentialSource::Forwarded),
+    );
+
+    match commands::config::check(&config).await {
+        Err(routectl_core::Error::Config(_)) => {}
+        Ok(()) => panic!("expected config error for forwarded provider off the pinned host"),
+        Err(other) => panic!("expected Config error, got: {other:?}"),
+    }
+}
+
+/// A clean forwarded provider (pinned host, empty `api_key_ref`) must
+/// pass `config check` alongside an unrelated own-credential provider
+/// -- coexistence is not itself an error at the config-validation layer.
+#[tokio::test]
+async fn config_check_passes_for_clean_forwarded_provider() {
+    use routectl_router::config::CredentialSource;
+
+    let mut config = bare_config();
+    add_mock_provider(&mut config);
+    config.providers.insert(
+        "anthropic-forwarded".into(),
+        ProviderEntry::anthropic_api("")
+            .with_base_url("https://api.anthropic.com")
+            .with_credential_source(CredentialSource::Forwarded),
+    );
+
+    commands::config::check(&config)
+        .await
+        .expect("clean forwarded provider alongside an own-credential provider must check ok");
+}
+
 #[test]
 fn config_show_redacts_literal_secrets() {
     let mut config = Config {

@@ -17,7 +17,6 @@ use routectl_core::{
     cache_control::{MAX_BREAKPOINTS, compute_frozen_floor, validate_source},
     context_reduction::{ReductionOutcome, apply_json_minify},
     failure_class::{ClassifiedFailure, FailureClass, MatchedBy, classify},
-    identity::anthropic::is_anthropic_api_host,
     sanitize_for_log, scan_volatile,
 };
 use serde_json::Value;
@@ -76,14 +75,6 @@ const INLOOP_RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
 /// `provider_kind` matches this token and skips the rest. Matches the
 /// `kind = "..."` discriminant from `ProviderEntry::kind_str`.
 const COUNT_TOKENS_CAPABLE_KIND: &str = "anthropic-api";
-
-/// The only provider kind a forwarded (pure-passthrough) request may
-/// egress to. Its value coincides with `COUNT_TOKENS_CAPABLE_KIND`
-/// because both gates pin the Anthropic Messages surface, but the two
-/// are independent concerns (forwarded-credential routing vs
-/// count_tokens capability) so each keeps its own named token. Matches
-/// the `kind = "..."` discriminant from `ProviderEntry::kind_str`.
-const FORWARDED_EGRESS_KIND: &str = "anthropic-api";
 
 pub struct Router {
     pub config: Arc<Config>,
@@ -165,6 +156,13 @@ pub struct Router {
     /// a hot-reload rebuild (a reset is benign for observability, same
     /// rationale as `round_robin`).
     metrics: RouterMetrics,
+    /// `true` iff `config.providers` contains a `ProviderEntry::AnthropicApi`
+    /// with `credential_source == Forwarded`. Computed ONCE here at
+    /// construction (a full `config.providers` scan) rather than re-scanned
+    /// per request -- this is the "configured capability" half of the
+    /// forwarded-mode CAPTURE gate (`forwarded_capture_armed` in
+    /// routectl-cli), replacing the removed `[mitm] credential_source` read.
+    has_forwarded_provider: bool,
 }
 
 /// Lock-free router-side observability counters.
@@ -177,11 +175,6 @@ pub struct Router {
 /// a counter here -- by construction the only inputs are refusal events.
 #[derive(Debug, Default)]
 struct RouterMetrics {
-    /// Forwarded (pure-passthrough) requests refused BEFORE dispatch
-    /// because their resolved target was not an api.anthropic.com
-    /// `anthropic-api` egress. Bumped by the router-side passthrough
-    /// gate; see [`Router::enforce_forwarded_anthropic_target`].
-    forwarded_non_anthropic_refusals: AtomicU64,
     /// Upstream failures the classifier could not confidently categorize
     /// (`FailureClass::Unknown`) that arrived on a real upstream HTTP
     /// outcome (`Error::Upstream`). A fail-closed unknown on a genuine
@@ -195,11 +188,6 @@ struct RouterMetrics {
 }
 
 impl RouterMetrics {
-    fn incr_forwarded_non_anthropic_refusal(&self) {
-        self.forwarded_non_anthropic_refusals
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
     fn incr_unknown_failure_classification(&self) {
         self.unknown_failure_classifications_total
             .fetch_add(1, Ordering::Relaxed);
@@ -208,15 +196,6 @@ impl RouterMetrics {
     fn incr_feature_unsupported(&self) {
         self.feature_unsupported_total
             .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Read the cumulative refusal count. Test-only read surface today
-    /// (no production observability reader yet); ungate when a router
-    /// metrics snapshot lands.
-    #[cfg(test)]
-    fn forwarded_non_anthropic_refusals(&self) -> u64 {
-        self.forwarded_non_anthropic_refusals
-            .load(Ordering::Relaxed)
     }
 
     /// Read the cumulative unknown-upstream-classification count.
@@ -309,9 +288,24 @@ pub struct DispatchMeta {
     /// target that served or terminally failed. `None` when no provider
     /// was touched.
     pub served_model: Option<String>,
-    /// Served wire model id -- the upstream id actually sent to the
-    /// provider. `None` when no provider was touched.
+    /// Served wire model id -- the model string actually sent to the
+    /// provider. For an OWN-credential target this is `target.upstream`
+    /// (the rewritten wire id) as before. For a FORWARDED-credential
+    /// target the rewrite is bypassed (model transparency), so this
+    /// carries the client's requested model verbatim instead --
+    /// `target.upstream` is never sent on the wire for that target and
+    /// would misreport what egress actually saw. `None` when no
+    /// provider was touched.
     pub served_upstream: Option<String>,
+    /// Whether the served/terminal target authenticated with the
+    /// forwarded client bearer (`DispatchTarget::use_forwarded_credential`)
+    /// rather than an own credential. `false` when no provider was
+    /// touched (the default absence of a forwarded target). Post-dispatch
+    /// consumers (usage accounting) read this instead of the
+    /// request-global bearer-presence check, which cannot tell a
+    /// forwarded target from a coexisting own-credential one in the same
+    /// chain.
+    pub served_forwarded_credential: bool,
     /// The resolved alias key the request routed under (the incoming
     /// `req.model`). Always populated, even when resolution then failed.
     pub resolved_alias: String,
@@ -422,6 +416,7 @@ impl DispatchMeta {
             served_provider_kind: None,
             served_model: None,
             served_upstream: None,
+            served_forwarded_credential: false,
             resolved_alias: alias.to_string(),
             cache_strategy: None,
             reduction_strategy: None,
@@ -444,11 +439,22 @@ impl DispatchMeta {
     /// terminal target. Called on each chain entry the loop actually
     /// dispatches to, so on the all-failed path the LAST dispatched
     /// target is the terminal one.
-    fn mark_target(&mut self, target: &DispatchTarget) {
+    ///
+    /// `requested_model` is the client's requested model (`req.model`,
+    /// read BEFORE any rewrite) -- the value a forwarded target actually
+    /// sends over the wire, since `use_forwarded_credential` bypasses the
+    /// `target.upstream` rewrite. Only consulted on that branch; an own
+    /// target's `served_upstream` is `target.upstream`, unchanged.
+    fn mark_target(&mut self, target: &DispatchTarget, requested_model: &str) {
         self.served_provider = Some(target.provider_name.clone());
         self.served_provider_kind = target.provider_kind.map(std::string::ToString::to_string);
         self.served_model = target.nickname.clone();
-        self.served_upstream = Some(target.upstream.clone());
+        self.served_upstream = Some(if target.use_forwarded_credential {
+            requested_model.to_string()
+        } else {
+            target.upstream.clone()
+        });
+        self.served_forwarded_credential = target.use_forwarded_credential;
         self.selection_decision = target.selection_decision;
     }
 }
@@ -537,6 +543,18 @@ struct DispatchTarget {
     /// when the provider entry could not be looked up (a legacy /
     /// direct-construction path that never set it).
     provider_kind: Option<&'static str>,
+    /// Per-target replacement for the removed request-global forwarded
+    /// check. `true` when this target's provider entry is an
+    /// `AnthropicApi` provider with `credential_source: Forwarded`;
+    /// populated ONCE at chain expansion in `expand_chain_to_targets`,
+    /// the same pattern as `provider_kind`, for both seat and non-seat
+    /// targets. Read at the three dispatch paths (`complete_inner`,
+    /// `count_tokens_try_seat`, `stream_inner`) to bypass the
+    /// `attempt_req.model` rewrite: a forwarded target forwards the
+    /// client's requested model verbatim; an own target still rewrites
+    /// to `upstream`. `false` in both constructors until the post-loop
+    /// sets it.
+    use_forwarded_credential: bool,
     /// Key into `Router.state` for the per-attempt rate-limit + circuit-
     /// breaker check.
     state_key: String,
@@ -672,6 +690,10 @@ impl Router {
             crate::k_estimator::LedgerBackedK::new(k_session_store.clone()),
         );
         let shadow_store = Arc::new(crate::k_estimator::ShadowStore::default());
+        let has_forwarded_provider = config
+            .providers
+            .values()
+            .any(|entry| entry.forwarded_base_url().is_some());
         Self {
             config,
             providers: Default::default(),
@@ -684,7 +706,16 @@ impl Router {
             k_estimator,
             shadow_store,
             metrics: RouterMetrics::default(),
+            has_forwarded_provider,
         }
+    }
+
+    /// `true` iff a `ProviderEntry::AnthropicApi` with
+    /// `credential_source == Forwarded` is configured. Build-time cached
+    /// (see [`Router::has_forwarded_provider`] field doc) -- callers never
+    /// re-scan `config.providers` per request.
+    pub const fn has_forwarded_provider(&self) -> bool {
+        self.has_forwarded_provider
     }
 
     /// Install the v0.6.0 pre-resolved model table. Called after
@@ -1107,6 +1138,12 @@ impl Router {
             if target.provider_kind.is_none() {
                 target.provider_kind = provider_entry.map(super::config::ProviderEntry::kind_str);
             }
+            // Provider-entry-derived, identical for a seat and a
+            // non-seat target of the same provider -- set unconditionally
+            // rather than only-when-unset (unlike `provider_kind`, which
+            // a seat constructor may have already populated).
+            target.use_forwarded_credential =
+                provider_entry.is_some_and(|entry| entry.forwarded_base_url().is_some());
             if target.class_overrides.is_empty()
                 && let Some(entry) = provider_entry
             {
@@ -1462,77 +1499,6 @@ impl Router {
             .result
     }
 
-    /// True iff `target` is a legitimate egress for a forwarded
-    /// (pure-passthrough) request: its provider kind is `anthropic-api`
-    /// AND the backing provider entry's `base_url` host is EXACTLY
-    /// api.anthropic.com. Any other kind, a non-anthropic host on an
-    /// anthropic-api entry, or a target whose provider entry cannot be
-    /// resolved from config all fail CLOSED (return false -> refuse).
-    fn target_is_anthropic_egress(&self, target: &DispatchTarget) -> bool {
-        if target.provider_kind != Some(FORWARDED_EGRESS_KIND) {
-            return false;
-        }
-        matches!(
-            self.config.providers.get(&target.provider_name),
-            Some(crate::config::ProviderEntry::AnthropicApi { base_url, .. })
-                if is_anthropic_api_host(base_url)
-        )
-    }
-
-    /// ROUTER-side pure-passthrough gate. When `forwarded` is set, refuse
-    /// TERMINALLY (no chain walk, no fallback hop, no silent substitute)
-    /// unless EVERY reachable entry in the resolved chain is an
-    /// api.anthropic.com `anthropic-api` egress. Defense in depth over the
-    /// WIRE stamp gate: a forwarded request can never even be SENT to the
-    /// wrong provider.
-    ///
-    /// Validates the WHOLE chain, not just `chain.first()`: the dispatch
-    /// loop advances to a later entry on a non-terminal error
-    /// (`continue 'chain`), and the count_tokens walk advances to the next
-    /// capable-by-kind seat, so a mixed chain whose first entry is a valid
-    /// Anthropic egress could otherwise deliver forwarded request content +
-    /// identity metadata to a later non-Anthropic target. Refusing the
-    /// whole request up front -- before ANY dispatch -- fails closed at the
-    /// earliest point. For the zero-config single-entry synthetic chain
-    /// (the primary use case) this is a no-op; it only bites a forwarded
-    /// request whose alias resolves to a mixed chain.
-    ///
-    /// On refusal it increments the router counter, emits a structured
-    /// WARN with SAFE dimensions only (reason, credential_source,
-    /// provider_kind -- never the token, host, or provider name), and
-    /// returns `Error::Validation`, which the Anthropic ingress maps to
-    /// HTTP 400 `invalid_request_error`. An empty chain is left to the
-    /// existing `UnknownAlias` path; the gate only judges concrete
-    /// resolved targets.
-    fn enforce_forwarded_anthropic_target(
-        &self,
-        chain: &[DispatchTarget],
-        forwarded: bool,
-    ) -> Result<()> {
-        if !forwarded {
-            return Ok(());
-        }
-        let Some(offending) = chain
-            .iter()
-            .find(|target| !self.target_is_anthropic_egress(target))
-        else {
-            return Ok(());
-        };
-        self.metrics.incr_forwarded_non_anthropic_refusal();
-        tracing::warn!(
-            reason = "non_anthropic_target",
-            credential_source = "forwarded",
-            provider_kind = offending.provider_kind.unwrap_or("unknown"),
-            "forwarded request refused: resolved chain contains a target \
-             that is not an api.anthropic.com anthropic-api egress",
-        );
-        Err(Error::Validation(
-            "forwarded request cannot be routed to a non-Anthropic target \
-             (reason=non_anthropic_target)"
-                .to_string(),
-        ))
-    }
-
     #[must_use]
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn complete_with_options(&self, req: ChatRequest, opts: RouterOptions) -> Dispatched {
@@ -1553,14 +1519,16 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<ChatResponse> {
         let chain = self.dispatch_chain_for_request(&req)?;
-        // ROUTER passthrough gate: a forwarded (pure-proxy) request must
-        // resolve to an api.anthropic.com anthropic-api egress. The flag
-        // is computed ONCE before the chain loop (mirroring `is_probe`
-        // below) and enforced BEFORE any upstream dispatch -- a terminal
-        // refuse, never a fallback hop. Defense in depth over the WIRE
-        // stamp gate.
+        // Whether the CLIENT'S request carried a captured forwarded
+        // bearer, computed ONCE before the chain loop (mirroring
+        // `is_probe` below). This is a request-global observability
+        // dimension ONLY (fed to `emit_class_observability`) -- the
+        // per-target `use_forwarded_credential` flag, not this, drives
+        // the model-rewrite bypass and the 401/403/429 terminal re-key,
+        // so a coexisting own-credential Anthropic target in the same
+        // chain keeps its normal auth recovery even on a request that
+        // also carries a forwarded bearer.
         let is_forwarded = req.routectl_internal.forwarded_bearer.is_some();
-        self.enforce_forwarded_anthropic_target(&chain, is_forwarded)?;
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         let hard_cap = policy.hard_retry_cap();
@@ -1595,11 +1563,25 @@ impl Router {
             // the hop. `chain_idx` is the index into the resolved chain;
             // a non-zero index means at least one earlier entry was tried
             // or skipped, i.e. we fell back to reach here.
-            meta.mark_target(target);
+            meta.mark_target(target, &req.model);
             meta.fallback_count = chain_idx as u32;
 
+            // Missing-bearer terminal guard: a forwarded target with NO
+            // captured client bearer must fail cleanly BEFORE egress --
+            // never an ambiguous upstream 401. Per-target (checked here,
+            // inside the loop), so a mixed chain that never reaches this
+            // target is unaffected.
+            if let Some(err) = missing_forwarded_bearer_error(target, &req) {
+                return Err(err);
+            }
+
             let mut attempt_req = req.clone();
-            attempt_req.model = model.to_string();
+            // A forwarded target keeps the client's requested model
+            // verbatim (model transparency); an own target rewrites to
+            // this target's `upstream` as before.
+            if !target.use_forwarded_credential {
+                attempt_req.model = model.to_string();
+            }
             // v0.6: layered config compose. The provider's
             // header_extras + payload_extras are looked up by
             // provider_name; the model's contribution lives on the
@@ -1785,14 +1767,18 @@ impl Router {
                         } else {
                             None
                         };
-                        // A forwarded-credential request that drew
+                        // A forwarded-credential TARGET that drew
                         // an upstream 401/403/429 is TERMINAL -- bypass BOTH
                         // the on_auth_failure refresh-and-retry (below) AND
                         // the fallback-chain hop, and surface the status
                         // verbatim. A request-scoped forwarded token has no
                         // refresh path and no credential to fall back to, so
                         // both recoveries are useless and wrong; the client
-                        // owns its own retry/backoff. Checked FIRST so it
+                        // owns its own retry/backoff. Keyed off the CURRENT
+                        // target's `use_forwarded_credential`, not
+                        // request-global bearer presence, so a coexisting
+                        // own-creds Anthropic target in the same chain keeps
+                        // normal auth recovery. Checked FIRST so it
                         // precedes auth-retry, same-provider retry, and
                         // fallback. Releases the half-open probe slot WITHOUT
                         // a breaker debit (mirrors the terminal path below):
@@ -1800,7 +1786,9 @@ impl Router {
                         // signal, so it must not trip routectl's breaker.
                         // Transport retries (5xx/network) are NOT in this set
                         // and fall through unchanged.
-                        if is_forwarded && let Some(status) = forwarded_terminal_status(&e) {
+                        if target.use_forwarded_credential
+                            && let Some(status) = forwarded_terminal_status(&e)
+                        {
                             log_forwarded_auth_terminal(
                                 status,
                                 req.routectl_internal.inbound_session_key.is_some(),
@@ -2087,12 +2075,6 @@ impl Router {
     #[tracing::instrument(skip_all, fields(alias = %sanitize_for_log(&req.model)))]
     pub async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
         let chain = self.dispatch_chain_for_request(&req)?;
-        // ROUTER passthrough gate (see `complete_inner`): refuse a
-        // forwarded request whose resolved target is not an
-        // api.anthropic.com anthropic-api egress BEFORE the capability
-        // walk touches any seat.
-        let is_forwarded = req.routectl_internal.forwarded_bearer.is_some();
-        self.enforce_forwarded_anthropic_target(&chain, is_forwarded)?;
         let mut saw_capable = false;
         for candidate in chain {
             if candidate.provider_kind != Some(COUNT_TOKENS_CAPABLE_KIND) {
@@ -2105,10 +2087,7 @@ impl Router {
                 continue;
             }
             saw_capable = true;
-            match self
-                .count_tokens_try_seat(&req, candidate, is_forwarded)
-                .await
-            {
+            match self.count_tokens_try_seat(&req, candidate).await {
                 CountSeatOutcome::Count(tc) => return Ok(tc),
                 CountSeatOutcome::Terminal(e) => return Err(e),
                 // Capability error: the seat is capable-by-kind but its
@@ -2150,7 +2129,6 @@ impl Router {
         &self,
         req: &ChatRequest,
         target: DispatchTarget,
-        is_forwarded: bool,
     ) -> CountSeatOutcome {
         let provider = match target.provider.clone() {
             Some(p) => p,
@@ -2163,12 +2141,24 @@ impl Router {
         let provider_name = target.provider_name.as_str();
         let model_label = target.nickname.as_deref().unwrap_or("");
 
+        // Missing-bearer terminal guard (see `complete_inner`): a
+        // forwarded seat with NO captured client bearer must fail
+        // cleanly before any upstream touch, never an ambiguous
+        // upstream 401.
+        if let Some(err) = missing_forwarded_bearer_error(&target, req) {
+            return CountSeatOutcome::Terminal(err);
+        }
+
         // Apply the same per-attempt overlays the messages path does so
         // header_extras / payload_extras are consistent -- notably the
         // `anthropic-beta` surface count_tokens must observe or the
         // upstream may reject a request /v1/messages would accept.
         let mut attempt_req = req.clone();
-        attempt_req.model = target.upstream.clone();
+        // See `complete_inner`: a forwarded target keeps the client's
+        // requested model verbatim instead of rewriting to `upstream`.
+        if !target.use_forwarded_credential {
+            attempt_req.model = target.upstream.clone();
+        }
         apply_layered_overlays(&self.config, &target, &mut attempt_req);
 
         let mut auth_retry_attempted = false;
@@ -2210,9 +2200,13 @@ impl Router {
                     // health park/debit, and surface verbatim as a Terminal
                     // outcome (count_tokens never WALKS on health errors, so
                     // "no fallback" here means also no breaker debit/park).
-                    // See `complete_inner` for the full rationale. Release
-                    // the half-open slot without a breaker debit.
-                    if is_forwarded && let Some(status) = forwarded_terminal_status(&e) {
+                    // Keyed off the TARGET's `use_forwarded_credential`, not
+                    // request-global bearer presence (see `complete_inner`
+                    // for the full rationale). Release the half-open slot
+                    // without a breaker debit.
+                    if target.use_forwarded_credential
+                        && let Some(status) = forwarded_terminal_status(&e)
+                    {
                         log_forwarded_auth_terminal(
                             status,
                             req.routectl_internal.inbound_session_key.is_some(),
@@ -2338,12 +2332,11 @@ impl Router {
         meta: &mut DispatchMeta,
     ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         let chain = self.dispatch_chain_for_request(&req)?;
-        // ROUTER passthrough gate (see `complete_inner`): refuse a
-        // forwarded request whose resolved target is not an
-        // api.anthropic.com anthropic-api egress BEFORE any upstream
-        // dispatch.
+        // See `complete_inner`: request-global observability dimension
+        // ONLY, fed to `emit_class_observability`. The per-target
+        // `use_forwarded_credential` flag drives the model-rewrite
+        // bypass and the 401/403/429 terminal re-key.
         let is_forwarded = req.routectl_internal.forwarded_bearer.is_some();
-        self.enforce_forwarded_anthropic_target(&chain, is_forwarded)?;
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         // Availability-probe detection (see `complete_with_options`). A
@@ -2370,11 +2363,20 @@ impl Router {
             // This entry is being dispatched: record it as the terminal
             // target (overwritten by a later entry on fallback) and count
             // the hop -- see `complete_inner` for the `chain_idx` rationale.
-            meta.mark_target(target);
+            meta.mark_target(target, &req.model);
             meta.fallback_count = chain_idx as u32;
 
+            // Missing-bearer terminal guard: see `complete_inner`.
+            if let Some(err) = missing_forwarded_bearer_error(target, &req) {
+                return Err(err);
+            }
+
             let mut attempt_req = req.clone();
-            attempt_req.model = model.to_string();
+            // See `complete_inner`: a forwarded target keeps the client's
+            // requested model verbatim instead of rewriting to `upstream`.
+            if !target.use_forwarded_credential {
+                attempt_req.model = model.to_string();
+            }
             apply_layered_overlays(&self.config, target, &mut attempt_req);
             let provider_cfg = self.config.providers.get(provider_name);
             // Context reduction: see `complete_inner`. Runs after overlays
@@ -2575,14 +2577,19 @@ impl Router {
                         } else {
                             None
                         };
-                        // A forwarded-credential 401/403/429 is
-                        // TERMINAL -- bypass the on_auth_failure refresh
-                        // (below) AND the fallback hop, surface verbatim.
-                        // See `complete_inner` for the full rationale. This
+                        // A forwarded-credential TARGET that drew a
+                        // 401/403/429 is TERMINAL -- bypass the
+                        // on_auth_failure refresh (below) AND the fallback
+                        // hop, surface verbatim. Keyed off the CURRENT
+                        // target's `use_forwarded_credential`, not
+                        // request-global bearer presence (see
+                        // `complete_inner` for the full rationale). This
                         // is the pre-first-chunk window; a mid-stream error
                         // never reaches here (it rides the wrapped stream).
                         // Release the half-open slot without a breaker debit.
-                        if is_forwarded && let Some(status) = forwarded_terminal_status(&e) {
+                        if target.use_forwarded_credential
+                            && let Some(status) = forwarded_terminal_status(&e)
+                        {
                             log_forwarded_auth_terminal(
                                 status,
                                 req.routectl_internal.inbound_session_key.is_some(),
@@ -3807,6 +3814,7 @@ fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
     DispatchTarget {
         provider_name: m.provider_name.clone(),
         provider_kind: None,
+        use_forwarded_credential: false,
         // v0.6.0 dispatch keys the breaker by nickname so two models
         // on one provider quarantine independently.
         state_key: m.nickname.clone(),
@@ -3846,6 +3854,7 @@ fn dispatch_target_for_seat(
     DispatchTarget {
         provider_name: m.provider_name.clone(),
         provider_kind,
+        use_forwarded_credential: false,
         state_key: seat.state_key.clone(),
         upstream: m.upstream.clone(),
         provider: Some(seat.provider.clone()),
@@ -4178,13 +4187,15 @@ fn log_probe_fast_fail(provider: &str, model: &str, status: u16, max_tokens: Opt
 /// back to, so on such a status the router must bypass BOTH the
 /// `on_auth_failure` refresh-and-retry AND the fallback-chain hop, and
 /// surface the upstream response verbatim -- Claude Code owns its own
-/// retry/backoff. Scoped to forwarded requests ONLY: the caller gates
-/// this on the `is_forwarded` flag, so non-forwarded requests keep the
-/// existing one-shot auth-refresh + fallback behavior unchanged. Same-
-/// request TRANSPORT retries (5xx / network / status-0, which reuse the
-/// same token) are NOT in this set, so they fall through to the normal
-/// predicates untouched. Pattern-mirrors `probe_fast_fail_status`: a
-/// pure decision helper; the caller owns the `return` that short-circuits.
+/// retry/backoff. Scoped to a forwarded TARGET ONLY: the caller gates
+/// this on the current dispatch target's `use_forwarded_credential`
+/// flag, so a coexisting own-credential target in the same chain keeps
+/// the existing one-shot auth-refresh + fallback behavior unchanged.
+/// Same-request TRANSPORT retries (5xx / network / status-0, which
+/// reuse the same token) are NOT in this set, so they fall through to
+/// the normal predicates untouched. Pattern-mirrors
+/// `probe_fast_fail_status`: a pure decision helper; the caller owns
+/// the `return` that short-circuits.
 const fn forwarded_terminal_status(err: &Error) -> Option<u16> {
     match err {
         Error::Upstream {
@@ -4210,6 +4221,41 @@ fn log_forwarded_auth_terminal(status: u16, has_client_session_id: bool) {
         "forwarded-token upstream auth failure surfaced verbatim; \
          bypassing on_auth_failure refresh and provider fallback",
     );
+}
+
+/// Missing-bearer terminal guard. `None` when `target` does not use a
+/// forwarded credential, or the client's bearer WAS captured; `Some`
+/// carries a clean terminal [`Error::Validation`] for the caller to
+/// return immediately -- BEFORE any upstream touch of this target.
+///
+/// A forwarded target with no captured bearer (seam header absent,
+/// capture gates closed, or the client simply never sent an
+/// `Authorization` header) has no credential to authenticate with; an
+/// upstream dispatch would either fail with a confusing anonymous
+/// request or -- worse -- silently succeed against the wrong identity
+/// if the egress falls back to some other implicit auth. Refusing here
+/// gives the client an unambiguous 4xx instead of a passed-through
+/// upstream 401. Per-target (the caller checks this inside the chain
+/// loop, once per target about to be dispatched), so a mixed chain that
+/// never reaches a forwarded target is unaffected. Emits a WARN with
+/// SAFE dimensions only (reason, credential_source, provider_kind --
+/// never the token, host, or provider name), mirroring the shape of the
+/// deleted whole-chain gate's refusal log.
+fn missing_forwarded_bearer_error(target: &DispatchTarget, req: &ChatRequest) -> Option<Error> {
+    if !target.use_forwarded_credential || req.routectl_internal.forwarded_bearer.is_some() {
+        return None;
+    }
+    tracing::warn!(
+        reason = "missing_forwarded_bearer",
+        credential_source = "forwarded",
+        provider_kind = target.provider_kind.unwrap_or("unknown"),
+        "forwarded target has no captured client bearer; refusing before egress",
+    );
+    Some(Error::Validation(
+        "forwarded target has no captured client bearer to authenticate this request \
+         (reason=missing_forwarded_bearer)"
+            .to_string(),
+    ))
 }
 
 /// The honored rate-limit reset for `err`, clamped to the configured
@@ -7551,6 +7597,495 @@ mod resolved_models_tests {
 }
 
 #[cfg(test)]
+mod has_forwarded_provider_tests {
+    //! `Router::has_forwarded_provider()`: build-time cached, `true` iff
+    //! `config.providers` contains a `ProviderEntry::AnthropicApi` with
+    //! `credential_source == Forwarded`. Replaces the removed `[mitm]
+    //! credential_source` read as the CAPTURE gate's "configured
+    //! capability" half (see `routectl_cli::handlers::ingress_handle`).
+    use super::*;
+    use crate::config::{CredentialSource, ProviderEntry};
+    use std::collections::BTreeMap;
+
+    fn router_with_providers(providers: BTreeMap<String, ProviderEntry>) -> Router {
+        Router::new(Arc::new(Config {
+            providers,
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn false_when_no_providers_configured() {
+        let router = router_with_providers(BTreeMap::new());
+        assert!(!router.has_forwarded_provider());
+    }
+
+    #[test]
+    fn false_when_only_own_credential_providers_configured() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "own-anthropic".to_string(),
+            ProviderEntry::anthropic_api("literal:k").with_credential_source(CredentialSource::Own),
+        );
+        providers.insert(
+            "own-compat".to_string(),
+            ProviderEntry::openai_compat("https://example.test/v1", "literal:k"),
+        );
+        let router = router_with_providers(providers);
+        assert!(!router.has_forwarded_provider());
+    }
+
+    #[test]
+    fn true_when_a_forwarded_anthropic_provider_is_configured() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "forwarded".to_string(),
+            ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+        );
+        let router = router_with_providers(providers);
+        assert!(router.has_forwarded_provider());
+    }
+
+    #[test]
+    fn true_when_a_forwarded_provider_coexists_with_own_credential_providers() {
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "own-compat".to_string(),
+            ProviderEntry::openai_compat("https://example.test/v1", "literal:k"),
+        );
+        providers.insert(
+            "forwarded".to_string(),
+            ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded),
+        );
+        let router = router_with_providers(providers);
+        assert!(
+            router.has_forwarded_provider(),
+            "coexistence must not hide the forwarded provider"
+        );
+    }
+}
+
+#[cfg(test)]
+mod forwarded_model_transparency_tests {
+    //! `DispatchTarget::use_forwarded_credential`: populated once at chain
+    //! expansion from the provider entry's `credential_source`, then read
+    //! at all three dispatch paths (complete, count_tokens, stream) to
+    //! bypass the `attempt_req.model` rewrite. A forwarded target forwards
+    //! the client's requested model verbatim; an own target still rewrites
+    //! to the target's configured `upstream`.
+    use super::*;
+    use crate::config::{AliasValue, CredentialSource, ProviderEntry};
+    use crate::resolved::ResolvedModel;
+    use async_trait::async_trait;
+    use futures::stream::BoxStream;
+    use parking_lot::Mutex;
+    use routectl_core::schema::ForwardedBearer;
+    use routectl_core::{
+        ChatChunk, ChatRequest, ChatResponse, Choice, Error, Message, Provider, TokenCount,
+    };
+    use std::collections::BTreeMap;
+
+    /// Records the `model` field of every request it is dispatched with,
+    /// and echoes it straight back on `complete` -- lets a test observe
+    /// exactly what the router sent upstream without inspecting private
+    /// dispatch state.
+    struct ModelSpyProvider {
+        id: String,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl ModelSpyProvider {
+        fn new(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_models(&self) -> Vec<String> {
+            self.seen.lock().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ModelSpyProvider {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
+        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+            Err(Error::normalize_response(&self.id, "unused"))
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            self.seen.lock().push(req.model.clone());
+            Ok(ChatResponse {
+                id: format!("ok-{}", self.id),
+                model: req.model,
+                created: 0,
+                choices: vec![Choice {
+                    logprobs: None,
+                    index: 0,
+                    message: Message {
+                        refusal: None,
+                        role: routectl_core::Role::Assistant,
+                        content: routectl_core::MessageContent::Text("ok".into()),
+                        reasoning: None,
+                        reasoning_details: vec![],
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                    matched_stop_sequence: None,
+                }],
+                usage: Some(routectl_core::Usage::default()),
+                routectl_provider: None,
+                extras: Default::default(),
+                upstream_meta: None,
+            })
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.seen.lock().push(req.model.clone());
+            Ok(Box::pin(futures::stream::once(async {
+                Ok(ChatChunk::default())
+            })))
+        }
+        async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
+            self.seen.lock().push(req.model.clone());
+            Ok(TokenCount::default())
+        }
+    }
+
+    /// Register one nickname/provider/upstream leg on a fresh router,
+    /// with the provider entry's `credential_source` set per `forwarded`.
+    fn router_with_leg(
+        nickname: &str,
+        provider_name: &str,
+        upstream: &str,
+        forwarded: bool,
+    ) -> (Router, Arc<ModelSpyProvider>) {
+        let spy = Arc::new(ModelSpyProvider::new(provider_name));
+        let mut entry = ProviderEntry::anthropic_api("literal:k");
+        if forwarded {
+            entry = entry.with_credential_source(CredentialSource::Forwarded);
+        }
+        let mut config = Config::default();
+        config.providers.insert(provider_name.to_string(), entry);
+        let mut router = Router::new(Arc::new(config));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            nickname.to_string(),
+            Arc::new(ResolvedModel::new(
+                nickname,
+                provider_name,
+                spy.clone() as Arc<dyn Provider>,
+                upstream,
+            )),
+        );
+        router.install_resolved_models(models);
+        (router, spy)
+    }
+
+    fn req_for(model: &str) -> ChatRequest {
+        ChatRequest {
+            model: model.to_string(),
+            messages: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// Like `req_for`, but stamps a captured forwarded bearer so a
+    /// forwarded-credential target's missing-bearer terminal guard (see
+    /// `missing_forwarded_bearer_error`) does not refuse the request
+    /// before the model-transparency assertion runs.
+    fn forwarded_req_for(model: &str) -> ChatRequest {
+        let mut req = req_for(model);
+        req.routectl_internal.forwarded_bearer =
+            Some(ForwardedBearer::new("sk-ant-oat01-test".to_string()));
+        req
+    }
+
+    #[test]
+    fn expand_chain_to_targets_sets_flag_true_for_forwarded_anthropic_provider() {
+        let (router, spy) = router_with_leg("opus", "fwd-prov", "claude-opus-upstream", true);
+        let model = Arc::new(ResolvedModel::new(
+            "opus",
+            "fwd-prov",
+            spy as Arc<dyn Provider>,
+            "claude-opus-upstream",
+        ));
+        let targets = router.expand_chain_to_targets(vec![model], None);
+        assert_eq!(targets.len(), 1);
+        assert!(
+            targets[0].use_forwarded_credential,
+            "a Forwarded AnthropicApi provider entry must set the target flag true",
+        );
+    }
+
+    #[test]
+    fn expand_chain_to_targets_sets_flag_false_for_own_anthropic_provider() {
+        let (router, spy) = router_with_leg("opus", "own-prov", "claude-opus-upstream", false);
+        let model = Arc::new(ResolvedModel::new(
+            "opus",
+            "own-prov",
+            spy as Arc<dyn Provider>,
+            "claude-opus-upstream",
+        ));
+        let targets = router.expand_chain_to_targets(vec![model], None);
+        assert_eq!(targets.len(), 1);
+        assert!(
+            !targets[0].use_forwarded_credential,
+            "the default Own credential source must leave the target flag false",
+        );
+    }
+
+    #[test]
+    fn expand_chain_to_targets_sets_flag_for_every_seat_of_a_forwarded_pool() {
+        let spy = Arc::new(ModelSpyProvider::new("fwd-prov"));
+        let mut config = Config::default();
+        config.providers.insert(
+            "fwd-prov".to_string(),
+            ProviderEntry::anthropic_api("literal:k")
+                .with_credential_source(CredentialSource::Forwarded),
+        );
+        let router = Router::new(Arc::new(config));
+        let seats: Vec<crate::seat_pool::SeatTarget> = ["seat-a", "seat-b"]
+            .iter()
+            .map(|label| crate::seat_pool::SeatTarget {
+                label: Some((*label).to_string()),
+                state_key: crate::seat_pool::seat_state_key("nick", Some(label)),
+                provider: spy.clone() as Arc<dyn Provider>,
+                auth_secret_ref: None,
+            })
+            .collect();
+        let model = Arc::new(
+            ResolvedModel::new("nick", "fwd-prov", spy as Arc<dyn Provider>, "claude-x")
+                .with_seats(seats.into()),
+        );
+        let targets = router.expand_chain_to_targets(vec![model], None);
+        assert_eq!(targets.len(), 2);
+        for target in &targets {
+            assert!(
+                target.use_forwarded_credential,
+                "every seat of a Forwarded provider's pool must carry the flag true",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_forwards_opus_verbatim_on_a_forwarded_target() {
+        let (router, spy) = router_with_leg("opus", "fwd-prov", "claude-opus-upstream", true);
+        router
+            .complete(forwarded_req_for("opus"))
+            .await
+            .expect("forwarded target must dispatch");
+        assert_eq!(
+            spy.seen_models(),
+            vec!["opus".to_string()],
+            "the client's requested model must reach egress verbatim",
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_forwards_haiku_verbatim_on_a_forwarded_target() {
+        let (router, spy) = router_with_leg("haiku", "fwd-prov", "claude-haiku-upstream", true);
+        router
+            .complete(forwarded_req_for("haiku"))
+            .await
+            .expect("forwarded target must dispatch");
+        assert_eq!(spy.seen_models(), vec!["haiku".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn complete_forwards_an_unknown_model_verbatim_via_default_alias() {
+        // The requested model matches no alias/glob/nickname and only
+        // resolves at all through the `default` catch-all -- exercising
+        // "no local model gatekeeping": routing picks the target, but the
+        // wire model text is untouched by that routing decision.
+        let (mut router, spy) = router_with_leg("opus", "fwd-prov", "claude-opus-upstream", true);
+        let mut config = (*router.config).clone();
+        config.aliases.insert(
+            "default".to_string(),
+            AliasValue::Single("opus".to_string()),
+        );
+        router.config = Arc::new(config);
+
+        router
+            .complete(forwarded_req_for("some-unlisted-vendor-model"))
+            .await
+            .expect("default alias must resolve and dispatch");
+        assert_eq!(
+            spy.seen_models(),
+            vec!["some-unlisted-vendor-model".to_string()],
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_rewrites_model_to_upstream_on_an_own_target() {
+        let (router, spy) = router_with_leg("opus", "own-prov", "claude-opus-upstream", false);
+        router
+            .complete(req_for("opus"))
+            .await
+            .expect("own target must dispatch");
+        assert_eq!(
+            spy.seen_models(),
+            vec!["claude-opus-upstream".to_string()],
+            "an own target must still rewrite to the configured upstream",
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_forwards_model_verbatim_on_a_forwarded_target() {
+        let (router, spy) = router_with_leg("opus", "fwd-prov", "claude-opus-upstream", true);
+        router
+            .count_tokens(forwarded_req_for("opus"))
+            .await
+            .expect("forwarded count_tokens target must dispatch");
+        assert_eq!(spy.seen_models(), vec!["opus".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_rewrites_model_to_upstream_on_an_own_target() {
+        let (router, spy) = router_with_leg("opus", "own-prov", "claude-opus-upstream", false);
+        router
+            .count_tokens(req_for("opus"))
+            .await
+            .expect("own count_tokens target must dispatch");
+        assert_eq!(spy.seen_models(), vec!["claude-opus-upstream".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn stream_forwards_model_verbatim_on_a_forwarded_target() {
+        let (router, spy) = router_with_leg("opus", "fwd-prov", "claude-opus-upstream", true);
+        let _stream = router
+            .stream(forwarded_req_for("opus"))
+            .await
+            .expect("forwarded stream target must dispatch");
+        assert_eq!(spy.seen_models(), vec!["opus".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn stream_rewrites_model_to_upstream_on_an_own_target() {
+        let (router, spy) = router_with_leg("opus", "own-prov", "claude-opus-upstream", false);
+        let _stream = router
+            .stream(req_for("opus"))
+            .await
+            .expect("own stream target must dispatch");
+        assert_eq!(spy.seen_models(), vec!["claude-opus-upstream".to_string()]);
+    }
+
+    // -------- DispatchMeta::served_upstream / served_forwarded_credential --
+    //
+    // `mark_target` mirrors the model-transparency bypass into the
+    // accounting meta so post-dispatch usage recording (which never sees
+    // the dropped `DispatchTarget` chain) can tell a forwarded row's
+    // actual served model apart from `target.upstream`, and flag the row
+    // as forwarded without re-deriving it from request-global bearer
+    // presence. `served_model` (the K-triple nickname) is asserted
+    // unchanged on both lanes -- it must never carry the wire model.
+
+    #[tokio::test]
+    async fn complete_forwarded_target_records_client_model_as_served_upstream() {
+        let (router, _spy) = router_with_leg("opus", "fwd-prov", "claude-opus-upstream", true);
+        let dispatched = router
+            .complete_with_options(forwarded_req_for("opus"), RouterOptions::default())
+            .await;
+        dispatched.result.expect("forwarded target must dispatch");
+        assert_eq!(
+            dispatched.meta.served_upstream,
+            Some("opus".to_string()),
+            "served_upstream must carry the client's requested model, not target.upstream",
+        );
+        assert_eq!(
+            dispatched.meta.served_model,
+            Some("opus".to_string()),
+            "the K-triple nickname dimension must stay stable on the forwarded lane",
+        );
+        assert!(
+            dispatched.meta.served_forwarded_credential,
+            "the forwarded marker must be set for post-dispatch usage disambiguation",
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_forwarded_unlisted_model_records_it_verbatim_as_served_upstream() {
+        // Model transparency for an unlisted model routed via the
+        // catch-all `default` alias: served_upstream still mirrors the
+        // client's exact (unlisted) request, never target.upstream.
+        let (mut router, _spy) = router_with_leg("opus", "fwd-prov", "claude-opus-upstream", true);
+        let mut config = (*router.config).clone();
+        config.aliases.insert(
+            "default".to_string(),
+            AliasValue::Single("opus".to_string()),
+        );
+        router.config = Arc::new(config);
+
+        let dispatched = router
+            .complete_with_options(
+                forwarded_req_for("some-unlisted-vendor-model"),
+                RouterOptions::default(),
+            )
+            .await;
+        dispatched
+            .result
+            .expect("default alias must resolve and dispatch");
+        assert_eq!(
+            dispatched.meta.served_upstream,
+            Some("some-unlisted-vendor-model".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_own_target_records_target_upstream_as_served_upstream_unchanged() {
+        let (router, _spy) = router_with_leg("opus", "own-prov", "claude-opus-upstream", false);
+        let dispatched = router
+            .complete_with_options(req_for("opus"), RouterOptions::default())
+            .await;
+        dispatched.result.expect("own target must dispatch");
+        assert_eq!(
+            dispatched.meta.served_upstream,
+            Some("claude-opus-upstream".to_string()),
+            "an own target's served_upstream must stay target.upstream, unchanged",
+        );
+        assert_eq!(dispatched.meta.served_model, Some("opus".to_string()));
+        assert!(
+            !dispatched.meta.served_forwarded_credential,
+            "an own target must never set the forwarded marker",
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_forwarded_target_records_client_model_as_served_upstream() {
+        let (router, _spy) = router_with_leg("opus", "fwd-prov", "claude-opus-upstream", true);
+        let dispatched = router
+            .stream_with_options(forwarded_req_for("opus"), RouterOptions::default())
+            .await;
+        let _stream = dispatched
+            .result
+            .expect("forwarded stream target must dispatch");
+        assert_eq!(dispatched.meta.served_upstream, Some("opus".to_string()));
+        assert_eq!(dispatched.meta.served_model, Some("opus".to_string()));
+        assert!(dispatched.meta.served_forwarded_credential);
+    }
+
+    #[tokio::test]
+    async fn stream_own_target_records_target_upstream_as_served_upstream_unchanged() {
+        let (router, _spy) = router_with_leg("opus", "own-prov", "claude-opus-upstream", false);
+        let dispatched = router
+            .stream_with_options(req_for("opus"), RouterOptions::default())
+            .await;
+        let _stream = dispatched.result.expect("own stream target must dispatch");
+        assert_eq!(
+            dispatched.meta.served_upstream,
+            Some("claude-opus-upstream".to_string()),
+        );
+        assert!(!dispatched.meta.served_forwarded_credential);
+    }
+}
+
+#[cfg(test)]
 mod gate_error_does_not_mask_real_error_tests {
     //! When the LAST chain entry is gate-refused (breaker open /
     //! RPM) but an EARLIER entry produced a real upstream error, the
@@ -7944,7 +8479,7 @@ mod seat_pool_dispatch_tests {
         assert_eq!(home.selection_decision, Some("birth_pick"));
 
         let mut meta = DispatchMeta::for_alias("opus");
-        meta.mark_target(home);
+        meta.mark_target(home, "opus");
         assert_eq!(meta.selection_decision, Some("birth_pick"));
     }
 
@@ -8384,6 +8919,7 @@ mod count_tokens_tests {
             base_url: "https://placeholder.invalid".into(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::default(),
+            credential_source: Default::default(),
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
@@ -10079,7 +10615,14 @@ mod forwarded_auth_terminal_tests {
     /// Returns the router plus the primary provider handle and the
     /// sibling call counter for post-dispatch assertions. A fast,
     /// no-retry `RetryPolicy` keeps every path single-attempt-per-seat.
-    fn build_chain(status: u16) -> (Router, Arc<StatusProvider>, Arc<AtomicUsize>) {
+    /// `primary_forwarded` marks `p-primary`'s provider entry
+    /// `credential_source = Forwarded` (the per-target flag the terminal
+    /// re-key now keys off) when `true`; `p-sibling` is always an Own
+    /// provider (it must never legitimately be reached by these tests).
+    fn build_chain(
+        status: u16,
+        primary_forwarded: bool,
+    ) -> (Router, Arc<StatusProvider>, Arc<AtomicUsize>) {
         let mut config = Config {
             retry: RetryPolicy {
                 max_attempts: 1,
@@ -10089,10 +10632,12 @@ mod forwarded_auth_terminal_tests {
             },
             ..Config::default()
         };
-        config.providers.insert(
-            "p-primary".into(),
-            ProviderEntry::anthropic_api("literal:k"),
-        );
+        let mut primary_entry = ProviderEntry::anthropic_api("literal:k");
+        if primary_forwarded {
+            primary_entry =
+                primary_entry.with_credential_source(crate::config::CredentialSource::Forwarded);
+        }
+        config.providers.insert("p-primary".into(), primary_entry);
         config.providers.insert(
             "p-sibling".into(),
             ProviderEntry::anthropic_api("literal:k"),
@@ -10162,7 +10707,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn complete_forwarded_401_is_terminal_no_auth_failure_no_fallback() {
-        let (router, primary, sibling_calls) = build_chain(401);
+        let (router, primary, sibling_calls) = build_chain(401, true);
 
         let err = router
             .complete(forwarded_req())
@@ -10189,7 +10734,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn complete_forwarded_403_is_terminal_no_fallback() {
-        let (router, primary, sibling_calls) = build_chain(403);
+        let (router, primary, sibling_calls) = build_chain(403, true);
 
         let err = router
             .complete(forwarded_req())
@@ -10208,7 +10753,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn complete_forwarded_429_is_terminal_no_fallback() {
-        let (router, primary, sibling_calls) = build_chain(429);
+        let (router, primary, sibling_calls) = build_chain(429, true);
 
         let err = router
             .complete(forwarded_req())
@@ -10233,7 +10778,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn stream_forwarded_401_is_terminal_no_auth_failure_no_fallback() {
-        let (router, primary, sibling_calls) = build_chain(401);
+        let (router, primary, sibling_calls) = build_chain(401, true);
 
         let err = router
             .stream(forwarded_req())
@@ -10257,7 +10802,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn stream_forwarded_403_is_terminal_no_fallback() {
-        let (router, primary, sibling_calls) = build_chain(403);
+        let (router, primary, sibling_calls) = build_chain(403, true);
 
         let err = router
             .stream(forwarded_req())
@@ -10273,7 +10818,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn stream_forwarded_429_is_terminal_no_fallback() {
-        let (router, primary, sibling_calls) = build_chain(429);
+        let (router, primary, sibling_calls) = build_chain(429, true);
 
         let err = router
             .stream(forwarded_req())
@@ -10291,7 +10836,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn count_tokens_forwarded_401_is_terminal_no_auth_failure() {
-        let (router, primary, sibling_calls) = build_chain(401);
+        let (router, primary, sibling_calls) = build_chain(401, true);
 
         let err = router
             .count_tokens(forwarded_req())
@@ -10318,7 +10863,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn count_tokens_forwarded_403_is_terminal() {
-        let (router, primary, sibling_calls) = build_chain(403);
+        let (router, primary, sibling_calls) = build_chain(403, true);
 
         let err = router
             .count_tokens(forwarded_req())
@@ -10333,7 +10878,7 @@ mod forwarded_auth_terminal_tests {
 
     #[tokio::test]
     async fn count_tokens_forwarded_429_is_terminal() {
-        let (router, primary, sibling_calls) = build_chain(429);
+        let (router, primary, sibling_calls) = build_chain(429, true);
 
         let err = router
             .count_tokens(forwarded_req())
@@ -10346,7 +10891,8 @@ mod forwarded_auth_terminal_tests {
         assert_eq!(sibling_calls.load(Ordering::SeqCst), 0);
     }
 
-    // ---- non-forwarded regression: the bypass is gated on is_forwarded ----
+    // ---- non-forwarded regression: the bypass is gated on the target's
+    //      use_forwarded_credential, not request-global bearer presence ----
 
     #[tokio::test]
     async fn complete_non_forwarded_401_still_refreshes_and_falls_back() {
@@ -10354,8 +10900,8 @@ mod forwarded_auth_terminal_tests {
         // one-shot auth-refresh (on_auth_failure) MUST still fire, and
         // after the second 401 the chain MUST still fall back to the
         // sibling. This is the guard that the forwarded-terminal bypass
-        // is scoped to forwarded requests only.
-        let (router, primary, sibling_calls) = build_chain(401);
+        // is scoped to a forwarded-credential TARGET only.
+        let (router, primary, sibling_calls) = build_chain(401, false);
 
         let err = router
             .complete(plain_req())
@@ -10381,6 +10927,47 @@ mod forwarded_auth_terminal_tests {
             sibling_calls.load(Ordering::SeqCst),
             1,
             "non-forwarded 401 must still fall back to the sibling",
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_forwarded_bearer_present_but_target_is_own_credential_still_refreshes_and_falls_back()
+     {
+        // Coexistence regression (f3 decision doc): a MITM-marked request
+        // (a captured forwarded bearer IS present) whose alias resolves
+        // to an OWN-credential Anthropic provider must retry/fall back
+        // EXACTLY as pre-f3 -- the floating bearer is never consumed by
+        // an own-creds target, and the terminal bypass never wrongly
+        // fires just because a bearer happens to be present on the
+        // request. Same router as the plain-request regression above;
+        // only the request differs.
+        let (router, primary, sibling_calls) = build_chain(401, false);
+
+        let err = router
+            .complete(forwarded_req())
+            .await
+            .expect_err("own-credential chain exhausts to the sibling error");
+
+        assert_eq!(
+            upstream_status(&err),
+            502,
+            "a captured bearer must not change fallback behavior on an own-credential target",
+        );
+        assert_eq!(
+            primary.on_auth_failure_calls.load(Ordering::SeqCst),
+            1,
+            "an own-credential target must still get the one-shot refresh \
+             even though the request carries a forwarded bearer",
+        );
+        assert_eq!(
+            primary.complete_calls.load(Ordering::SeqCst),
+            2,
+            "own-credential target refreshes and retries the same seat once",
+        );
+        assert_eq!(
+            sibling_calls.load(Ordering::SeqCst),
+            1,
+            "own-credential target must still fall back to the sibling",
         );
     }
 }
@@ -10556,6 +11143,7 @@ mod circuit_breaker_slot_release_tests {
                 base_url: "https://placeholder.invalid".into(),
                 anthropic_version: "2023-06-01".into(),
                 auth_kind: routectl_providers::anthropic_api::AuthKind::default(),
+                credential_source: Default::default(),
                 header_extras: BTreeMap::new(),
                 payload_extras: None,
                 user_agent: None,
@@ -12206,6 +12794,7 @@ mod auto_emit_cache_control_tests {
             base_url: "https://api.anthropic.com".into(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: Default::default(),
+            credential_source: Default::default(),
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
@@ -13446,6 +14035,7 @@ mod context_reduction_dispatch_tests {
             base_url: "https://api.anthropic.com".into(),
             anthropic_version: "2023-06-01".into(),
             auth_kind: Default::default(),
+            credential_source: Default::default(),
             header_extras: BTreeMap::new(),
             payload_extras: None,
             user_agent: None,
@@ -13647,21 +14237,36 @@ mod context_reduction_dispatch_tests {
 }
 
 #[cfg(test)]
-mod forwarded_router_gate_tests {
-    //! ROUTER-side pure-passthrough gate (defense in depth over the WIRE
-    //! stamp gate): a request carrying `forwarded_bearer` must resolve to
-    //! an api.anthropic.com `anthropic-api` egress, or it is refused
-    //! TERMINALLY -- before any upstream dispatch, with no chain walk and
-    //! no fallback hop -- in all three dispatch paths (complete,
-    //! count_tokens, stream). Non-forwarded requests are unaffected.
+mod forwarded_coexistence_tests {
+    //! f3 dissolves the f2 whole-chain forwarded-passthrough gate
+    //! (`enforce_forwarded_anthropic_target` / `target_is_anthropic_egress`
+    //! / `FORWARDED_EGRESS_KIND`, deleted): `credential_source = "forwarded"`
+    //! is now a PER-PROVIDER config, not a request-global mode switch, so
+    //! an alias routes exactly like any other -- no whole-chain refusal, no
+    //! steering. These tests cover what f3 enforces in its place:
+    //!
+    //! - A request carrying a captured forwarded bearer no longer bends
+    //!   routing: an alias to an OWN-credential provider (any kind, mixed
+    //!   chain or not) dispatches with that provider's own credentials,
+    //!   and is never refused up front.
+    //! - A forwarded-CREDENTIAL target (an `anthropic-api` provider with
+    //!   `credential_source = "forwarded"`) with NO captured bearer
+    //!   refuses cleanly BEFORE egress -- the compensating guard f3 pairs
+    //!   with the gate deletion -- and the guard is per-target, so a
+    //!   chain that never reaches that target is unaffected.
+    //!
+    //! The broader "still refreshes and falls back" coexistence
+    //! regression -- a MITM-marked request routed to an OWN-credential
+    //! Anthropic provider behaves exactly pre-f3, and the floating bearer
+    //! is never consumed by it -- lives in `forwarded_auth_terminal_tests`,
+    //! next to the terminal-bypass mocks it reuses.
     use super::*;
-    use crate::config::{ProviderEntry, ProviderRuntimePolicy};
+    use crate::config::{CredentialSource, ProviderEntry, ProviderRuntimePolicy};
     use crate::resolved::ResolvedModel;
     use async_trait::async_trait;
     use futures::stream::{BoxStream, StreamExt};
     use routectl_core::schema::ForwardedBearer;
     use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Provider, TokenCount};
-    use routectl_providers::anthropic_api::{AuthKind, CloakConfig};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -13703,29 +14308,18 @@ mod forwarded_router_gate_tests {
         }
     }
 
-    /// An `anthropic-api` provider entry pointed at `base_url`.
-    fn anthropic_entry(base_url: &str) -> ProviderEntry {
-        ProviderEntry::AnthropicApi {
-            api_key_ref: "literal:k".into(),
-            base_url: base_url.into(),
-            anthropic_version: "2023-06-01".into(),
-            auth_kind: AuthKind::default(),
-            header_extras: BTreeMap::new(),
-            payload_extras: None,
-            user_agent: None,
-            allowed_betas: vec![],
-            forward_client_headers: vec![],
-            context_management: false,
-            max_thinking_entry_bytes: None,
-            cache_capability: None,
-            auto_emit_top_level_breakpoint: None,
-            reduction_enabled: None,
-            cloak: CloakConfig::default(),
-            runtime: ProviderRuntimePolicy::default(),
+    /// An `anthropic-api` provider entry on the default (api.anthropic.com)
+    /// host, with `credential_source` set per `forwarded`.
+    fn anthropic_entry(forwarded: bool) -> ProviderEntry {
+        let entry = ProviderEntry::anthropic_api("literal:k");
+        if forwarded {
+            entry.with_credential_source(CredentialSource::Forwarded)
+        } else {
+            entry
         }
     }
 
-    /// A non-`anthropic-api` provider entry (`openai-compat`).
+    /// A non-`anthropic-api`, OWN-credential provider entry.
     fn openai_compat_entry() -> ProviderEntry {
         ProviderEntry::OpenaiCompat {
             base_url: "https://placeholder.invalid/v1".into(),
@@ -13800,269 +14394,36 @@ mod forwarded_router_gate_tests {
         req
     }
 
-    // ---- host predicate: the ROUTER gate delegates to the shared
-    //      exact-host predicate in routectl_core::identity::anthropic ----
-
-    #[test]
-    fn egress_host_delegates_to_shared_exact_host_predicate() {
-        // Exhaustive host-matching cases (path/port/case, sibling-domain
-        // takeover, host-in-path/query/fragment, credentials smuggle) live
-        // with the shared predicate in `routectl_core::identity::anthropic`.
-        // This thin test pins that the ROUTER gate judges "the Anthropic
-        // host" through that same single source of truth -- so the WIRE gate
-        // and the ROUTER gate can never drift on what the host is.
-        assert!(is_anthropic_api_host("https://api.anthropic.com"));
-        assert!(!is_anthropic_api_host(
-            "https://api.anthropic.com.evil.example"
-        ));
-    }
-
-    // ---- complete: refuse before dispatch ----
+    // ---- coexistence: a captured bearer no longer steers routing ----
 
     #[tokio::test]
-    async fn complete_forwarded_wrong_kind_refused_before_dispatch() {
+    async fn complete_forwarded_bearer_present_routes_to_own_compat_normally() {
         let (router, counters) = build_router(vec![Leg {
             nickname: "compat",
             provider_name: "compat-prov",
             entry: openai_compat_entry(),
-        }]);
-
-        let err = router.complete(forwarded_req()).await.unwrap_err();
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(
-            err.to_string().contains("non_anthropic_target"),
-            "refuse message must carry the reason; got: {err}"
-        );
-        assert_eq!(
-            counters[0].load(Ordering::SeqCst),
-            0,
-            "non-anthropic target must never be dispatched to",
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_forwarded_anthropic_kind_wrong_host_refused_before_dispatch() {
-        // Right KIND (anthropic-api) but a lookalike host: still refused.
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "lookalike",
-            provider_name: "lookalike-prov",
-            entry: anthropic_entry("https://api.anthropic.com.evil.example"),
-        }]);
-
-        let err = router.complete(forwarded_req()).await.unwrap_err();
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(err.to_string().contains("non_anthropic_target"));
-        assert_eq!(
-            counters[0].load(Ordering::SeqCst),
-            0,
-            "anthropic-api on a non-anthropic host must never be dispatched to",
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_forwarded_anthropic_egress_dispatches_normally() {
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "anthropic",
-            provider_name: "anthropic-prov",
-            entry: anthropic_entry("https://api.anthropic.com"),
         }]);
 
         router
             .complete(forwarded_req())
             .await
-            .expect("forwarded request to api.anthropic.com must dispatch");
-
-        assert_eq!(
-            counters[0].load(Ordering::SeqCst),
-            1,
-            "the anthropic egress must be dispatched to exactly once",
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_non_forwarded_request_is_unaffected_by_the_gate() {
-        // No forwarded_bearer: the gate must not fire even for a
-        // non-anthropic target -- ordinary routing/fallback is untouched.
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "compat",
-            provider_name: "compat-prov",
-            entry: openai_compat_entry(),
-        }]);
-
-        router
-            .complete(plain_req())
-            .await
-            .expect("non-forwarded request must route normally");
-
-        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
-    }
-
-    // ---- count_tokens: refuse before dispatch ----
-
-    #[tokio::test]
-    async fn count_tokens_forwarded_anthropic_kind_wrong_host_refused_before_dispatch() {
-        // The anthropic-api leg is count_tokens-CAPABLE by kind, so
-        // WITHOUT the gate count_tokens would dispatch to it. The gate
-        // must refuse first because the host is not api.anthropic.com.
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "lookalike",
-            provider_name: "lookalike-prov",
-            entry: anthropic_entry("https://placeholder.invalid"),
-        }]);
-
-        let err = router.count_tokens(forwarded_req()).await.unwrap_err();
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(err.to_string().contains("non_anthropic_target"));
-        assert_eq!(
-            counters[0].load(Ordering::SeqCst),
-            0,
-            "capable-by-kind but wrong-host target must never be dispatched to",
-        );
-    }
-
-    #[tokio::test]
-    async fn count_tokens_forwarded_wrong_kind_refused_as_validation_not_not_implemented() {
-        // Distinguishes the gate from the pre-existing capability walk:
-        // a non-forwarded openai-compat-only chain returns NotImplemented,
-        // but a FORWARDED one must terminate as a 400 Validation refuse.
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "compat",
-            provider_name: "compat-prov",
-            entry: openai_compat_entry(),
-        }]);
-
-        let err = router.count_tokens(forwarded_req()).await.unwrap_err();
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(err.to_string().contains("non_anthropic_target"));
-        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn count_tokens_forwarded_anthropic_egress_dispatches_normally() {
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "anthropic",
-            provider_name: "anthropic-prov",
-            entry: anthropic_entry("https://api.anthropic.com"),
-        }]);
-
-        router
-            .count_tokens(forwarded_req())
-            .await
-            .expect("forwarded count_tokens to api.anthropic.com must dispatch");
+            .expect("an OWN-credential target dispatches regardless of a captured bearer");
 
         assert_eq!(counters[0].load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn count_tokens_non_forwarded_wrong_host_is_unaffected_by_the_gate() {
-        // A non-forwarded count_tokens to a capable-by-kind, non-anthropic
-        // host still dispatches -- the gate is forwarded-only.
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "lookalike",
-            provider_name: "lookalike-prov",
-            entry: anthropic_entry("https://placeholder.invalid"),
-        }]);
-
-        router
-            .count_tokens(plain_req())
-            .await
-            .expect("non-forwarded count_tokens must route normally");
-
-        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
-    }
-
-    // ---- stream: refuse before dispatch ----
-
-    #[tokio::test]
-    async fn stream_forwarded_wrong_kind_refused_before_dispatch() {
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "compat",
-            provider_name: "compat-prov",
-            entry: openai_compat_entry(),
-        }]);
-
-        let err = router.stream(forwarded_req()).await.err().expect("refused");
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(err.to_string().contains("non_anthropic_target"));
-        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn stream_forwarded_anthropic_kind_wrong_host_refused_before_dispatch() {
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "lookalike",
-            provider_name: "lookalike-prov",
-            entry: anthropic_entry("https://api.anthropic.com.evil.example"),
-        }]);
-
-        let err = router.stream(forwarded_req()).await.err().expect("refused");
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(err.to_string().contains("non_anthropic_target"));
-        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn stream_forwarded_anthropic_egress_dispatches_normally() {
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "anthropic",
-            provider_name: "anthropic-prov",
-            entry: anthropic_entry("https://api.anthropic.com"),
-        }]);
-
-        let _stream = router
-            .stream(forwarded_req())
-            .await
-            .expect("forwarded stream to api.anthropic.com must dispatch");
-
-        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn stream_non_forwarded_request_is_unaffected_by_the_gate() {
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "compat",
-            provider_name: "compat-prov",
-            entry: openai_compat_entry(),
-        }]);
-
-        let _stream = router
-            .stream(plain_req())
-            .await
-            .expect("non-forwarded stream must route normally");
-
-        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
-    }
-
-    // ---- whole-chain validation: a reachable non-Anthropic entry
-    //      ANYWHERE in the chain refuses the WHOLE forwarded request ----
-    //
-    // The gate must judge every reachable entry, not just `chain.first()`.
-    // The dispatch loop advances to a later entry on a non-terminal error
-    // (`continue 'chain`), and the count_tokens walk advances to the next
-    // capable-by-kind seat, so a mixed chain whose first entry is a valid
-    // Anthropic egress could otherwise deliver forwarded request content
-    // + identity to a later non-Anthropic target. These tests pin the
-    // fail-closed contract: refuse BEFORE any dispatch if ANY reachable
-    // entry is not an exact-host api.anthropic.com anthropic-api egress.
-
-    #[tokio::test]
-    async fn complete_forwarded_mixed_chain_wrong_kind_fallback_refused_before_any_dispatch() {
-        // Chain [anthropic@api.anthropic.com, openai-compat]. The first
-        // entry is a valid egress -- a first-entry-only gate would PASS and
-        // let a non-terminal error on entry 0 fall through to the
-        // non-Anthropic entry 1. The whole-chain gate refuses up front:
-        // NEITHER leg is dispatched to.
+    async fn complete_forwarded_bearer_present_mixed_chain_own_first_entry_dispatches_normally() {
+        // Chain [own-anthropic, openai-compat], request carries a
+        // captured bearer. f2's whole-chain gate would have refused this
+        // up front because entry 1 is non-Anthropic; f3 routes purely by
+        // alias -- the first entry succeeds and the second is never
+        // reached.
         let (router, counters) = build_router(vec![
             Leg {
                 nickname: "anthropic",
                 provider_name: "anthropic-prov",
-                entry: anthropic_entry("https://api.anthropic.com"),
+                entry: anthropic_entry(false),
             },
             Leg {
                 nickname: "compat",
@@ -14071,97 +14432,10 @@ mod forwarded_router_gate_tests {
             },
         ]);
 
-        let err = router.complete(forwarded_req()).await.unwrap_err();
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(err.to_string().contains("non_anthropic_target"));
-        assert_eq!(
-            counters[0].load(Ordering::SeqCst),
-            0,
-            "up-front refusal: even the valid first entry is never dispatched to",
-        );
-        assert_eq!(
-            counters[1].load(Ordering::SeqCst),
-            0,
-            "the non-Anthropic fallback must never be reached",
-        );
-    }
-
-    #[tokio::test]
-    async fn count_tokens_forwarded_mixed_chain_wrong_host_fallback_refused_before_any_dispatch() {
-        // Chain [anthropic@api.anthropic.com, anthropic-api@wrong-host].
-        // Entry 1 is count_tokens-CAPABLE by kind, so the capability walk
-        // WOULD reach it after a capability error on entry 0 -- a first-
-        // entry-only gate leaks. The whole-chain gate refuses up front.
-        let (router, counters) = build_router(vec![
-            Leg {
-                nickname: "anthropic",
-                provider_name: "anthropic-prov",
-                entry: anthropic_entry("https://api.anthropic.com"),
-            },
-            Leg {
-                nickname: "lookalike",
-                provider_name: "lookalike-prov",
-                entry: anthropic_entry("https://api.anthropic.com.evil.example"),
-            },
-        ]);
-
-        let err = router.count_tokens(forwarded_req()).await.unwrap_err();
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(err.to_string().contains("non_anthropic_target"));
-        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
-        assert_eq!(
-            counters[1].load(Ordering::SeqCst),
-            0,
-            "a capable-by-kind wrong-host fallback must never be reached",
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_forwarded_mixed_chain_wrong_host_fallback_refused_before_any_dispatch() {
-        let (router, counters) = build_router(vec![
-            Leg {
-                nickname: "anthropic",
-                provider_name: "anthropic-prov",
-                entry: anthropic_entry("https://api.anthropic.com"),
-            },
-            Leg {
-                nickname: "lookalike",
-                provider_name: "lookalike-prov",
-                entry: anthropic_entry("https://api.anthropic.com.evil.example"),
-            },
-        ]);
-
-        let err = router.stream(forwarded_req()).await.err().expect("refused");
-
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        assert!(err.to_string().contains("non_anthropic_target"));
-        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
-        assert_eq!(counters[1].load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn complete_forwarded_all_anthropic_multi_leg_chain_dispatches_normally() {
-        // Every entry is an exact-host Anthropic egress: the gate passes
-        // and normal dispatch serves the first entry (no fallback needed).
-        let (router, counters) = build_router(vec![
-            Leg {
-                nickname: "a1",
-                provider_name: "a1-prov",
-                entry: anthropic_entry("https://api.anthropic.com"),
-            },
-            Leg {
-                nickname: "a2",
-                provider_name: "a2-prov",
-                entry: anthropic_entry("https://api.anthropic.com:443/v1"),
-            },
-        ]);
-
         router
             .complete(forwarded_req())
             .await
-            .expect("all-anthropic chain must dispatch");
+            .expect("a mixed OWN-credential chain is never refused up front");
 
         assert_eq!(counters[0].load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -14172,87 +14446,210 @@ mod forwarded_router_gate_tests {
     }
 
     #[tokio::test]
-    async fn complete_non_forwarded_mixed_chain_unaffected_by_gate() {
-        // No forwarded bearer: the whole-chain gate must not fire even
-        // though entry 1 is non-Anthropic. Ordinary routing serves entry 0.
+    async fn count_tokens_forwarded_bearer_present_routes_to_own_compat_capability_error() {
+        // openai-compat is not count_tokens-capable by kind: without any
+        // forwarded gate, the walk simply reports NotImplemented, same as
+        // a plain request -- a captured bearer must not change this.
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "compat",
+            provider_name: "compat-prov",
+            entry: openai_compat_entry(),
+        }]);
+
+        let err = router.count_tokens(forwarded_req()).await.unwrap_err();
+
+        assert!(matches!(err, Error::NotImplemented(..)), "got {err:?}");
+        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stream_forwarded_bearer_present_routes_to_own_compat_normally() {
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "compat",
+            provider_name: "compat-prov",
+            entry: openai_compat_entry(),
+        }]);
+
+        let _stream = router
+            .stream(forwarded_req())
+            .await
+            .expect("an OWN-credential target dispatches regardless of a captured bearer");
+
+        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
+    }
+
+    // ---- missing-bearer terminal guard ----
+    //
+    // A forwarded-CREDENTIAL target (provider `credential_source =
+    // "forwarded"`) with NO captured bearer must refuse cleanly BEFORE
+    // egress -- never an ambiguous upstream 401 -- in all three dispatch
+    // paths. The guard is per-target: it fires only for the target about
+    // to be dispatched to.
+
+    #[tokio::test]
+    async fn complete_forwarded_target_missing_bearer_refused_before_dispatch() {
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "fwd",
+            provider_name: "fwd-prov",
+            entry: anthropic_entry(true),
+        }]);
+
+        let err = router.complete(plain_req()).await.unwrap_err();
+
+        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("missing_forwarded_bearer"),
+            "refuse message must carry the reason; got: {err}",
+        );
+        assert_eq!(
+            counters[0].load(Ordering::SeqCst),
+            0,
+            "a forwarded target with no captured bearer must never be dispatched to",
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_forwarded_target_missing_bearer_refused_before_dispatch() {
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "fwd",
+            provider_name: "fwd-prov",
+            entry: anthropic_entry(true),
+        }]);
+
+        let err = router.count_tokens(plain_req()).await.unwrap_err();
+
+        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(err.to_string().contains("missing_forwarded_bearer"));
+        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stream_forwarded_target_missing_bearer_refused_before_dispatch() {
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "fwd",
+            provider_name: "fwd-prov",
+            entry: anthropic_entry(true),
+        }]);
+
+        let err = router.stream(plain_req()).await.err().expect("refused");
+
+        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(err.to_string().contains("missing_forwarded_bearer"));
+        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn complete_forwarded_target_with_captured_bearer_dispatches_normally() {
+        let (router, counters) = build_router(vec![Leg {
+            nickname: "fwd",
+            provider_name: "fwd-prov",
+            entry: anthropic_entry(true),
+        }]);
+
+        router
+            .complete(forwarded_req())
+            .await
+            .expect("a forwarded target with a captured bearer must dispatch");
+
+        assert_eq!(counters[0].load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_mixed_chain_own_first_entry_succeeds_forwarded_missing_bearer_never_reached()
+    {
+        // Per-target guard: a chain whose first (OWN-credential) entry
+        // succeeds never reaches the forwarded second entry, so the
+        // missing-bearer guard never fires even though the request has
+        // no captured bearer at all.
         let (router, counters) = build_router(vec![
             Leg {
-                nickname: "anthropic",
-                provider_name: "anthropic-prov",
-                entry: anthropic_entry("https://api.anthropic.com"),
+                nickname: "own",
+                provider_name: "own-prov",
+                entry: anthropic_entry(false),
             },
             Leg {
-                nickname: "compat",
-                provider_name: "compat-prov",
-                entry: openai_compat_entry(),
+                nickname: "fwd",
+                provider_name: "fwd-prov",
+                entry: anthropic_entry(true),
             },
         ]);
 
         router
             .complete(plain_req())
             .await
-            .expect("non-forwarded request must route normally");
+            .expect("the first entry succeeds without ever touching the forwarded target");
 
         assert_eq!(counters[0].load(Ordering::SeqCst), 1);
-        assert_eq!(counters[1].load(Ordering::SeqCst), 0);
-    }
-
-    // ---- counter + client-facing refuse shape ----
-    //
-    // The structured-log safe-dimensions + no-token assertions live in an
-    // isolated integration-test binary
-    // (`tests/forwarded_gate_log.rs`): a thread-local capture subscriber
-    // over a shared `warn!` callsite is unreliable in this 600+-test lib
-    // binary because sibling tests hit the callsite under the default
-    // `NoSubscriber` first and poison the global Interest cache. The
-    // counter + client-error assertions below are subscriber-independent
-    // and stay here.
-
-    #[tokio::test]
-    async fn refuse_increments_counter_once_and_client_error_carries_no_token() {
-        let (router, counters) = build_router(vec![Leg {
-            nickname: "compat",
-            provider_name: "compat-prov",
-            entry: openai_compat_entry(),
-        }]);
-        assert_eq!(router.metrics.forwarded_non_anthropic_refusals(), 0);
-
-        let err = router.complete(forwarded_req()).await.unwrap_err();
-
-        // Refused (Validation -> HTTP 400 at the Anthropic ingress), never
-        // dispatched, and the client-facing message carries the reason but
-        // NEVER the forwarded token.
-        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
-        let client_msg = err.to_string();
-        assert!(client_msg.contains("non_anthropic_target"));
-        assert!(
-            !client_msg.contains(FORWARDED_TOKEN),
-            "client error must not carry the forwarded token: {client_msg}",
-        );
-        assert_eq!(counters[0].load(Ordering::SeqCst), 0);
         assert_eq!(
-            router.metrics.forwarded_non_anthropic_refusals(),
-            1,
-            "one refusal bumps the counter exactly once",
+            counters[1].load(Ordering::SeqCst),
+            0,
+            "the forwarded second entry must never be reached",
         );
     }
 
     #[tokio::test]
-    async fn refuse_counter_accumulates_across_paths() {
+    async fn missing_bearer_refuse_client_error_carries_no_token() {
+        // The client never captured a bearer in this scenario, so there
+        // is nothing to leak -- but pin that the refuse message stays
+        // generic (reason only) and never echoes request content.
         let (router, _counters) = build_router(vec![Leg {
-            nickname: "compat",
-            provider_name: "compat-prov",
-            entry: openai_compat_entry(),
+            nickname: "fwd",
+            provider_name: "fwd-prov",
+            entry: anthropic_entry(true),
         }]);
 
-        let _ = router.complete(forwarded_req()).await;
-        let _ = router.count_tokens(forwarded_req()).await;
-        let _ = router.stream(forwarded_req()).await;
+        let err = router.complete(plain_req()).await.unwrap_err();
+        let client_msg = err.to_string();
 
-        assert_eq!(
-            router.metrics.forwarded_non_anthropic_refusals(),
-            3,
-            "each refused path (complete, count_tokens, stream) bumps the counter once",
+        assert!(!client_msg.contains(FORWARDED_TOKEN));
+    }
+
+    // ---- real-factory build integration ----
+    //
+    // Every test above wires a `RecordingProvider` mock straight onto a
+    // `ResolvedModel`, bypassing `crate::factory::build_provider`
+    // entirely. That is exactly why a factory-side bug (unconditionally
+    // resolving a token from a forwarded entry's guaranteed-empty
+    // `api_key_ref`) could break `serve` while every dispatch-behavior
+    // test here kept passing. This test drives the REAL factory build
+    // for the forwarded leg so the two layers are exercised together.
+
+    #[tokio::test]
+    async fn forwarded_target_built_via_real_factory_still_refuses_missing_bearer() {
+        let entry = anthropic_entry(true);
+        let secrets: Arc<dyn routectl_auth::SecretStore> =
+            Arc::new(routectl_auth::MemoryStore::new());
+        let provider = crate::factory::build_provider("fwd-prov", &entry, secrets)
+            .await
+            .expect("a valid forwarded provider entry must build");
+
+        let mut config = Config::default();
+        config.providers.insert("fwd-prov".into(), entry);
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "fwd".into(),
+            Arc::new(ResolvedModel::new(
+                "fwd",
+                "fwd-prov",
+                provider,
+                "upstream-fwd".to_string(),
+            )),
+        );
+        config
+            .aliases
+            .insert("alias".into(), AliasValue::Chain(vec!["fwd".into()]));
+        let mut router = Router::new(Arc::new(config));
+        router.install_resolved_models(models);
+
+        // No captured bearer: the router's missing-bearer guard must
+        // refuse cleanly before ever calling into the real provider
+        // (which would otherwise try to egress with no credential).
+        let err = router.complete(plain_req()).await.unwrap_err();
+
+        assert!(matches!(err, Error::Validation(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("missing_forwarded_bearer"),
+            "got: {err}",
         );
     }
 }
@@ -14686,7 +15083,7 @@ mod observability_seam_tests {
         let router = router_with_failing(400, None, Some("unsupported_parameter"));
 
         // Act: the pre-first-chunk error rides the stream error arm.
-        let (result, events) = with_capture(router.stream(req_m1())).await;
+        let (result, events) = with_capture(Box::pin(router.stream(req_m1()))).await;
 
         // Assert
         assert!(result.is_err());
@@ -14739,7 +15136,7 @@ mod observability_seam_tests {
         let router = router_with_failing(600, None, None);
 
         // Act
-        let (result, events) = with_capture(router.stream(req_m1())).await;
+        let (result, events) = with_capture(Box::pin(router.stream(req_m1()))).await;
 
         // Assert
         assert!(result.is_err());

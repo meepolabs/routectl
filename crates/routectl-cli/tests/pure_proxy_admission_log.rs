@@ -13,7 +13,7 @@
 //! tests hit the same callsite under the default `NoSubscriber` first and
 //! poison tracing's global per-callsite `Interest` cache. In a dedicated
 //! binary the callsite is only ever evaluated under this capture subscriber.
-//! Mirrors the router-side `forwarded_gate_log.rs` capture pattern.
+//! Mirrors the router-side `forwarded_auth_terminal_log.rs` capture pattern.
 
 use std::sync::Arc;
 
@@ -21,9 +21,9 @@ use arc_swap::ArcSwap;
 use axum::Json;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, header::AUTHORIZATION};
 use routectl_cli::handlers::ingress_handle::ingress_handle;
+use routectl_cli::ingress::MitmSeamNonce;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::server::AppState;
-use routectl_router::config::CredentialSource;
 use routectl_router::{Config, MitmConfig, Router};
 use routectl_testkit::{CapturedEvent, with_capture};
 use routectl_usage::UsageWriter;
@@ -34,20 +34,18 @@ use serde_json::{Value, json};
 const FORWARDED_TOKEN: &str = "sk-ant-oat01-FORWARDED-INGRESS-must-never-surface";
 
 /// The MITM seam header the forwarded-mode admission gate treats as the hint
-/// that a request arrived through the MITM proxy leg.
+/// that a request arrived through the MITM proxy leg -- ONLY when its value
+/// matches the `AppState`'s `MitmSeamNonce` (see `identity_missing_headers`).
 const MITM_PROXIED_HEADER: &str = "x-routectl-mitm-proxied";
 
-/// Build a forwarded-mode `AppState` (`[mitm] credential_source = forwarded`)
-/// with an isolated in-tempdir usage writer. `AppState::for_test` is
-/// `#[cfg(test)]`-only (not visible to an integration crate), so we build the
-/// pub-field struct directly.
+/// Build a forwarded-mode `AppState` (a present `[mitm]` block, transport
+/// only -- forwardedness is a per-provider config choice post-f3, not a
+/// `[mitm]` one) with an isolated in-tempdir usage writer. `AppState::
+/// for_test` is `#[cfg(test)]`-only (not visible to an integration crate),
+/// so we build the pub-field struct directly.
 fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
-    let mitm = MitmConfig {
-        credential_source: CredentialSource::Forwarded,
-        ..Default::default()
-    };
     let router = Router::new(Arc::new(Config {
-        mitm: Some(mitm),
+        mitm: Some(MitmConfig::default()),
         ..Default::default()
     }));
     let dir = tempfile::tempdir().expect("usage tempdir");
@@ -58,6 +56,7 @@ fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
     let state = Arc::new(AppState {
         router: Arc::new(ArcSwap::from_pointee(router)),
         usage,
+        mitm_seam_nonce: Arc::new(MitmSeamNonce::generate()),
     });
     (state, dir)
 }
@@ -65,11 +64,14 @@ fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
 /// Headers for a MITM-marked forwarded request carrying the distinctive
 /// bearer but NO `x-claude-code-session-id`: that is the `identity_missing`
 /// case, which is the strongest leak probe because it carries a token.
-fn identity_missing_headers() -> HeaderMap {
+/// Stamps `nonce`'s exact value -- a bare/wrong value would downgrade to
+/// seam-absent and never reach the identity_missing rejection this test
+/// exercises.
+fn identity_missing_headers(nonce: &MitmSeamNonce) -> HeaderMap {
     let mut h = HeaderMap::new();
     h.insert(
         HeaderName::from_static(MITM_PROXIED_HEADER),
-        HeaderValue::from_static("1"),
+        nonce.header_value(),
     );
     h.insert(
         AUTHORIZATION,
@@ -81,7 +83,7 @@ fn identity_missing_headers() -> HeaderMap {
 #[tokio::test]
 async fn rejection_logs_safe_dimensions_and_never_the_token() {
     let (state, _dir) = forwarded_app_state();
-    let headers = identity_missing_headers();
+    let headers = identity_missing_headers(&state.mitm_seam_nonce);
     // Admission runs before body parse, so the body is never inspected on
     // the rejection path.
     let body: std::result::Result<Json<Value>, axum::extract::rejection::JsonRejection> =

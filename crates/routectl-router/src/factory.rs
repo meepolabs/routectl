@@ -10,6 +10,7 @@ use routectl_auth::OAuthStoreProjectCache;
 use routectl_auth::{SecretRef, SecretStore};
 #[cfg(feature = "gemini")]
 use routectl_core::CloudProjectCache;
+use routectl_core::identity::anthropic::is_anthropic_api_host;
 use routectl_core::{Provider, Result};
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
 use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
@@ -29,7 +30,7 @@ use crate::catalog::{lookup_baked_with_overrides, lookup_overlay_cell, merge};
 use crate::catalog_overlay::CatalogOverlay;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
-use crate::config::{Config, ProviderEntry};
+use crate::config::{Config, CredentialSource, ProviderEntry};
 use crate::resolved::ResolvedModel;
 
 /// Convenience wrapper that builds a provider with `BuildOptions::default()`.
@@ -210,6 +211,7 @@ async fn build_provider_inner(
             base_url,
             anthropic_version,
             auth_kind,
+            credential_source,
             header_extras,
             payload_extras: _,
             user_agent,
@@ -224,6 +226,7 @@ async fn build_provider_inner(
             runtime: _,
         } => {
             validate_base_url_scheme(name, base_url)?;
+            let is_forwarded = *credential_source == CredentialSource::Forwarded;
             // OAuth-aware: for `oauth://<provider>` refs the provider
             // gets a `ManagedToken` that re-enters `SecretStore::get`
             // per request, so token rotation in credentials.json is
@@ -231,7 +234,27 @@ async fn build_provider_inner(
             // the value is resolved once and wrapped in `StaticToken`
             // (semantically equivalent to the pre-v0.7 `api_key:
             // String` field).
-            let auth = resolve_token_source(&secrets, api_key_ref).await?;
+            //
+            // `credential_source = "forwarded"` is the exception:
+            // `validate_provider_credential_sources` guarantees
+            // `api_key_ref` is empty for a forwarded entry (there is no
+            // configured secret to resolve -- the provider authenticates
+            // with the client's captured bearer instead), so calling
+            // `resolve_token_source` here would always fail with an
+            // "unrecognized secret URI scheme" error. Wire a sentinel
+            // `StaticToken` instead: it is unreachable by construction --
+            // `resolve_effective_token` / `build_headers` never call
+            // `cfg.auth.token()` on the forwarded leg (gated by
+            // `should_use_forwarded_bearer`, which reads
+            // `req.routectl_internal.forwarded_bearer` instead), and the
+            // router's `missing_forwarded_bearer_error` guard refuses any
+            // request with no captured bearer before this provider is
+            // ever dispatched to.
+            let auth: Arc<dyn routectl_core::TokenSource> = if is_forwarded {
+                Arc::new(routectl_core::StaticToken::new(String::new()))
+            } else {
+                resolve_token_source(&secrets, api_key_ref).await?
+            };
             // Resolve the stable per-credential Claude Code session id
             // for the OauthBearer surface only. `api_key_ref` already
             // carries the seat label (`build_seat_targets` rebuilds each
@@ -241,16 +264,20 @@ async fn build_provider_inner(
             // None. The ref already parsed cleanly inside
             // `resolve_token_source` above, so a parse error here is
             // unreachable; treat it as "no session id" rather than fail
-            // the build.
-            let session_id =
-                if *auth_kind == routectl_providers::anthropic_api::AuthKind::OauthBearer {
-                    match SecretRef::parse(api_key_ref) {
-                        Ok(sr) => secrets.peek_session_id(&sr).await,
-                        Err(_) => None,
-                    }
-                } else {
-                    None
-                };
+            // the build. A forwarded entry is excluded up front even if
+            // `auth_kind` happens to be `OauthBearer` -- its `api_key_ref`
+            // is always empty, so there is no seat to resolve a session
+            // id for.
+            let session_id = if !is_forwarded
+                && *auth_kind == routectl_providers::anthropic_api::AuthKind::OauthBearer
+            {
+                match SecretRef::parse(api_key_ref) {
+                    Ok(sr) => secrets.peek_session_id(&sr).await,
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
             let cfg = AnthropicApiConfig {
                 id: format!("anthropic-api:{name}"),
                 auth,
@@ -271,6 +298,7 @@ async fn build_provider_inner(
                 ),
                 session_id,
                 cloak: cloak.clone(),
+                use_forwarded_bearer: is_forwarded,
             };
             Ok(Arc::new(AnthropicApiProvider::new(cfg)))
         }
@@ -2372,6 +2400,70 @@ pub fn validate_mitm_config(config: &crate::config::Config) -> Result<()> {
     Ok(())
 }
 
+/// Reject an incoherent provider-level `credential_source` on any
+/// `[providers.X]` `anthropic-api` entry, for every provider in
+/// `config.providers` (not just the ones a request happens to route
+/// through). Runs on every config-validation path, not only serve
+/// startup -- see `commands::config::check`, `commands::test::run`, and
+/// `commands::prompt_size::run` in routectl-cli.
+///
+/// - `Forwarded` requires an EMPTY `api_key_ref` AND `base_url` pinned
+///   to `api.anthropic.com` (`is_anthropic_api_host`). This is a hard
+///   containment guarantee: a forwarded provider carries the client's
+///   full-scope claude.ai bearer, which must never be sent to a
+///   non-Anthropic egress -- pinning the host at config-validation time
+///   makes containment true by construction, mirroring
+///   `validate_mitm_config`'s host pin.
+/// - `Own` requires a non-empty `api_key_ref`, exactly as before this
+///   field existed on the variant.
+pub fn validate_provider_credential_sources(config: &Config) -> Result<()> {
+    use routectl_core::Error;
+
+    for (name, entry) in &config.providers {
+        let ProviderEntry::AnthropicApi {
+            api_key_ref,
+            base_url,
+            credential_source,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+
+        match credential_source {
+            CredentialSource::Forwarded => {
+                if !api_key_ref.is_empty() {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: credential_source = \"forwarded\" must not set \
+                         api_key_ref (got a non-empty value) -- a forwarded provider \
+                         authenticates with the client's captured bearer, never a configured key"
+                    )));
+                }
+                if !is_anthropic_api_host(base_url) {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: credential_source = \"forwarded\" requires \
+                         base_url's host to be exactly api.anthropic.com (got {base_url:?}) -- \
+                         a path, port, or credentials prefix on that host is fine, but no other \
+                         host is accepted. This is a hard containment guarantee: a forwarded \
+                         provider carries the client's full-scope claude.ai bearer, which must \
+                         never be sent to a non-Anthropic egress"
+                    )));
+                }
+            }
+            CredentialSource::Own => {
+                if api_key_ref.is_empty() {
+                    return Err(Error::Config(format!(
+                        "provider `{name}`: credential_source = \"own\" (the default) requires \
+                         a non-empty api_key_ref"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod base_url_validation_tests {
     use super::validate_base_url_scheme;
@@ -4077,7 +4169,7 @@ mod anthropic_api_config_propagation_tests {
     //! destructure pattern so any mismatch in the wiring is caught at
     //! compile time (missing field) or at runtime (wrong value).
 
-    use crate::config::ProviderEntry;
+    use crate::config::{CredentialSource, ProviderEntry};
     use routectl_providers::anthropic_api::AnthropicApiConfig;
 
     /// Helper that simulates the factory destructure and returns the
@@ -4090,6 +4182,20 @@ mod anthropic_api_config_propagation_tests {
             ProviderEntry::AnthropicApi {
                 context_management, ..
             } => *context_management,
+            other => panic!("expected AnthropicApi entry; got {other:?}"),
+        }
+    }
+
+    /// Helper that simulates the factory destructure and returns the
+    /// `use_forwarded_bearer` value that would land in `AnthropicApiConfig`
+    /// (`credential_source == Forwarded`). Mirrors the exact
+    /// `build_provider_inner` wiring so a future factory refactor that
+    /// drops the derivation breaks this test at compile time.
+    fn extract_use_forwarded_bearer(entry: &ProviderEntry) -> bool {
+        match entry {
+            ProviderEntry::AnthropicApi {
+                credential_source, ..
+            } => *credential_source == CredentialSource::Forwarded,
             other => panic!("expected AnthropicApi entry; got {other:?}"),
         }
     }
@@ -4143,6 +4249,61 @@ mod anthropic_api_config_propagation_tests {
         assert!(
             !cfg_with_flag.context_management,
             "context_management must default to false in AnthropicApiConfig"
+        );
+    }
+
+    /// `ProviderEntry::AnthropicApi { credential_source: Forwarded, .. }`
+    /// wires `use_forwarded_bearer: true` into `AnthropicApiConfig` --
+    /// acceptance criterion for the per-provider WIRE gate.
+    #[test]
+    fn factory_propagates_forwarded_credential_source_to_use_forwarded_bearer_true() {
+        // Arrange
+        let mut entry = ProviderEntry::anthropic_api("literal:sk-test");
+        if let ProviderEntry::AnthropicApi {
+            ref mut credential_source,
+            ref mut api_key_ref,
+            ..
+        } = entry
+        {
+            *credential_source = CredentialSource::Forwarded;
+            api_key_ref.clear();
+        }
+
+        // Act
+        let extracted = extract_use_forwarded_bearer(&entry);
+        let cfg = AnthropicApiConfig::new("test", "sk-test");
+        let cfg_with_flag = AnthropicApiConfig {
+            use_forwarded_bearer: extracted,
+            ..cfg
+        };
+
+        // Assert
+        assert!(
+            cfg_with_flag.use_forwarded_bearer,
+            "credential_source: Forwarded must propagate to use_forwarded_bearer: true"
+        );
+    }
+
+    /// A default `ProviderEntry::AnthropicApi` (credential_source omitted,
+    /// so `Own`) wires `use_forwarded_bearer: false` -- the own-mode
+    /// default that never consumes a floating forwarded bearer.
+    #[test]
+    fn factory_propagates_own_credential_source_to_use_forwarded_bearer_false_default() {
+        // Arrange: use the constructor helper -- credential_source defaults to Own.
+        let entry = ProviderEntry::anthropic_api("literal:sk-test");
+
+        // Act
+        let extracted = extract_use_forwarded_bearer(&entry);
+        let cfg = AnthropicApiConfig::new("test", "sk-test");
+        let cfg_with_flag = AnthropicApiConfig {
+            use_forwarded_bearer: extracted,
+            ..cfg
+        };
+
+        // Assert
+        assert!(
+            !cfg_with_flag.use_forwarded_bearer,
+            "credential_source: Own must propagate to use_forwarded_bearer: false"
         );
     }
 }
@@ -4414,6 +4575,157 @@ mod validate_mitm_config_tests {
         let err = validate_mitm_config(&cfg).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("mitm_host"), "msg: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod validate_provider_credential_sources_tests {
+    //! Config-BOUNDARY tests (parse via `toml::from_str`, not bare-struct
+    //! construction only) for the provider-level `credential_source`
+    //! field-coherence validator: `forwarded` requires an empty
+    //! `api_key_ref` AND a base_url pinned to `api.anthropic.com`; `own`
+    //! (the default) requires a non-empty `api_key_ref`, exactly as
+    //! every `anthropic-api` provider behaved before this field existed.
+
+    use super::validate_provider_credential_sources;
+    use crate::config::Config;
+
+    /// A forwarded provider block with NO `api_key_ref` line at all must
+    /// parse cleanly (the field is `#[serde(default)]`) and pass
+    /// validation.
+    #[test]
+    fn forwarded_block_with_no_api_key_ref_parses_and_validates() {
+        let toml_text = r#"
+[providers.anthropic-forwarded]
+kind = "anthropic-api"
+base_url = "https://api.anthropic.com"
+credential_source = "forwarded"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("forwarded block must parse");
+        validate_provider_credential_sources(&cfg).expect("clean forwarded block must validate ok");
+    }
+
+    /// `credential_source` omitted entirely defaults to `own` and the
+    /// pre-existing `api_key_ref`-required behavior is unchanged.
+    #[test]
+    fn own_block_with_credential_source_omitted_is_unchanged() {
+        let toml_text = r#"
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "literal:sk-ant-test"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("own block must parse");
+        validate_provider_credential_sources(&cfg)
+            .expect("default-own block with a key must validate ok");
+    }
+
+    #[test]
+    fn rejects_forwarded_on_a_non_anthropic_host() {
+        let toml_text = r#"
+[providers.sneaky]
+kind = "anthropic-api"
+base_url = "https://evil.example.com"
+credential_source = "forwarded"
+"#;
+        let cfg: Config = toml::from_str(toml_text)
+            .expect("must parse (host pin is validator-time, not parse-time)");
+        let err = validate_provider_credential_sources(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("sneaky"), "msg: {msg}");
+        assert!(msg.contains("api.anthropic.com"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_forwarded_carrying_a_nonempty_api_key_ref() {
+        let toml_text = r#"
+[providers.mixed-up]
+kind = "anthropic-api"
+base_url = "https://api.anthropic.com"
+api_key_ref = "literal:sk-ant-should-not-be-here"
+credential_source = "forwarded"
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("must parse");
+        let err = validate_provider_credential_sources(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mixed-up"), "msg: {msg}");
+        assert!(msg.contains("api_key_ref"), "msg: {msg}");
+    }
+
+    #[test]
+    fn rejects_own_with_an_empty_api_key_ref() {
+        let toml_text = r#"
+[providers.no-key]
+kind = "anthropic-api"
+"#;
+        let cfg: Config =
+            toml::from_str(toml_text).expect("must parse (api_key_ref defaults empty)");
+        let err = validate_provider_credential_sources(&cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no-key"), "msg: {msg}");
+        assert!(msg.contains("own"), "msg: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod forwarded_provider_build_tests {
+    //! Regression coverage for the gap `validate_provider_credential_sources`
+    //! cannot see: that field-coherence validator runs at `config check`
+    //! time and confirms a `credential_source = "forwarded"` entry's
+    //! shape is coherent (empty `api_key_ref`, host pinned), but it never
+    //! calls `build_provider` -- so a forwarded entry could pass `config
+    //! check` and still fail at `serve` time if the factory's build arm
+    //! ever tried to resolve a token from the (guaranteed-empty)
+    //! `api_key_ref`. These tests close that gap by driving the real
+    //! `build_provider` entry point.
+
+    use super::build_provider;
+    use crate::config::{CredentialSource, ProviderEntry};
+    use async_trait::async_trait;
+    use routectl_auth::{SecretRef, SecretStore};
+    use std::sync::Arc;
+
+    /// A forwarded, own-host `anthropic-api` provider entry, matching the
+    /// shape `validate_provider_credential_sources` requires: empty
+    /// `api_key_ref`, `credential_source = "forwarded"`.
+    fn forwarded_entry() -> ProviderEntry {
+        ProviderEntry::anthropic_api("").with_credential_source(CredentialSource::Forwarded)
+    }
+
+    /// A `SecretStore` that panics on any call. A forwarded entry's
+    /// `api_key_ref` is guaranteed empty by config validation, so there
+    /// is no secret to resolve for it -- the factory must never touch
+    /// the store while building this provider. Panicking (rather than
+    /// just erroring) makes an accidental store call fail loudly instead
+    /// of being swallowed by `?` and mistaken for the pre-fix bug.
+    struct PanicIfTouchedStore;
+
+    #[async_trait]
+    impl SecretStore for PanicIfTouchedStore {
+        async fn get(&self, _sr: &SecretRef) -> routectl_core::Result<String> {
+            panic!("forwarded provider build must never resolve a secret");
+        }
+        async fn set(&self, _sr: &SecretRef, _v: &str) -> routectl_core::Result<()> {
+            panic!("forwarded provider build must never resolve a secret");
+        }
+        async fn delete(&self, _sr: &SecretRef) -> routectl_core::Result<()> {
+            panic!("forwarded provider build must never resolve a secret");
+        }
+    }
+
+    /// The regression this task fixes: a `credential_source = "forwarded"`
+    /// provider (valid config, passes `config check`) must actually BUILD
+    /// at `serve` time instead of erroring on the empty `api_key_ref`.
+    #[tokio::test]
+    async fn forwarded_entry_builds_successfully() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(PanicIfTouchedStore);
+
+        let provider = build_provider("anthropic-forwarded", &forwarded_entry(), secrets).await;
+
+        assert!(
+            provider.is_ok(),
+            "a valid forwarded provider entry must build: {:?}",
+            provider.err()
+        );
     }
 }
 
