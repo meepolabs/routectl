@@ -10,6 +10,7 @@ pub mod cloud_project;
 pub mod content_part;
 pub mod context_reduction;
 pub mod error;
+pub mod failure_class;
 pub mod identity;
 pub mod log_safe;
 pub mod provider;
