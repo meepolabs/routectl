@@ -38,7 +38,7 @@
 //! in-process fake origin this file's booted server could legally point
 //! `upstream_origin` at without either dialing the real internet or
 //! weakening `build_client`'s TLS verification (out of scope -- that is
-//! f1.05's forward-leg transport, not this task's to change). That same
+//! the MITM proxy's forward-leg transport, not this file's to change). That same
 //! scenario IS covered end-to-end -- CONNECT parse, TLS handoff, and the
 //! control-plane forward, all through this module's own real code paths
 //! -- by

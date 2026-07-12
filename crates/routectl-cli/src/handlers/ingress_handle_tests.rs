@@ -2704,9 +2704,9 @@ fn extract_bearer_preserves_token_internal_structure() {
     );
 }
 
-// ============ forwarded-mode ingress admission rejections (f2.06) ======
+// ============ forwarded-mode ingress admission rejections ======
 //
-// The decision-doc Section 6 matrix, enforced at the shared ingress driver
+// The forwarded-mode rejection matrix, enforced at the shared ingress driver
 // BEFORE parse/dispatch, firing ONLY when `credential_source == Forwarded`.
 // Three layers of coverage, all deterministic (no log capture -- that ONE
 // assertion lives in the isolated integration binary
@@ -2761,7 +2761,7 @@ fn admission_headers(
 /// Own mode (`forwarded == false`) ADMITS every request, even one carrying
 /// each case's trip conditions: a non-Anthropic dialect, no seam header, no
 /// bearer, and no session id all pass. This is the "byte-identical to
-/// pre-f2" guarantee at the decision level.
+/// pre-passthrough" guarantee at the decision level.
 #[test]
 fn classify_own_mode_admits_every_would_be_rejection() {
     // Non-Anthropic dialect, no seam, no bearer, no session id -- every trip
@@ -3166,7 +3166,7 @@ fn adapter_envelope_shapes_drive_the_dialect_discriminator() {
 
 /// Own mode is UNAFFECTED: a request carrying each case's trip conditions is
 /// ADMITTED (the gate returns `None`), so `ingress_handle` behaves exactly as
-/// it did pre-f2. Covers both a present `[mitm] credential_source = own`
+/// it did pre-passthrough. Covers both a present `[mitm] credential_source = own`
 /// block and no `[mitm]` block at all.
 #[test]
 fn enforce_own_mode_admits_every_would_be_case() {

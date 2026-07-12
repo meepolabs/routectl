@@ -1,4 +1,4 @@
-//! MITM front-proxy module for the first-party-passthrough feature.
+//! MITM front-proxy module for first-party credential passthrough.
 //!
 //! Deliberately isolated from the rest of `routectl-cli`: nothing here
 //! imports `crate::handlers`, `crate::server::AppState`, or

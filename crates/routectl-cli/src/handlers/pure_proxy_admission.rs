@@ -1,6 +1,6 @@
 //! Forwarded-mode (pure-proxy) ingress admission gate.
 //!
-//! Runs the decision-doc Section 6 rejection matrix at the shared ingress
+//! Runs the forwarded-mode rejection matrix at the shared ingress
 //! driver, before body parse and dispatch: a forwarded-mode request must
 //! arrive on the Anthropic dialect, through the MITM proxy, carrying an
 //! inbound `Authorization` bearer and a client session id, or it is
@@ -19,7 +19,7 @@ use crate::handlers::pure_proxy_metrics::{PureProxyRejectionReason, record_rejec
 use crate::ingress::ErrorEnvelopeShape;
 
 /// Forwarded-mode (pure-proxy) ingress admission gate. Runs the
-/// decision-doc Section 6 rejection matrix and, on a rejection, records the
+/// forwarded-mode rejection matrix and, on a rejection, records the
 /// `pure_proxy_rejections_total{reason}` counter + the structured rejection
 /// log, then returns the dialect-correct error `Response`. Returns `None`
 /// (admit) for own mode and for a well-formed forwarded request.
@@ -67,7 +67,7 @@ pub(crate) struct PureProxyAdmissionInputs {
     /// for the OpenAI chat-completions and Responses dialects.
     pub(crate) is_anthropic_dialect: bool,
     /// The `x-routectl-mitm-proxied` seam header is present
-    /// (header-is-a-hint: it arrived through the f1 MITM inference leg).
+    /// (header-is-a-hint: it arrived through the MITM inference path).
     pub(crate) seam_present: bool,
     /// A usable inbound `Authorization` bearer is present.
     pub(crate) has_bearer: bool,

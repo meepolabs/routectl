@@ -10,7 +10,7 @@
 //! Design note: this ships the CA-anchored leaf (leaf signed by a local
 //! root, not a bare self-signed leaf). Whether a bare self-signed leaf
 //! would also validate via `NODE_EXTRA_CA_CERTS` across Claude Code
-//! versions was left unproven by the decision doc; collapsing to a
+//! versions was left unproven; collapsing to a
 //! bare leaf later is a reversible, smaller change if that is ever
 //! confirmed. Building that variant is out of scope here.
 //!

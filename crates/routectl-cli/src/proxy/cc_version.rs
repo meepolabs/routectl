@@ -1,8 +1,8 @@
 //! CC-version warn-and-proceed check for the MITM front-proxy.
 //!
-//! The decision doc requires recording the Claude Code CLI version this
-//! `[mitm]` config was tested against, then WARNING -- never
-//! hard-refusing -- when the version actually observed on the wire
+//! This check records the Claude Code CLI version this
+//! `[mitm]` config was tested against, then WARNS -- never
+//! hard-refuses -- when the version actually observed on the wire
 //! differs. A hard refuse would break routectl on every Claude Code
 //! release; skipping the check entirely would lose the only signal that
 //! CC's wire shape moved out from under
